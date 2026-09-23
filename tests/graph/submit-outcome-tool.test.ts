@@ -18,16 +18,12 @@
  */
 
 import { describe, expect, it, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
-import {
-  EnginePersistence,
-  engineStateDir,
-} from "../../src/graph/persistence/engine-persistence.ts";
-import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
+import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { proposalDigest } from "../../src/graph/outcome/proposal.ts";
@@ -517,18 +513,20 @@ describe("graph_submit_outcome — the vertical path", () => {
 // ── Addressing: declaration-only graphs, legacy graphs ──────────────────────
 
 describe("graph_submit_outcome — the graphs it serves", () => {
-  it("refuses a record pinned to the deleted legacy protocol, without opening a ledger", async () => {
+  it("refuses a graph whose id is owned by a retired v2 container, without opening a ledger", async () => {
     const dir = makeTmpDir("submit-outcome-legacy-");
     const ts = createGraphToolSet({ stateDir: dir });
-    // A protocol-1 record — the deleted legacy run path — owns the id. The
-    // loader refuses it as unsupported(execution), so this ingress reports an
-    // unreadable plan and never treats it as a graph it serves.
-    const state = createEngineState(
-      { version: 2, name: "legacy.graph", nodes: [], edges: [] },
-      "legacy.graph",
+    // A RETIRED per-graph container owns the id. This build has no decoder for
+    // it, so the store REFUSES to be initialized beside it and this ingress
+    // reports an unreadable plan rather than treating the id as a graph it
+    // serves or as one that does not exist.
+    const stateDir = engineStateDir(dir);
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "engine-legacy.graph.json"),
+      JSON.stringify({ version: 2, graphId: "legacy.graph", phase: "executing" }),
+      "utf-8",
     );
-    state.executionProtocolVersion = 1;
-    new EnginePersistence(dir).save(state);
 
     let caught: unknown;
     try {

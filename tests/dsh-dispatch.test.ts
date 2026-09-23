@@ -451,7 +451,7 @@ describe("outcome dispatch through the dsh subagent seam", () => {
     };
     persistDeclaredGraph(
       buildDeclaredOutcomeGraph({ declaration, completionPolicies: AUTHORIZED }),
-      tmpDir,
+      engineStateDir(tmpDir),
     );
     service.seedProvider("worker-agent");
     service.seedProvider("shipper-agent");
@@ -514,7 +514,7 @@ describe("outcome dispatch through the dsh subagent seam", () => {
         "origin-1",
       ]);
 
-      const state = scanPersistedStates(tmpDir).loaded.find(
+      const state = scanPersistedStates(engineStateDir(tmpDir)).loaded.find(
         (candidate) => candidate.graphId === "dsh.outcome",
       );
       expect(state?.phase).toBe("complete");
@@ -628,15 +628,15 @@ describe("the real host execution-id flow over the production dsh delivery", () 
 
   /** Start ONE attempt through the real delivery and read what the platform minted. */
   async function startOneAttempt(): Promise<IdFlow> {
+    const storeRoot = join(tmpDir, "host-store");
     persistDeclaredGraph(
       buildDeclaredOutcomeGraph({
         declaration: ID_DECLARATION,
         completionPolicies: ID_AUTHORIZED,
       }),
-      tmpDir,
+      storeRoot,
     );
     service.seedProvider("worker-agent");
-    const storeRoot = join(tmpDir, "host-store");
     let host: OutcomeHost | undefined;
     const delivery = new DshOutcomeDelivery({
       subagents: service,

@@ -2,17 +2,17 @@
  * Execution-protocol registration and the outcome-only load contract.
  *
  * The legacy signal protocol is deleted: this build registers exactly one
- * handler (the outcome protocol), a record pinned to version 1 is `unsupported`
- * and a record with NO protocol key is `corrupt` — there is no backfill and no
- * implicit protocol. A declared graph loads as valid and runs its compiled plan
- * through the outcome run path.
+ * handler (the outcome protocol), and a graph whose id is owned by a RETIRED
+ * per-graph v2 container is `unsupported` — there is no backfill, no implicit
+ * protocol and no decoder for the retired layout. A declared graph is stored as
+ * a runnable definition and runs its compiled plan through the outcome run path.
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
  */
 
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,10 +30,10 @@ import {
   isOutcomeProtocolHandler,
 } from "../../src/graph/protocol/execution-protocol.ts";
 import {
-  DEFAULT_STORAGE_FORMAT_REGISTRY,
+  engineStateDir,
   engineStatePath,
-  loadEngineStateForResume,
 } from "../../src/graph/persistence/engine-persistence.ts";
+import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
@@ -132,73 +132,53 @@ describe("execution-protocol registry — the outcome handler", () => {
 
 // ── Load contract: no backfill, no implicit protocol ────────────────────────
 
-describe("the loader's protocol gate", () => {
-  it("loads a persisted declaration as valid under the outcome protocol", async () => {
+describe("the stored record's gates", () => {
+  it("stores a declaration as a runnable definition whose plan is the outcome protocol's", async () => {
     const dir = mkdtempSync(join(tmpdir(), "outcome-load-"));
     try {
       const graph = buildDeclaredOutcomeGraph({ declaration: DECLARATION });
       expect(persistDeclaredGraph(graph, dir)).toBe(true);
-      const loaded = loadEngineStateForResume(
-        readFileSync(engineStatePath(dir, "graph.protocol"), "utf-8"),
-        engineStatePath(dir, "graph.protocol"),
-        DEFAULT_STORAGE_FORMAT_REGISTRY,
-        DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-      );
-      expect(loaded.kind).toBe("valid");
-      if (loaded.kind === "valid") {
-        expect(loaded.executionProtocol).toBe(OUTCOME_PROTOCOL);
-        expect(loaded.state.compiledPlan?.planRevision).toBe(graph.plan.planRevision);
-      }
+
+      // THE DEFINITION IS THE RECORD. There is no engine-state container: the
+      // store holds the plan, and the reader resolves it back with the same
+      // content address the compiler minted.
+      const reading = readStoredDefinition(dir, "graph.protocol");
+      expect(reading.kind).toBe("ok");
+      if (reading.kind !== "ok") return;
+      expect(reading.declared.plan.planRevision).toBe(graph.plan.planRevision);
+      expect(reading.declared.plan.graphId).toBe("graph.protocol");
+      expect(reading.declared.declarationDigest).toBe(graph.declarationDigest);
+
+      // The run path's own enablement condition is unchanged: the protocol has
+      // exactly one registered handler and it is this graph's.
+      expect(OUTCOME_PROTOCOL_HANDLER.version).toBe(OUTCOME_PROTOCOL);
+      expect(isOutcomeProtocolHandler(OUTCOME_PROTOCOL_HANDLER)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("reports a record with NO protocol key as corrupt(execution) — no backfill", () => {
-    const raw = JSON.stringify({
-      version: 2,
-      graphId: "no-protocol",
-      phase: "idle",
-      graphDeclaration: { version: 2, name: "no-protocol", nodes: [], edges: [] },
-      nodes: {},
-      loopGroups: {},
-      signalLedger: {},
-      frontier: [],
-      pendingCompletions: [],
-      budget: { sessionsSpawned: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 },
-      startedAt: 1,
-      updatedAt: 1,
-      advancingLock: false,
-    });
-    const loaded = loadEngineStateForResume(
-      raw,
-      "no-protocol",
-      DEFAULT_STORAGE_FORMAT_REGISTRY,
-      DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-    );
-    expect(loaded.kind).toBe("corrupt");
-    if (loaded.kind === "corrupt") expect(loaded.dimension).toBe("execution");
-  });
-
-  it("reports a record pinned to the deleted protocol 1 as unsupported(execution)", async () => {
+  it("refuses a graph whose id is owned by a record this build has no decoder for", async () => {
     const dir = mkdtempSync(join(tmpdir(), "legacy-record-"));
     try {
-      const graph = buildDeclaredOutcomeGraph({ declaration: DECLARATION });
-      expect(persistDeclaredGraph(graph, dir)).toBe(true);
-      const path = engineStatePath(dir, "graph.protocol");
-      const parsed = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
-      parsed.executionProtocolVersion = 1;
-      const loaded = loadEngineStateForResume(
-        JSON.stringify(parsed),
-        path,
-        DEFAULT_STORAGE_FORMAT_REGISTRY,
-        DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-      );
-      expect(loaded.kind).toBe("unsupported");
-      if (loaded.kind === "unsupported") {
-        expect(loaded.dimension).toBe("execution");
-        expect(loaded.detail).toBe("1");
-      }
+      // The RETIRED per-graph container: a well-formed file of a layout this
+      // build no longer writes. It is never a valid definition, never absent,
+      // and never rewritten.
+      mkdirSync(engineStateDir(dir), { recursive: true });
+      const retiredPath = engineStatePath(dir, "graph.protocol");
+      const retiredText = JSON.stringify({
+        version: 2,
+        graphId: "graph.protocol",
+        executionProtocolVersion: 1,
+      });
+      writeFileSync(retiredPath, retiredText, "utf-8");
+
+      const reading = readStoredDefinition(engineStateDir(dir), "graph.protocol");
+      expect(reading.kind).toBe("blocked");
+      if (reading.kind !== "blocked") return;
+      expect(reading.verdict.kind).toBe("unsupported");
+      expect(JSON.stringify(reading.verdict)).toContain("engine-graph.protocol.json");
+      expect(readFileSync(retiredPath, "utf-8")).toBe(retiredText);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

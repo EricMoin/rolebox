@@ -54,22 +54,15 @@
  * stays in the platform adapter.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { logWarn } from "../log-warn.ts";
 import {
-  DEFAULT_STORAGE_FORMAT_REGISTRY,
-  engineStateDir,
-  engineStatePath,
-  loadEngineStateForResume,
-} from "../persistence/engine-persistence.ts";
+  describeStoredReading,
+  readStoredDefinition,
+} from "../persistence/declared-record.ts";
+import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
-import { persistOutcomeProjection } from "../persistence/outcome-projection.ts";
-import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
-import { readPersistedOutcomePlan } from "../outcome/recovery.ts";
 import {
   OutcomeGraphRuntime,
   type OutcomeResumeResult,
@@ -366,15 +359,10 @@ export class OutcomeHost {
     const previous = this.holder.current();
     if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
     try {
-      const report = await bridge.complete({ graphId, attemptId });
-      if (report.kind === "settled") {
-        const { runtime } = await this.runtimeFor(graphId);
-        const state = runtime.state();
-        if (state !== undefined) {
-          persistOutcomeProjection(this.workspaceDir, state, this.clock());
-        }
-      }
-      return report;
+      // The settlement's own acceptance transaction wrote the run state to the
+      // store, and the query paths read it from there: there is no second
+      // durable record left to refresh.
+      return await bridge.complete({ graphId, attemptId });
     } finally {
       if (previous === undefined) {
         this.holder.clear();
@@ -410,24 +398,22 @@ export class OutcomeHost {
     this.rememberOrigin(graphId, invocation);
     this.setInvocation(invocation);
     try {
-      const result = runtime.resume(this.clock());
-      // The run just advanced; refresh the operator view of the graph's own
-      // record so graph_status reads what the ledger holds (best-effort, and
-      // never part of the transaction: the ledger already committed).
-      if (result.kind !== "refused") {
-        persistOutcomeProjection(this.workspaceDir, result.state, this.clock());
-      }
-      return result;
+      // The run advanced inside the acceptance transaction, which wrote the run
+      // state to the store; the query paths read it from there.
+      return runtime.resume(this.clock());
     } finally {
       this.holder.clear();
     }
   }
 
   /**
-   * The boot sweep: every protocol-2 record in the workspace store gets the
-   * same first-execution/resume treatment as {@link startDeclaredGraph}, one
-   * graph at a time. A record this host cannot open is reported, never
-   * rewritten; the sweep never throws.
+   * The boot sweep: every graph whose DEFINITION the workspace's store holds gets
+   * the same first-execution/resume treatment as {@link startDeclaredGraph}, one
+   * graph at a time. The definition row is the sweep's whole inventory — the
+   * retired per-graph v2 container is never listed, never read and never
+   * rewritten here, so an existing one cannot be resumed or started by a boot
+   * (plan §3.6). A graph this host cannot open is reported, never rewritten; the
+   * sweep never throws.
    */
   async recoverDeclaredGraphs(): Promise<OutcomeHostRecoveryReport> {
     this.assertOpen();
@@ -663,56 +649,23 @@ export class OutcomeHost {
   private async openRuntime(
     graphId: string,
   ): Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }> {
-    const path = engineStatePath(this.workspaceDir, graphId);
-    let raw: string;
-    try {
-      raw = readFileSync(path, "utf-8");
-    } catch (error) {
+    const reading = readStoredDefinition(this.storeRoot, graphId);
+    if (reading.kind !== "ok") {
       throw new Error(
         "outcome-host: graph " +
           JSON.stringify(graphId) +
-          " has no readable persisted record at " +
-          path +
+          " has no readable stored definition in " +
+          this.storeRoot +
           " (" +
-          errorText(error) +
-          ") — a declared graph is dispatched only from its SAVED plan",
+          describeStoredReading(reading) +
+          ") — a declared graph is dispatched only from its SAVED plan, and the " +
+          "retired per-graph v2 container is never read as one",
       );
     }
-    const loaded = loadEngineStateForResume(
-      raw,
-      path,
-      DEFAULT_STORAGE_FORMAT_REGISTRY,
-    );
-    if (loaded.kind !== "valid") {
-      throw new Error(
-        "outcome-host: graph " +
-          JSON.stringify(graphId) +
-          " is not a loadable outcome record (" +
-          loaded.kind +
-          ")",
-      );
-    }
-    if (loaded.executionProtocol !== OUTCOME_PROTOCOL) {
-      throw new Error(
-        "outcome-host: graph " +
-          JSON.stringify(graphId) +
-          " is bound to execution protocol " +
-          String(loaded.executionProtocol) +
-          ", not the outcome protocol",
-      );
-    }
-    const reading = readPersistedOutcomePlan(loaded.state);
-    if (reading.kind === "refused") {
-      throw new Error(
-        "outcome-host: graph " +
-          JSON.stringify(graphId) +
-          " cannot be run from its persisted record: " +
-          reading.refusals.map((r) => r.code).join(", "),
-      );
-    }
+    const plan = reading.declared.plan;
     const ledger = await SqliteAcceptanceLedger.create(this.storeRoot);
     const runtime = new OutcomeGraphRuntime({
-      plan: reading.plan.plan,
+      plan,
       ledger,
       dispatch: this.dispatchAdapter,
       validators: this.validators,
@@ -729,34 +682,22 @@ export class OutcomeHost {
     return { runtime, ledger };
   }
 
-  /** Every graph id the workspace store holds a protocol-2 record for. */
+  /**
+   * Every graph id the workspace's store holds an immutable DEFINITION for.
+   *
+   * The definition row is what makes a graph declared (P1 item 5): the sweep's
+   * inventory is the store's own listing, so a store this host cannot open makes
+   * the sweep report that refusal per graph rather than silently finding nothing
+   * to do. A store that does not exist yet is an empty sweep, never an error.
+   */
   private declaredGraphIds(): string[] {
-    const stateDir = engineStateDir(this.workspaceDir);
-    let files: string[];
+    const loaded = loadGraphStoreSync(this.storeRoot);
+    if (loaded.kind !== "valid") return [];
     try {
-      files = readdirSync(stateDir, { encoding: "utf-8" });
-    } catch {
-      return [];
+      return [...loaded.value.definitionGraphIds()];
+    } finally {
+      loaded.value.close();
     }
-    const ids: string[] = [];
-    for (const file of files.sort()) {
-      if (!/^engine-.+\.json$/.test(file)) continue;
-      const path = join(stateDir, file);
-      try {
-        const loaded = loadEngineStateForResume(
-          readFileSync(path, "utf-8"),
-          path,
-          DEFAULT_STORAGE_FORMAT_REGISTRY,
-        );
-        if (loaded.kind === "valid" && loaded.executionProtocol === OUTCOME_PROTOCOL) {
-          ids.push(loaded.state.graphId);
-        }
-      } catch {
-        // A record this sweep cannot read is not a declared graph to start;
-        // the drain audit reports it as a blocker.
-      }
-    }
-    return ids;
   }
 
   private assertOpen(): void {

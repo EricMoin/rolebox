@@ -80,10 +80,6 @@ import {
 } from "../../src/graph/protocol/execution-protocol.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
-import {
-  EnginePersistence,
-  engineStatePath,
-} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";

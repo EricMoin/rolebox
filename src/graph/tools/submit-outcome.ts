@@ -56,20 +56,14 @@
  * adapter contract.
  */
 
-import { readFileSync } from "node:fs";
-
 import type { CompiledPlan } from "../compiler/plan.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
+import { engineStateDir } from "../persistence/engine-persistence.ts";
 import {
-  DEFAULT_STORAGE_FORMAT_REGISTRY,
-  engineStateDir,
-  engineStatePath,
-  loadEngineStateForResume,
-  type EngineLoadResult,
-} from "../persistence/engine-persistence.ts";
+  describeStoredReading,
+  readStoredDefinition,
+} from "../persistence/declared-record.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
-import { persistOutcomeProjection } from "../persistence/outcome-projection.ts";
-import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import type {
   AcceptanceDecision,
   RequirementEvaluation,
@@ -98,7 +92,6 @@ import {
   createValidatorRegistry,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
-import { readExistingDeclaredGraph } from "./declare-graph.ts";
 
 // ── Args and result ─────────────────────────────────────────────────────────
 
@@ -300,115 +293,70 @@ export interface SubmitOutcomeTarget {
 }
 
 /**
- * Resolve the PERSISTED compiled plan of a declared graph, or refuse by name.
+ * Resolve the STORED compiled plan of a declared graph, or refuse by name.
  *
  * Order is deliberate:
- * 1. the persisted record is classified (absent / declared / unreadable) so
- *    each case gets its own reason;
- * 2. the record is loaded through the SAME loader every other consumer uses —
- *    storage-format gate, protocol gate and persisted-plan verification — and a
- *    record that is not a valid OUTCOME-protocol state is refused rather than
- *    partially trusted.
+ * 1. the store's own verdict and the graph's definition are classified
+ *    (absent / declared / unreadable) so each case gets its own reason;
+ * 2. the stored definition is decoded through `persistence/declared-record.ts`
+ *    — the strict v3 front end, the declaration digest, and the persisted-plan
+ *    gate (executability, topology, contracts, node bindings, plan revision) —
+ *    and a definition that fails any of them is refused rather than partially
+ *    trusted.
+ *
+ * The plan comes from the STORE. The retired per-graph v2 container is never
+ * read here, and a store this build may not read (`unsupported` / `corrupt`,
+ * including a root that still holds a retired container) is refused by name
+ * rather than answered as "no such graph" — which is what would let a
+ * submission be judged against a plan nobody could verify.
  *
  * The declaration is never an input: there is no path here that compiles
  * anything.
  */
-function resolvePersistedPlan(target: SubmitOutcomeTarget): CompiledPlan {
+function resolvePersistedPlan(
+  target: SubmitOutcomeTarget,
+  storeDirectory: string | undefined,
+): CompiledPlan {
   const { graphId } = target;
-  if (target.workspaceDir === undefined) {
+  if (storeDirectory === undefined) {
     throw new OutcomeSubmissionRefusedError(
       "no-state-directory",
       graphId,
       `graph_submit_outcome refused: no state directory is configured, so graph "${graphId}"` +
-        " has no .rolebox/state store to hold its compiled plan and no acceptance ledger to" +
+        " has no graph store to hold its compiled plan and no acceptance ledger to" +
         " commit an outcome into. Construct the toolset with a stateDir.",
     );
   }
-  const onDisk = readExistingDeclaredGraph(target.workspaceDir, graphId);
-  if (onDisk.kind === "unreadable") {
-    throw new OutcomeSubmissionRefusedError(
-      "unreadable-plan",
-      graphId,
-      `graph_submit_outcome refused: the persisted record of graph "${graphId}" could not be` +
-        ` read (${onDisk.reason}). A declaration-only graph is the only kind this ingress` +
-        " accepts, and it is never guessed at or overwritten.",
-    );
-  }
-  if (onDisk.kind === "absent") {
+  // ONE store read decides every branch: the store's own verdict, the definition
+  // row and the plan all come from the same call, so two reads can never
+  // disagree and a refusal names what is actually there.
+  const reading = readStoredDefinition(storeDirectory, graphId);
+  if (reading.kind === "blocked" && reading.verdict.kind === "absent") {
+    // AN ABSENT STORE IS ABSENT: nothing was ever declared under this id here.
+    // (No store and no retired record beside it is the one reading a caller may
+    // start a graph from; every other verdict is a refusal below.)
     throw new OutcomeSubmissionRefusedError(
       target.declaredInMemory ? "plan-not-persisted" : "unknown-graph",
       graphId,
       target.declaredInMemory
         ? `graph_submit_outcome refused: graph "${graphId}" is declared in memory but its` +
-          " compiled plan never reached the store, so the outcome state has nowhere durable to" +
-          " live. Declare it with a stateDir configured and submit again."
+          " definition never reached the graph store, so the outcome state has nowhere durable" +
+          " to live. Declare it with a graph store configured and submit again."
         : `graph_submit_outcome refused: graph "${graphId}" is not a declared` +
-          " (outcome-protocol) graph. This ingress serves declaration-only graphs; call" +
+          " (outcome-protocol) graph. This ingress serves declared graphs; call" +
           " graph_declare first.",
     );
   }
-
-  const path = engineStatePath(target.workspaceDir, graphId);
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch (error) {
+  if (reading.kind !== "ok") {
     throw new OutcomeSubmissionRefusedError(
       "unreadable-plan",
       graphId,
-      `graph_submit_outcome refused: the persisted record of graph "${graphId}" could not be` +
-        ` read from ${path} (${errorText(error)}); nothing was submitted.`,
+      `graph_submit_outcome refused: the stored record of graph "${graphId}" could not be` +
+        ` read (${describeStoredReading(reading)}). A declared graph is the only kind this` +
+        " ingress accepts, and it is never guessed at or overwritten.",
     );
   }
-  const loaded = loadEngineStateForResume(
-    raw,
-    path,
-    DEFAULT_STORAGE_FORMAT_REGISTRY,
-  );
-  if (loaded.kind !== "valid") {
-    throw new OutcomeSubmissionRefusedError(
-      "unreadable-plan",
-      graphId,
-      `graph_submit_outcome refused: the persisted record of graph "${graphId}" is not a` +
-        ` loadable engine state (${describeLoad(loaded)}); nothing was submitted.`,
-    );
-  }
-  if (loaded.executionProtocol !== OUTCOME_PROTOCOL) {
-    throw new OutcomeSubmissionRefusedError(
-      "unreadable-plan",
-      graphId,
-      `graph_submit_outcome refused: the persisted record of graph "${graphId}" is bound to` +
-        ` execution protocol ${loaded.executionProtocol}, not the outcome protocol, so this` +
-        " ingress does not serve it; nothing was submitted.",
-    );
-  }
-  const plan = loaded.state.compiledPlan;
-  if (plan === undefined) {
-    throw new OutcomeSubmissionRefusedError(
-      "unreadable-plan",
-      graphId,
-      `graph_submit_outcome refused: graph "${graphId}" is bound to the outcome protocol but` +
-        " its persisted record carries no compiled plan, so the node's contract cannot be" +
-        " resolved from the saved plan; nothing was submitted.",
-    );
-  }
-  return plan;
-}
-
-/** Describe a non-valid load result for a diagnostic. */
-function describeLoad(
-  loaded: Exclude<EngineLoadResult, { kind: "valid" }>,
-): string {
-  switch (loaded.kind) {
-    case "absent":
-      return "no record";
-    case "corrupt":
-      return `corrupt ${loaded.dimension}: ${loaded.reason}`;
-    case "unsupported":
-      return `unsupported ${loaded.dimension}: ${loaded.detail}`;
-    case "migration-required":
-      return `migration-required storage ${loaded.from} -> ${loaded.to}`;
-  }
+  return reading.declared.plan;
 }
 
 // ── The submission ──────────────────────────────────────────────────────────
@@ -479,7 +427,17 @@ export async function submitDeclaredOutcome(
   args: GraphSubmitOutcomeArgs,
   deps: SubmitOutcomeDeps,
 ): Promise<GraphSubmitOutcomeResult> {
-  const plan = resolvePersistedPlan(target);
+  // ONE store root for the whole call: the same directory the ledger is opened
+  // at is the one the definition is read from, so a plan and the acceptance it
+  // licenses can never come from two different stores.
+  const isolation = readCredentialIsolationAdapter(deps.credentialIsolation);
+  const storeDirectory =
+    isolation === undefined
+      ? target.workspaceDir === undefined
+        ? undefined
+        : engineStateDir(target.workspaceDir)
+      : isolation.credentialStoreRoot;
+  const plan = resolvePersistedPlan(target, storeDirectory);
   // THE HOST CAPABILITY GATE (D7) RUNS BEFORE ANY STORE IS OPENED. Without a
   // readable host credential-isolation capability this build cannot keep the
   // attempt credentials it persists out of another same-account process's
@@ -528,17 +486,12 @@ export async function submitDeclaredOutcome(
         "was submitted and no ledger was opened.",
     );
   }
-  // A readable adapter routes the credential store to the root the host
-  // declares as protected; the workspace default is used only when no adapter
-  // exists, which the gate above already refused.
-  const isolation = readCredentialIsolationAdapter(deps.credentialIsolation);
   // The gate above admitted only an ABSENT or READABLE capability, so this
-  // normalization only ever lifts a readable host declaration.
+  // normalization only ever lifts a readable host declaration. The ledger is
+  // opened at the SAME root the plan was read from (see `storeDirectory`).
   const hostIdentity = readHostIdentityCapability(deps.hostIdentity);
   const ledger = await SqliteAcceptanceLedger.create(
-    isolation === undefined
-      ? engineStateDir(workspaceOf(target))
-      : isolation.credentialStoreRoot,
+    workspaceOf(target, storeDirectory),
   );
   try {
     const runtime = new OutcomeGraphRuntime({
@@ -562,27 +515,21 @@ export async function submitDeclaredOutcome(
         ? {}
         : { evidenceRefs: [...args.evidence_refs] }),
     };
+    // The acceptance transaction committed the run state to this store, and the
+    // query paths read it from there: no second durable record is refreshed.
     const result = runtime.submit(proposal, deps.now);
-    // Refresh the operator view of the graph's own persisted record from the
-    // state this acceptance committed, so graph_status reads the run's real
-    // position. Best-effort and AFTER the transaction: the ledger is already
-    // the authority and a failed projection changes no decision.
-    if (result.kind === "accepted") {
-      persistOutcomeProjection(
-        workspaceOf(target),
-        result.state,
-        deps.now ?? Date.now(),
-      );
-    }
     return renderResult(plan, args, result);
   } finally {
     ledger.close();
   }
 }
 
-/** The workspace directory a submission is addressed against. */
-function workspaceOf(target: SubmitOutcomeTarget): string {
-  if (target.workspaceDir === undefined) {
+/** The store directory a submission's ledger is opened at. */
+function workspaceOf(
+  target: SubmitOutcomeTarget,
+  storeDirectory: string | undefined,
+): string {
+  if (storeDirectory === undefined) {
     // Unreachable: resolvePersistedPlan refuses this before a ledger is opened.
     throw new OutcomeSubmissionRefusedError(
       "no-state-directory",
@@ -590,7 +537,7 @@ function workspaceOf(target: SubmitOutcomeTarget): string {
       `graph_submit_outcome refused: no state directory is configured for graph "${target.graphId}".`,
     );
   }
-  return target.workspaceDir;
+  return storeDirectory;
 }
 
 /**

@@ -1,18 +1,25 @@
 /**
- * Graph Execution Engine v2 — Engine State Persistence
+ * Graph Execution Engine v2 — the RETIRED engine-state container's codec
  *
- * Version: 2.0
- * Date: 2026-07-25
+ * Version: 3.0
+ * Date: 2026-09-23
  *
- * The unified on-disk store for {@link EngineState}. Serializes the whole
- * engine container — including the `Map` fields — into a plain, versioned JSON
- * file that a later `recover()` can hydrate back into a live engine.
+ * THE WRITE PATH IS DELETED (P1 item 5). This module used to own the unified
+ * on-disk store for {@link EngineState}: a versioned JSON container at
+ * `.rolebox/state/engine-<slug>.json`, written by `EnginePersistence.save`.
+ * A declared graph's durable record is now its immutable definition row in the
+ * workspace's ONE graph store (`src/graph/store/`, the same
+ * `graph-acceptance-ledger.sqlite` that holds every receipt, effect and run
+ * state), written by `tools/declare-graph.ts:persistDeclaredGraph` and read by
+ * `persistence/declared-record.ts`. Nothing in production writes — or can
+ * write — an `engine-*.json` container any more, and an existing one is a
+ * RETIRED authority this build refuses, never initializes over and never
+ * rewrites (plan §3.6). See "The retired write path" below.
  *
- * Scope:
- * - `EnginePersistence.save(state)` — synchronous, atomic (`.tmp` +
- *   `renameSync`) write of a declared graph's record. This is the one write
- *   path the outcome run path uses: a declaration reaches disk here before the
- *   host may start it.
+ * WHAT REMAINS IS READ-SIDE. Serializing and hydrating the container — into a
+ * plain, versioned JSON file and back into a live engine state — is still what
+ * makes the refusal of an existing record a NAMED verdict rather than a guess:
+ *
  * - `loadEngineStateForResume(raw, label?, registry?, protocols?)` —
  *   read + validate with every non-valid outcome kept distinguishable
  *   ({@link EngineLoadResult}: absent / corrupt / unsupported /
@@ -23,10 +30,10 @@
  * - `serializeEngineState` / `deserializeEngineState` — the pure version-2
  *   codec (Maps flat, runtime-only flags omitted).
  *
- * The deleted legacy runtime's debounced write path, its two-tier durability
- * policy and its `load`/`loadForResume` class methods are gone with it; the
- * outcome path writes a record once per declaration and reads it through the
- * structured loader.
+ * Its remaining production reader is the operator monitor
+ * (`src/cli/commands/monitor/monitor-reader-engine.ts`), which lists whatever
+ * containers an earlier build left in a workspace. Collapsing that surface onto
+ * the unified query model is P5 item 3; deleting the codec itself is P6 item 1.
  *
  * Design reference:
  * - `.rolebox/design/engine-state-machine.md` §4 (persistence model, atomic
@@ -684,73 +691,37 @@ export type EngineLoadResult =
       to: number;
     };
 
-// ── Store ───────────────────────────────────────────────────────────────────
+// ── The retired write path ──────────────────────────────────────────────────
 
 /**
- * File-backed store for a single graph's engine state.
+ * THE WRITE PATH THAT USED TO BE HERE IS DELETED (P1 item 5).
  *
- * Construct with a workspace directory (defaults to `process.cwd()`); the
- * state file lives under `.rolebox/state/`. The `directory` is injectable so
- * tests can point at a throwaway temp dir and never touch the real state tree.
+ * `EnginePersistence` was the file-backed store of ONE graph's v2 engine-state
+ * container (`.rolebox/state/engine-<slug>.json`): it serialized an
+ * `EngineState` and replaced the file atomically. `graph_declare` wrote a
+ * record through it, and `persistence/outcome-projection.ts` refreshed that
+ * record after every settlement.
  *
- * The write is synchronous and atomic (`.tmp` + `renameSync`), the same
- * crash-safe pattern as `task-store.ts:101-108`. `save` never throws — a
- * failed write is logged as a warning and reported via the boolean return, so
- * a caller deciding whether a declaration reached disk can gate on the
- * outcome. Reads go through {@link loadEngineStateForResume}, which keeps
- * every non-valid outcome distinguishable; this class deliberately holds no
- * read method and no debounced write path (both belonged to the deleted legacy
- * runtime, whose two-tier durability policy no longer exists).
+ * Both callers are gone with this class. A declared graph's durable record is
+ * now its immutable definition row in the workspace's ONE graph store
+ * (`src/graph/store/`, the same `graph-acceptance-ledger.sqlite` that holds
+ * every receipt, effect and run state), written by
+ * `tools/declare-graph.ts:persistDeclaredGraph`; the query paths read it back
+ * through `persistence/declared-record.ts`. Nothing in production writes — or
+ * can write — an `engine-*.json` container any more, which is what plan §3.6
+ * requires: an existing one is a RETIRED authority this build refuses, never
+ * initializes over and never rewrites.
+ *
+ * WHAT STILL LIVES IN THIS MODULE. The pure v2 codec and its total, structured
+ * loader (`serializeEngineState` / `deserializeEngineState` /
+ * `loadEngineStateForResume`) and the persisted-plan and persisted-binding
+ * gates (`verifyPersistedPlan` and its parts). They are read-side only, they
+ * are what makes the refusal of an existing container a named verdict rather
+ * than a guess, and they are still reached by the operator monitor
+ * (`src/cli/commands/monitor/monitor-reader-engine.ts`) and by the tests that
+ * pin the `unsupported` / `corrupt` readings. Removing the codec itself is P6
+ * item 1's deletion of the retired decoder, not this work package's.
  */
-export class EnginePersistence {
-  private readonly directory: string;
-
-  constructor(directory?: string) {
-    this.directory = directory ?? process.cwd();
-  }
-
-  /**
-   * Write-through save of the current engine state. Synchronous and atomic.
-   *
-   * Returns `true` when the state reached disk, `false` on a failed write
-   * (never throws).
-   */
-  save(state: EngineState): boolean {
-    return this._write(state);
-  }
-
-  // ── Internals ─────────────────────────────────────────────────────────────
-
-  /**
-   * Serialize → mkdir → write `.tmp` → atomic rename-over the destination.
-   *
-   * The destination is replaced by a single `renameSync(tmp, filePath)` —
-   * POSIX rename-over is atomic, so a concurrent reader can never observe the
-   * path missing mid-write: the destination always holds either the previous
-   * snapshot or the new one.
-   *
-   * Returns `true` on success, `false` on failure. Never throws — a failed
-   * write degrades gracefully in memory and is reported through the boolean.
-   */
-  private _write(state: EngineState): boolean {
-    const filePath = engineStatePath(this.directory, state.graphId);
-    const stateDir = join(filePath, "..");
-    try {
-      const json = JSON.stringify(serializeEngineState(state), null, 2);
-      mkdirSync(stateDir, { recursive: true });
-      const tmp = `${filePath}.tmp`;
-      writeFileSync(tmp, json, "utf-8");
-      // Atomic replace in one step: rename-over the destination, no separate
-      // unlink. A reader with no open descriptor always sees either the
-      // previous snapshot or the new one — never ENOENT.
-      renameSync(tmp, filePath);
-      return true;
-    } catch (err) {
-      logWarn(`engine-persist: save failed for graph "${state.graphId}": ${errorText(err)}`);
-      return false;
-    }
-  }
-}
 
 // ── Persisted plan verification (B6 binding + B7 compiled plan) ─────────────
 

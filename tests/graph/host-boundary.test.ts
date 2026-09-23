@@ -332,7 +332,7 @@ describe("host boundary — a completion after a restart has no durable binding"
     const storeRoot = join(dir, "host-store");
     persistDeclaredGraph(
       buildDeclaredOutcomeGraph({ declaration: restartDeclaration() }),
-      dir,
+      storeRoot,
     );
     const effect = dispatchEffectKeyOf(RESTART_GRAPH_ID, "work#1");
     const platformExecutionId = "platform-run-after-restart";

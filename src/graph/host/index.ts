@@ -10,9 +10,6 @@
  * (`src/graph/store/`): the same SQLite file as the acceptance ledger, with one
  * schema, one format gate and one transaction boundary (P1 item 3).
  *
- * - `host-store.ts` — the RETIRED host-store path: a compatibility alias for
- *   the workspace's store root, and nothing else. The second database it used to
- *   own is gone; the next P1 step deletes this module and its two entry imports.
  * - `credential-vault.ts` — the store and per-attempt delivery half of the
  *   credential-isolation capability (version 3), whose default keeps NO
  *   credential value on disk and whose capability states that honestly. Its
@@ -41,7 +38,6 @@
  * host and is driven directly by the tests.
  */
 
-export { hostStoreRoot } from "./host-store.ts";
 export {
   GRAPH_STORE_FILE,
   GRAPH_STORE_FORMAT_VERSION,

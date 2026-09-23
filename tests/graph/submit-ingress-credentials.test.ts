@@ -144,7 +144,7 @@ async function openIngressFixture(
 ): Promise<IngressFixture> {
   const dir = makeTmpDir("submit-ingress-");
   const storeRoot = join(dir, "host-store");
-  persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration }), dir);
+  persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration }), storeRoot);
   const dispatched: OutcomeDispatchRequest[] = [];
   const invocations: (HostDispatchInvocation | undefined)[] = [];
   const host = OutcomeHost.open({

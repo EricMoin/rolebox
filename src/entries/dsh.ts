@@ -110,7 +110,7 @@ import {
   createOutcomeGraphTools,
 } from "../graph/tools/index.ts";
 import { OutcomeHost } from "../graph/host/outcome-host.ts";
-import { hostStoreRoot } from "../graph/host/host-store.ts";
+import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { DshOutcomeDelivery } from "../platform/adapters/dsh/outcome-dispatch.ts";
 import { createValidatorRegistry } from "../graph/outcome/validators.ts";
@@ -1202,7 +1202,7 @@ export async function apply(
   // `<workspace>/.rolebox/state` handed every worker the directory. This is the
   // one path-shaped part of the boundary — `credential-vault.ts` states why it
   // is not isolation by itself and what the vault does NOT put on disk.
-  const outcomeStoreRoot = hostStoreRoot(getDataDir(), process.cwd());
+  const outcomeStoreRoot = graphStoreRoot(getDataDir(), process.cwd());
   // D9 IS NOT DECLARED BY THIS HOST, and that is the honest decision: the dsh
   // platform attributes a dispatched worker's own tool call to the WORKER's
   // session and agent (tool-factory.ts builds the context from the executing

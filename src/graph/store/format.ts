@@ -33,7 +33,7 @@
  * schema, and touches no record type.
  */
 
-import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { existsSync, openSync, readdirSync, readSync, closeSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import type { DatabaseDriver } from "../../memory/db-driver.ts";
@@ -44,6 +44,8 @@ import {
   GRAPH_STORE_FORMAT_VERSION,
   GRAPH_STORE_TABLES,
   RETIRED_AUTHORITY_FILES,
+  RETIRED_AUTHORITY_PREFIX,
+  RETIRED_AUTHORITY_SUFFIX,
   SCHEMA_STATEMENTS,
   graphStoreFilePath,
   type GraphStoreColumn,
@@ -89,13 +91,29 @@ export function readStoreDirectory(root: string): StoreDirectoryReading {
     return { kind: "store", filePath, empty };
   }
   const retired: string[] = [];
-  for (const name of RETIRED_AUTHORITY_FILES) {
+  const note = (name: string): void => {
     const path = join(root, name);
     try {
       if (existsSync(path) && statSync(path).size > 0) retired.push(name);
     } catch {
       // A file that cannot be stat'ed is not evidence of records; the gate
       // reports the store it was actually asked to open.
+    }
+  };
+  for (const name of RETIRED_AUTHORITY_FILES) note(name);
+  // The RETIRED PER-GRAPH CONTAINER (P1 item 5): `engine-<slug>.json` files
+  // this build no longer writes and has no decoder for. A directory listing is
+  // only consulted when the authoritative file is absent, and a listing that
+  // fails is not evidence of records — the same containment the loop above has.
+  let listed: string[] = [];
+  try {
+    listed = readdirSync(root, { encoding: "utf-8" });
+  } catch {
+    listed = [];
+  }
+  for (const name of listed.sort()) {
+    if (name.startsWith(RETIRED_AUTHORITY_PREFIX) && name.endsWith(RETIRED_AUTHORITY_SUFFIX)) {
+      note(name);
     }
   }
   if (retired.length === 0) return { kind: "absent", filePath };

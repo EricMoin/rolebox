@@ -56,7 +56,7 @@ describe("OutcomeHost.complete — an out-of-band completion settles", () => {
       declaration: naturalDeclaration(),
       completionPolicies: AUTHORIZED,
     });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
     const deliveries: OutcomeDispatchRequest[] = [];
     const host = openHost({ dir, storeRoot, deliveries, completionPolicies: AUTHORIZED });
     try {
@@ -110,7 +110,7 @@ describe("the invocation-identity decision", () => {
     const dir = makeTmpDir("outcome-host-optout-");
     const storeRoot = join(dir, "host-store");
     const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
     const deliveries: OutcomeDispatchRequest[] = [];
     const host = openHost({
       dir,
@@ -155,7 +155,7 @@ describe("the invocation-identity decision", () => {
     const dir = makeTmpDir("outcome-host-identity-");
     const storeRoot = join(dir, "host-store");
     const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
     const deliveries: OutcomeDispatchRequest[] = [];
     const host = openHost({ dir, storeRoot, deliveries });
     try {
@@ -217,7 +217,7 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
       declaration: naturalDeclaration(),
       completionPolicies: AUTHORIZED,
     });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
     const deliveries: OutcomeDispatchRequest[] = [];
     const invocations: Array<HostDispatchInvocation | undefined> = [];
     const host = OutcomeHost.open({
@@ -259,7 +259,7 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
     const dir = makeTmpDir("outcome-host-no-origin-");
     const storeRoot = join(dir, "host-store");
     const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
     const invocations: Array<HostDispatchInvocation | undefined> = [];
     const host = OutcomeHost.open({
       workspaceDir: dir,
@@ -296,7 +296,7 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
     const dir = makeTmpDir("outcome-host-restart-origin-");
     const storeRoot = join(dir, "host-store");
     const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
 
     // THE FIRST PROCESS: the platform cannot start the worker (no live parent),
     // so the delivery throws. The state and its dispatch effect are already
@@ -367,7 +367,7 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
     const dir = makeTmpDir("outcome-host-effect-refusal-");
     const storeRoot = join(dir, "host-store");
     const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, storeRoot);
 
     // The graph is left with a committed state and a pending effect by a
     // process whose platform refused the dispatch, and NO invocation was ever

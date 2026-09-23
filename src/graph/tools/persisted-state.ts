@@ -1,78 +1,82 @@
 /**
- * Graph Execution Engine v2 — Persisted-State Scanner
+ * Graph query surface — the stored-graph scanner
  *
- * Version: 2.0
- * Date: 2026-07-26
+ * Version: 3.0
+ * Date: 2026-09-23
  *
- * A read-only, cross-session view over the on-disk engine-state store. Whereas
- * `engine-persistence.ts` is the per-graph store (save one graph, load one
- * graph), this helper scans the whole store and surfaces a summary of every
- * graph that has been persisted — including graphs written by earlier
- * sessions that are no longer resident in memory.
+ * A read-only, cross-session view over the workspace's ONE graph store. Whereas
+ * `persistence/declared-record.ts` reads one graph's definition, this helper
+ * scans the whole store and surfaces a summary of every declared graph it holds
+ * — including graphs declared by earlier sessions that are no longer resident in
+ * memory.
  *
- * This is the backing store for the cross-session `graph_status` query (a
- * separate subtask wires the query in); this module deliberately contains no
- * graph_status integration of its own.
+ * P1 ITEM 5 REPOINTED THIS SCANNER. It used to list `.rolebox/state/engine-*.json`
+ * and hydrate each through the v2 container loader. That container is no longer
+ * written, so the scan now reads the `graph_definitions` table of
+ * `graph-acceptance-ledger.sqlite` and derives each graph's operator view from
+ * the stored definition plus the stored run-state body (the TEMPORARY pure
+ * mapping in `declared-record.ts`, which P5 deletes with its consumers).
  *
  * Scope:
- * - `scanPersistedStates(stateDir)` — list `.rolebox/state/engine-*.json`,
- *   hydrate each through the structured loader, and return the states the loader
- *   BOUND to the outcome protocol. Corrupt-JSON, schema-version-mismatched,
- *   unrecognized-protocol and unreadable files are skipped honestly (counted,
- *   never thrown, never fabricated) — the deleted legacy signal protocol among
- *   them, which is why those records no longer appear in a status view. A
- *   missing store yields an empty result, never an error.
+ * - `scanPersistedStates(storeDirectory)` — read every stored definition, decode
+ *   it, project the recorded run position, and return the graphs this build can
+ *   read. A definition that fails a gate is named in `skippedGraphs` (counted,
+ *   never thrown, never fabricated). A store this build may not read at all is
+ *   reported by its own verdict in `blocked` — never as "no graphs", which is
+ *   the answer that would license a new run beside an unreadable one. A missing
+ *   store yields an empty result, never an error.
  * - `buildPersistedSummary(state)` — a pure, JSON-primitive summary of one
- *   hydrated state (graphId, phase, node counts per status, per-node
- *   agent/status/timing, startedAt/updatedAt, frontier).
- * - `scanPersistedSummaries(stateDir)` — convenience combining the scan with
- *   the summary builder, ordered most-recently-updated first.
+ *   projected state (graphId, phase, node counts per status, per-node
+ *   agent/status/timing, startedAt/updatedAt).
+ * - `scanPersistedSummaries(storeDirectory)` — convenience combining the scan
+ *   with the summary builder, ordered most-recently-updated first.
  * - Node / loop / budget accessors (`getNode`, `listNodes`, `getLoopGroup`,
  *   `listLoopGroups`, `getBudget`) so the graph_status query can read across
  *   sessions without owning the Map unwrapping.
  *
- * All functions are total (never throw): every filesystem and parse failure
- * path is contained. Directory semantics match
- * `src/graph/persistence/engine-persistence.ts` — `stateDir` is the workspace
- * directory, and the state files live under `.rolebox/state/` (see
- * `engineStatePath`).
+ * `storeDirectory` is the directory that HOLDS the store file — the root the
+ * run path opens (`credentialIsolation.credentialStoreRoot` when the host
+ * declares one, the workspace's `.rolebox/state` otherwise). It is no longer a
+ * workspace directory the scanner appends `.rolebox/state` to: the store did not
+ * move, the layout under a workspace did.
  *
- * Design reference: `.rolebox/design/engine-state-machine.md` §4 (persistence
- * model); the scan pattern is the one the deleted `engine-startup.ts` used.
+ * All functions are total (never throw): every read, decode and projection
+ * failure path is contained.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
-import { loadEngineStateForResume } from "../persistence/engine-persistence.ts";
+import { loadGraphStoreSync } from "../store/load.ts";
 import type { EngineState } from "../../types.engine-v2.ts";
 import type {
   GraphBudgetState,
   LoopGroupRuntimeState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
-
-// ── Constants ───────────────────────────────────────────────────────────────
-
-/** Matches the per-graph engine-state filenames written by `engine-persistence`. */
-const ENGINE_STATE_FILENAME = /^engine-.+\.json$/;
+import {
+  describeStoreVerdict,
+  listStoredEngineStates,
+} from "../persistence/declared-record.ts";
 
 // ── Result types ────────────────────────────────────────────────────────────
 
-/** Outcome of scanning the persisted-state store. Total — never throws. */
+/** Outcome of scanning the stored-graph store. Total — never throws. */
 export interface PersistedStateScan {
-  /** Workspace directory that was scanned. */
-  directory: string;
-  /** Engine-state directory actually read (`.rolebox/state`). */
-  stateDirectory: string;
-  /** Total `engine-*.json` files present in the store. */
+  /** The directory holding the authoritative store that was read. */
+  storeDirectory: string;
+  /** How many graph definitions the store holds. */
   count: number;
-  /** Successfully hydrated engine states (valid v2, read OK). */
+  /** Successfully decoded graphs, projected to the query-boundary shape. */
   loaded: EngineState[];
-  /** Number of files skipped (corrupt / version-mismatched / read error). */
+  /** Number of stored definitions skipped (failed a decode or state gate). */
   skipped: number;
-  /** Names of the skipped files, in scan order. */
-  skippedFiles: string[];
+  /** Graph ids of the skipped definitions, in scan order. */
+  skippedGraphs: string[];
+  /**
+   * Set when the store itself could not be read (a damaged file, a retired
+   * container beside it, a format this build has no decoder for). The scan is
+   * then EMPTY and this names the verdict; a caller must not read it as
+   * "no graphs".
+   */
+  blocked?: string;
 }
 
 /** JSON-primitive per-node projection for a cross-session summary. */
@@ -87,7 +91,7 @@ export interface PersistedNodeSummary {
 }
 
 /**
- * Cross-session, JSON-primitive summary of a single persisted engine state.
+ * Cross-session, JSON-primitive summary of a single stored graph.
  * Everything here is safe to serialize and to diff across sessions.
  */
 export interface PersistedStateSummary {
@@ -101,7 +105,6 @@ export interface PersistedStateSummary {
   nodes: PersistedNodeSummary[];
   startedAt: number;
   updatedAt: number;
-  frontier: string[];
   /** Whether the state carries any recorded lifecycle checkpoints. */
   hasCheckpoints: boolean;
 }
@@ -109,75 +112,51 @@ export interface PersistedStateSummary {
 // ── Scanner ───────────────────────────────────────────────────────────────
 
 /**
- * Scan the persisted-state store under `stateDir/.rolebox/state` and hydrate
- * every `engine-*.json` file present.
+ * Scan the workspace's graph store and read every declared graph it holds.
  *
- * Corrupt JSON, schema-version-mismatched files, and unreadable files are
- * skipped honestly: they are counted in `skipped` / named in `skippedFiles`
- * and never included in `loaded`. A missing or unreadable store is a clean
- * empty result — `scanPersistedStates` never throws.
+ * A definition that fails a gate is skipped honestly: counted in `skipped` /
+ * named in `skippedGraphs` and never included in `loaded`. A missing store is a
+ * clean empty result; a store this build may not read is an empty result with
+ * `blocked` set. `scanPersistedStates` never throws.
  *
- * @param stateDir - Workspace directory (the same `directory` argument
- *                   `EnginePersistence` / `engineStatePath` expect). The
- *                   engine-state files live under `.rolebox/state/`.
+ * @param storeDirectory - The directory holding
+ *   `graph-acceptance-ledger.sqlite` (the root the run path opens).
  */
-export function scanPersistedStates(stateDir: string): PersistedStateScan {
-  const stateDirectory = join(stateDir, ".rolebox", "state");
-
-  let files: string[];
-  try {
-    files = readdirSync(stateDirectory, { encoding: "utf-8" }).filter((f) =>
-      ENGINE_STATE_FILENAME.test(f),
-    );
-  } catch {
-    // No `.rolebox/state` yet — clean start. Empty result, no error.
+export function scanPersistedStates(storeDirectory: string): PersistedStateScan {
+  const loaded = loadGraphStoreSync(storeDirectory);
+  if (loaded.kind === "absent") {
     return {
-      directory: stateDir,
-      stateDirectory,
+      storeDirectory,
       count: 0,
       loaded: [],
       skipped: 0,
-      skippedFiles: [],
+      skippedGraphs: [],
     };
   }
-
-  // Deterministic scan order so cross-session output is stable for a given store.
-  files.sort();
-
-  const loaded: EngineState[] = [];
-  const skippedFiles: string[] = [];
-
-  for (const file of files) {
-    try {
-      const raw = readFileSync(join(stateDirectory, file), "utf-8");
-      const result = loadEngineStateForResume(raw, file);
-      if (result.kind === "valid") {
-        loaded.push(result.state);
-      } else {
-        // Valid read, but corrupt / version-mismatched / a protocol this build
-        // does not run.
-        skippedFiles.push(file);
-      }
-    } catch {
-      // Read error (e.g. permission, path churn mid-scan). Skip, never throw.
-      skippedFiles.push(file);
-    }
+  if (loaded.kind !== "valid") {
+    return {
+      storeDirectory,
+      count: 0,
+      loaded: [],
+      skipped: 0,
+      skippedGraphs: [],
+      blocked: describeStoreVerdict(loaded),
+    };
   }
-
+  const listing = listStoredEngineStates(storeDirectory);
   return {
-    directory: stateDir,
-    stateDirectory,
-    count: files.length,
-    loaded,
-    skipped: skippedFiles.length,
-    skippedFiles,
+    storeDirectory,
+    count: listing.states.length + listing.skipped.length,
+    loaded: [...listing.states],
+    skipped: listing.skipped.length,
+    skippedGraphs: [...listing.skipped],
   };
 }
 
 // ── Summary builder ────────────────────────────────────────────────────────
 
 /**
- * Pure projection of one hydrated {@link EngineState} into a JSON summary.
+ * Pure projection of one projected state into a JSON summary.
  *
  * @internal No production caller — `graph-tools.ts` imports only
  * {@link scanPersistedStates}. Retained as a published surface (this package
@@ -209,21 +188,20 @@ export function buildPersistedSummary(state: EngineState): PersistedStateSummary
     nodes,
     startedAt: state.startedAt,
     updatedAt: state.updatedAt,
-    frontier: [...state.frontier],
     hasCheckpoints: state.checkpoints != null && Object.keys(state.checkpoints).length > 0,
   };
 }
 
 /**
  * Scan the store and return the cross-session summary of every graph that
- * loaded successfully, ordered most-recently-updated first. Total — never
+ * decoded successfully, ordered most-recently-updated first. Total — never
  * throws (delegates to {@link scanPersistedStates}).
  *
  * @internal No production caller (see {@link buildPersistedSummary}); retained
  * as a published surface per FIX-PLAN B19.
  */
-export function scanPersistedSummaries(stateDir: string): PersistedStateSummary[] {
-  const { loaded } = scanPersistedStates(stateDir);
+export function scanPersistedSummaries(storeDirectory: string): PersistedStateSummary[] {
+  const { loaded } = scanPersistedStates(storeDirectory);
   return loaded
     .map((state) => buildPersistedSummary(state))
     .sort((a, b) => b.updatedAt - a.updatedAt);

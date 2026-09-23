@@ -50,7 +50,6 @@ import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
 import {
   engineStateDir,
-  engineStatePath,
 } from "../../src/graph/persistence/engine-persistence.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import {
@@ -69,6 +68,8 @@ import {
 } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.ts";
+import { loadGraphStoreSync } from "../../src/graph/store/load.ts";
+import { hasNoAcceptanceRecords } from "./helpers/acceptance-records.ts";
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { createOutcomeGraphTools as createGraphTools } from "../../src/graph/tools/index.ts";
@@ -257,8 +258,27 @@ function resumeReport(result: OutcomeResumeResult): unknown {
 }
 
 /** The raw text of one persisted engine state, for the store checks. */
+/**
+ * The durable DEFINITION record of one graph, as text.
+ *
+ * It used to be the `engine-<slug>.json` container; P1 item 5 records the
+ * definition in the workspace's graph store instead, so "the declaration reached
+ * disk" is the same assertion against the store's own row.
+ */
 function readStateRecord(dir: string, graphId: string): string {
-  return readFileSync(engineStatePath(dir, graphId), "utf-8");
+  const loaded = loadGraphStoreSync(engineStateDir(dir));
+  if (loaded.kind !== "valid") {
+    throw new Error("fixture: the graph store is not readable (" + loaded.kind + ")");
+  }
+  try {
+    const row = loaded.value.readDefinition(graphId);
+    if (row === undefined) {
+      throw new Error("fixture: no stored definition for " + graphId);
+    }
+    return JSON.stringify(row);
+  } finally {
+    loaded.value.close();
+  }
 }
 
 // ── The gate ────────────────────────────────────────────────────────────────
@@ -918,8 +938,12 @@ describe("no report channel carries an attempt credential", () => {
     }
     expect(caught.reason).toBe("credential-isolation-unavailable");
     expect(caught.message).toContain("credential-isolation-unavailable");
-    // NOTHING was opened: the refusal precedes SqliteAcceptanceLedger.create.
-    expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
+    // NOTHING WAS ACCEPTED: the refusal precedes SqliteAcceptanceLedger.create.
+    // The store FILE legitimately exists — `graph_declare` put the definition
+    // there — so the assertion is about records, which is what the gate owns.
+    expect(
+      await hasNoAcceptanceRecords(engineStateDir(workspace), declared.graph_id),
+    ).toBe(true);
 
     // The declaration is still on disk, unmoved: a refusal is not a deletion.
     expect(readStateRecord(workspace, declared.graph_id).length).toBeGreaterThan(0);

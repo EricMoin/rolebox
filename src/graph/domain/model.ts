@@ -240,9 +240,10 @@ export type DispatchEffect = PendingEffectRecord;
  * `markCreating` / `confirm` / `release`
  * (`src/graph/host/execution-index.ts`). A graph-side intent never writes a
  * host fact.
- * Replaces: an ALIAS of `HostDispatchExecution`, the typed view of the host
- * store's `host_dispatch_executions` row (`src/graph/host/host-store.ts`), which
- * P1 item 3 moves into the converged database. It does NOT own credentials: the
+ * Replaces: an ALIAS of `HostDispatchExecution`, the typed view of the
+ * `host_dispatch_executions` row of the workspace's ONE graph store
+ * (`src/graph/store/schema.ts`), which P1 item 3 moved into the converged
+ * database and P1 item 5 finished by deleting the retired host-store module. It does NOT own credentials: the
  * credential record is `host_attempt_credentials`
  * (`src/graph/host/credential-vault.ts`) and the attempt's credential DIGEST
  * belongs to `NodeAttempt`. It is also the durable record that must make the

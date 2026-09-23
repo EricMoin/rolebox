@@ -1,193 +1,157 @@
 /**
  * Graph Execution Engine v2 — Read-only drain / migration audit (E stage entry)
  *
- * Version: 1.0
- * Date: 2026-09-22
+ * Version: 2.0
+ * Date: 2026-09-23
  *
- * The read-only inventory of the persisted graph store, kept after the legacy
- * execution path was retired: it is how a store is shown to hold nothing the
- * deleted runtime would have been needed for. One total, read-only inventory of
- * the persisted graph store, in which every graph is
+ * The read-only inventory of the workspace's ONE graph store, kept after the
+ * legacy execution path was retired: it is how a store is shown to hold nothing
+ * the deleted runtime would have been needed for. One total, read-only inventory
+ * of the store, in which every declared graph is
  *
  * - `terminal` — readable and quiescent: the record takes no further step;
- * - `in-flight` — readable and still owed work: the outcome run path has not
- *   finished it; or
- * - `blocked` — the record cannot be read, or its version is unknown (a
- *   storage format or execution protocol with no installed capability), or it
- *   is INTACT but not executable until a registered storage migration commits.
- *   Every blocked entry is a BLOCKER for the drain decision and is listed
- *   individually — it is never folded into a count and never ignored.
+ * - `in-flight` — readable and still owed work: the outcome run path has
+ *   not finished it; or
+ * - `blocked` — the record cannot be read, its definition fails a gate, or
+ *   its run-state row is not the state the strict reader accepts. Every blocked
+ *   entry is a BLOCKER for the drain decision and is listed individually — it is
+ *   never folded into a count and never ignored.
  *
- * STRICTLY READ-ONLY, BY CONSTRUCTION. Nothing here writes a graph, a state
- * row, a ledger row or a file: the engine-state files are read as text and
- * classified by the same total loader the startup sweep uses, and the outcome
- * protocol's run state is read through `SqliteAcceptanceLedger.openReadOnly`
- * — an open that does not create the directory, does not create the file, never
- * initializes a schema, and holds a connection on which SQLite itself refuses
- * every write. A store the open cannot read without changing — a WAL-mode
- * ledger, whose read-only open would rewrite its `-shm` side file — is refused
- * before any connection exists and reported as a `ledger-refused` blocker, so
- * the no-write promise holds for every store, not only the ones this build
- * writes. A store that does not exist is `absent`, which is a reading and
- * never a licence to initialize one — and for a protocol-2 record it is not a
- * blocker either: nothing was ever committed, so the graph's first execution is
- * still owed and the run path (not the audit) is what creates the store.
- * `tests/graph/drain-audit.test.ts` proves
- * the zero-write property the hard way: every file under the audited workspace
- * is hashed and mtime-compared before and after a full audit over mixed
- * records, including the SQLite ledger.
+ * THE UNIVERSE IS THE STORE, NOT A DIRECTORY OF FILES (P1 item 5). The audit
+ * used to list `engine-*.json` and classify each through the v2 container
+ * loader. That container is no longer written, so the inventory is now the
+ * `graph_definitions` table of `graph-acceptance-ledger.sqlite`, and each
+ * graph is classified from its DEFINITION plus its `ledger_graph_state` row
+ * and its `ledger_pending_effects` rows — all read from the same open
+ * store. The retired per-graph container is never a record this audit
+ * interprets: a non-empty one found where the previous layout kept it is
+ * reported as a `retired-state-record` blocker that names the file (plan
+ * §P6.4), and one beside the store itself makes the store `unsupported` at
+ * the gate.
  *
- * THE UNIVERSE IS THE ENGINE-STATE STORE — the same `engine-*.json` set the
- * startup sweep scans (`engineStateDir(directory)`, i.e.
- * `<directory>/.rolebox/state`). One file is one graph, and its
- * `executionProtocolVersion` is the identity the loader BOUND. A record pinned
- * to any protocol this build does not register — the deleted legacy signal
- * protocol included — is a BLOCKER (`unsupported-version`), never a run this
- * audit interprets. The outcome protocol keeps its run state in the acceptance
- * ledger rather than in that file, so a protocol-2 entry is classified from the
- * ledger's `graphState` row — the state is read against the graph's SAVED
- * compiled plan with the same strict, versioned reader the run path uses.
+ * STRICTLY READ-ONLY, BY CONSTRUCTION. Nothing here writes a graph, a state row,
+ * a definition row or a file: the store is opened through
+ * `loadGraphStoreSync`, which runs the format gate and hands back a handle
+ * whose connection refuses every write at the SQLite layer. A store the gate
+ * refuses — a foreign file, a zero-byte file, an unknown format, a retired
+ * authority beside it, a WAL-mode store whose read-only open would rewrite its
+ * `-shm` side file — is refused BEFORE a row is read and reported as a
+ * blocker, so the no-write promise holds for every store, not only the ones this
+ * build writes. A store that does not exist is `absent`, which is a reading
+ * and never a licence to initialize one.
  *
- * TERMINAL MEANS QUIESCENT, AND THE PHASE IS ALWAYS REPORTED. An outcome record
- * is terminal when its phase is `complete` OR `stopped`: a stopped run is
+ * TERMINAL MEANS QUIESCENT, AND THE PHASE IS ALWAYS REPORTED. A run is terminal
+ * when its phase is `complete` OR `stopped`: a stopped run is
  * deliberately NOT `complete` (it was cut short by a declared hard limit or
- * progress threshold), but it refuses every further advance and launches
- * nothing on recovery, so it takes no further step and is migration-quiescent.
- * The entry carries the exact `phase` and, for a stop, its reason and
- * description, so "cut short" is never read as "finished" and the audit's
- * judgement stays checkable.
+ * progress threshold), but it refuses every further advance and launches nothing
+ * on recovery, so it takes no further step and is migration-quiescent. The entry
+ * carries the exact `phase` and, for a stop, its reason and description, so
+ * "cut short" is never read as "finished" and the audit's judgement stays
+ * checkable.
  *
  * IN-FLIGHT IS MORE THAN "NOT TERMINAL". A readable entry is in flight when it
- * is not quiescent: an outcome record in `ready`/`executing`, or a declared
- * outcome graph whose ledger holds no state row yet — including a ledger STORE
- * that does not exist at all, which nothing has ever committed to. Its first
- * execution is still owed: the sweep would create the store and start the graph
- * from the saved plan. The entry names the WORK, not just the phase: every node
- * the persisted state records as in flight, with its attempt, and every effect
- * still `pending` or `started`.
+ * is not quiescent: a definition whose run-state row is `ready` /
+ * `executing`, or one whose store holds no run-state row yet — nothing has
+ * ever committed one, so the graph's first execution is still owed and the run
+ * path (not the audit) is what performs it. The entry names the WORK, not just
+ * the phase: every node the run state records as in flight, with its attempt,
+ * and every effect still `pending` or `started`.
  *
- * UNSETTLED EFFECTS ARE REPORTED FOR EVERY READABLE OUTCOME GRAPH, terminal or
- * not. An effect a process left `started` is real outstanding work even when
- * the graph around it finished, so it is listed rather than filtered by phase —
- * and it holds the verdict below open even when the graph count alone would
- * look drained.
+ * UNSETTLED EFFECTS ARE REPORTED FOR EVERY READABLE GRAPH, terminal or not. An
+ * effect a process left `started` is real outstanding work even when the
+ * graph around it finished, so it is listed rather than filtered by phase — and
+ * it holds the verdict below open even when the graph count alone would look
+ * drained.
  *
- * THE VERDICT IS NOT A COUNT. `drained` requires BOTH halves: no blocker AND
- * no in-flight graph AND no unsettled effect. A store with zero non-terminal
- * graphs but one unreadable record, or one `started` effect nobody settled, is
- * NOT drained — it is `blocked` or `in-flight` respectively. That is the whole
- * point of the report: "nothing looked non-terminal" is not evidence that the
- * store is quiescent.
+ * THE VERDICT IS NOT A COUNT. `drained` requires BOTH halves: no blocker
+ * AND no in-flight graph AND no unsettled effect. A store with zero non-terminal
+ * graphs but one unreadable definition, or one `started` effect nobody
+ * settled, is NOT drained — it is `blocked` or `in-flight`
+ * respectively. That is the whole point of the report: "nothing looked
+ * non-terminal" is not evidence that the store is quiescent.
  *
  * THE IN-FLIGHT SET IS DECIDABLE, NOT MERELY COUNTED (E gate, step 1). "Six
- * graphs are in flight" cannot be acted on; "six records with nothing queued
- * and no state update for 9 to 13 days" can. Every readable in-flight entry
- * carries a `staleness` block — the record's own last update, its age, the
- * threshold that was applied, the queue facts and the inference — and `totals`
- * splits the in-flight count into `staleLocks` / `activelyExecuting`. It is an
- * INFERENCE with a stated basis, never a write: a stale lock is reported, never
- * resolved, and the verdict rules above are unchanged.
+ * graphs are in flight" cannot be acted on; "six records with nothing queued and
+ * no state update for 9 to 13 days" can. Every readable in-flight entry carries
+ * a `staleness` block — the record's own last update, its age, the
+ * threshold that was applied, the queue facts and the inference — and
+ * `totals` splits the in-flight count into `staleLocks` /
+ * `activelyExecuting`. It is an INFERENCE with a stated basis, never a
+ * write: a stale lock is reported, never resolved, and the verdict rules above
+ * are unchanged.
  *
- * THE QUEUE IS THE OUTCOME STATE'S OWN. An in-flight outcome entry's queue is
- * its armed attempts plus its unsettled effects, read from the acceptance
- * ledger through the same strict readers the run path uses. A record the loader
- * refuses (a deleted protocol, an unknown storage format, a corrupt body) is a
- * blocker, so there is no queue to guess at.
- *
- * Dependency note: this module reads the loader, the ledger's read-only open and
+ * Dependency note: this module reads the store, the domain loader verdict and
  * the outcome state reader, and imports no run path. It dispatches nothing,
  * recovers nothing, migrates nothing and compiles nothing.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { errorText } from "../../utils/error-text.ts";
-import type { EngineState } from "../../types.engine-v2.ts";
-import type { CompiledPlan } from "../compiler/plan.ts";
 import {
-  readOutcomeGraphState,
   describeOutcomeStop,
-  OutcomeStateError,
+  readOutcomeGraphState,
   type OutcomeGraphState,
   type OutcomeStop,
 } from "../outcome/graph-state.ts";
+import { ledgerFilePath } from "../ledger/sqlite-ledger.ts";
+import type { EffectStatus, PendingEffectRecord } from "../ledger/types.ts";
+import { engineStateDir } from "../persistence/engine-persistence.ts";
 import {
-  ledgerFilePath,
-  SqliteAcceptanceLedger,
-  type AcceptanceLedgerReader,
-  type LedgerReadOpenResult,
-} from "../ledger/sqlite-ledger.ts";
-import type {
-  EffectStatus,
-  GraphStateRecord,
-  PendingEffectRecord,
-} from "../ledger/types.ts";
+  decodeStoredDefinition,
+  describeStoreVerdict,
+  type StoredDeclaredGraph,
+} from "../persistence/declared-record.ts";
 import {
-  DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-  OUTCOME_PROTOCOL,
-  type ExecutionProtocolRegistry,
-} from "../protocol/execution-protocol.ts";
-import {
-  DEFAULT_STORAGE_FORMAT_REGISTRY,
-  engineStateDir,
-  loadEngineStateForResume,
-  type EngineLoadDimension,
-  type EngineLoadResult,
-} from "../persistence/engine-persistence.ts";
-import type { StorageFormatRegistry } from "../persistence/storage-format.ts";
+  RETIRED_AUTHORITY_PREFIX,
+  RETIRED_AUTHORITY_SUFFIX,
+} from "../store/schema.ts";
+import { loadGraphStoreSync, type GraphStoreLoadResult } from "../store/load.ts";
+import type { GraphStore } from "../store/graph-store.ts";
 
 // ── Blocker vocabulary ──────────────────────────────────────────────────────
 
 /**
  * Everything that makes one graph unusable as drain evidence. A CLOSED
- * vocabulary: each code names one condition the audit decided from the record
+ * vocabulary: each code names one condition the audit decided from the store
  * itself, so a caller branches on the code instead of parsing a message.
  *
- * - `state-store-unreadable` — the engine-state DIRECTORY could not be listed;
- *   nothing was audited at all.
- * - `read-error` — one `engine-*.json` exists but could not be read.
- * - `loader-failure` — the total loader threw on one file (containment).
- * - `loader-absent` — the raw-text loader answered `absent`, which is not a
- *   reading it can produce; recorded instead of skipped.
- * - `corrupt-record` — a recognized representation violates its schema,
- *   digest or binding invariants. `dimension` names the violated axis.
- * - `unsupported-version` — a well-formed version/capability with no installed
- *   handler: a storage format no decoder reads, or an execution protocol no
- *   handler owns. `dimension` names the axis.
- * - `migration-required` — an INTACT recognized snapshot with a registered
- *   storage conversion that has not been committed. It is not corrupt and it is
- *   not executable, so it blocks the drain until it is converted.
- * - `unclassified-protocol` — the record loaded as VALID under a registered
- *   protocol this audit has no terminality rule for. Guessing would be worse
- *   than refusing: an unknown protocol's phase vocabulary is not ours to read.
- * - `missing-persisted-plan` / `missing-plan-binding` /
- *   `plan-binding-mismatch` — a protocol-2 record whose plan identity is
- *   absent or self-contradicting; the same rules recovery applies, re-checked
- *   here so the audit never trusts a state handed in from elsewhere.
- * - `ledger-refused` / `ledger-unreadable` — the acceptance ledger exists but
+ * - `state-store-unreadable` — the store could not be listed at all;
+ *   nothing was audited. The verdict's own text rides in `detail`.
+ * - `retired-state-record` — a NON-EMPTY retired per-graph v2 container
+ *   (`engine-<slug>.json`) is still present where the previous layout kept
+ *   it. This build neither reads nor converts it, so its graph must be
+ *   inventoried and archived by an operator before the workspace can be called
+ *   drained (plan §P6.4). The blocker names the file.
+ * - `corrupt-record` — the authoritative store exists but is not a store
+ *   this build can read (a foreign file, a zero-byte file, a reshaped layout).
+ *   `dimension` names the violated axis.
+ * - `unsupported-version` — a well-formed store format this build has no
+ *   decoder for (newer, older, unknown). `dimension` names the axis.
+ * - `unrunnable-definition` — the store holds a definition row for this
+ *   graph that fails a decode gate: the declaration is not a strict v3
+ *   declaration, its digest does not address its content, or the persisted plan
+ *   is a draft, malformed, or disagrees with its binding. The detail names the
+ *   gate.
+ * - `ledger-refused` / `ledger-unreadable` — the store exists but
  *   this build may not read it (foreign / unknown / newer / older / reshaped
- *   format), or could not open it. A protocol-2 record's state is in that store,
- *   so the graph is a blocker.
- * - `state-plan-mismatch` / `state-version-unsupported` / `state-malformed`
- *   / `state-unreadable` — the ledger's state row for this graph is not the
- *   state the strict reader accepts: bound to another plan revision, written in
- *   a body version this build has no reader for, malformed, or refused by an
- *   unexpected error — including a ledger row (or effect-row) read the store's
- *   own gate threw on, which is contained here rather than escaping.
+ *   format), or could not be opened. Every definition's run state is in that
+ *   store, so every graph is a blocker.
+ * - `state-plan-mismatch` / `state-version-unsupported` /
+ *   `state-malformed` / `state-unreadable` — the store's run-state
+ *   row for this graph is not the state the strict reader accepts: bound to
+ *   another plan revision, written in a body version this build has no reader
+ *   for, malformed, or refused by an unexpected error — including an effect-row
+ *   read the store's own gate threw on, which is contained here rather than
+ *   escaping.
  */
 export type DrainAuditBlockerCode =
   | "state-store-unreadable"
-  | "read-error"
-  | "loader-failure"
-  | "loader-absent"
+  | "retired-state-record"
   | "corrupt-record"
   | "unsupported-version"
-  | "migration-required"
-  | "unclassified-protocol"
-  | "missing-persisted-plan"
-  | "missing-plan-binding"
-  | "plan-binding-mismatch"
+  | "unrunnable-definition"
   | "ledger-refused"
   | "ledger-unreadable"
   | "state-plan-mismatch"
@@ -197,7 +161,8 @@ export type DrainAuditBlockerCode =
 
 /** The axis a blocker belongs to, when one owns it. */
 export type DrainAuditBlockerDimension =
-  | EngineLoadDimension
+  | "storage"
+  | "contract"
   | "ledger"
   | "outcome-state";
 
@@ -208,10 +173,10 @@ export interface DrainAuditBlocker {
   readonly dimension?: DrainAuditBlockerDimension;
   /** What was found. Wording is not API; the code is. */
   readonly detail: string;
-  /** The `engine-*.json` file the blocker was observed in, when per-file. */
-  readonly file?: string;
-  /** The graph id, when the record was readable enough to name one. */
+  /** The graph id the blocker belongs to, when one was readable. */
   readonly graphId?: string;
+  /** The retired container file the blocker names, when it is one. */
+  readonly file?: string;
 }
 
 // ── Report model ────────────────────────────────────────────────────────────
@@ -232,20 +197,20 @@ export type DrainAuditClassification = "terminal" | "in-flight" | "blocked";
  *
  * THE BASIS, stated so it can be argued with rather than guessed at:
  *
- * - A live engine writes its state SYNCHRONOUSLY on every critical mutation
- *   (node lifecycle, phase, frontier, checkpoint, approval), so the only window
- *   in which a running graph produces no state update is while a dispatched
- *   task is executing. Silence is therefore evidence, not noise.
- * - The build's own liveness rule is that a `running` node past its staleness
- *   deadline is dead: `DEFAULT_NODE_STALE_TIMEOUT_MS` is 15 minutes and the
- *   tool surface configures it on every engine it builds, persisting a
- *   `timeout` transition when it fires. A record older than that deadline,
- *   with nothing queued, is one whose own watchdog never fired — which is what
- *   a process that is no longer alive looks like.
+ * - A live run commits its run state SYNCHRONOUSLY with every acceptance, so the
+ *   only window in which a running graph produces no state update is while a
+ *   dispatched task is executing. Silence is therefore evidence, not noise.
+ * - The build's own liveness rule is that a `running` node past its
+ *   staleness deadline is dead: `DEFAULT_NODE_STALE_TIMEOUT_MS` is 15
+ *   minutes and the tool surface configures it on every engine it builds,
+ *   persisting a `timeout` transition when it fires. A record older than
+ *   that deadline, with nothing queued, is one whose own watchdog never fired —
+ *   which is what a process that is no longer alive looks like.
  * - 24 hours is 96x that default deadline. The multiple is deliberate: a node
- *   may declare a `budget.timeout_ms` longer than the default, and a single
- *   long dispatch is the one legitimate reason for silence, so the threshold is
- *   set far above any plausible single task rather than just above the default.
+ *   may declare a `budget.timeout_ms` longer than the default, and a
+ *   single long dispatch is the one legitimate reason for silence, so the
+ *   threshold is set far above any plausible single task rather than just above
+ *   the default.
  * - It is a JUDGEMENT, not a protocol invariant, and it is not derived from the
  *   store it is applied to. For the reading that motivated it — records 9 to 13
  *   days old — it is decisive with two orders of magnitude to spare, and a
@@ -258,16 +223,17 @@ export const STALE_LOCK_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
  * Whether a readable in-flight record looks dead or may still be moving.
  *
  * This is an INFERENCE from the facts below, never a rewrite: the audit reads
- * the store and changes nothing, so a `stale-lock` verdict resolves no lock,
- * re-dispatches nothing and deletes nothing. It answers one question and only
- * that one — "is any live process plausibly advancing this record?":
+ * the store and changes nothing, so a `stale-lock` verdict resolves no
+ * lock, re-dispatches nothing and deletes nothing. It answers one question and
+ * only that one — "is any live process plausibly advancing this record?":
  *
  * - `stale-lock` — nothing is queued (no armed attempt and no unsettled
  *   effect) AND the last state update is at least
  *   {@link STALE_LOCK_IDLE_THRESHOLD_MS} old. No live run is advancing it.
- * - `actively-executing` — something is queued OR the last update is inside
- *   the threshold. The audit REFUSES to call this dead; that is not the same as
- *   observing a live process, and the facts that decided it stay on the entry.
+ * - `actively-executing` — something is queued OR the last update is
+ *   inside the threshold. The audit REFUSES to call this dead; that is not the
+ *   same as observing a live process, and the facts that decided it stay on the
+ *   entry.
  */
 export type DrainAuditStaleness = "stale-lock" | "actively-executing";
 
@@ -275,12 +241,10 @@ export type DrainAuditStaleness = "stale-lock" | "actively-executing";
  * The staleness reading for one readable in-flight record: the inference, the
  * threshold applied, and every fact it was drawn from.
  *
- * Present exactly on a readable `in-flight` entry — never on a `terminal` one
- * (it takes no further step, so there is no lock to judge) and never on a
- * `blocked` one (nothing about it is known well enough to infer anything; the
- * blocker is the answer). The queue fact is the entry's OWN protocol's queue:
- * an outcome entry carries `armed` / `unsettledEffects`, and this block says
- * whether that queue was empty.
+ * Present exactly on a readable `in-flight` entry — never on a
+ * `terminal` one (it takes no further step, so there is no lock to judge)
+ * and never on a `blocked` one (nothing about it is known well enough to
+ * infer anything; the blocker is the answer).
  */
 export interface DrainAuditStalenessFacts {
   /** Epoch ms of the record's own last state update, as persisted. */
@@ -298,14 +262,14 @@ export interface DrainAuditStalenessFacts {
   readonly hasQueuedWork: boolean;
 }
 
-/** One node the persisted outcome state records as in flight. */
+/** One node the run state records as in flight. */
 export interface DrainAuditArmedNode {
   readonly nodeId: string;
   /** The attempt a submission must settle (never the credential). */
   readonly attemptId: string;
 }
 
-/** One effect the ledger still records `pending` or `started`. */
+/** One effect the store still records `pending` or `started`. */
 export interface DrainAuditEffect {
   readonly effectId: string;
   readonly attemptId: string;
@@ -322,32 +286,25 @@ export interface DrainAuditStop {
 
 /** One graph's audited record. */
 export interface DrainAuditEntry {
-  /** The `engine-*.json` file this entry was read from. */
-  readonly file: string;
-  /** The graph id, when the record was readable enough to name one. */
-  readonly graphId?: string;
-  /**
-   * The execution-protocol identity the loader BOUND to this record. Absent
-   * only when the record could not be loaded far enough to bind one (a
-   * blocked, unreadable entry) — never guessed.
-   */
-  readonly executionProtocolVersion?: number;
+  /** The graph id this entry was read from — the store's own key. */
+  readonly graphId: string;
   readonly protocol: DrainAuditProtocol;
   readonly classification: DrainAuditClassification;
   /** The persisted phase, exactly as recorded. */
   readonly phase?: string;
-  /** The plan revision, for a protocol-2 record that names one. */
+  /** The definition's own content-addressed plan revision. */
   readonly planRevision?: string;
-  /** Outcome only: nodes the persisted state records as in flight. */
+  /** Outcome only: nodes the run state records as in flight. */
   readonly armed?: readonly DrainAuditArmedNode[];
   /** Outcome only: effects still `pending` or `started`. */
   readonly unsettledEffects?: readonly DrainAuditEffect[];
   /** Outcome only: present exactly when the run ended on a declared stop. */
   readonly stop?: DrainAuditStop;
   /**
-   * Outcome only: whether the ledger holds a state row for this graph. `false`
-   * means the first execution is still owed, not that the state was lost and
-   * not that it is unreadable — a state this build cannot read is a blocker.
+   * Outcome only: whether the store holds a run-state row for this graph.
+   * `false` means the first execution is still owed, not that the state
+   * was lost and not that it is unreadable — a state this build cannot read is
+   * a blocker.
    */
   readonly hasState?: boolean;
   /**
@@ -365,27 +322,27 @@ export type DrainAuditLedgerStatus = "opened" | "absent" | "refused" | "unreadab
 
 /** Counts, including the ones the three-way partition does NOT carry. */
 export interface DrainAuditTotals {
-  /** `engine-*.json` files found in the store. */
-  readonly files: number;
+  /** Definitions found in the store. */
+  readonly graphs: number;
   /** Readable and quiescent. */
   readonly terminal: number;
   /** Readable with work still owed. */
   readonly inFlight: number;
-  /** Unreadable, version-unknown, or intact-but-migration-required. */
+  /** Unreadable or refused by a gate. */
   readonly blocked: number;
   /** Of the in-flight entries, those bound to the outcome protocol. */
   readonly outcomeInFlight: number;
   /**
    * Of the in-flight entries, those the staleness inference calls
-   * `stale-lock`: nothing queued and no state update for at least the applied
-   * threshold. A count of READABLE records, not a write: the audit resolves no
-   * lock and retires nothing.
+   * `stale-lock`: nothing queued and no state update for at least the
+   * applied threshold. A count of READABLE records, not a write: the audit
+   * resolves no lock and retires nothing.
    */
   readonly staleLocks: number;
   /**
    * Of the in-flight entries, those it refuses to call dead — something is
-   * queued or the last update is inside the threshold. `staleLocks` and this
-   * field always sum to {@link inFlight}, which is what makes the pair
+   * queued or the last update is inside the threshold. `staleLocks` and
+   * this field always sum to {@link inFlight}, which is what makes the pair
    * checkable rather than merely informative.
    */
   readonly activelyExecuting: number;
@@ -399,22 +356,22 @@ export interface DrainAuditTotals {
  * The drain verdict.
  *
  * `drained` requires all three: no blocker, no in-flight graph and no
- * unsettled effect. `blocked` wins over `in-flight`: an unreadable record
- * could be anything, and the drain decision must resolve it before it can be
- * called safe.
+ * unsettled effect. `blocked` wins over `in-flight`: an unreadable
+ * record could be anything, and the drain decision must resolve it before it can
+ * be called safe.
  */
 export type DrainAuditVerdict = "drained" | "in-flight" | "blocked";
 
 /** The whole audit. Every array is in deterministic store order. */
 export interface DrainAuditReport {
-  /** The workspace directory audited. */
+  /** The workspace directory the audit was addressed to. */
   readonly directory: string;
-  /** The engine-state directory actually read (`.rolebox/state`). */
-  readonly stateDirectory: string;
-  /** The acceptance-ledger file path (reported even when it is absent). */
+  /** The store directory actually read. */
+  readonly storeDirectory: string;
+  /** The authoritative store file path (reported even when it is absent). */
   readonly ledgerFilePath: string;
   readonly ledger: DrainAuditLedgerStatus;
-  /** One entry per `engine-*.json`, sorted by file name. */
+  /** One entry per stored definition, sorted by graph id. */
   readonly entries: readonly DrainAuditEntry[];
   /** Every blocker, store-level and per-entry, in report order. */
   readonly blockers: readonly DrainAuditBlocker[];
@@ -426,33 +383,30 @@ export interface DrainAuditReport {
 
 /** Inputs for {@link auditGraphStore}. */
 export interface DrainAuditOptions {
-  /** Workspace directory whose `.rolebox/state` store is audited. */
+  /** Workspace directory the audit is addressed to (names the report). */
   readonly directory: string;
   /**
-   * The directory the acceptance ledger is opened from. Defaults to the
-   * workspace state directory (`engineStateDir(directory)`).
+   * The directory the graph store is opened from. Defaults to the workspace
+   * state directory (`engineStateDir(directory)`).
    *
-   * A host that keeps its protected store at its OWN declared root — the same
-   * root the submission ingress opens its ledger at — passes that root here, so
-   * the audit reads the ledger the run actually wrote instead of reporting a
-   * healthy graph as "ledger absent".
+   * A host that keeps its store at its OWN declared root — the same root the
+   * submission ingress opens its ledger at — passes that root here, so the audit
+   * reads the store the run actually wrote instead of reporting a healthy graph
+   * as "store absent".
    */
   readonly ledgerDirectory?: string;
-  /** Storage-format capabilities; defaults to the shipped registry. */
-  readonly storageFormatRegistry?: StorageFormatRegistry;
-  /** Execution-protocol capabilities; defaults to the shipped registry. */
-  readonly protocolRegistry?: ExecutionProtocolRegistry;
   /**
-   * Injected ledger open, for a caller that owns the store handle or a test
-   * that must exercise a refusal. Absent → the real read-only open
-   * ({@link SqliteAcceptanceLedger.openReadOnly}) is used, and the handle it
-   * returns is closed before the audit resolves.
+   * Where the RETIRED per-graph v2 containers would be, when that is a different
+   * directory from the store. Defaults to the workspace state directory. This
+   * build does not read them, but it must report them: an operator cannot call a
+   * workspace drained while records it cannot decode are still on disk
+   * (plan §P6.4).
    */
-  readonly openLedger?: (directory: string) => Promise<LedgerReadOpenResult>;
+  readonly retiredRecordDirectory?: string;
   /**
-   * Read "now" for the staleness inference; defaults to `Date.now`. Injected
-   * by a caller (or a test) that must classify against a fixed instant instead
-   * of the wall clock — the audit is read-only either way.
+   * Read "now" for the staleness inference; defaults to `Date.now`.
+   * Injected by a caller (or a test) that must classify against a fixed instant
+   * instead of the wall clock — the audit is read-only either way.
    */
   readonly now?: () => number;
   /**
@@ -466,42 +420,29 @@ export interface DrainAuditOptions {
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
-/** Matches the per-graph engine-state filenames the store writes. */
-const ENGINE_STATE_FILENAME = /^engine-.+\.json$/;
-
-/** Is this a file the engine-state store owns? */
-function isEngineStateFile(name: string): boolean {
-  return ENGINE_STATE_FILENAME.test(name);
-}
-
-/** One blocker, with the file (and graph, when known) it belongs to. */
+/** One blocker, with the graph (and file, when it is one) it belongs to. */
 function blocker(
   code: DrainAuditBlockerCode,
   detail: string,
-  where: { readonly file?: string; readonly graphId?: string },
+  where: { readonly graphId?: string; readonly file?: string },
   dimension?: DrainAuditBlockerDimension,
 ): DrainAuditBlocker {
   return Object.freeze({
     code,
     ...(dimension === undefined ? {} : { dimension }),
     detail,
-    ...(where.file === undefined ? {} : { file: where.file }),
     ...(where.graphId === undefined ? {} : { graphId: where.graphId }),
+    ...(where.file === undefined ? {} : { file: where.file }),
   });
 }
 
-/**
- * A blocked entry: a record the audit could not classify into terminal or
- * in-flight — unreadable, version-unknown, or intact-but-migration-required.
- * It carries no phase, protocol or work, because the audit has none to report:
- * guessing would be worse than the blocker.
- */
-function blockedFileEntry(
-  file: string,
+/** A blocked entry: a definition the audit could not classify. */
+function blockedEntry(
+  graphId: string,
   codes: readonly DrainAuditBlockerCode[],
 ): DrainAuditEntry {
   return Object.freeze({
-    file,
+    graphId,
     protocol: "unknown" as const,
     classification: "blocked" as const,
     blockerCodes: Object.freeze([...codes]),
@@ -540,13 +481,10 @@ interface EntryQueue {
 
 /** Everything a classification pass may add to an entry. */
 interface EntryBody {
-  readonly graphId?: string;
   readonly protocol: DrainAuditProtocol;
   readonly classification: DrainAuditClassification;
   readonly phase?: string;
   readonly planRevision?: string;
-  readonly nodeStatusCounts?: Readonly<Record<string, number>>;
-  readonly unsettledNodeIds?: readonly string[];
   readonly armed?: readonly DrainAuditArmedNode[];
   readonly unsettledEffects?: readonly DrainAuditEffect[];
   readonly stop?: DrainAuditStop;
@@ -572,10 +510,10 @@ function outcomeQueue(armedCount: number, effectCount: number): EntryQueue {
 }
 
 /**
- * The queue of an outcome record that was declared but never started. Its queue
- * is the FIRST EXECUTION ITSELF: the run path starts the graph from the saved
- * plan at any time, so the record is not a dead lock and must never be reported
- * as one. No frontier exists to report — there is no engine state yet — so only
+ * The queue of a graph that was declared but never started. Its queue is the
+ * FIRST EXECUTION ITSELF: the run path starts the graph from the stored plan at
+ * any time, so the record is not a dead lock and must never be reported as one.
+ * No frontier exists to report — there is no run state yet — so only
  * `hasQueuedWork` is carried.
  */
 const UNSTARTED_OUTCOME_QUEUE: EntryQueue = Object.freeze({
@@ -585,8 +523,8 @@ const UNSTARTED_OUTCOME_QUEUE: EntryQueue = Object.freeze({
 /**
  * Decide one in-flight record's staleness — the SINGLE owner of the rule.
  *
- * `stale-lock` requires BOTH halves: nothing queued and no state update for at
- * least the threshold. Either half alone keeps the entry
+ * `stale-lock` requires BOTH halves: nothing queued and no state update
+ * for at least the threshold. Either half alone keeps the entry
  * `actively-executing`, because the audit must not call a record dead on
  * evidence that does not support it.
  */
@@ -613,19 +551,19 @@ function stalenessFacts(
 /**
  * Read one graph's unsettled effects, CONTAINED.
  *
- * A ledger read can THROW: the store's own row gate refuses a hand-edited or
+ * A store read can THROW: the store's own row gate refuses a hand-edited or
  * foreign row instead of returning it. The audit must report that as a blocker
  * for the entry and never let it escape — totality is what makes the report
  * evidence rather than a crash waiting for a bad row.
  */
 function readUnsettledEffects(
-  ledger: AcceptanceLedgerReader,
+  store: GraphStore,
   graphId: string,
 ):
   | { readonly ok: true; readonly effects: readonly DrainAuditEffect[] }
   | { readonly ok: false; readonly reason: string } {
   try {
-    const rows = ledger.pendingEffects(graphId);
+    const rows = store.pendingEffects(graphId);
     return { ok: true, effects: Object.freeze(rows.map(toAuditEffect)) };
   } catch (error) {
     return { ok: false, reason: errorText(error) };
@@ -633,128 +571,62 @@ function readUnsettledEffects(
 }
 
 /**
- * Classify one VALID outcome-protocol record.
+ * Classify one DECODED definition against the store's run state.
  *
- * The plan identity is re-checked here (the same three rules recovery applies)
- * before the ledger is read, because a state handed to this function from
- * anywhere else must get the same guarantee. The ledger's state row is then
- * read through the strict versioned reader against the SAVED plan: a state this
- * build cannot read is a BLOCKER, never a clean start and never a guess.
+ * The definition's own gates have already run (`decodeStoredDefinition`),
+ * so this pass only reads the run: the state row through the strict versioned
+ * reader, against the SAVED plan. A state this build cannot read is a BLOCKER,
+ * never a clean start and never a guess.
  */
 function classifyOutcome(
-  state: EngineState,
-  ledger: AcceptanceLedgerReader | undefined,
-  ledgerBlocker: DrainAuditBlockerCode | undefined,
+  declared: StoredDeclaredGraph,
+  store: GraphStore,
 ): EntryBody {
-  const plan: CompiledPlan | undefined = state.compiledPlan;
-  if (plan === undefined) {
+  const graphId = declared.graphId;
+  const planRevision = declared.plan.planRevision;
+  const effects = readUnsettledEffects(store, graphId);
+  if (!effects.ok) {
+    const detail =
+      "graph " + JSON.stringify(graphId) +
+      " has effect rows this build could not read (" + effects.reason + ")";
     return {
-      graphId: state.graphId,
       protocol: "outcome",
       classification: "blocked",
-      blockerCodes: ["missing-persisted-plan"],
-    };
-  }
-  const binding = state.planBinding;
-  if (binding === undefined) {
-    return {
-      graphId: state.graphId,
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision: plan.planRevision,
-      blockerCodes: ["missing-plan-binding"],
-    };
-  }
-  if (plan.graphId !== state.graphId || plan.planRevision !== binding.planRevision) {
-    return {
-      graphId: state.graphId,
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision: plan.planRevision,
-      blockerCodes: ["plan-binding-mismatch"],
-    };
-  }
-  if (ledger === undefined) {
-    // An ABSENT ledger file is not an unreadable one: `openReadOnly` answers
-    // `absent` without creating it, and only a refusal or a failed open carries
-    // a store-level blocker. Nothing was ever committed here, so the graph's
-    // first execution is still owed — the same shape as "no state row yet", and
-    // the run path (never the audit) is what creates the store and starts it.
-    // Reporting a blocker here would invent an unreadable record that does not
-    // exist and stall the drain on a graph that only needs its first execution.
-    if (ledgerBlocker === undefined) {
-      return {
-        graphId: state.graphId,
-        protocol: "outcome",
-        classification: "in-flight",
-        planRevision: plan.planRevision,
-        hasState: false,
-        armed: Object.freeze([]),
-        unsettledEffects: Object.freeze([]),
-        lastUpdatedAt: state.updatedAt,
-        queue: UNSTARTED_OUTCOME_QUEUE,
-        blockerCodes: [],
-      };
-    }
-    // The store EXISTS but is not one this build may read; this record's run
-    // state lives in it, so the entry inherits the store-level blocker.
-    return {
-      graphId: state.graphId,
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision: plan.planRevision,
-      blockerCodes: [ledgerBlocker],
+      planRevision,
+      blockerCodes: ["state-unreadable"],
+      blockerDetails: { "state-unreadable": detail },
     };
   }
 
-  let record: GraphStateRecord | undefined;
+  let raw: ReturnType<GraphStore["readGraphState"]>;
   try {
-    record = ledger.readGraphState(state.graphId);
+    raw = store.readGraphState(graphId);
   } catch (error) {
-    // The ledger's own row gate refused a row (a hand-edited or foreign store):
+    // The store's own row gate refused a row (a hand-edited or foreign record):
     // contained as a blocker, never thrown past the audit.
+    const detail =
+      "graph " + JSON.stringify(graphId) +
+      " has a run-state row this build could not read (" + errorText(error) + ")";
     return {
-      graphId: state.graphId,
       protocol: "outcome",
       classification: "blocked",
-      planRevision: plan.planRevision,
+      planRevision,
       blockerCodes: ["state-unreadable"],
-      blockerDetails: {
-        "state-unreadable":
-          "graph " + JSON.stringify(state.graphId) + " has a ledger state row " +
-          "this build could not read (" + errorText(error) + ")",
-      },
+      blockerDetails: { "state-unreadable": detail },
     };
   }
-  const effects = readUnsettledEffects(ledger, state.graphId);
-  if (!effects.ok) {
-    return {
-      graphId: state.graphId,
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision: plan.planRevision,
-      hasState: record !== undefined,
-      blockerCodes: ["state-unreadable"],
-      blockerDetails: {
-        "state-unreadable":
-          "graph " + JSON.stringify(state.graphId) + " has effect rows this " +
-          "build could not read (" + effects.reason + ")",
-      },
-    };
-  }
-  if (record === undefined) {
-    // No state row: the graph was declared but never started, so its first
+  if (raw === undefined) {
+    // No run-state row: the graph was declared but never started, so its first
     // execution is still owed. That is in flight, NOT blocked — nothing about
     // the record is unreadable.
     return {
-      graphId: state.graphId,
       protocol: "outcome",
       classification: "in-flight",
-      planRevision: plan.planRevision,
+      planRevision,
       hasState: false,
       armed: Object.freeze([]),
       unsettledEffects: effects.effects,
-      lastUpdatedAt: state.updatedAt,
+      lastUpdatedAt: declared.recordedAt,
       queue: UNSTARTED_OUTCOME_QUEUE,
       blockerCodes: [],
     };
@@ -762,23 +634,19 @@ function classifyOutcome(
 
   let outcomeState: OutcomeGraphState;
   try {
-    outcomeState = readOutcomeGraphState(record, plan);
+    outcomeState = readOutcomeGraphState(raw, declared.plan);
   } catch (error) {
-    const code: DrainAuditBlockerCode =
-      error instanceof OutcomeStateError
-        ? error.problem === "state-plan-mismatch"
-          ? "state-plan-mismatch"
-          : error.problem === "unsupported-state-version"
-            ? "state-version-unsupported"
-            : "state-malformed"
-        : "state-unreadable";
+    const detail =
+      "graph " + JSON.stringify(graphId) +
+      " has a run-state row that is not the state its plan defines: " +
+      errorText(error);
     return {
-      graphId: state.graphId,
       protocol: "outcome",
       classification: "blocked",
-      planRevision: plan.planRevision,
+      planRevision,
       hasState: true,
-      blockerCodes: [code],
+      blockerCodes: ["state-malformed"],
+      blockerDetails: { "state-malformed": detail },
     };
   }
 
@@ -791,7 +659,6 @@ function classifyOutcome(
   const quiescent =
     outcomeState.phase === "complete" || outcomeState.phase === "stopped";
   return {
-    graphId: state.graphId,
     protocol: "outcome",
     classification: quiescent ? "terminal" : "in-flight",
     phase: outcomeState.phase,
@@ -799,7 +666,7 @@ function classifyOutcome(
     hasState: true,
     armed: Object.freeze(armed),
     unsettledEffects: effects.effects,
-    lastUpdatedAt: record.updatedAt,
+    lastUpdatedAt: raw.updatedAt,
     queue: outcomeQueue(armed.length, effects.effects.length),
     ...(outcomeState.stop === undefined
       ? {}
@@ -809,80 +676,45 @@ function classifyOutcome(
 }
 
 /**
- * Classify one VALID record under a protocol this audit has no terminality rule
- * for. The record is readable and the loader bound it, but its phase vocabulary
- * is not this audit's to interpret: guessing "terminal" would let an unknown
- * protocol's work be retired silently, so the entry is a blocker.
+ * Turn one stored definition (or the decode refusal it produced) into an entry
+ * plus the blockers it produced.
  */
-function classifyUnknownProtocol(state: EngineState): EntryBody {
-  return {
-    graphId: state.graphId,
-    protocol: "unknown",
-    classification: "blocked",
-    blockerCodes: ["unclassified-protocol"],
-  };
-}
-
-// ── Entry assembly ──────────────────────────────────────────────────────────
-
-/** Turn a loaded file into one entry plus the blockers it produced. */
-function entryForLoadResult(
-  file: string,
-  loaded: EngineLoadResult,
-  ledger: AcceptanceLedgerReader | undefined,
-  ledgerBlocker: DrainAuditBlockerCode | undefined,
+function entryForDefinition(
+  graphId: string,
+  decoded: ReturnType<typeof decodeStoredDefinition>,
+  store: GraphStore | undefined,
+  storeBlocker: DrainAuditBlockerCode | undefined,
   now: number,
   staleAfterMs: number,
 ): {
   readonly entry: DrainAuditEntry;
   readonly blockers: readonly DrainAuditBlocker[];
 } {
-  if (loaded.kind === "absent") {
-    // Defensive: the raw-text loader can never answer `absent`, and a file that
-    // vanished is the read error arm above. Recorded, never skipped.
-    const detail =
-      "the loader answered absent for a file read from the store — the raw-text " +
-      "loader cannot produce that reading, so the record is unresolved";
+  if (decoded.kind === "refused") {
+    const detail = decoded.issues
+      .map((issue) => "[" + issue.code + "] " + issue.path + ": " + issue.message)
+      .join("; ");
     return {
-      entry: blockedFileEntry(file, ["loader-absent"]),
-      blockers: [blocker("loader-absent", detail, { file })],
-    };
-  }
-  if (loaded.kind === "corrupt") {
-    const detail = "corrupt " + loaded.dimension + ": " + loaded.reason;
-    return {
-      entry: blockedFileEntry(file, ["corrupt-record"]),
-      blockers: [blocker("corrupt-record", detail, { file }, loaded.dimension)],
-    };
-  }
-  if (loaded.kind === "unsupported") {
-    const detail = "unsupported " + loaded.dimension + ": " + loaded.detail;
-    return {
-      entry: blockedFileEntry(file, ["unsupported-version"]),
+      entry: blockedEntry(graphId, ["unrunnable-definition"]),
       blockers: [
-        blocker("unsupported-version", detail, { file }, loaded.dimension),
+        blocker("unrunnable-definition", detail, { graphId }, "contract"),
       ],
     };
   }
-  if (loaded.kind === "migration-required") {
-    const detail =
-      "migration-required storage: " + loaded.from + " -> " + loaded.to +
-      "; the snapshot is intact but not executable until that registered " +
-      "conversion commits";
+  if (store === undefined) {
+    // The store could not be opened, so this definition was never reached; the
+    // store-level blocker is the answer and every graph inherits it.
     return {
-      entry: blockedFileEntry(file, ["migration-required"]),
-      blockers: [blocker("migration-required", detail, { file }, "storage")],
+      entry: blockedEntry(graphId, [storeBlocker ?? "ledger-unreadable"]),
+      blockers: [],
     };
   }
 
-  const state = loaded.state;
-  const body =
-    loaded.executionProtocol === OUTCOME_PROTOCOL
-      ? classifyOutcome(state, ledger, ledgerBlocker)
-      : classifyUnknownProtocol(state);
+  const body = classifyOutcome(decoded.declared, store);
   // The queue is an INPUT to the staleness inference, not part of the report:
-  // the entry's own work fields (`armed` / `unsettledEffects`) surface it.
-  // Dropped here rather than duplicated as a second shape that could drift.
+  // the entry's own work fields (`armed` / `unsettledEffects`)
+  // surface it. Dropped here rather than duplicated as a second shape that
+  // could drift.
   const { lastUpdatedAt, queue, ...reportable } = body;
   const staleness =
     body.classification === "in-flight" &&
@@ -891,10 +723,9 @@ function entryForLoadResult(
       ? stalenessFacts(lastUpdatedAt, queue, now, staleAfterMs)
       : undefined;
   const entry = Object.freeze({
-    file,
+    graphId,
     ...reportable,
     ...(staleness === undefined ? {} : { staleness }),
-    executionProtocolVersion: loaded.executionProtocol,
     blockerCodes: Object.freeze([...body.blockerCodes]),
   });
   return {
@@ -902,8 +733,8 @@ function entryForLoadResult(
     blockers: body.blockerCodes.map((code) =>
       blocker(
         code,
-        body.blockerDetails?.[code] ?? describeEntryBlocker(code, state.graphId),
-        { file, graphId: state.graphId },
+        body.blockerDetails?.[code] ?? describeEntryBlocker(code, graphId),
+        { graphId },
         blockerDimensionFor(code),
       ),
     ),
@@ -915,6 +746,7 @@ function blockerDimensionFor(
   code: DrainAuditBlockerCode,
 ): DrainAuditBlockerDimension | undefined {
   if (code === "ledger-refused" || code === "ledger-unreadable") return "ledger";
+  if (code === "unrunnable-definition") return "contract";
   if (
     code === "state-plan-mismatch" ||
     code === "state-version-unsupported" ||
@@ -932,99 +764,102 @@ function describeEntryBlocker(
   graphId: string,
 ): string {
   switch (code) {
-    case "missing-persisted-plan":
+    case "unrunnable-definition":
       return (
         "graph " + JSON.stringify(graphId) +
-        " is bound to the outcome protocol but its record carries no compiled " +
-        "plan — the plan is the run's topology authority, so its state cannot " +
-        "be read without one"
-      );
-    case "missing-plan-binding":
-      return (
-        "graph " + JSON.stringify(graphId) +
-        " carries a persisted compiled plan but no plan binding — a declared " +
-        "graph is always written with both"
-      );
-    case "plan-binding-mismatch":
-      return (
-        "graph " + JSON.stringify(graphId) +
-        " carries a compiled plan whose revision the plan binding does not " +
-        "corroborate"
-      );
-    case "unclassified-protocol":
-      return (
-        "graph " + JSON.stringify(graphId) +
-        " loaded under a registered execution protocol this audit has no " +
-        "terminality rule for — a protocol's phase vocabulary is not guessable " +
-        "from outside it"
+        " has a stored definition this build cannot run"
       );
     case "ledger-refused":
       return (
         "graph " + JSON.stringify(graphId) +
-        " keeps its run state in the acceptance ledger, which exists but is " +
-        "not a store this build may read"
+        " keeps its run state in the graph store, which exists but is not a " +
+        "store this build may read"
       );
     case "ledger-unreadable":
       return (
         "graph " + JSON.stringify(graphId) +
-        " keeps its run state in the acceptance ledger, which could not be " +
-        "opened for reading"
+        " keeps its run state in the graph store, which could not be opened " +
+        "for reading"
       );
     case "state-plan-mismatch":
       return (
         "graph " + JSON.stringify(graphId) +
-        " has a state row bound to a different graph or plan revision than the " +
-        "plan its record carries"
+        " has a run-state row bound to a different graph or plan revision than " +
+        "the definition it belongs to"
       );
     case "state-version-unsupported":
       return (
         "graph " + JSON.stringify(graphId) +
-        " has a state row written in a body version this build has no reader " +
-        "for — refusing it rather than reading it partially"
+        " has a run-state row written in a body version this build has no " +
+        "reader for — refusing it rather than reading it partially"
       );
     case "state-malformed":
       return (
         "graph " + JSON.stringify(graphId) +
-        " has a state row that is not the shape its declared body version " +
+        " has a run-state row that is not the shape its declared body version " +
         "defines"
       );
     case "state-unreadable":
       return (
         "graph " + JSON.stringify(graphId) +
-        " has a state row the strict reader could not process (an unexpected " +
-        "error was contained)"
+        " has a run-state row the strict reader could not process (an " +
+        "unexpected error was contained)"
       );
     default:
-      // The remaining codes carry their own engine-load detail in the loader
-      // verdict; this path is not reachable for them.
+      // The store-level codes carry their own verdict text in the blocker
+      // detail; this path is not reachable for them.
       return "graph " + JSON.stringify(graphId) + ": " + code;
   }
+}
+
+// ── Retired records ─────────────────────────────────────────────────────────
+
+/**
+ * The retired per-graph v2 containers still on disk under `directory`.
+ *
+ * A NON-EMPTY `engine-<slug>.json` is a record of a layout this build no
+ * longer writes and has no decoder for. The audit does not read it — it reports
+ * it, by name, as the reason the workspace is not drained: "no readable graph is
+ * in flight" is not the same fact as "nothing is left to account for"
+ * (plan §3.6, §P6.4). A missing directory is an empty list, never an error.
+ */
+function retiredRecordFiles(directory: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(directory, { encoding: "utf-8" });
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names.sort()) {
+    if (!name.startsWith(RETIRED_AUTHORITY_PREFIX)) continue;
+    if (!name.endsWith(RETIRED_AUTHORITY_SUFFIX)) continue;
+    try {
+      if (statSync(join(directory, name)).size > 0) found.push(name);
+    } catch {
+      // A path that cannot be stat'ed is not evidence of a record.
+    }
+  }
+  return found;
 }
 
 // ── The audit ───────────────────────────────────────────────────────────────
 
 /**
- * Audit one workspace's persisted graph store, READ-ONLY.
+ * Audit one workspace's graph store, READ-ONLY.
  *
- * TOTAL: a missing store is an empty report, an unreadable directory is one
- * store-level blocker, and every per-file failure is contained as its own
+ * TOTAL: a missing store is an empty report, an unreadable store is one
+ * store-level blocker, and every per-graph failure is contained as its own
  * entry. Nothing is thrown for a state of the store; a thrown exception here
  * would be a bug in the audit, not a fact about a graph.
  */
 export async function auditGraphStore(
   options: DrainAuditOptions,
 ): Promise<DrainAuditReport> {
-  const stateDirectory = engineStateDir(options.directory);
-  // The ledger may live at a different root than the engine-state files (a host
-  // that declares its own protected store); the engine-state listing below
-  // always reads the workspace store.
-  const ledgerDirectory = options.ledgerDirectory ?? stateDirectory;
-  const filePath = ledgerFilePath(ledgerDirectory);
-  const storageFormats =
-    options.storageFormatRegistry ?? DEFAULT_STORAGE_FORMAT_REGISTRY;
-  const protocols =
-    options.protocolRegistry ?? DEFAULT_EXECUTION_PROTOCOL_REGISTRY;
-  const openLedger = options.openLedger ?? SqliteAcceptanceLedger.openReadOnly;
+  const defaultStateDirectory = engineStateDir(options.directory);
+  const storeDirectory = options.ledgerDirectory ?? defaultStateDirectory;
+  const retiredDirectory = options.retiredRecordDirectory ?? defaultStateDirectory;
+  const filePath = ledgerFilePath(storeDirectory);
   // "Now" is read ONCE: every entry in one report is classified against the
   // same instant, so two entries with the same age cannot land on opposite sides
   // of the threshold because the audit took a while.
@@ -1034,116 +869,122 @@ export async function auditGraphStore(
   const blockers: DrainAuditBlocker[] = [];
   const entries: DrainAuditEntry[] = [];
 
-  // 1. The ledger, opened READ-ONLY and never created. Opening it first is
-  //    deliberate: a refusal is a store-level blocker that every protocol-2
-  //    entry inherits, and an absent store is a fact about the whole report.
-  let ledger: AcceptanceLedgerReader | undefined;
-  let ledgerStatus: DrainAuditLedgerStatus;
-  let ledgerBlocker: DrainAuditBlockerCode | undefined;
-  let opened: LedgerReadOpenResult;
-  try {
-    opened = await openLedger(ledgerDirectory);
-  } catch (error) {
-    opened = {
-      kind: "unreadable",
-      filePath,
-      reason: "the read-only ledger open threw: " + errorText(error),
-    };
+  // 1. The retired per-graph containers, BEFORE the store is opened: they are
+  //    the records this build refuses to interpret, and a workspace that still
+  //    holds one is never drained whatever the store says.
+  for (const name of retiredRecordFiles(retiredDirectory)) {
+    blockers.push(
+      blocker(
+        "retired-state-record",
+        "the retired per-graph engine-state container " +
+          join(retiredDirectory, name) +
+          " is still present; this build neither reads it nor converts it, so " +
+          "its graph must be inventoried and archived before the workspace can " +
+          "be called drained",
+        { file: name },
+        "storage",
+      ),
+    );
   }
-  if (opened.kind === "opened") {
-    ledger = opened.ledger;
+
+  // 2. The store, opened READ-ONLY through the format gate and never created.
+  //    A refusal is a store-level blocker that every definition inherits, and
+  //    an absent store is a fact about the whole report.
+  const loaded: GraphStoreLoadResult = loadGraphStoreSync(storeDirectory);
+  let store: GraphStore | undefined;
+  let ledgerStatus: DrainAuditLedgerStatus;
+  let storeBlocker: DrainAuditBlockerCode | undefined;
+  if (loaded.kind === "valid") {
+    store = loaded.value;
     ledgerStatus = "opened";
-  } else if (opened.kind === "absent") {
+  } else if (loaded.kind === "absent") {
     ledgerStatus = "absent";
-  } else if (opened.kind === "refused") {
+  } else if (loaded.kind === "unsupported") {
     ledgerStatus = "refused";
-    ledgerBlocker = "ledger-refused";
+    storeBlocker = "ledger-refused";
     blockers.push(
       blocker(
         "ledger-refused",
-        "acceptance ledger " + opened.filePath + " is not a store this build " +
-          "may read (" + opened.problem + "): " + opened.message,
+        "graph store " + filePath + " is not a store this build may read (" +
+          describeStoreVerdict(loaded) + ")",
+        {},
+        "ledger",
+      ),
+    );
+  } else if (loaded.kind === "corrupt") {
+    ledgerStatus = "unreadable";
+    storeBlocker = "ledger-unreadable";
+    blockers.push(
+      blocker(
+        "ledger-unreadable",
+        "graph store " + filePath + " could not be read (" +
+          describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
     );
   } else {
-    ledgerStatus = "unreadable";
-    ledgerBlocker = "ledger-unreadable";
+    // `migration-required` is uninhabited while no conversion is
+    // registered; reported by name rather than folded into another branch.
+    ledgerStatus = "refused";
+    storeBlocker = "ledger-refused";
     blockers.push(
       blocker(
-        "ledger-unreadable",
-        "acceptance ledger " + opened.filePath +
-          " could not be opened read-only: " + opened.reason,
+        "ledger-refused",
+        "graph store " + filePath + " needs a registered conversion (" +
+          describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
     );
   }
 
-  // 2. List the engine-state store. A missing directory is an empty store; any
-  //    other listing failure means NOTHING was audited, which is its own
-  //    blocker rather than an empty (and therefore "drained") report.
-  let files: string[] = [];
-  try {
-    files = readdirSync(stateDirectory, { encoding: "utf-8" })
-      .filter(isEngineStateFile)
-      .sort();
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
+  // 3. Every stored definition, classified against the same store. The store's
+  //    own row gate is total over raw SQL, and each failure is contained, so one
+  //    hostile row cannot hide the rest of the store.
+  let graphIds: readonly string[] = [];
+  if (store !== undefined) {
+    try {
+      graphIds = store.definitionGraphIds();
+    } catch (error) {
       blockers.push(
         blocker(
           "state-store-unreadable",
-          "the engine-state store " + stateDirectory +
-            " could not be listed: " + errorText(error),
+          "the graph store " + storeDirectory + " could not be listed: " +
+            errorText(error),
           {},
           "storage",
         ),
       );
+      graphIds = [];
     }
   }
-
   try {
-    // 3. Read and classify every record. The loader is total over raw text and
-    //    the read itself is contained, so one hostile file cannot hide the
-    //    rest of the store.
-    for (const file of files) {
-      const path = join(stateDirectory, file);
-      let raw: string;
+    for (const graphId of graphIds) {
+      let decoded: ReturnType<typeof decodeStoredDefinition>;
       try {
-        raw = readFileSync(path, "utf-8");
+        const row = store?.readDefinition(graphId);
+        if (row === undefined) continue;
+        decoded = decodeStoredDefinition(row);
       } catch (error) {
-        entries.push(blockedFileEntry(file, ["read-error"]));
+        entries.push(blockedEntry(graphId, ["unrunnable-definition"]));
         blockers.push(
           blocker(
-            "read-error",
-            file + " exists but could not be read: " + errorText(error),
-            { file },
+            "unrunnable-definition",
+            "graph " + JSON.stringify(graphId) +
+              " has a definition row the store could not read (" +
+              errorText(error) + ")",
+            { graphId },
+            "contract",
           ),
         );
         continue;
       }
-      let loaded: EngineLoadResult;
-      try {
-        loaded = loadEngineStateForResume(raw, path, storageFormats, protocols);
-      } catch (error) {
-        entries.push(blockedFileEntry(file, ["loader-failure"]));
-        blockers.push(
-          blocker(
-            "loader-failure",
-            "the loader threw on " + file + " (it is total by contract): " +
-              errorText(error),
-            { file },
-          ),
-        );
-        continue;
-      }
-      const audited = entryForLoadResult(
-        file,
-        loaded,
-        ledger,
-        ledgerBlocker,
+      const audited = entryForDefinition(
+        graphId,
+        decoded,
+        store,
+        storeBlocker,
         now,
         staleAfterMs,
       );
@@ -1152,7 +993,7 @@ export async function auditGraphStore(
     }
   } finally {
     // The audit owns the handle only when it opened it.
-    if (options.openLedger === undefined) ledger?.close();
+    store?.close();
   }
 
   // 4. Counts. The three-way partition is the headline; the protocol split and
@@ -1191,13 +1032,13 @@ export async function auditGraphStore(
 
   return Object.freeze({
     directory: options.directory,
-    stateDirectory,
+    storeDirectory,
     ledgerFilePath: filePath,
     ledger: ledgerStatus,
     entries: Object.freeze(entries),
     blockers: Object.freeze(blockers),
     totals: Object.freeze({
-      files: files.length,
+      graphs: graphIds.length,
       terminal,
       inFlight,
       blocked,

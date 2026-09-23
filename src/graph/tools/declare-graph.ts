@@ -18,13 +18,13 @@
  *    structurally complete but NON-EXECUTABLE, and persisting it as if it were
  *    executable would run gates that were never checked (B9). The refusal names
  *    every unresolved entry;
- * 4. BIND the plan: the durable record (`PersistedCompiledPlan`), the plan
- *    BINDING (the plan's own revision plus the contract content/identity/
- *    node-binding projection) and the EXECUTION-PROTOCOL identity
- *    (`executionProtocolVersion = OUTCOME_PROTOCOL`) are written onto the
- *    graph's engine state, and the state is persisted through the existing
- *    store (`EnginePersistence`, the same version-2 layout and the same loader
- *    gates).
+ * 4. RECORD the plan: the validated declaration, the compiled plan and the
+ *    EXECUTION-PROTOCOL identity are written as ONE immutable definition row in
+ *    the workspace's unified graph store (`src/graph/store/`, the same
+ *    `graph-acceptance-ledger.sqlite` the run's acceptance is committed to).
+ *    This module writes NO v2 engine-state container: a new graph's durable
+ *    record is the store row, and the container is a retired authority
+ *    (`§P1.6`) this build refuses rather than initializes over.
  *
  * THE BOUNDARY, STATED PLAINLY: the outcome protocol has a registered handler
  * and a declared graph runs through the outcome run path
@@ -35,17 +35,18 @@
  * HERE dispatches, reduces or accepts anything: this module only authors,
  * compiles and persists.
  *
- * The state's `graphDeclaration` is a deliberately EMPTY carrier: the v3
- * declaration is not a v2 declaration, so none is fabricated. The compiled plan
- * is the graph's topology authority, and the state carries one pending runtime
- * node per compiled node so the persisted plan's node bindings verify against
- * the state that holds them (the load gate requires every topology node id to
- * be a node the state declares).
+ * The in-memory `state` this module hands back is a QUERY-BOUNDARY view (see
+ * `persistence/declared-record.ts`): its carrier declaration is deliberately
+ * EMPTY — the v3 declaration is not a v2 declaration, so none is fabricated —
+ * and the compiled plan is the graph's topology authority, from which the view
+ * declares one pending runtime node per compiled node. Nothing durable is
+ * derived from it.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+
 import { errorText } from "../../utils/error-text.ts";
-import type { GraphDeclaration } from "../../types.graph-v2.ts";
+import { logWarn } from "../log-warn.ts";
 import type { EngineState, PlanBinding } from "../../types.engine-v2.ts";
 import { contractDigest } from "../contracts/contract-definition.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
@@ -68,11 +69,15 @@ import {
 } from "../compiler/plan.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
+import { engineStatePath } from "../persistence/engine-persistence.ts";
 import {
-  EnginePersistence,
-  engineStatePath,
-} from "../persistence/engine-persistence.ts";
-import { createEngineState, registerNode } from "../persistence/declared-state.ts";
+  declaredEngineStateOf,
+  describeStoreVerdict,
+  readStoredDefinition,
+  type StoredDeclaredGraph,
+} from "../persistence/declared-record.ts";
+import { GraphStore } from "../store/graph-store.ts";
+import { GraphStoreFormatError } from "../store/errors.ts";
 
 // ── Args and result ─────────────────────────────────────────────────────────
 
@@ -353,9 +358,13 @@ export interface DeclaredOutcomeGraph {
   readonly plan: CompiledPlan;
   /** The plan as the durable record `EngineState.compiledPlan` carries. */
   readonly record: PersistedCompiledPlan;
-  /** The plan binding `EngineState.planBinding` carries (a plan projection). */
+  /** The plan binding the run path pins (a plan projection). */
   readonly binding: PlanBinding;
-  /** The engine state carrying protocol + plan + binding for this graph. */
+  /**
+   * The QUERY-BOUNDARY view of this declaration, for the caller that holds the
+   * graph in memory for the length of one session (the `graph_status` session
+   * scope). Derived, never persisted — see `persistence/declared-record.ts`.
+   */
   readonly state: EngineState;
 }
 
@@ -420,6 +429,16 @@ export function buildDeclaredOutcomeGraph(
     );
   }
 
+  const stored: StoredDeclaredGraph = Object.freeze({
+    graphId: declaration.name,
+    declaration,
+    declarationDigest,
+    plan,
+    record,
+    binding,
+    recordedAt: Date.now(),
+  });
+
   return Object.freeze({
     graphId: declaration.name,
     declaration,
@@ -427,45 +446,8 @@ export function buildDeclaredOutcomeGraph(
     plan,
     record,
     binding,
-    state: buildDeclaredEngineState(plan, record, binding),
+    state: declaredEngineStateOf(stored, undefined, stored.recordedAt),
   });
-}
-
-/**
- * Build the engine state a declared graph is bound to.
- *
- * The carrier declaration is EMPTY on purpose — no v2 declaration is fabricated
- * for a v3 graph. The state registers one pending runtime node per compiled node
- * (so the persisted plan's topology verifies against the state holding it) and
- * then pins the three identities: the execution protocol, the compiled-plan
- * record and the plan binding.
- */
-function buildDeclaredEngineState(
-  plan: CompiledPlan,
-  record: PersistedCompiledPlan,
-  binding: PlanBinding,
-): EngineState {
-  const carrier: GraphDeclaration = {
-    version: 2,
-    name: plan.graphId,
-    nodes: [],
-    edges: [],
-  };
-  const state = createEngineState(carrier, plan.graphId);
-  for (const node of plan.nodes) {
-    registerNode(state, {
-      id: node.id,
-      agent: node.agent,
-      prompt: node.prompt,
-      ...(node.join === undefined ? {} : { join: node.join }),
-      ...(node.budget === undefined ? {} : { budget: node.budget }),
-    });
-  }
-  state.executionProtocolVersion = OUTCOME_PROTOCOL;
-  state.compiledPlan = record;
-  state.planBinding = binding;
-  state.updatedAt = Date.now();
-  return state;
 }
 
 
@@ -482,126 +464,147 @@ export type ExistingDeclaredGraph =
   | { readonly kind: "unreadable"; readonly reason: string };
 
 /**
- * Read the existing persisted record for a graph id WITHOUT going through the
- * loader's protocol gate.
+ * Read the store's existing definition for a graph id.
  *
- * The shipped loader refuses a protocol-2 state as `unsupported(execution)` by
- * design, so it cannot answer "the plan already on disk is revision R". This
- * function reads exactly that identity, and NOTHING else: it neither hydrates a
- * state nor verifies the plan (the loader owns that), so it must not be used as
- * a load path.
+ * This is the adoption path, not a load path: it answers exactly "does this
+ * store already own a definition for this graph, and at which plan revision",
+ * and NOTHING else. The plan's own verification belongs to
+ * `persistence/declared-record.ts` and is what the run paths apply.
  *
- * TOTAL: every failure is a verdict. An unreadable, malformed or foreign file
- * is `unreadable` — a caller must refuse rather than overwrite a record it
- * could not understand.
+ * TOTAL: every failure is a verdict, and NONE of them is `absent`. A store this
+ * build may not read — a damaged authoritative file, a retired per-graph
+ * container beside it, a format with no decoder — is `unreadable` with the
+ * verdict named, because answering `absent` there is exactly what would
+ * initialize a new run over records the operator can still see
+ * (plan §P1.6, §3.6).
+ *
+ * @param storeDirectory - the directory holding
+ *   `graph-acceptance-ledger.sqlite`, or `undefined` when the caller has no
+ *   store configured (the graph is declared in memory only).
  */
 export function readExistingDeclaredGraph(
-  stateDir: string | undefined,
+  storeDirectory: string | undefined,
   graphId: string,
 ): ExistingDeclaredGraph {
-  if (stateDir === undefined) return { kind: "absent" };
-  const path = engineStatePath(stateDir, graphId);
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch (error) {
-    if (isMissingFile(error)) return { kind: "absent" };
-    return {
-      kind: "unreadable",
-      reason: `the existing state file at ${path} could not be read: ${errorText(error)}`,
-    };
+  if (storeDirectory === undefined) return { kind: "absent" };
+  const reading = readStoredDefinition(storeDirectory, graphId);
+  switch (reading.kind) {
+    case "ok":
+      return { kind: "declared", planRevision: reading.declared.plan.planRevision };
+    case "absent":
+      return { kind: "absent" };
+    case "blocked":
+      // AN ABSENT STORE IS ABSENT. "No store and no retired authority beside it"
+      // is the one reading a caller may start a graph from; every other verdict
+      // is a refusal that names what is actually there.
+      if (reading.verdict.kind === "absent") return { kind: "absent" };
+      return {
+        kind: "unreadable",
+        reason:
+          `the graph store at ${storeDirectory} cannot be read for graph ` +
+          `${JSON.stringify(graphId)} (` +
+          describeStoreVerdict(reading.verdict) +
+          ")",
+      };
+    case "refused":
+      return {
+        kind: "unreadable",
+        reason:
+          `the graph store already holds a definition for ${JSON.stringify(graphId)} ` +
+          `that this build cannot read: ` +
+          reading.issues.map((issue) => `[${issue.code}] ${issue.path}: ${issue.message}`).join("; "),
+      };
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    return {
-      kind: "unreadable",
-      reason: `the existing state file at ${path} is not valid JSON: ${errorText(error)}`,
-    };
-  }
-  if (!isRecord(parsed)) {
-    return {
-      kind: "unreadable",
-      reason: `the existing state file at ${path} is not a JSON object`,
-    };
-  }
-  if (parsed.graphId !== graphId) {
-    return {
-      kind: "unreadable",
-      reason:
-        `the state file at ${path} carries graphId ${describeValue(parsed.graphId)}, not ${JSON.stringify(graphId)}` +
-        " — refusing to overwrite a record that belongs to another graph",
-    };
-  }
-  const protocol = parsed.executionProtocolVersion;
-  if (protocol !== OUTCOME_PROTOCOL) {
-    // No inference: an absent key is not an implicit protocol and a different
-    // number is not a convertible predecessor. Either way the file is not a
-    // declared-graph record this build may overwrite.
-    return {
-      kind: "unreadable",
-      reason: `the state file at ${path} carries executionProtocolVersion ${describeValue(protocol)}, not the outcome protocol`,
-    };
-  }
-  const plan = parsed.compiledPlan;
-  if (!isRecord(plan)) {
-    return {
-      kind: "unreadable",
-      reason: `the state file at ${path} is bound to the outcome protocol but carries no compiled-plan record`,
-    };
-  }
-  const planRevision = plan.planRevision;
-  if (typeof planRevision !== "string" || planRevision.length === 0) {
-    return {
-      kind: "unreadable",
-      reason: `the state file at ${path} carries a compiled plan without a plan revision`,
-    };
-  }
-  return { kind: "declared", planRevision };
-}
-
-/** Whether a read failure means "the file does not exist". */
-function isMissingFile(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
-}
-
-/** Whether a value is a JSON object container (non-null, non-array). */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Name what was received for a diagnostic, without throwing on the value. */
-function describeValue(value: unknown): string {
-  if (value === null) return "null";
-  if (value === undefined) return "undefined";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return typeof value;
 }
 
 /**
- * Persist a declared graph's engine state through the existing store.
+ * The retired v2 container of one graph, if it is still on disk.
  *
- * Returns `true` only when the state reached disk; `false` when no state
- * directory is configured (the graph is registered in memory only) or the
- * atomic write failed. The write is the SAME version-2 layout every other state
- * uses, so the existing loader gates apply to it unchanged — including the
- * execution-protocol gate, which REFUSES this protocol in this build.
+ * The container (`<workspace>/.rolebox/state/engine-<slug>.json` in the old
+ * layout) is what `graph_declare` used to write and the outcome projection used
+ * to refresh. This build neither reads nor rewrites it (plan §3.6), so a
+ * declaration that would leave one behind for the SAME graph is refused before
+ * anything is written: the operator must inventory and archive it first
+ * (plan §P6.4). A stale container for another graph is the audit's to report.
+ *
+ * @param stateDir - the WORKSPACE directory whose `.rolebox/state` held the
+ *   container (not the store directory: in a host-declared configuration the
+ *   store lives outside the workspace and the retired files do not).
+ */
+export function retiredDeclaredRecord(
+  stateDir: string | undefined,
+  graphId: string,
+): { readonly path: string } | undefined {
+  if (stateDir === undefined) return undefined;
+  const path = engineStatePath(stateDir, graphId);
+  try {
+    if (existsSync(path) && statSync(path).size > 0) return { path };
+  } catch {
+    // A path that cannot be stat'ed is not evidence of a record; the store gate
+    // reports what the store it was asked to open actually is.
+  }
+  return undefined;
+}
+
+/**
+ * Record a declared graph's immutable definition in the unified store.
+ *
+ * Returns `true` when the definition is IN the store afterwards — either
+ * because this call wrote it (`recorded`) or because the store already held the
+ * same declaration digest and plan revision (`preserved`, the B8 adoption
+ * rule) — and `false` when no store directory is configured (the graph is
+ * registered in memory only), when the store's own gate refused to open, or
+ * when the write failed. Nothing is ever written over a different definition:
+ * `writeDefinition` refuses that in the store, and the caller has already run
+ * {@link readExistingDeclaredGraph} to turn the refusal into a declared-graph
+ * error rather than a silent overwrite.
  */
 export function persistDeclaredGraph(
   graph: DeclaredOutcomeGraph,
-  stateDir: string | undefined,
+  storeDirectory: string | undefined,
 ): boolean {
-  if (stateDir === undefined) return false;
-  return new EnginePersistence(stateDir).save(graph.state);
+  if (storeDirectory === undefined) return false;
+  let store: GraphStore;
+  try {
+    store = GraphStore.openFile(storeDirectory);
+  } catch (error) {
+    logDeclarePersistenceFailure(graph.graphId, error);
+    return false;
+  }
+  try {
+    store.writeDefinition({
+      graphId: graph.graphId,
+      declarationDigest: graph.declarationDigest,
+      planRevision: graph.plan.planRevision,
+      declaration: graph.declaration,
+      plan: graph.record,
+      recordedAt: Date.now(),
+    });
+    return true;
+  } catch (error) {
+    logDeclarePersistenceFailure(graph.graphId, error);
+    return false;
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Report a persistence failure without turning it into a thrown error.
+ *
+ * The tool result's `persisted` flag is how the caller learns the definition
+ * did not reach the store; the refusal itself is decided BEFORE this point by
+ * {@link readExistingDeclaredGraph}, so a failure here is a store-level problem
+ * (a gate, a disk error) and is logged with its own text rather than masked.
+ */
+function logDeclarePersistenceFailure(graphId: string, error: unknown): void {
+  const detail =
+    error instanceof GraphStoreFormatError
+      ? `the store refused it (${error.problem}): ${error.message}`
+      : errorText(error);
+  logWarn(
+    `graph_declare: the definition of graph "${graphId}" did not reach the graph store: ${detail}`,
+  );
 }
 
 /** Build the successful tool result for a declared (or preserved) graph. */

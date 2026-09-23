@@ -270,18 +270,25 @@ export function crossSessionViewRequested(args: GraphStatusArgs): boolean {
   );
 }
 
-/** Honest-empty note for a persisted store that yielded no hydrated graph. */
+/** Honest-empty note for a store that yielded no readable graph. */
 export function persistedEmptyNote(scan: PersistedStateScan): string {
-  if (scan.count === 0) {
+  if (scan.blocked !== undefined) {
     return (
-      `No persisted graphs found under ${scan.stateDirectory}. Run a graph to a ` +
-      `persisted checkpoint to enable cross-session (scope=persisted) queries.`
+      `The graph store at ${scan.storeDirectory} cannot be read: ${scan.blocked}. ` +
+      `No persisted query is answered from it — an unreadable store is never ` +
+      `reported as an empty one.`
     );
   }
-  // Files present but none hydrated — corrupt / version-mismatched reads.
+  if (scan.count === 0) {
+    return (
+      `No persisted graphs found in the graph store at ${scan.storeDirectory}. Run a ` +
+      `graph to a persisted checkpoint to enable cross-session (scope=persisted) queries.`
+    );
+  }
+  // Definitions present but none decoded — a gate refused each of them.
   return (
-    `Persisted graphs: none hydrated — ${scan.skipped} file(s) skipped ` +
-    `(${scan.skippedFiles.join(", ")}).`
+    `Persisted graphs: none readable — ${scan.skipped} stored definition(s) skipped ` +
+    `(${scan.skippedGraphs.join(", ")}).`
   );
 }
 

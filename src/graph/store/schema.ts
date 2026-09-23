@@ -81,6 +81,21 @@ export const RETIRED_AUTHORITY_FILES = Object.freeze([
   "rolebox-host-store.sqlite",
   "host-invocation-origins.json",
 ] as const);
+/**
+ * The PREFIX/SUFFIX pair of a retired authority a previous shape wrote one file
+ * PER GRAPH under. The v2 engine-state container (`engine-<slug>.json`) held the
+ * plan binding, the compiled plan, the execution-protocol identity and the
+ * declared per-node fields of one graph, and `persistence/outcome-projection.ts`
+ * used to overlay run progress on it. P1 item 5 stops writing it, so a root that
+ * still holds one is exactly the "an existing record is never `absent`" case
+ * {@link RETIRED_AUTHORITY_FILES} covers: a container this build has no decoder
+ * for, whose graphs an operator must inventory and archive before that root
+ * becomes a store (the gate that combines the two lists lives in `format.ts`).
+ */
+export const RETIRED_AUTHORITY_PREFIX = "engine-" as const;
+
+/** The extension companions of {@link RETIRED_AUTHORITY_PREFIX}. */
+export const RETIRED_AUTHORITY_SUFFIX = ".json" as const;
 
 /**
  * The store root for one workspace, under the host's OWN data directory.

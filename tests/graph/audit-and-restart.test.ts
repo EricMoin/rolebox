@@ -2,20 +2,25 @@
  * The read-only store audit and the host's boot sweep — the surviving evidence
  * surfaces over a declared (outcome-protocol) graph store.
  *
- * The legacy runtime is deleted, so a record pinned to protocol 1 is not
- * classified as a runnable graph: it is an `unsupported-version` BLOCKER. These
- * cases pin that reading, the zero-write property of the audit, the graph_audit
- * tool face, and the host sweep's first-execution/restart behaviour.
+ * The audit's universe is the workspace's ONE graph store (P1 item 5), so a
+ * graph is one stored DEFINITION plus its run-state row. A RETIRED per-graph v2
+ * container left on disk is not a graph this build can read: it is a
+ * `retired-state-record` BLOCKER that names the file, and the store beside it
+ * is never initialized over it. These cases pin that reading, the zero-write
+ * property of the audit, the graph_audit tool face, and the host sweep's
+ * first-execution/restart behaviour.
  */
 
 import { describe, expect, it } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -27,11 +32,7 @@ import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
-import {
-  EnginePersistence,
-  engineStateDir,
-} from "../../src/graph/persistence/engine-persistence.ts";
-import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
+import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import {
@@ -74,26 +75,35 @@ function makeTmpDir(prefix: string): string {
   return dir;
 }
 
-function entryOf(report: DrainAuditReport, file: string) {
-  const entry = report.entries.find((candidate) => candidate.file === file);
-  if (entry === undefined) throw new Error("fixture: no audit entry for " + file);
+function entryOf(report: DrainAuditReport, graphId: string) {
+  const entry = report.entries.find((candidate) => candidate.graphId === graphId);
+  if (entry === undefined) throw new Error("fixture: no audit entry for " + graphId);
   return entry;
 }
 
-/** A protocol-1 record: what the deleted legacy runtime owned. */
-function persistLegacyRecord(dir: string, graphId: string): void {
-  const state = createEngineState(
-    { version: 2, name: graphId, nodes: [], edges: [] },
-    graphId,
+/**
+ * A RETIRED per-graph v2 container on disk — what the previous layout wrote and
+ * this build no longer reads, writes or converts.
+ *
+ * Written as RAW TEXT on purpose: production has no writer for it any more
+ * (`EnginePersistence` is deleted), and the audit must report the file's
+ * PRESENCE, which is a fact about the directory rather than about its content.
+ */
+function writeRetiredContainer(dir: string, slug: string): string {
+  const path = join(engineStateDir(dir), "engine-" + slug + ".json");
+  mkdirSync(engineStateDir(dir), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({ version: 2, graphId: slug, phase: "executing" }),
+    "utf-8",
   );
-  state.executionProtocolVersion = 1;
-  new EnginePersistence(dir).save(state);
+  return path;
 }
 
 /** Run one declared graph to completion through the outcome runtime. */
 async function runToCompletion(dir: string, declaration: GraphDeclarationV3): Promise<void> {
   const graph = buildDeclaredOutcomeGraph({ declaration });
-  persistDeclaredGraph(graph, dir);
+  persistDeclaredGraph(graph, engineStateDir(dir));
   const ledger = await SqliteAcceptanceLedger.create(engineStateDir(dir));
   try {
     const credentials = new Map<string, string>();
@@ -128,7 +138,7 @@ async function runToCompletion(dir: string, declaration: GraphDeclarationV3): Pr
 /** Start one declared graph and leave its entry attempt armed. */
 async function startAndLeaveArmed(dir: string, declaration: GraphDeclarationV3): Promise<void> {
   const graph = buildDeclaredOutcomeGraph({ declaration });
-  persistDeclaredGraph(graph, dir);
+  persistDeclaredGraph(graph, engineStateDir(dir));
   const ledger = await SqliteAcceptanceLedger.create(engineStateDir(dir));
   try {
     const runtime = new OutcomeGraphRuntime({
@@ -169,78 +179,58 @@ function snapshotTree(dir: string): string {
 // ── Audit ───────────────────────────────────────────────────────────────────
 
 describe("auditGraphStore — the surviving store evidence", () => {
-  it("classifies outcome records and blocks every record it cannot run", async () => {
+  it("classifies stored definitions and reports every record it cannot account for", async () => {
     const dir = makeTmpDir("audit-mixed-");
     await runToCompletion(dir, LINEAR);
     await startAndLeaveArmed(dir, OPEN);
-    persistLegacyRecord(dir, "audit.legacy");
-    // A storage format with no decoder, and a legal protocol with no handler.
-    new EnginePersistence(dir).save(
-      Object.assign(
-        createEngineState(
-          { version: 2, name: "audit.unknownprotocol", nodes: [], edges: [] },
-          "audit.unknownprotocol",
-        ),
-        { executionProtocolVersion: 42 },
-      ),
-    );
-    rmSync(join(engineStateDir(dir), "engine-audit.unknownprotocol.json"), { force: true });
-    // Re-save through the store, then pin an unregistered protocol on the file.
-    const unknown = createEngineState(
-      { version: 2, name: "audit.unknownprotocol", nodes: [], edges: [] },
-      "audit.unknownprotocol",
-    );
-    unknown.executionProtocolVersion = 42;
-    new EnginePersistence(dir).save(unknown);
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(
-      join(engineStateDir(dir), "engine-audit.badformat.json"),
-      JSON.stringify({ version: 99, graphId: "audit.badformat" }),
-      "utf-8",
-    );
+    // A RETIRED per-graph v2 container: no decoder, never read, never rewritten.
+    writeRetiredContainer(dir, "audit.legacy");
 
     const report = await auditGraphStore({ directory: dir, now: () => NOW });
 
-    expect(report.totals.files).toBe(5);
+    expect(report.totals.graphs).toBe(2);
     expect(report.totals.terminal).toBe(1);
     expect(report.totals.inFlight).toBe(1);
-    expect(report.totals.blocked).toBe(3);
+    expect(report.totals.blocked).toBe(0);
     expect(report.totals.outcomeInFlight).toBe(1);
+    // The retired container is a BLOCKER even though every stored graph reads
+    // cleanly: "nothing looked non-terminal" is not "nothing left to account for".
     expect(report.verdict).toBe("blocked");
     expect(report.drained).toBe(false);
+    const retired = report.blockers.find((entry) => entry.code === "retired-state-record");
+    expect(retired?.file).toBe("engine-audit.legacy.json");
 
-    const terminal = entryOf(report, "engine-audit.linear.json");
+    const terminal = entryOf(report, "audit.linear");
     expect(terminal.protocol).toBe("outcome");
     expect(terminal.classification).toBe("terminal");
     expect(terminal.phase).toBe("complete");
     expect(terminal.blockerCodes).toEqual([]);
 
-    const inFlight = entryOf(report, "engine-audit.open.json");
+    const inFlight = entryOf(report, "audit.open");
     expect(inFlight.protocol).toBe("outcome");
     expect(inFlight.classification).toBe("in-flight");
     expect(inFlight.armed?.map((node) => node.nodeId)).toEqual(["work"]);
+  });
 
-    // The deleted legacy protocol is a BLOCKER, never a runnable graph.
-    const legacy = entryOf(report, "engine-audit.legacy.json");
-    expect(legacy.protocol).toBe("unknown");
-    expect(legacy.classification).toBe("blocked");
-    expect(legacy.blockerCodes).toContain("unsupported-version");
-    expect(legacy.executionProtocolVersion).toBeUndefined();
+  it("blocks a store the format gate refuses, and never reports it as empty", async () => {
+    const dir = makeTmpDir("audit-damaged-");
+    // A zero-byte authoritative file is a DAMAGED store, never an absent one.
+    mkdirSync(engineStateDir(dir), { recursive: true });
+    writeFileSync(join(engineStateDir(dir), "graph-acceptance-ledger.sqlite"), "");
 
-    const unknownProtocol = entryOf(report, "engine-audit.unknownprotocol.json");
-    expect(unknownProtocol.classification).toBe("blocked");
-    expect(unknownProtocol.blockerCodes).toContain("unsupported-version");
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
 
-    const badFormat = entryOf(report, "engine-audit.badformat.json");
-    expect(badFormat.classification).toBe("blocked");
-    expect(badFormat.blockerCodes).toContain("unsupported-version");
+    expect(report.totals.graphs).toBe(0);
+    expect(report.ledger).toBe("unreadable");
+    expect(report.verdict).toBe("blocked");
+    expect(report.blockers.map((entry) => entry.code)).toContain("ledger-unreadable");
   });
 
   it("writes nothing: every file is byte-identical and mtime-identical after an audit", async () => {
     const dir = makeTmpDir("audit-nowrite-");
     await runToCompletion(dir, LINEAR);
     await startAndLeaveArmed(dir, OPEN);
-    persistLegacyRecord(dir, "audit.legacy");
+    writeRetiredContainer(dir, "audit.legacy");
 
     const before = snapshotTree(dir);
     await auditGraphStore({ directory: dir, now: () => NOW });
@@ -282,7 +272,7 @@ describe("OutcomeHost.recoverDeclaredGraphs — first execution and restart", ()
   it("starts on the first sweep, resumes on the second, and never re-delivers an armed attempt", async () => {
     const dir = makeTmpDir("audit-restart-");
     const graph = buildDeclaredOutcomeGraph({ declaration: LINEAR });
-    persistDeclaredGraph(graph, dir);
+    persistDeclaredGraph(graph, engineStateDir(dir));
 
     const firstDeliveries: OutcomeDispatchRequest[] = [];
     const first = OutcomeHost.open({
@@ -324,9 +314,9 @@ describe("OutcomeHost.recoverDeclaredGraphs — first execution and restart", ()
     expect(secondDeliveries).toEqual([]);
   });
 
-  it("refuses a protocol-1 record and dispatches nothing for it", async () => {
+  it("never visits a retired container, never rewrites it, and starts nothing for it", async () => {
     const dir = makeTmpDir("audit-restart-legacy-");
-    persistLegacyRecord(dir, "audit.legacy");
+    writeRetiredContainer(dir, "audit.legacy");
 
     const deliveries: OutcomeDispatchRequest[] = [];
     const host = OutcomeHost.open({
@@ -339,9 +329,10 @@ describe("OutcomeHost.recoverDeclaredGraphs — first execution and restart", ()
     });
     const before = readFileSync(join(engineStateDir(dir), "engine-audit.legacy.json"), "utf-8");
     try {
-      // A protocol-1 record is not a DECLARED graph this build can open, so the
-      // sweep never visits it: it is not started, not resumed, and not rewritten.
-      // (The audit is where it surfaces, as an unsupported-version blocker.)
+      // A retired per-graph container is not a STORED DEFINITION, so the sweep
+      // — whose inventory is the store's own definition listing — never visits
+      // it: it is not started, not resumed, and not rewritten. (The audit is
+      // where it surfaces, as a retired-state-record blocker.)
       const report = await host.recoverDeclaredGraphs();
       expect(report.started).toEqual([]);
       expect(report.resumed).toEqual([]);

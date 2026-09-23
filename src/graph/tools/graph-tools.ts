@@ -45,6 +45,7 @@ import {
   GraphDeclareRefusedError,
   persistDeclaredGraph,
   readExistingDeclaredGraph,
+  retiredDeclaredRecord,
   type DeclaredOutcomeGraph,
   type GraphDeclareArgs,
   type GraphDeclareResult,
@@ -64,6 +65,8 @@ import {
 } from "../audit/drain-audit.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
+import { engineStateDir } from "../persistence/engine-persistence.ts";
+import { readCredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
 import { createSubLogger } from "../../logger.ts";
 import { errorText } from "../../utils/error-text.ts";
 import {
@@ -500,9 +503,8 @@ export class GraphToolSet {
       return result;
     };
 
-    // A graph id belongs to exactly ONE execution protocol. A record that is not
-    // this build's declared-graph state is refused by readExistingDeclaredGraph
-    // below rather than converted in place.
+    // A graph id belongs to exactly ONE store record, and the retired per-graph
+    // v2 container is not one of them.
     const existing = this.declaredGraphs.get(built.graphId);
     if (existing !== undefined) {
       if (existing.graph.declarationDigest !== built.declarationDigest) {
@@ -534,7 +536,21 @@ export class GraphToolSet {
     // B8's rule; across a restart the declaration itself is not persisted, so
     // the comparison is the persisted plan revision — the only identity on
     // disk. Both refuse rather than drop.)
-    const onDisk = readExistingDeclaredGraph(this.deps.stateDir, built.graphId);
+    // A RETIRED per-graph container for THIS graph refuses first: this build
+    // neither reads nor rewrites it, and declaring over it would leave a record
+    // the operator can still see stranded beside a new run (plan §3.6, §P6.4).
+    const retired = retiredDeclaredRecord(this.deps.stateDir, built.graphId);
+    if (retired !== undefined) {
+      throw new GraphDeclareRefusedError(
+        "persisted-state-unreadable",
+        `graph_declare refused: a retired per-graph engine-state container for graph ` +
+          `"${built.graphId}" is still present at ${retired.path}. That record belongs to a ` +
+          "layout this build no longer writes and has NO decoder for, so it is neither read " +
+          "as a declaration nor overwritten. Inventory and archive it (or declare the graph " +
+          "under a new name); the declaration is refused rather than allowed to strand it.",
+      );
+    }
+    const onDisk = readExistingDeclaredGraph(this.storeDirectory(), built.graphId);
     if (onDisk.kind === "unreadable") {
       throw new GraphDeclareRefusedError(
         "persisted-state-unreadable",
@@ -558,7 +574,7 @@ export class GraphToolSet {
       return declared(declaredGraphResult(built, { persisted: true, preserved: true }));
     }
 
-    const persisted = persistDeclaredGraph(built, this.deps.stateDir);
+    const persisted = persistDeclaredGraph(built, this.storeDirectory());
     this.declaredGraphs.set(built.graphId, { graph: built, persisted });
     return declared(declaredGraphResult(built, { persisted, preserved: false }));
   }
@@ -738,9 +754,28 @@ export class GraphToolSet {
     return out;
   }
 
-  /** Scan the on-disk engine-state store under `stateDir` (default cwd). */
+  /**
+   * The directory holding this workspace's ONE graph store.
+   *
+   * EXACTLY the resolution the submission ingress and the host use: the
+   * credential-isolation adapter's declared root when the host declares one
+   * (the SHIPPED configuration — the store lives outside the workspace on
+   * purpose), the workspace state directory otherwise. One function, so the
+   * declaration, the status scan and the audit can never address two different
+   * stores.
+   */
+  private storeDirectory(): string | undefined {
+    const isolation = readCredentialIsolationAdapter(this.deps.credentialIsolation);
+    if (isolation !== undefined) return isolation.credentialStoreRoot;
+    if (this.deps.stateDir === undefined) return undefined;
+    return engineStateDir(this.deps.stateDir);
+  }
+
+  /** Scan the workspace's graph store (see {@link storeDirectory}). */
   private persistedScan(): PersistedStateScan {
-    return scanPersistedStates(this.deps.stateDir ?? process.cwd());
+    return scanPersistedStates(
+      this.storeDirectory() ?? engineStateDir(this.deps.stateDir ?? process.cwd()),
+    );
   }
 
   /** Declared states followed by persisted states, deduped by graphId (a
@@ -1588,16 +1623,18 @@ export class GraphToolSet {
    * halves: no blocker AND nothing in flight.
    */
   async graph_audit(): Promise<DrainAuditReport> {
-    const isolation = this.deps.credentialIsolation;
     return auditGraphStore({
       directory: this.deps.stateDir ?? process.cwd(),
-      // The host's declared credential-store root IS where the run opens its
-      // ledger (the submission ingress reads the same declaration), so the
-      // audit must read it there too — otherwise a completed graph audits as
-      // "ledger absent, in flight" while its ledger sits one directory away.
-      ...(isolation === undefined
+      // The SAME store the declaration, the submission ingress and the host
+      // use (see `storeDirectory`), so the audit reads the records the run
+      // actually wrote instead of reporting a healthy graph as "store absent".
+      ...(this.storeDirectory() === undefined
         ? {}
-        : { ledgerDirectory: isolation.credentialStoreRoot }),
+        : { ledgerDirectory: this.storeDirectory() }),
+      // The retired per-graph containers live where the WORKSPACE kept them,
+      // which in the shipped configuration is not the store root: they are
+      // reported from there, never read.
+      retiredRecordDirectory: engineStateDir(this.deps.stateDir ?? process.cwd()),
     });
   }
 }

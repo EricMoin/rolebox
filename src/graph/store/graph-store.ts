@@ -161,6 +161,8 @@ export interface GraphStoreTx extends AcceptanceLedgerTx {
   readInvocationOrigin(graphId: string): InvocationOriginRecord | undefined;
   /** Every graph id the origin table holds, sorted. */
   invocationOriginGraphIds(): readonly string[];
+  /** Every graph id the store holds an immutable definition for, sorted. */
+  definitionGraphIds(): readonly string[];
 }
 
 /** One row of an arbitrary query result, as a field bag. */
@@ -329,6 +331,7 @@ export class GraphStore {
       ): InvocationOriginRecord | undefined => this.readInvocationOrigin(graphId),
       invocationOriginGraphIds: (): readonly string[] =>
         this.invocationOriginGraphIds(),
+      definitionGraphIds: (): readonly string[] => this.definitionGraphIds(),
     });
   }
 
@@ -846,6 +849,30 @@ export class GraphStore {
         GRAPH_STORE_TABLES.definitions,
       ),
     };
+  }
+
+  /**
+   * Every graph id this store holds an immutable DEFINITION for, sorted.
+   *
+   * The declared-graph read paths enumerate through this: a graph this build
+   * can run is one whose definition is in the store, so the listing is the
+   * "which graphs exist" answer the retired per-graph container used to give by
+   * its file names. It reads the primary key only — a caller that needs the
+   * definition calls {@link readDefinition}.
+   */
+  definitionGraphIds(): readonly string[] {
+    this.assertOpen("definitionGraphIds");
+    const rows = this.db
+      .query(`SELECT graph_id FROM ${GRAPH_STORE_TABLES.definitions}`)
+      .all();
+    const ids: string[] = [];
+    for (const row of rows) {
+      const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.definitions);
+      ids.push(
+        readStoreText(entry, "graph_id", this.filePath, GRAPH_STORE_TABLES.definitions),
+      );
+    }
+    return Object.freeze(ids.sort());
   }
 
   // ── Host execution bindings ───────────────────────────────────────────────

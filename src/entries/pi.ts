@@ -82,7 +82,7 @@ import {
   createOutcomeGraphTools,
 } from "../graph/tools/index.ts";
 import { OutcomeHost } from "../graph/host/outcome-host.ts";
-import { hostStoreRoot } from "../graph/host/host-store.ts";
+import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
 import { createValidatorRegistry } from "../graph/outcome/validators.ts";
@@ -845,7 +845,7 @@ export default async function (pi: any): Promise<void> {
       // the one path-shaped part of the boundary — `credential-vault.ts` states
       // why it is not isolation by itself and what the vault does NOT put on
       // disk.
-      storeRoot: hostStoreRoot(getDataDir(), process.cwd()),
+      storeRoot: graphStoreRoot(getDataDir(), process.cwd()),
       deliver: outcomeDelivery.deliver,
       validators: createValidatorRegistry([]),
       declareInvocationIdentity: false,

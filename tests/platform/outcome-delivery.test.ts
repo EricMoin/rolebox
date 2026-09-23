@@ -47,8 +47,7 @@ import {
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
 import { scanPersistedStates } from "../../src/graph/tools/persisted-state.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { HostDispatchInvocation } from "../../src/graph/host/dispatch-host.ts";
 import {
@@ -65,6 +64,32 @@ const NOW = 1_700_000_000_000;
 const CREDENTIAL = "attempt-credential-7f3a";
 /** The invocation the host attributes to the graph's declaring call. */
 const INVOCATION = { sessionId: "session-1", agent: "agent.orchestrator" } as const;
+
+/**
+ * Every byte of every file under `root`, as text — the credential-search
+ * surface. A directory that does not exist is empty text: the assertion is
+ * "nothing durable carries the value", and a missing directory carries nothing.
+ */
+function readTextUnder(root: string): string {
+  let names: string[];
+  try {
+    names = readdirSync(root, { encoding: "utf-8" });
+  } catch {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const name of names) {
+    const path = join(root, name);
+    try {
+      if (statSync(path).isDirectory()) parts.push(readTextUnder(path));
+      else parts.push(readFileSync(path, "utf8"));
+    } catch {
+      // A path that cannot be read is not evidence either way; the assertion
+      // below is about what IS readable.
+    }
+  }
+  return parts.join("\n");
+}
 
 function request(): OutcomeDispatchRequest {
   return {
@@ -381,7 +406,8 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
       declaration: naturalDeclaration(),
       completionPolicies: AUTHORIZED,
     });
-    persistDeclaredGraph(graph, dir);
+    const storeRoot = join(dir, "host-store");
+    persistDeclaredGraph(graph, storeRoot);
 
     const { port, launches, contexts, terminate } = makePiPort();
     let host: OutcomeHost | undefined;
@@ -412,7 +438,7 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
     };
     host = OutcomeHost.open({
       workspaceDir: dir,
-      storeRoot: join(dir, "host-store"),
+      storeRoot,
       deliver: recordingDelivery,
       validators: EMPTY_VALIDATORS,
       completionPolicies: AUTHORIZED,
@@ -449,7 +475,7 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
       terminate("task-2", "completed");
       await settleCompletions();
 
-      const state = scanPersistedStates(dir).loaded.find(
+      const state = scanPersistedStates(storeRoot).loaded.find(
         (candidate) => candidate.graphId === GRAPH_ID,
       );
       expect(state?.phase).toBe("complete");
@@ -467,13 +493,12 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
       expect(credentials[0]).not.toBe(credentials[1]);
       expect(launches[0]?.prompt ?? "").toContain(credentials[0] ?? "");
       expect(launches[1]?.prompt ?? "").toContain(credentials[1] ?? "");
-      const persisted = readFileSync(
-        join(engineStateDir(dir), "engine-" + GRAPH_ID + ".json"),
-        "utf8",
-      );
+      // THE STORE IS THE RECORD, and it carries no credential value either:
+      // every durable byte of the workspace plus the host's store root is
+      // searched for the delivered values.
       for (const credential of credentials) {
-        expect(persisted).not.toContain(credential);
         expect(JSON.stringify(state)).not.toContain(credential);
+        expect(readTextUnder(storeRoot)).not.toContain(credential);
       }
     } finally {
       host.close();
