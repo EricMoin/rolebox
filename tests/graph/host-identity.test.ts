@@ -45,7 +45,7 @@ import { join } from "node:path";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
-import { engineStateDir } from "../../src/graph/engine/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
 import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
 import {
   LEDGER_FILE_NAME,

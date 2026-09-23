@@ -50,7 +50,7 @@ import {
   graphEventsPath,
   type GraphEventRecord,
 } from "../../src/graph/engine/graph-events.ts";
-import { markNonCriticalDirty } from "../../src/graph/engine/engine-persistence.ts";
+import { markNonCriticalDirty } from "../../src/graph/persistence/engine-persistence.ts";
 import {
   AdvanceEngine,
   type NodeDispatchPort,

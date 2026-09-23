@@ -26,7 +26,7 @@ import {
 import {
   EnginePersistence,
   serializeEngineState,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import {
   contractDigest,
   type ContractSnapshot,

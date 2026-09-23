@@ -47,7 +47,7 @@ import {
   shouldPersistNonCritical,
   markDirty,
   markNonCriticalDirty,
-} from "./engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import {
   type DispatchParentContext,
   type TaskTerminatedCallback,
@@ -103,7 +103,7 @@ import {
   type GraphTerminalEvent,
   type TerminationContext,
 } from "./engine-termination.ts";
-import { logWarn } from "./log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 import { executeLoopStep } from "./loop-group-executor.ts";
 import {
   recordNodeArtifactsAndEvidence,
@@ -141,7 +141,7 @@ import {
   getSignal,
   isInferred,
   SIGNAL_KEY,
-} from "./signal-payload.ts";
+} from "../tools/signal-payload.ts";
 import { isThenable } from "./thenable.ts";
 import { errorText } from "../../utils/error-text.ts";
 

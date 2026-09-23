@@ -19,7 +19,7 @@ import {
 } from "../../src/graph/tools/status-queries.ts";
 import { NodeStatus } from "../../src/constants.ts";
 import type { EngineState } from "../../src/types.engine-v2.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 
 const T0 = 1_700_000_000_000;
 

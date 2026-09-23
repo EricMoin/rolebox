@@ -36,8 +36,8 @@ import type {
 } from "../../types.engine-v2.ts";
 import { resolveJoinStrategy, isReviseBackEdge } from "./join-evaluator.ts";
 import { markReady } from "./node-lifecycle.ts";
-import { markDirty, markNonCriticalDirty } from "./engine-persistence.ts";
-import { logWarn } from "./log-warn.ts";
+import { markDirty, markNonCriticalDirty } from "../persistence/engine-persistence.ts";
+import { logWarn } from "../log-warn.ts";
 
 // ── Event sinks (write-side graph event log) ────────────────────────────────
 //

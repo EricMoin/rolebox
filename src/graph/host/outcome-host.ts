@@ -38,13 +38,13 @@ import { join } from "node:path";
 
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
-import { logWarn } from "../engine/log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 import {
   DEFAULT_STORAGE_FORMAT_REGISTRY,
   engineStateDir,
   engineStatePath,
   loadEngineStateForResume,
-} from "../engine/engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import { readPersistedOutcomePlan } from "../outcome/recovery.ts";

@@ -51,7 +51,7 @@ import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
 import type { CancelLaneOptions } from "./cascade-canceller.ts";
 import { retireCancelledNode } from "./cancellation.ts";
 import { recordSignalToLedger } from "./signal-bridge.ts";
-import { asRecord } from "./signal-payload.ts";
+import { asRecord } from "../tools/signal-payload.ts";
 import {
   deriveNodeArtifacts,
   recordNodeArtifactsAndEvidence,

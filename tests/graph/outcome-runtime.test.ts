@@ -81,7 +81,7 @@ import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 import {
   EnginePersistence,
   engineStatePath,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";

@@ -42,7 +42,7 @@ import {
 import {
   EnginePersistence,
   engineStatePath,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { OUTCOME_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";

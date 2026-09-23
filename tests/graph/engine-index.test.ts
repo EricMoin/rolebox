@@ -16,7 +16,7 @@ import {
   EnginePersistence,
   NON_CRITICAL_DEBOUNCE_MS,
   engineStatePath,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import {
   createEngine,
   type EngineRuntime,

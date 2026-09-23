@@ -7,7 +7,7 @@ import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState } from "../../src/types.engine-v2.ts";
 import { createEngineState } from "../../src/graph/engine/engine-state.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 import { GraphEventRecorder } from "../../src/graph/engine/graph-events.ts";
 import type { NodeCompletionEvent } from "../../src/graph/engine/engine-advance.ts";
 import { readMonitorSnapshot } from "../../src/cli/commands/monitor/monitor-reader.ts";

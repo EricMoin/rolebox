@@ -43,8 +43,8 @@ import type { EnginePhase } from "../../constants.ts";
 import { errorText } from "../../utils/error-text.ts";
 import type { GraphBudgetState } from "../../types.engine-v2.ts";
 import type { NodeCompletionEvent } from "./engine-advance.ts";
-import { logWarn } from "./log-warn.ts";
-import { asRecord } from "./signal-payload.ts";
+import { logWarn } from "../log-warn.ts";
+import { asRecord } from "../tools/signal-payload.ts";
 
 // ── Event vocabulary ────────────────────────────────────────────────────────
 

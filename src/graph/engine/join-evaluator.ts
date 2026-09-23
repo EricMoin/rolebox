@@ -30,7 +30,7 @@ import type {
   ResolvedJoinStrategy,
 } from "../../types.engine-v2.ts";
 import type { EdgePayload } from "../../types.engine-v2.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markDirty } from "../persistence/engine-persistence.ts";
 import { readQuorum, resolveJoinStrategy } from "../join-strategy.ts";
 
 // The strategy RESOLUTION lives in the dependency-leaf module

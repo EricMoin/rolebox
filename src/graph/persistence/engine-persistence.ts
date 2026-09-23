@@ -85,7 +85,7 @@ import {
   type StorageFormatDecoder,
   type StorageFormatMigration,
   type StorageFormatRegistry,
-} from "../persistence/storage-format.ts";
+} from "./storage-format.ts";
 import {
   classifyExecutionProtocol,
   DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
@@ -93,7 +93,7 @@ import {
   type ExecutionProtocolRegistry,
   type ExecutionProtocolVerdict,
 } from "../protocol/execution-protocol.ts";
-import { logWarn } from "./log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 import {
   inspectCompiledTopology,
   NON_EXECUTABLE_PLAN_CODE,

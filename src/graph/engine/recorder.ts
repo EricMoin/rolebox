@@ -38,8 +38,8 @@ import type {
   NodeRuntimeState,
   RoundHistoryEntry,
 } from "../../types.engine-v2.ts";
-import { markDirty } from "./engine-persistence.ts";
-import { asRecord } from "./signal-payload.ts";
+import { markDirty } from "../persistence/engine-persistence.ts";
+import { asRecord } from "../tools/signal-payload.ts";
 
 // ── Checkpoints (EngineState.checkpoints) ───────────────────────────────────
 

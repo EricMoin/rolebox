@@ -7,7 +7,7 @@ import {
   hasUnresolvedPayload,
   isInferred,
   revisionText,
-} from "../../src/graph/engine/signal-payload.ts";
+} from "../../src/graph/tools/signal-payload.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 

@@ -49,7 +49,7 @@
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markDirty } from "../persistence/engine-persistence.ts";
 
 // ── Transition table ───────────────────────────────────────────────────────
 

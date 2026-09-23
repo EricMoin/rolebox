@@ -25,7 +25,7 @@ import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import { createEngineState } from "../../src/graph/engine/engine-state.ts";
 import { EnginePhase } from "../../src/constants.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 import {
   collectStartupPendingApprovals,
   buildPendingApprovalsReminder,

@@ -80,10 +80,10 @@ import {
   clonePlanBinding,
   markDirty,
   markNonCriticalDirty,
-} from "./engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import { contractDigest } from "../contracts/contract-definition.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
-import { logWarn } from "./log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";

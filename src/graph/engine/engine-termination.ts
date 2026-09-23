@@ -39,9 +39,9 @@ import { errorText } from "../../utils/error-text.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import { canTransitionPhase, transitionPhase } from "./engine-state.ts";
 import { markEscalated } from "./node-lifecycle.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markDirty } from "../persistence/engine-persistence.ts";
 import { isThenable } from "./thenable.ts";
-import { logWarn } from "./log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 
 /**
  * Base reason applied to every pending node when a runtime graph deadlock is

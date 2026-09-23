@@ -54,7 +54,7 @@
 
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import { getSignal } from "../engine/signal-payload.ts";
+import { getSignal } from "./signal-payload.ts";
 
 /**
  * The `graph_status` filter surface. Every field is optional — a filter is

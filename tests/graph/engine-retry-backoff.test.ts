@@ -49,7 +49,7 @@ import { adoptPriorNodeStates } from "../../src/graph/engine/engine-recovery.ts"
 import {
   deserializeEngineState,
   serializeEngineState,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 
 // ── Scripted dispatch seam with per-dispatch timestamps ─────────────────────
 

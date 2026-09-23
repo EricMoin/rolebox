@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { createGraphToolSet, type GraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { createGraphTools } from "../../src/graph/tools/index.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { EngineState } from "../../src/types.engine-v2.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";

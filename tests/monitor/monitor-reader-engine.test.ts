@@ -29,7 +29,7 @@ function writeEngineFile(filename: string, contents: string): string {
 /**
  * Build a valid, hand-authored engine-`2` persistence file object. Mirrors the
  * serialized shape produced by `serializeEngineState` (see
- * `src/graph/engine/engine-persistence.ts`) so it round-trips through
+ * `src/graph/persistence/engine-persistence.ts`) so it round-trips through
  * `loadEngineStateFromJson`. `overrides` let tests mutate specific fields.
  *
  * `nodeOverrides` supplies per-node overrides keyed by node id (e.g.

@@ -22,7 +22,7 @@
  */
 
 import type { EngineState, SignalLedgerEvent, SignalLedgerSource } from "../../types.engine-v2.ts";
-import { markNonCriticalDirty } from "./engine-persistence.ts";
+import { markNonCriticalDirty } from "../persistence/engine-persistence.ts";
 
 // ── Signal-type vocabulary (imported from src/signal/signal-constants.ts) ────
 

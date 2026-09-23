@@ -28,7 +28,7 @@ import {
   markDirty,
   clearDirty,
   shouldPersist,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import {
   classifyStorageFormat,
   createStorageFormatRegistry,

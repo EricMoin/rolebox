@@ -52,7 +52,7 @@ import type {
 } from "../../src/graph/outcome/dispatch-effects.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
-import { engineStateDir } from "../../src/graph/engine/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
 import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";

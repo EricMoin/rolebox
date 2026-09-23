@@ -32,7 +32,7 @@ import {
   EnginePersistence,
   serializeEngineState,
   deserializeEngineState,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────

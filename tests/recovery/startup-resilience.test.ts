@@ -16,7 +16,7 @@ import { shortHash } from "../../src/utils/state-paths";
 import { LoopStore } from "../../src/loop/loop-store";
 import { FunctionRuntimeStore } from "../../src/function/runtime-store";
 import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence";
 import { BudgetTracker } from "../../src/dispatch/budget/budget-tracker";
 import { DEFAULT_CONFIG } from "../../src/dispatch/config";
 import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup";

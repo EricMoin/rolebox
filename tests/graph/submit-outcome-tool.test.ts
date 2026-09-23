@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
-import { engineStateDir } from "../../src/graph/engine/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
 import { buildEngineGraphStateBlock } from "../../src/graph/engine/graph-state-block.ts";
 import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";

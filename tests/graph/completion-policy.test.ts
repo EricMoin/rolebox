@@ -58,7 +58,7 @@ import {
   REPOSITORY_COMPLETION_POLICY_ID,
   type RepositoryCompletionPolicyDeclaration,
 } from "../../src/graph/policy/declarations.ts";
-import { engineStateDir, verifyPersistedCompiledPlan } from "../../src/graph/engine/engine-persistence.ts";
+import { engineStateDir, verifyPersistedCompiledPlan } from "../../src/graph/persistence/engine-persistence.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { resumePersistedOutcomeGraph } from "../../src/graph/outcome/recovery.ts";

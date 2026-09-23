@@ -67,7 +67,7 @@ import {
   asRecord,
   hasUnresolvedPayload,
   isInferred,
-} from "./signal-payload.ts";
+} from "../tools/signal-payload.ts";
 import { recordLoopRound } from "./recorder.ts";
 import {
   fingerprintPayload,

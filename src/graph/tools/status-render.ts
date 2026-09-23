@@ -40,7 +40,7 @@ import type {
 } from "../../types.engine-v2.ts";
 import type { GraphDeclaration, LoopMode } from "../../types.graph-v2.ts";
 import { createSubLogger } from "../../logger.ts";
-import { getSignal, SIGNAL_KEY } from "../engine/signal-payload.ts";
+import { getSignal, SIGNAL_KEY } from "./signal-payload.ts";
 import type { PersistedStateScan } from "./persisted-state.ts";
 import {
   filterNodes,

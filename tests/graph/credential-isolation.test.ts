@@ -51,7 +51,7 @@ import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credent
 import {
   engineStateDir,
   engineStatePath,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { buildEngineGraphStateBlock } from "../../src/graph/engine/graph-state-block.ts";
 import {
   recoverInterruptedGraphs,

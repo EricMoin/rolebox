@@ -80,7 +80,7 @@ import {
   removeFromFrontier,
 } from "./engine-state.ts";
 import { markReady } from "./node-lifecycle.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markDirty } from "../persistence/engine-persistence.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────

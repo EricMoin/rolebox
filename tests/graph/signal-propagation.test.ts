@@ -19,7 +19,7 @@ import {
   propagateEscalate,
 } from "../../src/graph/engine/signal-propagation.ts";
 import { markEscalated, markReady, markRunning } from "../../src/graph/engine/node-lifecycle.ts";
-import { clearDirty } from "../../src/graph/engine/engine-persistence.ts";
+import { clearDirty } from "../../src/graph/persistence/engine-persistence.ts";
 
 // ── Controllable fake dispatch port (mirrors engine-advance.test.ts) ───────
 

@@ -96,7 +96,7 @@ import {
   engineStateDir,
   loadEngineStateForResume,
   type EngineLoadResult,
-} from "./engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import {
@@ -123,7 +123,7 @@ import type {
   OutcomeDispatchAdapter,
   OutcomeResumeResult,
 } from "../outcome/runtime.ts";
-import { logWarn } from "./log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 import type {
   NodeCompletionEvent,
   GraphTerminalEvent,

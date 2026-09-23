@@ -154,7 +154,7 @@ import {
   loadEngineStateForResume,
   type EngineLoadDimension,
   type EngineLoadResult,
-} from "../engine/engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import type { StorageFormatRegistry } from "../persistence/storage-format.ts";
 
 // ── Blocker vocabulary ──────────────────────────────────────────────────────

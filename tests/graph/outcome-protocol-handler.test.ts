@@ -41,7 +41,7 @@ import {
   DEFAULT_STORAGE_FORMAT_REGISTRY,
   engineStatePath,
   loadEngineStateForResume,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";

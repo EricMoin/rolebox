@@ -76,7 +76,7 @@ import {
 import {
   EnginePersistence,
   engineStatePath,
-} from "../engine/engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import { createEngineState, registerNode } from "../engine/engine-state.ts";
 
 // ── Args and result ─────────────────────────────────────────────────────────

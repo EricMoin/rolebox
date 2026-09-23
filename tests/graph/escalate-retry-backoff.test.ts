@@ -47,7 +47,7 @@ import { adoptPriorNodeStates } from "../../src/graph/engine/engine-recovery.ts"
 import {
   serializeEngineState,
   deserializeEngineState,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
 
 // ── Controllable fake dispatch port ─────────────────────────────────────────

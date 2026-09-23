@@ -28,7 +28,7 @@ import {
 import { NodeStatus } from "../../src/constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 
 // ── fixed epoch timestamps for deterministic date-window assertions ─────────
 const T0 = 1_700_000_000_000; // +0s

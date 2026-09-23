@@ -16,7 +16,7 @@ import {
   DEFAULT_STORAGE_FORMAT_REGISTRY,
   EnginePersistence,
   serializeEngineState,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
   recoverInterruptedGraphs,

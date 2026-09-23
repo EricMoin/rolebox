@@ -70,9 +70,9 @@ import {
   extractReason,
   revisionText,
   SIGNAL_KEY,
-} from "./signal-payload.ts";
+} from "../tools/signal-payload.ts";
 import { deriveNodeArtifacts } from "./recorder.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markDirty } from "../persistence/engine-persistence.ts";
 
 /**
  * Node states a `revise_needed` back-edge may re-enter (Y15).

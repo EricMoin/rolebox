@@ -41,7 +41,7 @@ import {
 import { NodeStatus } from "../../src/constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 
 // ── fixed timestamps across distinct hours / days (deterministic buckets) ────
 const H10 = new Date("2026-07-25T10:15:30.000Z").getTime();

@@ -68,7 +68,7 @@ import {
   engineStatePath,
   loadEngineStateForResume,
   type EngineLoadResult,
-} from "../engine/engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import type {

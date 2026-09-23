@@ -34,7 +34,7 @@ import {
   engineStatePath,
   cloneCheckpointHistory,
   type EnginePersistenceFile,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { LEGACY_SIGNAL_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────

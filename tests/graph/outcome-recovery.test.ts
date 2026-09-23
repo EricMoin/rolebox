@@ -32,7 +32,7 @@ import {
   EnginePersistence,
   engineStateDir,
   engineStatePath,
-} from "../../src/graph/engine/engine-persistence.ts";
+} from "../../src/graph/persistence/engine-persistence.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
   recoverInterruptedGraphs,

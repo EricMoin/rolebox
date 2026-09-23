@@ -55,7 +55,7 @@ import {
   type GraphTerminalEvent,
 } from "./engine-advance.ts";
 import { SignalBridge } from "./signal-bridge.ts";
-import { logWarn } from "./log-warn.ts";
+import { logWarn } from "../log-warn.ts";
 import {
   BudgetBridge,
 } from "./budget-bridge.ts";
@@ -73,7 +73,7 @@ import {
   EnginePersistence,
   clonePersistedCompiledPlan,
   clonePlanBinding,
-} from "./engine-persistence.ts";
+} from "../persistence/engine-persistence.ts";
 import { LEGACY_SIGNAL_PROTOCOL } from "../protocol/execution-protocol.ts";
 import type { GraphEventRecorder } from "./graph-events.ts";
 import {
@@ -1900,7 +1900,7 @@ export {
 
 // ── Re-exports for tool-layer consumers (barrel-only access) ─────────────────
 
-export { loadEngineStateFromJson } from "./engine-persistence.ts";
+export { loadEngineStateFromJson } from "../persistence/engine-persistence.ts";
 
 /**
  * The B8 adoption-refusal surface. The tool layer pre-checks a rebuild with
