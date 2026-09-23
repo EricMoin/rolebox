@@ -1780,18 +1780,26 @@ export class OutcomeHost {
   }
 
   /**
-   * The durable half of {@link OutcomeHost.workerPrincipalOf}: scan the
-   * still-unsettled dispatch effects of every declared graph and ask which of
-   * their execution rows names this session as its worker.
+   * The durable half of {@link OutcomeHost.workerPrincipalOf}: scan every
+   * declared graph's dispatch records and ask which execution row names this
+   * session as its worker.
+   *
+   * TWO LISTINGS, ONE ROW. A still-unsettled effect is listed by
+   * `pendingEffects`. A SETTLED attempt is listed by its ACCEPTED EVENT: the
+   * effect stops being pending the moment the attempt settles, while the store
+   * KEEPS the execution row (a `created` row is never released — that
+   * execution exists), so the event's attempt id is what reaches the same row
+   * a running attempt's effect reaches. Without the second listing a worker
+   * whose attempt settled would be unbound in a host that did not confirm it
+   * itself, and the face would grant it the declarer's capabilities again
+   * (G-A21-restart).
    *
    * READ-ONLY AND FAIL-OPEN. The scan borrows a read-only connection (it never
    * creates or initializes a store), and a store that cannot be read answers
    * "no worker bound" rather than denying: the very tool the caller is invoking
    * reports the unreadable store by name, and a boundary that turned a damaged
    * store into "everything is a worker" would break the declarer's own
-   * recovery. A settled attempt is covered by the remembered half when THIS
-   * process confirmed it; after a restart, only a still-running attempt can
-   * still be calling tools, and its effect is by definition unsettled.
+   * recovery.
    */
   private dispatchedWorkerPrincipalOf(
     sessionId: string,
@@ -1804,22 +1812,22 @@ export class OutcomeHost {
     try {
       for (const graphId of store.definitionGraphIds()) {
         for (const effect of store.pendingEffects(graphId)) {
-          const row = store.readExecution({
-            graphId,
-            effectId: effect.effectId,
-            attemptId: effect.attemptId,
-          });
-          if (row === undefined || row.state !== "created" || row.execution === undefined) {
-            continue;
-          }
-          const workerSessionId = workerSessionOf(row.execution);
-          if (workerSessionId !== sessionId) continue;
-          return Object.freeze({
-            graphId,
-            attemptId: row.attemptId,
-            executionId: row.execution.executionId,
-            workerSessionId,
-          });
+          const principal = this.durableWorkerPrincipalOf(
+            store,
+            effect,
+            sessionId,
+            workerSessionOf,
+          );
+          if (principal !== undefined) return principal;
+        }
+        for (const event of store.acceptedEvents(graphId)) {
+          const principal = this.durableWorkerPrincipalOf(
+            store,
+            dispatchEffectKeyOf(graphId, event.attemptId),
+            sessionId,
+            workerSessionOf,
+          );
+          if (principal !== undefined) return principal;
         }
       }
       return undefined;
@@ -1828,6 +1836,34 @@ export class OutcomeHost {
     } finally {
       store.close();
     }
+  }
+
+  /**
+   * One durable execution row as a worker principal, when the session the
+   * platform created it for is the one that arrived.
+   *
+   * The row is the host's own fact on both listings: a row that is not
+   * `created`, or that carries no execution the platform's derivation can turn
+   * into a session, binds nobody.
+   */
+  private durableWorkerPrincipalOf(
+    store: GraphStore,
+    effect: OutcomeDispatchEffectKey,
+    sessionId: string,
+    workerSessionOf: (execution: HostExecutionIdentity) => string | undefined,
+  ): OutcomeWorkerPrincipal | undefined {
+    const row = store.readExecution(effect);
+    if (row === undefined || row.state !== "created" || row.execution === undefined) {
+      return undefined;
+    }
+    const workerSessionId = workerSessionOf(row.execution);
+    if (workerSessionId !== sessionId) return undefined;
+    return Object.freeze({
+      graphId: effect.graphId,
+      attemptId: row.attemptId,
+      executionId: row.execution.executionId,
+      workerSessionId,
+    });
   }
 
   /** The per-graph completion bridge, created on first use. */

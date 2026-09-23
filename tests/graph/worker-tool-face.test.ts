@@ -519,6 +519,71 @@ describe("a dispatched worker cannot reach the declarer/store face", () => {
       second.host.close();
     }
   });
+
+  it("finds a worker whose attempt SETTLED before a restart (the effect is no longer pending)", async () => {
+    const fixture = await openFaceFixture(FAN_OUT);
+    const betaCredential = credentialOf(fixture, "beta");
+    try {
+      const accepted = JSON.parse(
+        String(
+          await fixture.tools.graph_submit_outcome.execute(
+            {
+              graph_id: fixture.graphId,
+              node_id: "alpha",
+              outcome_id: "done",
+              credential: credentialOf(fixture, "alpha"),
+            },
+            fixture.contextOf(childSessionOf("alpha#1"), "agent.alpha"),
+          ),
+        ),
+      ) as { decision?: string };
+      expect(accepted.decision).toBe("accepted");
+      expect(nodeOf(await readGraph(fixture), "alpha")["status"]).toBe("settled");
+    } finally {
+      fixture.host.close();
+    }
+
+    // The attempt SETTLED, so its dispatch effect is no longer pending: a
+    // fresh host can only know this session was a worker from the durable
+    // EXECUTION row the store keeps after settlement (a created row is never
+    // released). A settled attempt's worker is still a worker.
+    const second = bindFaceOver(fixture.dir, fixture.storeRoot);
+    try {
+      await expectWorkerRefusal(
+        { ...second, graphId: FAN_OUT.name },
+        "graph_status",
+        { graph_id: FAN_OUT.name },
+        childSessionOf("alpha#1"),
+        "agent.alpha",
+        { graphId: FAN_OUT.name, attemptId: "alpha#1" },
+      );
+
+      // ... and the boundary is not a blanket denial: the attempt that is
+      // still open settles through the SAME fresh host, with the credential
+      // the first host handed its worker. The delivery survives the restart
+      // the boundary is judged across.
+      const betaAccepted = JSON.parse(
+        String(
+          await second.tools.graph_submit_outcome.execute(
+            {
+              graph_id: FAN_OUT.name,
+              node_id: "beta",
+              outcome_id: "done",
+              credential: betaCredential,
+            },
+            second.contextOf(childSessionOf("beta#2"), "agent.beta"),
+          ),
+        ),
+      ) as { decision?: string; attempt_id?: string };
+      expect(betaAccepted.decision).toBe("accepted");
+      expect(betaAccepted.attempt_id).toBe("beta#2");
+      expect(nodeOf(await readGraph({ ...second, graphId: FAN_OUT.name }), "beta")["status"]).toBe(
+        "settled",
+      );
+    } finally {
+      second.host.close();
+    }
+  });
 });
 
 // ── The boundary does not over-block ────────────────────────────────────────
