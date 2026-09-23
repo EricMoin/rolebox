@@ -13,7 +13,9 @@
  *   sequence — while the old run's row, state, receipts, accepted events, effects and
  *   decisions stay exactly as they were and stay readable by the old run's own id;
  * - a run that is still executing, or whose external work is unaccounted for, is REFUSED:
- *   re-executing a graph whose side effects may still be live is what §4 forbids;
+ *   re-executing a graph whose side effects may still be live is what §4 forbids — and the
+ *   fence holds for a SUCCESSOR-ARMED effect too: in an A→B chain, B's execution is judged
+ *   by B's OWN attempt id, never by the settled feeder whose acceptance armed it;
  * - the ORDER is idempotent and outlives the process that decided it: the boot sweep
  *   honours an owed order, and a second sweep does not execute it twice;
  * - a changed effective plan forms a NEW revision: the successor's row and state record the
@@ -65,6 +67,27 @@ const SOLO: GraphDeclarationV3 = {
     { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
   ],
   edges: [],
+};
+
+/**
+ * A CHAIN: settling \`work#1\` ARMS \`review#2\`, so the successor-armed effect exists
+ * beside the attempt that decided it. Every case above uses the solo graph, whose entry
+ * effect happens to be stamped with the submitting attempt — which is exactly why the
+ * successor-armed shape needs its own graph.
+ */
+const CHAIN: GraphDeclarationV3 = {
+  version: 3,
+  name: "reexecute.chain",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "review",
+      agent: "agent.review",
+      prompt: "Review the work.",
+      outcomes: [{ id: "approved" }],
+    },
+  ],
+  edges: [{ from: "work", to: "review", outcome: "done" }],
 };
 
 const FIXED_AT = 1_700_000_000_000;
@@ -128,10 +151,15 @@ interface ReexecFixture {
  * PLATFORM-CONFIRMED (the effect becomes `done`, so the execution is accounted for and a
  * re-execution may proceed); WITHOUT it the cancel intent stays unconfirmed and the
  * external execution keeps blocking a re-execution.
+ *
+ * \`declaration\` defaults to {@link SOLO}, so every case that only needs a run keeps the
+ * graph it always had; a case about a SUCCESSOR-ARMED effect passes {@link CHAIN}.
  */
 async function openReexecFixture(options: {
   readonly cancelling?: boolean;
+  readonly declaration?: GraphDeclarationV3;
 } = {}): Promise<ReexecFixture> {
+  const declaration = options.declaration ?? SOLO;
   const dir = makeTmpDir("run-reexecution-");
   const storeRoot = join(dir, "host-store");
   mkdirSync(storeRoot, { recursive: true });
@@ -175,20 +203,20 @@ async function openReexecFixture(options: {
     dispatched,
     storeRoot,
     workspaceDir: dir,
-    graphId: SOLO.name,
+    graphId: declaration.name,
     declarer,
     contextOf: (sessionID, agent) => makeContext(sessionID, agent, dir),
   };
   const declared = String(
     await fixture.tools.graph_declare.execute(
-      { declaration: SOLO },
+      { declaration },
       fixture.contextOf(declarer, "agent.declarer"),
     ),
   );
   if (declared.includes("graph_declare failed:")) {
     throw new Error("fixture: graph_declare refused the declaration: " + declared);
   }
-  const started = await opened.startDeclaredGraph(SOLO.name, {
+  const started = await opened.startDeclaredGraph(declaration.name, {
     sessionId: declarer,
     agent: "agent.declarer",
   });
@@ -657,6 +685,167 @@ describe("terminal-graph re-execution — a NEW run", () => {
       expect(
         withStore(fixture, (store) => store.runs.readReexecution(fixture.graphId, runId)),
       ).toBeUndefined();
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── The successor-armed effect: every run fence joins its OWN attempt ───────
+//
+// The three run-scoped fences join an attempt to ITS dispatch effect. In a chain the
+// effect that exists for the armed attempt was decided by a DIFFERENT, already settled
+// attempt, so a row that carried the feeder's id would be invisible to every one of
+// them: the re-execution would proceed over a possibly-live execution and a closed run
+// would accept the armed attempt's result. These cases drive the chain shape the solo
+// graph cannot produce.
+
+describe("the run fence holds for a SUCCESSOR-ARMED effect (an A→B chain)", () => {
+  it("refuses a run-scoped retry while B's first execution is live and unconfirmed, naming its OWN attempt", async () => {
+    // No cancel port: the trusted cancel is durable but the platform never confirmed it,
+    // so \`review#2\` may still be live.
+    const fixture = await openReexecFixture({ declaration: CHAIN });
+    try {
+      expect(await settleWork(fixture, "work#1")).toBe("accepted");
+      // Settling \`work#1\` ARMED \`review#2\` and the host delivered it.
+      expect(fixture.dispatched.map((request) => request.attemptId)).toEqual([
+        "work#1",
+        "review#2",
+      ]);
+      const runId =
+        withStore(fixture, (store) => store.runs.readRun(fixture.graphId)?.runId) ?? "";
+
+      // THE ARMED EFFECT CARRIES THE ARMED ATTEMPT. This is the column every fence
+      // joins on, and it must name the execution the effect id names — NOT the settled
+      // feeder whose acceptance decided to arm it.
+      withStore(fixture, (store) => {
+        const armed = store
+          .pendingEffects(fixture.graphId, runId)
+          .find((effect) => effect.effectId === "dispatch:review#2");
+        expect(armed?.attemptId).toBe("review#2");
+        expect(armed?.status).toBe("started");
+      });
+
+      const cancelled = await control(fixture, {
+        graph_id: fixture.graphId,
+        command: "cancel",
+        reason: "stop it",
+      });
+      expect(cancelled.kind).toBe("applied");
+
+      const answer = await control(fixture, {
+        graph_id: fixture.graphId,
+        command: "retry",
+        reason: "re-run it anyway",
+      });
+      expect(answer.kind).toBe("refused");
+      expect(answer.refusals?.[0]?.code).toBe("run-has-unsettled-effects");
+      // THE ARMED EXECUTION IS NAMED, by its own effect id and its own attempt.
+      expect(answer.refusals?.[0]?.message).toContain("dispatch:review#2");
+      expect(answer.refusals?.[0]?.message).toContain("attempt review#2");
+      // NOTHING WAS WRITTEN: no order, no successor run, no second dispatch.
+      expect(
+        withStore(fixture, (store) => store.runs.runsOf(fixture.graphId).map((run) => run.runSeq)),
+      ).toEqual([1]);
+      expect(
+        withStore(fixture, (store) => store.runs.readReexecution(fixture.graphId, runId)),
+      ).toBeUndefined();
+      expect(fixture.dispatched.map((request) => request.attemptId)).toEqual([
+        "work#1",
+        "review#2",
+      ]);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("refuses the closed run's successor-armed attempt at the STORE, with no receipt and no accepted event", async () => {
+    const fixture = await openReexecFixture({ declaration: CHAIN });
+    try {
+      expect(await settleWork(fixture, "work#1")).toBe("accepted");
+      const runs = withStore(fixture, (store) => store.runs.runsOf(fixture.graphId));
+      expect(runs.map((run) => run.runSeq)).toEqual([1]);
+      const firstRunId = runs[0]?.runId ?? "";
+      const firstRevision = runs[0]?.planRevision ?? "";
+      const eventsBefore = withStore(fixture, (store) => store.acceptedEvents(fixture.graphId));
+      const stateOfClosedRun = withStore(fixture, (store) =>
+        store.readGraphStateOf(fixture.graphId, firstRunId),
+      );
+
+      // THE GRAPH MOVES ON through the store's OWN successor-run operation, and the
+      // successor run is minted DIRECTLY rather than through the control path on
+      // purpose: a platform-confirmed cancel also files a \`cancel:<armed>\` row under
+      // the closed run, and the third guard clause would then refuse the batch through
+      // THAT row — hiding whether the ARMED DISPATCH row is attributable to the closed
+      // run at all. Here the dispatch row is the only row that names \`review#2\`.
+      const successorRunId = fixture.graphId + "@successor+2";
+      withStore(fixture, (store) => {
+        expect(
+          store.runs.mintNextRun(
+            {
+              graphId: fixture.graphId,
+              runId: successorRunId,
+              startedAt: ORDER_AT,
+              planRevision: firstRevision,
+            },
+            firstRunId,
+          )?.runId,
+        ).toBe(successorRunId);
+        expect(store.runs.readRun(fixture.graphId)?.runId).toBe(successorRunId);
+        // The closed run holds the never-settled armed attempt and nothing else: no
+        // cancel effect was recorded (the intent was never handed to a platform).
+        expect(
+          store
+            .pendingEffects(fixture.graphId, firstRunId)
+            .map((effect) => [effect.effectId, effect.attemptId, effect.status]),
+        ).toEqual([["dispatch:review#2", "review#2", "started"]]);
+
+        const verdict = store.commitAccepted({
+          receipt: {
+            graphId: fixture.graphId,
+            attemptId: "review#2",
+            submissionId: "submission:late-armed",
+            planRevision: firstRevision,
+            proposalDigest: "digest:late-armed",
+            decision: "accepted",
+            committedAt: ORDER_AT,
+          },
+          acceptedEvent: {
+            graphId: fixture.graphId,
+            attemptId: "review#2",
+            submissionId: "submission:late-armed",
+            planRevision: firstRevision,
+            outcomeId: "approved",
+            acceptedAt: ORDER_AT,
+          },
+        });
+        expect(verdict.kind).toBe("run-superseded");
+        if (verdict.kind !== "run-superseded") {
+          throw new Error("fixture: expected run-superseded");
+        }
+        expect(verdict.runId).toBe(firstRunId);
+        expect(verdict.reason).toContain(firstRunId);
+        // NO RECEIPT, NO ACCEPTED EVENT, NO ACCEPTED RESULT was written.
+        expect(
+          store.lookupReceipt({
+            graphId: fixture.graphId,
+            attemptId: "review#2",
+            submissionId: "submission:late-armed",
+          }),
+        ).toBeUndefined();
+        expect(stateOfClosedRun).toBeDefined();
+        expect(store.readGraphStateOf(fixture.graphId, firstRunId)).toEqual(stateOfClosedRun);
+        expect(store.readAcceptedResult(fixture.graphId, "review#2")).toBeUndefined();
+        // The armed row is exactly what it was: an abandoned execution stays VISIBLE.
+        expect(
+          store
+            .pendingEffects(fixture.graphId, firstRunId)
+            .map((effect) => [effect.effectId, effect.status]),
+        ).toEqual([["dispatch:review#2", "started"]]);
+      });
+      expect(withStore(fixture, (store) => store.acceptedEvents(fixture.graphId))).toEqual(
+        eventsBefore,
+      );
     } finally {
       fixture.host.close();
     }

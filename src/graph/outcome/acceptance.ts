@@ -105,14 +105,32 @@ import {
  * One pending effect the acceptance produces, as the caller describes it.
  *
  * The caller owns `effectId` — it is the STABLE id a later process uses to
- * look the effect up and reconcile it — while `graphId`, `attemptId`,
- * `createdAt` and the initial `pending` status come from the trusted context
- * and the clock, never from the caller's payload, so an effect cannot name
- * another execution.
+ * look the effect up and reconcile it — and may name the attempt the effect is
+ * work for (see {@link PendingEffectInput.attemptId}); `graphId`, `createdAt`
+ * and the initial `pending` status come from the trusted context and the clock,
+ * never from the caller's payload.
  */
 export interface PendingEffectInput {
   /** Stable effect id, unique within the batch. */
   readonly effectId: string;
+  /**
+   * The attempt this effect is work for. OMITTED means the submitting
+   * execution's own attempt, which is what an effect the submitting attempt
+   * itself produces always is.
+   *
+   * AN ARMED SUCCESSOR IS WHY THIS FIELD EXISTS. An acceptance that settles
+   * `work#1` and arms `review#2` produces a dispatch effect for `review#2`,
+   * and the row must carry THAT attempt — the same one its `effectId` names —
+   * so an attempt-scoped reader (the run's unsettled-effect fence, a superseded
+   * run's acceptance guard) joins the row to the execution it describes instead
+   * of to the settled feeder that decided to arm it.
+   *
+   * The value is written verbatim; the store's own row gate refuses a malformed
+   * identifier. Nothing here checks that the named attempt belongs to this
+   * graph, so a producer that names one must name the attempt the effect really
+   * belongs to.
+   */
+  readonly attemptId?: string;
   /** Effect kind, e.g. the dispatch or notification it performs. */
   readonly kind: string;
   /** Opaque payload, stored verbatim; `null` when the effect carries nothing. */
@@ -306,8 +324,13 @@ export type SubmissionResult =
 export interface AcceptanceJoinResult {
   /**
    * Extra pending effects this acceptance produces (a successor dispatch, for
-   * example). They are stamped with the trusted identity and the clock exactly
-   * like the request's own effects and written into the SAME batch.
+   * example). They are stamped with the clock and the trusted graph exactly like
+   * the request's own effects, and they are written in the SAME transaction as
+   * the batch — but through the standalone intent write, NOT inside the batch:
+   * the batch's effects must all name the receipt's attempt (one batch describes
+   * one submission), while an armed successor's dispatch names the ARMED
+   * attempt, which is the whole point of the row. Written only when the batch
+   * actually committed, so a replay, conflict or settlement writes none.
    */
   readonly effects?: readonly PendingEffectInput[];
   /**
@@ -643,13 +666,14 @@ type CommitAttempt =
  * outside this boundary by design and its result is evidence for exactly the
  * inputs it saw.
  *
- * Accepted: receipt + accepted event + every pending effect in one batch.
- * Rejected: the receipt ONLY — no event, so the attempt stays open.
+ * Accepted: receipt + accepted event + the submission's own pending effects in
+ * one batch. Rejected: the receipt ONLY — no event, so the attempt stays open.
  *
  * The optional `join` runs inside that same transaction, after the recheck and
  * before the batch is written, and is where a caller's graph state joins the
- * acceptance: its effects are written into the batch, and its `settle` write
- * runs only after the batch actually committed. See {@link AcceptanceJoin}.
+ * acceptance: its effects (work for an attempt the acceptance ARMED) and its
+ * `settle` write both run only after the batch actually committed, in the same
+ * transaction. See {@link AcceptanceJoin}.
  */
 export function commitSubmission(
   request: CommitSubmissionRequest,
@@ -703,14 +727,30 @@ export function commitSubmission(
               outcomeId: decision.outcomeId,
               acceptedAt: now,
             }),
-            effects: [...effects, ...pendingEffectsOf(joined?.effects, identity, now)],
+            // THE BATCH CARRIES THE SUBMISSION'S OWN EFFECTS, and only those: the
+            // store's batch gate refuses an effect whose attempt is not the
+            // receipt's, which is the guarantee that one batch describes one
+            // submission.
+            effects,
           }
         : { receipt };
     const verdict = tx.commitAccepted(batch);
     // The state joins only a batch that actually COMMITTED: a replay, conflict
     // or settlement must not advance the state a second time.
-    if (verdict.kind === "committed" && joined?.settle !== undefined) {
-      joined.settle(tx);
+    if (verdict.kind === "committed") {
+      // AN ARMED SUCCESSOR'S EFFECT IS WRITTEN WITH THE ADVANCE (P3 item 2). It
+      // is work for the attempt the acceptance ARMED, not for the submitting
+      // attempt whose receipt this batch holds, so it cannot ride the
+      // submission's batch without weakening the one-submission rule above. It
+      // is written here instead — the SAME transaction, after the batch landed,
+      // through the standalone intent write — under its own attempt id, which is
+      // the same attempt its effect id names, so an attempt-scoped fence joins
+      // the row to the execution it describes. The entry path writes its intents
+      // the same way, beside the state they belong to.
+      for (const effect of pendingEffectsOf(joined?.effects, identity, now)) {
+        tx.writeEffect(effect);
+      }
+      joined?.settle?.(tx);
     }
     return { kind: "committed", verdict };
   });
@@ -809,9 +849,11 @@ function staleRefusal(
 /**
  * Stamp the caller's effect descriptions with trusted provenance.
  *
- * `graphId` and `attemptId` come from the execution identity, `createdAt`
- * from the explicit clock, and the status is always the initial `pending`: an
- * acceptance commit records work to be done, never work already started.
+ * `graphId` comes from the execution identity, `createdAt` from the explicit
+ * clock, and the status is always the initial `pending`: an acceptance commit
+ * records work to be done, never work already started. The attempt is the
+ * INPUT's own when it names one — a dispatch armed for a successor is work for
+ * the ARMED attempt — and the submitting identity's attempt otherwise.
  */
 function pendingEffectsOf(
   inputs: readonly PendingEffectInput[] | undefined,
@@ -824,7 +866,7 @@ function pendingEffectsOf(
       Object.freeze({
         graphId: identity.graphId,
         effectId: input.effectId,
-        attemptId: identity.attemptId,
+        attemptId: input.attemptId ?? identity.attemptId,
         kind: input.kind,
         payload: input.payload,
         createdAt: now,

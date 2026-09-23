@@ -4405,6 +4405,15 @@ export class OutcomeGraphRuntime {
     });
     const effects = advance.dispatches.map((intent) => ({
       effectId: dispatchEffectIdOf(intent.attemptId),
+      // THE EFFECT IS THE ARMED ATTEMPT'S OWN (P3 item 2). `intent.attemptId` is
+      // the attempt this dispatch is FOR, and it is not the submitting attempt:
+      // accepting `work#1` in a `work -> review` chain arms `review#2`, so the
+      // row must carry `review#2` — the attempt its effect id already names —
+      // or every attempt-scoped fence (the run's unsettled-effect block, a
+      // superseded run's acceptance guard) would join it to the settled feeder
+      // whose acceptance decided to arm it, and the live successor execution
+      // would be exempt from all of them.
+      attemptId: intent.attemptId,
       kind: "dispatch",
       // CREDENTIAL-FREE payload: the durable effect names the dispatch target
       // and nothing else. Neither the effect nor the state carries the

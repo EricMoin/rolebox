@@ -744,9 +744,10 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
       expect(effects[0]?.effectId).toBe("dispatch:ship#2");
       const successorEffect = effects[0];
       expect(successorEffect?.kind).toBe("dispatch");
-      // The effect row records the attempt that PRODUCED it (the trusted
-      // context); the dispatch it carries names the successor's fresh attempt.
-      expect(successorEffect?.attemptId).toBe("work#1");
+      // The effect row records the attempt it DISPATCHES — the one its effect id
+      // names — not the settled feeder whose acceptance decided to arm it, so an
+      // attempt-scoped reader joins the row to the execution it describes.
+      expect(successorEffect?.attemptId).toBe("ship#2");
       expect(fieldOf(successorEffect?.payload, "nodeId")).toBe("ship");
       expect(fieldOf(successorEffect?.payload, "attemptId")).toBe("ship#2");
       expect(runtime.state()).toEqual(first.state);

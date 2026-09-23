@@ -1520,13 +1520,16 @@ function orderReexecution(
   // TRUSTED COMMAND ALREADY STOPPED keeps the command that stopped it. Late work
   // against the superseded run is refused AT THE STORE, not only by the run
   // path's credential resolution: once the successor is current, an acceptance
-  // batch for one of the closed run's attempts is answered `run-superseded` (the
-  // third guard clause of the batch write joins the attempt to its own dispatch
-  // effect, filed under a run the graph has replaced) and an effect transition
+  // batch for a closed run's attempt is answered `run-superseded` when that
+  // attempt's OWN dispatch effect is filed under the closed run — the third
+  // guard clause of the batch write joins the attempt to the row carrying its
+  // attempt_id, and a successor-armed dispatch carries the ARMED attempt, not
+  // the settled feeder whose acceptance produced it — and an effect transition
   // against one of its effects is refused by the SAME conditional statement that
   // would rewrite the row — the run fence is part of the UPDATE's WHERE clause,
-  // not a prior read — so neither a receipt nor an effect row of a closed run is
-  // ever rewritten.
+  // not a prior read. An attempt with NO effect row anywhere is not attributable
+  // to a run (there is nothing to compare) and this guard does not fence it;
+  // every attempt the run path armed has one by construction.
   runs.claimRunControl(
     Object.freeze({
       graphId,

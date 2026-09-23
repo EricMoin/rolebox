@@ -386,6 +386,14 @@ export function dispatchIdempotencyKeyOf(effect: OutcomeDispatchEffectKey): stri
  * - everything else does: the attempt is still the node's in-flight attempt and
  *   nothing proves the external execution is over.
  *
+ * THE ATTEMPT AN EFFECT IS JUDGED BY IS ITS OWN COLUMN, AND THAT COLUMN NAMES
+ * THE DISPATCHED ATTEMPT — the one its effect id spells — never the feeder
+ * whose acceptance produced the row. A `work -> review` chain files
+ * `dispatch:review#2` under `review#2`, so the SETTLED feeder (`work#1`) cannot
+ * exempt the armed execution: `review#2` is the run's in-flight attempt and
+ * nothing proves its execution is over, so the armed dispatch blocks exactly
+ * like an entry dispatch.
+ *
  * `attempts` is what the caller could establish about the run's state. Passing
  * `undefined` — a snapshot that is not this plan's state — makes the rule
  * CONSERVATIVE: without the node entries the last two exemptions cannot be
