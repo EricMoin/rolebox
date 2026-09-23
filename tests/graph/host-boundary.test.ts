@@ -52,6 +52,11 @@ import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
+import {
+  completionPolicyRefOf,
+  createCompletionPolicyRegistry,
+  type CompletionPolicyBody,
+} from "../../src/graph/policy/completion-policy.ts";
 
 const GRAPH_ID = "graph.host-boundary";
 const WORK = { graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" } as const;
@@ -283,41 +288,87 @@ describe("host boundary — the reproduced defects stay closed", () => {
   });
 });
 
-// ── The fifth counterexample: a completion that arrives after a restart ─────
+// ── A07: a completion that arrives after a restart ─────────────────────────
 //
-// THE MISSING BINDING, PINNED HONESTLY. `HostDispatchCompletionBridge` keeps its
-// attempt bindings in an in-process `Map` and the ONLY production bind site is
-// the dispatch adapter, so a completion that arrives after the process which
-// dispatched the attempt exited has no binding to resolve. The case below builds
-// TWO genuinely different object graphs over ONE durable store root — a new
-// vault, a new execution index, a new dispatch adapter and a new host — and asks
-// the second to complete the attempt the first dispatched. It reports UNBOUND.
+// THE MISSING BINDING IS GONE (P2 item 6). P0 pinned this case honestly: the
+// completion bridge kept its bindings in an in-process `Map`, the only
+// production bind site was the dispatch adapter, and a completion arriving after
+// the process which dispatched the attempt exited had nothing to resolve — so it
+// was reported UNBOUND. That pin belonged to acceptance entry A07 ("a natural
+// completion received or queried after a host restart: the binding is recovered,
+// not unbound, and accepted once"); the durable binding and the host-execution
+// authentication below are what close it.
 //
-// WHAT IS ASSERTED, EXACTLY: the report is `unbound`; the persisted graph state
-// still shows the attempt in flight with no accepted event (no fabricated
-// completion); the host's durable FACT about the platform execution survives the
-// restart; and the restarted host creates NO second execution for the effect —
-// not on the completion, and not on the boot sweep either. The sweep's own
-// per-effect refusal (`credential-missing`: the shipped vault keeps no
-// credential VALUE on disk) is carried in the report rather than dropped.
+// HOW A BINDING IS REBUILT AFTER A RESTART. The host's OWN record — the ONE
+// store's `host_dispatch_executions` row, keyed by the stable effect id
+// `dispatch:<attemptId>`, plus the dispatch effect that names the node — is the
+// authority; the bridge's map is only a cache of what THIS process delivered.
+// The completion is then authenticated by the confirmed EXECUTION the record
+// names, not by re-obtaining the worker's bearer value: the shipped vault keeps
+// no credential value on disk at all (§3.3), and re-reading the worker's prompt
+// is exactly what a trusted completion must not depend on.
 //
-// NOTHING HERE CLAIMS A RECOVERY THIS BUILD DOES NOT HAVE. Acceptance-matrix
-// entries A06/A07 (the pending/creating/created restart windows; a completion
-// after a host restart binding and settling once) stay OPEN until P2 provides a
-// durable completion binding and a restart credential authorization; this case
-// is the regression that must change shape when it does.
+// WHAT IS ASSERTED, EXACTLY: a genuinely different object graph over the same
+// durable root settles the attempt the FIRST process dispatched; the settlement
+// is accepted ONCE and a repeated observation replays the receipt without
+// advancing anything; the record shows the node settled on its original attempt
+// with exactly one accepted event; the restarted host creates NO second
+// execution for the effect; and an attempt this host never delivered is still
+// reported UNBOUND rather than guessed.
+//
+// The REAL process boundary for this scenario is in
+// `tests/graph/host-restart-cross-process.test.ts`, which drives the same two
+// windows with `Bun.spawn` workers.
 
 const RESTART_GRAPH_ID = "graph.host-boundary.restart";
+const RESTART_POLICY_ID = "policy.host-boundary.restart";
+const RESTART_POLICY_REVISION = "1";
 
-/** One node with one explicit outcome: only a worker submission settles it. */
+/**
+ * The host's AUTHORIZATION of the restart graph's natural completion.
+ *
+ * A completion is only ever settled through the mapping the PLAN pinned and the
+ * HOST authorized (D6): the fixture therefore declares `natural` completion and
+ * installs the exact policy revision that grants it, so a host-observed
+ * completion is the plan's own mapping rather than an outcome a caller chose.
+ */
+const RESTART_POLICY_BODY: CompletionPolicyBody = {
+  version: 1,
+  default: "ungranted",
+  rules: [
+    { graphId: RESTART_GRAPH_ID, nodeId: "work", outcome: "done", decision: "allow" },
+  ],
+};
+
+const RESTART_POLICIES = createCompletionPolicyRegistry({
+  policies: [
+    {
+      ref: completionPolicyRefOf({
+        id: RESTART_POLICY_ID,
+        revision: RESTART_POLICY_REVISION,
+        body: RESTART_POLICY_BODY,
+      }),
+      body: RESTART_POLICY_BODY,
+    },
+  ],
+});
+
+/** One node completing NATURALLY: the plan authorizes exactly this mapping. */
 function restartDeclaration(): GraphDeclarationV3 {
   return {
     version: 3,
     name: RESTART_GRAPH_ID,
     nodes: [
-      { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+      {
+        id: "work",
+        agent: "agent.work",
+        prompt: "Do the work.",
+        outcomes: [{ id: "done" }],
+        completion: { mode: "natural", outcome: "done" },
+      },
     ],
     edges: [],
+    completion_policy: { id: RESTART_POLICY_ID, revision: RESTART_POLICY_REVISION },
   };
 }
 
@@ -359,12 +410,15 @@ async function readRestartRecord(storeRoot: string): Promise<RestartReading> {
   }
 }
 
-describe("host boundary — a completion after a restart has no durable binding", () => {
-  it("reports the post-restart completion as UNBOUND, fabricates no completion and creates no second execution", async () => {
+describe("host boundary — a completion after a restart is bound and settles once", () => {
+  it("rebuilds the durable binding, settles without the worker bearer, and creates no second execution", async () => {
     const dir = makeTmpDir("host-boundary-restart-");
     const storeRoot = join(dir, "host-store");
     persistDeclaredGraph(
-      buildDeclaredOutcomeGraph({ declaration: restartDeclaration() }),
+      buildDeclaredOutcomeGraph({
+        declaration: restartDeclaration(),
+        completionPolicies: RESTART_POLICIES,
+      }),
       storeRoot,
     );
     const effect = dispatchEffectKeyOf(RESTART_GRAPH_ID, "work#1");
@@ -378,10 +432,14 @@ describe("host boundary — a completion after a restart has no durable binding"
       deliver: (request) => {
         deliveriesOne.push(request);
       },
-      // THE SHIPPED CONFIGURATION: file durability, no durable credential value,
-      // and no declaration of an identity capability the host cannot substantiate.
+      // THE SHIPPED SHAPE: file durability, no durable credential value, and no
+      // declaration of an identity capability the host cannot substantiate —
+      // plus the one authorization this graph requires (its pinned completion
+      // policy).
       declareInvocationIdentity: false,
+      completionPolicies: RESTART_POLICIES,
     });
+    let workerCredential = "";
     try {
       const started = await hostOne.startDeclaredGraph(RESTART_GRAPH_ID, {
         sessionId: "session-declarer",
@@ -389,11 +447,24 @@ describe("host boundary — a completion after a restart has no durable binding"
       });
       expect(started.kind).toBe("started");
       expect(deliveriesOne.map((request) => request.attemptId)).toEqual(["work#1"]);
+      workerCredential = deliveriesOne[0]?.credential ?? "";
+      expect(workerCredential.length).toBeGreaterThan(0);
       // The platform named the execution it created; the host records the FACT.
       expect(
         hostOne.confirmExecution(effect, { executionId: platformExecutionId }),
       ).toBe(true);
       expect(hostOne.dispatch.lookup(effect).kind).toBe("created");
+      // THE VALUE IS NOT ON DISK: the attempt's record is durable, its
+      // credential is not. A restart therefore CANNOT settle this completion by
+      // resolving the bearer value, which is exactly why the durable binding and
+      // the host-execution proof below are the ones under test.
+      expect(
+        hostOne.credentials.durableRecord({
+          graphId: RESTART_GRAPH_ID,
+          nodeId: "work",
+          attemptId: "work#1",
+        }),
+      ).toBe("not-retained");
     } finally {
       hostOne.close();
     }
@@ -407,6 +478,12 @@ describe("host boundary — a completion after a restart has no durable binding"
         deliveriesTwo.push(request);
       },
       declareInvocationIdentity: false,
+      // The graph's natural completion is a PLAN-LEVEL authorization (D6): a
+      // host that does not install the exact policy revision the plan pinned
+      // refuses to run the graph at all, and that refusal is asserted nowhere
+      // here — the rest of this host is the shipped shape (file durability, no
+      // durable credential value, no D9 declaration).
+      completionPolicies: RESTART_POLICIES,
     });
     try {
       // A genuinely different object graph, not a reopened variable.
@@ -420,45 +497,65 @@ describe("host boundary — a completion after a restart has no durable binding"
       const row = HostExecutionIndex.open({ root: storeRoot }).read(effect);
       expect(row?.state).toBe("created");
       expect(row?.execution?.executionId).toBe(platformExecutionId);
+      expect(
+        hostTwo.credentials.resolve({
+          graphId: RESTART_GRAPH_ID,
+          nodeId: "work",
+          attemptId: "work#1",
+        }),
+      ).toBeUndefined();
 
       // ── THE COMPLETION ARRIVES AFTER THE RESTART ─────────────────────────
       const report = await hostTwo.complete(RESTART_GRAPH_ID, "work#1");
-      // THE HONEST FACT: this process holds no binding for the attempt, so the
-      // completion bridge reports it UNBOUND — it never parses the attempt id
-      // and never substitutes the node's current attempt.
-      expect(report.kind).toBe("unbound");
-      if (report.kind === "unbound") {
-        expect(report.attemptId).toBe("work#1");
-      }
+      // THE BINDING WAS REBUILT FROM DURABLE FACTS, so the completion is not
+      // UNBOUND any more — and it is authenticated by the confirmed execution,
+      // not by a bearer value this process never held.
+      expect(report.kind).toBe("settled");
+      if (report.kind !== "settled") return;
+      expect(report.nodeId).toBe("work");
+      expect(report.settlement.kind).toBe("accepted");
+      if (report.settlement.kind !== "accepted") return;
+      expect(report.settlement.replayed).toBe(false);
+      expect(report.settlement.completion.outcomeId).toBe("done");
+      expect(report.settlement.completion.attemptId).toBe("work#1");
+      // The worker's bearer value is in NO field of the report: the host never
+      // held it after the restart, and nothing fabricated it back.
+      expect(JSON.stringify(report)).not.toContain(workerCredential);
 
-      // NO FABRICATED COMPLETION: the authoritative record still shows the
-      // attempt in flight, with no accepted event appended.
+      // ONE ACCEPTED EVENT, ON THE ORIGINAL ATTEMPT.
       const after = await readRestartRecord(storeRoot);
-      expect(after.phase).toBe("executing");
+      expect(after.node?.["status"]).toBe("settled");
       expect(after.node?.["attemptId"]).toBe("work#1");
-      expect(after.node?.["status"]).toBe("dispatched");
-      expect(after.events).toBe(0);
+      expect(after.node?.["outcomeId"]).toBe("done");
+      expect(after.events).toBe(1);
+      expect(after.effects).toEqual([]);
 
-      // NO SECOND EXECUTION: the boot sweep re-visits the graph and issues no
-      // create at all. The shipped vault keeps no credential VALUE, so the
-      // attempt's effect is refused by name and stays unsettled rather than
-      // being re-delivered with an invented credential.
+      // A REPEATED OBSERVATION REPLAYS: no second settlement, no second event.
+      const replay = await hostTwo.complete(RESTART_GRAPH_ID, "work#1");
+      expect(replay.kind).toBe("settled");
+      if (replay.kind !== "settled") return;
+      expect(replay.settlement.kind).toBe("accepted");
+      if (replay.settlement.kind !== "accepted") return;
+      expect(replay.settlement.replayed).toBe(true);
+      const final = await readRestartRecord(storeRoot);
+      expect(final.events).toBe(1);
+
+      // NO SECOND EXECUTION: the boot sweep re-visits the graph — now terminal —
+      // and issues no create at all.
       const sweep = await hostTwo.recoverDeclaredGraphs();
       expect(sweep.started).toEqual([]);
-      expect(sweep.resumed).toEqual([RESTART_GRAPH_ID + ":executing"]);
       expect(sweep.refused).toEqual([]);
+      expect(sweep.completed).toEqual([]);
       expect(sweep.divergences).toEqual([]);
-      expect(sweep.effectRefusals.map((refusal) => refusal.code)).toEqual([
-        "credential-missing",
-      ]);
+      expect(sweep.effectRefusals).toEqual([]);
       expect(deliveriesTwo).toEqual([]);
-
-      // The effect is exactly where the first process left it: started, not
-      // re-launched and not silently dropped.
-      const final = await readRestartRecord(storeRoot);
-      expect(final.effects).toEqual(["dispatch:work#1@started"]);
-      expect(final.events).toBe(0);
       expect(hostTwo.dispatch.lookup(effect).kind).toBe("created");
+
+      // AN ATTEMPT THIS HOST NEVER DELIVERED IS STILL UNBOUND. The durable
+      // binding rebuilds what the host recorded, and nothing else: an attempt
+      // with no row is reported, never guessed from its id.
+      const ghost = await hostTwo.complete(RESTART_GRAPH_ID, "ghost#1");
+      expect(ghost.kind).toBe("unbound");
     } finally {
       hostTwo.close();
     }

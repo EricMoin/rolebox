@@ -131,6 +131,27 @@
  * from the host layer and calls `settleNatural` — this module still owns the
  * settlement and reads no host state of its own.
  *
+ * A COMPLETION IS AUTHENTICATED BY WHICHEVER PROOF THE HOST ACTUALLY HAS
+ * (§3.3, P2 items 6/7). `settleNatural` presents the attempt's bearer
+ * credential; `settleHostCompletion` presents the host's own durable record of
+ * the execution it created, checked through the injected
+ * {@link HostCompletionAuthority}. The two channels are authenticated
+ * SEPARATELY — a restart that lost the worker's bearer can still settle the
+ * execution the host really made — and they then enter the SAME acceptance
+ * core, the same declared gates, the same reducer and the same atomic
+ * transaction. Neither channel can name an outcome: the mapping is always the
+ * plan's pinned natural-completion authorization.
+ *
+ * A LOST CREDENTIAL IS RE-ISSUED ONLY ON A PROVEN ABSENCE (§3.3, P2 item 8).
+ * `resume` will mint a NEW GENERATION of an attempt's credential — replacing
+ * the recorded verifier in the same transaction that adopts the value, so the
+ * old credential stops matching anything — only when the effect was NEVER handed
+ * to the platform AND the host proves no execution exists for it. When the host
+ * answers `unknown`, re-issuing and re-delivering are FORBIDDEN
+ * (`credential-reissue-forbidden`) and the effect is reported: a blind retry
+ * could run the attempt twice, and "the create failed" is not "no execution
+ * exists".
+ *
  * CREDENTIAL ISOLATION IS THE FIRST RUN PRECONDITION (D7). The durable state
  * records only the credential's DIGEST, so reading the ledger yields nothing a
  * reader can present — but the credential ITSELF has to be stored and delivered
@@ -472,7 +493,41 @@ export type OutcomeRuntimeRefusalCode =
    * ignored, because the outcome a natural completion settles is exactly the
    * mapping the plan was authorized for.
    */
-  | "natural-completion-unauthorized";
+  | "natural-completion-unauthorized"
+  /**
+   * A HOST-COMPLETION delivery is not the closed record this protocol defines:
+   * it is missing `nodeId`, `attemptId` or `executionId`, one of them is not a
+   * non-empty string, or it carries a key the envelope does not define. The
+   * last case is the same no-data-channel rule the bearer envelope enforces: a
+   * completion fact that could carry an outcome or a payload would be a second
+   * submission channel.
+   */
+  | "malformed-host-completion"
+  /**
+   * A completion fact arrived through the HOST-COMPLETION channel
+   * ({@link OutcomeGraphRuntime.settleHostCompletion}) but this runtime holds
+   * no HOST COMPLETION AUTHORITY, so it cannot check the fact against the
+   * host's own durable execution record. The channel is refused by name rather
+   * than settled on the caller's word: "the host says so" is exactly the claim
+   * that has to be substantiated (plan §3.3).
+   */
+  | "host-completion-unavailable"
+  /**
+   * The host completion authority does not corroborate the delivery: it holds
+   * no confirmed execution for the attempt, or it names a DIFFERENT execution
+   * than the one the delivery reports. Nothing was written, and the completion
+   * is never re-bound to whichever execution happens to exist.
+   */
+  | "host-completion-unauthenticated"
+  /**
+   * A recovered attempt's credential is gone and the runtime refuses to
+   * re-issue one, because the restart-authorization conditions of plan §3.3 are
+   * not met: the effect is not an UNSTARTED one, or the host did not answer
+   * `absent` for it (the answer was `unknown` or `created`). Re-issuing and
+   * re-delivering under an unknown create outcome is forbidden — a blind retry
+   * could run the attempt twice — so the effect stays unsettled and is reported.
+   */
+  | "credential-reissue-forbidden";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -860,6 +915,77 @@ export interface OutcomeGraphRuntimeOptions {
    * and leaves every other attempt exactly as it was.
    */
   readonly hostIdentity?: HostIdentityCapability;
+  /**
+   * The HOST-COMPLETION AUTHORITY (P2 items 6/7) — the host's own durable
+   * record of the execution it created for one attempt.
+   *
+   * WHY A COMPLETION NEEDS A SECOND AUTHENTICATION CHANNEL. §3.3: a worker's
+   * submission and a host's completion fact are authenticated SEPARATELY and
+   * then enter the SAME acceptance core. The bearer credential above proves
+   * that whoever presents it was handed the attempt's capability; it says
+   * nothing about the host having created, or observed the end of, an
+   * execution — and re-obtaining a lost bearer after a restart is exactly what
+   * the plan forbids a trusted completion from depending on. This capability is
+   * the other half: the host answers with the execution its OWN durable record
+   * carries (the row its platform confirmation wrote, with the platform's real
+   * execution id), and {@link OutcomeGraphRuntime.settleHostCompletion} settles
+   * only a fact that capability corroborates.
+   *
+   * OMITTED IS NOT A DOWNGRADE FOR THE OTHER CHANNELS: without it the run path
+   * behaves exactly as before, and only the host-completion entry refuses
+   * (host-completion-unavailable) — the completion channel is the one thing the
+   * capability enables. It carries no credential and never reads one.
+   */
+  readonly hostCompletions?: HostCompletionAuthority;
+}
+
+/**
+ * One attempt's CONFIRMED host execution, as the host's own record holds it.
+ *
+ * Structural on purpose: the shipped record is the execution index's
+ * HostExecutionIdentity (src/graph/host/execution-index.ts), and this module
+ * must not import the host layer. The execution id is the platform's own id —
+ * the token a recovery can ask the platform about — so a completion fact is
+ * never authenticated against a locally invented identifier.
+ */
+export interface HostCompletionExecution {
+  readonly executionId: string;
+  readonly taskId?: string;
+}
+
+/** The attempt one host-completion question is about. */
+export interface HostCompletionAttemptRef {
+  readonly graphId: string;
+  readonly attemptId: string;
+}
+
+/**
+ * The HOST's completion authority: what the host can substantiate about the
+ * execution it created for one attempt.
+ *
+ * ONE METHOD, ONE FACT, NO CREDENTIAL. It answers with the confirmed execution
+ * the host's OWN durable record carries, or undefined when the host holds no
+ * confirmed execution for that attempt — never a guess, never the node's
+ * current attempt and never a value derived from one. A host that throws has
+ * not answered, and the caller refuses rather than settling.
+ */
+export interface HostCompletionAuthority {
+  executionFor(attempt: HostCompletionAttemptRef): HostCompletionExecution | undefined;
+}
+
+/**
+ * One host completion fact as it crosses the settlement boundary.
+ *
+ * The closed shape the host-completion channel accepts: the attempt that
+ * finished, the node it belongs to and the platform execution the host
+ * recorded. No outcome and no payload — the outcome is the plan's pinned
+ * natural-completion authorization, exactly as it is on the bearer channel, so
+ * a completion can never choose what it settles.
+ */
+export interface HostCompletionFact {
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly executionId: string;
 }
 
 /**
@@ -889,6 +1015,13 @@ export class OutcomeGraphRuntime {
   private readonly credentialIsolation: CredentialIsolationCapability | undefined;
   private readonly credentialStore: CredentialIsolationStore | undefined;
   private readonly hostIdentity: HostIdentityCapability | undefined;
+  /**
+   * The host's completion authority (P2 item 7): what substantiates a
+   * completion fact that no worker bearer vouches for. Absent means the
+   * host-completion channel is not enabled for this runtime, and it says so by
+   * name instead of settling on the caller's word.
+   */
+  private readonly hostCompletions: HostCompletionAuthority | undefined;
   /**
    * The credential source the run path uses: the injected generator, wrapped so
    * that every credential it mints is ADOPTED BY THE HOST'S STORE before the
@@ -938,6 +1071,7 @@ export class OutcomeGraphRuntime {
       return credential;
     };
     this.hostIdentity = options.hostIdentity;
+    this.hostCompletions = options.hostCompletions;
   }
 
   /**
@@ -1168,6 +1302,14 @@ export class OutcomeGraphRuntime {
     now: number | undefined,
     source: SettlementSource,
     expectedAttemptId?: string,
+    /**
+     * The host-authenticated execution, when this settlement arrives through the
+     * HOST-COMPLETION channel ({@link settleHostCompletion}). Its presence is
+     * what makes the identity resolution below accept the host's own durable
+     * record INSTEAD of a bearer credential; it is never set for a proposal that
+     * carries one.
+     */
+    hostCompletion?: HostCompletionExecution,
   ): OutcomeSubmissionResult {
     const at = this.readClock(now);
     if (typeof at !== "number") return refused([at]);
@@ -1236,6 +1378,7 @@ export class OutcomeGraphRuntime {
       hostIdentity,
       source,
       expectedAttemptId,
+      hostCompletion,
     );
     if ("refusal" in identity) return refused([identity.refusal]);
 
@@ -1444,6 +1587,160 @@ export class OutcomeGraphRuntime {
     const completion = naturalCompletionSettlementOf({
       nodeId: reading.delivery.nodeId,
       attemptId: reading.delivery.attemptId,
+      outcomeId: authorization.outcome,
+      proposalDigest: result.decision.proposalDigest,
+      policy: authorization.policy,
+    });
+    switch (result.kind) {
+      case "accepted":
+        return { ...result, completion };
+      case "rejected":
+        return { ...result, completion };
+      case "not-committed":
+        return { ...result, completion };
+    }
+  }
+
+  /**
+   * Settle one attempt from a HOST-AUTHENTICATED completion fact (P2 items 6/7).
+   *
+   * THE SECOND AUTHENTICATION CHANNEL, AND WHY IT EXISTS. Plan §3.3: a worker's
+   * submission and a host's completion fact are authenticated SEPARATELY and
+   * then enter the SAME acceptance core. {@link settleNatural} authenticates
+   * with the attempt's bearer credential — fine while the host still holds the
+   * value, impossible once a restart has lost it (the shipped durable store
+   * keeps NO value by default, and re-obtaining the worker's bearer is exactly
+   * what a trusted completion must not depend on). This entry authenticates the
+   * SAME completion with the other fact the host owns: the durable record of
+   * the execution IT created, checked through the injected
+   * {@link HostCompletionAuthority}. No credential is read, presented or
+   * fabricated on this path.
+   *
+   * EVERYTHING ELSE IS SHARED, DELIBERATELY. The outcome is still the plan's
+   * pinned natural-completion authorization (a delivery cannot name one), the
+   * attempt is still resolved against the persisted state, and the settlement
+   * still runs through {@link settleSubmission} — the same acceptance core, the
+   * same declared gates, the same reducer and the same atomic
+   * receipt/event/state/effects transaction. The only difference is WHICH proof
+   * of the attempt the identity resolution accepts.
+   *
+   * IDEMPOTENT BY CONTENT, LIKE ITS BEARER TWIN. The synthesized proposal is the
+   * canonical (nodeId, outcomeId) of the authorized mapping with no credential,
+   * so a repeated host completion derives the SAME submission key and the
+   * ledger REPLAYS the first receipt: no second settlement, no second accepted
+   * event, no state advance. A completion for an attempt another channel
+   * already settled is reported not-committed, and the original settlement is
+   * never overwritten.
+   *
+   * REFUSED BY NAME WHEN THE HOST CANNOT SUBSTANTIATE IT. With no authority
+   * (host-completion-unavailable), an authority that holds no confirmed
+   * execution for the attempt, or one that names a DIFFERENT execution than the
+   * delivery reports (host-completion-unauthenticated), nothing is written: a
+   * completion that cannot be bound is reported, never guessed.
+   */
+  settleHostCompletion(delivery: unknown, now?: number): OutcomeNaturalSettlementResult {
+    // The envelope is read first, exactly as the bearer channel reads its own:
+    // a malformed completion fact is not a completion.
+    const reading = readHostCompletionFact(delivery);
+    if (reading.kind === "malformed") return refused(reading.issues);
+    const fact = reading.fact;
+    const at = this.readClock(now);
+    if (typeof at !== "number") return refused([at]);
+    const authority = this.hostCompletions;
+    if (authority === undefined) {
+      return refused([
+        {
+          code: "host-completion-unavailable",
+          path: "$.hostCompletions",
+          message:
+            "outcome-runtime: a host completion fact for attempt " +
+            JSON.stringify(fact.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " arrived through the host-completion channel, but this runtime holds no " +
+            "host-completion authority: no durable execution record can corroborate the fact, " +
+            "and a completion is never settled on the caller's word (plan §3.3). Nothing was " +
+            "written; the host must inject the authority it can substantiate",
+        },
+      ]);
+    }
+    let execution: HostCompletionExecution | undefined;
+    try {
+      execution = authority.executionFor(
+        Object.freeze({ graphId: this.graphId, attemptId: fact.attemptId }),
+      );
+    } catch (error) {
+      // The authority was handed the attempt identity only — no credential is in
+      // scope on this channel — so its own failure text is quotable.
+      return refused([
+        {
+          code: "host-completion-unauthenticated",
+          path: "$.executionId",
+          message:
+            "outcome-runtime: the host-completion authority threw while asked for the execution " +
+            "of attempt " +
+            JSON.stringify(fact.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " (" +
+            errorText(error) +
+            ") — an unanswered question is not an authenticated execution, so nothing was written",
+        },
+      ]);
+    }
+    if (execution === undefined) {
+      return refused([
+        {
+          code: "host-completion-unauthenticated",
+          path: "$.executionId",
+          message:
+            "outcome-runtime: the host holds no CONFIRMED execution for attempt " +
+            JSON.stringify(fact.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            ", so this completion has no host fact to authenticate against — a delivery " +
+            "observation alone is not a completion and nothing was written",
+        },
+      ]);
+    }
+    if (execution.executionId !== fact.executionId) {
+      return refused([
+        {
+          code: "host-completion-unauthenticated",
+          path: "$.executionId",
+          message:
+            "outcome-runtime: the delivery names execution " +
+            JSON.stringify(fact.executionId) +
+            " for attempt " +
+            JSON.stringify(fact.attemptId) +
+            ", but the host's own record names " +
+            JSON.stringify(execution.executionId) +
+            " — a completion is never re-bound to whichever execution happens to exist",
+        },
+      ]);
+    }
+    // The authorization is a PLAN-LEVEL fact, resolved before the state is
+    // touched, exactly as it is on the bearer channel: the host-completion
+    // channel settles the same pinned mapping and never an outcome of its own.
+    const authorization = this.naturalCompletionAuthorityOf(fact.nodeId);
+    if ("refusal" in authorization) return refused([authorization.refusal]);
+    const result = this.settleSubmission(
+      naturalCompletionProposalOf({
+        nodeId: fact.nodeId,
+        outcomeId: authorization.outcome,
+        credential: undefined,
+      }),
+      at,
+      "natural-completion",
+      fact.attemptId,
+      execution,
+    );
+    if (result.kind === "refused") return result;
+    // The provenance record names the very submission key the receipt persists,
+    // derived from the canonical proposal digest the decision was addressed by.
+    const completion = naturalCompletionSettlementOf({
+      nodeId: fact.nodeId,
+      attemptId: fact.attemptId,
       outcomeId: authorization.outcome,
       proposalDigest: result.decision.proposalDigest,
       policy: authorization.policy,
@@ -1723,16 +2020,30 @@ export class OutcomeGraphRuntime {
       };
     }
 
-    const resolved = this.reconcileUnsettledDispatches(state);
+    const resolved = this.reconcileUnsettledDispatches(state, at);
     if ("refusal" in resolved) return refused([resolved.refusal]);
     const effects = this.unsettledEffectReading();
     if ("code" in effects) return refused([effects]);
+    // A RE-ISSUE REWROTE THE STATE, so the report carries the state that is
+    // actually stored now: the pre-reconcile read differs from it in the
+    // re-issued attempt's credential digest and in the record's timestamp, and
+    // reporting the stale read would describe a state no reader can find. The
+    // re-read cannot fail the resume — a failed read keeps the state this call
+    // already reconciled and reported.
+    let reported = state;
+    if (resolved.reissued) {
+      try {
+        reported = this.state() ?? state;
+      } catch {
+        reported = state;
+      }
+    }
     // The armed report is credential-free by construction; an in-flight attempt
     // the state cannot corroborate with a credential is reported as refused.
-    const readable = armedReading(state);
+    const readable = armedReading(reported);
     return {
       kind: "resumed",
-      state,
+      state: reported,
       dispatched: Object.freeze(resolved.launched),
       reconciled: resolved.reconciled,
       divergences: resolved.divergences,
@@ -2148,12 +2459,27 @@ export class OutcomeGraphRuntime {
    * corroborate (wrong node, wrong attempt, node not dispatched) is never
    * launched and is reported as a refusal; it stays unsettled.
    */
-  private reconcileUnsettledDispatches(state: OutcomeGraphState):
+  private reconcileUnsettledDispatches(
+    state: OutcomeGraphState,
+    /**
+     * The instant this recovery runs at. It timestamps the one write recovery
+     * performs — a §3.3 credential re-issue — so the state that records the new
+     * verifier carries the same explicit time the caller supplied everywhere
+     * else, never a clock read inside a transaction.
+     */
+    at: number,
+  ):
     | {
         readonly launched: readonly OutcomeDispatchRequest[];
         readonly reconciled: readonly OutcomeReconciledEffect[];
         readonly divergences: readonly OutcomeEffectDivergence[];
         readonly refusals: readonly OutcomeRuntimeRefusal[];
+        /**
+         * Whether this pass REWROTE the persisted state by re-issuing a lost
+         * attempt credential (§3.3). The caller re-reads the state it reports
+         * when it did, so the reported state is the one that is stored.
+         */
+        readonly reissued: boolean;
       }
     | { readonly refusal: OutcomeRuntimeRefusal } {
     let effects: readonly PendingEffectRecord[];
@@ -2181,6 +2507,7 @@ export class OutcomeGraphRuntime {
     const reconciled: OutcomeReconciledEffect[] = [];
     const divergences: OutcomeEffectDivergence[] = [];
     const refusals: OutcomeRuntimeRefusal[] = [];
+    let reissued = false;
     for (const effect of effects) {
       if (effect.kind !== "dispatch") continue;
       const reading = readDispatchRequest(
@@ -2255,34 +2582,33 @@ export class OutcomeGraphRuntime {
         });
         continue;
       }
+      const key = dispatchEffectKeyOf(this.graphId, target.attemptId);
+      // THE HOST'S OWN ANSWER IS READ BEFORE THE CREDENTIAL IS, because §3.3
+      // makes it the CONDITION of re-issuing one: only a host that proves no
+      // execution exists may have a lost credential replaced.
+      const lookup = this.lookupExecution(key);
       const resolvedCredential = this.resolveStoredCredential(
         target.nodeId,
         target.attemptId,
       );
-      if (resolvedCredential.kind === "unavailable") {
-        refusals.push({
-          code: "credential-missing",
-          path: "$.attemptCredentialDigest",
-          message:
-            "outcome-runtime: dispatch effect " +
-            JSON.stringify(effect.effectId) +
-            " targets node " +
-            JSON.stringify(target.nodeId) +
-            " on attempt " +
-            JSON.stringify(target.attemptId) +
-            ", but the host credential store cannot produce the credential this attempt " +
-            "was issued: " +
-            // The reason is runtime-authored text naming the failure category —
-            // never the store's own message or value (see resolveStoredCredential).
-            resolvedCredential.reason +
-            " — the persisted state holds only its digest, so the attempt is NOT " +
-            "re-launched with an invented credential and stays unsettled",
+      let credential: string;
+      if (resolvedCredential.kind === "resolved") {
+        credential = resolvedCredential.credential;
+      } else {
+        const reissuedCredential = this.reissueLostCredential({
+          effect,
+          target,
+          lookup,
+          at,
+          reason: resolvedCredential.reason,
         });
-        continue;
+        if ("refusal" in reissuedCredential) {
+          refusals.push(reissuedCredential.refusal);
+          continue;
+        }
+        credential = reissuedCredential.credential;
+        reissued = true;
       }
-      const credential = resolvedCredential.credential;
-      const key = dispatchEffectKeyOf(this.graphId, target.attemptId);
-      const lookup = this.lookupExecution(key);
 
       if (effect.status === "started") {
         // THE ROW SAYS A CREATE RETURNED. Nothing is re-created either way; a
@@ -2397,6 +2723,7 @@ export class OutcomeGraphRuntime {
       reconciled: Object.freeze(reconciled),
       divergences: Object.freeze(divergences),
       refusals: Object.freeze(refusals),
+      reissued,
     };
   }
 
@@ -2480,6 +2807,233 @@ export class OutcomeGraphRuntime {
       });
     }
     return Object.freeze({ kind: "resolved" as const, credential: resolved });
+  }
+
+  /**
+   * THE RESTART AUTHORIZATION POLICY (plan §3.3, P2 item 8).
+   *
+   * A recovered attempt whose credential the host can no longer produce is
+   * either re-issued or reported — never re-dispatched blind. The conditions
+   * are the whole rule, and every one of them must hold:
+   *
+   * 1. THE EFFECT WAS NEVER HANDED OVER (`status === "pending"`). A `started`
+   *    row says a create returned, so an execution exists and re-issuing would
+   *    mean replacing the capability of a worker that may be running.
+   * 2. THE HOST PROVES NO EXECUTION EXISTS (`lookup === "absent"`). That answer
+   *    is the JOIN of the host's own durable registry with the platform's query
+   *    port when one is installed: a `pending` claim owned by another live
+   *    process, a `creating` row whose result is unknown, a platform that
+   *    cannot answer, and a platform that names an execution ALL block here.
+   *    "The create failed" and "no execution exists" are different facts, and
+   *    only the second one licenses a second create (P2 item 4).
+   * 3. THE OLD GENERATION IS INVALIDATED BY THE WRITE ITSELF. The re-issued
+   *    credential's DIGEST replaces the recorded verifier in the SAME
+   *    transaction that adopts the value into the host store, so the previous
+   *    generation no longer matches any recorded verifier: a delivery that
+   *    still carries it is refused `credential-unknown`, exactly as a
+   *    superseded attempt's credential is. The previous value is never kept
+   *    beside the new one, and no report names either.
+   *
+   * WHEN THE ANSWER IS `unknown` THIS REFUSES (`credential-reissue-forbidden`)
+   * and the effect stays exactly as it is. Re-issuing and re-delivering under an
+   * unknown create outcome is forbidden because a blind retry could run the
+   * attempt twice — the failure the whole dispatch-effect ledger exists to
+   * prevent — and the refusal is carried in the recovery report so the block is
+   * OBSERVABLE rather than a silent strand.
+   *
+   * THE RE-ISSUED CREDENTIAL IS NOT A FABRICATION. It proves possession of a
+   * capability this host issued for exactly this attempt, and the state records
+   * its digest; nothing about the attempt, the node or the plan is invented. It
+   * is a NEW GENERATION of the same binding, not a new attempt: a retry that
+   * creates a new attempt is P3's command, and it goes through the reducer.
+   */
+  private reissueLostCredential(input: {
+    readonly effect: PendingEffectRecord;
+    readonly target: OutcomeDispatchTarget;
+    readonly lookup: OutcomeExecutionLookup;
+    readonly at: number;
+    readonly reason: string;
+  }): { readonly credential: string } | { readonly refusal: OutcomeRuntimeRefusal } {
+    const effect = input.effect;
+    const target = input.target;
+    const effectId = effect.effectId;
+    if (effect.status !== "pending") {
+      return {
+        refusal: {
+          code: "credential-reissue-forbidden",
+          path: "$.status",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effectId) +
+            " names node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            " and is recorded " +
+            JSON.stringify(effect.status) +
+            ", so a create RETURNED for it and an execution may exist — a lost credential is " +
+            "never replaced for an effect that was handed to the platform (the reason the host " +
+            "store could not produce it: " +
+            input.reason +
+            "); the effect stays unsettled and is reported",
+        },
+      };
+    }
+    if (input.lookup.kind !== "absent") {
+      return {
+        refusal: {
+          code: "credential-reissue-forbidden",
+          path: "$.effectId",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effectId) +
+            " names node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            ", its credential is gone (" +
+            input.reason +
+            "), and re-issuing one is permitted ONLY after the host proves no execution " +
+            "exists. The host answered " +
+            input.lookup.kind +
+            (input.lookup.kind === "unknown" ? " (" + input.lookup.reason + ")" : "") +
+            " — so the attempt is NOT re-issued and NOT re-delivered: a blind retry could run " +
+            "it twice, and the block is reported rather than resolved by guessing",
+        },
+      };
+    }
+    const replaced = this.replaceAttemptCredential(target.nodeId, target.attemptId, input.at);
+    if ("refusal" in replaced) return replaced;
+    return { credential: replaced.credential };
+  }
+
+  /**
+   * Adopt ONE new credential generation for an attempt and replace the digest
+   * the persisted state verifies against, in ONE transaction.
+   *
+   * The two writes are one commit by construction: {@link credentialSource}
+   * ADOPTS the freshly minted value into the host's store (the version-3
+   * capability's `remember`) and the state write that records its digest joins
+   * the SAME `runInTransaction` boundary, so a failed write leaves neither.
+   * That is what makes the previous generation invalid rather than merely
+   * superseded: the old digest is not kept anywhere, so the old credential
+   * matches no recorded verifier and is refused by name.
+   *
+   * REFUSES WHAT IT CANNOT REPLACE: a state this build cannot read, a node the
+   * plan does not declare, an entry whose attempt is not the named one, a node
+   * that is not in flight, and a body layout that is not this build's current
+   * one are all structured refusals — recovery never rewrites a record it could
+   * not read, and never advances an older body version.
+   */
+  private replaceAttemptCredential(
+    nodeId: string,
+    attemptId: string,
+    at: number,
+  ): { readonly credential: string } | { readonly refusal: OutcomeRuntimeRefusal } {
+    try {
+      const credential = this.ledger.runInTransaction((tx) => {
+        const record = tx.readGraphState(this.graphId);
+        if (record === undefined) {
+          throw new OutcomeAdvanceRefusedError(
+            "state-ledger-disagreement",
+            "outcome-runtime: the state of graph " +
+              JSON.stringify(this.graphId) +
+              " disappeared between recovery's read and the credential re-issue — nothing " +
+              "was re-issued",
+          );
+        }
+        const state = readOutcomeGraphState(record, this.plan);
+        if (state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY) {
+          throw new OutcomeAdvanceRefusedError(
+            "unsupported-state-version",
+            "outcome-runtime: graph " +
+              JSON.stringify(this.graphId) +
+              " records state body version " +
+              String(state.bodyVersion) +
+              ", which this build does not rewrite — the credential of a recovered attempt is " +
+              "never re-issued into an older layout",
+          );
+        }
+        const position = this.plan.nodes.findIndex((node) => node.id === nodeId);
+        const current = position < 0 ? undefined : state.nodes[position];
+        if (current === undefined || current.attemptId !== attemptId) {
+          throw new OutcomeAdvanceRefusedError(
+            "attempt-mismatch",
+            "outcome-runtime: the credential re-issue was asked for node " +
+              JSON.stringify(nodeId) +
+              " attempt " +
+              JSON.stringify(attemptId) +
+              ", but the state records " +
+              (current === undefined || current.attemptId === undefined
+                ? "no such attempt"
+                : "attempt " + JSON.stringify(current.attemptId)) +
+              " — nothing was re-issued",
+          );
+        }
+        if (current.status !== "dispatched" || current.attemptCredentialDigest === undefined) {
+          throw new OutcomeAdvanceRefusedError(
+            "node-not-dispatched",
+            "outcome-runtime: node " +
+              JSON.stringify(nodeId) +
+              " is " +
+              current.status +
+              " (or records no credential digest), so its attempt is not one whose lost " +
+              "credential this build re-issues — nothing was written",
+          );
+        }
+        const minted = this.credentialSource(
+          attemptCredentialBinding({
+            graphId: this.graphId,
+            nodeId,
+            attemptId,
+            planRevision: this.planRevision,
+          }),
+        );
+        const nodes = state.nodes.map((entry, index) =>
+          index === position
+            ? Object.freeze({
+                ...entry,
+                attemptCredentialDigest: attemptCredentialDigest(minted),
+              })
+            : entry,
+        );
+        tx.writeGraphState(
+          stateRecordOf(Object.freeze({ ...state, nodes: Object.freeze(nodes) }), at),
+        );
+        return minted;
+      });
+      return { credential };
+    } catch (error) {
+      if (error instanceof OutcomeAdvanceRefusedError) {
+        return {
+          refusal: {
+            code: error.code as OutcomeRuntimeRefusal["code"],
+            path: "$.attemptCredentialDigest",
+            message: error.message,
+          },
+        };
+      }
+      if (error instanceof OutcomeStateError) {
+        return { refusal: this.stateRefusal(error) };
+      }
+      return {
+        refusal: {
+          code: "credential-missing",
+          path: "$.attemptCredentialDigest",
+          message:
+            "outcome-runtime: the credential re-issue for node " +
+            JSON.stringify(nodeId) +
+            " attempt " +
+            JSON.stringify(attemptId) +
+            " could not be committed (" +
+            // The failing call may be the HOST STORE (the mint adopts the value
+            // there), so its own text is not quoted: this is one of the two
+            // components that legitimately handle a credential.
+            "the transaction rolled back) — nothing was re-issued and the effect stays " +
+            "unsettled",
+        },
+      };
+    }
   }
 
   /**
@@ -2567,6 +3121,7 @@ export class OutcomeGraphRuntime {
     hostIdentity: HostIdentityReading,
     source: SettlementSource,
     expectedAttemptId?: string,
+    hostCompletion?: HostCompletionExecution,
   ): ExecutionIdentity | { readonly refusal: OutcomeRuntimeRefusal } {
     const reading = readOutcomeProposal(proposal);
     if (reading.kind === "malformed") {
@@ -2593,6 +3148,91 @@ export class OutcomeGraphRuntime {
         },
       };
     }
+    // ── THE HOST-COMPLETION CHANNEL (P2 items 6/7) ─────────────────────────
+    //
+    // A host-authenticated completion resolves its attempt from the HOST'S OWN
+    // durable execution record — already corroborated by the caller — and from
+    // the attempt the PERSISTED STATE records for the named node. It never
+    // reads, requires or fabricates a bearer credential: a restart that lost
+    // the value must still be able to settle the execution the host created
+    // (plan §3.3, "a trusted host completion must not depend on re-obtaining
+    // the worker's bearer").
+    if (hostCompletion !== undefined) {
+      if (reading.proposal.credential !== undefined) {
+        return {
+          refusal: {
+            code: "malformed-natural-delivery",
+            path: "$.credential",
+            message:
+              "outcome-runtime: a host-completion delivery for node " +
+              JSON.stringify(reading.proposal.nodeId) +
+              " carries an attempt credential — this channel is authenticated by the host's " +
+              "own durable execution record and never reads a bearer value, so the delivery is " +
+              "refused instead of settling under whichever proof it happened to present",
+          },
+        };
+      }
+      if (expectedAttemptId === undefined) {
+        return {
+          refusal: {
+            code: "attempt-mismatch",
+            path: "$.attemptId",
+            message:
+              "outcome-runtime: a host completion for node " +
+              JSON.stringify(reading.proposal.nodeId) +
+              " names no attempt, so there is no execution the host's fact could belong to",
+          },
+        };
+      }
+      const recorded = stateNodeOf(state, reading.proposal.nodeId);
+      if (recorded === undefined || recorded.attemptId !== expectedAttemptId) {
+        return {
+          refusal: {
+            code: "attempt-mismatch",
+            path: "$.attemptId",
+            message:
+              "outcome-runtime: the host reports attempt " +
+              JSON.stringify(expectedAttemptId) +
+              " of node " +
+              JSON.stringify(reading.proposal.nodeId) +
+              " finished, but the persisted state records " +
+              (recorded === undefined || recorded.attemptId === undefined
+                ? "no attempt for that node"
+                : "attempt " + JSON.stringify(recorded.attemptId)) +
+              " — a completion fact is never re-bound to the node's current attempt",
+          },
+        };
+      }
+      if (recorded.status === "pending") {
+        return {
+          refusal: {
+            code: "node-not-dispatched",
+            path: "$.nodeId",
+            message:
+              "outcome-runtime: node " +
+              JSON.stringify(reading.proposal.nodeId) +
+              " records attempt " +
+              JSON.stringify(expectedAttemptId) +
+              " while still pending, so no execution of it was ever dispatched for a host " +
+              "completion to describe — nothing was settled",
+          },
+        };
+      }
+      // The host identity constraint applies to this channel too (D9): the
+      // reference is the identity the DISPATCH recorded on the attempt, never
+      // the invocation that happens to be observing the completion.
+      const hostIdentityCheck = hostIdentityCheckRefusal(
+        recorded.dispatchIdentity,
+        hostIdentity,
+      );
+      if (hostIdentityCheck !== undefined) return { refusal: hostIdentityCheck };
+      return {
+        graphId: this.graphId,
+        attemptId: expectedAttemptId,
+        submissionId: submissionIdOf(proposal, source),
+      };
+    }
+
     const credential = reading.proposal.credential;
     if (credential === undefined) {
       return {
@@ -3099,6 +3739,103 @@ function stateNodeOf(
     if (node.nodeId === nodeId) return node;
   }
   return undefined;
+}
+
+/** What reading a raw host-completion delivery produced. */
+type HostCompletionFactReading =
+  | { readonly kind: "ok"; readonly fact: HostCompletionFact }
+  | { readonly kind: "malformed"; readonly issues: readonly OutcomeRuntimeRefusal[] };
+
+/**
+ * Read an untrusted value as a {@link HostCompletionFact}.
+ *
+ * TOTAL, and CLOSED exactly like the bearer channel's envelope
+ * (`natural-completion.ts`): the three fields must be non-empty strings and any
+ * other key is refused BY NAME — an `outcomeId`, a payload or an evidence list
+ * offered alongside a completion fact is not dropped, because a completion that
+ * could carry a result would be a second submission channel. A property read
+ * that throws (an accessor, a hostile Proxy) is contained as one more malformed
+ * issue rather than escaping.
+ */
+function readHostCompletionFact(value: unknown): HostCompletionFactReading {
+  const issues: OutcomeRuntimeRefusal[] = [];
+  const malformed = (path: string, message: string): void => {
+    issues.push({ code: "malformed-host-completion", path, message });
+  };
+  try {
+    if (!isRecord(value)) {
+      return {
+        kind: "malformed",
+        issues: [
+          {
+            code: "malformed-host-completion",
+            path: "$",
+            message:
+              "a host-completion delivery is a record of { nodeId, attemptId, executionId }, " +
+              "received " +
+              describeValue(value),
+          },
+        ],
+      };
+    }
+    for (const key of Object.keys(value)) {
+      if (key !== "nodeId" && key !== "attemptId" && key !== "executionId") {
+        malformed(
+          "$." + key,
+          "unknown key " +
+            JSON.stringify(key) +
+            " — a host-completion delivery carries only the node, the attempt and the host " +
+            "execution that finished, and an unrecognized field is refused rather than " +
+            "dropped: a completion fact is not a submission and has no channel for an outcome, " +
+            "a payload or evidence",
+        );
+      }
+    }
+    // Read each field EXACTLY ONCE into a local, so an accessor-backed record
+    // cannot answer one value to the check and another to the construction.
+    const nodeId = nonEmptyString(value.nodeId);
+    if (nodeId === undefined) {
+      malformed(
+        "$.nodeId",
+        "nodeId is " + describeValue(value.nodeId) + ", not a non-empty node id",
+      );
+    }
+    const attemptId = nonEmptyString(value.attemptId);
+    if (attemptId === undefined) {
+      malformed(
+        "$.attemptId",
+        "attemptId is " + describeValue(value.attemptId) + ", not a non-empty attempt id",
+      );
+    }
+    const executionId = nonEmptyString(value.executionId);
+    if (executionId === undefined) {
+      malformed(
+        "$.executionId",
+        "executionId is " +
+          describeValue(value.executionId) +
+          ", not the non-empty host execution id the platform named",
+      );
+    }
+    if (nodeId === undefined || attemptId === undefined || executionId === undefined) {
+      return { kind: "malformed", issues };
+    }
+    return {
+      kind: "ok",
+      fact: Object.freeze({ nodeId, attemptId, executionId }),
+    };
+  } catch (error) {
+    return {
+      kind: "malformed",
+      issues: [
+        {
+          code: "malformed-host-completion",
+          path: "$",
+          message:
+            "the host-completion delivery could not be read (" + errorText(error) + ")",
+        },
+      ],
+    };
+  }
 }
 
 /** What reading a persisted dispatch-effect payload produced. */

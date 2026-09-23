@@ -18,7 +18,26 @@
  *   captured on each attempt's binding and re-entered for the duration of that
  *   attempt's completion settlement (see {@link OutcomeHost.complete});
  * - the completion bridge — an attempt the platform reports finished is settled
- *   through the runtime's `settleNatural`, never through a second ingress.
+ *   through the runtime's own completion channels, never through a second
+ *   ingress;
+ * - the DURABLE completion binding and the platform re-read (P2 item 6) — a
+ *   completion that arrives after the process which dispatched the attempt
+ *   exited is resolved from the host's own record (the ONE store's execution row
+ *   plus the dispatch effect that names the node), and an execution that already
+ *   reached its end while nobody was listening is READ from the platform and
+ *   applied idempotently instead of waiting for a callback that will never come;
+ * - the host's COMPLETION AUTHORITY (P2 item 7) — the confirmed execution the
+ *   host's durable record carries is what authenticates a completion the
+ *   worker's bearer value can no longer vouch for, and the run path refuses a
+ *   fact it cannot corroborate.
+ *
+ * AND THE CACHED RUN PATH IS VALIDATED BEFORE IT IS USED (G14). A graph's
+ * runtime is opened once and kept, so the durable definition row is re-read on
+ * every acquisition: a row that stopped reading, or that no longer names the
+ * same content, refuses the graph BY NAME — which is what keeps the boot sweep,
+ * the audit and the status query answering the same thing about the same store.
+ * A store the format gate refuses is reported as a BLOCKED sweep, never as an
+ * empty one.
  *
  * WHETHER THE HOST DECLARES D9 IS A DECISION, NOT A DEFAULT. The identity
  * capability is an assertion the host must be able to substantiate: the
@@ -67,6 +86,7 @@ import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/type
 import { errorText } from "../../utils/error-text.ts";
 import { logWarn } from "../log-warn.ts";
 import {
+  describeStoreVerdict,
   describeStoredReading,
   readStoredDefinition,
 } from "../persistence/declared-record.ts";
@@ -74,6 +94,8 @@ import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import {
   OutcomeGraphRuntime,
+  type HostCompletionAttemptRef,
+  type HostCompletionAuthority,
   type OutcomeResumeResult,
 } from "../outcome/runtime.ts";
 import type {
@@ -92,11 +114,15 @@ import {
 } from "../outcome/validators.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type {
+  HostAttemptBinding,
   HostDispatchDelivery,
   HostDispatchInvocation,
 } from "./dispatch-host.ts";
 import type { OutcomeDispatchEffectKey } from "../outcome/dispatch-effects.ts";
-import { dispatchEffectKeyOf } from "../outcome/dispatch-effects.ts";
+import {
+  dispatchEffectIdOf,
+  dispatchEffectKeyOf,
+} from "../outcome/dispatch-effects.ts";
 import type {
   OutcomeEffectDivergence,
   OutcomeRuntimeRefusal,
@@ -111,6 +137,7 @@ import { HostInvocationOrigins } from "./invocation-origins.ts";
 import { GraphStore } from "../store/graph-store.ts";
 import {
   HostDispatchCompletionBridge,
+  type HostCompletionAttempt,
   type HostCompletionReport,
   type HostCompletionRuntime,
 } from "./completion-bridge.ts";
@@ -200,12 +227,75 @@ export interface OutcomeHostOptions {
    * leaves the D9 binding unenabled.
    */
   readonly workerSessionOf?: (execution: HostExecutionIdentity) => string | undefined;
+  /**
+   * THE PLATFORM'S OWN ANSWER ABOUT A CONFIRMED EXECUTION (P2 item 6).
+   *
+   * §3.3: a restart rebuilds the completion binding from the persisted
+   * execution/child-session binding and RE-SUBSCRIBES OR READS THE TERMINAL
+   * STATE. Re-subscribing is the platform's callback (already wired); this port
+   * is the read: asked about an execution the host confirmed, the platform
+   * answers whether that execution has already reached its end.
+   *
+   * WHY IT MATTERS. An execution that finished while no process was listening
+   * will never announce itself again. Without this port the attempt would wait
+   * forever for a callback that is not coming — the silent strand the plan
+   * forbids — so the boot sweep asks, and a `terminal` answer settles the
+   * attempt idempotently through the same acceptance core an announced
+   * completion uses.
+   *
+   * OMITTED IS HONEST, NOT SILENT: a host that cannot ask the platform (neither
+   * shipped adapter implements this yet — see §8.1 of the execution plan)
+   * reports every in-flight attempt it could not observe as an explicit
+   * per-effect refusal. It never reports the graph resumed-and-fine while an
+   * execution's fate is unknown.
+   */
+  readonly observeExecution?: HostExecutionObservationPort;
 }
+
+/**
+ * What the platform can say about one CONFIRMED execution.
+ *
+ * A CLOSED three-way answer, because "finished" and "not finished" are the only
+ * facts a completion needs and "I cannot tell" must never be rounded into
+ * either: `unknown` keeps the attempt in flight and is REPORTED, exactly as an
+ * unanswerable execution query keeps a dispatch effect unsettled.
+ */
+export type HostExecutionObservation =
+  | { readonly kind: "terminal" }
+  | { readonly kind: "running" }
+  | { readonly kind: "unknown"; readonly reason: string };
+
+/**
+ * How the host asks the platform about a confirmed execution. Receives the
+ * host's own confirmed identity — never a caller-supplied value — so the
+ * question is always about the execution the host actually created.
+ */
+export type HostExecutionObservationPort = (
+  execution: HostExecutionIdentity,
+) => HostExecutionObservation;
 
 /** One host invocation's attribution, as the declaring tool call saw it. */
 export interface OutcomeHostInvocation {
   readonly sessionId?: string;
   readonly agent?: string;
+}
+
+/**
+ * One per-effect refusal a sweep reports.
+ *
+ * Mostly the run path's own refusals, each tagged with the graph it came from.
+ * The sweep ALSO reports conditions the run path cannot name — an in-flight
+ * attempt the platform could not be asked about, or one the platform reports
+ * TERMINAL that the host could not settle — so the vocabulary carries one code
+ * of the sweep's own: `completion-unsettled` says "this attempt is still
+ * unsettled and here is why", which is exactly the observable block P2 item 6
+ * requires where a silent strand would otherwise be.
+ */
+export interface OutcomeHostEffectRefusal {
+  readonly code: OutcomeRuntimeRefusal["code"] | "completion-unsettled";
+  readonly message: string;
+  readonly path?: string;
+  readonly graphId: string;
 }
 
 /**
@@ -231,9 +321,7 @@ export interface OutcomeHostRecoveryReport {
    * unreadable payload, a credential the host cannot produce, a create the
    * platform refused) stays `pending` and is named here rather than dropped.
    */
-  readonly effectRefusals: readonly (OutcomeRuntimeRefusal & {
-    readonly graphId: string;
-  })[];
+  readonly effectRefusals: readonly OutcomeHostEffectRefusal[];
   /**
    * Every restart DIVERGENCE the graphs' own resumes reported, each tagged with
    * its graph: the persisted local effect status and the host's fact about the
@@ -243,6 +331,40 @@ export interface OutcomeHostRecoveryReport {
   readonly divergences: readonly (OutcomeEffectDivergence & {
     readonly graphId: string;
   })[];
+  /**
+   * `graph:attempt:verdict` for each in-flight attempt this sweep settled from
+   * a TERMINAL host execution (P2 item 6). `accepted` means the completion was
+   * applied (or replayed) through the same acceptance core an announced
+   * completion uses; `rejected` and `not-committed` mean the settlement ran
+   * and the ledger decided — never that a completion was fabricated.
+   */
+  readonly completed: readonly string[];
+  /**
+   * Set when the workspace's store could not be read AT ALL, so the sweep had no
+   * inventory to visit. A store the format gate refuses must not read as "no
+   * graphs exist" — that is the same disagreement between the boot sweep, the
+   * audit and the status surface that G14 names, one level up. A store that
+   * simply does not exist yet is an empty sweep and sets nothing.
+   */
+  readonly storeBlocked?: string;
+}
+
+/**
+ * One graph's open run path, held for the process lifetime.
+ *
+ * The two identity values are the ones the definition row carried when this
+ * runtime was opened. They are NOT a second authority: they exist so
+ * {@link OutcomeHost} can notice that the durable definition a cached runtime
+ * was opened from is no longer the one the store holds (G14), which is a
+ * comparison of two live reads, not a stored copy.
+ */
+interface RunningGraphRuntime {
+  readonly runtime: OutcomeGraphRuntime;
+  readonly ledger: SqliteAcceptanceLedger;
+  /** The declaration digest this runtime's plan was decoded from. */
+  readonly declarationDigest: string;
+  /** The plan revision the same row named. */
+  readonly planRevision: string;
 }
 
 // ── The host ────────────────────────────────────────────────────────────────
@@ -289,12 +411,20 @@ export class OutcomeHost {
     | ((execution: HostExecutionIdentity) => string | undefined)
     | undefined;
   private readonly dispatchAdapter: HostOutcomeDispatch;
+  /** The platform port the boot sweep observes a confirmed execution through. */
+  private readonly observeExecution: HostExecutionObservationPort | undefined;
+  /**
+   * What substantiates a host completion fact this host holds no bearer for
+   * (P2 item 7): the host's OWN confirmed execution record. Bound methods, so
+   * the runtime holds the capability without holding the host.
+   */
+  private readonly completionAuthority: HostCompletionAuthority;
   /** One bridge per graph — a settlement needs the graph's own saved plan. */
   private readonly bridges = new Map<string, HostDispatchCompletionBridge>();
   /** One open runtime (and ledger) per graph, for settlements and resumes. */
   private readonly runtimes = new Map<
     string,
-    Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }>
+    Promise<RunningGraphRuntime>
   >();
   private closed = false;
 
@@ -329,6 +459,14 @@ export class OutcomeHost {
     this.holder = createHostInvocationHolder();
     this.workerSessions = createHostWorkerSessionHolder();
     this.workerSessionOf = options.workerSessionOf;
+    this.observeExecution = options.observeExecution;
+    // The authority is the host's own durable record, read through the SAME
+    // accessor the worker binding uses: one source of truth for "which
+    // execution did this attempt get", never a second copy.
+    this.completionAuthority = Object.freeze({
+      executionFor: (attempt: HostCompletionAttemptRef) =>
+        this.executionBindingOf(attempt),
+    });
     this.workerCapability = hostWorkerIdentityCapability("host:worker-identity", {
       current: () => this.holder.current(),
       currentSession: () => this.workerSessions.currentSession(),
@@ -545,9 +683,11 @@ export class OutcomeHost {
     const started: string[] = [];
     const resumed: string[] = [];
     const refused: string[] = [];
-    const effectRefusals: (OutcomeRuntimeRefusal & { graphId: string })[] = [];
+    const effectRefusals: OutcomeHostEffectRefusal[] = [];
     const divergences: (OutcomeEffectDivergence & { graphId: string })[] = [];
-    for (const graphId of this.declaredGraphIds()) {
+    const completed: string[] = [];
+    const inventory = this.declaredGraphInventory();
+    for (const graphId of inventory.graphIds) {
       try {
         // The invocation this graph was declared under, when this host knows it
         // (in memory, or from its own record after a restart): a resumed graph
@@ -577,16 +717,129 @@ export class OutcomeHost {
         for (const divergence of result.divergences) {
           divergences.push(Object.freeze({ graphId, ...divergence }));
         }
+        // ── RE-READ THE HOST'S TERMINAL STATE (P2 item 6) ───────────────────
+        //
+        // A resume re-establishes the binding for every attempt still in
+        // flight, so a completion the platform announces LATER settles. An
+        // execution that finished while no process was listening will never
+        // announce itself again, so for each in-flight attempt the host
+        // CONFIRMED it asks the platform whether it is already over, and a
+        // `terminal` answer is settled idempotently through the same
+        // acceptance core an announced completion uses. An unanswerable
+        // question is REPORTED: never resumed-and-fine, never waited on
+        // forever.
+        for (const node of result.armed) {
+          const attemptId = node.attemptId;
+          let execution: HostExecutionIdentity | undefined;
+          try {
+            execution = this.executionBindingOf({ graphId, attemptId });
+          } catch (error) {
+            effectRefusals.push(
+              Object.freeze({
+                graphId,
+                code: "completion-unsettled" as const,
+                path: "$.attemptId",
+                message:
+                  "outcome-host: the host's execution record for node " +
+                  JSON.stringify(node.nodeId) +
+                  " attempt " +
+                  JSON.stringify(attemptId) +
+                  " could not be read (" +
+                  errorText(error) +
+                  "), so whether that execution finished cannot be established — the attempt " +
+                  "stays in flight and is reported rather than silently stranded",
+              }),
+            );
+            continue;
+          }
+          if (execution === undefined) {
+            // No CONFIRMED execution: the resume above already reported the
+            // effect (unsettled, credential-missing, divergence …), and an
+            // attempt nobody confirmed cannot be completed from a host fact.
+            continue;
+          }
+          const observation = this.observeExecutionOf(execution);
+          if (observation.kind === "running") continue;
+          if (observation.kind === "unknown") {
+            effectRefusals.push(
+              Object.freeze({
+                graphId,
+                code: "completion-unsettled" as const,
+                path: "$.executionId",
+                message:
+                  "outcome-host: confirmed host execution " +
+                  JSON.stringify(execution.executionId) +
+                  " for node " +
+                  JSON.stringify(node.nodeId) +
+                  " attempt " +
+                  JSON.stringify(attemptId) +
+                  " could not be observed (" +
+                  observation.reason +
+                  ") — whether it already finished is UNKNOWN, so the attempt stays in " +
+                  "flight and is reported instead of being settled on a guess",
+              }),
+            );
+            continue;
+          }
+          const settlement = await this.complete(graphId, attemptId);
+          if (settlement.kind === "settled" && settlement.settlement.kind !== "refused") {
+            // The settlement RAN: accepted (committed or replayed), rejected by
+            // a declared gate, or not-committed because another channel already
+            // settled the attempt. All three are the acceptance core's own
+            // answers, and the first one is why the sweep asked at all.
+            completed.push(
+              graphId + ":" + attemptId + ":" + settlement.settlement.kind,
+            );
+            continue;
+          }
+          // WHY IT COULD NOT SETTLE is carried verbatim from the bridge's own
+          // report (or the runtime's own refusal codes), so the block is
+          // diagnosable without re-running the sweep.
+          const why =
+            settlement.kind !== "settled"
+              ? settlement.kind + ": " + settlement.reason
+              : settlement.settlement.kind === "refused"
+                ? "the settlement was refused: " +
+                  settlement.settlement.refusals
+                    .map((refusal) => refusal.code)
+                    .join(",")
+                : "the settlement did not run";
+          effectRefusals.push(
+            Object.freeze({
+              graphId,
+              code: "completion-unsettled" as const,
+              path: "$.attemptId",
+              message:
+                "outcome-host: the platform reports host execution " +
+                JSON.stringify(execution.executionId) +
+                " of node " +
+                JSON.stringify(node.nodeId) +
+                " attempt " +
+                JSON.stringify(attemptId) +
+                " TERMINAL, but this host could not settle it (" +
+                why +
+                ") — the attempt stays unsettled and is reported",
+            }),
+          );
+        }
       } catch (err) {
         refused.push(graphId + ": " + errorText(err));
       }
+    }
+    if (inventory.blocked !== undefined) {
+      logWarn(
+        "outcome-host: declared-graph sweep — the workspace store could not be read (" +
+          inventory.blocked +
+          "), so there was NO inventory to visit; this is a BLOCKED sweep, not an empty one",
+      );
     }
     if (
       started.length > 0 ||
       resumed.length > 0 ||
       refused.length > 0 ||
       effectRefusals.length > 0 ||
-      divergences.length > 0
+      divergences.length > 0 ||
+      completed.length > 0
     ) {
       logWarn(
         "outcome-host: declared-graph sweep — started=[" +
@@ -612,6 +865,8 @@ export class OutcomeHost {
                 divergence.host,
             )
             .join(", ") +
+          "] completed=[" +
+          completed.join(", ") +
           "]",
       );
     }
@@ -621,6 +876,12 @@ export class OutcomeHost {
       refused: Object.freeze(refused),
       effectRefusals: Object.freeze(effectRefusals),
       divergences: Object.freeze(divergences),
+      completed: Object.freeze(completed),
+      // A store the format gate refuses is a BLOCK, never an empty sweep: the
+      // audit and the status surface already refuse it, and the boot sweep must
+      // not answer "nothing to do" for the same workspace. A store that simply
+      // does not exist yet is an empty sweep and sets nothing.
+      ...(inventory.blocked === undefined ? {} : { storeBlocked: inventory.blocked }),
     });
   }
 
@@ -802,6 +1063,18 @@ export class OutcomeHost {
       runtime: () => this.runtimeFor(graphId).then(({ runtime }) => runtime),
       credentials: this.vault,
       clock: this.clock,
+      // THE DURABLE HALF OF THE BINDING (P2 item 6). This process's map holds
+      // what IT delivered; the store holds what the HOST delivered, before and
+      // after a restart.
+      bindings: {
+        resolve: (attempt: HostCompletionAttempt) => this.durableBindingOf(attempt),
+      },
+      // THE HOST'S OWN EXECUTION RECORD (P2 item 7): the fact a completion is
+      // authenticated against when no bearer value survives the restart.
+      executions: {
+        executionFor: (attempt: HostCompletionAttempt) =>
+          this.executionBindingOf(attempt),
+      },
     });
     this.bridges.set(graphId, bridge);
     return bridge;
@@ -814,19 +1087,84 @@ export class OutcomeHost {
    * record that is not this build's outcome-protocol state is refused instead of
    * being run approximately.
    */
-  private runtimeFor(
-    graphId: string,
-  ): Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }> {
+  private runtimeFor(graphId: string): Promise<RunningGraphRuntime> {
     const existing = this.runtimes.get(graphId);
-    if (existing !== undefined) return existing;
-    const pending = this.openRuntime(graphId);
-    this.runtimes.set(graphId, pending);
-    return pending;
+    if (existing === undefined) {
+      const pending = this.openRuntime(graphId);
+      this.runtimes.set(graphId, pending);
+      return pending;
+    }
+    // THE CACHE IS VALIDATED AGAINST THE STORE ON EVERY USE (G14).
+    //
+    // A runtime is opened once per graph and kept, because a settlement needs
+    // the graph's own saved plan. The plan is not the only thing that can
+    // change: the DEFINITION ROW can become unreadable after this process
+    // cached its runtime, and continuing to run from the cached plan would make
+    // the boot sweep answer RESUMED from a plan the audit and the status
+    // surface both refuse — the same graph reported three different ways. So
+    // the durable definition is re-read here, before the cached runtime is
+    // handed to any caller, and a definition that no longer reads (or no longer
+    // names the same content) refuses by name instead.
+    return existing.then((entry) => {
+      this.assertDefinitionCurrent(graphId, entry);
+      return entry;
+    });
   }
 
-  private async openRuntime(
+  /**
+   * Refuse when the definition the workspace store holds is no longer the one
+   * the cached runtime was opened from.
+   *
+   * TWO FAILURES, ONE RULE — the cached plan is used only while the store still
+   * corroborates it:
+   * - the row no longer reads at all (damaged, refused by the decoder, or the
+   *   store itself unreadable): the graph is BLOCKED, exactly as the audit and
+   *   the status surface report it;
+   * - the row reads but names different content: a definition a run may be
+   *   executing is never replaced in place (`GraphStore.writeDefinition`
+   *   preserves an unchanged one and refuses a changed one), so this is a
+   *   foreign writer or corruption, and it is refused rather than run.
+   */
+  private assertDefinitionCurrent(
     graphId: string,
-  ): Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }> {
+    entry: RunningGraphRuntime,
+  ): void {
+    const reading = readStoredDefinition(this.storeRoot, graphId);
+    if (reading.kind !== "ok") {
+      throw new Error(
+        "outcome-host: the stored definition of graph " +
+          JSON.stringify(graphId) +
+          " is no longer readable in " +
+          this.storeRoot +
+          " (" +
+          describeStoredReading(reading) +
+          ") — the run path this process opened for it is STALE, and nothing is started, " +
+          "resumed or settled from a plan the store no longer corroborates",
+      );
+    }
+    const declared = reading.declared;
+    if (
+      declared.declarationDigest !== entry.declarationDigest ||
+      declared.plan.planRevision !== entry.planRevision
+    ) {
+      throw new Error(
+        "outcome-host: the stored definition of graph " +
+          JSON.stringify(graphId) +
+          " changed after this process opened its run path (declaration " +
+          JSON.stringify(entry.declarationDigest) +
+          " -> " +
+          JSON.stringify(declared.declarationDigest) +
+          ", plan revision " +
+          JSON.stringify(entry.planRevision) +
+          " -> " +
+          JSON.stringify(declared.plan.planRevision) +
+          ") — a definition a run may be executing is never replaced in place, so the " +
+          "cached run path is refused rather than used",
+      );
+    }
+  }
+
+  private async openRuntime(graphId: string): Promise<RunningGraphRuntime> {
     const reading = readStoredDefinition(this.storeRoot, graphId);
     if (reading.kind !== "ok") {
       throw new Error(
@@ -856,25 +1194,205 @@ export class OutcomeHost {
       ...(this.completionPolicies === undefined
         ? {}
         : { completionPolicies: this.completionPolicies }),
+      // THE HOST'S COMPLETION AUTHORITY (P2 item 7). It is installed
+      // unconditionally — it is the host's own durable record, and the only
+      // thing it enables is the completion channel that would otherwise refuse
+      // by name.
+      hostCompletions: this.completionAuthority,
     });
-    return { runtime, ledger };
+    return {
+      runtime,
+      ledger,
+      declarationDigest: reading.declared.declarationDigest,
+      planRevision: reading.declared.plan.planRevision,
+    };
   }
 
   /**
-   * Every graph id the workspace's store holds an immutable DEFINITION for.
+   * The sweep's inventory: every graph id the workspace's store holds an
+   * immutable DEFINITION for, plus why there is none when the store itself was
+   * refused.
    *
-   * The definition row is what makes a graph declared (P1 item 5): the sweep's
-   * inventory is the store's own listing, so a store this host cannot open makes
-   * the sweep report that refusal per graph rather than silently finding nothing
-   * to do. A store that does not exist yet is an empty sweep, never an error.
+   * The definition row is what makes a graph declared (P1 item 5), so the store
+   * is the sweep's own listing. A store the FORMAT GATE refuses must not read as
+   * "no graphs exist": the audit and the status surface report that workspace as
+   * blocked, and a sweep that answered "nothing to do" would be the third
+   * surface disagreeing. Only a store that does not exist yet (or a workspace
+   * with no definitions) is an empty sweep.
    */
-  private declaredGraphIds(): string[] {
+  private declaredGraphInventory(): {
+    readonly graphIds: readonly string[];
+    readonly blocked?: string;
+  } {
     const loaded = loadGraphStoreSync(this.storeRoot);
-    if (loaded.kind !== "valid") return [];
+    if (loaded.kind !== "valid") {
+      return Object.freeze({
+        graphIds: Object.freeze([]),
+        ...(loaded.kind === "absent"
+          ? {}
+          : { blocked: describeStoreVerdict(loaded) }),
+      });
+    }
     try {
-      return [...loaded.value.definitionGraphIds()];
+      return Object.freeze({
+        graphIds: Object.freeze([...loaded.value.definitionGraphIds()]),
+      });
     } finally {
       loaded.value.close();
+    }
+  }
+
+  /**
+   * The binding of one attempt, read from the host's DURABLE record (P2 item 6).
+   *
+   * THE DURABLE FACTS, AND NOTHING ELSE. The host's execution row is keyed by
+   * the stable effect id derived from the attempt (`dispatch:<attemptId>`) and
+   * names the attempt it belongs to; the dispatch EFFECT the run committed
+   * carries the node the attempt executes. Both are rows in the workspace's ONE
+   * store, so a completion observed after a restart resolves exactly the
+   * (graph, node, attempt) binding the delivering process recorded — no attempt
+   * id is parsed for structure and no node's current attempt is substituted.
+   *
+   * `undefined` is the honest answer for every missing half: no row, a row that
+   * names another attempt, an effect payload this build cannot read as a
+   * dispatch target, or a store that cannot be opened. The caller reports the
+   * completion as UNBOUND rather than inventing a binding.
+   */
+  private durableBindingOf(
+    attempt: HostCompletionAttempt,
+  ): HostAttemptBinding | undefined {
+    // A memory-mode host keeps its bindings in the bridge's own map — that IS
+    // its durable record for the process — so there is no file to read.
+    const loaded = loadGraphStoreSync(this.storeRoot);
+    if (loaded.kind !== "valid") return undefined;
+    const store = loaded.value;
+    try {
+      const effectId = dispatchEffectIdOf(attempt.attemptId);
+      const row = store.readExecution({
+        graphId: attempt.graphId,
+        effectId,
+        attemptId: attempt.attemptId,
+      });
+      if (row === undefined || row.attemptId !== attempt.attemptId) return undefined;
+      // THE NODE COMES FROM THE DISPATCH RECORD while the effect is
+      // outstanding, and from the recorded RUN STATE once it is terminal: a
+      // settled attempt's effect row is DONE and is deliberately not part of
+      // the "unsettled work" stream, so a repeated completion observation would
+      // otherwise lose a binding it had a moment ago. Both sources are rows in
+      // the SAME store, and the runtime re-checks the node/attempt pair against
+      // the state it settles, so neither can re-aim a completion.
+      const nodeId =
+        this.dispatchNodeOf(store, attempt.graphId, effectId, attempt.attemptId) ??
+        this.recordedNodeOf(store, attempt.graphId, attempt.attemptId);
+      if (nodeId === undefined) return undefined;
+      return Object.freeze({
+        graphId: attempt.graphId,
+        nodeId,
+        attemptId: attempt.attemptId,
+      });
+    } catch {
+      return undefined;
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * The node one dispatch effect names, read from its persisted payload.
+   *
+   * The payload is the credential-free dispatch target the run path wrote, so
+   * its `nodeId` is runtime provenance; the attempt it names must be the one
+   * asked about, or the row is not this attempt's dispatch and answers
+   * `undefined`. Nothing here trusts a shape it cannot verify: a payload that
+   * is not a record, or carries no non-empty `nodeId`, is not a target.
+   */
+  private dispatchNodeOf(
+    store: GraphStore,
+    graphId: string,
+    effectId: string,
+    attemptId: string,
+  ): string | undefined {
+    for (const effect of store.pendingEffects(graphId)) {
+      if (effect.effectId !== effectId) continue;
+      const payload = effect.payload;
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+        return undefined;
+      }
+      const record = payload as Record<string, unknown>;
+      if (record.attemptId !== attemptId) return undefined;
+      const nodeId = record.nodeId;
+      return typeof nodeId === "string" && nodeId.length > 0 ? nodeId : undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * The node the recorded RUN STATE attributes one attempt to, or an absent
+   * answer.
+   *
+   * A DEFENSIVE SCAN OF A ROW THIS BUILD WROTE, not a decoder: the binding only
+   * needs the node id an entry carries beside the attempt, and a body that is
+   * not a record, carries no node list, or names the SAME attempt on more than
+   * one node is not an answer. Nothing here decides whether the attempt settled
+   * — the runtime does, against the state it settles — so a body that disagrees
+   * with the deployment's expectation is refused there rather than trusted
+   * here.
+   */
+  private recordedNodeOf(
+    store: GraphStore,
+    graphId: string,
+    attemptId: string,
+  ): string | undefined {
+    const record = store.readGraphState(graphId);
+    const body = record?.body;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return undefined;
+    }
+    const nodes = (body as Record<string, unknown>)["nodes"];
+    if (!Array.isArray(nodes)) return undefined;
+    let found: string | undefined;
+    for (const entry of nodes) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const node = entry as Record<string, unknown>;
+      if (node["attemptId"] !== attemptId) continue;
+      const nodeId = node["nodeId"];
+      if (typeof nodeId !== "string" || nodeId.length === 0) return undefined;
+      // TWO NODES ON ONE ATTEMPT IS NOT A BINDING — it is an ambiguity, and an
+      // ambiguous answer is reported rather than resolved by list order.
+      if (found !== undefined && found !== nodeId) return undefined;
+      found = nodeId;
+    }
+    return found;
+  }
+
+  /**
+   * Ask the platform about one CONFIRMED execution, or say why it could not be
+   * asked.
+   *
+   * A THROWING PORT HAS NOT ANSWERED: a port that fails is reported as
+   * `unknown` — the same rule the dispatch adapter applies to a throwing
+   * execution query — so an unreachable control plane never becomes "it must
+   * still be running" and never becomes a fabricated completion. The reason is
+   * host-authored text about a QUESTION, and no credential is in scope here:
+   * the port receives the host's own confirmed execution id and nothing else.
+   */
+  private observeExecutionOf(execution: HostExecutionIdentity): HostExecutionObservation {
+    const observe = this.observeExecution;
+    if (observe === undefined) {
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason:
+          "this host installs no platform execution-observation port, so it cannot tell " +
+          "whether an execution that finished while no process was listening has ended",
+      });
+    }
+    try {
+      return observe(execution);
+    } catch (error) {
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason: "the platform execution-observation port threw (" + errorText(error) + ")",
+      });
     }
   }
 

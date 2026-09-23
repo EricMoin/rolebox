@@ -1026,18 +1026,21 @@ describe("host completion bridge — a dispatched attempt settles through settle
     });
   });
 
-  it("reports a completion whose credential the host no longer holds", async () => {
+  it("reports a completion NOTHING can authenticate, instead of settling it", async () => {
     await withHostRun(async ({ runtime, bridge }) => {
       runtime.start(NOW);
-      // A host that restarted with a memory-only store bound the attempt again
-      // but cannot produce its credential: the attempt is REPORTED, never
-      // settled with a fabricated one.
+      // A host that bound an attempt it never confirmed an execution for — and
+      // whose vault holds no credential for it — has NO proof of the
+      // completion: not the worker's bearer, and not a confirmed execution.
+      // The attempt is REPORTED, never settled with a fabricated credential and
+      // never settled against an execution the host did not confirm.
       bridge.bind({ graphId: GRAPH_ID, nodeId: "work", attemptId: "work#7" });
       const report = await bridge.complete({ graphId: GRAPH_ID, attemptId: "work#7" });
-      expect(report.kind).toBe("credential-unavailable");
-      if (report.kind !== "credential-unavailable") return;
+      expect(report.kind).toBe("unauthenticated");
+      if (report.kind !== "unauthenticated") return;
       expect(report.nodeId).toBe("work");
       expect(report.reason).toContain("fabricated credential");
+      expect(report.reason).toContain("no host fact to authenticate against");
       const state = runtime.state();
       expect(state?.nodes.find((node) => node.nodeId === "work")?.status).toBe("dispatched");
     });
