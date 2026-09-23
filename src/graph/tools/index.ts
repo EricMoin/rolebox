@@ -471,7 +471,6 @@ function createGraphStatusTool(
   });
 }
 
-/** graph_cancel — cancel a graph, node, or loop group. */
 // Re-export the toolset factory + type so host assembly layers construct the one
 // instance the outcome tool face is bound to.
 export { createGraphToolSet, type GraphToolSet } from "./graph-tools.ts";

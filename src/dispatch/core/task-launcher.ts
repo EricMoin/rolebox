@@ -25,14 +25,9 @@ import {
 export async function launch(
   d: TaskLifecycleDeps,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
+  parentContext: { sessionID: string; agent: string; directory: string },
 ): Promise<DispatchTask> {
   const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
-  // Graph-scope marker: set by the graph engine via graphParentContext and/or
-  // DispatchInput.graphScoped (executeNode sets both). Carried onto the task so
-  // the notification choke points can suppress parent reminders for
-  // graph-scoped tasks (graph-notify.ts reports node completion instead).
-  const graphScoped = parentContext.graphScoped ?? input.graphScoped;
 
   const task: DispatchTask = {
     id: taskId,
@@ -48,7 +43,6 @@ export async function launch(
     progress: { lastUpdate: new Date(), toolCalls: 0 },
     timeoutMs: input.timeout_ms,
     priority: input.priority ?? 0,
-    graphScoped,
   };
 
   d.tasks.set(taskId, task);
@@ -68,7 +62,7 @@ export async function startBackgroundTask(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
+  parentContext: { sessionID: string; agent: string; directory: string },
 ): Promise<void> {
   const task = d.tasks.get(taskId);
   if (!task) return;
@@ -185,12 +179,7 @@ export async function startBackgroundTask(
         leaveRunning(d, taskId);
         notifyTerminated(d, taskId, "error");
         try { await d.client.abort(task.sessionId); } catch { /* session may already be gone */ }
-        // Graph-scope suppression: node completion is reported exclusively by
-        // the graph notifier — never emit a dispatch-layer parent reminder for
-        // a graph-scoped task, even on spawn failure.
-        if (!task.graphScoped) {
-          void notifyParent(d.client, task, 0, { maxRetries: 0 });
-        }
+        void notifyParent(d.client, task, 0, { maxRetries: 0 });
         return;
       }
 
@@ -220,12 +209,7 @@ export async function startBackgroundTask(
       leaveRunning(d, taskId);
       notifyTerminated(d, taskId, "error");
       try { await d.client.abort(task.sessionId); } catch { /* session may already be gone */ }
-      // Graph-scope suppression: node completion is reported exclusively by
-      // the graph notifier — never emit a dispatch-layer parent reminder for
-      // a graph-scoped task, even on session-create failure.
-      if (!task.graphScoped) {
-        void notifyParent(d.client, task, 0, { maxRetries: 0 });
-      }
+      void notifyParent(d.client, task, 0, { maxRetries: 0 });
     } else {
       scheduleCleanup(d, taskId);
       notifyTerminated(d, taskId, "error");
@@ -241,7 +225,7 @@ export async function reopenForContinuation(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
+  parentContext: { sessionID: string; agent: string; directory: string },
 ): Promise<DispatchTask> {
   if (d.cleanedUpTasks.has(taskId)) throw new Error(`Task '${taskId}' was cleaned up`);
   const task = d.tasks.get(taskId);

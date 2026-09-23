@@ -467,9 +467,10 @@ export function deriveAttention(
       // nothing.
       const key = name.toLowerCase();
       // `blocked` is the ONE node status that stays LIVE across a terminal
-      // phase. engine.cancel() deliberately leaves a human-in-the-loop gate for
-      // the human while forcing the phase to `complete` anyway, so the node is
-      // still resolvable through graph_approve — and this repo's own monitor
+      // phase: the deleted engine's cancel() left a human-in-the-loop gate for
+      // the human while forcing the phase to `complete` anyway, and the record
+      // still carries the blocked node even though the approval tool that once
+      // resolved it (graph_approve) no longer exists. This repo's own monitor
       // reader keeps exactly that graph out of its staleness filter so "a
       // human-in-the-loop approval pause is never hidden as dead". Claiming
       // "All clear" over a pending approval is under-reporting of the costliest

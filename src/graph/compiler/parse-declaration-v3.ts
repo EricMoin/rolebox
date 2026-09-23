@@ -894,7 +894,7 @@ function readNonEmptyString(
 /**
  * Read the required graph name — which IS the graph id.
  *
- * A name that is blank after trimming names no graph: `graph_create` refuses
+ * A name that is blank after trimming names no graph: `graph_declare` refuses
  * the same input (`name.trim() === ""`), and a whitespace-only id would own a
  * state-file key no caller could address deliberately. The authored spelling is
  * preserved — the ingress does not silently rewrite a declaration it just

@@ -20,11 +20,11 @@
  *   record — the same "the execution did not start" fact a synchronous throw
  *   records.
  *
- * The task is deliberately NOT marked `graphScoped`: the legacy graph engine
- * suppressed the dispatch manager's parent notification because its own graph
- * notifier reported node completion, and the outcome run path has no such
- * notifier, so the manager's normal completion notice stays the orchestrator's
- * visibility into a finished attempt.
+ * The task carries NO notification-suppression marker: the deleted legacy
+ * graph engine turned off the dispatch manager's parent notification because
+ * its own notifier reported node completion, and the outcome run path has no
+ * such notifier, so the manager's normal completion notice stays the
+ * orchestrator's visibility into a finished attempt.
  */
 
 import type {
@@ -53,12 +53,7 @@ export type PiOutcomeSettlement =
 export interface PiOutcomeDispatchPort {
   launch(
     input: DispatchInput,
-    parentContext: {
-      sessionID: string;
-      agent: string;
-      directory: string;
-      graphScoped?: boolean;
-    },
+    parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<DispatchTask>;
   onTaskTerminated(
     taskId: string,

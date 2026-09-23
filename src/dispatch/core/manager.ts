@@ -194,14 +194,14 @@ export class DispatchManager {
 
   async launch(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
+    parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<DispatchTask> {
     return this.lifecycle.launch(input, parentContext);
   }
 
   async executeSync(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
+    parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<string> {
     return this.lifecycle.executeSync(input, parentContext);
   }
@@ -209,7 +209,7 @@ export class DispatchManager {
   async reopenForContinuation(
     taskId: string,
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
+    parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<DispatchTask> {
     return this.lifecycle.reopenForContinuation(taskId, input, parentContext);
   }
@@ -342,20 +342,8 @@ export class DispatchManager {
 
   // ── Notification ──────────────────────────────────────────────
 
-  /**
-   * Notify the parent session about a task's completion.
-   *
-   * Graph-scope suppression: graph-scoped tasks (dispatched by the deleted
-   * legacy graph engine via `executeNode`/`graphParentContext`) return
-   * immediately without sending — the deleted legacy graph notifier reported
-   * node completion itself, and no shipped host sets the marker today. This
-   * guards the direct callers
-   * (approveTask/rejectTask) and the `sendNotification` callback path used by
-   * recovery-orchestrator and the completion-orchestrator outbox sweeper.
-   * Real-session tasks notify exactly as before.
-   */
+  /** Notify the parent session about a task's completion. */
   async notifyCompletion(task: DispatchTask, remainingTasks: number, resultText?: string): Promise<boolean> {
-    if (task.graphScoped) return true;
     return notifyParent(this.client, task, remainingTasks, undefined, resultText);
   }
 

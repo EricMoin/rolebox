@@ -108,20 +108,6 @@ export interface DispatchTask {
    * correctly.
    */
   terminatingSignal?: { type: string; payload: unknown };
-  /**
-   * Graph-scope marker: set when this task was dispatched by the (deleted)
-   * legacy graph engine via `executeNode`/`graphParentContext`.
-   *
-   * While set, the dispatch layer suppresses its parent notifications
-   * (`[BACKGROUND TASK COMPLETED]` / `[ALL BACKGROUND TASKS COMPLETE]`): the
-   * deleted legacy graph notifier reported node completion itself, by node id
-   * rather than by the internal `bg_*` dispatch task id. No shipped host sets
-   * the marker today — the outcome run path deliberately leaves it unset so the
-   * normal completion notice stays the orchestrator's visibility — and it
-   * remains only so a task persisted by the legacy runtime keeps its
-   * suppression semantics. Absent/undefined for every real-session dispatch.
-   */
-  graphScoped?: boolean;
 }
 /**
  * Input parameters for the dispatch tool (task() call).
@@ -144,14 +130,6 @@ export interface DispatchInput {
   sync_timeout_ms?: number;
   /** When true, the dispatched session is created without parentID — it does NOT inherit the parent session's conversation history. Used by the loop system to ensure each round starts fresh. */
   noParentInherit?: boolean;
-  /**
-   * Graph-scope marker: set by the deleted legacy graph engine's `executeNode`
-   * for every node dispatch. Carried onto the resulting {@link DispatchTask} so
-   * the notification choke points can suppress parent reminders for
-   * graph-scoped tasks. No shipped host sets it today; absent for real-session
-   * dispatches.
-   */
-  graphScoped?: boolean;
   /** Priority: lower number = higher priority. Default 0 (normal).
    *  Higher-priority tasks (lower value) acquire concurrency slots first.
    *  Within the same priority level, tasks are dequeued in FIFO order. */

@@ -75,11 +75,7 @@ import {
   seedSentFinalNotifies,
   getSentFinalNotifies,
   enqueueNotify,
-  PENDING_APPROVALS_MARKER,
 } from "../dispatch/notification.ts";
-import { buildReminder } from "../prompt/reminder.ts";
-import { scanPersistedStates } from "../graph/tools/persisted-state.ts";
-import { listPendingApprovals } from "../graph/tools/status-queries.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import {
   createGraphToolSet,
@@ -150,47 +146,6 @@ let piNotificationManager: NotificationManager | undefined;
  */
 export function getPiNotificationManager(): NotificationManager | undefined {
   return piNotificationManager;
-}
-
-/**
- * Scan the on-disk persisted engine store and enumerate every graph gate still
- * awaiting a human approval decision (a `blocked` node with `needsApproval`).
- * This is the authoritative cross-session source at startup — it holds gates
- * persisted by earlier sessions and every graph recovered this boot. The pure
- * `listPendingApprovals` helper (subtask 1) does the enumeration; this wrapper
- * owns only the `scanPersistedStates` read. Returns an empty array when the
- * store is empty or no gate is blocked (never an invented row).
- */
-export function collectStartupPendingApprovals(
-  stateDir: string,
-): ReturnType<typeof listPendingApprovals> {
-  const states = scanPersistedStates(stateDir).loaded;
-  return listPendingApprovals(states);
-}
-
-/**
- * Build the single aggregated `[PENDING APPROVALS]` system-reminder body for a
- * non-empty set of pending-approval entries. Each gate is listed with its graph
- * id, node id, agent, and a paste-ready `graph_approve` call. Empty input yields
- * an empty string (caller treats it as a silent no-op).
- */
-export function buildPendingApprovalsReminder(
-  pending: ReturnType<typeof listPendingApprovals>,
-): string {
-  if (pending.length === 0) return "";
-  const gatesBody = pending
-    .map(
-      (e) =>
-        `- ${e.nodeId} (graph: ${e.graphId}, agent: ${e.agent}) → ${e.approveCall}`,
-    )
-    .join("\n");
-  return buildReminder({
-    marker: PENDING_APPROVALS_MARKER,
-    fields: [{ label: "count", value: String(pending.length) }],
-    action:
-      "Review each blocked gate and run its graph_approve call to resolve the pending decision.",
-    body: gatesBody,
-  });
 }
 
 // ── Canonical event property helpers ──────────────────────────────────────
@@ -915,15 +870,6 @@ export default async function (pi: any): Promise<void> {
       }
     }
 
-    // ── Startup "pending approvals": retired with the legacy approval gate ──
-    //
-    // The legacy `needs_approval` gate and its `graph_approve` entry point are
-    // not part of the assembled graph surface any more, so the startup reminder
-    // that told the orchestrator to run `graph_approve` is gone with them: a
-    // reminder naming a tool this build does not register is a dead instruction.
-    // The read-only helpers (`collectStartupPendingApprovals` /
-    // `buildPendingApprovalsReminder`) remain exported for the legacy record
-    // reader until the deletion slice removes the record layer they read.
 
     // ── session.status synthesis ────────────────────────────────────────
     //
@@ -1131,7 +1077,7 @@ export default async function (pi: any): Promise<void> {
       resolvedRoles,
       piSessionDir,
       undefined, // dispatchTools disabled (graph-only orchestration)
-      undefined, // loopTools disabled (graph_add_loop replaces loop_*)
+      undefined, // loop tools disabled (a loop group is declared inside a graph)
       taskTools,
       extraTools,
       dispatchManager,

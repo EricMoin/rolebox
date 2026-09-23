@@ -71,9 +71,9 @@ export class ToolService implements PluginService {
       resolvedRoles: ctx.resolvedRoles,
       directory: ctx.directory,
       capabilities: ctx.capabilities,
-      // dispatch_* tool registration DISABLED — orchestration is graph-only
-      // (graph_create/graph_add_node/graph_run). Bare dispatch calls would
-      // bypass graph budget accounting, approval gates, and loop caps.
+      // dispatch_* tool registration DISABLED — orchestration is
+      // declared-graph only (graph_declare / graph_submit_outcome). Bare
+      // dispatch calls would bypass graph budget accounting and loop caps.
       // dispatchToolsOverride: dispatchService.getTools(),
       // loop_* tool registration DISABLED (see 1.6 above).
       // loopToolsOverride,

@@ -54,7 +54,6 @@
 
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import { getSignal } from "./signal-payload.ts";
 
 /**
  * The `graph_status` filter surface. Every field is optional — a filter is
@@ -72,15 +71,6 @@ export interface StatusQuery {
   /** ISO-8601 window upper bound (node.completedAt <= to, when completed). */
   to_date?: string;
 }
-
-/**
- * Ledger key of the non-signal approval context stash. The engine writes it via
- * `recordSignalToLedger` (engine-advance.ts, `buildApprovalPayload`) as a
- * *context stash*, not one of the signal types — so it is deliberately not part
- * of the engine's `SIGNAL_KEY` vocabulary, but the read still goes through the
- * shared `getSignal` narrowing seam (Y8).
- */
-const APPROVAL_PAYLOAD_KEY = "approval_payload";
 
 /**
  * A `signalsObserved` ledger entry that is present. The shared `getSignal`
@@ -279,121 +269,3 @@ export function groupCompletedNodes(
     .map(([key, ids]) => ({ key, count: ids.length, nodes: ids }));
 }
 
-// ── Pending approvals (first-class "awaiting human" query surface) ──────────
-
-/**
- * A single node awaiting a human approval decision. Backs the `graph_status`
- * `pending_approvals` view flag (and is independently importable for subtasks
- * that need to enumerate gated nodes — e.g. a batch-approve round).
- */
-export interface PendingApprovalEntry {
-  /** Owning graph id. */
-  graphId: string;
-  /** The `needs_approval` node currently `blocked`. */
-  nodeId: string;
-  /** Agent bound to the node. */
-  agent: string;
-  /**
-   * Epoch ms when the node entered the blocked state. Sourced from the stashed
-   * `approval_payload.timestamp` (ISO → ms) when present; otherwise falls back
-   * to the node's `startedAt`. Absent only when neither timestamp exists.
-   */
-  blockedSince?: number;
-  /**
-   * Truncated summary of the node's stashed `signalsObserved["approval_payload"]`
-   * (JSON-serialized, then capped at `summaryLimit` chars). Absent when the node
-   * has no approval_payload stash. Never a fabricated value.
-   */
-  approvalPayloadSummary?: string;
-  /** A paste-ready `graph_approve` call to accumulate the approval. */
-  approveCall: string;
-}
-
-/** Options for {@link listPendingApprovals}. */
-export interface ListPendingApprovalsOptions {
-  /** Truncation limit for the approval_payload summary (`approvalPayloadSummary`).
-   *  Default 200 chars. */
-  summaryLimit?: number;
-}
-
-const DEFAULT_PAYLOAD_SUMMARY_LIMIT = 200;
-
-/** Extract the blocked-since epoch from a stashed approval_payload, else startedAt. */
-function blockedSinceMs(payload: unknown, node: NodeRuntimeState): number | undefined {
-  if (payload && typeof payload === "object" && "timestamp" in payload) {
-    const ts = (payload as { timestamp?: unknown }).timestamp;
-    if (typeof ts === "string") {
-      const ms = new Date(ts).getTime();
-      if (!Number.isNaN(ms)) return ms;
-    }
-  }
-  return node.startedAt;
-}
-
-/**
- * Serialize a stashed approval_payload to a truncated one-line summary.
- *
- * `JSON.stringify` throws on a cyclic value and on a BigInt, and answers
- * `undefined` for a function / symbol — the tool boundary narrows the payload
- * with `z.json()` (approve-tools.ts, B26), but a programmatic stash can still
- * carry an unserializable value. A throw is contained here and surfaced as an
- * explicit marker rather than escaping the read-only status query.
- */
-function summarizePayload(payload: unknown, limit: number): string | undefined {
-  if (payload === undefined || payload === null) return undefined;
-  let text: string | undefined;
-  try {
-    text = typeof payload === "string" ? payload : JSON.stringify(payload);
-  } catch {
-    return "[unserializable payload]";
-  }
-  // A function / symbol payload has no JSON form — treated as "no summary",
-  // matching the pre-existing honest-absence behavior.
-  if (text === undefined) return undefined;
-  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
-}
-
-/**
- * Enumerate every node currently awaiting a human approval decision across the
- * supplied engine states.
- *
- * A "pending approval" is a node with BOTH `status === Blocked` AND
- * `needsApproval === true` — the exact gate the `graph_approve` tool resolves.
- * Pure function over a read-only state set: registry states, persisted states,
- * or a merged set can all be passed in. Honesty contract:
- *
- *   - Every field is sourced from real recorded state — never fabricated.
- *   - An empty input yields an empty list, never an invented row.
- *   - Iteration order follows the input array order (caller controls
- *     registry-first / persisted-first merge via the array it builds).
- *
- * @param states Read-only engine states to scan.
- * @param opts   Optional summary-length cap.
- * @returns The pending-approval entries, in input order.
- */
-export function listPendingApprovals(
-  states: ReadonlyArray<EngineState>,
-  opts: ListPendingApprovalsOptions = {},
-): PendingApprovalEntry[] {
-  const limit = opts.summaryLimit ?? DEFAULT_PAYLOAD_SUMMARY_LIMIT;
-  const out: PendingApprovalEntry[] = [];
-  for (const state of states) {
-    for (const node of state.nodes.values()) {
-      if (node.status !== NodeStatus.Blocked) continue;
-      if (!node.needsApproval) continue;
-      // Shared ledger read (contract C2 / Y8): a missing / malformed ledger
-      // answers `undefined` instead of tripping the old optional chain, and the
-      // key is a named constant rather than a loose literal.
-      const payload = getSignal(node, APPROVAL_PAYLOAD_KEY, isRecordedSignal);
-      out.push({
-        graphId: state.graphId,
-        nodeId: node.nodeId,
-        agent: node.agent,
-        blockedSince: blockedSinceMs(payload, node),
-        approvalPayloadSummary: summarizePayload(payload, limit),
-        approveCall: `graph_approve(graph_id="${state.graphId}", node_id="${node.nodeId}", action="approve")`,
-      });
-    }
-  }
-  return out;
-}
