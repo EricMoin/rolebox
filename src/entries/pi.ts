@@ -925,6 +925,10 @@ export default async function (pi: any): Promise<void> {
           outcomeRecovery.refused.length > 0 ||
           outcomeRecovery.effectRefusals.length > 0 ||
           outcomeRecovery.divergences.length > 0 ||
+          // A controlled run is reported in `resumed` too, but it is named here
+          // so the gate cannot depend on that staying true (P3 item 1).
+          outcomeRecovery.controlled.length > 0 ||
+          outcomeRecovery.unconfirmedExecutions.length > 0 ||
           outcomeRecovery.cancellations.length > 0 ||
           outcomeRecovery.cancelBlocked.length > 0
         ) {
@@ -947,6 +951,11 @@ export default async function (pi: any): Promise<void> {
                 "->" +
                 divergence.host,
             ),
+            // WHAT A TRUSTED CONTROL COMMAND STOPPED (P3 item 1): `graph:command`
+            // for every run a failure / timeout / cancel ended. The values are
+            // computed by the sweep, and logging them here is what keeps a
+            // restart from presenting a stopped run as merely `resumed`.
+            controlled: outcomeRecovery.controlled,
             // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
             // requested / unsupported / blocked, per attempt. Only `confirmed`
             // is the platform's own substantiation; everything else leaves the
@@ -956,6 +965,17 @@ export default async function (pi: any): Promise<void> {
                 entry.graphId + ":" + entry.attemptId + ":" + entry.state,
             ),
             cancelBlocked: outcomeRecovery.cancelBlocked,
+            // THE EXTERNAL WORK A STOP LEFT UNCONFIRMED (P3 item 1): every
+            // `pending` / `creating` execution behind a controlled run, as
+            // `graph:attempt:state`. A `creating` row may name a task the
+            // platform really started, so it is REPORTED here rather than
+            // hidden; this runs AFTER the cancel deliveries above, so an
+            // execution the platform has since confirmed is no longer
+            // unconfirmed.
+            unconfirmedExecutions: outcomeRecovery.unconfirmedExecutions.map(
+              (entry) =>
+                entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+            ),
           });
         }
         // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every

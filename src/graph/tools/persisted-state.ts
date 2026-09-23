@@ -53,10 +53,14 @@ import type {
   LoopGroupRuntimeState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
+import type { RunControlRecord } from "../ledger/types.ts";
 import {
   describeStoreVerdict,
   listStoredEngineStates,
 } from "../persistence/declared-record.ts";
+
+/** The empty control map a scan that read no store reports. */
+const NO_CONTROLS: ReadonlyMap<string, RunControlRecord> = new Map();
 
 // ── Result types ────────────────────────────────────────────────────────────
 
@@ -83,6 +87,15 @@ export interface PersistedStateScan {
    * "no graphs".
    */
   blocked?: string;
+  /**
+   * The RUN-LEVEL control fact of every graph in {@link loaded}, by graph id
+   * (P3 item 1). A graph absent from this map has no control fact — it was not
+   * stopped by a trusted command — while a graph whose control row this build
+   * cannot read is NOT in `loaded` at all: it is named in
+   * {@link skippedGraphs}, exactly like a damaged run-state row, so no caller
+   * can render it as an unchecked run.
+   */
+  controls: ReadonlyMap<string, RunControlRecord>;
 }
 
 /** JSON-primitive per-node projection for a cross-session summary. */
@@ -123,9 +136,10 @@ export interface PersistedStateSummary {
  * A definition that fails a gate is skipped honestly: counted in `skipped` /
  * named in `skippedGraphs` and never included in `loaded` — and so is a stored
  * graph whose RUN STATE cannot be decoded, which must not be reported as an
- * `idle` graph. A missing store is a clean empty result; a store this build may
- * not read is an empty result with `blocked` set. `scanPersistedStates` never
- * throws.
+ * `idle` graph, and one whose run-CONTROL row cannot be read, which must not be
+ * reported as an unchecked one. A missing store is a clean empty result; a store
+ * this build may not read is an empty result with `blocked` set.
+ * `scanPersistedStates` never throws.
  *
  * @param storeDirectory - The directory holding
  *   `graph-acceptance-ledger.sqlite` (the root the run path opens).
@@ -139,6 +153,7 @@ export function scanPersistedStates(storeDirectory: string): PersistedStateScan 
       loaded: [],
       skipped: 0,
       skippedGraphs: [],
+      controls: NO_CONTROLS,
     };
   }
   if (loaded.kind !== "valid") {
@@ -149,17 +164,46 @@ export function scanPersistedStates(storeDirectory: string): PersistedStateScan 
       skipped: 0,
       skippedGraphs: [],
       blocked: describeStoreVerdict(loaded),
+      controls: NO_CONTROLS,
     };
   }
   const listing = listStoredEngineStates(storeDirectory);
+  // THE RUN-LEVEL CONTROL FACT IS READ FROM THE SAME STORE (P3 item 1), on the
+  // handle this scan borrowed, so a status render can say a run was STOPPED
+  // instead of rendering its recorded phase as if it were still moving. A
+  // control row this build cannot read is a SKIP, never an unchecked run: the
+  // graph keeps none of its position in `loaded` and is named in
+  // `skippedGraphs`, the same treatment a damaged run-state row gets.
+  const controls = new Map<string, RunControlRecord>();
+  const states: EngineState[] = [];
+  const skipped = [...listing.skipped];
+  try {
+    for (const state of listing.states) {
+      let control: RunControlRecord | undefined;
+      try {
+        control = loaded.value.readRunControl(state.graphId);
+      } catch {
+        skipped.push(state.graphId);
+        continue;
+      }
+      if (control !== undefined) controls.set(state.graphId, control);
+      states.push(state);
+    }
+  } finally {
+    // The scan BORROWED this read-only handle; `listStoredEngineStates` opened
+    // and closed its own. Returning the borrow keeps the process's shared
+    // read-only connection refcount balanced across scans.
+    loaded.value.close();
+  }
   return {
     storeDirectory,
     // Each stored definition is in exactly one bucket, so this is the store's
     // definition count (see listStoredEngineStates).
     count: listing.states.length + listing.skipped.length,
-    loaded: [...listing.states],
-    skipped: listing.skipped.length,
-    skippedGraphs: [...listing.skipped],
+    loaded: states,
+    skipped: skipped.length,
+    skippedGraphs: skipped.slice().sort(),
+    controls,
   };
 }
 

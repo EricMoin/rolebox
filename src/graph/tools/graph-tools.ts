@@ -70,6 +70,7 @@ import { readCredentialIsolationAdapter } from "../outcome/credential-isolation.
 import { createSubLogger } from "../../logger.ts";
 import { errorText } from "../../utils/error-text.ts";
 import type { GraphControlResult } from "../control/application.ts";
+import type { RunControlRecord } from "../ledger/types.ts";
 import {
   runGraphControlEntry,
   type GraphControlEntryArgs,
@@ -96,6 +97,8 @@ import {
   budgetSummary,
   buildNodeFilter,
   checkpointEntries,
+  controlLine,
+  controlMarker,
   crossSessionBudget,
   crossSessionViewRequested,
   flagData,
@@ -370,6 +373,13 @@ export interface GraphNodeSummary extends GraphFlagData {
   node_id: string;
   status: NodeStatus;
   agent: string;
+  /**
+   * The RUN's durable control fact when a trusted command stopped it (P3 item
+   * 1). Present only when the run carries one: a node whose recorded status is
+   * still `running` says so here, beside the stop that ended the run, instead
+   * of reading as work that is still moving.
+   */
+  control?: GraphControlSummary;
   needs_approval: boolean;
   loop_group: string | undefined;
   traversal_count: number;
@@ -400,9 +410,41 @@ export interface GraphStatusSnapshot extends GraphFlagData {
   graph_id: string;
   phase: string;
   nodes: GraphNodeSummary[];
+  /**
+   * The run's durable control fact when a trusted command STOPPED it (P3 item
+   * 1, plan §5 A09). Present ONLY when the run carries one, and additive: the
+   * `phase` key keeps the phase the store records, so a reader can tell a
+   * still-executing run from a stopped one without this surface rewriting a
+   * fact the store holds.
+   */
+  control?: GraphControlSummary;
   budget?: GraphBudgetSummary;
   loops?: GraphLoopSummary[];
   metrics?: string;
+}
+
+/** The run-level control fact, as the `graph_status` JSON contract carries it. */
+export interface GraphControlSummary {
+  command: string;
+  reason: string;
+  decided_at: number;
+  decided_by_session?: string;
+  decided_by_agent?: string;
+}
+
+/** Project one stored run-control record onto the JSON contract above. */
+function controlSummary(control: RunControlRecord): GraphControlSummary {
+  return {
+    command: control.command,
+    reason: control.reason,
+    decided_at: control.decidedAt,
+    ...(control.decidedBy === undefined
+      ? {}
+      : { decided_by_session: control.decidedBy.sessionId }),
+    ...(control.decidedBy?.agentId === undefined
+      ? {}
+      : { decided_by_agent: control.decidedBy.agentId }),
+  };
 }
 /**
  * `graph_status` flags in `.rolebox/design/tool-merge-map.md` §2.2 that have
@@ -876,7 +918,10 @@ export class GraphToolSet {
     }
     if (rows.length === 0) return persistedEmptyNote(view.scan);
     const lines = rows.map(
-      (row) => `  ${row.id}\t[phase: ${row.state.phase}]\t${row.state.nodes.size} nodes`,
+      (row) =>
+        `  ${row.id}\t[phase: ${row.state.phase}]${controlMarker(
+          view.scan.controls.get(row.id),
+        )}\t${row.state.nodes.size} nodes`,
     );
     if (unreadable.length > 0) lines.push(skippedGraphsNote(unreadable));
     return `Graphs (${rows.length}):\n${lines.join("\n")}`;
@@ -916,6 +961,20 @@ export class GraphToolSet {
     return scanPersistedStates(
       this.storeDirectory() ?? engineStateDir(this.deps.stateDir ?? process.cwd()),
     );
+  }
+
+  /**
+   * The durable control fact that stopped one graph's run, or `undefined`
+   * (P3 item 1).
+   *
+   * Read from the SAME store scan the status views already perform, so a status
+   * render can name the stop beside the recorded phase instead of presenting a
+   * stopped run as one that is still executing. A graph whose control row is
+   * unreadable is not in the scan's `loaded` set at all: it is refused by the
+   * scan's own skipped-graph note rather than rendered as an unchecked run.
+   */
+  private runControlOf(graphId: string): RunControlRecord | undefined {
+    return this.persistedScan().controls.get(graphId);
   }
 
   /** Declared states followed by persisted states, deduped by graphId (a
@@ -965,7 +1024,12 @@ export class GraphToolSet {
     const scan = this.persistedScan();
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
     if (states.length === 0) return this.emptyScopeNote(scan, scope);
-    const lines = states.map((s) => `  ${s.graphId}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`);
+    const lines = states.map(
+      (s) =>
+        `  ${s.graphId}\t[phase: ${s.phase}]${controlMarker(
+          scan.controls.get(s.graphId),
+        )}\t${s.nodes.size} nodes`,
+    );
     // Readable rows exist, but the store also holds definitions this build
     // cannot read: name them rather than dropping a graph the audit and the
     // boot sweep call blocked (A19).
@@ -1020,11 +1084,15 @@ export class GraphToolSet {
         JSON.stringify(
           {
             scope,
-            graphs: states.map((s) => ({
-              graph_id: s.graphId,
-              phase: s.phase,
-              node_count: s.nodes.size,
-            })),
+            graphs: states.map((s) => {
+              const control = scan.controls.get(s.graphId);
+              return {
+                graph_id: s.graphId,
+                phase: s.phase,
+                node_count: s.nodes.size,
+                ...(control === undefined ? {} : { control: controlSummary(control) }),
+              };
+            }),
             nodes: capped.map((r) => ({
               graph_id: r.graphId,
               node_id: r.node.nodeId,
@@ -1241,6 +1309,11 @@ export class GraphToolSet {
         args,
       );
     }
+    // THE DURABLE CONTROL FACT (P3 item 1, A09). A stopped run keeps its
+    // recorded phase — the store holds both facts — so the phase line carries
+    // the stop beside it and the detail line below names the command, the
+    // reason and the instant it was decided. Read once, used by every format.
+    const control = this.runControlOf(state.graphId);
     switch (args.format ?? "summary") {
       case "json": {
         const snapshot: GraphStatusSnapshot = {
@@ -1252,6 +1325,7 @@ export class GraphToolSet {
           // Conditional spreads: an unset flag leaves its key out entirely
           // instead of writing an explicit `undefined` that only
           // JSON.stringify happens to drop (Y27).
+          ...(control === undefined ? {} : { control: controlSummary(control) }),
           ...(args.include_budget ? { budget: budgetSummary(state) } : {}),
           ...(args.include_loops
             ? {
@@ -1273,14 +1347,14 @@ export class GraphToolSet {
       }
       case "tree":
         return this.appendFlagSections(
-          renderTree(state, nodeFilter, args.depth),
+          renderTree(state, nodeFilter, args.depth, control),
           state,
           args,
         );
       case "summary":
       default:
         return this.appendFlagSections(
-          this.renderSummary(state, args, nodeFilter),
+          this.renderSummary(state, args, nodeFilter, control),
           state,
           args,
         );
@@ -1330,6 +1404,7 @@ export class GraphToolSet {
     state: EngineState,
     args: GraphStatusArgs,
     nodeFilter?: Set<string>,
+    control?: RunControlRecord,
   ): string {
     const nodes = nodeFilter
       ? [...nodeFilter].map((id) => state.nodes.get(id)).filter(
@@ -1337,7 +1412,13 @@ export class GraphToolSet {
         )
       : [...state.nodes.values()];
     const lines: string[] = [];
-    lines.push(`Graph "${state.graphId}"  [phase: ${state.phase}]`);
+    lines.push(
+      `Graph "${state.graphId}"  [phase: ${state.phase}]${controlMarker(control)}`,
+    );
+    // THE STOP, SPELLED OUT (P3 item 1, A09): a stopped run renders the command,
+    // the caller's reason and the decided instant right under its header, so
+    // `executing` beside it can never be read as "still moving".
+    if (control !== undefined) lines.push(controlLine(control));
     lines.push("  NODE                  STATUS      AGENT");
     for (const n of limitNodes(nodes, args.limit)) {
       // Liveness (subtask 7 display): stall marker on the row ONLY for RUNNING
@@ -1381,6 +1462,11 @@ export class GraphToolSet {
     if (!node) {
       throw new Error(`graph_status: unknown node "${nodeId}" in graph "${state.graphId}".`);
     }
+    // THE RUN'S CONTROL FACT (P3 item 1, A09), read once for both formats: a
+    // node's own status is a recorded fact and is never rewritten, but a
+    // stopped run names the stop here so `running` is not read as "still
+    // moving".
+    const control = this.runControlOf(state.graphId);
     if (args.format === "json") {
       // JSON node view (monitor M8): serialize the shared nodeSummary — which
       // honors include_output by adding an `output` field with the node's
@@ -1390,12 +1476,14 @@ export class GraphToolSet {
       // JSON output so max_chars/offset/tail apply.
       const summary: GraphNodeSummary = {
         ...this.nodeSummary(state, node, args),
+        ...(control === undefined ? {} : { control: controlSummary(control) }),
         ...flagData(state, { ...args, node_id: nodeId }),
       };
       return paginate(JSON.stringify(summary, null, 2), args);
     }
     const lines: string[] = [];
     lines.push(`Node "${nodeId}"`);
+    if (control !== undefined) lines.push(controlLine(control));
     lines.push(`  status: ${node.status}`);
     lines.push(`  agent: ${node.agent}`);
     lines.push(`  needs_approval: ${node.needsApproval}`);

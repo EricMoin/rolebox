@@ -1354,6 +1354,10 @@ export async function apply(
         report.refused.length > 0 ||
         report.effectRefusals.length > 0 ||
         report.divergences.length > 0 ||
+        // A controlled run is reported in `resumed` too, but it is named here so
+        // the gate cannot depend on that staying true (P3 item 1).
+        report.controlled.length > 0 ||
+        report.unconfirmedExecutions.length > 0 ||
         report.cancellations.length > 0 ||
         report.cancelBlocked.length > 0
       ) {
@@ -1376,6 +1380,11 @@ export async function apply(
               "->" +
               divergence.host,
           ),
+          // WHAT A TRUSTED CONTROL COMMAND STOPPED (P3 item 1): `graph:command`
+          // for every run a failure / timeout / cancel ended. The values are
+          // computed by the sweep, and logging them here is what keeps a
+          // restart from presenting a stopped run as merely `resumed`.
+          controlled: report.controlled,
           // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
           // requested / unsupported / blocked, per attempt. Only `confirmed`
           // is the platform's own substantiation; everything else leaves the
@@ -1385,6 +1394,16 @@ export async function apply(
               entry.graphId + ":" + entry.attemptId + ":" + entry.state,
           ),
           cancelBlocked: report.cancelBlocked,
+          // THE EXTERNAL WORK A STOP LEFT UNCONFIRMED (P3 item 1): every
+          // `pending` / `creating` execution behind a controlled run, as
+          // `graph:attempt:state`. A `creating` row may name a task the
+          // platform really started, so it is REPORTED here rather than hidden;
+          // this runs AFTER the cancel deliveries above, so an execution the
+          // platform has since confirmed is no longer unconfirmed.
+          unconfirmedExecutions: report.unconfirmedExecutions.map(
+            (entry) =>
+              entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+          ),
         });
       }
       // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every

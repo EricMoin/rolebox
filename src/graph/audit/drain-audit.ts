@@ -96,7 +96,11 @@ import {
   type OutcomeStop,
 } from "../outcome/graph-state.ts";
 import { ledgerFilePath } from "../ledger/sqlite-ledger.ts";
-import type { EffectStatus, PendingEffectRecord } from "../ledger/types.ts";
+import type {
+  EffectStatus,
+  PendingEffectRecord,
+  RunControlRecord,
+} from "../ledger/types.ts";
 import { engineStateDir } from "../persistence/engine-persistence.ts";
 import {
   decodeStoredDefinition,
@@ -284,6 +288,24 @@ export interface DrainAuditStop {
   readonly summary: string;
 }
 
+/**
+ * The TRUSTED CONTROL FACT that stopped one run (P3 item 1, plan §5 A09).
+ *
+ * A controlled run stays `in-flight` for the verdict below — the stop leaves
+ * unsettled effects, and possibly an external task nobody confirmed, behind —
+ * but the entry NAMES the stop, its reason and the instant it was decided, so
+ * "in flight" is never read as "still advancing": every write refuses and
+ * nothing moves the record again without a new command.
+ */
+export interface DrainAuditControl {
+  readonly command: string;
+  readonly reason: string;
+  /** Epoch milliseconds the stopping command was decided at. */
+  readonly decidedAt: number;
+  readonly decidedBySession?: string;
+  readonly decidedByAgent?: string;
+}
+
 /** One graph's audited record. */
 export interface DrainAuditEntry {
   /** The graph id this entry was read from — the store's own key. */
@@ -300,6 +322,14 @@ export interface DrainAuditEntry {
   readonly unsettledEffects?: readonly DrainAuditEffect[];
   /** Outcome only: present exactly when the run ended on a declared stop. */
   readonly stop?: DrainAuditStop;
+  /**
+   * Outcome only: the durable control fact when a trusted command STOPPED the
+   * run (P3 item 1). Read from the same store as the rest of the entry, and
+   * present only when the run carries one — a control row this build cannot
+   * read is a `state-unreadable` blocker, never an entry that silently looks
+   * uncontrolled.
+   */
+  readonly control?: DrainAuditControl;
   /**
    * Outcome only: whether the store holds a run-state row for this graph.
    * `false` means the first execution is still owed, not that the state
@@ -467,6 +497,23 @@ function toAuditStop(stop: OutcomeStop): DrainAuditStop {
   });
 }
 
+/** Project one stored run-control record into the report's own shape. */
+function toAuditControl(control: RunControlRecord): DrainAuditControl {
+  return Object.freeze({
+    command: control.command,
+    reason: control.reason,
+    decidedAt: control.decidedAt,
+    ...(control.decidedBy === undefined
+      ? {}
+      : {
+          decidedBySession: control.decidedBy.sessionId,
+          ...(control.decidedBy.agentId === undefined
+            ? {}
+            : { decidedByAgent: control.decidedBy.agentId }),
+        }),
+  });
+}
+
 // ── Entry classification ────────────────────────────────────────────────────
 
 /**
@@ -488,6 +535,8 @@ interface EntryBody {
   readonly armed?: readonly DrainAuditArmedNode[];
   readonly unsettledEffects?: readonly DrainAuditEffect[];
   readonly stop?: DrainAuditStop;
+  /** The run's durable control fact, when the store holds a readable one. */
+  readonly control?: DrainAuditControl;
   readonly hasState?: boolean;
   /** The record's own last state-update timestamp, when it holds one. */
   readonly lastUpdatedAt?: number;
@@ -584,6 +633,27 @@ function classifyOutcome(
 ): EntryBody {
   const graphId = declared.graphId;
   const planRevision = declared.plan.planRevision;
+
+  // THE RUN'S CONTROL FACT FIRST (P3 item 1). The store's own row gate can
+  // refuse a control row, and a row this build cannot read is NOT "no stop" —
+  // the entry is blocked rather than reported as an advancing one.
+  let control: DrainAuditControl | undefined;
+  try {
+    const written = store.readRunControl(graphId);
+    control = written === undefined ? undefined : toAuditControl(written);
+  } catch (error) {
+    const detail =
+      "graph " + JSON.stringify(graphId) +
+      " has a run-control row this build could not read (" + errorText(error) + ")";
+    return {
+      protocol: "outcome",
+      classification: "blocked",
+      planRevision,
+      blockerCodes: ["state-unreadable"],
+      blockerDetails: { "state-unreadable": detail },
+    };
+  }
+
   const effects = readUnsettledEffects(store, graphId);
   if (!effects.ok) {
     const detail =
@@ -623,6 +693,7 @@ function classifyOutcome(
       protocol: "outcome",
       classification: "in-flight",
       planRevision,
+      ...(control === undefined ? {} : { control }),
       hasState: false,
       armed: Object.freeze([]),
       unsettledEffects: effects.effects,
@@ -663,6 +734,10 @@ function classifyOutcome(
     classification: quiescent ? "terminal" : "in-flight",
     phase: outcomeState.phase,
     planRevision: outcomeState.planRevision,
+    // THE STOP IS NAMED (P3 item 1, A09): a controlled run whose phase still
+    // reads `executing` is in flight only because unsettled work remains — it
+    // is not advancing, and the command, reason and decided instant say so.
+    ...(control === undefined ? {} : { control }),
     hasState: true,
     armed: Object.freeze(armed),
     unsettledEffects: effects.effects,

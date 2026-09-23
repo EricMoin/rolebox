@@ -39,6 +39,7 @@ import type {
   SignalLedgerEvent,
 } from "../../types.engine-v2.ts";
 import type { GraphDeclaration, LoopMode } from "../../types.graph-v2.ts";
+import type { RunControlRecord } from "../ledger/types.ts";
 import { createSubLogger } from "../../logger.ts";
 import { getSignal, SIGNAL_KEY } from "./signal-payload.ts";
 import type { PersistedStateScan } from "./persisted-state.ts";
@@ -519,6 +520,33 @@ export function flagData(state: EngineState, args: GraphStatusArgs): GraphFlagDa
   };
 }
 
+// ── The durable control fact (P3 item 1, plan §5 A09) ──────────────────────
+
+/**
+ * The compact marker appended to a rendered graph phase when a trusted control
+ * command STOPPED the run: `[control: <command>]`, or the empty string.
+ *
+ * WHY THE PHASE ALONE IS NOT ENOUGH. A control fact is durable and every write
+ * refuses, but it does not rewrite the run's recorded phase — so a stopped run
+ * whose last recorded snapshot still says `executing` would otherwise render
+ * as permanently executing. This marker is what makes the stop visible beside
+ * the recorded phase instead of replacing a fact the store still holds.
+ */
+export function controlMarker(control: RunControlRecord | undefined): string {
+  return control === undefined ? "" : `  [control: ${control.command}]`;
+}
+
+/**
+ * The control detail line rendered UNDER a graph's header: the command, the
+ * operator-supplied reason and the instant the trusted caller decided it.
+ */
+export function controlLine(control: RunControlRecord): string {
+  return (
+    `  Control: ${control.command} — ${control.reason} ` +
+    `(decided ${new Date(control.decidedAt).toISOString()})`
+  );
+}
+
 // ── Text renderers / summaries ──────────────────────────────────────────────
 
 /**
@@ -526,11 +554,17 @@ export function flagData(state: EngineState, args: GraphStatusArgs): GraphFlagDa
  * `nodeFilter` and pruned at `depth` levels (0 = roots only; `undefined` =
  * full depth, byte-identical to legacy output). Children come from the
  * declaration's edges; loop back-edges are annotated and never recursed into.
+ *
+ * `control` is the run's durable control fact when a trusted command stopped it
+ * (P3 item 1): the phase line then carries {@link controlMarker} and
+ * {@link controlLine} follows it, so a stopped run is never rendered as one
+ * that is merely still executing.
  */
 export function renderTree(
   state: EngineState,
   nodeFilter?: Set<string>,
   depth?: number,
+  control?: RunControlRecord,
 ): string {
   // Visible node ids: the filter set, or every node when no filter is active.
   const visible = nodeFilter
@@ -555,7 +589,8 @@ export function renderTree(
   // nodes are never marked visited and are simply absent from the output.
   const maxDepth = depth;
   const lines: string[] = [];
-  lines.push(`Graph "${state.graphId}" [${state.phase}]`);
+  lines.push(`Graph "${state.graphId}" [${state.phase}]${controlMarker(control)}`);
+  if (control !== undefined) lines.push(controlLine(control));
   const visited = new Set<string>();
   const render = (id: string, prefix: string, d: number): void => {
     if (maxDepth !== undefined && d > maxDepth) return;

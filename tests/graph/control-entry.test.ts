@@ -1571,6 +1571,80 @@ describe("graph_control — a failure/timeout survives the recording PROCESS", (
   }
 });
 
+// ── The stop is visible to the readers ──────────────────────────────────────
+
+describe("graph_control — the durable stop reaches the status and audit readers", () => {
+  it("names the command, the reason and the decided instant instead of a permanently executing run", async () => {
+    const fixture = await openControlFixture(CHAIN);
+    try {
+      const reason = "the worker process died";
+      const answer = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "failure",
+          node_id: "work",
+          reason,
+        },
+        declarerOf(fixture),
+      );
+      expect(answer.kind).toBe("applied");
+      const decidedAt = answer.runControl?.decidedAt;
+      expect(typeof decidedAt).toBe("number");
+
+      // THE RECORDED PHASE IS NOT REWRITTEN: the stop is a SEPARATE durable
+      // fact, so the status face names it BESIDE `executing` rather than
+      // inventing a phase the store does not hold.
+      expect(readState(fixture).phase).toBe("executing");
+
+      const summary = fixture.toolset.graph_status({ graph_id: fixture.graphId });
+      expect(summary).toContain("[phase: executing]");
+      expect(summary).toContain("[control: failure]");
+      expect(summary).toContain(reason);
+      expect(summary).toContain(new Date(decidedAt ?? 0).toISOString());
+
+      const snapshot = JSON.parse(
+        fixture.toolset.graph_status({ graph_id: fixture.graphId, format: "json" }),
+      ) as {
+        readonly phase: string;
+        readonly control?: {
+          readonly command: string;
+          readonly reason: string;
+          readonly decided_at: number;
+        };
+      };
+      expect(snapshot.phase).toBe("executing");
+      expect(snapshot.control?.command).toBe("failure");
+      expect(snapshot.control?.reason).toBe(reason);
+      expect(snapshot.control?.decided_at).toBe(decidedAt);
+
+      // The node view says the run is stopped too, so a node still recorded
+      // `dispatched` is not read as work that is still moving.
+      const nodeView = fixture.toolset.graph_status({
+        graph_id: fixture.graphId,
+        node_id: "work",
+      });
+      expect(nodeView).toContain("status: running");
+      expect(nodeView).toContain("Control: failure");
+      expect(nodeView).toContain(reason);
+
+      const audit = await fixture.toolset.graph_audit();
+      const entry = audit.entries.find(
+        (candidate) => candidate.graphId === fixture.graphId,
+      );
+      expect(entry?.classification).toBe("in-flight");
+      expect(entry?.phase).toBe("executing");
+      expect(entry?.control?.command).toBe("failure");
+      expect(entry?.control?.reason).toBe(reason);
+      expect(entry?.control?.decidedAt).toBe(decidedAt);
+      expect(entry?.control?.decidedBySession).toBe(declarerOf(fixture));
+      expect(entry?.control?.decidedByAgent).toBe("agent.declarer");
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
 /** Call the SHIPPED `graph_control` tool and parse its JSON answer. */
 async function control(
   fixture: ControlFixture,

@@ -327,8 +327,12 @@ export interface RunControlWrite {
  *   a settled attempt is never re-labelled by a control command. This check is
  *   part of the INSERT itself (a conditional `INSERT ... WHERE NOT EXISTS`), so
  *   it decides against the committed store rather than against a value read
- *   earlier in the transaction: whichever of an acceptance and a control
- *   decision commits FIRST is the fact that stands, at any concurrency.
+ *   earlier in the transaction. The acceptance side carries the SYMMETRIC rule
+ *   in the same shape: the FIRST statement of its batch write is a receipt
+ *   INSERT conditioned on the run having no control fact, so NEITHER side
+ *   decides from a read that precedes its write. Whichever of an acceptance and
+ *   a control decision commits FIRST is therefore the fact that stands, at any
+ *   concurrency, and the loser writes NOTHING.
  */
 export type RunControlWriteResult =
   | {
@@ -454,10 +458,10 @@ export interface AcceptanceBatch {
  *   a controlled run commits no acceptance at all — no receipt, no accepted
  *   event, no state advance and no successor effect — and the fact that stopped
  *   the run is returned instead. It is the STRUCTURAL half of the rule the run
- *   path applies by name (`control-stopped`) before it settles; the check is
- *   evaluated inside the committing transaction against the COMMITTED store, so
- *   whichever of control and acceptance COMMITS first is the fact that stands
- *   and the loser writes nothing.
+ *   path applies by name (`control-stopped`) before it settles: the check is the
+ *   FIRST statement of the batch write, inside the committing transaction and
+ *   against the COMMITTED store, so whichever of control and acceptance COMMITS
+ *   first is the fact that stands and the loser writes nothing.
  */
 export type CommitResult =
   | { readonly kind: "committed"; readonly receipt: ReceiptRecord }

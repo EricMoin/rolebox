@@ -1129,11 +1129,14 @@ describe("trusted control across two real processes", () => {
       const control = reports.find((report) => report.role === "control");
 
       // THE INVARIANT, read back from the COMMITTED store rather than assumed:
-      // exactly ONE of the two terminal facts exists for this attempt. The
-      // control write refuses an attempt that already settled (`settled`,
-      // nothing written) and the ACCEPTANCE refuses a run that already carries
-      // a control fact (`controlled`, nothing written), so the double fact
-      // this case used to accept is unrepresentable at any interleaving.
+      // exactly ONE of the two terminal facts exists for this attempt. Each
+      // side decides against the COMMITTED store in the FIRST statement of its
+      // own write: the control decision INSERT is conditioned on no accepted
+      // event existing for the attempt (`settled`, nothing written), and the
+      // acceptance receipt INSERT is conditioned on the run carrying no control
+      // fact (`controlled`, nothing written). Whichever of the two commits
+      // first is the fact that stands, so the double fact this case used to
+      // accept is unrepresentable through those two writes at any interleaving.
       const settled = fx.store
         .acceptedEvents(GRAPH)
         .some((event) => event.attemptId === attemptId);

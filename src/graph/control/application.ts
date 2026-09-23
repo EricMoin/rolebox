@@ -85,15 +85,18 @@
  * 3. AGAINST ACCEPTANCE, IN BOTH DIRECTIONS. This service reads the attempt's
  *    accepted events and writes its decision in ONE store transaction, so an
  *    attempt that settled is refused (`attempt-already-settled`). The inverse
- *    rule is enforced on the acceptance side and does NOT rest on a value read
- *    before it: `commitAccepted` refuses a batch whose run already carries a
- *    control fact (verdict `controlled`, nothing written), and the run path
- *    refuses the same fact by name (`control-stopped`) both before it validates
- *    a submission and again INSIDE its acceptance transaction — so a command
- *    that commits while a submission is between those two checks still wins.
- *    Whichever COMMITS first is therefore the fact that stands and the loser
- *    writes NOTHING: one attempt can never carry both an accepted event and a
- *    control decision.
+ *    rule is enforced on the acceptance side in the SAME shape and does NOT rest
+ *    on a value read before it: the FIRST statement of `commitAccepted`'s batch
+ *    write is a receipt INSERT conditioned on the run having no control fact
+ *    (`WHERE NOT EXISTS`), so a batch whose run carries one is refused
+ *    (verdict `controlled`, nothing written) against the committed store — the
+ *    run path additionally refuses the same fact by name (`control-stopped`)
+ *    both before it validates a submission and again INSIDE its acceptance
+ *    transaction, so a command that commits while a submission is between those
+ *    two checks still wins. Whichever COMMITS first is therefore the fact that
+ *    stands and the loser writes NOTHING: one attempt can never carry both an
+ *    accepted event and a control decision — at the store API, not only on the
+ *    shipped run path.
  *
  * NEVER HIDE AN UNCONFIRMED EXTERNAL TASK. Every answer carries the run's
  * unsettled effects and every execution row of those attempts the host has NOT

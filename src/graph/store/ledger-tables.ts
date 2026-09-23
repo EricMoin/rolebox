@@ -483,6 +483,24 @@ function assertBatchShape(batch: GraphAcceptanceBatch): void {
   }
 }
 
+/**
+ * The `controlled` verdict for one run-control fact.
+ *
+ * ONE owner of the wording, so the fast-path read and the atomic guard's
+ * post-refusal classification refuse a batch in the same words and a caller
+ * cannot tell which of the two answered.
+ */
+function controlledVerdict(control: RunControlRecord): CommitResult {
+  return {
+    kind: "controlled",
+    control,
+    reason:
+      `run ${control.runId} of graph ${control.graphId} was stopped by the trusted control command ` +
+      `${control.command} (${control.reason}) before this submission committed — a controlled run ` +
+      "accepts nothing, so no receipt, accepted event, state advance or successor effect was written",
+  };
+}
+
 // ── The tables ──────────────────────────────────────────────────────────────
 
 /**
@@ -559,30 +577,35 @@ export class LedgerTables {
     }
 
     // CONTROL IS NOT OUTCOME (P3 item 1, plan §3.4). An acceptance for a run a
-    // trusted command STOPPED commits nothing: the check runs on this
-    // connection, inside the caller's transaction, so it reads the control fact
-    // as it is at COMMIT time — a submission whose gates were evaluated before
-    // the command landed cannot write a receipt, an accepted event, a state
-    // advance or a successor effect. The rule is READ-BEFORE-WRITE on purpose:
-    // nothing is written, so there is no partial batch to un-write, and it is
-    // the structural twin of the control write's conditional
-    // `INSERT ... WHERE NOT EXISTS (accepted event)`. The run path refuses the
-    // same fact by name (`control-stopped`) before it reaches this point, so
-    // the two boundaries can never disagree about what was written.
+    // trusted command STOPPED commits nothing. This read is the FAST PATH: a
+    // run already known to carry a control fact refuses the batch without
+    // opening a write transaction, and a control fact is never cleared, so its
+    // verdict cannot go stale. It is NOT the guarantee — the authoritative
+    // check is the FIRST STATEMENT of the batch write below, inside the same
+    // atomic boundary as the rows it guards (see {@link writeBatch}).
     const control = this.readRunControl(receipt.graphId);
-    if (control !== undefined) {
-      return {
-        kind: "controlled",
-        control,
-        reason:
-          `run ${control.runId} of graph ${control.graphId} was stopped by the trusted control command ` +
-          `${control.command} (${control.reason}) before this submission committed — a controlled run ` +
-          "accepts nothing, so no receipt, accepted event, state advance or successor effect was written",
-      };
-    }
+    if (control !== undefined) return controlledVerdict(control);
 
     const write = (): CommitResult => {
-      this.writeBatch(batch);
+      if (!this.writeBatch(batch)) {
+        // THE GUARD REFUSED THE BATCH: the run carried no control fact when the
+        // fast path read it, and the guarded write found one — a command
+        // committed in that window. The verdict is classified from the
+        // COMMITTED store (the fact this transaction can see), never assumed
+        // from the refusal, and NOTHING of the batch was written.
+        const raced = this.readRunControl(receipt.graphId);
+        if (raced === undefined) {
+          throw new GraphStoreWriteError(
+            "invalid-record",
+            "acceptance-ledger: the batch write for graph " +
+              JSON.stringify(receipt.graphId) +
+              " was refused by the run-control guard, but the store holds no control fact " +
+              "for that graph — the guarded write and the store disagree, so the batch was " +
+              "rolled back and no verdict is reported",
+          );
+        }
+        return controlledVerdict(raced);
+      }
       return { kind: "committed", receipt };
     };
     // A commit issued inside a caller's transaction joins it: opening a second
@@ -593,20 +616,44 @@ export class LedgerTables {
 
   /**
    * Write the receipt, the accepted event, the accepted result and every
-   * pending effect.
+   * pending effect — and answer whether the batch actually landed.
    *
+   * THE RUN-CONTROL GUARD IS THE FIRST STATEMENT (P3 item 1, plan §3.4). The
+   * receipt INSERT carries its own
+   * `WHERE NOT EXISTS (graph_runs.control_command IS NOT NULL)`, so it decides
+   * against the COMMITTED STORE at the moment of the write rather than against
+   * the value the fast path read earlier — the structural twin of the control
+   * write's conditional `INSERT ... WHERE NOT EXISTS (accepted event)`.
+   * Whichever of an acceptance and a control command COMMITS first is therefore
+   * the fact that stands, and the loser writes NOTHING; a batch that carries a
+   * receipt is never one whose run is stopped.
+   *
+   * BEING FIRST IS ALSO WHAT MAKES THE RACE A WAIT. A write statement takes
+   * SQLite's RESERVED lock immediately, so a racing control writer WAITS on
+   * `busy_timeout` instead of failing the shared-to-reserved lock PROMOTION a
+   * read-then-write shape produces (the "database is locked" failure P3 solved
+   * for the control path). The guard is never evaluated by a separate SELECT:
+   * a read here would take the lock first and reintroduce exactly that failure.
+   *
+   * `false` means the guard matched no row and NOTHING was written — not a
+   * partial batch, because the receipt is the batch's first row. The caller
+   * then classifies the refusal from the committed store; it is never assumed.
    * Called ONLY from inside a transaction. The catch turns a driver-level
    * rejection into the typed error the caller sees, and — because the throw
    * crosses the driver's transaction boundary — into the rollback of every row
    * this batch already wrote.
    */
-  private writeBatch(batch: GraphAcceptanceBatch): void {
+  private writeBatch(batch: GraphAcceptanceBatch): boolean {
     try {
       const receipt = batch.receipt;
       this.db.run(
         `INSERT INTO ${GRAPH_STORE_TABLES.receipts}
            (graph_id, attempt_id, submission_id, plan_revision, proposal_digest, decision, committed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.runs}
+           WHERE graph_id = ? AND control_command IS NOT NULL
+         )`,
         receipt.graphId,
         receipt.attemptId,
         receipt.submissionId,
@@ -614,7 +661,12 @@ export class LedgerTables {
         receipt.proposalDigest,
         receipt.decision,
         receipt.committedAt,
+        receipt.graphId,
       );
+      // A conditional INSERT that matched nothing changed no row. A PRIMARY KEY
+      // violation is NOT this case: the guard passing means the row was
+      // selected, and a duplicate key throws and rolls the batch back instead.
+      if (this.changes() === 0) return false;
       const event = batch.acceptedEvent;
       if (event !== undefined) {
         this.db.run(
@@ -647,6 +699,7 @@ export class LedgerTables {
           effect.status,
         );
       }
+      return true;
     } catch (error) {
       if (error instanceof GraphStoreWriteError) throw error;
       throw new GraphStoreWriteError(
@@ -654,6 +707,31 @@ export class LedgerTables {
         `acceptance-ledger: the store rejected a row of the batch for graph ${batch.receipt.graphId} (${errorText(error)}) — the transaction rolled back, so nothing from this batch was committed`,
       );
     }
+  }
+
+  /**
+   * How many rows the statement just executed on this connection changed.
+   *
+   * Read from the connection itself (`SELECT changes()`), exactly as the store's
+   * own conditional writes do, so a guarded INSERT that matched no row is
+   * distinguishable from one that landed. An answer that is not a number is
+   * REFUSED rather than defaulted to 0: 0 means "the guard refused the batch",
+   * and inventing that verdict from an unreadable counter would report a
+   * controlled run where the batch simply did not commit.
+   */
+  private changes(): number {
+    const row = this.db.query("SELECT changes() AS changed").get();
+    const value =
+      typeof row === "object" && row !== null && !Array.isArray(row)
+        ? (row as Record<string, unknown>)["changed"]
+        : undefined;
+    if (typeof value !== "number") {
+      throw new GraphStoreWriteError(
+        "invalid-record",
+        "acceptance-ledger: the store did not answer how many rows the guarded batch write changed, so whether the batch landed cannot be established and no verdict is reported",
+      );
+    }
+    return value;
   }
 
   // ── Graph state ───────────────────────────────────────────────────────────
