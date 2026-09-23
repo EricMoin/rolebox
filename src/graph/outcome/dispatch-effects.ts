@@ -92,6 +92,8 @@
  * without a cycle.
  */
 
+import type { PendingEffectRecord } from "../ledger/types.ts";
+
 // ── The dispatch request ────────────────────────────────────────────────────
 
 /**
@@ -366,4 +368,67 @@ export function dispatchEffectKeyOf(
  */
 export function dispatchIdempotencyKeyOf(effect: OutcomeDispatchEffectKey): string {
   return effect.graphId + "/" + effect.effectId;
+}
+
+/**
+ * The unsettled effects that make RE-EXECUTING a run unsafe (P3 item 2).
+ *
+ * §4: "明确下游失效范围，不能把已完成外部副作用自动重跑." A run may be replaced by a new
+ * run only when no external side effect of it can still be live:
+ *
+ * - an effect a `done` CANCEL covers is accounted for — the platform confirmed
+ *   the execution was stopped — so it does not block;
+ * - an attempt the run itself SUPERSEDED (a node-scoped retry replaced it) does
+ *   not block: the trusted retry already decided that this work is redone, and
+ *   its execution stays visible as an unsettled effect;
+ * - an attempt the run records as SETTLED does not block: the settlement proves
+ *   the execution ran and produced its accepted outcome;
+ * - everything else does: the attempt is still the node's in-flight attempt and
+ *   nothing proves the external execution is over.
+ *
+ * `attempts` is what the caller could establish about the run's state. Passing
+ * `undefined` — a snapshot that is not this plan's state — makes the rule
+ * CONSERVATIVE: without the node entries the last two exemptions cannot be
+ * established, so an unsettled dispatch blocks unless a confirmed cancellation
+ * covers it.
+ *
+ * PURE and TOTAL: it decides from the values it is given and never reads a
+ * store, so the control service (deciding whether to record the order) and the
+ * run path (deciding whether to honour one) apply the SAME rule instead of two
+ * that could drift.
+ */
+export function blockingReexecutionEffectsOf(
+  effects: readonly PendingEffectRecord[],
+  facts: {
+    /**
+     * The attempts whose cancellation the PLATFORM CONFIRMED. This is the one fact
+     * that clears an unsettled dispatch whose execution the run decided to abandon:
+     * the platform's own confirmation is what says the external task is over. It is
+     * passed in rather than derived from \`effects\`, because a confirmed cancellation
+     * is a TERMINAL cancel effect and therefore not in the unsettled set at all.
+     */
+    readonly cancelled: ReadonlySet<string>;
+    /**
+     * The attempts the run records as in flight. OMITTED means the run's state could
+     * not be verified against the executing plan, which makes the rule CONSERVATIVE:
+     * an unsettled dispatch then blocks unless its cancellation was confirmed.
+     */
+    readonly inFlight?: ReadonlySet<string>;
+    /** The attempts the run records as settled, when the state could be verified. */
+    readonly settled?: ReadonlySet<string>;
+  },
+): readonly PendingEffectRecord[] {
+  const blocking: PendingEffectRecord[] = [];
+  for (const effect of effects) {
+    if (effect.kind !== "dispatch") continue;
+    if (facts.cancelled.has(effect.attemptId)) continue;
+    if (facts.inFlight === undefined || facts.settled === undefined) {
+      blocking.push(effect);
+      continue;
+    }
+    if (facts.settled.has(effect.attemptId)) continue;
+    if (!facts.inFlight.has(effect.attemptId)) continue;
+    blocking.push(effect);
+  }
+  return Object.freeze(blocking);
 }

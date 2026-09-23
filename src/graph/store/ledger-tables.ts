@@ -40,6 +40,7 @@ import { errorText } from "../../utils/error-text.ts";
 import {
   type AcceptedEventRecord,
   type CommitResult,
+  type ControlDecisionRecord,
   type EffectStatus,
   type EffectTransition,
   type GraphStateRecord,
@@ -225,8 +226,13 @@ function toGraphState(
   path: string,
 ): GraphStateRecord {
   const table = GRAPH_STORE_TABLES.graphState;
+  const runId = readText(row, "run_id", path, table);
   return {
     graphId: readText(row, "graph_id", path, table),
+    // The reserved id of a graph that never minted one is reported as ABSENT, not
+    // as a run identity: the record model says "no run identity yet", and a reader
+    // that received the reserved string could mistake it for a run it can address.
+    ...(runId === UNMINTED_RUN_ID ? {} : { runId }),
     planRevision: readText(row, "plan_revision", path, table),
     body: readJsonBody(row, "body", path, table),
     updatedAt: readEpoch(row, "updated_at", path, table),
@@ -238,8 +244,10 @@ function toPendingEffect(
   path: string,
 ): PendingEffectRecord {
   const table = GRAPH_STORE_TABLES.pendingEffects;
+  const runId = readText(row, "run_id", path, table);
   return {
     graphId: readText(row, "graph_id", path, table),
+    ...(runId === UNMINTED_RUN_ID ? {} : { runId }),
     effectId: readText(row, "effect_id", path, table),
     attemptId: readText(row, "attempt_id", path, table),
     kind: readText(row, "kind", path, table),
@@ -501,6 +509,38 @@ function controlledVerdict(control: RunControlRecord): CommitResult {
   };
 }
 
+/**
+ * The `superseded` verdict for one attempt a trusted retry replaced.
+ *
+ * ONE owner of the wording, exactly like {@link controlledVerdict}, so the fast
+ * path and the guarded write refuse a batch in the same words.
+ */
+function supersededVerdict(decision: ControlDecisionRecord): CommitResult {
+  return {
+    kind: "superseded",
+    decision,
+    reason:
+      `attempt ${decision.attemptId} of node ${decision.nodeId} in graph ${decision.graphId} was ` +
+      `SUPERSEDED by the trusted retry decided at ${String(decision.decidedAt)} (${decision.reason}) ` +
+      "before this submission committed — a superseded attempt accepts nothing, so no receipt, " +
+      "accepted event, state advance or successor effect was written; its successor carries the " +
+      "node forward",
+  };
+}
+
+/**
+ * The run id a row is filed under when the graph holds NO run identity.
+ *
+ * The run surface is OPTIONAL on this port (the acceptance core is usable
+ * without it), so a substrate that never minted a run — a focused test double, a
+ * ledger used for acceptance alone — still writes its state and effects. The id
+ * is RESERVED and can never be minted by a run: `readRun`/\`readRunOf\` are
+ * keyed on the run table, so this value addresses the graph's one implicit run
+ * and nothing else. A graph that DOES have a run identity never sees it: every
+ * write is then resolved to the current run by {@link LedgerTables.writeRunIdOf}.
+ */
+const UNMINTED_RUN_ID = "run:unminted";
+
 // ── The tables ──────────────────────────────────────────────────────────────
 
 /**
@@ -521,17 +561,83 @@ export class LedgerTables {
    * needs answered inside the acceptance transaction (P3 item 1).
    */
   private readonly readRunControl: (graphId: string) => RunControlRecord | undefined;
+  /**
+   * The graph's CURRENT run id, read through the store that owns the run
+   * tables. Every effect and state row is filed under it (P3 item 2), and the
+   * resolution happens inside the WRITING transaction, so a row can never be
+   * committed without the run it belongs to.
+   */
+  private readonly readCurrentRunId: (graphId: string) => string | undefined;
+  /**
+   * The `retry` decision that SUPERSEDED one attempt, if any (P3 item 2), read
+   * through the store that owns the control table for the same reason: the
+   * acceptance core needs the fact inside the transaction that refuses the
+   * batch, and the SQL of `graph_control_decisions` keeps ONE owner.
+   */
+  private readonly readSupersedingRetry: (
+    graphId: string,
+    attemptId: string,
+  ) => ControlDecisionRecord | undefined;
 
   constructor(
     db: DatabaseDriver,
     filePath: string,
     join: <R>(work: () => R) => R,
     readRunControl: (graphId: string) => RunControlRecord | undefined,
+    readCurrentRunId: (graphId: string) => string | undefined,
+    readSupersedingRetry: (
+      graphId: string,
+      attemptId: string,
+    ) => ControlDecisionRecord | undefined,
   ) {
     this.db = db;
     this.filePath = filePath;
     this.join = join;
     this.readRunControl = readRunControl;
+    this.readCurrentRunId = readCurrentRunId;
+    this.readSupersedingRetry = readSupersedingRetry;
+  }
+
+  /**
+   * The run one effect or state row is filed under: the record's own `runId`
+   * when it carries one, otherwise the graph's CURRENT run — and a graph with no
+   * run identity, or a record aimed at a run that is no longer current, is
+   * REFUSED by name.
+   *
+   * WHY REFUSING IS THE ONLY HONEST ANSWER. A run-scoped store exists so a
+   * superseded run's rows stay exactly as they were: writing a state or an
+   * effect against a run the graph no longer addresses would either create a row
+   * under an id nobody can reach, or overwrite the position of a run whose
+   * receipts are still the authority for what it accepted. A row with no run at
+   * all is not "unscoped", it is unaddressable — and the run identity is minted
+   * inside the same transaction that writes the first of these rows, so a
+   * legitimate writer always has one.
+   */
+  private writeRunIdOf(graphId: string, explicit: string | undefined): string {
+    const current = this.readCurrentRunId(graphId);
+    if (current === undefined) {
+      // NO RUN IDENTITY YET. The run surface is OPTIONAL on this port — the
+      // acceptance core is usable without it — so a substrate that never minted a
+      // run still writes its rows, under the record's own run when it names one
+      // and under the reserved {@link UNMINTED_RUN_ID} otherwise. No reader ever
+      // treats the reserved value as a run: `readRunOf` answers `undefined` for it,
+      // and the graph-only reads answer the graph's only (implicit) run.
+      return explicit ?? UNMINTED_RUN_ID;
+    }
+    if (explicit !== undefined && explicit !== current) {
+      throw new GraphStoreWriteError(
+        "invalid-record",
+        "acceptance-ledger: run " +
+          JSON.stringify(explicit) +
+          " of graph " +
+          JSON.stringify(graphId) +
+          " is not the graph's CURRENT run (" +
+          JSON.stringify(current) +
+          ") — a superseded run's state and effects are immutable, so the write was refused " +
+          "and nothing was written",
+      );
+    }
+    return current;
   }
 
   // ── Commit ────────────────────────────────────────────────────────────────
@@ -585,26 +691,33 @@ export class LedgerTables {
     // atomic boundary as the rows it guards (see {@link writeBatch}).
     const control = this.readRunControl(receipt.graphId);
     if (control !== undefined) return controlledVerdict(control);
+    // A SUPERSEDED ATTEMPT ACCEPTS NOTHING (P3 item 2). Same shape as the
+    // control fast path: the fact is never cleared, so a decision read here
+    // cannot go stale, and the authoritative check is the second `WHERE NOT
+    // EXISTS` of the batch write below.
+    const superseded = this.readSupersedingRetry(receipt.graphId, receipt.attemptId);
+    if (superseded !== undefined) return supersededVerdict(superseded);
 
     const write = (): CommitResult => {
       if (!this.writeBatch(batch)) {
-        // THE GUARD REFUSED THE BATCH: the run carried no control fact when the
-        // fast path read it, and the guarded write found one — a command
-        // committed in that window. The verdict is classified from the
-        // COMMITTED store (the fact this transaction can see), never assumed
-        // from the refusal, and NOTHING of the batch was written.
+        // THE GUARD REFUSED THE BATCH: the run carried no control fact and the
+        // attempt carried no superseding retry when the fast path read them, and
+        // the guarded write found one — a command committed in that window. The
+        // verdict is classified from the COMMITTED store (the facts this
+        // transaction can see), never assumed from the refusal, and NOTHING of
+        // the batch was written.
         const raced = this.readRunControl(receipt.graphId);
-        if (raced === undefined) {
-          throw new GraphStoreWriteError(
-            "invalid-record",
-            "acceptance-ledger: the batch write for graph " +
-              JSON.stringify(receipt.graphId) +
-              " was refused by the run-control guard, but the store holds no control fact " +
-              "for that graph — the guarded write and the store disagree, so the batch was " +
-              "rolled back and no verdict is reported",
-          );
-        }
-        return controlledVerdict(raced);
+        if (raced !== undefined) return controlledVerdict(raced);
+        const retried = this.readSupersedingRetry(receipt.graphId, receipt.attemptId);
+        if (retried !== undefined) return supersededVerdict(retried);
+        throw new GraphStoreWriteError(
+          "invalid-record",
+          "acceptance-ledger: the batch write for graph " +
+            JSON.stringify(receipt.graphId) +
+            " was refused by the run-control or supersession guard, but the store holds " +
+            "neither fact for that graph and attempt — the guarded write and the store " +
+            "disagree, so the batch was rolled back and no verdict is reported",
+        );
       }
       return { kind: "committed", receipt };
     };
@@ -618,15 +731,22 @@ export class LedgerTables {
    * Write the receipt, the accepted event, the accepted result and every
    * pending effect — and answer whether the batch actually landed.
    *
-   * THE RUN-CONTROL GUARD IS THE FIRST STATEMENT (P3 item 1, plan §3.4). The
-   * receipt INSERT carries its own
-   * `WHERE NOT EXISTS (graph_runs.control_command IS NOT NULL)`, so it decides
-   * against the COMMITTED STORE at the moment of the write rather than against
-   * the value the fast path read earlier — the structural twin of the control
-   * write's conditional `INSERT ... WHERE NOT EXISTS (accepted event)`.
-   * Whichever of an acceptance and a control command COMMITS first is therefore
-   * the fact that stands, and the loser writes NOTHING; a batch that carries a
-   * receipt is never one whose run is stopped.
+   * THE TWO GUARDS ARE THE FIRST STATEMENT (P3 items 1-2, plan §3.4). The
+   * receipt INSERT carries its own `WHERE NOT EXISTS (...)` clauses, so they
+   * decide against the COMMITTED STORE at the moment of the write rather than
+   * against the values the fast path read earlier — the structural twin of the
+   * control write's conditional `INSERT ... WHERE NOT EXISTS (accepted event)`:
+   *
+   * - THE RUN'S CONTROL FACT, read for the graph's CURRENT run only (G3): a
+   *   superseded run's stop must not refuse a later run's acceptance, and a
+   *   later run's acceptance must not be refused by a stop it never carried.
+   *   Whichever of an acceptance and a control command COMMITS first is the fact
+   *   that stands, and the loser writes NOTHING.
+   * - THE ATTEMPT WAS SUPERSEDED BY A `retry` (P3 item 2): an attempt a trusted
+   *   retry replaced accepts nothing, because its result would belong to an
+   *   execution the node no longer holds and the successor attempt carries the
+   *   node forward. A retry and an acceptance therefore cannot both land for one
+   *   attempt, in either order.
    *
    * BEING FIRST IS ALSO WHAT MAKES THE RACE A WAIT. A write statement takes
    * SQLite's RESERVED lock immediately, so a racing control writer WAITS on
@@ -653,6 +773,14 @@ export class LedgerTables {
          WHERE NOT EXISTS (
            SELECT 1 FROM ${GRAPH_STORE_TABLES.runs}
            WHERE graph_id = ? AND control_command IS NOT NULL
+             AND run_id = (
+               SELECT run_id FROM ${GRAPH_STORE_TABLES.runs}
+               WHERE graph_id = ? ORDER BY run_seq DESC LIMIT 1
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.controlDecisions}
+           WHERE graph_id = ? AND attempt_id = ? AND command = 'retry'
          )`,
         receipt.graphId,
         receipt.attemptId,
@@ -662,6 +790,9 @@ export class LedgerTables {
         receipt.decision,
         receipt.committedAt,
         receipt.graphId,
+        receipt.graphId,
+        receipt.graphId,
+        receipt.attemptId,
       );
       // A conditional INSERT that matched nothing changed no row. A PRIMARY KEY
       // violation is NOT this case: the guard passing means the row was
@@ -686,11 +817,13 @@ export class LedgerTables {
         this.writeAcceptedResult(result);
       }
       for (const effect of batch.effects ?? []) {
+        const effectRunId = this.writeRunIdOf(effect.graphId, effect.runId);
         this.db.run(
           `INSERT INTO ${GRAPH_STORE_TABLES.pendingEffects}
-             (graph_id, effect_id, attempt_id, kind, payload, created_at, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           effect.graphId,
+          effectRunId,
           effect.effectId,
           effect.attemptId,
           effect.kind,
@@ -744,13 +877,42 @@ export class LedgerTables {
    * the acceptance is actually committing against.
    */
   readGraphState(graphId: string): GraphStateRecord | undefined {
+    const runId = this.readCurrentRunId(graphId);
+    if (runId !== undefined) return this.readGraphStateOf(graphId, runId);
+    // NO RUN IDENTITY: the graph has exactly one implicit run (the run surface is
+    // optional, and a substrate that never minted an identity has not re-executed
+    // anything), so its ONE snapshot is the answer. The row is read by position
+    // rather than by picking whichever run id happens to sort first.
     const row = this.db
       .query(
-        `SELECT graph_id, plan_revision, body, updated_at
+        `SELECT graph_id, run_id, plan_revision, body, updated_at
          FROM ${GRAPH_STORE_TABLES.graphState}
-         WHERE graph_id = ?`,
+         WHERE graph_id = ?
+         ORDER BY rowid DESC LIMIT 1`,
       )
       .get(graphId);
+    if (isNoRow(row)) return undefined;
+    return toGraphState(
+      asRow(row, this.filePath, GRAPH_STORE_TABLES.graphState),
+      this.filePath,
+    );
+  }
+
+  /**
+   * ONE RUN'S state snapshot, by its own id (P3 item 2).
+   *
+   * This is the read that makes a superseded run's last position stay readable
+   * after a re-execution: `readGraphState` answers the CURRENT run, this answers
+   * the run a receipt, an effect or a control decision names.
+   */
+  readGraphStateOf(graphId: string, runId: string): GraphStateRecord | undefined {
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, plan_revision, body, updated_at
+         FROM ${GRAPH_STORE_TABLES.graphState}
+         WHERE graph_id = ? AND run_id = ?`,
+      )
+      .get(graphId, runId);
     if (isNoRow(row)) return undefined;
     return toGraphState(
       asRow(row, this.filePath, GRAPH_STORE_TABLES.graphState),
@@ -772,16 +934,18 @@ export class LedgerTables {
    */
   writeGraphState(record: GraphStateRecord): void {
     assertGraphStateShape(record);
+    const runId = this.writeRunIdOf(record.graphId, record.runId);
     try {
       this.db.run(
         `INSERT INTO ${GRAPH_STORE_TABLES.graphState}
-           (graph_id, plan_revision, body, updated_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(graph_id) DO UPDATE SET
+           (graph_id, run_id, plan_revision, body, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(graph_id, run_id) DO UPDATE SET
            plan_revision = excluded.plan_revision,
            body = excluded.body,
            updated_at = excluded.updated_at`,
         record.graphId,
+        runId,
         record.planRevision,
         encodeStateBody(record.body, record.graphId),
         record.updatedAt,
@@ -836,21 +1000,69 @@ export class LedgerTables {
    * and the listing survives a restart because it is a read, which IS the
    * resume path for a process that died between the commit and the work.
    */
-  pendingEffects(graphId: string): readonly PendingEffectRecord[] {
-    const rows = this.db
-      .query(
-        `SELECT graph_id, effect_id, attempt_id, kind, payload, created_at, status
-         FROM ${GRAPH_STORE_TABLES.pendingEffects}
-         WHERE graph_id = ? AND status IN ('pending', 'started')
-         ORDER BY created_at, effect_id`,
-      )
-      .all(graphId);
+  pendingEffects(graphId: string, runId?: string): readonly PendingEffectRecord[] {
+    // RUN-SCOPED (G3). The explicit run wins; otherwise the graph's CURRENT run
+    // — and a graph with no run identity has no addressable effect, because an
+    // effect is written under a run (see `writeRunIdOf`).
+    const scope = runId ?? this.readCurrentRunId(graphId);
+    const rows =
+      scope === undefined
+        ? // NO RUN IDENTITY: one implicit run, so every unsettled effect of the
+          // graph belongs to it.
+          this.db
+            .query(
+              `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
+               FROM ${GRAPH_STORE_TABLES.pendingEffects}
+               WHERE graph_id = ? AND status IN ('pending', 'started')
+               ORDER BY created_at, effect_id`,
+            )
+            .all(graphId)
+        : this.db
+            .query(
+              `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
+               FROM ${GRAPH_STORE_TABLES.pendingEffects}
+               WHERE graph_id = ? AND run_id = ? AND status IN ('pending', 'started')
+               ORDER BY created_at, effect_id`,
+            )
+            .all(graphId, scope);
     return rows.map((row) =>
       toPendingEffect(
         asRow(row, this.filePath, GRAPH_STORE_TABLES.pendingEffects),
         this.filePath,
       ),
     );
+  }
+
+  /**
+   * The attempts of one run whose cancellation the platform CONFIRMED (`done`
+   * cancel effects), as a set-shaped list.
+   *
+   * A TERMINAL read, deliberately: these rows are exactly the ones the
+   * unsettled listing cannot answer, and a re-execution needs them to tell an
+   * abandoned execution whose fate is known from one that may still be live.
+   */
+  confirmedCancelAttempts(graphId: string, runId?: string): readonly string[] {
+    const scope = runId ?? this.readCurrentRunId(graphId);
+    const rows =
+      scope === undefined
+        ? this.db
+            .query(
+              `SELECT DISTINCT attempt_id FROM ${GRAPH_STORE_TABLES.pendingEffects}
+               WHERE graph_id = ? AND kind = 'cancel' AND status = 'done'`,
+            )
+            .all(graphId)
+        : this.db
+            .query(
+              `SELECT DISTINCT attempt_id FROM ${GRAPH_STORE_TABLES.pendingEffects}
+               WHERE graph_id = ? AND run_id = ? AND kind = 'cancel' AND status = 'done'`,
+            )
+            .all(graphId, scope);
+    const attempts: string[] = [];
+    for (const row of rows) {
+      const entry = asRow(row, this.filePath, GRAPH_STORE_TABLES.pendingEffects);
+      attempts.push(readText(entry, "attempt_id", this.filePath, GRAPH_STORE_TABLES.pendingEffects));
+    }
+    return Object.freeze(attempts.sort());
   }
 
   /**
@@ -866,13 +1078,15 @@ export class LedgerTables {
    */
   writeEffect(record: PendingEffectRecord): void {
     assertEffectShape(record);
+    const runId = this.writeRunIdOf(record.graphId, record.runId);
     try {
       this.db.run(
         `INSERT INTO ${GRAPH_STORE_TABLES.pendingEffects}
-           (graph_id, effect_id, attempt_id, kind, payload, created_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(graph_id, effect_id) DO NOTHING`,
         record.graphId,
+        runId,
         record.effectId,
         record.attemptId,
         record.kind,
@@ -1052,7 +1266,7 @@ export class LedgerTables {
   ): PendingEffectRecord | undefined {
     const row = this.db
       .query(
-        `SELECT graph_id, effect_id, attempt_id, kind, payload, created_at, status
+        `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
          FROM ${GRAPH_STORE_TABLES.pendingEffects}
          WHERE graph_id = ? AND effect_id = ?`,
       )

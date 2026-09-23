@@ -125,8 +125,13 @@ export type { GraphStoreWriteProblem as LedgerWriteProblem } from "../store/erro
 export interface AcceptanceLedgerReader {
   /** The persisted state snapshot of one graph, or `undefined`. */
   readGraphState(graphId: string): GraphStateRecord | undefined;
-  /** The effects of one graph still `pending` or `started`. */
-  pendingEffects(graphId: string): readonly PendingEffectRecord[];
+  /**
+   * The effects of one RUN still `pending` or `started`; `runId` omitted means
+   * the graph's current run (G3).
+   */
+  pendingEffects(graphId: string, runId?: string): readonly PendingEffectRecord[];
+  /** The attempts of one run whose cancellation the PLATFORM CONFIRMED. */
+  confirmedCancelAttempts(graphId: string, runId?: string): readonly string[];
   /** Close the substrate. Idempotent. */
   close(): void;
 }
@@ -314,9 +319,19 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
     return this.store.acceptedEvents(graphId);
   }
 
-  /** The UNSETTLED effects of one graph: rows still `pending` or `started`. */
-  pendingEffects(graphId: string): readonly PendingEffectRecord[] {
-    return this.store.pendingEffects(graphId);
+  /**
+   * The UNSETTLED effects of one RUN — rows still `pending` or `started`.
+   *
+   * RUN-SCOPED (G3): `runId` omitted means the graph's CURRENT run. A graph with
+   * no run row has one implicit run and is answered in full.
+   */
+  pendingEffects(graphId: string, runId?: string): readonly PendingEffectRecord[] {
+    return this.store.pendingEffects(graphId, runId);
+  }
+
+  /** The attempts of one run whose cancellation the PLATFORM CONFIRMED. */
+  confirmedCancelAttempts(graphId: string, runId?: string): readonly string[] {
+    return this.store.confirmedCancelAttempts(graphId, runId);
   }
 
   /**

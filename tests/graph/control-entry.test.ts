@@ -303,6 +303,13 @@ interface ControlAnswer {
   readonly graphId?: string;
   readonly runId?: string;
   readonly command?: string;
+  readonly scope?: "attempt" | "run";
+  readonly minted?: readonly {
+    readonly nodeId: string;
+    readonly attemptId: string;
+    readonly attemptSeq: number;
+    readonly effectId: string;
+  }[];
   readonly decided?: readonly {
     readonly nodeId: string;
     readonly attemptId: string;
@@ -687,19 +694,38 @@ describe("graph_control — the permission check", () => {
 // ── Explicit command types ──────────────────────────────────────────────────
 
 describe("graph_control — explicit command types only", () => {
-  it("refuses retry and budget-stop by name instead of recording an intent", async () => {
+  it("refuses budget-stop by name, and APPLIES retry rather than pretending it is unimplemented", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
-      for (const command of ["retry", "budget-stop"] as const) {
-        const answer = await control(
-          fixture,
-          { graph_id: fixture.graphId, command, node_id: "work", reason: "not implemented yet" },
-          declarerOf(fixture),
-        );
-        expect(answer.kind).toBe("refused");
-        expect(answer.refusals?.[0]?.code).toBe("command-unimplemented");
-      }
+      // A command whose own semantics this build does not implement is refused by
+      // name: recording an intent no path would honour is not a capability.
+      const unimplemented = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "budget-stop",
+          node_id: "work",
+          reason: "not implemented yet",
+        },
+        declarerOf(fixture),
+      );
+      expect(unimplemented.kind).toBe("refused");
+      expect(unimplemented.refusals?.[0]?.code).toBe("command-unimplemented");
       expect(readControlRows(fixture).decisions).toEqual([]);
+
+      // RETRY IS IMPLEMENTED (P3 item 2): it supersedes the node's attempt with a
+      // new one, so it is APPLIED and no longer refused as unimplemented.
+      const retried = await control(
+        fixture,
+        { graph_id: fixture.graphId, command: "retry", node_id: "work", reason: "stuck" },
+        declarerOf(fixture),
+      );
+      expect(retried.kind).toBe("applied");
+      expect(retried.command).toBe("retry");
+      expect(retried.minted?.map((entry) => entry.attemptId)).toEqual(["work#2"]);
+      expect(readControlRows(fixture).decisions.map((entry) => entry.attemptId)).toEqual([
+        "work#1",
+      ]);
     } finally {
       fixture.host.close();
     }

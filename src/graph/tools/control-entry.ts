@@ -32,7 +32,12 @@
  */
 
 import type { ControlCommandName } from "../ledger/types.ts";
-import { applyGraphControl, type GraphControlResult } from "../control/application.ts";
+import {
+  applyGraphControl,
+  type GraphControlResult,
+} from "../control/application.ts";
+import type { AttemptCredentialSource } from "../outcome/attempt-credential.ts";
+import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import { GraphStoreFormatError } from "../store/errors.ts";
 import { readStoreDirectory } from "../store/format.ts";
 import { GraphStore } from "../store/graph-store.ts";
@@ -56,6 +61,18 @@ export interface GraphControlEntryDeps {
   readonly storeDirectory: string | undefined;
   /** Epoch-millisecond clock; defaults to `Date.now`. Time is an explicit input. */
   readonly now?: number;
+  /**
+   * The host's protected credential store, when this process has one.
+   *
+   * A retry MINTS a successor attempt, so it needs the same capability the run
+   * path does: the value is adopted by the host's store inside the transaction
+   * that records its digest. Absent, a retry is refused
+   * `credential-isolation-unavailable` and nothing is written — the capability
+   * is never a tool argument, exactly as it is not one anywhere else.
+   */
+  readonly credentialIsolation?: CredentialIsolationCapability;
+  /** The minting source a retry uses; defaults to the platform CSPRNG. */
+  readonly mintCredential?: AttemptCredentialSource;
 }
 
 /** One refusal as a value, in the service's own vocabulary. */
@@ -144,6 +161,16 @@ export function runGraphControlEntry(
               ...(agent === undefined || agent.length === 0 ? {} : { agentId: agent }),
             }),
       at: deps.now ?? Date.now(),
+      ...(deps.credentialIsolation === undefined
+        ? {}
+        : {
+            retry: Object.freeze({
+              credentialIsolation: deps.credentialIsolation,
+              ...(deps.mintCredential === undefined
+                ? {}
+                : { mintCredential: deps.mintCredential }),
+            }),
+          }),
     });
   } finally {
     store.close();

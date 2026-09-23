@@ -122,7 +122,11 @@ import {
 } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
-import type { ControlDecisionRecord, PendingEffectRecord } from "../ledger/types.ts";
+import type {
+  ControlDecisionRecord,
+  PendingEffectRecord,
+  RunReexecutionRecord,
+} from "../ledger/types.ts";
 import {
   OutcomeGraphRuntime,
   type AttemptCredentialReissueFence,
@@ -683,6 +687,16 @@ export interface OutcomeHostRecoveryReport {
    */
   readonly cancelBlocked: readonly string[];
   /**
+   * `graph:fromRunId->runId` for each graph this sweep RE-EXECUTED as a NEW RUN
+   * (P3 item 2): a run-scoped `retry` recorded the trusted order, and this sweep
+   * is one of the windows that honours it. The graph is NOT in `started`
+   * (nothing was started for the first time) and not in `resumed` (the run that
+   * was continued is a different one): a sweep that folded a re-execution into
+   * either bucket would hide that the previous run is over and a new identity
+   * carries the graph forward.
+   */
+  readonly reexecuted: readonly string[];
+  /**
    * Set when the workspace's store could not be read AT ALL, so the sweep had no
    * inventory to visit. A store the format gate refuses must not read as "no
    * graphs exist" — that is the same disagreement between the boot sweep, the
@@ -1104,11 +1118,128 @@ export class OutcomeHost {
     await this.primePlatformReadings(graphId, ledger, invocation);
     this.setInvocation(invocation);
     try {
+      // A PENDING RE-EXECUTION ORDER IS HONOURED HERE (P3 item 2). The order is a
+      // durable trusted decision — a run-scoped retry recorded it — and it is
+      // consumed exactly once, inside the transaction that mints the successor
+      // run. Every continuation entry reaches this method (the graph-control
+      // follow-up, the boot sweep, a restart), so an order survives the process
+      // that decided it instead of being a command nothing would finish.
+      if (this.pendingReexecutionOf(graphId, ledger) !== undefined) {
+        return this.reexecuteDeclaredGraph(graphId, runtime, ledger);
+      }
       // The run advanced inside the acceptance transaction, which wrote the run
       // state to the store; the query paths read it from there.
       return runtime.resume(this.clock());
     } finally {
       this.holder.clear();
+    }
+  }
+
+  /**
+   * The re-execution order a graph's CURRENT run still OWES, or `undefined`.
+   *
+   * An order whose successor is already recorded has been honoured, and the graph
+   * is then executing that successor — so "current run has an OWED order" is the
+   * whole condition. A store or run surface that cannot be read answers
+   * `undefined` here and lets the resume path report the unreadable ledger in
+   * its own words rather than this helper swallowing it.
+   */
+  private pendingReexecutionOf(
+    graphId: string,
+    ledger: SqliteAcceptanceLedger,
+  ): RunReexecutionRecord | undefined {
+    try {
+      const runs = ledger.runs;
+      if (runs === undefined) return undefined;
+      const run = runs.readRun(graphId);
+      if (run === undefined) return undefined;
+      const order = runs.readReexecution(graphId, run.runId);
+      return order !== undefined && order.successorRunId === undefined ? order : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Mint the successor run an order authorizes, and report it in the SAME shape
+   * a resume uses (P3 item 2).
+   *
+   * The report shape is deliberate: a re-execution is a continuation of the
+   * graph, so every consumer of the resume report — the sweep, the host's log,
+   * the entry's own dispatch — reads it without a second code path, and the
+   * `reexecuted` marker is what tells them a NEW RUN was minted rather than the
+   * old one continued.
+   */
+  private reexecuteDeclaredGraph(
+    graphId: string,
+    runtime: OutcomeGraphRuntime,
+    ledger: SqliteAcceptanceLedger,
+  ): OutcomeResumeResult {
+    const reexecuted = runtime.reexecute(this.clock());
+    if (reexecuted.kind === "refused") {
+      return { kind: "refused", refusals: reexecuted.refusals };
+    }
+    // The successor run's own unsettled effects are the inventory, read AFTER the
+    // runtime committed and launched: a failed launch stays `pending` and stays
+    // listed, so the report cannot claim a dispatch that did not happen. An
+    // unreadable ledger falls back to the inventory the runtime just read.
+    let effects: readonly PendingEffectRecord[] = reexecuted.unsettledEffects;
+    try {
+      effects = ledger.pendingEffects(graphId, reexecuted.runId);
+    } catch {
+      effects = reexecuted.unsettledEffects;
+    }
+    return {
+      kind: "resumed",
+      state: reexecuted.state,
+      dispatched: reexecuted.dispatched,
+      // A re-execution reconciles nothing: every effect it wrote is a launch it
+      // just made, not a crash window it had to resolve.
+      reconciled: Object.freeze([]),
+      divergences: Object.freeze([]),
+      armed: reexecuted.armed,
+      unsettledEffects: effects,
+      refusals: Object.freeze([]),
+      reexecuted: Object.freeze({
+        runId: reexecuted.runId,
+        runSeq: reexecuted.runSeq,
+        fromRunId: reexecuted.fromRunId,
+        planRevision: reexecuted.planRevision,
+      }),
+    };
+  }
+
+  /**
+   * CONTINUE A GRAPH AFTER AN APPLIED CONTROL COMMAND (P3 item 2).
+   *
+   * The follow-up the `graph_control` wrapper calls once the trusted command is
+   * durable: for a retry that means the run the command just armed (a node-scoped
+   * retry's pending effect) or the NEW run it ordered (a run-scoped retry). It
+   * goes through {@link startDeclaredGraph} with the graph's RECORDED origin, so
+   * the attempts it arms are dispatched under the same invocation as every other
+   * dispatch of that graph.
+   *
+   * TOTAL: a graph this host cannot open or continue is REPORTED to the host's
+   * log, never thrown — the durable facts (the decision, the order, the effect)
+   * remain for the next window, and a thrown error here would make an applied
+   * command look refused. It never changes a tool result: the control answer is
+   * already the service's verdict.
+   */
+  async continueAfterControl(graphId: string): Promise<void> {
+    this.assertOpen();
+    const origin = this.origins.get(graphId);
+    try {
+      const result = await this.startDeclaredGraph(graphId, origin ?? {});
+      reportControlContinuation(graphId, result);
+    } catch (error) {
+      logWarn(
+        "outcome-host: continuing graph " +
+          JSON.stringify(graphId) +
+          " after an applied control command threw (" +
+          describeWatchFailure(error) +
+          ") — the durable control fact and effect stay visible, and the next boot " +
+          "sweep is the next window that continues them",
+      );
     }
   }
 
@@ -1182,6 +1313,7 @@ export class OutcomeHost {
     const unconfirmed: OutcomeHostUnconfirmedExecution[] = [];
     const cancellations: OutcomeCancelDeliveryEntry[] = [];
     const cancelBlocked: string[] = [];
+    const reexecuted: string[] = [];
     const inventory = this.declaredGraphInventory();
     for (const graphId of inventory.graphIds) {
       try {
@@ -1200,6 +1332,16 @@ export class OutcomeHost {
         }
         if (result.kind === "started") {
           started.push(graphId + ":" + result.state.planRevision);
+        } else if (result.reexecuted !== undefined) {
+          // A NEW RUN, minted from a durable trusted order (P3 item 2): the
+          // previous run is untouched and still readable by its own id.
+          reexecuted.push(
+            graphId +
+              ":" +
+              result.reexecuted.fromRunId +
+              "->" +
+              result.reexecuted.runId,
+          );
         } else {
           resumed.push(graphId + ":" + result.state.phase);
         }
@@ -1521,6 +1663,10 @@ export class OutcomeHost {
       // cancellation unless the platform substantiated it.
       cancellations: Object.freeze(cancellations),
       cancelBlocked: Object.freeze(cancelBlocked),
+      // WHAT THE SWEEP RE-EXECUTED AS A NEW RUN (P3 item 2). These graphs are in
+      // neither `started` nor `resumed`: a NEW run identity carries them, and
+      // the run it replaced is over and still readable by its own id.
+      reexecuted: Object.freeze(reexecuted),
       // A store the format gate refuses is a BLOCK, never an empty sweep: the
       // audit and the status surface already refuse it, and the boot sweep must
       // not answer "nothing to do" for the same workspace. A store that simply
@@ -2861,6 +3007,48 @@ export function bindOutcomeToolInvocation(
 }
 
 /**
+ * Report what one control follow-up did, in one log line.
+ *
+ * A re-execution is named as such — a NEW RUN was minted — because an operator
+ * reading "resumed" must be able to tell it from continuing the run that was
+ * already there; refusals are counted and named by code so a follow-up that
+ * could not launch is visible instead of silently absent.
+ */
+function reportControlContinuation(graphId: string, result: OutcomeResumeResult): void {
+  const parts: string[] = [];
+  if (result.kind === "refused") {
+    parts.push("REFUSED (" + result.refusals.map((entry) => entry.code).join(", ") + ")");
+  } else {
+    parts.push(result.kind);
+    if (result.kind === "resumed" && result.reexecuted !== undefined) {
+      parts.push(
+        "re-executed run " +
+          JSON.stringify(result.reexecuted.fromRunId) +
+          " as " +
+          JSON.stringify(result.reexecuted.runId) +
+          " (runSeq " +
+          String(result.reexecuted.runSeq) +
+          ", plan revision " +
+          JSON.stringify(result.reexecuted.planRevision) +
+          ")",
+      );
+    }
+    if (result.dispatched.length > 0) {
+      parts.push(String(result.dispatched.length) + " dispatched");
+    }
+    if (result.refusals.length > 0) {
+      parts.push(String(result.refusals.length) + " effect refusal(s)");
+    }
+  }
+  logWarn(
+    "outcome-host: control follow-up for graph " +
+      JSON.stringify(graphId) +
+      " — " +
+      parts.join(", "),
+  );
+}
+
+/**
  * HAND A GRAPH'S CANCEL INTENTS TO THE PLATFORM AFTER A `graph_control` CALL (P3 cancel).
  *
  * THE LIVE TRIGGER. A trusted cancel command becomes durable inside the tool body (the control
@@ -2881,6 +3069,14 @@ export function bindOutcomeToolInvocation(
  * - it NEVER changes the tool's result. The control answer already names every unconfirmed
  *   execution; what this adds is the platform half — reported to the host's log and to the next
  *   boot sweep, and recorded in the durable cancel effects.
+ *
+ * AND IT CONTINUES THE RUN AN APPLIED `retry` ARMED (P3 item 2). A node-scoped retry recorded the
+ * successor attempt and its dispatch effect; a run-scoped retry recorded the ORDER to execute a NEW
+ * run. Neither has reached the platform yet, and the tool call is the window that hands them over:
+ * the wrapper asks the host to continue the graph ({@link OutcomeHost.continueAfterControl}), which
+ * resumes the run (launching the retry's pending effect once) or mints the ordered successor run.
+ * It runs for `retry` ONLY: a stopping command ends a run, and continuing one after a stop would ask
+ * the host to do work the stop forbids.
  *
  * APPLY IT INSIDE {@link OutcomeHost.bindTools}, AS THE SHIPPED ENTRIES DO: the invocation binding
  * installs the worker boundary, so a DISPATCHED WORKER's call is refused before the tool body runs
@@ -2905,14 +3101,22 @@ export function withCancelDelivery(
         // thrown store failure reached no platform either — neither has an intent to
         // hand over, and delivering on one would let an unauthorized caller make the
         // host ask a platform to stop a graph it does not own.
-        const graphId = appliedControlGraphIdOf(result);
-        if (graphId !== undefined) {
+        const applied = appliedControlAnswerOf(result);
+        if (applied !== undefined) {
           try {
-            reportCancelDelivery(await host.deliverCancelIntents(graphId));
+            reportCancelDelivery(await host.deliverCancelIntents(applied.graphId));
+            // ONLY A RETRY LEAVES WORK TO HAND OVER: the effects it just wrote (a
+            // superseded attempt's successor) or the order to mint a new run.
+            // `continueAfterControl` is total — it reports a graph it cannot
+            // continue to the host's log and never throws — so an applied
+            // command is never turned into a failed tool result here.
+            if (applied.command === "retry") {
+              await host.continueAfterControl(applied.graphId);
+            }
           } catch (error) {
             logWarn(
-              "outcome-host: delivering the cancel intents of graph " +
-                JSON.stringify(graphId) +
+              "outcome-host: the control follow-up of graph " +
+                JSON.stringify(applied.graphId) +
                 " threw (" +
                 describeWatchFailure(error) +
                 ") — the durable cancel intent and every unconfirmed execution stay visible, " +
@@ -2927,14 +3131,22 @@ export function withCancelDelivery(
 }
 
 /**
- * The graph id of an APPLIED `graph_control` answer, or `undefined` for anything else.
+ * The graph id AND command of an APPLIED `graph_control` answer, or `undefined`.
  *
  * The tool body renders the control service's result as JSON; `kind: "applied"` is the
  * service's own verdict that the command wrote a durable fact, so it is the only answer a
  * platform delivery may follow. A refused answer (or an error string a thrown store failure
  * produced) names no applied command and is answered `undefined`: nothing is delivered.
+ *
+ * The COMMAND is read too (P3 item 2), because a retry leaves work this call must hand over —
+ * the successor attempt's pending effect, or the order to mint a new run — while a stopping
+ * command leaves only its cancel intents. A missing or non-string command is treated as an
+ * answer this build cannot act on: the graph id alone still delivers cancel intents, and no
+ * continuation is attempted.
  */
-function appliedControlGraphIdOf(result: unknown): string | undefined {
+function appliedControlAnswerOf(
+  result: unknown,
+): { readonly graphId: string; readonly command: string | undefined } | undefined {
   if (typeof result !== "string") return undefined;
   let parsed: unknown;
   try {
@@ -2946,7 +3158,12 @@ function appliedControlGraphIdOf(result: unknown): string | undefined {
   const answer = parsed as Record<string, unknown>;
   if (answer["kind"] !== "applied") return undefined;
   const graphId = answer["graphId"];
-  return typeof graphId === "string" && graphId.length > 0 ? graphId : undefined;
+  if (typeof graphId !== "string" || graphId.length === 0) return undefined;
+  const command = answer["command"];
+  return Object.freeze({
+    graphId,
+    command: typeof command === "string" && command.length > 0 ? command : undefined,
+  });
 }
 
 /**

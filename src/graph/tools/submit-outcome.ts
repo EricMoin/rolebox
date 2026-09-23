@@ -179,7 +179,18 @@ export interface GraphSubmitOutcomeResult {
    * the run path answers that fact as the named `control-stopped` refusal, so
    * this verdict is only ever rendered when a refusal was not the answer).
    */
-  readonly verdict?: "committed" | "replayed" | "conflict" | "settled" | "controlled";
+  readonly verdict?:
+    | "committed"
+    | "replayed"
+    | "conflict"
+    | "settled"
+    | "controlled"
+    // The attempt was SUPERSEDED by a trusted retry (P3 item 2): nothing was
+    // written for it, and the successor attempt carries the node forward. The
+    // run path answers this by name before it reaches this projection; the
+    // verdict is spelled here because the ledger's own verdict vocabulary is
+    // what this field renders.
+    | "superseded";
   /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
   /** Every required gate's outcome, for an accepted or rejected decision. */

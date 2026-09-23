@@ -241,6 +241,7 @@ import {
   stateRecordOf,
   type OutcomeAdvance,
   type OutcomeDispatchIntent,
+  type OutcomeGraphPhase,
   type OutcomeGraphState,
   type OutcomeNodeState,
   type OutcomeStop,
@@ -262,7 +263,7 @@ import {
 import {
   CREDENTIAL_ISOLATION_VERSION_V3,
   credentialIsolationRefusal,
-  readCredentialIsolationAdapter,
+  readCredentialIsolationStore,
   type CredentialIsolationCapability,
   type CredentialIsolationStore,
 } from "./credential-isolation.ts";
@@ -275,6 +276,7 @@ import {
   type HostInvocationIdentity,
 } from "./host-identity.ts";
 import {
+  blockingReexecutionEffectsOf,
   dispatchEffectIdOf,
   dispatchEffectKeyOf,
   normalizeOutcomeDispatch,
@@ -591,7 +593,45 @@ export type OutcomeRuntimeRefusalCode =
    * and the same code is what a late worker submission and a late completion
    * fact both meet.
    */
-  | "control-stopped";
+  | "control-stopped"
+  /**
+   * The attempt was SUPERSEDED by a trusted `retry` (P3 item 2). The retry is a
+   * successor command, not a stopping one: the run continues, but the attempt it
+   * replaced accepts nothing — its result would belong to an execution the node
+   * no longer holds. The successor attempt named in the refusal carries the node
+   * forward, and the superseded attempt's own receipts, accepted event and
+   * decisions (if it ever had any) stay exactly as they were.
+   */
+  | "attempt-superseded"
+  /**
+   * No trusted order to re-execute this run is recorded, so the runtime refuses
+   * to mint a successor run on its own. A new run is a trusted decision (§3.2:
+   * "终态图重新运行创建新 Run"), and the order is what makes it durable before
+   * anything is minted; a caller that wants one applies the run-scoped `retry`
+   * command through the control entry.
+   */
+  | "reexecution-not-authorized"
+  /**
+   * The run the order names is not TERMINAL: its state still records work in
+   * flight, so re-executing the graph would run nodes the current run has not
+   * finished. A node-scoped `retry` is the command for a live run.
+   */
+  | "reexecution-not-terminal"
+  /**
+   * The terminal run still owes external work whose fate is UNKNOWN — at least
+   * one unsettled dispatch effect whose attempt the run never superseded and
+   * which no platform-confirmed cancellation covers. Re-executing the graph
+   * could run a side effect that is still live, which is exactly what §4's
+   * "不能把已完成外部副作用自动重跑" forbids; the effects stay visible and the
+   * caller resolves them (or waits) before re-executing.
+   */
+  | "reexecution-unsettled-effects"
+  /**
+   * Another process minted the successor run, or consumed the order, between
+   * this call's read and its write. Nothing was written: the caller re-reads the
+   * graph and sees the successor that stands.
+   */
+  | "reexecution-raced";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -609,6 +649,43 @@ export type OutcomeStartResult =
     }
   /** The graph already has a state snapshot; start is idempotent. */
   | { readonly kind: "already-started"; readonly state: OutcomeGraphState }
+  | {
+      readonly kind: "refused";
+      readonly refusals: readonly OutcomeRuntimeRefusal[];
+    };
+
+/**
+ * What {@link OutcomeGraphRuntime.reexecute} produced.
+ *
+ * A re-execution is NOT a resume and NOT a second start: it mints a NEW RUN for
+ * one TERMINAL run's graph, under a durable trusted order the control service
+ * recorded, and keeps every fact of the run it supersedes exactly as it was —
+ * its run row, its state snapshot, its receipts, its accepted events, its
+ * effects and its control decisions.
+ */
+export type OutcomeReexecutionResult =
+  | {
+      readonly kind: "reexecuted";
+      /** The NEW run's identity. */
+      readonly runId: string;
+      /** Its graph-local sequence; exactly one greater than the run it supersedes. */
+      readonly runSeq: number;
+      /** The plan revision THIS run executes (recorded on its row and its state). */
+      readonly planRevision: string;
+      /** The terminal run this one succeeds. */
+      readonly fromRunId: string;
+      readonly state: OutcomeGraphState;
+      readonly dispatched: readonly OutcomeDispatchRequest[];
+      /**
+       * The attempts the new run records as in flight, CREDENTIAL-FREE, exactly as
+       * `resume` reports them: a re-execution arms its entry nodes, so the caller
+       * gets the same inventory a first execution does rather than an empty
+       * "armed" list that would make the new run look idle.
+       */
+      readonly armed: readonly OutcomeArmedNode[];
+      /** The new run's unsettled effects (the intents a host is to launch). */
+      readonly unsettledEffects: readonly PendingEffectRecord[];
+    }
   | {
       readonly kind: "refused";
       readonly refusals: readonly OutcomeRuntimeRefusal[];
@@ -898,6 +975,20 @@ export type OutcomeResumeResult =
        * this process cannot confirm is REPORTED, never hidden.
        */
       readonly control?: RunControlRecord;
+      /**
+       * Present exactly when this call MINTED A NEW RUN in place of a terminal
+       * one (P3 item 2): the successor's identity, its graph-local sequence, the
+       * run it succeeds and the plan revision it executes. Every other field of
+       * this answer then describes THE SUCCESSOR — its state, its armed attempts
+       * and its unsettled effects — and the superseded run is untouched and still
+       * addressable by its own id.
+       */
+      readonly reexecuted?: {
+        readonly runId: string;
+        readonly runSeq: number;
+        readonly fromRunId: string;
+        readonly planRevision: string;
+      };
     }
   | {
       readonly kind: "refused";
@@ -1190,7 +1281,7 @@ export class OutcomeGraphRuntime {
       options.mintCredential ?? RUNTIME_ATTEMPT_CREDENTIAL_SOURCE;
     this.completionPolicies = options.completionPolicies;
     this.credentialIsolation = options.credentialIsolation;
-    this.credentialStore = readCredentialStore(options.credentialIsolation);
+    this.credentialStore = readCredentialIsolationStore(options.credentialIsolation);
     this.credentialSource = (binding) => {
       const credential = mintAttemptCredential(this.mintCredential, binding);
       this.credentialStore?.remember(
@@ -1287,6 +1378,73 @@ export class OutcomeGraphRuntime {
       ]);
     }
 
+    // THE RUN IDENTITY the whole run is addressed by (P3 item 1). It is minted
+    // HERE, inside the transaction that commits the first snapshot, so a run id
+    // without the state it names is unrepresentable; `mintRun` keeps the
+    // identity an earlier writer recorded, so two processes that raced this
+    // graph's first execution agree on ONE run instead of each minting its own.
+    // A graph that was RE-EXECUTED already holds runs, and `mintRun` then answers
+    // the CURRENT one — the successor of a terminal run is minted exclusively by
+    // `reexecute` (P3 item 2), never by a repeated start.
+    const runId = runIdentityOf(this.graphId, at);
+    // ONE transaction for the run identity, the starting snapshot, its dispatch
+    // intents AND the credential record every armed attempt is settled with.
+    // There is no acceptance to join yet; what must not come apart is the run
+    // identity, the state that records the attempt, the effect that says the
+    // attempt is to be started, and the credential the host store must hold for
+    // it. The mint is synchronous and its store write joins this open boundary,
+    // so a start that rolls back leaves no credential row for an attempt that
+    // does not exist. The dispatch seam runs only after the commit, and what it
+    // cannot deliver stays a durable, reconcilable row.
+    const run = this.ledger.runInTransaction((tx) =>
+      this.mintRunInTransaction(tx, at, {
+        runId,
+        // The identity the run's attempts are armed under (D9). Absent when the
+        // host declared none: the absence IS the record, and no later process
+        // back-fills one.
+        dispatchIdentity,
+        // A first run starts its graph-wide attempt counter at zero; a
+        // re-execution continues it (P3 item 2), so attempt ids are unique for
+        // the whole graph and a later run can never address an earlier run's
+        // attempt.
+        fromAttemptSeq: 0,
+      }),
+    );
+    this.launchDispatches(run.dispatched);
+    return { kind: "started", state: run.state, dispatched: run.dispatched };
+  }
+
+  /**
+   * Mint one run's identity, starting snapshot, dispatch effects and attempt
+   * credentials INSIDE the caller's transaction — the ONE implementation of
+   * "a run begins here" (P3 items 1-2).
+   *
+   * WHY ONE IMPLEMENTATION. A first execution (`start`) and a re-execution
+   * (`reexecute`) publish the same kinds of fact about a run — its identity, the
+   * state that records which attempts are armed, one dispatch effect per armed
+   * attempt, and a credential per attempt adopted by the host's store in the
+   * SAME commit. Two copies of that loop could drift into two different notions
+   * of "a run began", which is exactly the second-authority shape §3.1 forbids.
+   * The differences are ARGUMENTS, not branches: the attempt counter continues
+   * from {@link fromAttemptSeq} when a graph-wide counter already moved, and the
+   * run identity is minted here for a first execution but already minted by
+   * `mintNextRun` for a successor.
+   *
+   * THE RUN IDENTITY IS MINTED FIRST. Every state and effect row is filed under
+   * the graph's CURRENT run by the store, and the run this call mints becomes
+   * current in the same statement sequence, so the rows cannot be filed under
+   * the run they supersede.
+   */
+  private mintRunInTransaction(
+    tx: AcceptanceLedgerTx,
+    at: number,
+    input: {
+      readonly runId: string;
+      readonly dispatchIdentity: HostInvocationIdentity | undefined;
+      readonly fromAttemptSeq: number;
+    },
+  ): { readonly state: OutcomeGraphState; readonly dispatched: readonly OutcomeDispatchRequest[] } {
+    const entries = entryNodesOf(this.plan);
     // One progress entry per loop group whose plan declares a policy, so the
     // state's own record is complete from the first snapshot: a body that
     // carried entries only after the first continuation could not be told from
@@ -1303,112 +1461,430 @@ export class OutcomeGraphRuntime {
         unchanged: 0,
       });
     }
-
+    // The run identity commits WITH the snapshot it names. A substrate with no
+    // run/control surface holds no runs, and therefore no control records
+    // either — nothing minted here, and the control entry refuses by name. For
+    // a RE-EXECUTION the successor was already minted by `mintNextRun`, so this
+    // call is the idempotent no-op that answers the run that is current.
+    tx.runs?.mintRun({
+      graphId: this.graphId,
+      runId: input.runId,
+      startedAt: at,
+      planRevision: this.planRevision,
+    });
     const entryIds = new Set(entries.map((node) => node.id));
-    // THE RUN IDENTITY the whole run is addressed by (P3 item 1). It is minted
-    // HERE, inside the transaction that commits the first snapshot, so a run id
-    // without the state it names is unrepresentable; `mintRun` keeps the
-    // identity an earlier writer recorded, so two processes that raced this
-    // graph's first execution agree on ONE run instead of each minting its own.
-    const runId = runIdentityOf(this.graphId, at);
-    // ONE transaction for the starting snapshot, its dispatch intents AND the
-    // credential record every armed attempt is settled with. There is no
-    // acceptance to join yet; what must not come apart is the state that
-    // records the attempt, the effect that says the attempt is to be started,
-    // and the credential the host store must hold for it. The mint is
-    // synchronous and its store write joins this open boundary, so a start
-    // that rolls back leaves no credential row for an attempt that does not
-    // exist. The dispatch seam runs only after the commit, and what it cannot
-    // deliver stays a durable, reconcilable row.
-    const started = this.ledger.runInTransaction((tx) => {
-      const nodes: OutcomeNodeState[] = [];
-      const dispatched: OutcomeDispatchRequest[] = [];
-      const effects: PendingEffectRecord[] = [];
-      let attemptSeq = 0;
-      for (const node of this.plan.nodes) {
-        if (!entryIds.has(node.id)) {
-          // No node has settled yet, so every arrival list is empty — which is
-          // exactly the canonical materialization of a state where nothing has
-          // arrived, and what the reader verifies against.
-          nodes.push(
-            Object.freeze({
-              nodeId: node.id,
-              status: "pending" as const,
-              arrivals: Object.freeze([]),
-            }),
-          );
-          continue;
-        }
-        attemptSeq += 1;
-        const attemptId = node.id + "#" + attemptSeq;
-        // The credential is minted WITH the attempt INSIDE this transaction:
-        // the source adopts it in the host's store, whose write joins the
-        // boundary this snapshot commits in. The binding a later submission is
-        // checked against is therefore the state's — never a credential from
-        // an attempt whose start rolled back.
-        const credential = mintAttemptCredential(
-          this.credentialSource,
-          attemptCredentialBinding({
-            graphId: this.graphId,
-            nodeId: node.id,
-            attemptId,
-            planRevision: this.planRevision,
-          }),
-        );
+    const nodes: OutcomeNodeState[] = [];
+    const dispatched: OutcomeDispatchRequest[] = [];
+    const effects: PendingEffectRecord[] = [];
+    let attemptSeq = input.fromAttemptSeq;
+    for (const node of this.plan.nodes) {
+      if (!entryIds.has(node.id)) {
+        // No node has settled yet, so every arrival list is empty — which is
+        // exactly the canonical materialization of a state where nothing has
+        // arrived, and what the reader verifies against.
         nodes.push(
           Object.freeze({
             nodeId: node.id,
-            status: "dispatched" as const,
-            attemptId,
-            attemptSeq,
-            attemptCredentialDigest: attemptCredentialDigest(credential),
-            // The host attribution this attempt is bound to (D9). Absent when the
-            // host declared no identity for this invocation — the absence IS the
-            // record, and no later process back-fills one.
-            ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
-            dispatchedAt: at,
+            status: "pending" as const,
             arrivals: Object.freeze([]),
           }),
         );
-        dispatched.push(
-          this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
-        );
-        // THE INTENT IS PART OF THE SAME SNAPSHOT (D8). The effect names this
-        // attempt under the stable id its host dedupes and looks up by, so a
-        // process that dies between this commit and the create leaves a row a
-        // recovery can reconcile instead of a state that merely looks armed.
-        effects.push(
-          Object.freeze({
-            graphId: this.graphId,
-            effectId: dispatchEffectIdOf(attemptId),
-            attemptId,
-            kind: "dispatch",
-            payload: this.dispatchTargetOf(node.id, attemptId, node.agent, node.prompt),
-            createdAt: at,
-            status: "pending" as const,
-          }),
-        );
+        continue;
       }
-      const state: OutcomeGraphState = Object.freeze({
-        bodyVersion: CURRENT_OUTCOME_STATE_BODY,
-        graphId: this.graphId,
-        planRevision: this.planRevision,
-        phase: "executing" as const,
-        nodes: Object.freeze(nodes),
-        loopTraversals: Object.freeze({}),
-        attemptSeq,
-        loopProgress: Object.freeze(loopProgress),
-      });
-      tx.writeGraphState(stateRecordOf(state, at));
-      // The run identity commits WITH the snapshot it names. A substrate with no
-      // run/control surface holds no runs, and therefore no control records
-      // either — nothing minted here, and the control entry refuses by name.
-      tx.runs?.mintRun({ graphId: this.graphId, runId, startedAt: at });
-      for (const effect of effects) tx.writeEffect(effect);
-      return Object.freeze({ state, dispatched: Object.freeze(dispatched) });
+      attemptSeq += 1;
+      const attemptId = node.id + "#" + attemptSeq;
+      // The credential is minted WITH the attempt INSIDE this transaction:
+      // the source adopts it in the host's store, whose write joins the
+      // boundary this snapshot commits in. The binding a later submission is
+      // checked against is therefore the state's — never a credential from
+      // an attempt whose start rolled back.
+      const credential = mintAttemptCredential(
+        this.credentialSource,
+        attemptCredentialBinding({
+          graphId: this.graphId,
+          nodeId: node.id,
+          attemptId,
+          planRevision: this.planRevision,
+        }),
+      );
+      nodes.push(
+        Object.freeze({
+          nodeId: node.id,
+          status: "dispatched" as const,
+          attemptId,
+          attemptSeq,
+          attemptCredentialDigest: attemptCredentialDigest(credential),
+          // The host attribution this attempt is bound to (D9). Absent when the
+          // host declared no identity for this invocation — the absence IS the
+          // record, and no later process back-fills one.
+          ...(input.dispatchIdentity === undefined
+            ? {}
+            : { dispatchIdentity: input.dispatchIdentity }),
+          dispatchedAt: at,
+          arrivals: Object.freeze([]),
+        }),
+      );
+      dispatched.push(
+        this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
+      );
+      // THE INTENT IS PART OF THE SAME SNAPSHOT (D8). The effect names this
+      // attempt under the stable id its host dedupes and looks up by, so a
+      // process that dies between this commit and the create leaves a row a
+      // recovery can reconcile instead of a state that merely looks armed.
+      effects.push(
+        Object.freeze({
+          graphId: this.graphId,
+          effectId: dispatchEffectIdOf(attemptId),
+          attemptId,
+          kind: "dispatch",
+          payload: this.dispatchTargetOf(node.id, attemptId, node.agent, node.prompt),
+          createdAt: at,
+          status: "pending" as const,
+        }),
+      );
+    }
+    const state: OutcomeGraphState = Object.freeze({
+      bodyVersion: CURRENT_OUTCOME_STATE_BODY,
+      graphId: this.graphId,
+      planRevision: this.planRevision,
+      phase: "executing" as const,
+      nodes: Object.freeze(nodes),
+      loopTraversals: Object.freeze({}),
+      attemptSeq,
+      loopProgress: Object.freeze(loopProgress),
     });
+    // The store files the row under the graph's CURRENT run, resolved inside
+    // this transaction: the run minted above for a first execution, or the
+    // successor `mintNextRun` already recorded for a re-execution.
+    tx.writeGraphState(stateRecordOf(state, at));
+    for (const effect of effects) tx.writeEffect(effect);
+    return Object.freeze({ state, dispatched: Object.freeze(dispatched) });
+  }
+
+  /**
+   * RE-EXECUTE one terminal run as a NEW RUN (P3 item 2; plan §4 "终态图重新执行：
+   * 创建新 run，保留旧 run 和回执；修改有效 plan 形成新 revision，不能改写旧 attempt
+   * 的语义").
+   *
+   * WHAT THIS IS. The execution half of the run-scoped `retry` command: the
+   * control service records the trusted ORDER (who, why, when) and this mints
+   * the run that honours it. The split is deliberate and is the same shape a
+   * dispatch has — the INTENT is durable before anything is created, so a
+   * process that dies in between leaves an order the next window can finish
+   * instead of a command nothing would ever honour. The order is consumed inside
+   * the minting transaction (`markReexecutionExecuted`, conditional), so it can
+   * never produce two runs.
+   *
+   * WHAT IS NEW, AND WHAT IS UNTOUCHED. New: a run row (`runSeq` one greater than
+   * the run it supersedes, carrying THIS runtime's plan revision), a state
+   * snapshot whose attempt counter CONTINUES the graph-wide one, a credential
+   * per armed attempt, and one dispatch effect per armed attempt. Untouched: the
+   * superseded run's row, its state snapshot, every receipt, accepted event,
+   * accepted result, effect and control decision it holds — nothing is rewritten
+   * and no attempt is re-labelled. The old run stays addressable by its own id
+   * (`readRunOf`, `readGraphStateOf`, `controlDecisions(graphId, runId)`) and a
+   * submission for one of its attempts is refused because the run path resolves
+   * attempts against the CURRENT run's state, where that attempt no longer
+   * exists.
+   *
+   * WHAT IT REFUSES TO DO. It never re-executes a run that is still executing, a
+   * run nobody ordered re-executed, or a run whose external work is unaccounted
+   * for (an unsettled dispatch the run never superseded and no confirmed
+   * cancellation covers): re-running a graph whose side effects may still be
+   * live is the one thing §4 forbids outright. It never reuses an attempt id:
+   * the counter continues, so a successor attempt can never be confused with the
+   * attempt it replaced, and the old attempt's immutable facts stay readable
+   * under their own ids.
+   *
+   * A CHANGED EFFECTIVE PLAN FORMS A NEW REVISION. The run row and the state both
+   * record `this.planRevision`, so a runtime constructed with a different
+   * revision re-executes INTO that revision while every earlier run keeps the
+   * revision its receipts were accepted under. The superseded run's state is read
+   * DEFENSIVELY for the two facts this needs (its phase and its attempt counter)
+   * when it is not a snapshot this plan can verify — a revision change is exactly
+   * that case, and refusing the read would make a changed plan unrunnable.
+   */
+  reexecute(now?: number): OutcomeReexecutionResult {
+    const at = this.readClock(now);
+    if (typeof at !== "number") return refused([at]);
+    const unavailable = this.protocolRefusal();
+    if (unavailable !== undefined) return refused([unavailable]);
+    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
+    if (unprotectedCredentials !== undefined) {
+      return refused([unprotectedCredentials]);
+    }
+    // The re-execution ARMS attempts, so it records the identity in effect for
+    // this invocation exactly as `start` does — and an unreadable declaration
+    // refuses rather than arming attempts nobody can verify (D9).
+    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
+    if (unreadableHostIdentity !== undefined) {
+      return refused([unreadableHostIdentity]);
+    }
+    const hostIdentity = readCurrentHostIdentity(this.hostIdentity);
+    if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
+    const dispatchIdentity =
+      hostIdentity.kind === "identified" ? hostIdentity.identity : undefined;
+    const undispatchable = this.dispatchCapabilityRefusal();
+    if (undispatchable !== undefined) return refused([undispatchable]);
+    const unsupportedCompletion = this.completionCapabilityRefusal();
+    if (unsupportedCompletion !== undefined) {
+      return refused([unsupportedCompletion]);
+    }
+
+    const runs = this.ledger.runs;
+    if (runs === undefined) {
+      return refused([
+        {
+          code: "reexecution-not-authorized",
+          path: "$.graphId",
+          message:
+            "outcome-runtime: this substrate holds no run/control surface, so it can hold " +
+            "neither a run identity nor the trusted order a re-execution requires — nothing " +
+            "was re-executed",
+        },
+      ]);
+    }
+    const run = runs.readRun(this.graphId);
+    if (run === undefined) {
+      return refused([
+        {
+          code: "graph-not-started",
+          path: "$.graphId",
+          message:
+            "outcome-runtime: graph " +
+            JSON.stringify(this.graphId) +
+            " holds no run identity, so there is no terminal run to re-execute",
+        },
+      ]);
+    }
+    const order = runs.readReexecution(this.graphId, run.runId);
+    if (order === undefined) {
+      return refused([
+        {
+          code: "reexecution-not-authorized",
+          path: "$.runId",
+          message:
+            "outcome-runtime: run " +
+            JSON.stringify(run.runId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " carries no trusted order to be re-executed, and a new run is a trusted " +
+            "decision rather than a side effect of reading — apply the run-scoped " +
+            "\"retry\" control command first, and nothing was re-executed",
+        },
+      ]);
+    }
+    if (order.successorRunId !== undefined) {
+      return refused([
+        {
+          code: "reexecution-raced",
+          path: "$.runId",
+          message:
+            "outcome-runtime: run " +
+            JSON.stringify(run.runId) +
+            " was already re-executed as run " +
+            JSON.stringify(order.successorRunId) +
+            " while this call saw it as current — nothing was written; re-read the graph to " +
+            "address the run that stands",
+        },
+      ]);
+    }
+
+    let record: GraphStateRecord | undefined;
+    try {
+      record = this.ledger.readGraphState(this.graphId);
+    } catch (error) {
+      return refused([this.ledgerRefusal(error)]);
+    }
+    if (record === undefined) {
+      return refused([
+        {
+          code: "unreadable-state",
+          path: "$.graphId",
+          message:
+            "outcome-runtime: run " +
+            JSON.stringify(run.runId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " holds no state snapshot, so neither its terminal position nor its attempt " +
+            "counter can be established — nothing was re-executed",
+        },
+      ]);
+    }
+    const position = rawRunPositionOf(record.body);
+    if (position === undefined) {
+      return refused([
+        {
+          code: "unreadable-state",
+          path: "$.body",
+          message:
+            "outcome-runtime: the state snapshot of run " +
+            JSON.stringify(run.runId) +
+            " does not carry a readable phase and attempt counter, so a successor run " +
+            "cannot continue its attempt sequence without risking an attempt id collision " +
+            "— nothing was re-executed",
+        },
+      ]);
+    }
+    // A snapshot THIS plan can verify is read fully, so the terminal check and
+    // the blocking-effect check below use the state's own node entries; a
+    // snapshot of ANOTHER revision is not this plan's state and is read
+    // defensively instead (the plan a re-execution runs may be a new revision).
+    let state: OutcomeGraphState | undefined;
+    try {
+      state = readOutcomeGraphState(record, this.plan);
+    } catch {
+      state = undefined;
+    }
+    const control = runs.readRunControlOf(this.graphId, run.runId);
+    const terminal =
+      control !== undefined || position.phase === "complete" || position.phase === "stopped";
+    if (!terminal) {
+      return refused([
+        {
+          code: "reexecution-not-terminal",
+          path: "$.runId",
+          message:
+            "outcome-runtime: run " +
+            JSON.stringify(run.runId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " is " +
+            position.phase +
+            " and carries no control fact, so it is still executing — re-executing the " +
+            "graph would run nodes this run has not finished; a node-scoped \"retry\" is " +
+            "the command for a live run, and nothing was re-executed",
+        },
+      ]);
+    }
+
+    let effects: readonly PendingEffectRecord[];
+    try {
+      effects = this.ledger.pendingEffects(this.graphId, run.runId);
+    } catch (error) {
+      return refused([this.ledgerRefusal(error)]);
+    }
+    let confirmedCancellations: readonly string[];
+    try {
+      confirmedCancellations = this.ledger.confirmedCancelAttempts(this.graphId, run.runId);
+    } catch (error) {
+      return refused([this.ledgerRefusal(error)]);
+    }
+    const blocking = blockingReexecutionEffectsOf(effects, {
+      cancelled: new Set(confirmedCancellations),
+      ...(state === undefined
+        ? {}
+        : {
+            inFlight: new Set(
+              state.nodes
+                .filter((node) => node.status === "dispatched" && node.attemptId !== undefined)
+                .map((node) => node.attemptId as string),
+            ),
+            settled: new Set(
+              state.nodes
+                .filter((node) => node.status === "settled" && node.attemptId !== undefined)
+                .map((node) => node.attemptId as string),
+            ),
+          }),
+    });
+    if (blocking.length > 0) {
+      return refused([
+        {
+          code: "reexecution-unsettled-effects",
+          path: "$.runId",
+          message:
+            "outcome-runtime: run " +
+            JSON.stringify(run.runId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " still owes external work whose fate is unknown — " +
+            blocking
+              .map(
+                (effect) =>
+                  effect.effectId +
+                  " (attempt " +
+                  effect.attemptId +
+                  ", " +
+                  effect.status +
+                  ")",
+              )
+              .join(", ") +
+            " — so re-executing the graph could run a side effect that is still live; a " +
+            "platform-confirmed cancellation of those attempts clears them, and nothing " +
+            "was re-executed",
+        },
+      ]);
+    }
+
+    const successorRunId = reexecutionRunIdentityOf(this.graphId, at, run.runSeq + 1);
+    let started: { state: OutcomeGraphState; dispatched: readonly OutcomeDispatchRequest[] };
+    try {
+      started = this.ledger.runInTransaction((tx) => {
+        const successor = tx.runs?.mintNextRun(
+          {
+            graphId: this.graphId,
+            runId: successorRunId,
+            startedAt: at,
+            planRevision: this.planRevision,
+          },
+          run.runId,
+        );
+        if (successor === undefined) throw new ReexecutionRacedError("current-run-moved");
+        const marked = tx.runs?.markReexecutionExecuted(
+          this.graphId,
+          run.runId,
+          successorRunId,
+          at,
+        );
+        if (marked !== true) throw new ReexecutionRacedError("order-already-consumed");
+        return this.mintRunInTransaction(tx, at, {
+          runId: successorRunId,
+          dispatchIdentity,
+          // THE ATTEMPT COUNTER CONTINUES (see the method doc): a successor run
+          // can never mint an attempt id an earlier run already used, so the old
+          // attempt's receipts and accepted events stay addressable and a stale
+          // credential can never resolve to the successor's attempt.
+          fromAttemptSeq: position.attemptSeq,
+        });
+      });
+    } catch (error) {
+      if (error instanceof ReexecutionRacedError) {
+        return refused([
+          {
+            code: "reexecution-raced",
+            path: "$.runId",
+            message:
+              "outcome-runtime: the re-execution of run " +
+              JSON.stringify(run.runId) +
+              " lost the race for the current run (" +
+              error.message +
+              ") — nothing was written and no run was minted; re-read the graph to address " +
+              "the run that stands",
+          },
+        ]);
+      }
+      if (error instanceof OutcomeStateError) {
+        return refused([this.stateRefusal(error)]);
+      }
+      throw error;
+    }
     this.launchDispatches(started.dispatched);
-    return { kind: "started", state: started.state, dispatched: started.dispatched };
+    const armed = armedReading(started.state);
+    const unsettled = this.unsettledEffectReading();
+    return {
+      kind: "reexecuted",
+      runId: successorRunId,
+      runSeq: run.runSeq + 1,
+      planRevision: this.planRevision,
+      fromRunId: run.runId,
+      state: started.state,
+      dispatched: started.dispatched,
+      // The inventory is read AFTER the launch, from the state the transaction
+      // committed: a failed launch leaves its effect unsettled and still listed,
+      // so nothing this report omits was silently dropped.
+      armed: armed.armed,
+      ...("code" in unsettled ? { unsettledEffects: Object.freeze([]) } : { unsettledEffects: unsettled }),
+    };
   }
 
   /**
@@ -1665,6 +2141,37 @@ export class OutcomeGraphRuntime {
     // `control-stopped`, never a settlement.
     if (verdict.kind === "controlled") {
       return refused([this.controlStopRefusal(verdict.control)]);
+    }
+    // A SUPERSEDED ATTEMPT ACCEPTS NOTHING (P3 item 2, the retry). The ledger's
+    // own guard refused the batch because a trusted retry replaced this attempt
+    // while the submission was being decided, so the attempt's result would
+    // belong to an execution the node no longer holds. It is answered by name,
+    // exactly like a control stop, and NEVER as a settlement: the successor
+    // attempt carries the node forward, and the superseded attempt's receipt,
+    // accepted event and decisions (if it had any) stay exactly as they were.
+    if (verdict.kind === "superseded") {
+      return refused([
+        {
+          code: "attempt-superseded",
+          path: "$.attemptId",
+          message:
+            "outcome-runtime: attempt " +
+            JSON.stringify(verdict.decision.attemptId) +
+            " of node " +
+            JSON.stringify(verdict.decision.nodeId) +
+            " in graph " +
+            JSON.stringify(this.graphId) +
+            " was SUPERSEDED by the trusted retry decided at " +
+            String(verdict.decision.decidedAt) +
+            " (" +
+            verdict.decision.reason +
+            ") while this submission was being decided, so nothing was accepted: no " +
+            "receipt, no accepted event, no state advance and no successor effect was " +
+            "written for it — the successor attempt " +
+            JSON.stringify(verdict.decision.successorAttemptId ?? "") +
+            " carries the node forward",
+        },
+      ]);
     }
     if (verdict.kind === "conflict" || verdict.kind === "settled") {
       return { kind: "not-committed", decision: evaluated, verdict };
@@ -4218,6 +4725,78 @@ function runIdentityOf(graphId: string, startedAt: number): string {
   return graphId + "@" + String(startedAt);
 }
 
+/**
+ * The run identity minted for one RE-EXECUTION of a graph.
+ *
+ * DERIVED, NOT RANDOM, like {@link runIdentityOf}, and it carries the run's own
+ * sequence so two re-executions decided at the same millisecond cannot collide:
+ * `run_seq` is unique within a graph by the store's own key, so the id a
+ * successor proposes is unique by construction rather than by retry.
+ */
+function reexecutionRunIdentityOf(
+  graphId: string,
+  startedAt: number,
+  runSeq: number,
+): string {
+  return graphId + "@" + String(startedAt) + "+" + String(runSeq);
+}
+
+/** The two facts a re-execution needs from a snapshot it may not be able to verify. */
+interface RawRunPosition {
+  readonly phase: OutcomeGraphPhase;
+  readonly attemptSeq: number;
+}
+
+/**
+ * Read one state body's PHASE and ATTEMPT COUNTER without verifying it against a
+ * plan.
+ *
+ * WHY A DEFENSIVE READ IS REQUIRED HERE. Re-executing a graph is exactly the
+ * operation that may run a CHANGED plan revision, and a snapshot of an earlier
+ * revision cannot be verified against this plan's contracts or topology — the
+ * strict reader would refuse it. These two facts are the exception: the phase
+ * says whether the run is over, and the counter says where the graph-wide
+ * attempt sequence stands. Both are read as VALUES, with a shape check, and
+ * anything else about the body is ignored rather than trusted: nothing here
+ * decides what the old run meant, and a body that does not carry them refuses
+ * the re-execution instead of guessing a counter (a guessed one could mint an
+ * attempt id an earlier run already used).
+ */
+function rawRunPositionOf(body: unknown): RawRunPosition | undefined {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const record = body as Record<string, unknown>;
+  const phase = record["phase"];
+  const attemptSeq = record["attemptSeq"];
+  if (phase !== "ready" && phase !== "executing" && phase !== "complete" && phase !== "stopped") {
+    return undefined;
+  }
+  if (
+    typeof attemptSeq !== "number" ||
+    !Number.isSafeInteger(attemptSeq) ||
+    attemptSeq < 0
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ phase, attemptSeq });
+}
+
+
+/**
+ * Internal: a re-execution whose conditional write did not land.
+ *
+ * Thrown INSIDE the minting transaction so the whole transaction rolls back —
+ * the run row, the order's successor link and every effect it wrote — and caught
+ * by {@link OutcomeGraphRuntime.reexecute}, which reports the race as a value.
+ * It carries no message a caller sees verbatim: the refusal's own wording is the
+ * report.
+ */
+class ReexecutionRacedError extends Error {
+  constructor(readonly step: string) {
+    super(step);
+    this.name = "ReexecutionRacedError";
+  }
+}
+
 /** The state's progress for one node, when that node is currently in flight. */
 function dispatchedNodeOf(
   state: OutcomeGraphState,
@@ -4481,17 +5060,6 @@ function submissionIdOf(proposal: unknown, source: SettlementSource): string {
  * the run path's enablement gate reports an unreadable capability by name
  * before this is consulted — it only means a recovery cannot re-deliver.
  */
-function readCredentialStore(
-  capability: CredentialIsolationCapability | undefined,
-): CredentialIsolationStore | undefined {
-  if (capability === undefined) return undefined;
-  const read = readCredentialIsolationAdapter(capability);
-  if (read === undefined || read.version !== CREDENTIAL_ISOLATION_VERSION_V3) {
-    return undefined;
-  }
-  return read.store;
-}
-
 /** Build the refusal result for a list of refusals. */
 function refused(refusals: readonly OutcomeRuntimeRefusal[]): {
   readonly kind: "refused";

@@ -655,7 +655,9 @@ function ledgerRefusingStateWrites(
     writeEffect: (record) => tx.writeEffect(record),
     lookupReceipt: (key) => tx.lookupReceipt(key),
     acceptedEvents: (graphId) => tx.acceptedEvents(graphId),
-    pendingEffects: (graphId) => tx.pendingEffects(graphId),
+    pendingEffects: (graphId, runId) => tx.pendingEffects(graphId, runId),
+    confirmedCancelAttempts: (graphId, runId) =>
+      tx.confirmedCancelAttempts(graphId, runId),
     markEffectStarted: (graphId, effectId) => tx.markEffectStarted(graphId, effectId),
     markEffectDone: (graphId, effectId) => tx.markEffectDone(graphId, effectId),
     markEffectFailed: (graphId, effectId) => tx.markEffectFailed(graphId, effectId),
@@ -671,7 +673,9 @@ function ledgerRefusingStateWrites(
     writeEffect: (record) => inner.writeEffect(record),
     lookupReceipt: (key) => inner.lookupReceipt(key),
     acceptedEvents: (graphId) => inner.acceptedEvents(graphId),
-    pendingEffects: (graphId) => inner.pendingEffects(graphId),
+    pendingEffects: (graphId, runId) => inner.pendingEffects(graphId, runId),
+    confirmedCancelAttempts: (graphId, runId) =>
+      inner.confirmedCancelAttempts(graphId, runId),
     markEffectStarted: (graphId, effectId) => inner.markEffectStarted(graphId, effectId),
     markEffectDone: (graphId, effectId) => inner.markEffectDone(graphId, effectId),
     markEffectFailed: (graphId, effectId) => inner.markEffectFailed(graphId, effectId),

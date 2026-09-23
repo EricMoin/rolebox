@@ -561,7 +561,12 @@ async function controlRace(store: GraphStore): Promise<void> {
 
   // The run identity the decision belongs to. Both racers mint it; the store
   // answers the FIRST one to every later mint, so the two processes agree.
-  store.runs.mintRun({ graphId, runId, startedAt: at });
+  store.runs.mintRun({
+    graphId,
+    runId,
+    startedAt: at,
+    planRevision: arg("plan-revision") ?? "plan.xproc",
+  });
 
   writeFileSync(join(markerDir, `ready-${id}-${round}.marker`), "1");
   await waitForMarker(
@@ -655,6 +660,7 @@ function applyControl(store: GraphStore): void {
     graphId,
     runId: arg("run") ?? graphId + "@apply-control",
     startedAt: at,
+    planRevision: arg("plan-revision") ?? "plan.xproc",
   });
   const verdict = store.runs.writeControlDecision({
     decision: {

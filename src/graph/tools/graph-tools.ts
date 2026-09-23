@@ -56,6 +56,7 @@ import {
   type GraphSubmitOutcomeResult,
 } from "./submit-outcome.ts";
 import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
+import type { AttemptCredentialSource } from "../outcome/attempt-credential.ts";
 import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
@@ -199,6 +200,15 @@ export interface GraphToolSetDeps {
    * `credentialStoreRoot`.
    */
   credentialIsolation?: CredentialIsolationCapability;
+  /**
+   * The credential SOURCE a retry mints its successor attempt's value from.
+   *
+   * A TOOLSET dependency, never a tool argument, and OPTIONAL in the same sense
+   * the run path's own is: omitting it uses the platform CSPRNG rather than
+   * minting nothing. It exists so a test can pin the value deterministically
+   * through the SAME `graph_control` entry production uses.
+   */
+  outcomeMintCredential?: AttemptCredentialSource;
   /**
    * HOST invocation-identity capability — the ADDITIONAL constraint a host may
    * declare on top of per-attempt credentials.
@@ -747,6 +757,17 @@ export class GraphToolSet {
       {
         storeDirectory: this.storeDirectory(),
         ...(this.deps.outcomeNow === undefined ? {} : { now: this.deps.outcomeNow }),
+        // THE RETRY'S OWN CAPABILITIES. A retry mints a successor attempt, so it
+        // needs the same two host facilities the run path does: a protected store
+        // the credential is adopted by, and a source. Omitting the store is not a
+        // silent downgrade — the control service refuses the command by name with
+        // nothing written.
+        ...(this.deps.credentialIsolation === undefined
+          ? {}
+          : { credentialIsolation: this.deps.credentialIsolation }),
+        ...(this.deps.outcomeMintCredential === undefined
+          ? {}
+          : { mintCredential: this.deps.outcomeMintCredential }),
       },
       args,
       invokingSessionId,

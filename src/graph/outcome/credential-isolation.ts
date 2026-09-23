@@ -538,6 +538,28 @@ export interface CredentialIsolationRefusal {
 }
 
 /**
+ * The protected STORE half of a readable version-3 capability, or `undefined`.
+ *
+ * ONE owner of the resolution, because two writers mint attempt credentials: the
+ * run path (a first execution and every successor a reducer arms) and the
+ * trusted control path (a retry's successor attempt). Both must adopt the value
+ * in the host's store INSIDE the transaction whose state records its digest — a
+ * credential the store never received would make its attempt undeliverable — and
+ * both must agree on what "a readable store" means: version 3 only, never a
+ * legacy version-1/2 declaration downgraded to the version-1 shape.
+ */
+export function readCredentialIsolationStore(
+  capability: CredentialIsolationCapability | undefined,
+): CredentialIsolationStore | undefined {
+  if (capability === undefined) return undefined;
+  const read = readCredentialIsolationAdapter(capability);
+  if (read === undefined || read.version !== CREDENTIAL_ISOLATION_VERSION_V3) {
+    return undefined;
+  }
+  return read.store;
+}
+
+/**
  * The enablement gate: `undefined` when `adapter` is a readable version-3
  * capability, a structured refusal otherwise (including for a legacy version-1
  * or version-2 value, which is refused by name rather than downgraded).

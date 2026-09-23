@@ -76,8 +76,19 @@
  * command?" — reading it as this build's store would report every controlled
  * run as merely executing. Same rule, same answer: refused by name, never
  * widened, never migrated (plan §3.6).
+ *
+ * VERSION 4 MAKES THE RUN THE SCOPING KEY (P3 item 2). A version-3 file keys the
+ * graph state by GRAPH and holds runs one-per-graph, which is exactly the
+ * assumption re-executing a terminal graph makes false: its `pendingEffects`
+ * and `controlDecisions` reads answer every row of the GRAPH, so a later run's
+ * recovery would be offered the earlier run's dispatches and cancellations. The
+ * run id becomes part of the graph-state key, an explicit column of every
+ * effect, and the `(graph, run)` pair of the run table; the control decision's
+ * key gains the command so a `retry` can be recorded beside the fact it
+ * supersedes. Same rule, same answer: refused by name, never widened, never
+ * migrated (plan §3.6).
  */
-export const LEDGER_FORMAT_VERSION = 3;
+export const LEDGER_FORMAT_VERSION = 4;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 
@@ -143,6 +154,20 @@ export type EffectStatus = "pending" | "started" | "done" | "failed";
  */
 export interface PendingEffectRecord {
   readonly graphId: string;
+  /**
+   * The RUN this effect belongs to (P3 item 2, G3). Every effect is work one
+   * run's state authorized, so a re-executed graph's successor run can never be
+   * answered with the superseded run's rows — the run-scoped reads
+   * ({@link AcceptanceLedgerTx.pendingEffects}) filter by exactly this value.
+   *
+   * ABSENT MEANS "THE RUN THAT IS CURRENT WHEN THIS ROW IS WRITTEN", and that is
+   * a resolution the STORE performs inside the writing transaction, never a
+   * default that invents a run: a write whose graph has no run identity, or
+   * whose resolved run is not the graph's current run, is REFUSED by name
+   * rather than filed under a run nobody can address. A reader always finds a
+   * value here, because every committed row was resolved before it was written.
+   */
+  readonly runId?: string;
   readonly effectId: string;
   readonly attemptId: string;
   readonly kind: string;
@@ -187,6 +212,21 @@ export const GRAPH_STATE_MAX_BYTES = 4_194_304;
  */
 export interface GraphStateRecord {
   readonly graphId: string;
+  /**
+   * The RUN whose position this snapshot records (P3 item 2, G3). A run's state
+   * is written once per step and NEVER rewritten after the run is superseded:
+   * re-executing a terminal graph mints a NEW run with its OWN snapshot, so the
+   * superseded run's last position stays readable
+   * ({@link RunControlLedger.readGraphStateOf}) instead of being overwritten by
+   * the successor.
+   *
+   * ABSENT MEANS "THE RUN THAT IS CURRENT WHEN THIS ROW IS WRITTEN", resolved by
+   * the store inside the writing transaction exactly like
+   * {@link PendingEffectRecord.runId}: a graph with no run identity, or a write
+   * aimed at a run that is no longer current, is REFUSED by name rather than
+   * filed against a run the graph does not address any more.
+   */
+  readonly runId?: string;
   /** The compiled-plan revision this snapshot belongs to. */
   readonly planRevision: string;
   /** The state body; the store persists its JSON text verbatim. */
@@ -253,7 +293,72 @@ export interface RunIdentityRecord {
   readonly runId: string;
   /** Epoch milliseconds the run's first snapshot was committed at. */
   readonly startedAt: number;
+  /**
+   * The compiled-plan revision this run executes (P3 item 2). Recorded WITH the
+   * run identity, so a superseded run's receipts and state keep addressing the
+   * revision they were accepted under even after a later run executes a
+   * different one. `planRevision` is therefore part of a run's identity, not a
+   * property of the graph.
+   */
+  readonly planRevision: string;
 }
+
+/**
+ * One run identity as the STORE holds it: the caller's record plus the
+ * graph-local sequence the store allocated.
+ *
+ * `runSeq` orders the runs of one graph (the CURRENT run is the one with the
+ * greatest sequence) and makes re-execution deterministic without reading a
+ * clock: a successor is `runSeq + 1`, and the unique key `(graphId, runSeq)`
+ * makes two racing successors unrepresentable.
+ */
+export interface StoredRunIdentity extends RunIdentityRecord {
+  readonly runSeq: number;
+}
+
+/**
+ * The durable TRUSTED DECISION that one terminal run is to be re-executed as a
+ * new run (P3 item 2; plan §4 "终态图重新执行：创建新 run，保留旧 run 和回执").
+ *
+ * Owns: which run the trusted principal ordered re-executed, why, when, who
+ * decided, and — once the re-execution has run — WHICH run succeeded it. The
+ * row is a DECISION, not a run: it names no attempt, mints no attempt and
+ * carries no plan, so it can never be read as a second run table. The successor
+ * run row is the run; this row is the authorization the successor was created
+ * under, which is why the successor link is written exactly once, inside the
+ * transaction that mints the successor.
+ *
+ * WHY IT EXISTS AT ALL. The order and the execution are two commits (the order
+ * is durable before any run is minted, exactly as a dispatch intent is durable
+ * before any create), so a process that dies between them leaves a row a later
+ * window — the boot sweep, the next `startDeclaredGraph` — can HONOUR instead
+ * of a command nothing would ever finish.
+ */
+export interface RunReexecutionRecord {
+  readonly graphId: string;
+  /** The TERMINAL run this decision orders re-executed. */
+  readonly runId: string;
+  readonly reason: string;
+  /** Epoch milliseconds the trusted decision was taken at. */
+  readonly decidedAt: number;
+  readonly decidedBy?: ControlPrincipalRecord;
+  /**
+   * The run minted to succeed {@link runId}, present exactly once the
+   * re-execution committed. Absent means the order is still OWED.
+   */
+  readonly successorRunId?: string;
+  /** Epoch milliseconds the successor run's first snapshot was committed at. */
+  readonly successorStartedAt?: number;
+}
+
+/** The verdict of recording one re-execution decision. */
+export type RunReexecutionWriteResult =
+  | { readonly kind: "recorded"; readonly reexecution: RunReexecutionRecord }
+  | {
+      /** The same order is already recorded; nothing was written. */
+      readonly kind: "replayed";
+      readonly reexecution: RunReexecutionRecord;
+    };
 
 /**
  * One durable TRUSTED CONTROL DECISION for one attempt (P3 item 1).
@@ -277,6 +382,16 @@ export interface ControlDecisionRecord {
   readonly decidedAt: number;
   /** The trusted invocation that decided, when the host attributes one. */
   readonly decidedBy?: ControlPrincipalRecord;
+  /**
+   * The attempt a `retry` MINTED in place of {@link attemptId} (P3 item 2).
+   * Present EXACTLY for a retry: the decision is recorded against the attempt it
+   * SUPERSEDES (which is what makes a repeated retry of that attempt a replay
+   * instead of a second attempt), so this field is the durable link from the
+   * superseded attempt to its successor. It is the identity a replay answers
+   * with, and the reason a retried attempt can be named after the fact without
+   * reading the run state.
+   */
+  readonly successorAttemptId?: string;
 }
 
 /**
@@ -309,8 +424,15 @@ export interface RunControlWrite {
    * The run's control to SET when the run has none. The write is conditional on
    * the run still being unclaimed, so a racing second command never replaces
    * the first — it is told which command already stopped the run instead.
+   *
+   * ABSENT MEANS "THIS DECISION DOES NOT CLAIM THE RUN". A `retry` is the one
+   * command that does not: it supersedes an attempt, it does not end the run,
+   * so claiming the run's stop fact would make the successor attempt
+   * unsettleable (every settlement path refuses a controlled run). Omitting it
+   * records the decision and leaves the run's own control fact exactly as it
+   * stands.
    */
-  readonly runControl: RunControlRecord;
+  readonly runControl?: RunControlRecord;
 }
 
 /**
@@ -338,7 +460,13 @@ export type RunControlWriteResult =
   | {
       readonly kind: "recorded";
       readonly decision: ControlDecisionRecord;
-      readonly runControl: RunControlRecord;
+      /**
+       * The run's control fact AFTER the write — the one that stands, which is
+       * the FIRST command recorded and therefore not necessarily this call's.
+       * `undefined` when the run has none and this call did not claim one (a
+       * retry), and when the graph holds no run row at all.
+       */
+      readonly runControl: RunControlRecord | undefined;
     }
   | {
       readonly kind: "replayed";
@@ -368,12 +496,63 @@ export type RunControlWriteResult =
  * write. A substrate that DOES implement it owns the uniqueness rules above.
  */
 export interface RunControlLedger {
-  /** The current run identity of one graph, or `undefined`. */
-  readRun(graphId: string): RunIdentityRecord | undefined;
+  /** The CURRENT run identity of one graph, or `undefined`. */
+  readRun(graphId: string): StoredRunIdentity | undefined;
   /** Record a run identity, or return the one already recorded (idempotent). */
-  mintRun(record: RunIdentityRecord): RunIdentityRecord;
+  mintRun(record: RunIdentityRecord): StoredRunIdentity;
+  /**
+   * ONE SUPERSEDED RUN, BY ITS OWN ID (P3 item 2).
+   *
+   * `readRun` answers the run a graph is executing NOW; this answers any run the
+   * graph EVER executed, which is what makes an old run's receipts and state
+   * addressable after a re-execution instead of merely "not the current one".
+   */
+  readRunOf(graphId: string, runId: string): StoredRunIdentity | undefined;
+  /** Every run of one graph, oldest first (ascending `runSeq`). */
+  runsOf(graphId: string): readonly StoredRunIdentity[];
+  /**
+   * Mint the SUCCESSOR of one run, conditional on that run still being the
+   * graph's current one.
+   *
+   * This is the ONLY way a graph gets a second run, and it is deliberately a
+   * separate operation from {@link mintRun}: `mintRun` is the idempotent
+   * first-execution mint (a racing second caller is answered the first run), so
+   * folding re-execution into it would make every repeated first-execution mint
+   * a new run. `afterRunId` is the CURRENT run this successor supersedes: the
+   * insert lands only while that run is still current, so two racers cannot both
+   * mint a successor, and `undefined` means the graph moved on and NOTHING was
+   * written.
+   */
+  mintNextRun(
+    record: RunIdentityRecord,
+    afterRunId: string,
+  ): StoredRunIdentity | undefined;
   /** The run-level control fact of one graph's current run, or `undefined`. */
   readRunControl(graphId: string): RunControlRecord | undefined;
+  /** The run-level control fact of ONE named run, or `undefined`. */
+  readRunControlOf(graphId: string, runId: string): RunControlRecord | undefined;
+  /** One run's re-execution decision, or `undefined`. */
+  readReexecution(graphId: string, runId: string): RunReexecutionRecord | undefined;
+  /**
+   * Record the trusted order to re-execute one run. IDEMPOTENT on
+   * `(graphId, runId)`: a repeated order REPLAYS the persisted decision (with
+   * the successor it already minted, if any) and writes nothing.
+   */
+  recordReexecution(record: RunReexecutionRecord): RunReexecutionWriteResult;
+  /**
+   * Link the successor run to the order that authorized it, ONCE.
+   *
+   * Conditional on the order still being owed (`successor_run_id IS NULL`), so
+   * a racing second executor loses and writes nothing. Called INSIDE the
+   * transaction that mints the successor, so an order is never marked executed
+   * without the run it names.
+   */
+  markReexecutionExecuted(
+    graphId: string,
+    runId: string,
+    successorRunId: string,
+    successorStartedAt: number,
+  ): boolean;
   /** The control decision one attempt carries, or `undefined`. */
   readControlDecision(
     graphId: string,
@@ -381,8 +560,37 @@ export interface RunControlLedger {
     nodeId: string,
     attemptId: string,
   ): ControlDecisionRecord | undefined;
-  /** Every control decision of one graph, in decision order. */
-  controlDecisions(graphId: string): readonly ControlDecisionRecord[];
+  /**
+   * The decision one attempt carries FOR ONE COMMAND, or `undefined`.
+   *
+   * The retry's idempotency key (P3 item 2): a retry is identified by the
+   * attempt it SUPERSEDES, so the read that decides "record or replay" is
+   * exactly this triple — and a repeated retry of that attempt must replay the
+   * decision that minted its successor rather than minting another.
+   */
+  readControlCommandDecision(
+    graphId: string,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+    command: ControlCommandName,
+  ): ControlDecisionRecord | undefined;
+  /**
+   * The control decisions of ONE run, in decision order.
+   *
+   * RUN-SCOPED (G3). A command is a fact about one run's attempt, and a graph
+   * that has been re-executed has more than one run: answering with every
+   * decision of the GRAPH would hand a later run's reader the earlier run's
+   * cancellations, retries and failures as if they belonged to the run it is
+   * asking about. `runId` omitted means the graph's CURRENT run. A graph with
+   * no run row at all has exactly one implicit run, so its decisions are
+   * answered in full — that case is not a second run, it is the same run before
+   * its identity was minted.
+   */
+  controlDecisions(
+    graphId: string,
+    runId?: string,
+  ): readonly ControlDecisionRecord[];
   /** Record one decision and, when the run is unclaimed, its control fact. */
   writeControlDecision(write: RunControlWrite): RunControlWriteResult;
   /**
@@ -473,6 +681,24 @@ export type CommitResult =
       /** The run-level control fact that refused this acceptance. */
       readonly control: RunControlRecord;
       readonly reason: string;
+    }
+  | {
+      /**
+       * The ATTEMPT was SUPERSEDED by a trusted `retry`: nothing was written.
+       *
+       * The check is part of the FIRST statement of the batch write (a receipt
+       * INSERT conditioned on no `retry` decision existing for this attempt), so
+       * it decides against the COMMITTED store, not against a value read before
+       * the write. A retry therefore can never race an acceptance into "both
+       * facts landed": whichever commits first stands, and a retried attempt
+       * accepts nothing afterwards — its result would belong to an execution the
+       * node no longer holds, and the successor attempt carries the node
+       * forward.
+       */
+      readonly kind: "superseded";
+      /** The retry decision that superseded this attempt. */
+      readonly decision: ControlDecisionRecord;
+      readonly reason: string;
     };
 
 /**
@@ -510,10 +736,16 @@ export interface AcceptanceLedgerTx {
   /** Commit one batch atomically; see {@link CommitResult}. */
   commitAccepted(batch: AcceptanceBatch): CommitResult;
   /**
-   * The persisted state snapshot of one graph, or `undefined` when the graph
-   * has never written one. Inside a transaction this reads the transaction's own
-   * uncommitted snapshot, which is what makes a reducer's transition a function
-   * of the state the acceptance is actually committing against.
+   * The persisted state snapshot of one graph's CURRENT RUN, or `undefined`
+   * when the graph has never written one. Inside a transaction this reads the
+   * transaction's own uncommitted snapshot, which is what makes a reducer's
+   * transition a function of the state the acceptance is actually committing
+   * against.
+   *
+   * RUN-SCOPED (G3). A graph that has been re-executed has more than one
+   * snapshot, and the run path always acts on the run the graph is executing
+   * NOW; a superseded run's snapshot stays readable through the control
+   * surface's own `readGraphStateOf`, never through this one.
    */
   readGraphState(graphId: string): GraphStateRecord | undefined;
   /**
@@ -531,10 +763,32 @@ export interface AcceptanceLedgerTx {
   /** Every accepted event of one graph, in accepted order. */
   acceptedEvents(graphId: string): readonly AcceptedEventRecord[];
   /**
-   * The UNSETTLED effects of one graph — rows still `pending` or `started`.
+   * The UNSETTLED effects of ONE RUN — rows still `pending` or `started`.
    * Terminal effects are never listed; that stream IS the resume set.
+   *
+   * RUN-SCOPED (G3). An effect is work one run's state authorized, and a graph
+   * that has been re-executed has more than one run: answering with every
+   * unsettled effect of the GRAPH would offer a later run's recovery the earlier
+   * run's dispatches, and — because a superseded attempt's effect is
+   * deliberately never rewound — could report the older run's abandoned work as
+   * this run's. `runId` omitted means the graph's CURRENT run. A graph with no
+   * run row has one implicit run and is answered in full.
    */
-  pendingEffects(graphId: string): readonly PendingEffectRecord[];
+  pendingEffects(graphId: string, runId?: string): readonly PendingEffectRecord[];
+  /**
+   * The attempts of one RUN whose cancellation the PLATFORM CONFIRMED — the
+   * `done` cancel effects, which are terminal and therefore absent from
+   * {@link pendingEffects}.
+   *
+   * WHY A SEPARATE READ. A confirmed cancellation is the one fact that accounts
+   * for an external execution the run abandoned: the dispatch effect stays
+   * unsettled (a cancel never rewinds it), so the only evidence that the
+   * execution is over is this row. A run may be re-executed when every
+   * unsettled dispatch is either superseded, settled, or covered here — and a
+   * caller that had to infer it from the unsettled set alone would never see it.
+   * `runId` omitted means the graph's current run.
+   */
+  confirmedCancelAttempts(graphId: string, runId?: string): readonly string[];
   /**
    * Write one NEW effect as the durable INTENT of work the transaction is
    * about to do — the atomic half of the outcome protocol's dispatch window.

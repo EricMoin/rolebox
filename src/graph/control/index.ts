@@ -5,9 +5,11 @@
  * Date: 2026-09-24
  *
  * The ONE trusted control surface of the graph: the application service that
- * turns a lifecycle command (failure / cancel / timeout, and the two commands
- * whose own work packages have not landed yet) into a durable fact, plus the
- * record and refusal vocabulary it answers with.
+ * turns a lifecycle command into a durable fact, plus the record and refusal
+ * vocabulary it answers with. Failure, cancel and timeout (P3 item 1) stop a run;
+ * \`retry\` (P3 item 2) supersedes one attempt in place — or, run-scoped, orders a
+ * terminal run re-executed as a NEW run. \`budget-stop\` is the one command whose own
+ * work package has not landed, and it is refused by name.
  *
  * WHY IT IS NOT PART OF `outcome/`. §3.4 separates an explicit business result
  * from trusted control. The outcome package owns proposals, acceptance,
@@ -26,11 +28,14 @@
 export {
   applyGraphControl,
   type GraphControlAttemptDecision,
+  type GraphControlMintedAttempt,
   type GraphControlPrincipal,
+  type GraphControlReexecution,
   type GraphControlRefusal,
   type GraphControlRefusalCode,
   type GraphControlRequest,
   type GraphControlResult,
+  type GraphControlRetryCapability,
   type GraphControlSkippedAttempt,
   type GraphControlUnconfirmedExecution,
 } from "./application.ts";

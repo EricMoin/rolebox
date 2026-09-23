@@ -85,6 +85,9 @@ import type {
   RunControlWrite,
   RunControlWriteResult,
   RunIdentityRecord,
+  RunReexecutionRecord,
+  RunReexecutionWriteResult,
+  StoredRunIdentity,
   SubmissionKey,
 } from "../ledger/types.ts";
 import {
@@ -294,18 +297,46 @@ export class GraphStore {
       (work) => this.joinOrBegin(work),
       // The run-control fact is read through THIS store: the acceptance rule
       // (a controlled run accepts nothing) is evaluated on the same connection
-      // and inside the same transaction as the batch it refuses.
+      // and inside the same transaction as the batch it refuses. It is the
+      // CURRENT run's fact (G3): a superseded run's stop refuses nothing in the
+      // run that succeeded it.
       (graphId) => this.readRunControl(graphId),
+      // Every effect and state row is filed under the graph's current run, and
+      // the resolution happens inside the writing transaction.
+      (graphId) => this.readRun(graphId)?.runId,
+      // The inverse acceptance rule (P3 item 2): an attempt a trusted retry
+      // SUPERSEDED accepts nothing, checked in the same boundary as the batch.
+      (graphId, attemptId) => this.readSupersedingRetry(graphId, attemptId),
     );
     // THE RUN/CONTROL SURFACE IS ONE OBJECT, bound to this store. It is built
     // before the transaction view because that view hands the SAME object out
     // (see `runs` below), so a caller inside a transaction and a caller holding
     // the store address one interface and one boundary.
     this.runsView = Object.freeze({
-      readRun: (graphId: string): RunIdentityRecord | undefined => this.readRun(graphId),
-      mintRun: (record: RunIdentityRecord): RunIdentityRecord => this.mintRun(record),
+      readRun: (graphId: string): StoredRunIdentity | undefined => this.readRun(graphId),
+      mintRun: (record: RunIdentityRecord): StoredRunIdentity => this.mintRun(record),
+      readRunOf: (graphId: string, runId: string): StoredRunIdentity | undefined =>
+        this.readRunOf(graphId, runId),
+      runsOf: (graphId: string): readonly StoredRunIdentity[] => this.runsOf(graphId),
+      mintNextRun: (
+        record: RunIdentityRecord,
+        afterRunId: string,
+      ): StoredRunIdentity | undefined => this.mintNextRun(record, afterRunId),
       readRunControl: (graphId: string): RunControlRecord | undefined =>
         this.readRunControl(graphId),
+      readRunControlOf: (graphId: string, runId: string): RunControlRecord | undefined =>
+        this.readRunControlOf(graphId, runId),
+      readReexecution: (graphId: string, runId: string): RunReexecutionRecord | undefined =>
+        this.readReexecution(graphId, runId),
+      recordReexecution: (record: RunReexecutionRecord): RunReexecutionWriteResult =>
+        this.recordReexecution(record),
+      markReexecutionExecuted: (
+        graphId: string,
+        runId: string,
+        successorRunId: string,
+        successorStartedAt: number,
+      ): boolean =>
+        this.markReexecutionExecuted(graphId, runId, successorRunId, successorStartedAt),
       readControlDecision: (
         graphId: string,
         runId: string,
@@ -313,8 +344,18 @@ export class GraphStore {
         attemptId: string,
       ): ControlDecisionRecord | undefined =>
         this.readControlDecision(graphId, runId, nodeId, attemptId),
-      controlDecisions: (graphId: string): readonly ControlDecisionRecord[] =>
-        this.controlDecisions(graphId),
+      readControlCommandDecision: (
+        graphId: string,
+        runId: string,
+        nodeId: string,
+        attemptId: string,
+        command: ControlCommandName,
+      ): ControlDecisionRecord | undefined =>
+        this.readControlCommandDecision(graphId, runId, nodeId, attemptId, command),
+      controlDecisions: (
+        graphId: string,
+        runId?: string,
+      ): readonly ControlDecisionRecord[] => this.controlDecisions(graphId, runId),
       writeControlDecision: (write: RunControlWrite): RunControlWriteResult =>
         this.writeControlDecision(write),
       claimRunControl: (control: RunControlRecord): RunControlRecord | undefined =>
@@ -334,8 +375,14 @@ export class GraphStore {
         this.lookupReceipt(key),
       acceptedEvents: (graphId: string): readonly AcceptedEventRecord[] =>
         this.acceptedEvents(graphId),
-      pendingEffects: (graphId: string): readonly PendingEffectRecord[] =>
-        this.pendingEffects(graphId),
+      pendingEffects: (
+        graphId: string,
+        runId?: string,
+      ): readonly PendingEffectRecord[] => this.pendingEffects(graphId, runId),
+      confirmedCancelAttempts: (
+        graphId: string,
+        runId?: string,
+      ): readonly string[] => this.confirmedCancelAttempts(graphId, runId),
       markEffectStarted: (graphId: string, effectId: string): EffectTransition =>
         this.markEffectStarted(graphId, effectId),
       markEffectDone: (graphId: string, effectId: string): EffectTransition =>
@@ -776,6 +823,12 @@ export class GraphStore {
     return this.ledger.readGraphState(graphId);
   }
 
+  /** ONE run's state snapshot, by its own id. */
+  readGraphStateOf(graphId: string, runId: string): GraphStateRecord | undefined {
+    this.assertOpen("readGraphStateOf");
+    return this.ledger.readGraphStateOf(graphId, runId);
+  }
+
   /** Write (or replace) one graph's state snapshot. */
   writeGraphState(record: GraphStateRecord): void {
     this.assertOpen("writeGraphState");
@@ -795,9 +848,15 @@ export class GraphStore {
   }
 
   /** The UNSETTLED effects of one graph — rows still `pending` or `started`. */
-  pendingEffects(graphId: string): readonly PendingEffectRecord[] {
+  pendingEffects(graphId: string, runId?: string): readonly PendingEffectRecord[] {
     this.assertOpen("pendingEffects");
-    return this.ledger.pendingEffects(graphId);
+    return this.ledger.pendingEffects(graphId, runId);
+  }
+
+  /** The attempts of one run whose cancellation the PLATFORM CONFIRMED. */
+  confirmedCancelAttempts(graphId: string, runId?: string): readonly string[] {
+    this.assertOpen("confirmedCancelAttempts");
+    return this.ledger.confirmedCancelAttempts(graphId, runId);
   }
 
   /** Write one NEW effect as the durable INTENT of work about to be done. */
@@ -1610,17 +1669,29 @@ export class GraphStore {
    * the first writer's — instead of each minting its own. The caller mints the
    * candidate id; the store decides which one is the run's.
    */
-  mintRun(record: RunIdentityRecord): RunIdentityRecord {
+  mintRun(record: RunIdentityRecord): StoredRunIdentity {
     this.assertOpen("mintRun");
     assertRunShape(record);
     return this.joinOrBegin(() => {
+      // FIRST-WINS ON THE FIRST RUN, and ONLY on the first: the insert lands
+      // only while the graph has NO run at all, so two processes that raced this
+      // graph's first execution agree on ONE run id instead of each minting its
+      // own — while a mint issued after a re-execution is answered the CURRENT
+      // run rather than appending a third identity. A successor run is minted
+      // exclusively through `mintNextRun`, which is conditional on the run it
+      // supersedes.
       this.db.run(
-        `INSERT INTO ${GRAPH_STORE_TABLES.runs} (graph_id, run_id, started_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT (graph_id) DO NOTHING`,
+        `INSERT INTO ${GRAPH_STORE_TABLES.runs}
+           (graph_id, run_id, run_seq, plan_revision, started_at)
+         SELECT ?, ?, 1, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.runs} WHERE graph_id = ?
+         )`,
         record.graphId,
         record.runId,
+        record.planRevision,
         record.startedAt,
+        record.graphId,
       );
       const stored = this.readRun(record.graphId);
       if (stored === undefined) {
@@ -1635,55 +1706,180 @@ export class GraphStore {
     });
   }
 
-  /** The current run identity of one graph, or `undefined`. */
-  readRun(graphId: string): RunIdentityRecord | undefined {
-    this.assertOpen("readRun");
-    const row = this.db
-      .query(
-        `SELECT graph_id, run_id, started_at FROM ${GRAPH_STORE_TABLES.runs} WHERE graph_id = ?`,
-      )
-      .get(graphId);
-    if (row === undefined || row === null) return undefined;
-    const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.runs);
-    return Object.freeze({
-      graphId: readStoreText(entry, "graph_id", this.filePath, GRAPH_STORE_TABLES.runs),
-      runId: readStoreText(entry, "run_id", this.filePath, GRAPH_STORE_TABLES.runs),
-      startedAt: readStoreEpoch(entry, "started_at", this.filePath, GRAPH_STORE_TABLES.runs),
+  /**
+   * Mint the SUCCESSOR of one run, conditional on that run still being current.
+   *
+   * ONE row per `(graph, run_seq)` makes two successors for one run
+   * unrepresentable, and the `WHERE` makes the winner the process that observed
+   * the run it supersedes: a racer whose `afterRunId` is no longer the graph's
+   * current run writes NOTHING and is answered `undefined` — never a second
+   * run, and never a silent adoption of the winner's. The sequence is read and
+   * incremented INSIDE this transaction, whose first statement takes the write
+   * lock, so the read cannot be stale.
+   */
+  mintNextRun(
+    record: RunIdentityRecord,
+    afterRunId: string,
+  ): StoredRunIdentity | undefined {
+    this.assertOpen("mintNextRun");
+    assertRunShape(record);
+    return this.joinOrBegin(() => {
+      // THE WRITE LOCK FIRST, exactly as the control path does: this operation
+      // reads the current run and then writes, and SQLite refuses a
+      // shared-to-reserved PROMOTION immediately when another connection holds
+      // the write lock. The statement changes no value.
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.runs}
+         SET started_at = started_at
+         WHERE graph_id = ?`,
+        record.graphId,
+      );
+      const current = this.readRun(record.graphId);
+      if (current === undefined || current.runId !== afterRunId) return undefined;
+      this.db.run(
+        `INSERT INTO ${GRAPH_STORE_TABLES.runs}
+           (graph_id, run_id, run_seq, plan_revision, started_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        record.graphId,
+        record.runId,
+        current.runSeq + 1,
+        record.planRevision,
+        record.startedAt,
+      );
+      return this.readRunOf(record.graphId, record.runId);
     });
   }
 
-  /** The run-level control fact of one graph's current run, or `undefined`. */
+  /** The CURRENT run identity of one graph, or `undefined`. */
+  readRun(graphId: string): StoredRunIdentity | undefined {
+    this.assertOpen("readRun");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, run_seq, plan_revision, started_at
+         FROM ${GRAPH_STORE_TABLES.runs}
+         WHERE graph_id = ?
+         ORDER BY run_seq DESC LIMIT 1`,
+      )
+      .get(graphId);
+    if (row === undefined || row === null) return undefined;
+    return this.runIdentityOfRow(row);
+  }
+
+  /** One SUPERSEDED run, by its own id, or `undefined`. */
+  readRunOf(graphId: string, runId: string): StoredRunIdentity | undefined {
+    this.assertOpen("readRunOf");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, run_seq, plan_revision, started_at
+         FROM ${GRAPH_STORE_TABLES.runs}
+         WHERE graph_id = ? AND run_id = ?`,
+      )
+      .get(graphId, runId);
+    if (row === undefined || row === null) return undefined;
+    return this.runIdentityOfRow(row);
+  }
+
+  /** Every run of one graph, oldest first. */
+  runsOf(graphId: string): readonly StoredRunIdentity[] {
+    this.assertOpen("runsOf");
+    const rows = this.db
+      .query(
+        `SELECT graph_id, run_id, run_seq, plan_revision, started_at
+         FROM ${GRAPH_STORE_TABLES.runs}
+         WHERE graph_id = ?
+         ORDER BY run_seq`,
+      )
+      .all(graphId);
+    const runs: StoredRunIdentity[] = [];
+    for (const row of rows) {
+      runs.push(this.runIdentityOfRow(row));
+    }
+    return Object.freeze(runs);
+  }
+
+  /** Project one `graph_runs` row onto the run identity. */
+  private runIdentityOfRow(row: unknown): StoredRunIdentity {
+    const table = GRAPH_STORE_TABLES.runs;
+    const entry = asStoreRow(row, this.filePath, table);
+    return Object.freeze({
+      graphId: readStoreText(entry, "graph_id", this.filePath, table),
+      runId: readStoreText(entry, "run_id", this.filePath, table),
+      runSeq: readStoreInteger(entry, "run_seq", this.filePath, table),
+      planRevision: readStoreText(entry, "plan_revision", this.filePath, table),
+      startedAt: readStoreEpoch(entry, "started_at", this.filePath, table),
+    });
+  }
+
+  /** The run-level control fact of one graph's CURRENT run, or `undefined`. */
   readRunControl(graphId: string): RunControlRecord | undefined {
     this.assertOpen("readRunControl");
     const run = this.readRun(graphId);
     if (run === undefined) return undefined;
+    return this.readRunControlOf(graphId, run.runId);
+  }
+
+  /**
+   * The run-level control fact of ONE named run, or `undefined`.
+   *
+   * The read that keeps a superseded run's stop addressable (G3): a run's
+   * control fact belongs to that run, never to the graph, so a later run is not
+   * answered with the command that stopped the earlier one.
+   */
+  readRunControlOf(graphId: string, runId: string): RunControlRecord | undefined {
+    this.assertOpen("readRunControlOf");
     const row = this.db
       .query(
-        `SELECT control_command, control_reason, control_decided_at,
+        `SELECT run_id, control_command, control_reason, control_decided_at,
                 control_decided_by_session, control_decided_by_agent
-         FROM ${GRAPH_STORE_TABLES.runs} WHERE graph_id = ? AND control_command IS NOT NULL`,
+         FROM ${GRAPH_STORE_TABLES.runs}
+         WHERE graph_id = ? AND run_id = ? AND control_command IS NOT NULL`,
       )
-      .get(graphId);
+      .get(graphId, runId);
     if (row === undefined || row === null) return undefined;
-    const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.runs);
+    const table = GRAPH_STORE_TABLES.runs;
+    const entry = asStoreRow(row, this.filePath, table);
     return Object.freeze({
-      graphId: run.graphId,
-      runId: run.runId,
-      command: readControlCommand(
+      graphId,
+      runId: readStoreText(entry, "run_id", this.filePath, table),
+      command: readControlCommand(entry, "control_command", this.filePath, table),
+      reason: readStoreText(entry, "control_reason", this.filePath, table),
+      decidedAt: readStoreEpoch(entry, "control_decided_at", this.filePath, table),
+      ...readDecidedBy(
         entry,
-        "control_command",
+        "control_decided_by_session",
+        "control_decided_by_agent",
         this.filePath,
-        GRAPH_STORE_TABLES.runs,
+        table,
       ),
-      reason: readStoreText(entry, "control_reason", this.filePath, GRAPH_STORE_TABLES.runs),
-      decidedAt: readStoreEpoch(
-        entry,
-        "control_decided_at",
-        this.filePath,
-        GRAPH_STORE_TABLES.runs,
-      ),
-      ...readDecidedBy(entry, "control_decided_by_session", "control_decided_by_agent", this.filePath, GRAPH_STORE_TABLES.runs),
     });
+  }
+
+  /**
+   * The `retry` decision that superseded ONE attempt, or `undefined`.
+   *
+   * An attempt is retried at most once, so this is a single row and the
+   * acceptance core asks it inside the transaction that would otherwise settle
+   * the superseded attempt.
+   */
+  readSupersedingRetry(
+    graphId: string,
+    attemptId: string,
+  ): ControlDecisionRecord | undefined {
+    this.assertOpen("readSupersedingRetry");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                decided_by_session, decided_by_agent, successor_attempt_id
+         FROM ${GRAPH_STORE_TABLES.controlDecisions}
+         WHERE graph_id = ? AND attempt_id = ? AND command = 'retry'
+         ORDER BY decided_at DESC LIMIT 1`,
+      )
+      .get(graphId, attemptId);
+    if (row === undefined || row === null) return undefined;
+    return readControlDecisionRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.controlDecisions),
+      this.filePath,
+    );
   }
 
   /** The control decision one attempt carries, or `undefined`. */
@@ -1697,9 +1893,10 @@ export class GraphStore {
     const row = this.db
       .query(
         `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
-                decided_by_session, decided_by_agent
+                decided_by_session, decided_by_agent, successor_attempt_id
          FROM ${GRAPH_STORE_TABLES.controlDecisions}
-         WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?`,
+         WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
+         ORDER BY decided_at, rowid LIMIT 1`,
       )
       .get(graphId, runId, nodeId, attemptId);
     if (row === undefined || row === null) return undefined;
@@ -1709,17 +1906,63 @@ export class GraphStore {
     );
   }
 
-  /** Every control decision of one graph, in decision order. */
-  controlDecisions(graphId: string): readonly ControlDecisionRecord[] {
-    this.assertOpen("controlDecisions");
-    const rows = this.db
+  /**
+   * The control decision ONE ATTEMPT carries FOR ONE COMMAND, or `undefined`.
+   *
+   * The retry's idempotency key is exactly this triple: a repeated retry of the
+   * same attempt must REPLAY the decision that minted its successor instead of
+   * minting another.
+   */
+  readControlCommandDecision(
+    graphId: string,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+    command: ControlCommandName,
+  ): ControlDecisionRecord | undefined {
+    this.assertOpen("readControlCommandDecision");
+    const row = this.db
       .query(
         `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
-                decided_by_session, decided_by_agent
+                decided_by_session, decided_by_agent, successor_attempt_id
          FROM ${GRAPH_STORE_TABLES.controlDecisions}
-         WHERE graph_id = ? ORDER BY decided_at, rowid`,
+         WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ? AND command = ?`,
       )
-      .all(graphId);
+      .get(graphId, runId, nodeId, attemptId, command);
+    if (row === undefined || row === null) return undefined;
+    return readControlDecisionRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.controlDecisions),
+      this.filePath,
+    );
+  }
+
+  /**
+   * The control decisions of ONE RUN, in decision order.
+   *
+   * RUN-SCOPED (G3): `runId` omitted means the graph's CURRENT run, and a graph
+   * with no run row has exactly one implicit run and is answered in full.
+   */
+  controlDecisions(graphId: string, runId?: string): readonly ControlDecisionRecord[] {
+    this.assertOpen("controlDecisions");
+    const scope = runId ?? this.readRun(graphId)?.runId;
+    const rows =
+      scope === undefined
+        ? this.db
+            .query(
+              `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                      decided_by_session, decided_by_agent, successor_attempt_id
+               FROM ${GRAPH_STORE_TABLES.controlDecisions}
+               WHERE graph_id = ? ORDER BY decided_at, rowid`,
+            )
+            .all(graphId)
+        : this.db
+            .query(
+              `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                      decided_by_session, decided_by_agent, successor_attempt_id
+               FROM ${GRAPH_STORE_TABLES.controlDecisions}
+               WHERE graph_id = ? AND run_id = ? ORDER BY decided_at, rowid`,
+            )
+            .all(graphId, scope);
     const decisions: ControlDecisionRecord[] = [];
     for (const row of rows) {
       decisions.push(
@@ -1777,11 +2020,20 @@ export class GraphStore {
       this.db.run(
         `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.controlDecisions}
            (graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
-            decided_by_session, decided_by_agent)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+            decided_by_session, decided_by_agent, successor_attempt_id)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          WHERE NOT EXISTS (
            SELECT 1 FROM ${GRAPH_STORE_TABLES.acceptedEvents}
            WHERE graph_id = ? AND attempt_id = ?
+         )
+         AND NOT (
+           ? IN ('failure', 'cancel', 'timeout', 'budget-stop')
+           AND EXISTS (
+             SELECT 1 FROM ${GRAPH_STORE_TABLES.controlDecisions}
+             WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
+               AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+               AND command <> ?
+           )
          )`,
         key.graphId,
         key.runId,
@@ -1792,74 +2044,134 @@ export class GraphStore {
         key.decidedAt,
         key.decidedBy?.sessionId ?? null,
         key.decidedBy?.agentId ?? null,
+        key.successorAttemptId ?? null,
         key.graphId,
         key.attemptId,
+        key.command,
+        key.graphId,
+        key.runId,
+        key.nodeId,
+        key.attemptId,
+        key.command,
       );
       if (this.changes() === 0) {
-        // NOTHING LANDED: either this attempt already carries a decision under
-        // the same key, or it SETTLED through the acceptance core. Both are
-        // facts of the COMMITTED store, read back here rather than assumed.
-        const raced = this.readControlDecision(
+        // NOTHING LANDED. Three facts of the COMMITTED store explain it, and
+        // they are read back here rather than assumed: this attempt already
+        // carries THIS command (a replay), it carries ANOTHER STOPPING command
+        // (a conflict), or it SETTLED through the acceptance core.
+        const raced = this.readControlCommandDecision(
           key.graphId,
           key.runId,
           key.nodeId,
           key.attemptId,
+          key.command,
+        );
+        if (raced !== undefined) {
+          return Object.freeze({
+            kind: "replayed" as const,
+            decision: raced,
+            runControl: this.readRunControl(key.graphId),
+          });
+        }
+        const competing = this.readStoppingControlDecision(
+          key.graphId,
+          key.runId,
+          key.nodeId,
+          key.attemptId,
+          key.command,
         );
         return Object.freeze(
-          raced === undefined
+          competing === undefined
             ? {
                 kind: "settled" as const,
                 attemptId: key.attemptId,
                 runControl: this.readRunControl(key.graphId),
               }
-            : raced.command === key.command
-              ? {
-                  kind: "replayed" as const,
-                  decision: raced,
-                  runControl: this.readRunControl(key.graphId),
-                }
-              : {
-                  kind: "conflict" as const,
-                  existing: raced,
-                  runControl: this.readRunControl(key.graphId),
-                },
+            : {
+                kind: "conflict" as const,
+                existing: competing,
+                runControl: this.readRunControl(key.graphId),
+              },
         );
       }
       const claimed = write.runControl;
-      this.db.run(
-        `UPDATE ${GRAPH_STORE_TABLES.runs}
-         SET control_command = ?, control_reason = ?, control_decided_at = ?,
-             control_decided_by_session = ?, control_decided_by_agent = ?
-         WHERE graph_id = ? AND run_id = ? AND control_command IS NULL`,
-        claimed.command,
-        claimed.reason,
-        claimed.decidedAt,
-        claimed.decidedBy?.sessionId ?? null,
-        claimed.decidedBy?.agentId ?? null,
-        claimed.graphId,
-        claimed.runId,
-      );
-      // THE STORED FACT IS THE ANSWER, not the value this call proposed: a
-      // racing command may have claimed the run between the read and the
-      // update, and reporting this call's candidate would name a command that
-      // is not the one that stands. A run row that is not there at all is an
-      // inconsistency, not a fact to invent.
-      const stored = this.readRunControl(key.graphId);
-      if (stored === undefined) {
-        throw new GraphStoreWriteError(
-          "invalid-record",
-          "graph-store: control decision for graph " +
-            JSON.stringify(key.graphId) +
-            " was recorded, but the store holds no run control fact for it — the run " +
-            "identity is missing and the decision was rolled back",
+      if (claimed !== undefined) {
+        this.db.run(
+          `UPDATE ${GRAPH_STORE_TABLES.runs}
+           SET control_command = ?, control_reason = ?, control_decided_at = ?,
+               control_decided_by_session = ?, control_decided_by_agent = ?
+           WHERE graph_id = ? AND run_id = ? AND control_command IS NULL`,
+          claimed.command,
+          claimed.reason,
+          claimed.decidedAt,
+          claimed.decidedBy?.sessionId ?? null,
+          claimed.decidedBy?.agentId ?? null,
+          claimed.graphId,
+          claimed.runId,
         );
+        // THE STORED FACT IS THE ANSWER, not the value this call proposed: a
+        // racing command may have claimed the run between the read and the
+        // update, and reporting this call's candidate would name a command that
+        // is not the one that stands. A run row that is not there at all is an
+        // inconsistency, not a fact to invent.
+        const stored = this.readRunControl(key.graphId);
+        if (stored === undefined) {
+          throw new GraphStoreWriteError(
+            "invalid-record",
+            "graph-store: control decision for graph " +
+              JSON.stringify(key.graphId) +
+              " was recorded, but the store holds no run control fact for it — the run " +
+              "identity is missing and the decision was rolled back",
+          );
+        }
+        return Object.freeze({
+          kind: "recorded" as const,
+          decision: key,
+          runControl: stored,
+        });
       }
+      // A DECISION THAT DOES NOT CLAIM THE RUN (a retry): the run keeps the fact
+      // it has — which may be the failure the retry succeeds — and the answer
+      // reports whatever stands rather than a candidate.
       return Object.freeze({
         kind: "recorded" as const,
         decision: key,
-        runControl: stored,
+        runControl: this.readRunControl(key.graphId),
       });
     });
+  }
+
+  /**
+   * One attempt's STOPPING control decision for a command OTHER than `except`.
+   *
+   * The `conflict` half of "one attempt, one stopping fact": a failure, a
+   * cancellation, a timeout and a budget stop are competing terminal decisions
+   * about one attempt, while a `retry` is a SUCCESSOR command recorded beside
+   * them and never a competitor.
+   */
+  private readStoppingControlDecision(
+    graphId: string,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+    except: ControlCommandName,
+  ): ControlDecisionRecord | undefined {
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                decided_by_session, decided_by_agent, successor_attempt_id
+         FROM ${GRAPH_STORE_TABLES.controlDecisions}
+         WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
+           AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+           AND command <> ?
+         ORDER BY decided_at, rowid LIMIT 1`,
+      )
+      .get(graphId, runId, nodeId, attemptId, except);
+    if (row === undefined || row === null) return undefined;
+    return readControlDecisionRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.controlDecisions),
+      this.filePath,
+    );
   }
 
   /**
@@ -1916,7 +2228,106 @@ export class GraphStore {
         control.graphId,
         control.runId,
       );
-      return this.readRunControl(control.graphId);
+      return this.readRunControlOf(control.graphId, control.runId);
+    });
+  }
+
+  // ── Terminal-run re-execution (P3 item 2) ──────────────────────────────────
+
+  /**
+   * One run's trusted re-execution decision, or `undefined`.
+   *
+   * The read that makes an ORDER durable independently of the run it produced:
+   * a process that dies between the decision and the mint leaves this row, and
+   * the next window (the tool call's own follow-up, the boot sweep) HONOURS it
+   * instead of a command nothing would finish.
+   */
+  readReexecution(graphId: string, runId: string): RunReexecutionRecord | undefined {
+    this.assertOpen("readReexecution");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, reason, decided_at, decided_by_session,
+                decided_by_agent, successor_run_id, successor_started_at
+         FROM ${GRAPH_STORE_TABLES.runReexecutions}
+         WHERE graph_id = ? AND run_id = ?`,
+      )
+      .get(graphId, runId);
+    if (row === undefined || row === null) return undefined;
+    return readReexecutionRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.runReexecutions),
+      this.filePath,
+    );
+  }
+
+  /**
+   * Record one trusted order to re-execute a run, or replay the one recorded.
+   *
+   * IDEMPOTENT ON `(graph, run)`: the primary key makes two orders for one run
+   * unrepresentable, so a repeated order REPLAYS the persisted decision —
+   * including the successor it already minted — and writes nothing. That is what
+   * makes a repeated run-scoped retry safe: it cannot become a second new run.
+   */
+  recordReexecution(record: RunReexecutionRecord): RunReexecutionWriteResult {
+    this.assertOpen("recordReexecution");
+    assertReexecutionShape(record);
+    return this.joinOrBegin(() => {
+      const existing = this.readReexecution(record.graphId, record.runId);
+      if (existing !== undefined) {
+        return Object.freeze({ kind: "replayed" as const, reexecution: existing });
+      }
+      this.db.run(
+        `INSERT INTO ${GRAPH_STORE_TABLES.runReexecutions}
+           (graph_id, run_id, reason, decided_at, decided_by_session, decided_by_agent,
+            successor_run_id, successor_started_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
+        record.graphId,
+        record.runId,
+        record.reason,
+        record.decidedAt,
+        record.decidedBy?.sessionId ?? null,
+        record.decidedBy?.agentId ?? null,
+      );
+      const stored = this.readReexecution(record.graphId, record.runId);
+      if (stored === undefined) {
+        throw new GraphStoreWriteError(
+          "invalid-record",
+          "graph-store: the re-execution decision of run " +
+            JSON.stringify(record.runId) +
+            " disappeared between the write and the read — nothing was recorded",
+        );
+      }
+      return Object.freeze({ kind: "recorded" as const, reexecution: stored });
+    });
+  }
+
+  /**
+   * Link the successor run to the order that authorized it, ONCE.
+   *
+   * Conditional on the order still being OWED (`successor_run_id IS NULL`), so a
+   * racing second executor's link lands nothing and it must roll back the run it
+   * tried to mint. Called INSIDE the transaction that mints the successor, so an
+   * order is never marked executed without the run it names.
+   */
+  markReexecutionExecuted(
+    graphId: string,
+    runId: string,
+    successorRunId: string,
+    successorStartedAt: number,
+  ): boolean {
+    this.assertOpen("markReexecutionExecuted");
+    requireStoreIdentifier(successorRunId, "reexecution.successorRunId");
+    requireStoreEpoch(successorStartedAt, "reexecution.successorStartedAt");
+    return this.joinOrBegin(() => {
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.runReexecutions}
+         SET successor_run_id = ?, successor_started_at = ?
+         WHERE graph_id = ? AND run_id = ? AND successor_run_id IS NULL`,
+        successorRunId,
+        successorStartedAt,
+        graphId,
+        runId,
+      );
+      return this.changes() === 1;
     });
   }
 
@@ -1990,6 +2401,26 @@ function readStoreEpoch(
       "malformed-row",
       path,
       `graph-store: a ${table} row of ${path} carries ${column} as ${describeValue(value)}, not epoch milliseconds — refusing to read it approximately`,
+      value,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  return value;
+}
+
+/** Read one INTEGER column that is not a timestamp, or refuse it by name. */
+function readStoreInteger(
+  row: Record<string, unknown>,
+  column: string,
+  path: string,
+  table: string,
+): number {
+  const value = row[column];
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} carries ${column} as ${describeValue(value)}, not a safe integer — refusing to read it approximately`,
       value,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -2096,15 +2527,76 @@ function readControlDecisionRow(
   path: string,
 ): ControlDecisionRecord {
   const table = GRAPH_STORE_TABLES.controlDecisions;
+  const command = readControlCommand(row, "command", path, table);
+  // The successor link is present EXACTLY for a retry (the DDL's CHECK says so),
+  // so a row that disagrees with its own command is refused rather than read
+  // approximately: a retry whose successor was lost could never answer which
+  // attempt it minted, and another command carrying one would name an attempt it
+  // never created.
+  const successor = row["successor_attempt_id"];
+  const successorAttemptId =
+    typeof successor === "string" && successor.length > 0 ? successor : undefined;
+  if (command === "retry" && successorAttemptId === undefined) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} records a retry with no successor attempt — refusing to read it approximately`,
+      successor,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  if (command !== "retry" && successor !== null && successor !== undefined) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} records command ${command} with a successor attempt — refusing to read it approximately`,
+      successor,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
   return Object.freeze({
     graphId: readStoreText(row, "graph_id", path, table),
     runId: readStoreText(row, "run_id", path, table),
     nodeId: readStoreText(row, "node_id", path, table),
     attemptId: readStoreText(row, "attempt_id", path, table),
-    command: readControlCommand(row, "command", path, table),
+    command,
+    reason: readStoreText(row, "reason", path, table),
+    decidedAt: readStoreEpoch(row, "decided_at", path, table),
+    ...(successorAttemptId === undefined ? {} : { successorAttemptId }),
+    ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
+  });
+}
+
+/** Read one `graph_run_reexecutions` row. */
+function readReexecutionRow(
+  row: Record<string, unknown>,
+  path: string,
+): RunReexecutionRecord {
+  const table = GRAPH_STORE_TABLES.runReexecutions;
+  const successor = row["successor_run_id"];
+  const startedAt = row["successor_started_at"];
+  const hasSuccessor = typeof successor === "string" && successor.length > 0;
+  if (hasSuccessor !== (typeof startedAt === "number")) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} carries a half-written successor (run id ${describeValue(successor)}, started at ${describeValue(startedAt)}) — refusing to read it approximately`,
+      successor,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  return Object.freeze({
+    graphId: readStoreText(row, "graph_id", path, table),
+    runId: readStoreText(row, "run_id", path, table),
     reason: readStoreText(row, "reason", path, table),
     decidedAt: readStoreEpoch(row, "decided_at", path, table),
     ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
+    ...(hasSuccessor
+      ? {
+          successorRunId: successor as string,
+          successorStartedAt: readStoreEpoch(row, "successor_started_at", path, table),
+        }
+      : {}),
   });
 }
 
@@ -2121,6 +2613,7 @@ function assertRunControlShape(control: RunControlRecord): void {
 function assertRunShape(record: RunIdentityRecord): void {
   requireStoreIdentifier(record.graphId, "run.graphId");
   requireStoreIdentifier(record.runId, "run.runId");
+  requireStoreIdentifier(record.planRevision, "run.planRevision");
   requireStoreEpoch(record.startedAt, "run.startedAt");
 }
 
@@ -2128,25 +2621,30 @@ function assertRunShape(record: RunIdentityRecord): void {
 function assertControlWriteShape(write: RunControlWrite): void {
   const decision = write.decision;
   const control = write.runControl;
-  if (decision.graphId !== control.graphId || decision.runId !== control.runId) {
-    throw new GraphStoreWriteError(
-      "invalid-record",
-      "graph-store: the control decision names run " +
-        JSON.stringify(decision.graphId + "/" + decision.runId) +
-        " while the run control fact names " +
-        JSON.stringify(control.graphId + "/" + control.runId) +
-        " — the write was not made",
-    );
-  }
-  if (decision.command !== control.command) {
-    throw new GraphStoreWriteError(
-      "invalid-record",
-      "graph-store: the control decision records " +
-        JSON.stringify(decision.command) +
-        " while the run control fact records " +
-        JSON.stringify(control.command) +
-        " — one write cannot record two commands, so nothing was written",
-    );
+  if (control !== undefined) {
+    if (decision.graphId !== control.graphId || decision.runId !== control.runId) {
+      throw new GraphStoreWriteError(
+        "invalid-record",
+        "graph-store: the control decision names run " +
+          JSON.stringify(decision.graphId + "/" + decision.runId) +
+          " while the run control fact names " +
+          JSON.stringify(control.graphId + "/" + control.runId) +
+          " — the write was not made",
+      );
+    }
+    if (decision.command !== control.command) {
+      throw new GraphStoreWriteError(
+        "invalid-record",
+        "graph-store: the control decision records " +
+          JSON.stringify(decision.command) +
+          " while the run control fact records " +
+          JSON.stringify(control.command) +
+          " — one write cannot record two commands, so nothing was written",
+      );
+    }
+    requireStoreIdentifier(control.reason, "control.reason");
+    requireStoreEpoch(control.decidedAt, "control.decidedAt");
+    assertPrincipalShape(control.decidedBy, "control.decidedBy");
   }
   requireStoreIdentifier(decision.graphId, "control.graphId");
   requireStoreIdentifier(decision.runId, "control.runId");
@@ -2154,10 +2652,43 @@ function assertControlWriteShape(write: RunControlWrite): void {
   requireStoreIdentifier(decision.attemptId, "control.attemptId");
   requireStoreIdentifier(decision.reason, "control.reason");
   requireStoreEpoch(decision.decidedAt, "control.decidedAt");
-  requireStoreIdentifier(control.reason, "control.reason");
-  requireStoreEpoch(control.decidedAt, "control.decidedAt");
   assertPrincipalShape(decision.decidedBy, "control.decidedBy");
-  assertPrincipalShape(control.decidedBy, "control.decidedBy");
+  // THE SUCCESSOR LINK IS PART OF THE RETRY'S SHAPE (the DDL's CHECK says the
+  // same): a retry that named no successor could never answer which attempt it
+  // minted, and a successor on another command would name an attempt that
+  // command never created.
+  if (decision.command === "retry") {
+    requireStoreIdentifier(decision.successorAttemptId, "control.successorAttemptId");
+  } else if (decision.successorAttemptId !== undefined) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: the control decision records command " +
+        JSON.stringify(decision.command) +
+        " with successor attempt " +
+        JSON.stringify(decision.successorAttemptId) +
+        " — only a retry mints an attempt, so nothing was written",
+    );
+  }
+}
+
+/** Refuse a re-execution decision that violates the record model. */
+function assertReexecutionShape(record: RunReexecutionRecord): void {
+  requireStoreIdentifier(record.graphId, "reexecution.graphId");
+  requireStoreIdentifier(record.runId, "reexecution.runId");
+  requireStoreIdentifier(record.reason, "reexecution.reason");
+  requireStoreEpoch(record.decidedAt, "reexecution.decidedAt");
+  assertPrincipalShape(record.decidedBy, "reexecution.decidedBy");
+  if (record.successorRunId !== undefined) {
+    requireStoreIdentifier(record.successorRunId, "reexecution.successorRunId");
+    requireStoreEpoch(record.successorStartedAt, "reexecution.successorStartedAt");
+  } else if (record.successorStartedAt !== undefined) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: the re-execution decision of run " +
+        JSON.stringify(record.runId) +
+        " carries a successor start time without a successor run — nothing was written",
+    );
+  }
 }
 
 /** Refuse a principal that is not a session with an optional non-empty agent. */

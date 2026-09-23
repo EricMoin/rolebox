@@ -50,6 +50,7 @@ afterEach(() => {
 
 const GRAPH = "control.store";
 const RUN = "control.store@1";
+const PLAN = "plan.control-store";
 
 function decision(
   overrides: Partial<ControlDecisionRecord> = {},
@@ -86,11 +87,27 @@ describe("graph store — the run identity table", () => {
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      const first = store.runs.mintRun({ graphId: GRAPH, runId: "run.one", startedAt: 10 });
-      expect(first).toEqual({ graphId: GRAPH, runId: "run.one", startedAt: 10 });
+      const first = store.runs.mintRun({
+        graphId: GRAPH,
+        runId: "run.one",
+        startedAt: 10,
+        planRevision: PLAN,
+      });
+      expect(first).toEqual({
+        graphId: GRAPH,
+        runId: "run.one",
+        runSeq: 1,
+        planRevision: PLAN,
+        startedAt: 10,
+      });
       // A racing second mint proposes ANOTHER id and is answered with the first:
       // two processes cannot disagree about which run the graph is executing.
-      const second = store.runs.mintRun({ graphId: GRAPH, runId: "run.two", startedAt: 11 });
+      const second = store.runs.mintRun({
+        graphId: GRAPH,
+        runId: "run.two",
+        startedAt: 11,
+        planRevision: "plan.other",
+      });
       expect(second.runId).toBe("run.one");
       expect(second.startedAt).toBe(10);
       expect(store.runs.readRun(GRAPH)?.runId).toBe("run.one");
@@ -108,7 +125,7 @@ describe("graph store — one control decision per attempt", () => {
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       const recorded = store.runs.writeControlDecision({
         decision: decision(),
         runControl: runControl(),
@@ -150,7 +167,7 @@ describe("graph store — one control decision per attempt", () => {
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       store.runs.writeControlDecision({
         decision: decision(),
         runControl: runControl(),
@@ -163,7 +180,7 @@ describe("graph store — one control decision per attempt", () => {
       expect(sibling.kind).toBe("recorded");
       if (sibling.kind !== "recorded") throw new Error("fixture: expected a record");
       // ...and the RUN keeps the command that stopped it FIRST.
-      expect(sibling.runControl.reason).toBe("the execution ended without its outcome");
+      expect(sibling.runControl?.reason).toBe("the execution ended without its outcome");
       expect(store.runs.readRunControl(GRAPH)?.reason).toBe(
         "the execution ended without its outcome",
       );
@@ -185,7 +202,7 @@ describe("graph store — the decision write is conditional on the COMMITTED sto
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       // The attempt settles FIRST, through the acceptance core's own commit.
       const committed = store.commitAccepted({
         receipt: {
@@ -231,7 +248,7 @@ describe("graph store — the decision write is conditional on the COMMITTED sto
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       const written = store.runs.writeControlDecision({
         decision: decision(),
         runControl: runControl(),
@@ -255,7 +272,7 @@ describe("graph store — the DDL refuses what the record model refuses", () => 
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       const insert =
         "INSERT INTO " +
         GRAPH_STORE_TABLES.controlDecisions +
@@ -318,7 +335,7 @@ describe("graph store — control and acceptance never both commit for one attem
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       const recorded = store.runs.writeControlDecision({
         decision: decision(),
         runControl: runControl(),
@@ -360,7 +377,7 @@ describe("graph store — control and acceptance never both commit for one attem
     const dir = makeDir();
     const store = GraphStore.openFile(dir);
     try {
-      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       expect(store.commitAccepted(acceptanceBatch("work#1")).kind).toBe("committed");
 
       // The inverse direction: the acceptance committed FIRST, so the attempt
@@ -385,7 +402,7 @@ describe("graph store — control facts are read back by a reopened store", () =
     const dir = makeDir();
     const first = GraphStore.openFile(dir);
     try {
-      first.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      first.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9, planRevision: PLAN });
       first.runs.writeControlDecision({
         decision: decision(),
         runControl: runControl(),
