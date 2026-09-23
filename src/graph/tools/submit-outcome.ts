@@ -85,13 +85,17 @@ import {
 } from "../outcome/credential-isolation.ts";
 import {
   hostWorkerBindingRefusal,
+  hostWorkerCallSessionRefusal,
   hostWorkerIdentityRefusal,
+  readCurrentHostIdentity,
   readCurrentWorkerSession,
   readHostIdentityCapability,
   readHostWorkerBindingFor,
   readHostWorkerIdentityCapability,
   type HostIdentityCapability,
+  type HostIdentityReading,
   type HostWorkerIdentityCapability,
+  type HostWorkerSessionReading,
 } from "../outcome/host-identity.ts";
 import { attemptEntryHoldingCredential } from "../outcome/attempt-credential.ts";
 import {
@@ -423,6 +427,26 @@ export interface SubmitOutcomeDeps {
    * silently is the one outcome this rule must not produce.
    */
   readonly hostIdentity?: HostIdentityCapability;
+  /**
+   * The session THIS call arrives from, as the tool facade captured it
+   * SYNCHRONOUSLY from the platform's own invocation context
+   * (`context.sessionID`), never from a tool argument and never from a value a
+   * caller can name.
+   *
+   * THE CALL'S OWN CONTEXT IS THE AUTHENTICATION FACT (P2 item 2, §3.2). The
+   * worker check compares this value with the child session the host confirmed
+   * it dispatched the attempt AS. It deliberately does not read the host
+   * capability's ambient `currentSession()` after an await: that holder is
+   * moved per tool call, so a late read answers whichever concurrent call
+   * wrote it last. The capability's answer is still consulted — ONCE,
+   * synchronously, in this call's prologue — and must AGREE with this value
+   * (see `invokingCallSession`).
+   *
+   * An absent or empty value is a call the host attributes no session to; a
+   * submission from such a call is refused `host-worker-absent` rather than
+   * settled on its credential alone.
+   */
+  readonly invokingSessionId?: string;
   /** Root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock, in epoch milliseconds; omitted → the runtime reads `Date.now()`. */
@@ -517,6 +541,35 @@ export async function submitDeclaredOutcome(
   // ledger is opened at the SAME root the plan was read from (see
   // `storeDirectory`).
   const hostIdentity = readHostIdentityCapability(deps.hostIdentity);
+  // ── THE CALL'S OWN IDENTITY, CAPTURED BEFORE THE FIRST await (P2 item 2) ──
+  //
+  // Both facts below belong to THIS call and are read here, in its synchronous
+  // prologue, so no concurrent call can move what they answer. Everything
+  // after `SqliteAcceptanceLedger.create` may resume interleaved with another
+  // submission, which is exactly why the checks that follow are handed the
+  // captured values instead of re-reading an ambient holder:
+  //
+  // - `callIdentity` is the strict D9 identity this invocation is running
+  //   under, read once from the host capability. The runtime records it on an
+  //   attempt this submission arms and checks it against the identity an
+  //   attempt recorded; without this snapshot the runtime would read the
+  //   capability after the await and compare whichever invocation wrote the
+  //   holder last (see `OutcomeGraphRuntime.submit`).
+  // - `callScope` is the worker capability and the session this call arrives
+  //   from (see `invokingCallSession`), checked against the attempt's confirmed
+  //   worker binding by `workerContextRefusal`.
+  //
+  // Both are `undefined` when the host declared no capability of that shape,
+  // and neither check then applies.
+  const callIdentity =
+    hostIdentity === undefined ? undefined : readCurrentHostIdentity(hostIdentity);
+  const callScope =
+    workerIdentity === undefined
+      ? undefined
+      : Object.freeze({
+          capability: workerIdentity,
+          session: invokingCallSession(deps.invokingSessionId, workerIdentity),
+        });
   const ledger = await SqliteAcceptanceLedger.create(
     workspaceOf(target, storeDirectory),
   );
@@ -538,8 +591,14 @@ export async function submitDeclaredOutcome(
     // the attempt's worker; the credential, the capability scope and the
     // attempt's currency are the core's own checks and run after this. A
     // refusal here writes nothing — no receipt, no event, no state, no effect.
-    if (workerIdentity !== undefined) {
-      const workerRefusal = workerContextRefusal(runtime, plan, args, workerIdentity);
+    if (callScope !== undefined) {
+      const workerRefusal = workerContextRefusal(
+        runtime,
+        plan,
+        args,
+        callScope.capability,
+        callScope.session,
+      );
       if (workerRefusal !== undefined) {
         return refuseBeforeAcceptance(plan, args, workerRefusal);
       }
@@ -555,7 +614,10 @@ export async function submitDeclaredOutcome(
     };
     // The acceptance transaction committed the run state to this store, and the
     // query paths read it from there: no second durable record is refreshed.
-    const result = runtime.submit(proposal, deps.now);
+    // The identity is THIS call's own snapshot, not a fresh ambient read: the
+    // ingress has awaited since it captured it, and a concurrent submission
+    // may have moved the host holder in the meantime.
+    const result = runtime.submit(proposal, deps.now, callIdentity);
     return renderResult(plan, args, result);
   } finally {
     ledger.close();
@@ -568,14 +630,15 @@ export async function submitDeclaredOutcome(
  * Authenticate the invocation this submission actually arrives from against
  * what the host confirmed it dispatched the attempt AS.
  *
- * THE ORDER IS THE RULE, AND ONLY THE FIRST STEPS ARE HERE. 1. the session the
- * host attributes to THIS call; 2. the binding the host recorded for the
- * attempt the presented credential names; 3. only the recorded child session
- * passes. The capability scope (the credential against the persisted digest,
- * bound to graph/node/attempt/plan revision/permission) and the current
- * authorization generation (the attempt is the node's CURRENT one under the
- * PERSISTED plan revision) are the acceptance core's own checks and run after
- * this returns.
+ * THE ORDER IS THE RULE, AND ONLY THE FIRST STEPS ARE HERE. 1. the session
+ * THIS call arrives from, captured synchronously in the call's own prologue
+ * (`invokingCallSession`) — never re-read from the host's ambient holder after
+ * the ingress awaited; 2. the binding the host recorded for the attempt the
+ * presented credential names; 3. only the recorded child session passes. The
+ * capability scope (the credential against the persisted digest, bound to
+ * graph/node/attempt/plan revision/permission) and the current authorization
+ * generation (the attempt is the node's CURRENT one under the PERSISTED plan
+ * revision) are the acceptance core's own checks and run after this returns.
  *
  * WHEN THE CHECK APPLIES, AND WHEN IT YIELDS TO A MORE PRECISE REFUSAL. The
  * attempt is located by the SAME rule the acceptance core applies — the
@@ -603,6 +666,7 @@ function workerContextRefusal(
   plan: CompiledPlan,
   args: GraphSubmitOutcomeArgs,
   capability: HostWorkerIdentityCapability,
+  session: HostWorkerSessionReading,
 ): SubmitOutcomeDiagnostic | undefined {
   if (args.credential === undefined) return undefined;
   let state: OutcomeGraphState | undefined;
@@ -624,11 +688,68 @@ function workerContextRefusal(
     nodeId: entry.nodeId,
     attemptId,
   });
-  const session = readCurrentWorkerSession(capability);
+  // THE CALL'S OWN SESSION, captured before the ingress awaited. Reading the
+  // capability's `currentSession()` HERE would answer whichever concurrent
+  // call wrote the shared holder last, which is the cross-wiring §3.2 forbids.
   const refusal = hostWorkerBindingRefusal(binding, session);
   return refusal === undefined
     ? undefined
     : { code: refusal.code, message: refusal.message, path: refusal.path };
+}
+
+/**
+ * The session ONE submission arrives from, established from the two host facts
+ * that can name it — and only while they agree.
+ *
+ * WHY TWO FACTS. The call context carries the session the platform attributes
+ * to this invocation (`SubmitOutcomeDeps.invokingSessionId`); the declared
+ * worker-identity capability answers the same question through
+ * `currentSession()`. They are one attribution, produced by the same host for
+ * the same call, so:
+ *
+ * - BOTH present and equal → `identified`, and the worker binding is checked
+ *   against it;
+ * - the call context carries NO session → `none`, which the binding check
+ *   answers `host-worker-absent` (never settled on the credential alone);
+ * - the capability answers nothing, throws, is unreadable, or names a
+ *   DIFFERENT session → `refused`: the host cannot say which invocation is
+ *   running, and resolving that by preferring one of its two answers would
+ *   pick an authentication factor instead of substantiating it.
+ *
+ * THE CAPABILITY IS READ SYNCHRONOUSLY, HERE, IN THE CALL'S OWN PROLOGUE.
+ * The ingress calls this before its first `await`, so the holder the host moved
+ * for this call is still the one in effect: a concurrent submission cannot have
+ * overwritten it, and this call cannot have overwritten the other's. This is
+ * the explicit threading §3.2 requires — the call's identity is captured once
+ * and passed down, never re-read across an await.
+ *
+ * TOTAL: it never throws, and a call the host cannot place is refused by name
+ * rather than guessed at.
+ */
+function invokingCallSession(
+  fromCallContext: string | undefined,
+  capability: HostWorkerIdentityCapability,
+): HostWorkerSessionReading {
+  const callSession =
+    typeof fromCallContext === "string" && fromCallContext.length > 0
+      ? fromCallContext
+      : undefined;
+  if (callSession === undefined) return Object.freeze({ kind: "none" as const });
+  const answered = readCurrentWorkerSession(capability);
+  if (answered.kind === "refused") return answered;
+  if (answered.kind === "none") {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: hostWorkerCallSessionRefusal(callSession, undefined),
+    });
+  }
+  if (answered.sessionId !== callSession) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: hostWorkerCallSessionRefusal(callSession, answered.sessionId),
+    });
+  }
+  return answered;
 }
 
 /**

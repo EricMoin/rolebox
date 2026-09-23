@@ -166,6 +166,12 @@ export interface HostWorkerSessionSource {
  * session. It is set from the platform's own tool-call context
  * (`context.sessionID`) by {@link bindOutcomeToolInvocation}, never from a
  * value any caller of a tool may supply.
+ *
+ * READ SYNCHRONOUSLY, IN THE CALL'S OWN PROLOGUE. The submission ingress asks
+ * the capability for this answer before its first await and requires it to
+ * agree with the session the call context carries (see `host-identity.ts`), so
+ * the holder is only ever consulted for the call it was moved for — never
+ * across an await, where a concurrent call could have overwritten it.
  */
 export interface HostWorkerSessionHolder extends HostWorkerSessionSource {
   /** Put one session in effect (an empty value clears it). */

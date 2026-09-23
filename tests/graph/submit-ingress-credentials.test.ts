@@ -41,6 +41,7 @@ import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import type { HostDispatchInvocation } from "../../src/graph/host/dispatch-host.ts";
+import { hostWorkerIdentityCapability } from "../../src/graph/host/identity.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
@@ -48,6 +49,7 @@ import {
   HOST_WORKER_ABSENT_CODE,
   HOST_WORKER_SESSION_MISMATCH_CODE,
   HOST_WORKER_UNBOUND_CODE,
+  HOST_WORKER_UNAVAILABLE_CODE,
 } from "../../src/graph/outcome/host-identity.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
@@ -62,7 +64,7 @@ import {
   type GraphSubmitOutcomeArgs,
   type GraphSubmitOutcomeResult,
 } from "../../src/graph/tools/submit-outcome.ts";
-import type { CanonicalToolContext } from "../../src/platform/types.ts";
+import type { CanonicalToolContext, CanonicalToolDef } from "../../src/platform/types.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -113,6 +115,29 @@ const ATTEMPT_LOOP: GraphDeclarationV3 = {
       exit_outcome: "approve",
     },
   ],
+};
+
+/**
+ * Two single-entry graphs, so ONE host can hold two attempts armed under two
+ * DIFFERENT declaring invocations — the population a concurrent submission can
+ * cross on the D9 identity path.
+ */
+const IDENTITY_ONE: GraphDeclarationV3 = {
+  version: 3,
+  name: "identity.one",
+  nodes: [
+    { id: "first", agent: "agent.one", prompt: "Do the first.", outcomes: [{ id: "done" }] },
+  ],
+  edges: [],
+};
+
+const IDENTITY_TWO: GraphDeclarationV3 = {
+  version: 3,
+  name: "identity.two",
+  nodes: [
+    { id: "second", agent: "agent.two", prompt: "Do the second.", outcomes: [{ id: "done" }] },
+  ],
+  edges: [],
 };
 
 const tmpDirs: string[] = [];
@@ -834,6 +859,264 @@ describe("the shipped path now binds an attempt by its credential AND its worker
       const alpha = nodeEntryOf(after, "alpha");
       expect(alpha["status"]).toBe("settled");
       expect(Object.prototype.hasOwnProperty.call(alpha, "dispatchIdentity")).toBe(false);
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── Concurrent submissions authenticate the call they ARRIVE FROM ───────────
+
+/**
+ * ONE host that declared the D9 identity, with the tool face the entries build
+ * (`hostIdentity: host.hostIdentity` — the STRICT shape, so the runtime checks
+ * the invocation instead of the worker binding), holding two attempts armed
+ * under two different declaring invocations.
+ */
+interface IdentityFixture extends SubmissionFixture {
+  /** The shipped tool face, bound to this host's per-call attribution. */
+  readonly tools: Record<string, CanonicalToolDef>;
+}
+
+async function openIdentityFixture(): Promise<IdentityFixture> {
+  const dir = makeTmpDir("submit-identity-");
+  const storeRoot = join(dir, "host-store");
+  persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration: IDENTITY_ONE }), storeRoot);
+  persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration: IDENTITY_TWO }), storeRoot);
+  const dispatched: OutcomeDispatchRequest[] = [];
+  const host = OutcomeHost.open({
+    workspaceDir: dir,
+    storeRoot,
+    deliver: (request) => {
+      dispatched.push(request);
+    },
+    validators: EMPTY_VALIDATORS,
+  });
+  const first = await host.startDeclaredGraph(IDENTITY_ONE.name, {
+    sessionId: "session-one",
+    agent: "agent.one",
+  });
+  const second = await host.startDeclaredGraph(IDENTITY_TWO.name, {
+    sessionId: "session-two",
+    agent: "agent.two",
+  });
+  if (first.kind !== "started" || second.kind !== "started") {
+    throw new Error("fixture: a declared graph did not start");
+  }
+  const toolset = createGraphToolSet({
+    stateDir: dir,
+    credentialIsolation: host.credentialIsolation,
+    hostIdentity: host.hostIdentity,
+    outcomeDispatch: host.dispatch,
+    outcomeValidators: EMPTY_VALIDATORS,
+    outcomeArtifactRoot: dir,
+  });
+  return {
+    dir,
+    storeRoot,
+    graphId: IDENTITY_ONE.name,
+    host,
+    dispatched,
+    tools: host.bindTools(createOutcomeGraphTools(toolset)),
+  };
+}
+
+/** The acceptance result of one raw tool answer. */
+function resultOf(raw: unknown): GraphSubmitOutcomeResult {
+  return JSON.parse(String(raw)) as GraphSubmitOutcomeResult;
+}
+
+describe("concurrent submissions authenticate their OWN call context", () => {
+  it("settles two workers of one fan-out together, with no cross-wired session", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const alphaCredential = dispatchedCredential(fixture, "alpha");
+      const betaCredential = dispatchedCredential(fixture, "beta");
+
+      // BOTH calls are in flight at once. The session each submission is
+      // judged by must be the one ITS OWN call arrived from; a shared ambient
+      // holder would answer whichever call wrote it last.
+      const [alpha, beta] = await Promise.all([
+        fixture.submit(
+          {
+            graph_id: fixture.graphId,
+            node_id: "alpha",
+            outcome_id: "done",
+            credential: alphaCredential,
+          },
+          { sessionID: "child-session:alpha#1", agent: "agent.alpha" },
+        ),
+        fixture.submit(
+          {
+            graph_id: fixture.graphId,
+            node_id: "beta",
+            outcome_id: "done",
+            credential: betaCredential,
+          },
+          { sessionID: "child-session:beta#2", agent: "agent.beta" },
+        ),
+      ]);
+
+      expect(alpha.refusals).toEqual([]);
+      expect(beta.refusals).toEqual([]);
+      expect(alpha.decision).toBe("accepted");
+      expect(beta.decision).toBe("accepted");
+      expect(alpha.attempt_id).toBe("alpha#1");
+      expect(beta.attempt_id).toBe("beta#2");
+
+      const after = await readPersisted(fixture);
+      expect(after.events).toBe(2);
+      expect(nodeEntryOf(after, "alpha")["status"]).toBe("settled");
+      expect(nodeEntryOf(after, "beta")["status"]).toBe("settled");
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("refuses an unrelated session that races the attempt's own worker, and writes nothing", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const alphaCredential = dispatchedCredential(fixture, "alpha");
+      const before = await readPersisted(fixture);
+
+      // The unrelated call starts FIRST; the real worker's call starts before
+      // the first one resumes. Both have suspended inside the ingress by the
+      // time either check runs.
+      const unrelated = fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential: alphaCredential,
+        },
+        { sessionID: "unrelated-session", agent: "unrelated-agent" },
+      );
+      const worker = fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential: alphaCredential,
+        },
+        { sessionID: "child-session:alpha#1", agent: "agent.alpha" },
+      );
+      const [refused, accepted] = await Promise.all([unrelated, worker]);
+
+      // The unrelated call is refused by ITS OWN session, not by whichever
+      // call happened to move the holder last.
+      expect(refused.decision).toBeUndefined();
+      expect(refused.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_SESSION_MISMATCH_CODE,
+      ]);
+      expect(refused.refusals[0]?.path).toBe("$.workerSession");
+
+      // The attempt's own worker settles it — exactly once.
+      expect(accepted.decision).toBe("accepted");
+      expect(accepted.attempt_id).toBe("alpha#1");
+
+      const after = await readPersisted(fixture);
+      expect(after.events).toBe(1);
+      expect(nodeEntryOf(after, "alpha")["status"]).toBe("settled");
+      expect(before.events).toBe(0);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("keeps two declaring invocations apart when their submissions overlap", async () => {
+    const fixture = await openIdentityFixture();
+    try {
+      const first = dispatchedCredential(fixture, "first");
+      const second = dispatchedCredential(fixture, "second");
+
+      // Two graphs of ONE host, armed under two different declaring
+      // invocations. The D9 identity each submission is judged by must be the
+      // one ITS OWN call arrived under.
+      const [one, two] = await Promise.all([
+        fixture.tools.graph_submit_outcome.execute(
+          {
+            graph_id: IDENTITY_ONE.name,
+            node_id: "first",
+            outcome_id: "done",
+            credential: first,
+          },
+          makeContext("session-one", "agent.one", fixture.dir),
+        ),
+        fixture.tools.graph_submit_outcome.execute(
+          {
+            graph_id: IDENTITY_TWO.name,
+            node_id: "second",
+            outcome_id: "done",
+            credential: second,
+          },
+          makeContext("session-two", "agent.two", fixture.dir),
+        ),
+      ]);
+
+      const firstResult = resultOf(one);
+      const secondResult = resultOf(two);
+      expect(firstResult.refusals).toEqual([]);
+      expect(secondResult.refusals).toEqual([]);
+      expect(firstResult.decision).toBe("accepted");
+      expect(secondResult.decision).toBe("accepted");
+
+      // One accepted event per graph — a cross-wired identity would have
+      // refused one of them (or settled it against the other's record).
+      const ledger = await SqliteAcceptanceLedger.create(fixture.storeRoot);
+      try {
+        expect(ledger.acceptedEvents(IDENTITY_ONE.name).length).toBe(1);
+        expect(ledger.acceptedEvents(IDENTITY_TWO.name).length).toBe(1);
+      } finally {
+        ledger.close();
+      }
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("refuses a call whose two host answers disagree about the session it arrives from", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const credential = dispatchedCredential(fixture, "alpha");
+      const before = await readPersisted(fixture);
+
+      // The declared capability answers a session that is NOT the one the call
+      // context carries. The two host answers for one call cannot both be the
+      // arrival, and preferring either would be a guess — so the call is
+      // refused by name and nothing is written.
+      const disagreeing = hostWorkerIdentityCapability("test-host:disagreeing", {
+        current: () => undefined,
+        currentSession: () => "child-session:not-this-call",
+        bindingFor: (attempt) => fixture.host.workerIdentity.bindingFor(attempt),
+      });
+      const tools = createOutcomeGraphTools(
+        createGraphToolSet({
+          stateDir: fixture.dir,
+          credentialIsolation: fixture.host.credentialIsolation,
+          hostIdentity: disagreeing,
+          outcomeDispatch: fixture.host.dispatch,
+          outcomeValidators: EMPTY_VALIDATORS,
+          outcomeArtifactRoot: fixture.dir,
+        }),
+      );
+      const result = resultOf(
+        await tools.graph_submit_outcome.execute(
+          {
+            graph_id: fixture.graphId,
+            node_id: "alpha",
+            outcome_id: "done",
+            credential,
+          },
+          makeContext("child-session:alpha#1", "agent.alpha", fixture.dir),
+        ),
+      );
+
+      expect(result.decision).toBeUndefined();
+      expect(result.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_UNAVAILABLE_CODE,
+      ]);
+      expect(result.refusals[0]?.path).toBe("$.workerSession");
+      expect(await readPersisted(fixture)).toEqual(before);
     } finally {
       fixture.host.close();
     }

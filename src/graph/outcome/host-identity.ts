@@ -639,6 +639,18 @@ export function describeHostWorkerBinding(binding: HostWorkerBinding): string {
  * when this call carries none — a fact, not an error. `bindingFor()` answers
  * what the host confirmed it dispatched one attempt AS, or `undefined` when it
  * has no such fact.
+ *
+ * WHEN THE INGRESS READS IT, AND WHY THAT IS THE WHOLE FIX. The submission
+ * ingress calls `currentSession()` ONCE, SYNCHRONOUSLY, in the call's own
+ * prologue — before the first `await` — and never after one. The holder this
+ * answer comes from is moved per tool call, so a read that happened after an
+ * await would report whichever concurrent call wrote the holder last, which is
+ * exactly the ambient-identity defect §3.2 forbids. The ingress compares that
+ * captured answer with the session the call context itself carries (the tool
+ * facade threads it from the platform's own invocation context, never from a
+ * tool argument); the two are the same host fact for one call, and a
+ * disagreement is refused by {@link hostWorkerCallSessionRefusal} rather than
+ * resolved by preferring either.
  */
 export interface HostWorkerIdentityCapability extends HostIdentityCapability {
   /**
@@ -752,6 +764,14 @@ export type HostWorkerSessionReading =
  *
  * TOTAL: an unreadable capability, a throwing `currentSession()` and a
  * malformed answer all come back as `refused` with the reason.
+ *
+ * THE CALLER MUST ASK SYNCHRONOUSLY, IN THE CALL'S OWN PROLOGUE. This function
+ * is not async and does not await, but its ANSWER is only the current call's
+ * while the host's per-call attribution is still in effect. A caller that
+ * stores the returned reading and consults it later is safe; a caller that
+ * calls this after an `await` has left the call's own window and may read
+ * another concurrent call's attribution. The submission ingress captures it
+ * before its first await for exactly that reason.
  */
 export function readCurrentWorkerSession(capability: unknown): HostWorkerSessionReading {
   const read = readHostWorkerIdentityCapability(capability);
@@ -985,6 +1005,45 @@ export function hostWorkerBindingRefusal(
       JSON.stringify(session.sessionId) +
       " — a submission settles an attempt only from the invocation the platform " +
       "created for that attempt's worker, so nothing was written",
+  });
+}
+
+/**
+ * The host gave TWO different answers about which call one submission arrives
+ * from, so neither answer can authenticate it.
+ *
+ * THE TWO ANSWERS ARE ONE FACT AND MUST AGREE. They are the session the call
+ * context carries (threaded by the tool facade from the platform's own
+ * invocation context) and the session the declared capability reports for this
+ * operation. Both are the host's own attribution of the SAME call, so a
+ * disagreement means the host cannot say which invocation is running: one of
+ * the two is stale, misconfigured or forged. Resolving that by preferring one
+ * of them would silently pick an authentication factor instead of requiring
+ * the host to substantiate it, so the submission is refused by name
+ * ({@link HOST_WORKER_UNAVAILABLE_CODE}) and nothing is written.
+ *
+ * TOTAL and pure: it reads the two values it is given and never calls the host.
+ * `undefined` is the capability reporting that it attributes NO session to
+ * this operation, which disagrees with a non-empty call context just as
+ * plainly as a different id does.
+ */
+export function hostWorkerCallSessionRefusal(
+  callSessionId: string,
+  declaredSessionId: string | undefined,
+): HostWorkerIdentityRefusal {
+  return Object.freeze({
+    code: HOST_WORKER_UNAVAILABLE_CODE,
+    path: "$.workerSession" as const,
+    message:
+      "outcome-runtime: the call context names session " +
+      JSON.stringify(callSessionId) +
+      " for this submission, while the host worker-identity capability answers " +
+      (declaredSessionId === undefined
+        ? "NO session for this operation"
+        : "session " + JSON.stringify(declaredSessionId)) +
+      " — the two answers are the host's attribution of the SAME call and must " +
+      "agree, so which invocation this submission arrives from cannot be " +
+      "established and nothing was written",
   });
 }
 

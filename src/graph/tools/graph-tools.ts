@@ -624,10 +624,19 @@ export class GraphToolSet {
    * graph, a plan that never reached the store — throws
    * {@link OutcomeSubmissionRefusedError} BEFORE a ledger is opened, so nothing
    * is written.
+   *
+   * THE SECOND PARAMETER IS THE CALL'S OWN SESSION, NOT AN ARGUMENT. The
+   * canonical facade passes the session the platform attributed to THIS tool
+   * call; the ingress threads it as the call context the attempt's confirmed
+   * worker binding is checked against (P2 item 2). It is never read from the
+   * args object, an extra key on which is never read at all, and a caller that
+   * omits it while a worker capability is installed gets the fail-closed
+   * `host-worker-absent` answer instead of a submission settled on its
+   * credential alone.
    */
   async graph_submit_outcome(
     args: GraphSubmitOutcomeArgs,
-    _invokingSessionId?: string,
+    invokingSessionId?: string,
     _agent?: string,
   ): Promise<GraphSubmitOutcomeResult> {
     return submitDeclaredOutcome(
@@ -638,6 +647,14 @@ export class GraphToolSet {
       },
       args,
       {
+        // THE CALL'S OWN SESSION (P2 item 2). The canonical facade passes the
+        // session the platform adapter attributed to THIS tool call; the
+        // ingress compares it with the child session the host confirmed for
+        // the attempt, captures the value synchronously, and never re-reads an
+        // ambient holder after an await. A caller that passes none (a direct
+        // toolset call with no platform context) gets the fail-closed
+        // `host-worker-absent` answer when a worker capability is installed.
+        ...(invokingSessionId === undefined ? {} : { invokingSessionId }),
         ...(this.deps.outcomeDispatch === undefined
           ? {}
           : { dispatch: this.deps.outcomeDispatch }),

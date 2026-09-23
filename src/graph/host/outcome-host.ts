@@ -550,6 +550,14 @@ export class OutcomeHost {
    * platform's confirmation created) through {@link workerSessionOf}. Neither
    * reads a caller-supplied string: the binding is a fact the platform minted.
    *
+   * WHEN IT IS READ, AND WHY THE HOLDER IS STILL LOAD-BEARING. The submission
+   * ingress reads `currentSession()` exactly ONCE, synchronously, before it
+   * awaits anything, and requires it to AGREE with the session the tool face
+   * threads from the same platform context; a disagreement is refused, never
+   * resolved by preferring one. The holder therefore never answers for a call
+   * other than the one in flight, and a submission can never be settled on
+   * whichever concurrent worker moved it last.
+   *
    * This is the capability the shipped entries inject into the toolset
    * (`createGraphToolSet({ hostIdentity: host.workerIdentity })`), and it is
    * deliberately NOT the capability the runtime's D9 check consumes — that one
@@ -1463,8 +1471,12 @@ export interface OutcomeToolAttribution {
   /**
    * The holder for the session THIS call arrives from — the worker side of the
    * identity model. Moved with the invocation holder from the same platform
-   * context, and read by {@link OutcomeHost.workerIdentity}; omitting it leaves
-   * the worker binding unable to name the current session.
+   * context, and read by {@link OutcomeHost.workerIdentity} SYNCHRONOUSLY: the
+   * submission ingress captures the answer in the call's own prologue (before
+   * its first await) and corroborates it with the session the tool face threads
+   * from the same context. Omitting it leaves the declared worker binding
+   * unable to name the session a submission arrives from, and such a
+   * submission is refused rather than settled on its credential alone.
    */
   readonly workerSession?: HostWorkerSessionHolder;
   /** Platform acting-agent resolver (`context.agent` wins when populated). */
@@ -1474,9 +1486,12 @@ export interface OutcomeToolAttribution {
 /**
  * Bind the outcome tool face to the host's invocation holder: every call puts
  * the host's attribution of THIS invocation in effect for the duration of the
- * call and clears it after. The runtime reads the holder synchronously when it
- * arms an attempt or checks a settlement, so a submission is attributed to the
- * caller rather than to whoever moved the holder last.
+ * call and clears it after. The same platform context also moves the worker
+ * session holder, which the submission ingress CAPTURES in the call's own
+ * synchronous prologue: the check that settles a submission therefore reads a
+ * per-call capture, never a holder a concurrent call could have overwritten
+ * (the dispatch that arms an attempt still reads the invocation holder inside
+ * its own synchronous window).
  */
 export function bindOutcomeToolInvocation(
   tools: Record<string, CanonicalToolDef>,
@@ -1510,7 +1525,9 @@ function withInvocation(
       // RAW — the D9 pair needs an agent too, while the worker binding is the
       // session the platform itself attributes the call to. An empty/absent
       // session clears the holder, and a submission under no session is refused
-      // by name rather than settled on its credential alone.
+      // by name rather than settled on its credential alone. The ingress
+      // captures this answer in the call's own synchronous prologue; the holder
+      // is never read across an await on the submission path.
       attribution.workerSession?.set(context?.sessionID);
       try {
         return await inner(args as ToolExecuteArgs, context);

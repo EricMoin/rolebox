@@ -1343,9 +1343,23 @@ export class OutcomeGraphRuntime {
    * attempt-completion channel and shares every line below through
    * {@link settleSubmission} — there is deliberately no second settlement
    * implementation to drift from this one.
+   *
+   * `invocation` IS THE CALL'S OWN IDENTITY when the caller captured it. The
+   * host capability it comes from is a mutable holder a host moves per tool
+   * call, so a caller that awaits before settling must read it in its own
+   * synchronous prologue and hand the reading here; the runtime then checks the
+   * attempt's recorded identity against THAT reading instead of re-reading the
+   * holder, which a concurrent call may have moved. Omitting it keeps the
+   * ambient read for callers whose settlement runs inside their own capture
+   * window (the host completion authority re-enters the delivery's identity for
+   * exactly that reason).
    */
-  submit(proposal: unknown, now?: number): OutcomeSubmissionResult {
-    return this.settleSubmission(proposal, now, "submission");
+  submit(
+    proposal: unknown,
+    now?: number,
+    invocation?: HostIdentityReading,
+  ): OutcomeSubmissionResult {
+    return this.settleSubmission(proposal, now, "submission", undefined, undefined, invocation);
   }
 
   /**
@@ -1380,6 +1394,12 @@ export class OutcomeGraphRuntime {
      * carries one.
      */
     hostCompletion?: HostCompletionExecution,
+    /**
+     * THE CALL'S OWN D9 IDENTITY, when the caller captured it before awaiting
+     * (see {@link submit}). Omitted → the capability is read here, which is only
+     * safe for a caller still inside its own capture window.
+     */
+    invocation?: HostIdentityReading,
   ): OutcomeSubmissionResult {
     const at = this.readClock(now);
     if (typeof at !== "number") return refused([at]);
@@ -1401,7 +1421,10 @@ export class OutcomeGraphRuntime {
     if (unreadableHostIdentity !== undefined) {
       return refused([unreadableHostIdentity]);
     }
-    const hostIdentity = readCurrentHostIdentity(this.hostIdentity);
+    // THE CALL'S OWN READING WINS OVER THE AMBIENT ONE. A caller that captured
+    // the identity synchronously passes it, so a concurrent call that moved the
+    // host's shared holder cannot change what this submission is judged by.
+    const hostIdentity = invocation ?? readCurrentHostIdentity(this.hostIdentity);
     if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
     // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
     // any state is read or written: without one, recording a dispatch would
