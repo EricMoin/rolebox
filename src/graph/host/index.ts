@@ -62,3 +62,12 @@ export {
   type HostCompletionRuntimeProvider,
   type HostCompletionSettlement,
 } from "./completion-bridge.ts";
+export {
+  OutcomeHost,
+  bindOutcomeToolInvocation,
+  type OutcomeHostDurability,
+  type OutcomeHostInvocation,
+  type OutcomeHostOptions,
+  type OutcomeHostRecoveryReport,
+  type OutcomeToolAttribution,
+} from "./outcome-host.ts";

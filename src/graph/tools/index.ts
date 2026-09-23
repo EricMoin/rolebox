@@ -212,14 +212,6 @@ export function createGraphTools(
      * every path behaves exactly as before (the core depends on no host).
      */
     hostIdentity?: HostIdentityCapability;
-    /**
-     * Optional HOST declaration that this deployment still creates NEW durable
-     * legacy graphs (E-gate step 1, `./legacy-creation-gate.ts`). Threaded into
-     * a toolset constructed HERE; ignored when a prebuilt `toolset` is provided,
-     * because that instance carries its own deps. Absent means the creation
-     * ingress refuses by default.
-     */
-    allowNewLegacyGraphs?: boolean;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -243,9 +235,6 @@ export function createGraphTools(
       : {}),
     ...(opts.livenessFeed !== undefined
       ? { livenessFeed: opts.livenessFeed }
-      : {}),
-    ...(opts.allowNewLegacyGraphs !== undefined
-      ? { allowNewLegacyGraphs: opts.allowNewLegacyGraphs }
       : {}),
   });
 
@@ -278,6 +267,46 @@ export type {
 // option — one instance backing both the graph_* tools and the HookDeps
 // graphTools in-flight query.
 export { createGraphToolSet, type GraphToolSet } from "./graph-tools.ts";
+
+// ── The outcome run path's tool face ────────────────────────────────────────
+
+/**
+ * Build the OUTCOME run path's tool face: the four entries that operate on a
+ * DECLARED (outcome-protocol) graph and nothing else —
+ * `graph_declare`, `graph_submit_outcome`, `graph_audit`, `graph_status`.
+ *
+ * This is the surface a shipping host registers. It deliberately excludes every
+ * legacy construction/execution entry point (`graph_create`, `graph_add_node`,
+ * `graph_add_edge`, `graph_add_loop`, `graph_run`, `graph_cancel`,
+ * `graph_approve`): a declared graph is dispatched by the host's own outcome
+ * dispatch adapter and settled by an accepted outcome, never by the legacy
+ * signal registry, so exposing those entries would offer a second execution
+ * path that no declared graph can enter.
+ *
+ * The toolset passed here is expected to be constructed with the outcome deps
+ * (dispatch adapter, credential isolation, validators, artifact root) and
+ * WITHOUT a legacy `manager`/`dispatch` seam — the legacy entries are not
+ * registered, so the toolset never builds a legacy engine.
+ */
+export function createOutcomeGraphTools(
+  toolset: GraphToolSet,
+  opts: {
+    /**
+     * Platform-provided acting-agent resolver (Pi / DSH), exactly as in
+     * {@link createGraphTools}: `context.agent` wins when populated, else this
+     * resolver supplies the orchestrator's role for the injected
+     * `<system-reminder>`.
+     */
+    getEffectiveAgent?: (sessionID?: string) => string;
+  } = {},
+): Record<string, CanonicalToolDef> {
+  return {
+    graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
+    graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
+    graph_audit: createGraphAuditTool(toolset),
+    graph_status: createGraphStatusTool(toolset),
+  };
+}
 
 // ── Individual tool factories ───────────────────────────────────────────────
 

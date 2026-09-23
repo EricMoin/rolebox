@@ -52,6 +52,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { z } from "zod";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import type {
@@ -104,9 +105,13 @@ import {
 import { dshCapabilities } from "../platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "../prompt/builder.ts";
 import { ProcessFatalReporter } from "../core/process-fatal-reporter.ts";
-import { createGraphTools } from "../graph/tools/index.ts";
-import { createGraphToolSet, type GraphToolSet } from "../graph/tools/graph-tools.ts";
-import { registerLiveGraphToolSet } from "../graph/tools/live-state.ts";
+import {
+  createGraphToolSet,
+  createOutcomeGraphTools,
+} from "../graph/tools/index.ts";
+import { OutcomeHost } from "../graph/host/outcome-host.ts";
+import { DshOutcomeDelivery } from "../platform/adapters/dsh/outcome-dispatch.ts";
+import { createValidatorRegistry } from "../graph/outcome/validators.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
 import { createLoopTools } from "../loop/loop-tools.ts";
@@ -1104,23 +1109,13 @@ export async function apply(
 
   // ── dsh dispatch path (subtask 8) ────────────────────────────────────────
   //
-  // The dsh platform's "dispatch manager": routes graph node dispatch AND
-  // loop worker rounds through the dsh services instead of the opencode SDK
-  // client — `ctx.subagents.start` for spawning (per-role agent mapping via
-  // the providers {@link DshAgentRegistrar} registered above), `ctx.sessions`
-  // + the run's `result` promise for collecting results, `run.dispose()` for
+  // The dsh platform's "dispatch manager" for LOOP worker rounds: routes loop
+  // rounds through the dsh services instead of the opencode SDK client —
+  // `ctx.subagents.start` for spawning (per-role agent mapping via the
+  // providers {@link DshAgentRegistrar} registered above), `ctx.sessions` +
+  // the run's `result` promise for collecting results, `run.dispose()` for
   // cancellation, and stopReason→DispatchTaskStatus translation so failures
-  // map to the engine's escalate semantics. This mirrors how the opencode
-  // entry constructs its DispatchManager (createDispatchManager in
-  // src/pi-extension.ts / src/index.ts) — the opencode path is untouched;
-  // this is additive routing by platform.
-  // Late-bound nested-graph liveness seam. The adapter is constructed before
-  // the graph toolset (the toolset depends on the adapter), so the probe is
-  // closed over a mutable reference assigned once the toolset exists. When
-  // wired, a node whose subagent launched a nested graph is NOT reported
-  // complete until that graph settles, and a nested-graph failure propagates
-  // (escalates the node) instead of being silently dropped.
-  let graphToolSet: GraphToolSet | undefined;
+  // map to the loop coordinator's semantics.
   const dshDispatch = new DshDispatchAdapter({
     subagents: ctx.subagents,
     sessionClient: sessionAdapter,
@@ -1132,93 +1127,142 @@ export async function apply(
     // fails loud with DshParentUnresolvedError instead of forwarding
     // `parent: undefined`.
     parentResolver: (sid) => agentRegistry?.get(sid),
-    graphLiveness: {
-      hasExecuting: (sid) => graphToolSet?.hasExecutingGraphsForSession(sid) ?? false,
-      subscribeTerminal: (cb) =>
-        graphToolSet?.subscribeGraphTerminal(cb) ?? (() => {}),
-    },
     directory: process.cwd(),
   });
 
-  // Graph engine v2 tools bound to the dsh dispatch seam. Engines construct
-  // with `{ dispatch: dshDispatch }` (no DispatchManager on the dsh path), so
-  // every graph node dispatches through the dsh subagent API. stateDir
-  // (process.cwd()) persists engine state under `.rolebox/state` — the same
-  // layout the opencode path uses.
+  // ── The outcome run path's host layer ────────────────────────────────────
   //
-  // `getEffectiveAgent` mirrors the Pi/dispatch deps-injection pattern: dsh
-  // never populates `context.agent` on tool contexts, so the graph tools fall
-  // back to this per-session resolver (the role switcher's ActiveRoleRef) so
-  // the injected `<system-reminder>` forwards the orchestrator's real role
-  // instead of falling back to `default_agent`. When no role is active for the
-  // session it resolves to "" (base agent → resume as default).
+  // A declared graph is dispatched by the host capability layer
+  // (`src/graph/host/outcome-host.ts`), not by a legacy engine:
+  //   - `DshOutcomeDelivery` starts one dsh subagent run per attempt and
+  //     observes its terminal result (the attempt's credential travels in that
+  //     worker's prompt — the one channel it belongs to);
+  //   - the `OutcomeHost` holds the protected credential vault, the durable
+  //     execution index, the invocation identity (D9) and the completion
+  //     bridge that settles a finished attempt through `settleNatural`;
+  //   - `graph_declare` reports the persisted plan through `onGraphDeclared`,
+  //     which starts (or resumes) the graph through the runtime's own
+  //     `resume` — the same entry the boot sweep uses.
   //
-  // `graphNotify` mirrors the opencode/Pi config (tool-service.ts:91-94 /
-  // pi service-stack.ts:201-204): `sessionClient` is the SAME session client
-  // the platform threads through dispatch/loop (dsh's `sessionAdapter`, whose
-  // `prompt()` now routes through the optional live-agent injector above), and
-  // `emperorSessionId` resolves the orchestrator session from the graph tool's
-  // execution context (`invokingSessionId`). This is what makes DSH graph
-  // orchestration produce `<system-reminder>` (node-completion + graph-terminal
-  // + stall) reminders targeting the calling emperor session, exactly like
-  // opencode/Pi. When `ctx.agents` is absent, `sessionAdapter.prompt()` is the
-  // documented no-op and the engine's F6 notifier degrades per-marker.
-  //
-  // The toolset is built explicitly (not via `createGraphTools`'s internal
-  // construction) so the SAME instance backs both the `graph_*` tools and the
-  // adapter's nested-graph liveness probe.
-  graphToolSet = createGraphToolSet({
-    dispatch: dshDispatch,
+  // The store root is deliberately a host directory beside the workspace state
+  // (workers are not handed its path): see `credential-vault.ts` for what that
+  // can and cannot isolate on a same-account platform.
+  let outcomeHost: OutcomeHost | undefined;
+  const outcomeDelivery = new DshOutcomeDelivery({
+    subagents: ctx.subagents,
+    parentResolver: (sid) => agentRegistry?.get(sid),
+    onStartFailed: (_request, effect, reason) => {
+      outcomeHost?.reportDeliveryFailure(effect, reason);
+    },
+    onSettled: (settlement) => {
+      const { request } = settlement;
+      if (settlement.kind === "failed") {
+        log.warn("dsh outcome dispatch: attempt did not complete", {
+          graphId: request.graphId,
+          nodeId: request.nodeId,
+          attemptId: request.attemptId,
+          reason: settlement.reason,
+        });
+        return;
+      }
+      void outcomeHost
+        ?.complete(request.graphId, request.attemptId)
+        .then((report) => {
+          // Any settlement moves the graph state the console renders.
+          notifyRoleboxChanged("graph");
+          log.debug("dsh outcome completion settled", {
+            graphId: request.graphId,
+            attemptId: request.attemptId,
+            kind: report.kind,
+          });
+        })
+        .catch((err: unknown) => {
+          log.warn("dsh outcome completion failed", {
+            graphId: request.graphId,
+            attemptId: request.attemptId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    },
+  });
+  const outcomeStoreRoot = join(process.cwd(), ".rolebox", "state", "host");
+  outcomeHost = OutcomeHost.open({
+    workspaceDir: process.cwd(),
+    storeRoot: outcomeStoreRoot,
+    deliver: outcomeDelivery.deliver,
+    validators: createValidatorRegistry([]),
+  });
+  // The outcome toolset: the four entries that operate on a DECLARED graph.
+  // No manager / dispatch seam is injected, so it can never build a legacy
+  // engine; the outcome deps are the host layer above.
+  const outcomeToolset = createGraphToolSet({
     directory: process.cwd(),
     stateDir: process.cwd(),
-    graphNotify: {
-      sessionClient: sessionAdapter,
-      emperorSessionId: (invokingSessionId) => invokingSessionId,
+    credentialIsolation: outcomeHost.credentialIsolation,
+    hostIdentity: outcomeHost.hostIdentity,
+    outcomeDispatch: outcomeHost.dispatch,
+    outcomeValidators: createValidatorRegistry([]),
+    outcomeArtifactRoot: process.cwd(),
+    onGraphDeclared: (graphId, invokingSessionId, agent) => {
+      // The attempt's dispatch happens inside `startDeclaredGraph`'s
+      // synchronous resume window, so the delivery seam is told which session
+      // those attempts belong to first; the invocation identity is attributed
+      // by the host's own holder for that window (D9).
+      outcomeDelivery.setParentSession(invokingSessionId);
+      void outcomeHost
+        ?.startDeclaredGraph(graphId, { sessionId: invokingSessionId, agent })
+        .then((result) => {
+          notifyRoleboxChanged("graph");
+          if (result.kind === "refused") {
+            log.warn("dsh outcome graph start refused", {
+              graphId,
+              refusals: result.refusals.map((r) => r.code).join(","),
+            });
+          } else {
+            log.info("dsh outcome graph started", {
+              graphId,
+              kind: result.kind,
+              dispatched: result.dispatched.length,
+            });
+          }
+        })
+        .catch((err: unknown) => {
+          log.warn("dsh outcome graph start failed", {
+            graphId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          outcomeDelivery.setParentSession(undefined);
+        });
     },
-    // Nested blocked-gate propagation: when a graph at any nesting depth
-    // blocks on a `needs_approval` gate, the toolset walks the invoking
-    // session chain through the dispatch adapter and delivers a [GRAPH BLOCKED]
-    // reminder to the OUTERMOST live session (the user's orchestrator), so the
-    // human can approve there even when the subagent session that invoked the
-    // nested graph has already ended. Single-level graphs resolve to a
-    // length-1 chain and behave exactly as before.
-    resolveSessionChain: (sid) => dshDispatch.resolveSessionChain(sid),
-    // E-GATE STEP 1 DECLARATION (allowNewLegacyGraphs): this host still creates
-    // new durable legacy graphs. Removing this one line closes the creation
-    // ingress for the dsh surface — it is NOT removed here because the outcome
-    // path still refuses by default without a host credential-isolation
-    // adapter, so the legacy run path is production's only one (see
-    // graph-tools.ts GraphToolSetDeps).
-    allowNewLegacyGraphs: true,
   });
-  // Monitor S10 (live-state): register the toolset as the process's live
-  // graph-registry source so the monitor's `readLiveEngineGraphs` projects
-  // running graphs from memory — the same in-memory feed the TUI reads. With no
-  // registration the /rolebox/status route falls back to a disk scan, so the
-  // web console must never see an empty engine list while graphs execute.
-  registerLiveGraphToolSet(graphToolSet);
-  const graphTools = createGraphTools(undefined, {
-    toolset: graphToolSet,
-    getEffectiveAgent: (sessionID?: string) =>
-      sessionID ? activeRole.get(sessionID) ?? "" : "",
+  const graphTools = outcomeHost.bindTools(
+    createOutcomeGraphTools(outcomeToolset, {
+      getEffectiveAgent: (sessionID?: string) =>
+        sessionID ? activeRole.get(sessionID) ?? "" : "",
+    }),
+    (sessionID?: string) => (sessionID ? activeRole.get(sessionID) ?? "" : ""),
+  );
+  // Boot recovery for declared graphs: a graph interrupted by the previous
+  // process is continued from its persisted state, and one that was declared
+  // but never started gets its first execution — through the same runtime entry
+  // the declaration seam uses. Best-effort: a failure is logged, never gates
+  // boot.
+  void outcomeHost.recoverDeclaredGraphs().catch((err: unknown) => {
+    log.warn("dsh outcome graph recovery failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   });
 
   // ── Event-driven console updates ─────────────────────────────────────────
-  // Three producers feed the web console's change channel. None of them polls:
-  //   - the loop coordinator's persist hook (above) fires on every loop state
-  //     transition;
-  //   - the toolset's terminal observer fires when a graph settles (the same
-  //     registry the dispatch adapter uses for nested-graph liveness);
+  // Two producers feed the web console's change channel. None of them polls:
+  //   - the outcome host reports a settlement / start through
+  //     `notifyRoleboxChanged("graph")` (above);
   //   - a debounced watch on the state directory covers what neither hook sees
-  //     — node-level engine writes, dispatch task files, progress and
-  //     checkpoints — because those files are what the snapshot readers read.
+  //     — node-level writes, dispatch task files, progress and checkpoints.
   // The route turns any of them into a coalesced SSE frame; with no console
-  // connected, all three cost a function call and nothing else.
-  routeDisposers.push(
-    graphToolSet.subscribeGraphTerminal(() => {
-      notifyRoleboxChanged("graph");
-    }),
-  );
+  // connected, both cost a function call and nothing else.
   routeDisposers.push(
     watchRoleboxState(process.cwd(), () => {
       notifyRoleboxChanged("file");

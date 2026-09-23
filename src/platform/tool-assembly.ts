@@ -40,11 +40,11 @@ import {
   createSessionForkTool,
 } from "../session/session-inspect-tools.ts";
 
-// Graph Execution Engine v2 — Phase 4, Subtask 6. Additive registration of the
-// seven imperative graph_* tools. Import-only (no protected files touched).
-import { createGraphTools } from "../graph/tools/index.ts";
-import type { GraphNotifySource, GraphToolSet } from "../graph/tools/index.ts";
-import type { NodeLivenessFeed } from "../graph/engine/index.ts";
+// Graph Execution Engine v2 — the OUTCOME run path's tool face is registered
+// here as a caller-provided record (the shipping hosts build it from their own
+// host capability layer). This assembly never constructs a graph toolset and
+// never imports the legacy engine: a host that wants graph orchestration passes
+// `outcomeGraphTools`.
 
 export interface BuildToolsOptions {
   sessionClient?: ISessionClient;
@@ -53,14 +53,6 @@ export interface BuildToolsOptions {
   subagentModelKey?: Map<string, string>;
   resolvedRoles: ResolvedRole[];
   directory: string;
-  /**
-   * Optional engine-state persistence dir, threaded through `createGraphTools`
-   * into every engine the graph tools construct. When set, engines persist
-   * their state under `stateDir/.rolebox/state` (write-through persistence
-   * seam in `createEngine`). Absent → engines run without persistence
-   * (backward compatible).
-   */
-  stateDir?: string;
   // Accepted for future use; not consulted in Phase 1 tool assembly.
   capabilities: PlatformCapabilities;
   extraTools?: Record<string, CanonicalToolDef>;
@@ -68,58 +60,18 @@ export interface BuildToolsOptions {
   loopToolsOverride?: Record<string, CanonicalToolDef>;
   taskToolsOverride?: Record<string, CanonicalToolDef>;
   /**
-   * Optional graph-notify source (subtask 3): a prebuilt
-   * `GraphCompletionHandler` or an owner config carrying the emperor session id
-   * + session client. Threaded through `createGraphTools` into every engine the
-   * graph tools construct so per-node completions AND graph-terminal transitions
-   * (COMPLETE / BLOCKED) route to graph-notify targeting the emperor session.
-   * Absent → graph_run builds engines with the default no-op seams (backward
-   * compatible). `graphParentContext` budget scoping (`sessionID: graphId`) is
-   * untouched.
+   * The graph orchestration surface this host assembles — the OUTCOME run
+   * path's tool face (`graph_declare`, `graph_submit_outcome`, `graph_audit`,
+   * `graph_status`), built by the host from its own capability layer
+   * (`src/graph/host/outcome-host.ts` + `createOutcomeGraphTools`).
+   *
+   * This assembly deliberately does NOT construct a graph toolset and does NOT
+   * register anything when the record is absent: a platform without an outcome
+   * capability layer (no protected credential store, no dispatch adapter) has
+   * no runnable graph path, and offering the legacy construction entries there
+   * would be a second execution path the outcome protocol does not serve.
    */
-  graphNotify?: GraphNotifySource;
-  /**
-   * Optional prebuilt {@link GraphToolSet} (subtask 2). When provided AND a
-   * dispatchManager is present, the graph_* tools bind to THIS instance
-   * instead of constructing a fresh toolset internally (via
-   * `createGraphTools({ toolset })`) — so the platform assembly layer that
-   * constructs the toolset once (tool-service / PiLightweightServiceStack)
-   * can expose the SAME instance through HookDeps.graphTools and the graph_*
-   * tools observe the same in-memory graph registry. Absent → the graph tools
-   * construct their own toolset (legacy behavior).
-   */
-  graphTools?: GraphToolSet;
-  /**
-   * Optional node-liveness feed seam (node-anomaly-detection subtask 2).
-   * Threaded through `createGraphTools` into the toolset's engines (when the
-   * toolset is constructed inside tool-assembly): the platform liveness wiring
-   * heartbeats / fail-fasts graph sessions through the shared feed. Absent →
-   * engines run without liveness recording (backward compatible).
-   */
-  livenessFeed?: NodeLivenessFeed;
-  /**
-   * Optional soft-stall warn threshold (ms) for the heartbeat-based liveness
-   * monitor (node-anomaly-detection subtask 6). Threaded into every engine
-   * the graph tools construct. Absent → the monitor's default
-   * (`min(60_000, nodeStaleTimeoutMs / 2)`).
-   */
-  nodeStallWarnMs?: number;
-  /**
-   * Optional hard-stall grace (ms) past `nodeStallWarnMs` before a stalling
-   * node is marked `timeout` (subtask 6). Absent → the monitor's default
-   * (30_000).
-   */
-  nodeStallGraceMs?: number;
-  /**
-   * Optional platform-provided acting-agent resolver (Pi / DSH). Threaded
-   * through `createGraphTools` into the graph tool execute methods so that when
-   * the platform never populates `context.agent`, the injected
-   * `<system-reminder>` still forwards the orchestrator's role instead of
-   * falling back to `default_agent`. Receives the invoking session id (so a
-   * per-session resolver like DSH's role switcher can resolve the active role).
-   * Absent → `context.agent`-only (opencode, unchanged).
-   */
-  getEffectiveAgent?: (sessionID?: string) => string;
+  outcomeGraphTools?: Record<string, CanonicalToolDef>;
 }
 
 /**
@@ -227,40 +179,15 @@ export function buildCanonicalTools(
     Object.assign(tools, opts.taskToolsOverride);
   }
 
-  // 5b. Graph Execution Engine v2 tools — Phase A coexistence (additive only)
-  // Registered alongside the loop_* tools when a dispatch manager is present.
-  // The graph_* keys share no namespace with loop_*, so this merge never
-  // overrides a legacy tool. Same additive precedence as
-  // extraTools/loopToolsOverride (Object.assign onto the assembled map).
-  if (opts.dispatchManager) {
-    Object.assign(tools, createGraphTools(opts.dispatchManager, {
-      directory: opts.directory,
-      stateDir: opts.stateDir,
-      graphNotify: opts.graphNotify,
-      // Subtask 2: reuse the prebuilt toolset (single instance backing both
-      // the graph_* tools and the HookDeps graphTools query) when the
-      // platform assembly layer provided one.
-      toolset: opts.graphTools,
-      // Non-opencode platforms (Pi/DSH) never populate `context.agent`, so the
-      // platform resolver supplies the orchestrator's role for the injected
-      // `<system-reminder>` (absent → context.agent-only, opencode unchanged).
-      ...(opts.getEffectiveAgent !== undefined
-        ? { getEffectiveAgent: opts.getEffectiveAgent }
-        : {}),
-      // Subtask 6: thread the node-liveness feed + monitor stall thresholds
-      // into the graph tools' engine construction (absent → defaults,
-      // behavior unchanged).
-      ...(opts.livenessFeed !== undefined
-        ? { livenessFeed: opts.livenessFeed }
-        : {}),
-      ...(opts.nodeStallWarnMs !== undefined
-        ? { nodeStallWarnMs: opts.nodeStallWarnMs }
-        : {}),
-      ...(opts.nodeStallGraceMs !== undefined
-        ? { nodeStallGraceMs: opts.nodeStallGraceMs }
-        : {}),
-    }));
+  // 5b. The OUTCOME run path's tool face — registered when, and only when, the
+  // host supplied it. The graph_* keys share no namespace with loop_*, so this
+  // merge never overrides another tool (same additive precedence as
+  // extraTools/loopToolsOverride).
+  if (opts.outcomeGraphTools) {
+    Object.assign(tools, opts.outcomeGraphTools);
   }
+
+  return tools;
 
   return tools;
 }

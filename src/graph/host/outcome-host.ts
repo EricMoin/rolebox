@@ -1,0 +1,536 @@
+/**
+ * Graph Execution Engine v2 — the SHIPPED host assembly for the outcome run path
+ *
+ * Version: 1.0
+ * Date: 2026-09-23
+ *
+ * WIRES THE HOST CAPABILITY LAYER (`src/graph/host/**`) INTO ONE OBJECT a
+ * shipping host injects into the outcome tool face and the startup recovery
+ * sweep:
+ *
+ * - the protected credential vault (D7) — the only place an attempt credential
+ *   exists once it is minted, since the ledger keeps its digest;
+ * - the durable execution index plus the dispatch adapter (D8) — create at most
+ *   once per stable effect id, and answer `created` / `absent` / `unknown`
+ *   about an effect a restart finds in the ledger;
+ * - the invocation-identity holder (D9) — the host's own attribution of "which
+ *   invocation is running now", moved per tool call and per first execution;
+ * - the completion bridge — an attempt the platform reports finished is settled
+ *   through the runtime's `settleNatural`, never through a second ingress.
+ *
+ * WHO RUNS THE FIRST DISPATCH. A declared graph is persisted by
+ * `graph_declare` and dispatched by nobody in the tool layer. The host calls
+ * {@link OutcomeHost.startDeclaredGraph} from its declaration seam: that opens
+ * the graph's saved plan, continues (or starts) it through the outcome
+ * runtime's own `resume`, and closes the same crash windows a restart sweep
+ * closes. {@link OutcomeHost.recoverDeclaredGraphs} is the same operation over
+ * every protocol-2 record in the store, for a host's boot path.
+ *
+ * WHAT THIS MODULE DELIBERATELY DOES NOT DO. It never builds a legacy engine,
+ * never imports one, and never registers a legacy tool: a declared graph has no
+ * legacy runtime instance. Its delivery seam is injected by the host
+ * ({@link HostDispatchDelivery}) so the platform-specific way to start a worker
+ * stays in the platform adapter.
+ */
+
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
+import { errorText } from "../../utils/error-text.ts";
+import { logWarn } from "../engine/log-warn.ts";
+import {
+  DEFAULT_STORAGE_FORMAT_REGISTRY,
+  engineStateDir,
+  engineStatePath,
+  loadEngineStateForResume,
+} from "../engine/engine-persistence.ts";
+import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
+import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
+import { readPersistedOutcomePlan } from "../outcome/recovery.ts";
+import {
+  OutcomeGraphRuntime,
+  type OutcomeResumeResult,
+} from "../outcome/runtime.ts";
+import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
+import type { HostIdentityCapability } from "../outcome/host-identity.ts";
+import {
+  createValidatorRegistry,
+  type ValidatorRegistry,
+} from "../outcome/validators.ts";
+import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
+import type {
+  HostDispatchDelivery,
+} from "./dispatch-host.ts";
+import type { OutcomeDispatchEffectKey } from "../outcome/dispatch-effects.ts";
+import { HostOutcomeDispatch } from "./dispatch-host.ts";
+import { HostExecutionIndex } from "./execution-index.ts";
+import { HostCredentialVault } from "./credential-vault.ts";
+import {
+  HostDispatchCompletionBridge,
+  type HostCompletionReport,
+  type HostCompletionRuntime,
+} from "./completion-bridge.ts";
+import {
+  createHostInvocationHolder,
+  hostInvocationIdentity,
+  type HostInvocationHolder,
+} from "./identity.ts";
+
+// ── Options and result shapes ───────────────────────────────────────────────
+
+/** How long the host's vault and execution index outlive the process. */
+export type OutcomeHostDurability = "file" | "memory";
+
+/** Inputs to {@link OutcomeHost.open}. */
+export interface OutcomeHostOptions {
+  /**
+   * The workspace whose `.rolebox/state` store holds the declared graphs'
+   * persisted plans. Also the default artifact root.
+   */
+  readonly workspaceDir: string;
+  /**
+   * The HOST-owned root the vault, the execution index and the acceptance
+   * ledger live under. Deliberately NOT the workspace by default — see
+   * `credential-vault.ts` for the boundary this root can and cannot give.
+   */
+  readonly storeRoot: string;
+  /** How the platform starts one attempt. See `dispatch-host.ts`. */
+  readonly deliver: HostDispatchDelivery;
+  /** The validator capabilities this host installs (defaults to none). */
+  readonly validators?: ValidatorRegistry;
+  /** The completion policies this host authorized (defaults to none). */
+  readonly completionPolicies?: CompletionPolicyRegistry;
+  /** Root every evidence reference resolves inside. Defaults to `workspaceDir`. */
+  readonly artifactRoot?: string;
+  /** The clock reported to settlements; defaults to `Date.now`. */
+  readonly clock?: () => number;
+  /** Vault/index durability. Defaults to `"file"` (restart-recoverable). */
+  readonly durability?: OutcomeHostDurability;
+}
+
+/** One host invocation's attribution, as the declaring tool call saw it. */
+export interface OutcomeHostInvocation {
+  readonly sessionId?: string;
+  readonly agent?: string;
+}
+
+/** What a boot sweep over the declared graphs did. */
+export interface OutcomeHostRecoveryReport {
+  /** `graph:revision` for each graph this sweep gave a FIRST EXECUTION. */
+  readonly started: readonly string[];
+  /** `graph:phase` for each graph continued from persisted state. */
+  readonly resumed: readonly string[];
+  /** `graph:reason` for each protocol-2 record this sweep could not open. */
+  readonly refused: readonly string[];
+}
+
+// ── The host ────────────────────────────────────────────────────────────────
+
+/**
+ * One host process's outcome-run-path capability layer.
+ *
+ * Construct with {@link OutcomeHost.open}, inject `credentialIsolation`,
+ * `hostIdentity`, `dispatch` and the toolset's outcome options, and keep the
+ * instance for the process lifetime: the vault and the execution index are the
+ * host's durable facts, and the completion bridge's bindings live here.
+ */
+export class OutcomeHost {
+  private readonly workspaceDir: string;
+  private readonly storeRoot: string;
+  private readonly artifactRoot: string;
+  private readonly clock: () => number;
+  private readonly validators: ValidatorRegistry;
+  private readonly completionPolicies: CompletionPolicyRegistry | undefined;
+  private readonly vault: HostCredentialVault;
+  private readonly executions: HostExecutionIndex;
+  private readonly holder: HostInvocationHolder;
+  private readonly dispatchAdapter: HostOutcomeDispatch;
+  /** One bridge per graph — a settlement needs the graph's own saved plan. */
+  private readonly bridges = new Map<string, HostDispatchCompletionBridge>();
+  /** One open runtime (and ledger) per graph, for settlements and resumes. */
+  private readonly runtimes = new Map<
+    string,
+    Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }>
+  >();
+  private closed = false;
+
+  private constructor(options: OutcomeHostOptions) {
+    this.workspaceDir = options.workspaceDir;
+    this.storeRoot = options.storeRoot;
+    this.artifactRoot = options.artifactRoot ?? options.workspaceDir;
+    this.clock = options.clock ?? (() => Date.now());
+    this.validators = options.validators ?? createValidatorRegistry([]);
+    this.completionPolicies = options.completionPolicies;
+    const durability = options.durability ?? "file";
+    this.vault = HostCredentialVault.open({ root: options.storeRoot, durability });
+    this.executions = HostExecutionIndex.open({ root: options.storeRoot, durability });
+    this.holder = createHostInvocationHolder();
+    this.dispatchAdapter = new HostOutcomeDispatch({
+      executions: this.executions,
+      deliver: options.deliver,
+      completions: {
+        bind: (binding) => {
+          this.bridgeFor(binding.graphId).bind(binding);
+        },
+      },
+    });
+  }
+
+  static open(options: OutcomeHostOptions): OutcomeHost {
+    return new OutcomeHost(options);
+  }
+
+  /** The protected credential store, injected as the runtime's D7 capability. */
+  get credentialIsolation(): CredentialIsolationCapability {
+    return this.vault.capability();
+  }
+
+  /** The host's invocation attribution, injected as the runtime's D9 capability. */
+  get hostIdentity(): HostIdentityCapability {
+    return this.holder.capability;
+  }
+
+  /** The dispatch adapter the outcome runtime and the toolset dispatch through. */
+  get dispatch(): HostOutcomeDispatch {
+    return this.dispatchAdapter;
+  }
+
+  /** The vault, exposed for tests and host reports. */
+  get credentials(): HostCredentialVault {
+    return this.vault;
+  }
+
+  /** Move the invocation this host attributes to the current operation. */
+  setInvocation(invocation: OutcomeHostInvocation): void {
+    this.holder.set(
+      hostInvocationIdentity(invocation.sessionId, invocation.agent),
+    );
+  }
+
+  /** Report that the current operation carries no host attribution. */
+  clearInvocation(): void {
+    this.holder.clear();
+  }
+
+  /**
+   * Settle the attempt the host observed finishing, through the graph's own
+   * saved plan. The report is the bridge's — see `completion-bridge.ts`.
+   */
+  complete(graphId: string, attemptId: string): Promise<HostCompletionReport> {
+    return this.bridgeFor(graphId).complete({ graphId, attemptId });
+  }
+
+  /**
+   * Give ONE declared graph its first execution, or continue it from the state
+   * its ledger already holds.
+   *
+   * This is deliberately the runtime's own `resume`: a graph with no ledger
+   * state is STARTED from the saved plan, a graph with one is continued, and
+   * nothing is ever started twice for the same plan revision. The invocation is
+   * put in effect for the synchronous dispatch window, so an attempt this call
+   * arms records the declaring invocation's identity (D9).
+   */
+  async startDeclaredGraph(
+    graphId: string,
+    invocation: OutcomeHostInvocation = {},
+  ): Promise<OutcomeResumeResult> {
+    this.assertOpen();
+    const { runtime } = await this.runtimeFor(graphId);
+    this.setInvocation(invocation);
+    try {
+      return runtime.resume(this.clock());
+    } finally {
+      this.holder.clear();
+    }
+  }
+
+  /**
+   * The boot sweep: every protocol-2 record in the workspace store gets the
+   * same first-execution/resume treatment as {@link startDeclaredGraph}, one
+   * graph at a time. A record this host cannot open is reported, never
+   * rewritten; the sweep never throws.
+   */
+  async recoverDeclaredGraphs(): Promise<OutcomeHostRecoveryReport> {
+    this.assertOpen();
+    const started: string[] = [];
+    const resumed: string[] = [];
+    const refused: string[] = [];
+    for (const graphId of this.declaredGraphIds()) {
+      try {
+        const result = await this.startDeclaredGraph(graphId);
+        if (result.kind === "refused") {
+          refused.push(
+            graphId + ": " + result.refusals.map((r) => r.code).join(","),
+          );
+          continue;
+        }
+        if (result.kind === "started") {
+          started.push(graphId + ":" + result.state.planRevision);
+        } else {
+          resumed.push(graphId + ":" + result.state.phase);
+        }
+      } catch (err) {
+        refused.push(graphId + ": " + errorText(err));
+      }
+    }
+    if (started.length > 0 || resumed.length > 0 || refused.length > 0) {
+      logWarn(
+        "outcome-host: declared-graph sweep — started=[" +
+          started.join(", ") +
+          "] resumed=[" +
+          resumed.join(", ") +
+          "] refused=[" +
+          refused.join(", ") +
+          "]",
+      );
+    }
+    return Object.freeze({
+      started: Object.freeze(started),
+      resumed: Object.freeze(resumed),
+      refused: Object.freeze(refused),
+    });
+  }
+
+  /**
+   * Bind a tool face to this host's invocation attribution: every call puts the
+   * host's attribution of THAT invocation in effect for the call's duration and
+   * clears it after (D9).
+   */
+  bindTools(
+    tools: Record<string, CanonicalToolDef>,
+    getEffectiveAgent?: (sessionID?: string) => string,
+  ): Record<string, CanonicalToolDef> {
+    return bindOutcomeToolInvocation(tools, {
+      holder: this.holder,
+      ...(getEffectiveAgent === undefined ? {} : { getEffectiveAgent }),
+    });
+  }
+
+  /**
+   * Report a delivery that failed asynchronously: no execution was created, so
+   * the record the adapter took before delivery is dropped. A later recovery
+   * then asks the host and gets `absent` instead of treating the effect as
+   * started.
+   */
+  reportDeliveryFailure(effect: OutcomeDispatchEffectKey, reason: string): void {
+    this.executions.unrecord(effect);
+    logWarn(
+      "outcome-host: delivery failed for graph " +
+        JSON.stringify(effect.graphId) +
+        " effect " +
+        JSON.stringify(effect.effectId) +
+        " — the execution-index record was dropped: " +
+        reason,
+    );
+  }
+
+  /** Release every open ledger handle. The host is inert afterwards. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.runtimes.values()) {
+      void pending.then(
+        ({ ledger }) => {
+          try {
+            ledger.close();
+          } catch {
+            // Closing an already-closed handle is not a host failure.
+          }
+        },
+        () => {},
+      );
+    }
+    this.runtimes.clear();
+    this.bridges.clear();
+  }
+
+  // ── Internals ─────────────────────────────────────────────────────────────
+
+  /** The per-graph completion bridge, created on first use. */
+  private bridgeFor(graphId: string): HostDispatchCompletionBridge {
+    const existing = this.bridges.get(graphId);
+    if (existing !== undefined) return existing;
+    const bridge = new HostDispatchCompletionBridge({
+      runtime: () => this.runtimeFor(graphId).then(({ runtime }) => runtime),
+      credentials: this.vault,
+      clock: this.clock,
+    });
+    this.bridges.set(graphId, bridge);
+    return bridge;
+  }
+
+  /**
+   * The graph's outcome runtime over its PERSISTED plan, opened once per graph
+   * and kept for the process lifetime (the completion bridge and the declaration
+   * seam share it). The loader is the same one the submission ingress uses, so a
+   * record that is not this build's outcome-protocol state is refused instead of
+   * being run approximately.
+   */
+  private runtimeFor(
+    graphId: string,
+  ): Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }> {
+    const existing = this.runtimes.get(graphId);
+    if (existing !== undefined) return existing;
+    const pending = this.openRuntime(graphId);
+    this.runtimes.set(graphId, pending);
+    return pending;
+  }
+
+  private async openRuntime(
+    graphId: string,
+  ): Promise<{ runtime: OutcomeGraphRuntime; ledger: SqliteAcceptanceLedger }> {
+    const path = engineStatePath(this.workspaceDir, graphId);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch (error) {
+      throw new Error(
+        "outcome-host: graph " +
+          JSON.stringify(graphId) +
+          " has no readable persisted record at " +
+          path +
+          " (" +
+          errorText(error) +
+          ") — a declared graph is dispatched only from its SAVED plan",
+      );
+    }
+    const loaded = loadEngineStateForResume(
+      raw,
+      path,
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+    );
+    if (loaded.kind !== "valid") {
+      throw new Error(
+        "outcome-host: graph " +
+          JSON.stringify(graphId) +
+          " is not a loadable outcome record (" +
+          loaded.kind +
+          ")",
+      );
+    }
+    if (loaded.executionProtocol !== OUTCOME_PROTOCOL) {
+      throw new Error(
+        "outcome-host: graph " +
+          JSON.stringify(graphId) +
+          " is bound to execution protocol " +
+          String(loaded.executionProtocol) +
+          ", not the outcome protocol",
+      );
+    }
+    const reading = readPersistedOutcomePlan(loaded.state);
+    if (reading.kind === "refused") {
+      throw new Error(
+        "outcome-host: graph " +
+          JSON.stringify(graphId) +
+          " cannot be run from its persisted record: " +
+          reading.refusals.map((r) => r.code).join(", "),
+      );
+    }
+    const ledger = await SqliteAcceptanceLedger.create(this.storeRoot);
+    const runtime = new OutcomeGraphRuntime({
+      plan: reading.plan.plan,
+      ledger,
+      dispatch: this.dispatchAdapter,
+      validators: this.validators,
+      artifactRoot: this.artifactRoot,
+      clock: this.clock,
+      credentialIsolation: this.credentialIsolation,
+      hostIdentity: this.hostIdentity,
+      ...(this.completionPolicies === undefined
+        ? {}
+        : { completionPolicies: this.completionPolicies }),
+    });
+    return { runtime, ledger };
+  }
+
+  /** Every graph id the workspace store holds a protocol-2 record for. */
+  private declaredGraphIds(): string[] {
+    const stateDir = engineStateDir(this.workspaceDir);
+    let files: string[];
+    try {
+      files = readdirSync(stateDir, { encoding: "utf-8" });
+    } catch {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const file of files.sort()) {
+      if (!/^engine-.+\.json$/.test(file)) continue;
+      const path = join(stateDir, file);
+      try {
+        const loaded = loadEngineStateForResume(
+          readFileSync(path, "utf-8"),
+          path,
+          DEFAULT_STORAGE_FORMAT_REGISTRY,
+        );
+        if (loaded.kind === "valid" && loaded.executionProtocol === OUTCOME_PROTOCOL) {
+          ids.push(loaded.state.graphId);
+        }
+      } catch {
+        // A record this sweep cannot read is not a declared graph to start;
+        // the drain audit reports it as a blocker.
+      }
+    }
+    return ids;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new Error("outcome-host: this host has been closed");
+    }
+  }
+}
+
+// ── Tool attribution ────────────────────────────────────────────────────────
+
+/** How the host resolves the acting agent for one tool invocation. */
+export interface OutcomeToolAttribution {
+  /** The host's invocation holder (D9). */
+  readonly holder: HostInvocationHolder;
+  /** Platform acting-agent resolver (`context.agent` wins when populated). */
+  readonly getEffectiveAgent?: (sessionID?: string) => string;
+}
+
+/**
+ * Bind the outcome tool face to the host's invocation holder: every call puts
+ * the host's attribution of THIS invocation in effect for the duration of the
+ * call and clears it after. The runtime reads the holder synchronously when it
+ * arms an attempt or checks a settlement, so a submission is attributed to the
+ * caller rather than to whoever moved the holder last.
+ */
+export function bindOutcomeToolInvocation(
+  tools: Record<string, CanonicalToolDef>,
+  attribution: OutcomeToolAttribution,
+): Record<string, CanonicalToolDef> {
+  const bound: Record<string, CanonicalToolDef> = {};
+  for (const [name, def] of Object.entries(tools)) {
+    bound[name] = withInvocation(def, attribution);
+  }
+  return bound;
+}
+
+/** The erased argument type one canonical tool's execute receives. */
+type ToolExecute = CanonicalToolDef["execute"];
+type ToolExecuteArgs = Parameters<ToolExecute>[0];
+
+function withInvocation(
+  def: CanonicalToolDef,
+  attribution: OutcomeToolAttribution,
+): CanonicalToolDef {
+  const inner = def.execute;
+  return {
+    ...def,
+    async execute(args: unknown, context: CanonicalToolContext) {
+      const agent =
+        context?.agent && context.agent.length > 0
+          ? context.agent
+          : (attribution.getEffectiveAgent?.(context?.sessionID) ?? "");
+      attribution.holder.set(hostInvocationIdentity(context?.sessionID, agent));
+      try {
+        return await inner(args as ToolExecuteArgs, context);
+      } finally {
+        attribution.holder.clear();
+      }
+    },
+  };
+}

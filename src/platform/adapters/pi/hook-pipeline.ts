@@ -73,16 +73,6 @@ export interface PiHookPipelineOptions {
   /** S3-wired Pi NotificationManager, if notifications are enabled. */
   notificationManager?: NotificationManager;
   /**
-   * The shared GraphToolSet in-flight query surface (subtask 2) — the SAME
-   * instance backing the `graph_*` tools (exposed by
-   * `PiLightweightServiceStack.getGraphToolSet()`). Lets the auto-continue
-   * path ask whether the invoking session still owns executing graphs before
-   * continuing (same registry as graph_run). Optional for backward
-   * compatibility — absent when the stack was built without a dispatch
-   * manager (no graph tools either).
-   */
-  graphTools?: HookDeps["graphTools"];
-  /**
    * Resolved subagent registry for the copilot LLM-role verdict source
    * (src/copilot/llm.ts). Threaded from pi-extension's buildSubagentLineage.
    * Optional — absent → the LLM verdict source is skipped (builtin + rules
@@ -127,7 +117,6 @@ export async function createPiHookPipeline(
     dispatchManager,
     loopManager,
     notificationManager,
-    graphTools,
     resolvedSubagents,
     dir,
   } = options;
@@ -190,14 +179,10 @@ export async function createPiHookPipeline(
     loopManager,
     customHooks,
     notificationManager,
-    // Subtask 2: the shared GraphToolSet query surface (same instance backing
-    // the graph_* tools). Absent → auto-continue treats graph in-flight as
-    // unknown (backward compatible).
-    graphTools,
     copilotConfigs,
     resolvedSubagents,
   };
-  log.debug("Pi HookDeps assembled", { graphTools: Boolean(deps.graphTools) });
+  log.debug("Pi HookDeps assembled", { roles: resolvedRoles.length });
 
   // ── Route PiEventBridge.emit → handleEvent ─────────────────────────────
   const handler = async (event: CanonicalEvent): Promise<void> => {

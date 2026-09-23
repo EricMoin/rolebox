@@ -4,7 +4,6 @@ import type { EventBus } from "../event-bus.ts";
 import type { Config, Hooks } from "@opencode-ai/plugin";
 import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-bridge.ts";
 import type { CanonicalEvent, CanonicalEventType } from "../../platform/types.ts";
-import type { GraphToolSet } from "../../graph/tools/index.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
 import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
 import { buildAgentConfig, transformPermission, type RoleboxAgentConfig } from "../../prompt/agent-config.ts";
@@ -32,38 +31,6 @@ import type { CopilotConfig } from "../../copilot/types.ts";
 
 const log = createSubLogger("hook-service");
 
-/**
- * Canonical activity event types that refresh the owning graph node's liveness
- * heartbeat (the opencode analog of the Pi liveness relay's `heartbeatOn`
- * subscriptions in pi-extension.ts:1117-1167). Each entry names the opencode
- * wire event that produces it:
- *
- *   - `part.updated`    ← `message.part.updated` (tool-call / streaming parts)
- *   - `message.updated` ← `message.updated`
- *   - `session.idle`    ← `session.idle` (finished turn)
- *
- * Each maps genuine session activity to `recordLivenessHeartbeat(nodeId,
- * "session")` via the GraphToolSet's `sessionId → nodeId` reverse index.
- *
- * Exported for the liveness-linkage test (tests/opencode-liveness-relay.test.ts).
- */
-export const LIVENESS_ACTIVITY_TYPES: ReadonlySet<CanonicalEventType> = new Set([
-  "part.updated",
-  "message.updated",
-  "session.idle",
-]);
-
-/**
- * Minimum interval (ms) between liveness heartbeats for one session. The
- * opencode `event` hook fires for every SDK event in the runtime (streaming
- * text deltas can arrive dozens of times per second); the liveness monitor
- * only needs a heartbeat within its warn window (default 60 s), so relaying
- * every event would be pure churn. Keyed off the last EMITTED timestamp, the
- * first event after any silence longer than the interval always emits
- * immediately — a long-running but active subagent keeps refreshing its node.
- */
-const LIVENESS_HEARTBEAT_INTERVAL_MS = 1_000;
-
 export class HookService implements PluginService {
   readonly name = "hook-service";
   readonly dependencies = [
@@ -84,7 +51,6 @@ export class HookService implements PluginService {
    * throttle interval are pruned lazily when the map grows, so completed
    * sessions do not accumulate forever.
    */
-  private readonly livenessHeartbeatAt = new Map<string, number>();
   /**
    * Stable reference wrapper returned to opencode. On hot-reload, init()
    * replaces the methods in-place so the external reference stays valid.
@@ -140,10 +106,6 @@ export class HookService implements PluginService {
     const recoveryService = ctx.core.getService<RecoveryService>("recovery-service");
     const extensionService = ctx.core.getService<ExtensionService>("extension-service");
     const notificationService = ctx.core.getService<NotificationService>("notification-service");
-    // Subtask 2: tool-service owns the single GraphToolSet backing the graph_*
-    // tools; its getter supplies the HookDeps `graphTools` in-flight query so
-    // the auto-continue path can ask whether the invoking session still owns
-    // executing graphs before continuing (same registry as graph_run).
     const toolService = ctx.core.getService<ToolService>("tool-service")!;
 
     const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
@@ -169,7 +131,6 @@ export class HookService implements PluginService {
       notificationManager: notificationService?.getNotificationManager(),
       extensionRegistry: extensionService?.getExtensionRegistry(),
       builtinConfig: recoveryService?.getBuiltinConfig(),
-      graphTools: toolService.getGraphToolSet(),
       copilotConfigs,
       // Optional-call guard: dispatch services assembled before this subtask
       // (or mocks in tests) may not expose getResolvedSubagents(). Absent →
@@ -177,7 +138,7 @@ export class HookService implements PluginService {
       // optional by contract).
       resolvedSubagents: dispatchService.getResolvedSubagents?.() ?? undefined,
     };
-    log.debug("HookDeps assembled", { graphTools: Boolean(this.deps.graphTools) });
+    log.debug("HookDeps assembled", { tools: Object.keys(toolService.getTools()).length });
 
     // --- Build handlers ---
     const newHandlers = this.buildHandlers(toolService.getTools(), ctx.bus, resolvedRoles);
@@ -217,69 +178,6 @@ export class HookService implements PluginService {
     return undefined;
   }
 
-  /**
-   * Relay genuine session activity into the graph engine's node-liveness
-   * machinery (false-positive regression fix for the opencode platform).
-   *
-   * A graph node dispatches its subagent through the opencode SDK
-   * (`session.create`), and that subagent's activity events —
-   * `message.part.updated` / `message.updated` / `session.idle` (canonical
-   * `part.updated` / `message.updated` / `session.idle`) — arrive here through
-   * the plugin's `event` hook. For each, resolve the owning graph node via
-   * the GraphToolSet's `sessionId → nodeId` reverse index (populated at
-   * launch when a liveness feed is wired onto the engine — see tool-service)
-   * and refresh its heartbeat through the public EngineRuntime surface.
-   *
-   * Without this relay, `lastActivityAt` freezes at the launch-time
-   * `dispatch` heartbeat, so the engine's NodeLivenessMonitor hard-stalls
-   * (escalate/timeout) every node whose subagent works longer than the
-   * warn+grace deadline (~90 s default) — the confirmed false positive this
-   * fixes.
-   *
-   * The relay is throttled per session (1 s) and fully contained: an unknown
-   * session, a detached node, an absent toolset, or a throwing runtime all
-   * no-op / log at debug — the hook pipeline must never break on a relay
-   * defect.
-   */
-  private relayLivenessHeartbeat(canonical: CanonicalEvent): void {
-    if (!LIVENESS_ACTIVITY_TYPES.has(canonical.type)) return;
-    const sessionID = HookService.extractEventSessionId(canonical.properties);
-    if (!sessionID) return;
-    // The deps contract exposes only the in-flight query surface; the real
-    // value is the full GraphToolSet (tool-service threads it). Widen for the
-    // liveness owner resolution — safe: the liveness surface is optional on
-    // the cast, so a stub toolset (no resolveSessionOwner) no-ops.
-    const toolset = this.deps?.graphTools as
-      | (GraphToolSet & { hasInflightGraphsForSession(sessionID: string): boolean })
-      | undefined;
-    if (!toolset?.resolveSessionOwner) return;
-
-    // Per-session throttle (see LIVENESS_HEARTBEAT_INTERVAL_MS). Lazy prune
-    // when the map grows so completed sessions cannot accumulate unboundedly.
-    const now = Date.now();
-    const last = this.livenessHeartbeatAt.get(sessionID) ?? 0;
-    if (now - last < LIVENESS_HEARTBEAT_INTERVAL_MS) return;
-    if (this.livenessHeartbeatAt.size > 512) {
-      for (const [sid, ts] of this.livenessHeartbeatAt) {
-        if (now - ts >= LIVENESS_HEARTBEAT_INTERVAL_MS) {
-          this.livenessHeartbeatAt.delete(sid);
-        }
-      }
-    }
-    this.livenessHeartbeatAt.set(sessionID, now);
-
-    try {
-      const owner = toolset.resolveSessionOwner(sessionID);
-      if (!owner) return; // unknown / detached session — nothing to heartbeat
-      owner.runtime.recordLivenessHeartbeat(owner.nodeId, "session");
-    } catch (err) {
-      log.debug("liveness: relay error", {
-        sessionID,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   private buildHandlers(tools: Record<string, any>, bus: EventBus, resolvedRoles: any[]) {
     const deps = this.deps!;
     const handlers = {
@@ -287,15 +185,6 @@ export class HookService implements PluginService {
       event: async (input: { event: unknown }) => {
         const canonical = normalizeOpencodeEvent(input.event);
         await handleEvent(canonical, hookState, deps);
-        // Node-liveness relay (opencode analog of the Pi relay in
-        // pi-extension.ts): genuine subagent session activity refreshes the
-        // owning graph node's heartbeat. Without this, a graph node's
-        // dispatched subagent would freeze at its launch-time `dispatch`
-        // heartbeat and be falsely hard-stalled (escalate/timeout) once it
-        // runs past the liveness deadline — opencode subagent sessions ARE
-        // observable through this event hook (same server runtime), unlike
-        // Pi's separate child processes, so this is the correct intake.
-        this.relayLivenessHeartbeat(canonical);
         // Emit to bus for notification and other subscribers
         const props = canonical.properties;
         const sessionID = HookService.extractEventSessionId(props);

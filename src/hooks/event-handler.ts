@@ -82,18 +82,6 @@ export async function handleEvent(
         });
         break;
       }
-      // Same discipline for graph executions owned by this session: while a
-      // graph node is mid-flight, the [GRAPH COMPLETE] termination reminder
-      // (graph-notify, noReply:false) is the ONLY wake-up source — auto-continue
-      // must NOT fire (it would spin-poll an unsatisfiable continue_until until
-      // the graph settles). Sessions without a wired graph toolset (optional
-      // field absent) keep existing behavior.
-      if (deps.graphTools?.hasInflightGraphsForSession(sid)) {
-        log.debug("suppressing auto-continue: session owns executing graph", {
-          sessionID: sid,
-        });
-        break;
-      }
       // Suppress function continuation for active loop origins during loop-owned
       // phases (summarizing, activating, finalizing). Worker continuation is
       // unaffected. NOTE: we use a flag instead of `break` so that the loop

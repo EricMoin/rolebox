@@ -28,11 +28,7 @@ import { z } from "zod";
 import { registerToolSchema, registerDeprecatedTool } from "../../../hooks/tool-before.ts";
 import type { DispatchManager } from "../../../dispatch/core/manager.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
-import {
-  createGraphToolSet,
-  type GraphToolSet,
-} from "../../../graph/tools/index.ts";
-import type { NodeLivenessFeed } from "../../../graph/engine/index.ts";
+import type { CanonicalToolDef as CanonicalToolDefForGraph } from "../../types.ts";
 
 // ── Shared tool assembly ────────────────────────────────────────────────────
 
@@ -128,34 +124,13 @@ export class PiLightweightServiceStack implements IHookProvider {
   /** Hook wiring consumed by the tool-execution interceptor (subtask S9). */
   private _interceptorHooks: ToolInterceptorHooks | undefined;
   /**
-   * The single GraphToolSet instance (subtask 2) backing BOTH the `graph_*`
-   * tools (threaded into buildCanonicalTools via the `graphTools` option) and
-   * the HookDeps `graphTools` in-flight query (consumed by the Pi hook
-   * pipeline through {@link getGraphToolSet}). Constructed eagerly with the
-   * SAME deps the graph_* tools receive inside buildCanonicalTools — manager,
-   * directory (process.cwd()), stateDir and graphNotify — so both surfaces
-   * observe the same in-memory graph registry. Absent (undefined) when no
-   * dispatch manager is supplied, mirroring the graph_* gating in
-   * buildCanonicalTools.
+   * The OUTCOME run path's tool face, built by the Pi entry from its own host
+   * capability layer (`OutcomeHost` + `createOutcomeGraphTools`) and threaded
+   * into `buildCanonicalTools` via the `outcomeGraphTools` option. Absent →
+   * no graph tools are registered (a platform without the host layer has no
+   * runnable graph path).
    */
-  private _graphToolSet: GraphToolSet | undefined;
-  /**
-   * Shared node-liveness feed (subtask 6). Threaded into every graph engine
-   * the stack's toolset builds so the engine records dispatch heartbeats,
-   * registers its sessions with the feed, and maintains the `sessionId →
-   * nodeId` reverse index the Pi liveness relay resolves through. Absent →
-   * engines run without liveness recording (backward compatible).
-   */
-  private _livenessFeed?: NodeLivenessFeed;
-  /**
-   * Optional platform-provided acting-agent resolver (Pi/DSH parity). On Pi
-   * `context.agent` is never populated, so the graph tools (wired via
-   * buildCanonicalTools → createGraphTools) fall back to this resolver so the
-   * injected `<system-reminder>` still forwards the orchestrator's real role
-   * instead of falling back to `default_agent`. Reads the role switcher's
-   * shared `ActiveAgentRef` (global, session-agnostic on Pi).
-   */
-  private _getEffectiveAgent?: (sessionID?: string) => string;
+  private _outcomeGraphTools?: Record<string, CanonicalToolDef>;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -171,8 +146,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     graphNotifyClient?: ISessionClient,
     stateDir: string = process.cwd(),
     interceptorHooks?: ToolInterceptorHooks,
-    livenessFeed?: NodeLivenessFeed,
-    getEffectiveAgent?: (sessionID?: string) => string,
+    outcomeGraphTools?: Record<string, CanonicalToolDef>,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
@@ -186,34 +160,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._graphNotifyClient = graphNotifyClient;
     this._stateDir = stateDir;
     this._interceptorHooks = interceptorHooks;
-    this._livenessFeed = livenessFeed;
-    this._getEffectiveAgent = getEffectiveAgent;
-    // Subtask 2: the graph tools only assemble when a dispatch manager is
-    // present (buildCanonicalTools gates the eight graph_* keys on it), so
-    // the shared toolset is constructed under the same gate. The graph-notify
-    // session client resolves exactly as in init() below (external client
-    // wins over the filesystem-backed session adapter).
-    if (dispatchManager) {
-      this._graphToolSet = createGraphToolSet({
-        manager: dispatchManager,
-        directory: process.cwd(),
-        stateDir,
-        graphNotify: {
-          sessionClient: graphNotifyClient ?? this._sessionAdapter,
-          emperorSessionId: (invokingSessionId) => invokingSessionId,
-        },
-        // Subtask 6: thread the shared node-liveness feed into the toolset's
-        // engines (absent → engine behavior unchanged).
-        ...(livenessFeed !== undefined ? { livenessFeed } : {}),
-        // E-GATE STEP 1 DECLARATION (allowNewLegacyGraphs): this host still
-        // creates new durable legacy graphs. Removing this one line closes the
-        // creation ingress for the Pi surface — it is NOT removed here because
-        // the outcome path still refuses by default without a host
-        // credential-isolation adapter, so the legacy run path is production's
-        // only one (see graph-tools.ts GraphToolSetDeps).
-        allowNewLegacyGraphs: true,
-      });
-    }
+    this._outcomeGraphTools = outcomeGraphTools;
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -227,13 +174,11 @@ export class PiLightweightServiceStack implements IHookProvider {
   }
 
   /**
-   * The single GraphToolSet instance (subtask 2) backing the graph_* tools and
-   * the HookDeps `graphTools` in-flight query. `undefined` when no dispatch
-   * manager was supplied (no graph tools are registered either). The Pi hook
-   * pipeline reads this when assembling HookDeps.
+   * The OUTCOME run path's tool face this stack registers, or `undefined` when
+   * the Pi entry did not supply one (no host capability layer → no graph path).
    */
-  getGraphToolSet(): GraphToolSet | undefined {
-    return this._graphToolSet;
+  getOutcomeGraphTools(): Record<string, CanonicalToolDef> | undefined {
+    return this._outcomeGraphTools;
   }
 
   /**
@@ -259,28 +204,14 @@ export class PiLightweightServiceStack implements IHookProvider {
       sessionClient: this._sessionAdapter,
       directory: process.cwd(),
       capabilities: piCapabilities(),
-      // When a dispatch manager is provided (real dispatch system, e.g. graph
-      // orchestration on Pi), it gates registration of the eight graph_* tools
-      // inside buildCanonicalTools. Absent → graph tools are not assembled
-      // (backward compatible with the stub/override-only path).
       dispatchManager: this._dispatchManager,
-      // Subtask 3 (graph-notify source): thread the emperor session identity +
-      // session client into the graph engine's completion AND graph-terminal
-      // seams. The emperor/orchestrator session is the session whose execution
-      // context drives graph_run — resolved at runtime by the graph tool's
-      // context (tool assembly is session-agnostic). `graphParentContext` budget
-      // scoping (sessionID: graphId) is untouched; the emperor session is carried
-      // ONLY for notification targeting. The notification client defaults to the
-      // Pi session adapter (filesystem-backed, read-only) unless an external
-      // graph notify client is supplied.
-      graphNotify: {
-        sessionClient: this._graphNotifyClient ?? this._sessionAdapter,
-        emperorSessionId: (invokingSessionId) => invokingSessionId,
-      },
-      // Subtask 2: bind the graph_* tools to the prebuilt toolset (single
-      // instance — same registry the HookDeps graphTools query reads). Absent
-      // when no dispatch manager was supplied (no graph tools are assembled).
-      graphTools: this._graphToolSet,
+      // The OUTCOME run path's tool face, built by the Pi entry from its host
+      // capability layer. Absent → no graph tools are registered: Pi without
+      // the host layer has no runnable graph path, and the legacy construction
+      // entries are deliberately not assembled.
+      ...(this._outcomeGraphTools === undefined
+        ? {}
+        : { outcomeGraphTools: this._outcomeGraphTools }),
       dispatchToolsOverride,
       loopToolsOverride: this._loopTools && Object.keys(this._loopTools).length > 0
         ? this._loopTools
@@ -298,21 +229,6 @@ export class PiLightweightServiceStack implements IHookProvider {
       extraTools: this._extraTools && Object.keys(this._extraTools).length > 0
         ? this._extraTools
         : undefined,
-      // Engine-state persistence dir, threaded through createGraphTools into
-      // every engine the graph tools construct (`.rolebox/state`). Defaults to
-      // process.cwd() at construction.
-      stateDir: this._stateDir,
-      // Subtask 6: thread the shared node-liveness feed into the graph tools'
-      // engine construction (absent → engine behavior unchanged).
-      ...(this._livenessFeed !== undefined
-        ? { livenessFeed: this._livenessFeed }
-        : {}),
-      // Pi never populates `context.agent`, so the graph tools fall back to
-      // this resolver to forward the orchestrator's role into the injected
-      // `<system-reminder>` (absent → context.agent-only, backward compatible).
-      ...(this._getEffectiveAgent !== undefined
-        ? { getEffectiveAgent: this._getEffectiveAgent }
-        : {}),
     });
 
     // 2.5 Register tool schemas + deprecation markers into the shared hook

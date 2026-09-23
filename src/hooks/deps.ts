@@ -24,15 +24,6 @@ export interface HookDeps {
   extensionRegistry?: ExtensionRegistry;
   builtinConfig?: Record<string, boolean>;
   /**
-   * Optional graph-toolset query surface (subtask 2): lets idle/continue
-   * handlers ask whether the invoking session still owns in-flight graphs
-   * before auto-continuing. Backed by the SAME GraphToolSet instance that
-   * powers the `graph_*` tools (assembled by tool-service on opencode /
-   * PiLightweightServiceStack on Pi). Optional for backward compatibility —
-   * absent on platforms/setups that do not assemble graph tools.
-   */
-  graphTools?: { hasInflightGraphsForSession(sessionID: string): boolean };
-  /**
    * Parsed copilot config per role id (built at deps assembly from each
    * role's raw `copilot:` block). Absent → the unified turn-end pipeline
    * treats every role as having no copilot config (builtin source only).

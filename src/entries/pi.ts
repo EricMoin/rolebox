@@ -13,7 +13,7 @@
  * @module
  */
 
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { PiLightweightServiceStack } from "../platform/adapters/pi/service-stack.ts";
@@ -81,14 +81,13 @@ import { buildReminder } from "../prompt/reminder.ts";
 import { scanPersistedStates } from "../graph/tools/persisted-state.ts";
 import { listPendingApprovals } from "../graph/tools/status-queries.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
-import { recoverInterruptedGraphs } from "../graph/engine/engine-startup.ts";
 import {
-  GraphEventRecorder,
-  createGraphNotifier,
-  createGraphTerminalNotifier,
-  type GraphTerminalEvent,
-  type NodeLivenessFeed,
-} from "../graph/engine/index.ts";
+  createGraphToolSet,
+  createOutcomeGraphTools,
+} from "../graph/tools/index.ts";
+import { OutcomeHost } from "../graph/host/outcome-host.ts";
+import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
+import { createValidatorRegistry } from "../graph/outcome/validators.ts";
 import {
   createAllLspTools,
   LspClientManager,
@@ -122,9 +121,10 @@ export const PI_SUBAGENT_TOOLS: string[] = [
   "session_read", "session_list", "session_info",
   "context_assemble",
   "signal",
-  "graph_create", "graph_add_node", "graph_add_edge", "graph_add_loop",
-  "graph_declare", "graph_submit_outcome",
-  "graph_run", "graph_status", "graph_cancel", "graph_approve",
+  // The OUTCOME run path's tool face: a spawned child declares graphs and
+  // settles its own attempt's outcome through graph_submit_outcome. The legacy
+  // construction/execution entries are retired and are NOT granted.
+  "graph_declare", "graph_submit_outcome", "graph_audit", "graph_status",
   "task_search", "task_budget", "task_graph",
 ];
 
@@ -814,158 +814,107 @@ export default async function (pi: any): Promise<void> {
       activeLocks: loopCoordinator.getAdvancingLockState().activeLocks,
     });
 
-    // ── Graph engine startup recovery ─────────────────────────────────────
+    // ── Outcome run path: host layer + boot recovery ───────────────────────
     //
-    // Resume any graph engine (`.rolebox/state/engine-*.json`) left
-    // mid-execution by a crash. Mirrors the loop recovery above: scan the
-    // store, skip already-`complete` graphs, and `recover()` the rest. A
-    // single bad engine file is isolated per-graph and logged — it can never
-    // block plugin startup (engine-startup.ts guarantees the sweep never
-    // throws).
+    // A declared graph is dispatched by the host capability layer
+    // (`src/graph/host/outcome-host.ts`), never by a legacy engine: the
+    // `PiOutcomeDelivery` starts one dispatch-manager task per attempt (the
+    // credential travels in that worker's prompt — the one channel it belongs
+    // to), and the `OutcomeHost` holds the protected vault, the durable
+    // execution index, the invocation identity (D9) and the completion bridge
+    // that settles a finished attempt through `settleNatural`.
     //
-    // Opt-out: `ROLEBOX_ENGINE_RECOVERY=off|0|false` disables the sweep.
+    // The store root is a host directory beside the workspace state (workers are
+    // not handed its path): see `credential-vault.ts` for what that can and
+    // cannot isolate on a same-account platform.
+    let outcomeHost: OutcomeHost | undefined;
+    const outcomeDelivery = new PiOutcomeDelivery({
+      manager: dispatchManager,
+      directory: process.cwd(),
+      onStartFailed: (_request, effect, reason) => {
+        outcomeHost?.reportDeliveryFailure(effect, reason);
+      },
+      onSettled: (settlement) => {
+        const { request } = settlement;
+        if (settlement.kind === "failed") {
+          log.warn("Pi outcome dispatch: attempt did not complete", {
+            graphId: request.graphId,
+            nodeId: request.nodeId,
+            attemptId: request.attemptId,
+            reason: settlement.reason,
+          });
+          return;
+        }
+        void outcomeHost
+          ?.complete(request.graphId, request.attemptId)
+          .then((report) => {
+            log.debug("Pi outcome completion settled", {
+              graphId: request.graphId,
+              attemptId: request.attemptId,
+              kind: report.kind,
+            });
+          })
+          .catch((err: unknown) => {
+            log.warn("Pi outcome completion failed", {
+              graphId: request.graphId,
+              attemptId: request.attemptId,
+              error: formatError(err),
+            });
+          });
+      },
+    });
+    outcomeHost = OutcomeHost.open({
+      workspaceDir: process.cwd(),
+      storeRoot: join(process.cwd(), ".rolebox", "state", "host"),
+      deliver: outcomeDelivery.deliver,
+      validators: createValidatorRegistry([]),
+    });
+
+    // Boot recovery for DECLARED graphs: a graph interrupted by the previous
+    // process is continued from its persisted state, and one that was declared
+    // but never started gets its first execution — through the same runtime
+    // entry the declaration seam uses. Opt-out: `ROLEBOX_ENGINE_RECOVERY`.
     const graphRecoveryValue = (process.env.ROLEBOX_ENGINE_RECOVERY ?? "").trim().toLowerCase();
     const graphRecoveryEnabled =
       graphRecoveryValue !== "off" &&
       graphRecoveryValue !== "0" &&
       graphRecoveryValue !== "false";
-
-    // Monitor (S10): a recovered engine must stay observable — re-announce
-    // terminal transitions ([GRAPH COMPLETE] / [GRAPH BLOCKED]) and continue
-    // its write-side event log (`graph-events-{hash}.ndjson`). The recorder is
-    // built over the SAME stateDir (`process.cwd()`) the engine-state store
-    // uses, so each graph's audit log keeps accumulating across the restart
-    // (the hash-derived filename is stable per graphId). The notifier session
-    // client (`notifyClient`, constructed above) IS available at this point;
-    // the emperor session id is resolved from the Pi extension context when one
-    // is active. If the client or a resolvable session were unavailable here,
-    // we degrade honestly to the event log only (no injected reminders) — the
-    // notifier factories are additionally no-op-safe without a session.
-    const graphRecoveryStateDir = process.cwd();
     const recoveredEmperorSessionId = (
       pi as {
         ctx?: { sessionManager?: { getSessionId?: () => string } };
       }
     )?.ctx?.sessionManager?.getSessionId?.();
-
-    const graphRecoveryReport = await recoverInterruptedGraphs({
-      // The engine persists under `{workspace}/.rolebox/state`, so the scan
-      // root is the workspace the plugin runs in (the same `process.cwd()`
-      // the loop dispatch adapter above uses for its own state store).
-      directory: graphRecoveryStateDir,
-      manager: dispatchManager,
-      stateDir: graphRecoveryStateDir,
-      enabled: graphRecoveryEnabled,
-      // Durable event log continuation — always wired (no session needed).
-      graphEvents: new GraphEventRecorder(graphRecoveryStateDir),
-      // Session notification re-announcement. notifyClient is available at this
-      // point (constructed above); when an emperor session can be resolved from
-      // the Pi context, wire both notifier seams so a recovered graph re-
-      // announces node completions and graph-terminal transitions. Without a
-      // resolvable session the notifiers would be strict no-ops by design, so
-      // the honest degradation is the event log only.
-      ...(notifyClient && recoveredEmperorSessionId
-        ? {
-            onNodeCompletion: createGraphNotifier(notifyClient, {
-              emperorSessionId: recoveredEmperorSessionId,
-            }),
-            // Wrap the terminal notifier so a quiescent-BLOCKED graph ALSO fires
-            // an OS-level ApprovalPending notification (desktop toast / sound /
-            // webhook via the shared NotificationManager, honoring quiet-hours +
-            // throttle). Purely additive — the underlying session-reminder
-            // behavior of the non-blocked branch is unchanged.
-            onGraphTerminal: ((inner) => {
-              return async (event: GraphTerminalEvent) => {
-                if (event.isBlocked) {
-                  getPiNotificationManager()?.handleApprovalPending(
-                    recoveredEmperorSessionId,
-                    event.graphId,
-                  );
-                }
-                return inner(event);
-              };
-            })(
-              createGraphTerminalNotifier(notifyClient, {
-                emperorSessionId: recoveredEmperorSessionId,
-              }),
-            ),
-          }
-        : {}),
-    });
-    if (
-      graphRecoveryReport.recovered > 0 ||
-      graphRecoveryReport.degraded.length > 0 ||
-      graphRecoveryReport.migrationRequired.length > 0 ||
-      graphRecoveryReport.failed.length > 0 ||
-      // C3c: a first execution, a resume, or a refused outcome graph is
-      // operational evidence too — logging only when a legacy bucket moved
-      // would drop the outcome protocol's report on a restart that had none.
-      graphRecoveryReport.outcomeProtocol !== undefined
-    ) {
-      log.info("Interrupted graph engines recovered", {
-        enabled: graphRecoveryEnabled,
-        scanned: graphRecoveryReport.scanned,
-        recovered: graphRecoveryReport.recovered,
-        // B3: a graph whose state was adopted but whose reconcile pass threw is
-        // reported here with its error text — never counted as recovered.
-        degraded: graphRecoveryReport.degraded,
-        // B stage: a recognized format with a registered migration is intact
-        // data that cannot execute yet. Surfaced at the entry point too — it is
-        // counted as neither recovered nor failed.
-        migrationRequired: graphRecoveryReport.migrationRequired,
-        failed: graphRecoveryReport.failed.length,
-        // C3c: what the outcome protocol did — every graph started or resumed,
-        // every dispatch launched, every node left armed and every effect left
-        // UNSETTLED (a `started` row from a dead process is reported, never
-        // dropped). Absent for a legacy-only store.
-        ...(graphRecoveryReport.outcomeProtocol === undefined
-          ? {}
-          : { outcomeProtocol: graphRecoveryReport.outcomeProtocol }),
-      });
-    }
-
-    // ── Startup "pending approvals" aggregate reminder ──────────────────
-    //
-    // After recovery, surface every gate still awaiting a human decision. The
-    // on-disk persisted store scanned below is the authoritative cross-session
-    // source at boot: it holds any blocked graph persisted by an earlier
-    // session AND every graph just recovered (recovery loads from — and re-
-    // flushes to — this same store), so `scanPersistedStates` sees them all.
-    // We enumerate the gates via the pure `listPendingApprovals` helper
-    // (subtask 1) and inject exactly ONE [PENDING APPROVALS] system-reminder
-    // into the emperor session listing each blocked gate and its graph_approve
-    // call. `noReply: false` so the emperor wakes to decide. When no gate is
-    // pending or no session is resolvable, this is a silent no-op. The marker
-    // is registered in DISPATCH_NOTIFICATION_MARKERS so it counts as a non-user
-    // turn and never resets the auto-continue counter.
-    if (notifyClient && recoveredEmperorSessionId) {
+    const graphRecoveryStateDir = process.cwd();
+    if (graphRecoveryEnabled) {
       try {
-        const pending = collectStartupPendingApprovals(graphRecoveryStateDir);
-        const reminder = buildPendingApprovalsReminder(pending);
-
-        if (reminder !== "") {
-          await enqueueNotify(recoveredEmperorSessionId, async () => {
-            await notifyClient.prompt(recoveredEmperorSessionId, {
-              parts: [{ type: "text", text: reminder }],
-              noReply: false,
-            });
-            return true;
-          });
-          log.info("Injected startup pending-approvals reminder", {
-            count: pending.length,
+        const outcomeRecovery = await outcomeHost.recoverDeclaredGraphs();
+        if (
+          outcomeRecovery.started.length > 0 ||
+          outcomeRecovery.resumed.length > 0 ||
+          outcomeRecovery.refused.length > 0
+        ) {
+          log.info("Declared outcome graphs recovered", {
+            started: outcomeRecovery.started,
+            resumed: outcomeRecovery.resumed,
+            refused: outcomeRecovery.refused,
           });
         }
       } catch (err) {
-        log.debug("startup pending-approvals reminder failed", {
+        log.warn("Declared outcome graph recovery failed", {
           error: formatError(err),
         });
       }
-    } else if (!notifyClient) {
-      log.debug("startup pending-approvals reminder skipped — no notify client");
-    } else if (!recoveredEmperorSessionId) {
-      log.debug("startup pending-approvals reminder skipped — no emperor session");
     }
 
+    // ── Startup "pending approvals": retired with the legacy approval gate ──
+    //
+    // The legacy `needs_approval` gate and its `graph_approve` entry point are
+    // not part of the assembled graph surface any more, so the startup reminder
+    // that told the orchestrator to run `graph_approve` is gone with them: a
+    // reminder naming a tool this build does not register is a dead instruction.
+    // The read-only helpers (`collectStartupPendingApprovals` /
+    // `buildPendingApprovalsReminder`) remain exported for the legacy record
+    // reader until the deletion slice removes the record layer they read.
 
     // ── session.status synthesis ────────────────────────────────────────
     //
@@ -1095,33 +1044,6 @@ export default async function (pi: any): Promise<void> {
       ...createAllLspTools(lspClientManager, lspDocManager),
     };
 
-    // Subtask 2: the stack is constructed BEFORE the hook pipeline so its
-    // getGraphToolSet() (the single GraphToolSet backing the graph_* tools)
-    // can feed the pipeline's HookDeps assembly below — deps.graphTools and
-    // the graph_* tools observe the same in-memory graph registry. The
-    // pipeline must exist before the stack's interceptor hooks (subtask S9),
-    // so the stack receives a mutable carrier that is populated with the
-    // pipeline's state + deps right after the pipeline is built (before
-    // init() compiles the tools).
-    const interceptorHooks: ToolInterceptorHooks = {};
-
-    // Subtask 6 (node-anomaly-detection liveness wiring): the shared
-    // NodeLivenessFeed instance threaded into every graph engine the stack's
-    // toolset builds. Its PRESENCE is what gates each engine's `sessionId →
-    // nodeId` reverse index population at launch + terminal detach
-    // (engine-advance.ts _dispatchNode / _detachLiveness) — the index is the
-    // liveness relay's authoritative owner source (see the relay wiring
-    // below). The instance itself is intentionally inert on Pi (observe-only
-    // logging); the relay reads the engines' index through the toolset.
-    const livenessFeed: NodeLivenessFeed = {
-      attach(nodeId: string, sessionId: string): void {
-        log.debug("liveness: session attached", { nodeId, sessionId });
-      },
-      detach(nodeId: string): void {
-        log.debug("liveness: session detached", { nodeId });
-      },
-    };
-
     // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
     //
     // Pi never populates `context.agent` on tool contexts. This shared ref is
@@ -1138,6 +1060,62 @@ export default async function (pi: any): Promise<void> {
       log.info("Seeded active agent from environment", { agent: seededAgent });
     }
 
+    // Subtask S9: the stack receives a mutable carrier populated with the hook
+    // pipeline's state + deps right after the pipeline is built (before init()
+    // compiles the tools).
+    const interceptorHooks: ToolInterceptorHooks = {};
+
+    // ── The outcome run path's tool face ──────────────────────────────────
+    //
+    // The Pi entry owns the host layer (constructed above): the toolset is
+    // built with the outcome deps and WITHOUT a legacy manager/dispatch seam,
+    // and `graph_declare` starts (or resumes) the declared graph through the
+    // host's own runtime entry. Only the four declared-graph entries are
+    // registered — the legacy construction tools are not assembled.
+    const outcomeToolset = createGraphToolSet({
+      directory: process.cwd(),
+      stateDir: process.cwd(),
+      credentialIsolation: outcomeHost.credentialIsolation,
+      hostIdentity: outcomeHost.hostIdentity,
+      outcomeDispatch: outcomeHost.dispatch,
+      outcomeValidators: createValidatorRegistry([]),
+      outcomeArtifactRoot: process.cwd(),
+      onGraphDeclared: (graphId, invokingSessionId, agent) => {
+        outcomeDelivery.setInvocation(invokingSessionId, agent ?? activeAgent.get() ?? "");
+        void outcomeHost
+          .startDeclaredGraph(graphId, { sessionId: invokingSessionId, agent })
+          .then((result) => {
+            if (result.kind === "refused") {
+              log.warn("Pi outcome graph start refused", {
+                graphId,
+                refusals: result.refusals.map((r) => r.code).join(","),
+              });
+            } else {
+              log.info("Pi outcome graph started", {
+                graphId,
+                kind: result.kind,
+                dispatched: result.dispatched.length,
+              });
+            }
+          })
+          .catch((err: unknown) => {
+            log.warn("Pi outcome graph start failed", {
+              graphId,
+              error: formatError(err),
+            });
+          })
+          .finally(() => {
+            outcomeDelivery.setInvocation(undefined, undefined);
+          });
+      },
+    });
+    const outcomeGraphTools = outcomeHost.bindTools(
+      createOutcomeGraphTools(outcomeToolset, {
+        getEffectiveAgent: () => activeAgent.get() ?? "",
+      }),
+      () => activeAgent.get() ?? "",
+    );
+
     const serviceStack = new PiLightweightServiceStack(
       pi,
       resolvedRoles,
@@ -1146,24 +1124,13 @@ export default async function (pi: any): Promise<void> {
       undefined, // loopTools disabled (graph_add_loop replaces loop_*)
       taskTools,
       extraTools,
-      // Subtask 3: thread the live graph runtime into the stack. The
-      // dispatchManager gates registration of the eight graph_* tools inside
-      // buildCanonicalTools; notifyClient supplies the graph-notify session
-      // client for emperor/orchestrator completion notifications; stateDir
-      // (process.cwd()) persists engine state under `.rolebox/state`.
       dispatchManager,
       notifyClient,
       process.cwd(),
       interceptorHooks,
-      // Subtask 6: thread the shared node-liveness feed into the stack's
-      // graph toolset so every engine records dispatch heartbeats, registers
-      // its sessions with the feed, and maintains the sessionId → nodeId
-      // reverse index the liveness relay below resolves through.
-      livenessFeed,
-      // Pi never populates `context.agent`, so the graph tools fall back to
-      // this resolver to forward the orchestrator's active role into the
-      // injected `<system-reminder>` (role switcher's ActiveAgentRef).
-      () => activeAgent.get() ?? "",
+      // The OUTCOME run path's tool face (host layer above). Absent → the
+      // stack registers no graph tools.
+      outcomeGraphTools,
     );
 
     // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────
@@ -1191,10 +1158,6 @@ export default async function (pi: any): Promise<void> {
       dispatchManager,
       loopManager: loopCoordinator,
       notificationManager: getPiNotificationManager(),
-      // Subtask 2: the shared GraphToolSet in-flight query (same instance
-      // backing the graph_* tools) — lets the auto-continue path observe
-      // executing graphs before continuing.
-      graphTools: serviceStack.getGraphToolSet(),
       // Copilot LLM-role verdict source: the subagent lineage built above
       // (line 540) — the configured llm.role must be a key of this map.
       resolvedSubagents,
@@ -1208,8 +1171,8 @@ export default async function (pi: any): Promise<void> {
     });
 
     // Subtask 9: populate the stack's interceptor-hooks carrier now that the
-    // pipeline exists (the stack was constructed before it so getGraphToolSet()
-    // could feed the HookDeps assembly). init() below compiles the tools with
+    // pipeline exists (the stack was constructed before it so the interceptor
+    // hooks carrier exists). init() below compiles the tools with
     // these — every Pi tool execute runs the shared handleToolBefore pipeline.
     interceptorHooks.state = hookPipeline.state;
     interceptorHooks.deps = hookPipeline.deps;
@@ -1303,98 +1266,15 @@ export default async function (pi: any): Promise<void> {
 
     log.info("Event wiring complete", { events: 9 });
 
-    // ── 6b. Node-liveness relay (node-anomaly-detection subtask 6) ────────
+    // ── 6b. Node-liveness relay: REMOVED with the legacy graph runtime ────
     //
-    // Subscribe to canonical events carrying session-level activity and relay
-    // them into the graph engine's node-liveness machinery through the public
-    // EngineRuntime surface:
-    //
-    //   part.created / part.updated / message.updated → session heartbeat
-    //     (tool-call + message activity = the owning node is alive);
-    //   session.idle → session heartbeat (a finished turn is still activity);
-    //   session.error → handleFeedSessionEvent(nodeId, "error", reason) — the
-    //     engine re-checks the dispatch task's liveness (transient-error
-    //     protection: a still-live task keeps the node running, heartbeat
-    //     only);
-    //   session.deleted → handleFeedSessionEvent(nodeId, "gone") — the
-    //     session vanished, so the owning node escalates immediately.
-    //
-    // The owning node is resolved through the graph toolset's engine-level
-    // `sessionId → nodeId` reverse index (GraphToolSet.resolveSessionOwner —
-    // populated at launch only when a liveness feed is wired onto the engine).
-    // An unknown / detached session, or no toolset (no dispatch manager),
-    // resolves to nothing and the handler no-ops — the wiring is
-    // OPTIONAL-ADDITIVE and engine behavior is unchanged without a feed.
-    //
-    // Every handler is wrapped in try/catch — a relay failure logs at debug
-    // and never throws to the Pi runtime (mirroring the wireEvent pattern at
-    // the top of this section).
-
-    /** Subscribe one canonical activity type → session heartbeat. */
-    const heartbeatOn = (canonicalType: CanonicalEventType): (() => void) =>
-      eventBridge.onType(canonicalType, (event) => {
-        try {
-          const sessionId = extractPiSessionId(event.properties);
-          if (!sessionId) return;
-          const owner = serviceStack.getGraphToolSet()?.resolveSessionOwner(sessionId);
-          if (!owner) return;
-          owner.runtime.recordLivenessHeartbeat(owner.nodeId, "session");
-        } catch (err) {
-          log.debug(`liveness:${canonicalType} relay error`, {
-            error: formatError(err),
-          });
-        }
-      });
-
-    const livenessUnsubs: Array<() => void> = [
-      heartbeatOn("part.created"),
-      heartbeatOn("part.updated"),
-      heartbeatOn("message.updated"),
-      heartbeatOn("session.idle"),
-      eventBridge.onType("session.error", (event) => {
-        try {
-          const sessionId = extractPiSessionId(event.properties);
-          if (!sessionId) return;
-          const owner = serviceStack.getGraphToolSet()?.resolveSessionOwner(sessionId);
-          if (!owner) return;
-          const reason =
-            (typeof event.properties.error === "string" && event.properties.error) ||
-            (typeof event.properties.message === "string" && event.properties.message) ||
-            undefined;
-          void owner.runtime.handleFeedSessionEvent(owner.nodeId, "error", reason);
-        } catch (err) {
-          log.debug("liveness:session.error relay error", {
-            error: formatError(err),
-          });
-        }
-      }),
-      eventBridge.onType("session.deleted", (event) => {
-        try {
-          const sessionId = extractPiSessionId(event.properties);
-          if (!sessionId) return;
-          const owner = serviceStack.getGraphToolSet()?.resolveSessionOwner(sessionId);
-          if (!owner) return;
-          void owner.runtime.handleFeedSessionEvent(owner.nodeId, "gone");
-        } catch (err) {
-          log.debug("liveness:session.deleted relay error", {
-            error: formatError(err),
-          });
-        }
-      }),
-    ];
-    bridgeUnsubscribers.push(() => {
-      for (const unsub of livenessUnsubs) {
-        try {
-          unsub();
-        } catch {
-          // best effort — never throw during teardown
-        }
-      }
-    });
-
-    log.info("Node-liveness relay wired", {
-      subscriptions: 6, // part.created / part.updated / message.updated / session.idle / session.error / session.deleted
-    });
+    // The relay resolved a live session to its owning graph node through the
+    // legacy GraphToolSet's engine-level reverse index. The outcome run path has
+    // no such in-memory node index — attempts live in the acceptance ledger and
+    // a completion is settled through the host's completion bridge — so there is
+    // nothing here to relay into. A future slice may add an outcome-backed
+    // liveness query; until then a worker's session activity is not mirrored
+    // into graph state.
 
     // ── /stop-loop command ─────────────────────────────────────────────
     //

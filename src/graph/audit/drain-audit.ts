@@ -108,11 +108,9 @@
  * no live process holds). The file is the authority for the REPORT and for the
  * stale-lock criterion only.
  *
- * The creation side is owned elsewhere and named here because the two together
- * decide the gate: `src/graph/tools/legacy-creation-gate.ts` refuses a NEW
- * durable protocol-1 record at the tool ingress unless the host declares
- * `allowNewLegacyGraphs`, so the population this audit drains cannot grow
- * silently.
+ * The creation side is owned elsewhere: the legacy construction ingress and
+ * its temporary host declaration were removed with the host switch, so the
+ * protocol-1 population this audit drains cannot grow silently.
  *
  * Dependency note: this module reads the loader, the ledger's read-only open and
  * the outcome state reader, and imports no run path. It dispatches nothing,

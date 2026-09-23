@@ -139,10 +139,6 @@ import {
   type GraphSubmitOutcomeArgs,
   type GraphSubmitOutcomeResult,
 } from "./submit-outcome.ts";
-import {
-  LegacyGraphCreationRefusedError,
-  legacyGraphCreationRefusal,
-} from "./legacy-creation-gate.ts";
 import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
 import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
@@ -304,28 +300,6 @@ export interface GraphToolSetDeps {
   /** Optional engine-state persistence dir (`.rolebox/state/...`). */
   stateDir?: string;
   /**
-   * Whether this HOST still declares that it creates NEW durable legacy graphs.
-   *
-   * DEFAULTS TO `false`, AND THAT IS THE GATE: with a `stateDir` configured, a
-   * `graph_run` for a graph whose id has no record in that store is refused
-   * with the stable code `legacy-graph-creation-refused`
-   * (`./legacy-creation-gate.ts`), because the first durable write would mint a
-   * protocol-1 record through the format-2 decoder's backfill — a brand-new
-   * legacy graph no drain can tell apart from a historical one.
-   *
-   * Stage E opens with "stop creating new legacy graphs", and this declaration
-   * is the ONE switch that closes it: a host that still needs the legacy
-   * ingress while the outcome path cannot run in production (it refuses by
-   * default until a deployment injects a credential-isolation adapter, D7)
-   * declares that reliance here, explicitly and greppably, instead of relying
-   * on an accident of the writer. Removing the declaration is the whole of the
-   * step-1 change for that host.
-   *
-   * It cannot create anything on its own: a record that already exists is never
-   * refused either way, and a toolset with no `stateDir` writes nothing.
-   */
-  allowNewLegacyGraphs?: boolean;
-  /**
    * Optional per-node staleness deadline (ms) for every engine this toolset
    * builds (F2). Defaults to {@link DEFAULT_NODE_STALE_TIMEOUT_MS} (15 min) —
    * a `running` node whose worker stops advancing is marked `timeout` so a
@@ -479,6 +453,27 @@ export interface GraphToolSetDeps {
    * `Date.now()`. The receipt records exactly this value.
    */
   outcomeNow?: number;
+  /**
+   * Optional HOST seam invoked after `graph_declare` has persisted (or
+   * preserved) a declaration's compiled plan.
+   *
+   * A declared graph is NOT dispatched by the tool that declares it: the plan
+   * reaches the store here, and the host that owns the run path performs the
+   * graph's FIRST EXECUTION (or a restart resume) through the outcome runtime's
+   * own entry. This seam is how that host learns the plan exists — without it a
+   * declared graph has no in-flight state and nothing ever arms a node.
+   *
+   * The invoking session and agent are forwarded because a host that enables
+   * the invocation-identity capability (D9) has to attribute the attempts this
+   * first execution arms to the invocation that declared the graph; the
+   * callback is invoked synchronously here and may return a promise the host
+   * manages itself (never awaited by the toolset).
+   */
+  onGraphDeclared?: (
+    graphId: string,
+    invokingSessionId?: string,
+    agent?: string,
+  ) => void;
 }
 
 // ── Tool parameter shapes (plain objects — subtask 6 wraps with zod) ─────────
@@ -1717,14 +1712,17 @@ export class GraphToolSet {
    *   than risk overwriting a plan it cannot see. The record is never
    *   overwritten silently.
    *
-   * The invoking session / agent are accepted for tool-layer signature symmetry
-   * and deliberately UNUSED: a declared graph dispatches nothing, so it has no
-   * notification seam to target.
+   * After the plan is persisted (or an identical persisted plan is preserved),
+   * the host's `onGraphDeclared` seam is invoked with the graph id and the
+   * invoking session / agent. The declared graph itself is not dispatched here:
+   * the host that owns the outcome run path performs the first execution (or a
+   * restart resume) through that seam. A throwing seam never fails the
+   * declaration — the plan is already durable, and the failure is logged.
    */
   graph_declare(
     args: GraphDeclareArgs,
-    _invokingSessionId?: string,
-    _agent?: string,
+    invokingSessionId?: string,
+    agent?: string,
   ): GraphDeclareResult {
     const built = buildDeclaredOutcomeGraph({
       declaration: args.declaration,
@@ -1739,6 +1737,22 @@ export class GraphToolSet {
         ? {}
         : { completionPolicies: this.deps.completionPolicies }),
     });
+
+    // The host's declaration seam: fire-and-report, never fail the declaration.
+    // The plan is already durable when this runs, so a host that cannot start
+    // the run reports that through its own channel; a throwing seam must not
+    // make a persisted declaration look refused.
+    const declared = (result: GraphDeclareResult): GraphDeclareResult => {
+      try {
+        this.deps.onGraphDeclared?.(result.graph_id, invokingSessionId, agent);
+      } catch (err) {
+        log.warn(
+          `graph_declare: onGraphDeclared seam threw for graph "${result.graph_id}" — ` +
+            `the declaration stands: ${errorText(err)}`,
+        );
+      }
+      return result;
+    };
 
     // A graph id belongs to exactly ONE execution protocol. A legacy graph is
     // never converted in place (protocol conversion is a separate, explicit
@@ -1769,10 +1783,12 @@ export class GraphToolSet {
       }
       // UNCHANGED declaration: preserve the stored plan and its persisted state
       // — never rebuild (and never rewrite the file) for identical content.
-      return declaredGraphResult(existing.graph, {
-        persisted: existing.persisted,
-        preserved: true,
-      });
+      return declared(
+        declaredGraphResult(existing.graph, {
+          persisted: existing.persisted,
+          preserved: true,
+        }),
+      );
     }
 
     // No in-memory entry — but a PREVIOUS process may have persisted a record
@@ -1812,12 +1828,12 @@ export class GraphToolSet {
       }
       // Same plan content: PRESERVE the file (no write) and register the entry.
       this.declaredGraphs.set(built.graphId, { graph: built, persisted: true });
-      return declaredGraphResult(built, { persisted: true, preserved: true });
+      return declared(declaredGraphResult(built, { persisted: true, preserved: true }));
     }
 
     const persisted = persistDeclaredGraph(built, this.deps.stateDir);
     this.declaredGraphs.set(built.graphId, { graph: built, persisted });
-    return declaredGraphResult(built, { persisted, preserved: false });
+    return declared(declaredGraphResult(built, { persisted, preserved: false }));
   }
 
   // ── graph_submit_outcome ───────────────────────────────────────────────────
@@ -1921,24 +1937,6 @@ export class GraphToolSet {
         `graph_run: no dispatch manager (or injected dispatch seam) available. ` +
           `Graph execution requires a DispatchManager or dispatch seam; construct the GraphToolSet with one (or use dry_run=true).`,
       );
-    }
-
-    // E GATE STEP 1 — no NEW durable legacy record (see
-    // ./legacy-creation-gate.ts). A fresh legacy state is persisted without an
-    // execution-protocol identity and the format-2 decoder then BINDS it to
-    // protocol 1 by backfill, so allowing this run would add a brand-new
-    // protocol-1 graph that no drain can distinguish from a historical one.
-    // Placed AFTER the dry-run short-circuit (a dry run writes nothing) and
-    // after the dispatch-seam check, so the refusal answers a run that would
-    // otherwise proceed. Resuming an existing record is never refused: the
-    // decision reads the store and refuses only where no record exists.
-    const creationRefusal = legacyGraphCreationRefusal({
-      stateDir: this.deps.stateDir,
-      graphId: args.graph_id,
-      allowedByHost: this.deps.allowNewLegacyGraphs === true,
-    });
-    if (creationRefusal !== null) {
-      throw new LegacyGraphCreationRefusedError(creationRefusal);
     }
 
     // Sticky notifier session: prefer the graph-captured (stored) invoking
