@@ -19,13 +19,16 @@
  * compared with its pre-submission snapshot: the attempt is still open in the
  * graph state and no accepted event was appended.
  *
- * THE HONEST BOUNDARY, stated as its own case instead of left silent: the
- * shipped hosts do not declare the host-identity capability
- * (declareInvocationIdentity: false, src/entries/dsh.ts), so the session a call
- * arrives from is NOT an authentication factor on this path — the attempt
- * credential is the only binding. That case asserts the ACCEPTANCE, so a later
- * work package that makes the session an authentication factor fails loudly
- * here rather than silently changing the contract.
+ * THE WORKER BINDING, WHICH REPLACED THAT BOUNDARY (P2 item 2). The shipped
+ * entries still decline the D9 dispatch-identity capability — the declaring
+ * invocation is attribution, not the worker's identity — but they now inject
+ * the WORKER-identity capability, so a submission must arrive from the child
+ * session the platform created for the attempt's worker. The boundary case
+ * P0 pinned (an unrelated session accepted a correct credential, BECAUSE no
+ * identity was declared) is therefore UPDATED DELIBERATELY at the bottom of
+ * this file: the shipped tool face now refuses that call, and the
+ * no-capability acceptance it used to assert stays a case of its own, so the
+ * old behavior is documented rather than deleted.
  *
  * Every case runs in its own mkdtemp directory and closes its host in a
  * finally block; nothing here writes outside a temp dir.
@@ -41,6 +44,11 @@ import type { HostDispatchInvocation } from "../../src/graph/host/dispatch-host.
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
+import {
+  HOST_WORKER_ABSENT_CODE,
+  HOST_WORKER_SESSION_MISMATCH_CODE,
+  HOST_WORKER_UNBOUND_CODE,
+} from "../../src/graph/outcome/host-identity.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import {
@@ -120,12 +128,16 @@ afterEach(() => {
   tmpDirs.length = 0;
 });
 
-interface IngressFixture {
+/** What every fixture in this file offers to the shared read-back helpers. */
+interface SubmissionFixture {
   readonly dir: string;
   readonly storeRoot: string;
   readonly graphId: string;
   readonly host: OutcomeHost;
   readonly dispatched: readonly OutcomeDispatchRequest[];
+}
+
+interface IngressFixture extends SubmissionFixture {
   readonly invocations: readonly (HostDispatchInvocation | undefined)[];
 }
 
@@ -190,7 +202,7 @@ function submit(
 
 /** The credential the vault holds for exactly one attempt, or a fixture error. */
 function credentialOf(
-  fixture: IngressFixture,
+  fixture: SubmissionFixture,
   nodeId: string,
   attemptId: string,
 ): string {
@@ -207,7 +219,7 @@ function credentialOf(
 
 /** The credential one dispatch request carried, or a fixture error. */
 function dispatchedCredential(
-  fixture: IngressFixture,
+  fixture: SubmissionFixture,
   nodeId: string,
 ): string {
   const request = fixture.dispatched.find((candidate) => candidate.nodeId === nodeId);
@@ -227,7 +239,7 @@ interface PersistedReading {
 }
 
 /** Read the AUTHORITATIVE record (the ledger) with a fresh connection. */
-async function readPersisted(fixture: IngressFixture): Promise<PersistedReading> {
+async function readPersisted(fixture: SubmissionFixture): Promise<PersistedReading> {
   const ledger = await SqliteAcceptanceLedger.create(fixture.storeRoot);
   try {
     const record = ledger.readGraphState(fixture.graphId);
@@ -445,21 +457,358 @@ describe("submission ingress over the real host — a wrong credential settles n
   });
 });
 
-// ── The boundary that does NOT exist, stated instead of implied ─────────────
+// ── The worker binding: the child session the platform created ─────────────
 
-describe("the shipped path binds an attempt by its credential, not by session", () => {
-  it("ACCEPTS a correct credential from an unrelated session, because no host identity is declared", async () => {
+interface WorkerFixture extends SubmissionFixture {
+  /** The child session the platform "created", per attempt id. */
+  readonly childSessions: ReadonlyMap<string, string>;
+  /** Submit through the SHIPPED tool face, from one invocation context. */
+  submit(
+    args: Record<string, unknown>,
+    invocation: { readonly sessionID: string; readonly agent: string },
+  ): Promise<GraphSubmitOutcomeResult>;
+}
+
+/**
+ * THE SHIPPED ASSEMBLY with a platform that names a real execution.
+ *
+ * `confirm` decides whether the delivery reports the execution the platform
+ * created — the host fact `OutcomeHost.confirmExecution` records. The child
+ * session is minted from the attempt id by the SAME one-line mapping the dsh
+ * entry installs (`run.id` IS the published child session id), so every session
+ * a case uses is a platform-minted id and never a string a submission chose.
+ */
+async function openWorkerFixture(
+  declaration: GraphDeclarationV3,
+  options: { readonly confirm: boolean },
+): Promise<WorkerFixture> {
+  const dir = makeTmpDir("submit-worker-");
+  const storeRoot = join(dir, "host-store");
+  persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration }), storeRoot);
+  const dispatched: OutcomeDispatchRequest[] = [];
+  const childSessions = new Map<string, string>();
+  let host: OutcomeHost | undefined;
+  const opened = OutcomeHost.open({
+    workspaceDir: dir,
+    storeRoot,
+    deliver: (request, effect) => {
+      dispatched.push(request);
+      if (!options.confirm) return;
+      const childSession = "child-session:" + request.attemptId;
+      childSessions.set(request.attemptId, childSession);
+      host?.confirmExecution(effect, { executionId: childSession });
+    },
+    validators: EMPTY_VALIDATORS,
+    // THE SHIPPED DECISION: the declaring invocation is attribution, not the
+    // worker's identity.
+    declareInvocationIdentity: false,
+    // The platform's own child-session fact (the dsh entry's mapping).
+    workerSessionOf: (execution) => execution.executionId,
+  });
+  host = opened;
+  const started = await opened.startDeclaredGraph(declaration.name, {
+    sessionId: "session-declarer",
+    agent: "agent.declarer",
+  });
+  if (started.kind !== "started") {
+    throw new Error("fixture: the graph did not start (" + started.kind + ")");
+  }
+  return {
+    dir,
+    storeRoot,
+    graphId: declaration.name,
+    host: opened,
+    dispatched,
+    childSessions,
+    submit: async (args, invocation) => {
+      // THE SHIPPED TOOL FACE: the same toolset, the same identity option and
+      // the same per-call attribution the entries install.
+      const toolset = createGraphToolSet({
+        stateDir: dir,
+        credentialIsolation: opened.credentialIsolation,
+        hostIdentity: opened.workerIdentity,
+        outcomeDispatch: opened.dispatch,
+        outcomeValidators: EMPTY_VALIDATORS,
+        outcomeArtifactRoot: dir,
+      });
+      const tools = opened.bindTools(createOutcomeGraphTools(toolset));
+      const raw = await tools.graph_submit_outcome.execute(
+        args,
+        makeContext(invocation.sessionID, invocation.agent, dir),
+      );
+      return JSON.parse(String(raw)) as GraphSubmitOutcomeResult;
+    },
+  };
+}
+
+describe("the worker binding — a submission must arrive from the attempt's own worker", () => {
+  it("refuses an unrelated session, then settles from the platform's child session", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const alphaCredential = dispatchedCredential(fixture, "alpha");
+      expect(fixture.childSessions.get("alpha#1")).toBe("child-session:alpha#1");
+      const before = await readPersisted(fixture);
+
+      const refused = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential: alphaCredential,
+        },
+        { sessionID: "unrelated-session", agent: "unrelated-agent" },
+      );
+      expect(refused.decision).toBeUndefined();
+      expect(refused.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_SESSION_MISMATCH_CODE,
+      ]);
+      expect(refused.refusals[0]?.path).toBe("$.workerSession");
+      expect(refused.attempt_id).toBeUndefined();
+
+      // NOTHING was written by the refusal: same state row, no accepted event.
+      const afterRefusal = await readPersisted(fixture);
+      expect(afterRefusal.events).toBe(0);
+      expect(afterRefusal.record).toEqual(before.record);
+      expect(nodeEntryOf(afterRefusal, "alpha")["status"]).toBe("dispatched");
+
+      // THE SAME CREDENTIAL FROM THE ATTEMPT'S OWN WORKER SETTLES IT.
+      const accepted = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential: alphaCredential,
+        },
+        { sessionID: "child-session:alpha#1", agent: "agent.alpha" },
+      );
+      expect(accepted.decision).toBe("accepted");
+      expect(accepted.attempt_id).toBe("alpha#1");
+      expect(accepted.refusals).toEqual([]);
+
+      const after = await readPersisted(fixture);
+      expect(after.events).toBe(1);
+      expect(nodeEntryOf(after, "alpha")["status"]).toBe("settled");
+      expect(nodeEntryOf(after, "beta")["status"]).toBe("dispatched");
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("refuses an attempt whose execution the platform never confirmed (host-worker-unbound)", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: false });
+    try {
+      const credential = dispatchedCredential(fixture, "alpha");
+      const before = await readPersisted(fixture);
+      const result = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential,
+        },
+        { sessionID: "child-session:alpha#1", agent: "agent.alpha" },
+      );
+      expect(result.decision).toBeUndefined();
+      expect(result.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_UNBOUND_CODE,
+      ]);
+      const after = await readPersisted(fixture);
+      expect(after.events).toBe(0);
+      expect(after.record).toEqual(before.record);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("refuses a call the host attributes no session to (host-worker-absent)", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const credential = dispatchedCredential(fixture, "alpha");
+      const result = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential,
+        },
+        { sessionID: "", agent: "agent.alpha" },
+      );
+      expect(result.decision).toBeUndefined();
+      expect(result.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_ABSENT_CODE,
+      ]);
+      expect(nodeEntryOf(await readPersisted(fixture), "alpha")["status"]).toBe("dispatched");
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("keeps the credential refusals' precise codes with the worker capability installed", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const betaCredential = dispatchedCredential(fixture, "beta");
+      const cases: readonly [Record<string, unknown>, string, string][] = [
+        [
+          { graph_id: fixture.graphId, node_id: "alpha", outcome_id: "done" },
+          "credential-missing",
+          "child-session:alpha#1",
+        ],
+        [
+          {
+            graph_id: fixture.graphId,
+            node_id: "alpha",
+            outcome_id: "done",
+            credential: betaCredential,
+          },
+          "credential-node-mismatch",
+          "child-session:beta#2",
+        ],
+        [
+          {
+            graph_id: fixture.graphId,
+            node_id: "alpha",
+            outcome_id: "done",
+            credential: "not-a-credential",
+          },
+          "credential-unknown",
+          "child-session:alpha#1",
+        ],
+      ];
+      for (const [args, code, sessionID] of cases) {
+        const result = await fixture.submit(args, { sessionID, agent: "agent.alpha" });
+        expect(result.decision).toBeUndefined();
+        expect(result.refusals.map((refusal) => refusal.code)).toEqual([code]);
+      }
+      // Every refusal above is the CREDENTIAL's: the worker check yielded to the
+      // more precise answer instead of masking it, and nothing was written.
+      const after = await readPersisted(fixture);
+      expect(after.events).toBe(0);
+      expect(nodeEntryOf(after, "alpha")["status"]).toBe("dispatched");
+      expect(nodeEntryOf(after, "beta")["status"]).toBe("dispatched");
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("refuses an OLD worker session for the re-armed attempt, and settles from the current worker", async () => {
+    const fixture = await openWorkerFixture(ATTEMPT_LOOP, { confirm: true });
+    try {
+      const firstWork = dispatchedCredential(fixture, "work");
+      const firstAccepted = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "work",
+          outcome_id: "done",
+          credential: firstWork,
+        },
+        { sessionID: "child-session:work#1", agent: "agent.work" },
+      );
+      expect(firstAccepted.decision).toBe("accepted");
+
+      const reviewCredential = credentialOf(fixture, "review", "review#2");
+      const reviewAccepted = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "review",
+          outcome_id: "revise",
+          credential: reviewCredential,
+        },
+        { sessionID: "child-session:review#2", agent: "agent.review" },
+      );
+      expect(reviewAccepted.decision).toBe("accepted");
+
+      const before = await readPersisted(fixture);
+      expect(nodeEntryOf(before, "work")["attemptId"]).toBe("work#3");
+      const currentWork = credentialOf(fixture, "work", "work#3");
+      expect(fixture.childSessions.get("work#3")).toBe("child-session:work#3");
+
+      // THE OLD WORKER CANNOT SETTLE THE NEW ATTEMPT, even holding the new
+      // attempt's own credential: the binding is per attempt, and a session is
+      // not re-aimed at a later generation of the same node.
+      const refused = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "work",
+          outcome_id: "done",
+          credential: currentWork,
+        },
+        { sessionID: "child-session:work#1", agent: "agent.work" },
+      );
+      expect(refused.decision).toBeUndefined();
+      expect(refused.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_SESSION_MISMATCH_CODE,
+      ]);
+      expect(await readPersisted(fixture)).toEqual(before);
+
+      // The CURRENT attempt's own worker settles it.
+      const accepted = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "work",
+          outcome_id: "done",
+          credential: currentWork,
+        },
+        { sessionID: "child-session:work#3", agent: "agent.work" },
+      );
+      expect(accepted.decision).toBe("accepted");
+      expect(accepted.attempt_id).toBe("work#3");
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── The boundary P0 pinned, deliberately updated ────────────────────────────
+
+describe("the shipped path now binds an attempt by its credential AND its worker", () => {
+  it("REFUSES a correct credential from an unrelated session, because the worker binding is declared", async () => {
+    const fixture = await openWorkerFixture(TWO_ENTRIES, { confirm: true });
+    try {
+      const alphaCredential = dispatchedCredential(fixture, "alpha");
+      const before = await readPersisted(fixture);
+
+      // The call arrives through the SHIPPED tool face (the same toolset, the
+      // same hostIdentity option and the same per-call attribution the entries
+      // install) from a completely unrelated invocation.
+      const refused = await fixture.submit(
+        {
+          graph_id: fixture.graphId,
+          node_id: "alpha",
+          outcome_id: "done",
+          credential: alphaCredential,
+        },
+        { sessionID: "unrelated-session", agent: "unrelated-agent" },
+      );
+
+      // P0's case asserted the ACCEPTANCE of exactly this shape, BECAUSE no
+      // identity was declared. The shipped path now declares the worker
+      // binding, so the boundary moved: the same call is REFUSED by name and
+      // the authoritative record is untouched. The no-capability acceptance is
+      // preserved as its own case below.
+      expect(refused.decision).toBeUndefined();
+      expect(refused.refusals.map((refusal) => refusal.code)).toEqual([
+        HOST_WORKER_SESSION_MISMATCH_CODE,
+      ]);
+      const after = await readPersisted(fixture);
+      expect(after.events).toBe(0);
+      expect(after.record).toEqual(before.record);
+      expect(nodeEntryOf(after, "alpha")["status"]).toBe("dispatched");
+      // The attempt itself still carries NO D9 dispatch identity: the
+      // declaring invocation was never recorded as the worker's identity.
+      expect(Object.prototype.hasOwnProperty.call(nodeEntryOf(after, "alpha"), "dispatchIdentity")).toBe(false);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("ACCEPTS a correct credential from any session when the host installs NO capability at all", async () => {
     const fixture = await openIngressFixture(TWO_ENTRIES);
     try {
-      // The attempt was armed under "session-declarer"...
-      expect(fixture.invocations[0]).toEqual({
-        sessionId: "session-declarer",
-        agent: "agent.declarer",
-      });
       const alphaCredential = dispatchedCredential(fixture, "alpha");
-
-      // ...and the call arrives through the SHIPPED tool face, bound to the
-      // host's invocation holder, from a completely unrelated invocation.
+      // THE PRE-EXISTING, HONEST BOUNDARY, kept as its own case: a host that
+      // declares no identity capability gets no session check — the attempt
+      // credential is the only binding, and this is ACCEPTED. Nothing about
+      // the arriving invocation is recorded on the attempt.
       const toolset = createGraphToolSet({
         stateDir: fixture.dir,
         credentialIsolation: fixture.host.credentialIsolation,
@@ -477,22 +826,10 @@ describe("the shipped path binds an attempt by its credential, not by session", 
         makeContext("unrelated-session", "unrelated-agent", fixture.dir),
       );
       const result = JSON.parse(String(raw)) as GraphSubmitOutcomeResult;
-
-      // THE HONEST BOUNDARY: with no host-identity capability installed, the
-      // session a call arrives from is NOT an authentication factor on the
-      // shipped path — the attempt credential is the only binding, so this is
-      // ACCEPTED. A later work package that makes the session an authentication
-      // factor must turn this into a refusal, and will fail loudly HERE.
-      // (The declared-identity alternative is covered by
-      // tests/graph/outcome-host.test.ts: a host that DOES declare the
-      // capability refuses the same shape with host-identity-mismatch.)
       expect(result.decision).toBe("accepted");
       expect(result.refusals).toEqual([]);
       expect(result.attempt_id).toBe("alpha#1");
 
-      // And nothing about the arriving invocation was recorded on the attempt:
-      // the persisted entry carries no dispatch identity to check against,
-      // because nothing claimed one.
       const after = await readPersisted(fixture);
       const alpha = nodeEntryOf(after, "alpha");
       expect(alpha["status"]).toBe("settled");

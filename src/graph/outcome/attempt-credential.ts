@@ -52,6 +52,18 @@
  * never falls back to "the node's current attempt" — a caller may present a
  * credential, but cannot move it to another execution.
  *
+ * THE CREDENTIAL IS ONE HALF OF A SUBMISSION, NOT THE WHOLE. The digest proves
+ * possession of the nonce the attempt was issued; it says nothing about WHO is
+ * presenting it. The OTHER half is the worker binding: the child session the
+ * platform created for the dispatched worker, recorded by the host when the
+ * platform confirmed the execution, and checked against the session the
+ * submitting call actually arrives from (see `outcome/host-identity.ts` and
+ * `tools/submit-outcome.ts`). The credential's binding tuple cannot carry that
+ * session: the tuple is minted with the attempt, BEFORE the platform has created
+ * any worker, so the worker half is established by the confirmed create — and a
+ * submission whose attempt has no confirmed worker is refused rather than
+ * settled on the credential alone.
+ *
  * Dependency leaf: the only import is `node:crypto`, so the state reader, the
  * run path and a test harness may depend on it without a cycle.
  */
@@ -241,6 +253,49 @@ export function isAttemptCredentialDigest(value: unknown): value is string {
     }
   }
   return true;
+}
+
+// ── Resolving the attempt a presented credential names ──────────────────────
+
+/**
+ * The fields of a persisted state entry this module needs to locate the attempt
+ * a presented credential was issued for. Structural on purpose: the caller
+ * passes its own `OutcomeNodeState` (which carries exactly these fields among
+ * others) without this dependency leaf importing the state model.
+ */
+export interface AttemptCredentialEntry {
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  readonly attemptCredentialDigest?: string;
+}
+
+/**
+ * The entry whose recorded DIGEST matches the presented credential, or
+ * `undefined` when no entry does.
+ *
+ * THE SAME RULE THE RUN PATH APPLIES, exposed so a caller that must make a
+ * decision BEFORE the acceptance core — the submission ingress's worker-context
+ * check — locates the SAME attempt the run path will settle, rather than
+ * re-deriving one from the node id or the node's current attempt. The
+ * comparison is a hash of what the caller presents against the recorded
+ * verifier: a credential the state never saw, a credential for another node and
+ * a credential for a superseded attempt all answer `undefined` here, exactly as
+ * they are refused there.
+ *
+ * WHAT THIS FUNCTION DOES NOT DECIDE. Finding an entry is NOT an acceptance: an
+ * entry with no `attemptId`, a node whose status makes the attempt unsettleable
+ * and every gate of the declared contract stay the acceptance core's to judge.
+ * This locator only says WHICH attempt the submission is about.
+ */
+export function attemptEntryHoldingCredential(
+  entries: readonly AttemptCredentialEntry[],
+  credential: string,
+): AttemptCredentialEntry | undefined {
+  const presented = attemptCredentialDigest(credential);
+  for (const entry of entries) {
+    if (entry.attemptCredentialDigest === presented) return entry;
+  }
+  return undefined;
 }
 
 // ── Shape ───────────────────────────────────────────────────────────────────

@@ -53,6 +53,17 @@
  *   later process never fabricates one for it — the reference is the dispatch
  *   record, never the current invocation.
  *
+ * THE SECOND SUBJECT THIS MODULE NAMES: THE WORKER. The D9 binding above binds
+ * an attempt to the invocation that ARMED it — the declaring/controlling
+ * principal. That is attribution, never the worker's identity: a dispatched
+ * worker runs in a session the platform creates for it, and its own tool calls
+ * are attributed to that session. The worker-binding section below adds what the
+ * host CONFIRMED it dispatched an attempt AS (the platform's real
+ * execution/task id and the child session) and the rule a submission from the
+ * worker is judged by. The two capabilities are separate SHAPES, read by name:
+ * a host declares one or the other, and the shipped hosts declare the worker
+ * binding because that is the subject their delivery handoff actually produces.
+ *
  * Dependency leaf: no imports at all, so the state reader,
  * `graph-state.ts`, the run path, the recovery seam and a host loader may all
  * depend on it without a cycle.
@@ -422,6 +433,561 @@ export function hostIdentityCheckRefusal(
   });
 }
 
+// ── The worker principal and the dispatch binding ───────────────────────────
+
+/**
+ * THE SECOND IDENTITY QUESTION, AND WHY IT IS NOT THE FIRST ONE.
+ *
+ * The D9 binding above answers "which invocation armed this attempt": the host's
+ * attribution at DISPATCH time, which is the declaring/controlling principal.
+ * That is attribution, not the worker's identity: a dispatched worker runs in a
+ * session the platform creates for it, and its own tool calls are attributed to
+ * THAT session, never to the declaring one. Comparing the two is comparing two
+ * different subjects, and a host that did so would refuse exactly the
+ * submission its own delivery handoff asks the worker to make.
+ *
+ * This section is the worker side: what the host CONFIRMED it dispatched one
+ * attempt AS — the platform's real execution/task id and the CHILD SESSION the
+ * platform created for the worker — and the rule a submission is judged by. The
+ * binding is established when the platform names the execution (never at
+ * declaration and never by a caller), it belongs to the attempt, and it is the
+ * reference the submitting invocation is checked against.
+ *
+ * THREE PRINCIPALS, THREE FACTS:
+ * - the DECLARING controller — the graph's recorded invocation
+ *   (`host/invocation-origins.ts`), used to attribute and notify, never as the
+ *   worker's identity;
+ * - the WORKER — the child session this binding names, checked against the
+ *   session the host attributes to the submission;
+ * - the HOST COMPLETION AUTHORITY — the host's confirmed execution fact, which
+ *   reaches the same acceptance core as its own source rather than impersonating
+ *   the declaring invocation.
+ *
+ * WHAT THE BINDING IS AND IS NOT. It is the platform's own session id — a fact
+ * the platform minted and the host read back, never a string a caller supplied.
+ * It is NOT a bearer value: it is not secret and proves nothing by possession;
+ * the attempt credential remains the capability, and this check is an ADDITIONAL
+ * constraint on the load-bearing one. A host that cannot name the session it
+ * created for an attempt records nothing, and then nothing may settle that
+ * attempt through this path ({@link HOST_WORKER_UNBOUND_CODE}) — an
+ * unsubstantiated binding is refused, never downgraded to "no constraint".
+ *
+ * SESSION, NOT AGENT. The binding names the session, because that is the
+ * platform's own scoping unit for an invocation and the one fact both shipped
+ * hosts can substantiate. The agent inside the session is not part of the
+ * binding: neither shipped host can say which agent id the platform attributes
+ * to a dispatched worker's own tool call (dsh resolves the acting agent through
+ * a role map, Pi through a process-wide active agent), so an agent comparison
+ * would be a check the host only appears to make. The plan's rule is the
+ * reverse of that: a check a host cannot substantiate is not declared.
+ */
+
+/**
+ * The capability-format version this build reads for the worker binding. An
+ * exact identity, like every other capability version here.
+ */
+export const HOST_WORKER_IDENTITY_VERSION = 1;
+
+/**
+ * The host declares the worker binding but this build cannot read the
+ * declaration, or the host failed while answering it (a throwing
+ * `currentSession()`/`bindingFor()`, a value that is not the declared shape).
+ */
+export const HOST_WORKER_UNAVAILABLE_CODE = "host-worker-unavailable" as const;
+
+/**
+ * The attempt has no confirmed dispatch binding: the host never recorded a real
+ * execution/child session for it — not confirmed yet, not this host's, or the
+ * platform never named one. Nothing may settle it through this path.
+ */
+export const HOST_WORKER_UNBOUND_CODE = "host-worker-unbound" as const;
+
+/**
+ * The host attributes NO session to this call, so the invocation it arrives from
+ * cannot be compared with the binding at all. Distinct from a mismatch: the
+ * repair is to submit from the worker's own invocation.
+ */
+export const HOST_WORKER_ABSENT_CODE = "host-worker-absent" as const;
+
+/**
+ * The session this call arrives from is not the child session the platform
+ * created for the attempt — an unrelated invocation, a superseded one, or a
+ * copied credential presented from somewhere else.
+ */
+export const HOST_WORKER_SESSION_MISMATCH_CODE = "host-worker-session-mismatch" as const;
+
+/** The refusal vocabulary the worker binding contributes. */
+export type HostWorkerIdentityRefusalCode =
+  | typeof HOST_WORKER_UNAVAILABLE_CODE
+  | typeof HOST_WORKER_UNBOUND_CODE
+  | typeof HOST_WORKER_ABSENT_CODE
+  | typeof HOST_WORKER_SESSION_MISMATCH_CODE;
+
+/** One structured reason a worker binding could not be established or matched. */
+export interface HostWorkerIdentityRefusal {
+  readonly code: HostWorkerIdentityRefusalCode;
+  /** Where the disagreement lives, in the runtime's own path vocabulary. */
+  readonly path: string;
+  readonly message: string;
+}
+
+/**
+ * One attempt, as the persisted state addresses it. The graph and node ids come
+ * from the compiled plan and the state; the attempt id is the one the presented
+ * credential resolved to — never a caller-supplied selector.
+ */
+export interface HostWorkerAttemptRef {
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+}
+
+/**
+ * What the host confirmed it dispatched one attempt AS. CLOSED SHAPE — exactly
+ * the keys below; the three platform facts and the three identity facts.
+ *
+ * `executionId` is the real host execution/task id the platform returned, and
+ * `workerSessionId` is the child session the platform created for the worker.
+ * Both are host facts; `graphId`/`nodeId`/`attemptId` are the runtime's own
+ * plan/run/attempt identity. `taskId` is present only when the platform names
+ * the task apart from the execution.
+ */
+export interface HostWorkerBinding {
+  /** The graph the attempt belongs to (the compiled plan's own id). */
+  readonly graphId: string;
+  /** The plan node the attempt executes. */
+  readonly nodeId: string;
+  /** The runtime-minted attempt this binding belongs to. */
+  readonly attemptId: string;
+  /** The platform's own id for the started execution. */
+  readonly executionId: string;
+  /** The platform's task id, when it names that apart from the execution. */
+  readonly taskId?: string;
+  /** The child session the platform created for the worker. */
+  readonly workerSessionId: string;
+}
+
+/**
+ * Read one binding value, or `undefined` when it is not one.
+ *
+ * STRICT and total: a plain record whose keys are exactly the required set plus
+ * whichever optional keys are present, each a non-empty string. The returned
+ * binding is frozen and structurally identical to the accepted input.
+ */
+export function readHostWorkerBinding(raw: unknown): HostWorkerBinding | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (
+    !hasKeysWithin(raw, ["graphId", "nodeId", "attemptId", "executionId", "workerSessionId"], [
+      "taskId",
+    ])
+  ) {
+    return undefined;
+  }
+  const graphId = nonEmptyString(raw.graphId);
+  const nodeId = nonEmptyString(raw.nodeId);
+  const attemptId = nonEmptyString(raw.attemptId);
+  const executionId = nonEmptyString(raw.executionId);
+  const workerSessionId = nonEmptyString(raw.workerSessionId);
+  if (
+    graphId === undefined ||
+    nodeId === undefined ||
+    attemptId === undefined ||
+    executionId === undefined ||
+    workerSessionId === undefined
+  ) {
+    return undefined;
+  }
+  const taskId = raw.taskId === undefined ? undefined : nonEmptyString(raw.taskId);
+  if (raw.taskId !== undefined && taskId === undefined) return undefined;
+  return Object.freeze({
+    graphId,
+    nodeId,
+    attemptId,
+    executionId,
+    workerSessionId,
+    ...(taskId === undefined ? {} : { taskId }),
+  });
+}
+
+/**
+ * A diagnostic token naming one binding: the attempt, the host execution and the
+ * worker session. Only ever built from a binding this build READ, so it names
+ * platform facts the host itself declared. Carries no credential.
+ */
+export function describeHostWorkerBinding(binding: HostWorkerBinding): string {
+  return (
+    "{ attemptId: " +
+    JSON.stringify(binding.attemptId) +
+    ", executionId: " +
+    JSON.stringify(binding.executionId) +
+    ", workerSessionId: " +
+    JSON.stringify(binding.workerSessionId) +
+    " }"
+  );
+}
+
+/**
+ * The host's WORKER-identity capability: the version-1 invocation identity plus
+ * the two facts a worker submission is judged by.
+ *
+ * It is a SUPERSET of {@link HostIdentityCapability} on purpose — the toolset
+ * carries exactly one identity option, and the mode is decided by which SHAPE
+ * the host declared, read by name, never by a flag or a boolean.
+ *
+ * `currentSession()` answers the session the host attributes to the operation
+ * being performed NOW (the session a submission arrives from), or `undefined`
+ * when this call carries none — a fact, not an error. `bindingFor()` answers
+ * what the host confirmed it dispatched one attempt AS, or `undefined` when it
+ * has no such fact.
+ */
+export interface HostWorkerIdentityCapability extends HostIdentityCapability {
+  /**
+   * The session the host attributes to the operation being performed, or
+   * `undefined` when this call carries none. Never a secret.
+   */
+  currentSession(): string | undefined;
+  /**
+   * The confirmed dispatch binding of one attempt, or `undefined` when the host
+   * has no confirmed execution/child session for it.
+   */
+  bindingFor(attempt: HostWorkerAttemptRef): HostWorkerBinding | undefined;
+}
+
+/**
+ * Read one worker-identity capability, or `undefined` when it is not one.
+ *
+ * STRICT and total: a plain record whose own keys are EXACTLY
+ * `{ version, id, current, currentSession, bindingFor }`, `version` exactly
+ * {@link HOST_WORKER_IDENTITY_VERSION}, a non-empty `id`, and all three of
+ * `current`, `currentSession` and `bindingFor` functions. A record with a
+ * missing or extra key is NOT this capability — a partial declaration is refused
+ * by name rather than trusted for the parts it happens to carry.
+ */
+export function readHostWorkerIdentityCapability(
+  raw: unknown,
+): HostWorkerIdentityCapability | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (
+    !hasExactKeys(raw, ["version", "id", "current", "currentSession", "bindingFor"])
+  ) {
+    return undefined;
+  }
+  if (raw.version !== HOST_WORKER_IDENTITY_VERSION) return undefined;
+  const id = nonEmptyString(raw.id);
+  if (id === undefined) return undefined;
+  if (typeof raw.current !== "function") return undefined;
+  if (typeof raw.currentSession !== "function") return undefined;
+  if (typeof raw.bindingFor !== "function") return undefined;
+  return Object.freeze({
+    version: HOST_WORKER_IDENTITY_VERSION,
+    id,
+    current: raw.current as () => HostInvocationIdentity | undefined,
+    currentSession: raw.currentSession as () => string | undefined,
+    bindingFor: raw.bindingFor as (
+      attempt: HostWorkerAttemptRef,
+    ) => HostWorkerBinding | undefined,
+  });
+}
+
+/** Whether a value is a readable worker-identity capability. */
+export function isHostWorkerIdentityCapability(
+  value: unknown,
+): value is HostWorkerIdentityCapability {
+  return readHostWorkerIdentityCapability(value) !== undefined;
+}
+
+/**
+ * The gate for a host identity declaration: `undefined` when NO capability was
+ * injected (neither binding is enabled), when the injected value is a readable
+ * worker declaration, or when it is a readable STRICT identity capability (the
+ * other valid declaration); a structured refusal when a declaration was
+ * injected that this build cannot read as EITHER shape.
+ *
+ * The code is {@link HOST_IDENTITY_UNAVAILABLE_CODE}, not the worker-specific
+ * one: this refusal is about the DECLARATION's shape, which is the same fact
+ * for both shapes, and a host that declared a constraint it cannot be judged
+ * by is refused by that name before anything is read or written. The
+ * worker-specific `host-worker-unavailable` is for a READABLE worker
+ * capability that then fails to answer.
+ */
+export function hostWorkerIdentityRefusal(
+  capability: unknown,
+): HostIdentityRefusal | undefined {
+  if (capability === undefined) return undefined;
+  if (readHostWorkerIdentityCapability(capability) !== undefined) return undefined;
+  if (readHostIdentityCapability(capability) !== undefined) return undefined;
+  return Object.freeze({
+    code: HOST_IDENTITY_UNAVAILABLE_CODE,
+    path: "$.hostIdentity" as const,
+    message:
+      "outcome-runtime: the injected host identity capability is neither a readable " +
+      "version-" +
+      HOST_IDENTITY_VERSION +
+      " identity nor a readable version-" +
+      HOST_WORKER_IDENTITY_VERSION +
+      " worker binding — a worker declaration must be exactly { version: " +
+      HOST_WORKER_IDENTITY_VERSION +
+      ", id, current, currentSession, bindingFor }, and a partial declaration is " +
+      "never downgraded to an unconstrained one",
+  });
+}
+
+/**
+ * What asking the host for the session of the current call produced.
+ *
+ * - `identified` — the host named the session this call arrives from.
+ * - `none` — the host attributes no session to this call. An attempt that has a
+ *   binding cannot be checked against it.
+ * - `refused` — the capability is unreadable, its `currentSession()` threw, or
+ *   it answered something that is not a non-empty session id. A host failure is
+ *   reported, never converted into "no session".
+ */
+export type HostWorkerSessionReading =
+  | { readonly kind: "identified"; readonly sessionId: string }
+  | { readonly kind: "none" }
+  | { readonly kind: "refused"; readonly refusal: HostWorkerIdentityRefusal };
+
+/**
+ * Ask the host which session the operation being performed arrives from.
+ *
+ * TOTAL: an unreadable capability, a throwing `currentSession()` and a
+ * malformed answer all come back as `refused` with the reason.
+ */
+export function readCurrentWorkerSession(capability: unknown): HostWorkerSessionReading {
+  const read = readHostWorkerIdentityCapability(capability);
+  if (read === undefined) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.hostIdentity" as const,
+        message:
+          "outcome-runtime: the host worker-identity capability could not be read, so the " +
+          "session this call arrives from cannot be established — nothing was written",
+      }),
+    });
+  }
+  let answered: unknown;
+  try {
+    answered = read.currentSession();
+  } catch (error) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.hostIdentity" as const,
+        message:
+          "outcome-runtime: the host worker-identity capability " +
+          JSON.stringify(read.id) +
+          " threw while answering the current call's session (" +
+          errorText(error) +
+          ") — an unanswered session is never treated as no session, so the operation " +
+          "is refused",
+      }),
+    });
+  }
+  if (answered === undefined) return Object.freeze({ kind: "none" as const });
+  const sessionId = nonEmptyString(answered);
+  if (sessionId === undefined) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.hostIdentity" as const,
+        message:
+          "outcome-runtime: the host worker-identity capability " +
+          JSON.stringify(read.id) +
+          " answered " +
+          describeValue(answered) +
+          ", not a non-empty session id — a value this build cannot read is refused " +
+          "rather than treated as no session",
+      }),
+    });
+  }
+  return Object.freeze({ kind: "identified" as const, sessionId });
+}
+
+/**
+ * What asking the host for one attempt's confirmed dispatch binding produced.
+ *
+ * - `binding` — the host confirmed a real execution and child session.
+ * - `unbound` — the host has no confirmed binding for this attempt.
+ * - `refused` — the capability is unreadable, its `bindingFor()` threw, or it
+ *   answered a value that is not a binding.
+ */
+export type HostWorkerBindingReading =
+  | { readonly kind: "binding"; readonly binding: HostWorkerBinding }
+  | { readonly kind: "unbound"; readonly attempt: HostWorkerAttemptRef }
+  | { readonly kind: "refused"; readonly refusal: HostWorkerIdentityRefusal };
+
+/**
+ * Ask the host what it dispatched one attempt AS.
+ *
+ * TOTAL: an unreadable capability, a throwing `bindingFor()` and a malformed
+ * answer all come back as `refused` with the reason, so "the host cannot say"
+ * is never confused with "the host says nothing constrains this attempt".
+ */
+export function readHostWorkerBindingFor(
+  capability: unknown,
+  attempt: HostWorkerAttemptRef,
+): HostWorkerBindingReading {
+  const read = readHostWorkerIdentityCapability(capability);
+  if (read === undefined) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.workerBinding" as const,
+        message:
+          "outcome-runtime: this process holds no readable host worker-identity " +
+          "capability, so what attempt " +
+          JSON.stringify(attempt.attemptId) +
+          " was dispatched as cannot be established — nothing was written",
+      }),
+    });
+  }
+  let answered: unknown;
+  try {
+    answered = read.bindingFor(attempt);
+  } catch (error) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.workerBinding" as const,
+        message:
+          "outcome-runtime: the host worker-identity capability " +
+          JSON.stringify(read.id) +
+          " threw while answering the binding of attempt " +
+          JSON.stringify(attempt.attemptId) +
+          " (" +
+          errorText(error) +
+          ") — an unanswered binding is never treated as no constraint",
+      }),
+    });
+  }
+  if (answered === undefined) {
+    return Object.freeze({ kind: "unbound" as const, attempt });
+  }
+  const binding = readHostWorkerBinding(answered);
+  if (binding === undefined) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.workerBinding" as const,
+        message:
+          "outcome-runtime: the host worker-identity capability " +
+          JSON.stringify(read.id) +
+          " answered " +
+          describeValue(answered) +
+          " for attempt " +
+          JSON.stringify(attempt.attemptId) +
+          ", not a { graphId, nodeId, attemptId, executionId, workerSessionId } binding — " +
+          "a value this build cannot read is refused rather than trusted in part",
+      }),
+    });
+  }
+  if (
+    binding.graphId !== attempt.graphId ||
+    binding.nodeId !== attempt.nodeId ||
+    binding.attemptId !== attempt.attemptId
+  ) {
+    return Object.freeze({
+      kind: "refused" as const,
+      refusal: Object.freeze({
+        code: HOST_WORKER_UNAVAILABLE_CODE,
+        path: "$.workerBinding" as const,
+        message:
+          "outcome-runtime: the host answered a binding for " +
+          describeHostWorkerBinding(binding) +
+          " when asked about graph " +
+          JSON.stringify(attempt.graphId) +
+          " node " +
+          JSON.stringify(attempt.nodeId) +
+          " attempt " +
+          JSON.stringify(attempt.attemptId) +
+          " — a binding is bound to exactly one attempt and is never re-aimed",
+      }),
+    });
+  }
+  return Object.freeze({ kind: "binding" as const, binding });
+}
+
+/**
+ * The worker rule of one submission: `undefined` when the submission may
+ * proceed to the acceptance core, a structured refusal otherwise.
+ *
+ * THE ORDER IS THE RULE:
+ *
+ * 1. a binding the host could not answer or that it answered malformed is a
+ *    host failure, and a host failure is never a pass;
+ * 2. `unbound` — the attempt has NO confirmed execution/child session. Nothing
+ *    may settle an attempt whose worker the host cannot name: the compatibility
+ *    rule of the D9 binding (an attempt that recorded nothing is unconstrained)
+ *    does NOT apply here, because this binding is established by the host's own
+ *    create, and "not confirmed" is a fact about the dispatch, not a licence to
+ *    accept any session;
+ * 3. a call the host attributes NO session to cannot be compared, and is refused
+ *    rather than settled on the credential alone;
+ * 4. only the exact child session the platform created passes.
+ *
+ * TOTAL and pure: it reads the two readings it is given and never calls the host.
+ */
+export function hostWorkerBindingRefusal(
+  binding: HostWorkerBindingReading,
+  session: HostWorkerSessionReading,
+): HostWorkerIdentityRefusal | undefined {
+  if (binding.kind === "refused") return binding.refusal;
+  if (session.kind === "refused") return session.refusal;
+  if (binding.kind === "unbound") {
+    return Object.freeze({
+      code: HOST_WORKER_UNBOUND_CODE,
+      path: "$.workerBinding" as const,
+      message:
+        "outcome-runtime: this host holds no confirmed execution and child session for " +
+        "attempt " +
+        JSON.stringify(binding.attempt.attemptId) +
+        " (graph " +
+        JSON.stringify(binding.attempt.graphId) +
+        ", node " +
+        JSON.stringify(binding.attempt.nodeId) +
+        "), so the invocation this submission arrives from cannot be checked against " +
+        "it — a worker submission is settled only by the attempt's own worker, and " +
+        "nothing was written",
+    });
+  }
+  if (session.kind === "none") {
+    return Object.freeze({
+      code: HOST_WORKER_ABSENT_CODE,
+      path: "$.workerSession" as const,
+      message:
+        "outcome-runtime: attempt " +
+        JSON.stringify(binding.binding.attemptId) +
+        " is bound to the worker session " +
+        JSON.stringify(binding.binding.workerSessionId) +
+        ", but the host attributes NO session to this submission, so the binding cannot " +
+        "be checked — nothing was written",
+    });
+  }
+  if (session.sessionId === binding.binding.workerSessionId) return undefined;
+  return Object.freeze({
+    code: HOST_WORKER_SESSION_MISMATCH_CODE,
+    path: "$.workerSession" as const,
+    message:
+      "outcome-runtime: attempt " +
+      JSON.stringify(binding.binding.attemptId) +
+      " was dispatched as the worker session " +
+      JSON.stringify(binding.binding.workerSessionId) +
+      " (host execution " +
+      JSON.stringify(binding.binding.executionId) +
+      "), but this submission arrives from session " +
+      JSON.stringify(session.sessionId) +
+      " — a submission settles an attempt only from the invocation the platform " +
+      "created for that attempt's worker, so nothing was written",
+  });
+}
+
 // ── Primitives ──────────────────────────────────────────────────────────────
 
 /** Whether a value is a PLAIN, non-array record. */
@@ -446,6 +1012,23 @@ function hasExactKeys(
   const own = Object.keys(record);
   if (own.length !== keys.length) return false;
   return keys.every((key) => own.includes(key));
+}
+
+/**
+ * Whether a record's own enumerable keys are EXACTLY the required set plus a
+ * subset of the optional one — no missing required key and no unknown key.
+ */
+function hasKeysWithin(
+  record: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const own = Object.keys(record);
+  for (const key of required) {
+    if (!own.includes(key)) return false;
+  }
+  const allowed = new Set([...required, ...optional]);
+  return own.every((key) => allowed.has(key));
 }
 
 /** Describe a rejected value for a diagnostic without ever throwing. */

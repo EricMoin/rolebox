@@ -1203,14 +1203,26 @@ export async function apply(
   // one path-shaped part of the boundary — `credential-vault.ts` states why it
   // is not isolation by itself and what the vault does NOT put on disk.
   const outcomeStoreRoot = graphStoreRoot(getDataDir(), process.cwd());
-  // D9 IS NOT DECLARED BY THIS HOST, and that is the honest decision: the dsh
-  // platform attributes a dispatched worker's own tool call to the WORKER's
-  // session and agent (tool-factory.ts builds the context from the executing
-  // agent), never to the declaring invocation that armed the attempt. Declaring
-  // the identity capability would therefore refuse the very submission the
-  // delivery handoff asks the worker to make (host-identity-mismatch). The
-  // bearer credential still binds every submission to its attempt; nothing else
-  // is weakened, and no identity is recorded on an attempt.
+  // TWO DIFFERENT SUBJECTS, TWO DIFFERENT DECISIONS.
+  //
+  // D9 IS NOT DECLARED. The runtime's dispatch-identity capability binds an
+  // attempt to the invocation that ARMED it — the declaring parent. That is
+  // attribution: the dsh platform attributes a dispatched worker's own tool
+  // call to the WORKER's session (the tool context is built for the executing
+  // agent), so a check against the declaring invocation would refuse exactly
+  // the submission the delivery handoff asks the worker to make
+  // (host-identity-mismatch), and a parent session is not the worker's
+  // identity.
+  //
+  // THE WORKER BINDING IS DECLARED, because this host CAN substantiate it: the
+  // dsh type documents that a local subagent run's id IS the published child
+  // session id (`DshSubagentRun.id`), and that is the value `onStarted` hands
+  // `confirmExecution` — and the session the platform attributes the worker's
+  // own tool calls to. The host therefore answers "the worker of attempt X is
+  // child session Y" from its durable execution record, and the submission
+  // ingress refuses a call that arrives from any other session. The bearer
+  // credential still binds the submission to its attempt: the worker binding
+  // is an ADDITIONAL constraint, never a replacement.
   outcomeHost = OutcomeHost.open({
     workspaceDir: process.cwd(),
     storeRoot: outcomeStoreRoot,
@@ -1220,6 +1232,10 @@ export async function apply(
     // platform boundary a durable value would need.
     validators: createValidatorRegistry([]),
     declareInvocationIdentity: false,
+    // The platform's own child-session fact, read back from the confirmed
+    // execution: for a local dsh run the run id IS the published child session
+    // id, so the worker of an attempt is the session `onStarted` reported.
+    workerSessionOf: (execution) => execution.executionId,
   });
   // The outcome toolset: the four entries that operate on a DECLARED graph.
   // No manager / dispatch seam is injected, so it can never build a legacy
@@ -1228,8 +1244,12 @@ export async function apply(
     directory: process.cwd(),
     stateDir: process.cwd(),
     credentialIsolation: outcomeHost.credentialIsolation,
-    // No hostIdentity: see the OutcomeHost.open decision above — this host does
-    // not declare a capability it cannot substantiate.
+    // THE WORKER-IDENTITY CAPABILITY, not the D9 one: the identity option
+    // carries whichever shape the host declared, and this shape names the
+    // child session the platform created for the attempt's worker. Without it
+    // the session a submission arrives from would not be an authentication
+    // factor at all.
+    hostIdentity: outcomeHost.workerIdentity,
     outcomeDispatch: outcomeHost.dispatch,
     outcomeValidators: createValidatorRegistry([]),
     outcomeArtifactRoot: process.cwd(),

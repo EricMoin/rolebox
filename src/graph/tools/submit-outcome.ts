@@ -84,10 +84,16 @@ import {
   type CredentialIsolationCapability,
 } from "../outcome/credential-isolation.ts";
 import {
-  hostIdentityRefusal,
+  hostWorkerBindingRefusal,
+  hostWorkerIdentityRefusal,
+  readCurrentWorkerSession,
   readHostIdentityCapability,
+  readHostWorkerBindingFor,
+  readHostWorkerIdentityCapability,
   type HostIdentityCapability,
+  type HostWorkerIdentityCapability,
 } from "../outcome/host-identity.ts";
+import { attemptEntryHoldingCredential } from "../outcome/attempt-credential.ts";
 import {
   createValidatorRegistry,
   type ValidatorRegistry,
@@ -395,12 +401,24 @@ export interface SubmitOutcomeDeps {
    */
   readonly credentialIsolation?: CredentialIsolationCapability;
   /**
-   * The HOST's invocation-identity capability (D9), threaded to the runtime
-   * unchanged. It is the ADDITIONAL constraint on top of the bearer credential:
-   * an attempt dispatched under a host identity is settled only by a submission
-   * the host attributes to the same invocation. OMITTED is legal and is the
-   * pre-existing behavior — nothing is recorded and nothing is checked — while a
-   * value this build CANNOT READ refuses the ingress before a ledger is opened
+   * The HOST's identity capability, in ONE of two readable shapes:
+   *
+   * - the WORKER-identity capability — what the shipped entries inject. The
+   *   submission is authenticated HERE, before the acceptance core: the
+   *   session the host attributes to THIS call must be the child session the
+   *   platform created for the attempt's worker, and an attempt with no
+   *   confirmed binding is refused rather than settled on its credential
+   *   alone. The capability is NOT threaded to the runtime (the two shapes are
+   *   told apart by the reader, and the declaring-invocation check is a
+   *   different subject).
+   * - the strict version-1 invocation identity (D9) — threaded to the runtime
+   *   unchanged. It is the ADDITIONAL constraint on top of the bearer
+   *   credential: an attempt dispatched under a host identity is settled only
+   *   by a submission the host attributes to the same invocation.
+   *
+   * OMITTED is legal for both and is the pre-existing behavior — nothing is
+   * recorded and nothing is checked — while a value this build CANNOT READ
+   * refuses the ingress before a ledger is opened
    * (`host-identity-unavailable`), because dropping a declared constraint
    * silently is the one outcome this rule must not produce.
    */
@@ -455,12 +473,18 @@ export async function submitDeclaredOutcome(
         unprotected.message,
     );
   }
-  // THE HOST IDENTITY GATE (D9) RUNS BEFORE ANY STORE IS OPENED, exactly like
-  // the credential gate: a capability this build cannot read is a declared
+  // THE HOST IDENTITY GATE RUNS BEFORE ANY STORE IS OPENED, exactly like the
+  // credential gate: a capability this build cannot read is a declared
   // constraint it must not silently drop, so the ingress refuses instead of
   // resolving the submission under an identity check nobody can perform. No
-  // capability at all is NOT a refusal — the binding is simply not enabled.
-  const unreadableHostIdentity = hostIdentityRefusal(deps.hostIdentity);
+  // capability at all is NOT a refusal — neither binding is then enabled.
+  //
+  // TWO READABLE SHAPES, TWO DIFFERENT SUBJECTS: the worker-identity
+  // capability (checked below, before the acceptance core) and the strict
+  // D9 identity (threaded to the runtime). The reader — not a boolean, not a
+  // flag — decides which one the host declared.
+  const workerIdentity = readHostWorkerIdentityCapability(deps.hostIdentity);
+  const unreadableHostIdentity = hostWorkerIdentityRefusal(deps.hostIdentity);
   if (unreadableHostIdentity !== undefined) {
     throw new OutcomeSubmissionRefusedError(
       "host-identity-unavailable",
@@ -487,8 +511,11 @@ export async function submitDeclaredOutcome(
     );
   }
   // The gate above admitted only an ABSENT or READABLE capability, so this
-  // normalization only ever lifts a readable host declaration. The ledger is
-  // opened at the SAME root the plan was read from (see `storeDirectory`).
+  // normalization only ever lifts a readable STRICT declaration: the
+  // worker-identity shape has different keys and is never read as one, which
+  // is what keeps the declaring-invocation check off the worker path. The
+  // ledger is opened at the SAME root the plan was read from (see
+  // `storeDirectory`).
   const hostIdentity = readHostIdentityCapability(deps.hostIdentity);
   const ledger = await SqliteAcceptanceLedger.create(
     workspaceOf(target, storeDirectory),
@@ -506,6 +533,17 @@ export async function submitDeclaredOutcome(
         ? {}
         : { completionPolicies: deps.completionPolicies }),
     });
+    // THE WORKER-CONTEXT CHECK RUNS BEFORE THE ACCEPTANCE CORE (P2 item 2).
+    // A submission must arrive from the invocation the platform created for
+    // the attempt's worker; the credential, the capability scope and the
+    // attempt's currency are the core's own checks and run after this. A
+    // refusal here writes nothing — no receipt, no event, no state, no effect.
+    if (workerIdentity !== undefined) {
+      const workerRefusal = workerContextRefusal(runtime, plan, args, workerIdentity);
+      if (workerRefusal !== undefined) {
+        return refuseBeforeAcceptance(plan, args, workerRefusal);
+      }
+    }
     const proposal = {
       nodeId: args.node_id,
       outcomeId: args.outcome_id,
@@ -522,6 +560,94 @@ export async function submitDeclaredOutcome(
   } finally {
     ledger.close();
   }
+}
+
+// ── The worker-context authentication ───────────────────────────────────────
+
+/**
+ * Authenticate the invocation this submission actually arrives from against
+ * what the host confirmed it dispatched the attempt AS.
+ *
+ * THE ORDER IS THE RULE, AND ONLY THE FIRST STEPS ARE HERE. 1. the session the
+ * host attributes to THIS call; 2. the binding the host recorded for the
+ * attempt the presented credential names; 3. only the recorded child session
+ * passes. The capability scope (the credential against the persisted digest,
+ * bound to graph/node/attempt/plan revision/permission) and the current
+ * authorization generation (the attempt is the node's CURRENT one under the
+ * PERSISTED plan revision) are the acceptance core's own checks and run after
+ * this returns.
+ *
+ * WHEN THE CHECK APPLIES, AND WHEN IT YIELDS TO A MORE PRECISE REFUSAL. The
+ * attempt is located by the SAME rule the acceptance core applies — the
+ * presented credential's digest against the persisted verifier — so a missing,
+ * unknown, tampered or other-node credential is handed to the core unchanged:
+ * `credential-missing`, `credential-unknown` and `credential-node-mismatch`
+ * are the core's answers, and this boundary must never mask them with a
+ * coarser one. Once the credential DOES name this node's current attempt, the
+ * worker binding is the question, and a host that cannot answer it refuses
+ * rather than settling on the credential alone.
+ *
+ * TOTAL: an unreadable state, a graph that never started, a malformed entry
+ * and a missing credential all answer `undefined` (the core reports each of
+ * them by name). This function never throws and never writes.
+ *
+ * THE LOCATE IS A READ, AND THE CORE RE-READS. The state this check locates
+ * the attempt in is the SAME authoritative snapshot the acceptance core reads
+ * again inside its transaction, so a state that moves between the two reads
+ * can never turn a refusal into an acceptance: the core resolves the
+ * credential itself, and an attempt this check authenticated that the core no
+ * longer holds is refused there (`credential-unknown`).
+ */
+function workerContextRefusal(
+  runtime: OutcomeGraphRuntime,
+  plan: CompiledPlan,
+  args: GraphSubmitOutcomeArgs,
+  capability: HostWorkerIdentityCapability,
+): SubmitOutcomeDiagnostic | undefined {
+  if (args.credential === undefined) return undefined;
+  let state: OutcomeGraphState | undefined;
+  try {
+    state = runtime.state();
+  } catch {
+    // An unreadable snapshot is the acceptance core's refusal to make, with
+    // its own code and path; this check adds nothing by guessing one here.
+    return undefined;
+  }
+  if (state === undefined) return undefined;
+  const entry = attemptEntryHoldingCredential(state.nodes, args.credential);
+  if (entry === undefined) return undefined;
+  if (entry.nodeId !== args.node_id) return undefined;
+  const attemptId = entry.attemptId;
+  if (attemptId === undefined) return undefined;
+  const binding = readHostWorkerBindingFor(capability, {
+    graphId: plan.graphId,
+    nodeId: entry.nodeId,
+    attemptId,
+  });
+  const session = readCurrentWorkerSession(capability);
+  const refusal = hostWorkerBindingRefusal(binding, session);
+  return refusal === undefined
+    ? undefined
+    : { code: refusal.code, message: refusal.message, path: refusal.path };
+}
+
+/**
+ * The tool's answer when the ingress refuses BEFORE the acceptance core: the
+ * same shape a runtime refusal renders as, with `refusals` non-empty and no
+ * decision, attempt or submission — nothing ran and nothing was written.
+ */
+function refuseBeforeAcceptance(
+  plan: CompiledPlan,
+  args: GraphSubmitOutcomeArgs,
+  refusal: SubmitOutcomeDiagnostic,
+): GraphSubmitOutcomeResult {
+  return {
+    graph_id: plan.graphId,
+    node_id: args.node_id,
+    outcome_id: args.outcome_id,
+    plan_revision: plan.planRevision,
+    refusals: [refusal],
+  };
 }
 
 /** The store directory a submission's ledger is opened at. */

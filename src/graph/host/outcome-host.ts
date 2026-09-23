@@ -28,6 +28,15 @@
  * dispatched worker is a separate agent session whose own tool calls are
  * attributed to the worker, never to the declaring invocation.
  *
+ * WHAT THE SHIPPED HOSTS DECLARE INSTEAD. Declining D9 is not declining to
+ * check anything: the same entries inject {@link OutcomeHost.workerIdentity},
+ * the binding of an attempt to the CHILD SESSION the platform created for its
+ * worker, and the submission ingress refuses a call that arrives from any other
+ * session ({@link OutcomeHostOptions.workerSessionOf} says where the session
+ * comes from). The two capabilities name two different subjects — the declaring
+ * controller and the actual worker — and a host declares the one it can
+ * substantiate.
+ *
  * WHO RUNS THE FIRST DISPATCH. A declared graph is persisted by
  * `graph_declare` and dispatched by nobody in the tool layer. The host calls
  * {@link OutcomeHost.startDeclaredGraph} from its declaration seam: that opens
@@ -71,7 +80,12 @@ import type {
   CredentialIsolationCapability,
   DurableCredentialStore,
 } from "../outcome/credential-isolation.ts";
-import type { HostIdentityCapability } from "../outcome/host-identity.ts";
+import type {
+  HostIdentityCapability,
+  HostWorkerAttemptRef,
+  HostWorkerBinding,
+  HostWorkerIdentityCapability,
+} from "../outcome/host-identity.ts";
 import {
   createValidatorRegistry,
   type ValidatorRegistry,
@@ -82,6 +96,7 @@ import type {
   HostDispatchInvocation,
 } from "./dispatch-host.ts";
 import type { OutcomeDispatchEffectKey } from "../outcome/dispatch-effects.ts";
+import { dispatchEffectKeyOf } from "../outcome/dispatch-effects.ts";
 import type {
   OutcomeEffectDivergence,
   OutcomeRuntimeRefusal,
@@ -101,8 +116,11 @@ import {
 } from "./completion-bridge.ts";
 import {
   createHostInvocationHolder,
+  createHostWorkerSessionHolder,
   hostInvocationIdentity,
+  hostWorkerIdentityCapability,
   type HostInvocationHolder,
+  type HostWorkerSessionHolder,
 } from "./identity.ts";
 
 // ── Options and result shapes ───────────────────────────────────────────────
@@ -156,11 +174,32 @@ export interface OutcomeHostOptions {
    * workers submit from their OWN invocations (the shipped dsh and Pi entries:
    * a worker is a separate agent session, not the declaring one) cannot
    * substantiate that, and declaring it would refuse exactly the submissions
-   * the delivery handoff asks the worker to make. Such a host passes `false`:
-   * every other guarantee is unchanged — the bearer credential still binds a
-   * submission to its attempt — and no identity is recorded on an attempt.
+   * the delivery handoff asks the worker to make. Such a host passes `false`
+   * and uses {@link workerSessionOf} instead: the DECLARING invocation stays
+   * attribution/notification, while the worker is bound by the child session
+   * the platform created ({@link OutcomeHost.workerIdentity}), which is the
+   * subject a worker's own tool call actually arrives from.
    */
   readonly declareInvocationIdentity?: boolean;
+  /**
+   * How this host derives the CHILD SESSION the platform created for one
+   * confirmed execution.
+   *
+   * This is the one platform-specific fact the generic host layer cannot read
+   * for itself: dsh publishes the child session as the run id it returns
+   * ({@link HostExecutionIdentity.executionId} for a local run), and Pi returns
+   * a dispatch task whose `sessionId` is the worker's session. The host calls
+   * this with the CONFIRMED execution identity — never with a caller-supplied
+   * value — the moment a submission is judged, and answers `undefined` when the
+   * platform cannot name the session (an unknown task, a run this host did not
+   * start): the attempt is then unbound and nothing settles it through the
+   * worker path.
+   *
+   * OMITTED for a host that cannot substantiate the child session: the worker
+   * binding is then not enabled for it, exactly as omitting the capability
+   * leaves the D9 binding unenabled.
+   */
+  readonly workerSessionOf?: (execution: HostExecutionIdentity) => string | undefined;
 }
 
 /** One host invocation's attribution, as the declaring tool call saw it. */
@@ -238,7 +277,17 @@ export class OutcomeHost {
    */
   private readonly sharedStore: GraphStore | undefined;
   private readonly holder: HostInvocationHolder;
+  /**
+   * The session of the operation being performed (the worker side), moved by
+   * {@link bindTools} for each tool call from the platform's own context.
+   */
+  private readonly workerSessions: HostWorkerSessionHolder;
+  private readonly workerCapability: HostWorkerIdentityCapability;
   private readonly declareInvocationIdentity: boolean;
+  /** The platform's child-session derivation, when the host declared one. */
+  private readonly workerSessionOf:
+    | ((execution: HostExecutionIdentity) => string | undefined)
+    | undefined;
   private readonly dispatchAdapter: HostOutcomeDispatch;
   /** One bridge per graph — a settlement needs the graph's own saved plan. */
   private readonly bridges = new Map<string, HostDispatchCompletionBridge>();
@@ -278,6 +327,13 @@ export class OutcomeHost {
       ...(shared === undefined ? {} : { store: shared }),
     });
     this.holder = createHostInvocationHolder();
+    this.workerSessions = createHostWorkerSessionHolder();
+    this.workerSessionOf = options.workerSessionOf;
+    this.workerCapability = hostWorkerIdentityCapability("host:worker-identity", {
+      current: () => this.holder.current(),
+      currentSession: () => this.workerSessions.currentSession(),
+      bindingFor: (attempt) => this.workerBindingOf(attempt),
+    });
     this.declareInvocationIdentity = options.declareInvocationIdentity ?? true;
     this.dispatchAdapter = new HostOutcomeDispatch({
       executions: this.executions,
@@ -309,6 +365,27 @@ export class OutcomeHost {
     return this.holder.capability;
   }
 
+  /**
+   * The host's WORKER-identity capability — what a worker submission is judged
+   * by: the session the call arrives from, checked against the child session
+   * the platform created for the attempt.
+   *
+   * WHAT IT ANSWERS FROM. `currentSession()` reads the holder
+   * {@link bindTools} moves per tool call from the platform's own context, and
+   * `bindingFor()` reads the host's DURABLE execution record (the row the
+   * platform's confirmation created) through {@link workerSessionOf}. Neither
+   * reads a caller-supplied string: the binding is a fact the platform minted.
+   *
+   * This is the capability the shipped entries inject into the toolset
+   * (`createGraphToolSet({ hostIdentity: host.workerIdentity })`), and it is
+   * deliberately NOT the capability the runtime's D9 check consumes — that one
+   * is {@link hostIdentity}, and the two are distinct shapes so a host cannot
+   * accidentally declare the wrong subject.
+   */
+  get workerIdentity(): HostWorkerIdentityCapability {
+    return this.workerCapability;
+  }
+
   /** The dispatch adapter the outcome runtime and the toolset dispatch through. */
   get dispatch(): HostOutcomeDispatch {
     return this.dispatchAdapter;
@@ -335,19 +412,33 @@ export class OutcomeHost {
    * Settle the attempt the host observed finishing, through the graph's own
    * saved plan. The report is the bridge's — see `completion-bridge.ts`.
    *
-   * THE SETTLEMENT RUNS UNDER THE ATTEMPT'S OWN DISPATCH ATTRIBUTION. A
-   * completion is observed later, out of band, when no invocation is in effect;
-   * the runtime still compares the host's current identity with the one it
-   * recorded when the attempt was armed. So the host re-enters the identity the
-   * delivery captured on the binding — or, for a host that declared no identity,
-   * the graph's own declaring invocation — for exactly this call and restores
-   * the ambient attribution afterwards. That window is also what arms the
-   * attempt's SUCCESSOR, so the dispatch it triggers names the same parent the
-   * entry attempt ran under, whatever the ambient attribution is at the moment
-   * the platform reports the completion. An attempt that recorded NO identity
-   * is settled with none — nothing fabricates an attribution for it — and an
-   * attempt this host never dispatched stays unbound and is reported by the
-   * bridge.
+   * THE HOST COMPLETION AUTHORITY HAS ITS OWN SOURCE, AND IT IS NOT THE
+   * DECLARING PRINCIPAL. The completion is observed later, out of band, long
+   * after the declaring call returned; the host settles it as the authority
+   * that created the execution, never by impersonating the invocation that
+   * armed the attempt and never by asking the worker for the bearer value it
+   * was handed. Which of the two modes applies is decided by what the host
+   * DECLARED, exactly as it is on the submission path:
+   *
+   * - WORKER MODE (`declareInvocationIdentity: false`, the shipped hosts): the
+   *   completion is authenticated against the host's OWN DURABLE execution
+   *   record — the row the platform's confirmation wrote, naming the real
+   *   execution id. An attempt with no such row is reported UNBOUND and nothing
+   *   is written, because an in-process delivery observation without a
+   *   confirmed host execution is not a completion fact. The holder is NOT
+   *   touched: the declaring invocation is attribution, and re-entering it
+   *   would make the authority pretend to be a principal it is not.
+   * - D9 MODE (`declareInvocationIdentity: true`): the host declared that the
+   *   dispatch and the settlement share one invocation, so it re-enters the
+   *   identity the delivery captured (or the graph's own declaring invocation)
+   *   for exactly this call and restores the ambient attribution afterwards.
+   *   That window is also what arms the attempt's SUCCESSOR, so the dispatch it
+   *   triggers names the same parent the entry attempt ran under.
+   *
+   * The bearer value is never recovered from anywhere but the host's own vault
+   * (the bridge's contract), and this method adds no second place it could come
+   * from. An attempt this host never dispatched stays unbound and is reported by
+   * the bridge.
    */
   async complete(
     graphId: string,
@@ -355,21 +446,55 @@ export class OutcomeHost {
   ): Promise<HostCompletionReport> {
     const bridge = this.bridgeFor(graphId);
     const binding = bridge.bindingFor({ graphId, attemptId });
-    const dispatchIdentity = binding?.dispatchIdentity ?? this.originIdentityOf(graphId);
-    const previous = this.holder.current();
-    if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
-    try {
-      // The settlement's own acceptance transaction wrote the run state to the
-      // store, and the query paths read it from there: there is no second
-      // durable record left to refresh.
-      return await bridge.complete({ graphId, attemptId });
-    } finally {
-      if (previous === undefined) {
-        this.holder.clear();
-      } else {
-        this.holder.set(previous);
+    if (this.declareInvocationIdentity) {
+      const dispatchIdentity = binding?.dispatchIdentity ?? this.originIdentityOf(graphId);
+      const previous = this.holder.current();
+      if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
+      try {
+        // The settlement's own acceptance transaction wrote the run state to the
+        // store, and the query paths read it from there: there is no second
+        // durable record left to refresh.
+        return await bridge.complete({ graphId, attemptId });
+      } finally {
+        if (previous === undefined) {
+          this.holder.clear();
+        } else {
+          this.holder.set(previous);
+        }
       }
     }
+    // WORKER MODE. An attempt this host never delivered is the bridge's own
+    // `unbound` report (unchanged); one it DID deliver must also have a
+    // confirmed host execution before the authority settles anything.
+    if (binding !== undefined) {
+      let execution: HostExecutionIdentity | undefined;
+      try {
+        execution = this.executionBindingOf({ graphId, attemptId });
+      } catch (error) {
+        return Object.freeze({
+          kind: "unbound" as const,
+          attemptId,
+          reason:
+            "the host's execution record for this attempt could not be read (" +
+            errorText(error) +
+            "), so no confirmed host execution authenticates this completion — " +
+            "nothing was written",
+        });
+      }
+      if (execution === undefined) {
+        return Object.freeze({
+          kind: "unbound" as const,
+          attemptId,
+          reason:
+            "this host delivered attempt " +
+            JSON.stringify(attemptId) +
+            " but holds no CONFIRMED host execution for it, so the completion has no " +
+            "execution source to authenticate against — a delivery observation alone " +
+            "is not a completion fact and nothing was written",
+        });
+      }
+    }
+    return bridge.complete({ graphId, attemptId });
   }
 
   /**
@@ -510,6 +635,7 @@ export class OutcomeHost {
   ): Record<string, CanonicalToolDef> {
     return bindOutcomeToolInvocation(tools, {
       holder: this.holder,
+      workerSession: this.workerSessions,
       ...(getEffectiveAgent === undefined ? {} : { getEffectiveAgent }),
     });
   }
@@ -616,6 +742,58 @@ export class OutcomeHost {
     return hostInvocationIdentity(origin.sessionId, origin.agent);
   }
 
+  /**
+   * The host's CONFIRMED execution for one attempt, from its durable record.
+   *
+   * A row is a host execution only when the platform confirmed it — state
+   * `created` carries the platform's real id, and the store's own CHECK makes
+   * "created without an id" unrepresentable. `pending`/`creating` rows are
+   * deliberately NOT an execution: whether one exists is unknown, and a
+   * completion settled against a guess is exactly what this rule prevents.
+   */
+  private executionBindingOf(attempt: {
+    readonly graphId: string;
+    readonly attemptId: string;
+  }): HostExecutionIdentity | undefined {
+    const row = this.executions.read(
+      dispatchEffectKeyOf(attempt.graphId, attempt.attemptId),
+    );
+    if (row === undefined) return undefined;
+    if (row.attemptId !== attempt.attemptId) return undefined;
+    if (row.state !== "created" || row.execution === undefined) return undefined;
+    return row.execution;
+  }
+
+  /**
+   * What this host confirmed it dispatched one attempt AS — the binding a
+   * worker submission is checked against.
+   *
+   * THE TWO FACTS AND WHERE THEY COME FROM. The real execution/task id is the
+   * durable record's own; the child session is derived from it by the
+   * platform-specific {@link OutcomeHostOptions.workerSessionOf}, which the
+   * shipped entries supply (dsh publishes the child session as the run id, Pi
+   * returns the dispatch task's session). Neither is supplied by the caller of
+   * a tool: a submission can present a credential, never its own binding.
+   *
+   * `undefined` means "not bound" — no confirmed execution, or a platform that
+   * cannot name the session it created — and the ingress refuses rather than
+   * falling back to a session-only or credential-only check.
+   */
+  private workerBindingOf(attempt: HostWorkerAttemptRef): HostWorkerBinding | undefined {
+    const execution = this.executionBindingOf(attempt);
+    if (execution === undefined) return undefined;
+    const workerSessionId = this.workerSessionOf?.(execution);
+    if (workerSessionId === undefined || workerSessionId.length === 0) return undefined;
+    return Object.freeze({
+      graphId: attempt.graphId,
+      nodeId: attempt.nodeId,
+      attemptId: attempt.attemptId,
+      executionId: execution.executionId,
+      ...(execution.taskId === undefined ? {} : { taskId: execution.taskId }),
+      workerSessionId,
+    });
+  }
+
   /** The per-graph completion bridge, created on first use. */
   private bridgeFor(graphId: string): HostDispatchCompletionBridge {
     const existing = this.bridges.get(graphId);
@@ -713,6 +891,13 @@ export class OutcomeHost {
 export interface OutcomeToolAttribution {
   /** The host's invocation holder (D9). */
   readonly holder: HostInvocationHolder;
+  /**
+   * The holder for the session THIS call arrives from — the worker side of the
+   * identity model. Moved with the invocation holder from the same platform
+   * context, and read by {@link OutcomeHost.workerIdentity}; omitting it leaves
+   * the worker binding unable to name the current session.
+   */
+  readonly workerSession?: HostWorkerSessionHolder;
   /** Platform acting-agent resolver (`context.agent` wins when populated). */
   readonly getEffectiveAgent?: (sessionID?: string) => string;
 }
@@ -752,10 +937,17 @@ function withInvocation(
           ? context.agent
           : (attribution.getEffectiveAgent?.(context?.sessionID) ?? "");
       attribution.holder.set(hostInvocationIdentity(context?.sessionID, agent));
+      // THE WORKER SIDE, FROM THE SAME PLATFORM CONTEXT. The session is taken
+      // RAW — the D9 pair needs an agent too, while the worker binding is the
+      // session the platform itself attributes the call to. An empty/absent
+      // session clears the holder, and a submission under no session is refused
+      // by name rather than settled on its credential alone.
+      attribution.workerSession?.set(context?.sessionID);
       try {
         return await inner(args as ToolExecuteArgs, context);
       } finally {
         attribution.holder.clear();
+        attribution.workerSession?.clear();
       }
     },
   };
