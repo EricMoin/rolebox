@@ -246,6 +246,21 @@ describe("graph_submit_outcome — the vertical path", () => {
     expect(accepted.refusals).toEqual([]);
     expect(toolRequests.map((request) => request.attemptId)).toEqual(["ship#2"]);
 
+    // The successor's dispatch effect is STARTED — created through the tool
+    // set's host in the same call (D8), never left as a `pending` row a later
+    // recovery would create a second time. `work#1`'s effect is already DONE:
+    // its attempt settled in this submission.
+    const afterSuccessor = await openLedger(dir);
+    try {
+      expect(
+        afterSuccessor
+          .pendingEffects(graphId)
+          .map((effect) => effect.effectId + "@" + effect.status),
+      ).toEqual(["dispatch:ship#2@started"]);
+    } finally {
+      afterSuccessor.close();
+    }
+
     // Terminal outcome ends the run.
     const last = await ts.graph_submit_outcome({
       graph_id: graphId,
@@ -258,8 +273,9 @@ describe("graph_submit_outcome — the vertical path", () => {
     // Plan order, not declaration order: the compiler fixes the node order.
     expect([...(last.settled_nodes ?? [])].sort()).toEqual(["ship", "work"]);
 
-    // The durable record is the ledger: two accepted events, one pending
-    // successor dispatch effect, one graph-state row.
+    // The durable record is the ledger: two accepted events, no unsettled
+    // dispatch effect (each attempt's effect is DONE once that attempt settled)
+    // and one graph-state row.
     const ledger = await openLedger(dir);
     try {
       // Both submissions were pinned to the same clock, so the ledger's
@@ -270,9 +286,7 @@ describe("graph_submit_outcome — the vertical path", () => {
           .map((event) => event.attemptId)
           .sort(),
       ).toEqual(["ship#2", "work#1"]);
-      expect(
-        ledger.pendingEffects(graphId).map((effect) => effect.effectId + "@" + effect.status),
-      ).toEqual(["dispatch:ship#2@pending"]);
+      expect(ledger.pendingEffects(graphId)).toEqual([]);
       expect(ledger.readGraphState(graphId)?.planRevision).toBe(declared.plan_revision);
     } finally {
       ledger.close();
@@ -281,9 +295,11 @@ describe("graph_submit_outcome — the vertical path", () => {
 
   it("derives identity and the plan revision itself: forged args cannot move them", async () => {
     const dir = makeTmpDir("submit-outcome-forge-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -358,9 +374,11 @@ describe("graph_submit_outcome — the vertical path", () => {
 
   it("returns structured repair diagnostics for a refusal and writes nothing", async () => {
     const dir = makeTmpDir("submit-outcome-refusal-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -431,11 +449,15 @@ describe("graph_submit_outcome — the vertical path", () => {
       "credential-unknown",
     ]);
 
-    // Nothing was written by any of the refusals.
+    // Nothing was written by any of the refusals: no event, and no dispatch
+    // effect beyond the entry attempt's own D8 row (which `start()` committed
+    // with the starting snapshot) — no successor was ever armed.
     const ledger = await openLedger(dir);
     try {
       expect(ledger.acceptedEvents(graphId)).toEqual([]);
-      expect(ledger.pendingEffects(graphId)).toEqual([]);
+      expect(ledger.pendingEffects(graphId).map((effect) => effect.effectId)).toEqual([
+        "dispatch:work#1",
+      ]);
     } finally {
       ledger.close();
     }
@@ -444,9 +466,11 @@ describe("graph_submit_outcome — the vertical path", () => {
   it("reports a rejected decision's per-requirement outcomes and accepts a repaired submission", async () => {
     const dir = makeTmpDir("submit-outcome-rejected-");
     let gate: ValidationOutcome = { kind: "fail", reason: "evidence is insufficient" };
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
       outcomeValidators: createValidatorRegistry([
         { id: GATE_ID, version: GATE_VERSION, implementation: () => gate },
@@ -608,9 +632,11 @@ describe("graph_submit_outcome — registration and completion authority", () =>
 
   it("executes through the registered tool and renders a legacy refusal as a clear failure", async () => {
     const dir = makeTmpDir("submit-outcome-registered-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -653,10 +679,12 @@ describe("graph_submit_outcome — registration and completion authority", () =>
   it("is the ONLY completion source: every legacy entry point refuses and the legacy port is never called", async () => {
     const dir = makeTmpDir("submit-outcome-authority-");
     const legacyPort = new CountingDispatch();
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       dispatch: legacyPort,
       outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });

@@ -115,7 +115,7 @@ import {
   type CredentialIsolationAdapter,
 } from "../outcome/credential-isolation.ts";
 import type {
-  OutcomeDispatchSeam,
+  OutcomeDispatchAdapter,
   OutcomeResumeResult,
 } from "../outcome/runtime.ts";
 import { logWarn } from "./log-warn.ts";
@@ -149,9 +149,15 @@ import { createEngine } from "./index.ts";
  * - `resumed` — the graph had a ledger state and was continued from it: the
  *   line names the plan revision, the phase and every armed node/attempt.
  * - `dispatched` — the dispatch requests this sweep actually launched
- *   (`graph:node#attempt`). A launch happens only for a `pending` dispatch
- *   effect the state corroborates, and the effect is marked `started` first,
- *   which is what keeps a second sweep from launching it again.
+ *   (`graph:node#attempt`). A launch happens only for a dispatch effect the
+ *   state corroborates and the HOST confirms has no execution yet (`absent`);
+ *   the effect is marked `started` only AFTER the create returns, so a second
+ *   sweep resolves the row again and re-creates nothing.
+ * - `reconciled` — every unsettled effect the sweep RESOLVED WITHOUT
+ *   LAUNCHING, with the host fact that resolved it (`graph:effectId:reason`):
+ *   the host reported the execution as already created, or the row already
+ *   recorded a create that returned. This is the crash window being closed by
+ *   asking the host instead of retrying.
  * - `armed` — every node the persisted state records as in flight
  *   (`graph:node#attempt`), including one whose effect is already `started`
  *   (a dead process began it) and one recorded by an earlier `start()`.
@@ -174,6 +180,8 @@ export interface OutcomeRecoveryReport {
   resumed: string[];
   /** Dispatch effects actually launched by this sweep. */
   dispatched: string[];
+  /** Unsettled effects this sweep resolved without launching, with the reason. */
+  reconciled: string[];
   /** Nodes the persisted state records as in flight, with their attempts. */
   armed: string[];
   /** Effects still pending or started after this sweep. */
@@ -316,15 +324,19 @@ export interface RecoverInterruptedGraphsOptions {
   graphEvents?: GraphEventRecorder;
 
   /**
-   * Optional dispatch seam for resumed/first-run OUTCOME-protocol graphs
-   * (C3c). The outcome run path launches a node by calling this seam; executing
-   * the node's agent is the deferred effect-EXECUTION work, so the default is a
-   * no-op and a launched effect stays `started` (and therefore reported in
-   * `outcomeProtocol.unsettledEffects`) for a later process to reconcile.
-   * Injecting a real seam here is what wires an outcome graph's nodes to actual
-   * work.
+   * The HOST dispatch adapter for resumed/first-run OUTCOME-protocol graphs
+   * (C3c, D8). The outcome run path starts a node by calling it, and a restart
+   * asks its execution query whether a create already happened.
+   *
+   * REQUIRED IN PRACTICE: without one the sweep reports every outcome graph as
+   * refused (`dispatch-unavailable`) and opens no ledger. There is deliberately
+   * no no-op default — a no-op would let the run record a dispatch nobody
+   * performed (and hand no worker its attempt credential) while every report
+   * reads as if the node were running. A bare seam is accepted as the
+   * degenerate adapter: it can create, it cannot be queried, and a recovery that
+   * needs the query reports the effect instead of re-issuing the create.
    */
-  outcomeDispatch?: OutcomeDispatchSeam;
+  outcomeDispatch?: OutcomeDispatchAdapter;
 
   /**
    * Optional installed validator implementations for outcome-protocol graphs
@@ -374,16 +386,6 @@ export interface RecoverInterruptedGraphsOptions {
 // ── Outcome-protocol recovery (C3c) ─────────────────────────────────────────
 
 /**
- * The dispatch seam used when the caller injects none.
- *
- * A no-op on purpose: launching a node's agent is the deferred effect-EXECUTION
- * work, and the effect row is durably marked `started` before this seam runs, so
- * the launch is reported as unsettled instead of being lost. A caller with a
- * real dispatcher injects it via `outcomeDispatch`.
- */
-const NOOP_OUTCOME_DISPATCH: OutcomeDispatchSeam = () => undefined;
-
-/**
  * The validator capability used when the caller injects none: EMPTY.
  *
  * Not a silent pass: the acceptance core refuses a requirement whose exact
@@ -398,6 +400,7 @@ function emptyOutcomeRecoveryReport(): OutcomeRecoveryReport {
     started: [],
     resumed: [],
     dispatched: [],
+    reconciled: [],
     armed: [],
     unsettledEffects: [],
     stopped: [],
@@ -447,6 +450,9 @@ function recordOutcomeRecovery(
   }
   for (const request of result.dispatched) {
     bucket.dispatched.push(`${graphId}:${request.attemptId}`);
+  }
+  for (const effect of result.reconciled) {
+    bucket.reconciled.push(`${graphId}:${effect.effectId}:${effect.reason}`);
   }
   for (const node of result.armed) {
     bucket.armed.push(`${graphId}:${node.attemptId}`);
@@ -640,6 +646,21 @@ export async function recoverInterruptedGraphs(
         );
         continue;
       }
+      // NO DISPATCH ADAPTER, NO RESUME (D8). A dispatch intent recorded without
+      // a host that can create the execution is a dispatch this sweep would be
+      // claiming it performed, so the graph is REPORTED and the store is left
+      // exactly as it was — the same shape as the credential gate above, and
+      // checked before the ledger is opened.
+      if (opts.outcomeDispatch === undefined) {
+        bucket.refused.push(
+          `${label} (graph ${loaded.state.graphId}: [dispatch-unavailable] ` +
+            "no dispatch adapter is installed for this process — an outcome graph's " +
+            "dispatch effects have to be created by a host, and a no-op default would " +
+            "record dispatches nobody performed; nothing was opened and nothing was " +
+            "resumed)",
+        );
+        continue;
+      }
       const isolation = readCredentialIsolationAdapter(
         opts.outcomeCredentialIsolation,
       );
@@ -655,7 +676,7 @@ export async function recoverInterruptedGraphs(
           resumePersistedOutcomeGraph({
             state: loaded.state,
             ledger,
-            dispatch: opts.outcomeDispatch ?? NOOP_OUTCOME_DISPATCH,
+            dispatch: opts.outcomeDispatch,
             validators: opts.outcomeValidators ?? NO_OUTCOME_VALIDATORS,
             artifactRoot: opts.outcomeArtifactRoot ?? opts.directory,
             ...(opts.outcomeNow === undefined ? {} : { now: opts.outcomeNow }),

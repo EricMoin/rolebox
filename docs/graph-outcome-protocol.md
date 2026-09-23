@@ -30,6 +30,11 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   registry with the artifact-reference validator, receipt replay, and the atomic
   commit of receipt, accepted event, state and pending effects
   (`src/graph/outcome/proposal.ts`, `acceptance.ts`, `validators.ts`);
+- the unified dispatch-effect executor (D8): the intent of a first dispatch, a
+  successor dispatch and a restart recovery is one durable effect committed with
+  the state it belongs to, executed through a host adapter that creates the
+  execution and answers whether one already exists
+  (`src/graph/outcome/dispatch-effects.ts`, `runtime.ts`, `recovery.ts`);
 - the durable STOP: hard-limit exhaustion and the declared progress-stalled
   policy end the run inside the same transaction that accepts the outcome
   (`src/graph/outcome/progress.ts`, `graph-state.ts`);
@@ -44,10 +49,11 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
   cannot provide one (it writes the ledger as an ordinary file), so the outcome
   run path refuses by default until a deployment injects its own (D7);
 - the protocol-aware dispatch completion bridge: the outcome runtime is driven by
-  a synchronous scripted seam, so production dispatch settles no node through it
+  a synchronous host adapter, so production dispatch settles no node through it
   and the natural-completion SETTLEMENT path is not executed;
-- effect execution beyond that seam — in particular any cross-process effect
-  execution or reconciliation;
+- any HOST implementation of the dispatch adapter: this build ships the contract
+  and the reconciliation, and no adapter, so every production entry refuses an
+  outcome graph until a deployment injects one (D8);
 - the remaining validator capabilities: only the registry and the
   artifact-reference validator exist; the schema, command-check and approval
   validators do not;
@@ -203,6 +209,13 @@ effect ID across the crash-after-launch window. External side effects require
 their own idempotency or reconciliation; this design does not promise global
 exactly-once execution. Cancellation, timeout, and submission races resolve
 through the same serialized transition rules.
+
+This build IMPLEMENTS that reconciliation for dispatch (D8, below): a dispatch
+intent is committed in the same transaction as the state that arms it, the row
+is marked `started` only after the host's create returned, and a recovery asks
+the host whether an execution for the effect's stable id exists — `created`
+records it without a second create, `absent` creates exactly once, and an
+unanswerable query is REPORTED as unsettled work rather than guessed at.
 
 ## Loop progress
 
@@ -1850,6 +1863,92 @@ redaction.
 DEFERRED by this slice, and not implied by it: any host implementation of the
 adapter, a store this build protects itself, per-worker filesystem isolation,
 platform identity and a signature over submissions, and stage-E retirement.
+
+D8 MAKES FIRST DISPATCH, SUCCESSOR DISPATCH AND RECOVERY ONE PERSISTED EFFECT
+EXECUTOR, AND REFUSES A RUN WITH NO DISPATCHER.
+
+TWO DEFECTS WERE REPRODUCED END TO END. (1) With the entry dispatch failing
+before delivery, the graph state read `executing` and NO dispatch effect existed
+— the intent lived only in the state — so a restart dispatched nothing, refused
+nothing and merely reported one armed node: a SILENT ZERO in which nobody could
+tell whether work had started and no record named what was missing. (2) A
+successor dispatch that SUCCEEDED left its effect row `pending` (only a recovery
+ever marked one `started`), so the next process treated the row as un-launched
+and created the SAME attempt a second time: the call count went 1 -> 2 for one
+attempt.
+
+THE INTENT IS ATOMIC WITH THE STATE. `start` writes the starting snapshot and
+the entry attempts' dispatch effects in ONE ledger transaction, and an accepted
+outcome still writes the successor's effect in the same transaction as its
+receipt, accepted event and state (C2). `AcceptanceLedgerTx.writeEffect`
+(`INSERT ... ON CONFLICT DO NOTHING`) is the port method for the intent half: a
+row is `pending` when written, an existing row is left exactly as it is, and a
+status transition still goes through `markEffectStarted` / `markEffectDone`,
+which carry the terminal guard.
+
+A STATUS RECORDS A CALL THAT RETURNED; IT IS NOT A SUBSTITUTE FOR ONE. The row
+is marked `started` only AFTER the host's create returned — never before — so
+the crash window is a `pending` row, not a row that claims a launch nobody
+performed. When the attempt settles, the SAME transaction that settles it marks
+its dispatch effect `done`, so a terminal graph leaves no unsettled row behind
+and an `unsettledEffects` reading means "work still owed", not "history".
+
+THE HOST ADAPTER OWNS BOTH HALVES (`src/graph/outcome/dispatch-effects.ts`).
+`OutcomeDispatchHost = { create(request, effect), lookup(effect) }`, keyed by
+the stable `{ graphId, effectId, attemptId }` with
+`effectId = "dispatch:" + attemptId` written by ONE function for all three
+paths. `create` MUST be idempotent per `(graphId, effectId)` — at most one
+execution — and `lookup` answers `created`, `absent` or `unknown` (with a
+reason), and says `unknown` rather than guessing. A bare `(request) => void`
+seam remains accepted as the degenerate host: it can create, its `lookup` is
+`unknown`, and the restriction is visible at every entry rather than hidden.
+
+RECOVERY ASKS THE HOST, THEN ACTS ON THE ANSWER — three answers, three actions:
+
+| Row | `lookup` | Action |
+| --- | --- | --- |
+| `pending` | `created` | mark `started`, report `reconciled: host-reported-created`; **never** create |
+| `pending` | `absent` | create ONCE, then mark `started`; the commit-then-crash window |
+| `pending` | `unknown` (or no query capability) | create NOTHING; report `dispatch-unreconciled` for host/manual reconciliation |
+| `started` | any | never re-create; report `reconciled: recorded-started` (or, on an `absent` contradiction, `dispatch-unreconciled`) |
+| any | attempt settled in the state | mark `done`, report `reconciled: attempt-settled` |
+
+Neither direction of guessing is available: re-issuing a create the protocol
+cannot prove absent could run an attempt twice, and reporting success would hide
+an attempt that never started. A create that THROWS leaves the row `pending`
+(its outcome is genuinely unknown) and reports `dispatch-failed`; the next
+recovery asks again. The in-process path (`start`/`submit`) does NOT query
+first, and says why: those effects were committed by the transaction that is
+running, under attempt ids minted in it, so no earlier process can have created
+them — the create is the first attempt, not a retry.
+
+NO DISPATCHER, NO OUTCOME GRAPH. There is no no-op default anywhere. A no-op
+would let the run record a dispatch nobody performed (and hand no worker its
+attempt credential) while every report read as if the node were running. The
+runtime refuses `start`, `resume` and `submit` with `dispatch-unavailable`
+before reading or writing anything; `graph_submit_outcome` refuses with the same
+code BEFORE it opens a ledger (`OutcomeSubmissionRefusedError.reason`); and the
+startup sweep reports `[dispatch-unavailable]` in `outcomeProtocol.refused`
+before opening one, after the record's own identity has been checked, so an
+environment refusal never hides a broken record. No adapter ships in this build,
+so a deployment that has not injected one gets the refusal by construction.
+
+ENFORCED BY TESTS. `tests/graph/outcome-dispatch-effects.test.ts` reproduces
+both defects as probes (the failed first dispatch leaves
+`dispatch:work#1@pending` and the recovery reports `dispatch-unreconciled`
+instead of dispatching nothing; one successor attempt is created exactly ONCE
+across a restart, count 1), covers the three host answers and the idempotent
+second resume, pins the effect lifecycle (settlement completes the effect), and
+refuses the runtime, the ingress and the sweep without an adapter.
+`tests/graph/outcome-recovery.test.ts` covers the same paths through the startup
+sweep, `tests/graph/submit-outcome-tool.test.ts` through the model-facing
+ingress, and `tests/graph/drain-audit.test.ts` the audit's reading of a started
+row.
+
+DEFERRED by this slice, and not implied by it: any host IMPLEMENTATION of the
+adapter, the protocol-aware dispatch completion bridge, storage format 3 with
+its `2 -> 3` migrator, a cross-process effect executor beyond the adapter
+contract, and stage-E retirement.
 
 ### Definitions, locations, and comparison owners
 

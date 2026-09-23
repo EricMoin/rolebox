@@ -278,13 +278,14 @@ async function buildMixedStore(dir: string): Promise<void> {
   persistLegacy(dir, "audit.legacy.running", EnginePhase.Executing, NodeStatus.Running);
 
   // Readable + in flight (outcome): started, nothing settled — the work#1
-  // attempt is armed and no effect exists yet.
+  // attempt is armed and its dispatch effect is `started` (D8: the intent is
+  // durable from the same transaction as the state, and the create returned).
   const running = await startOutcomeGraph(dir, "audit.outcome.running");
   running.ledger.close();
 
-  // Readable + terminal (outcome): both nodes settled. The acceptance that
-  // armed the successor wrote a dispatch effect the deferred effect-execution
-  // path never marks done, so it stays unsettled — deliberately asserted below.
+  // Readable + terminal (outcome): both nodes settled, and every dispatch
+  // effect was completed by its own attempt's settlement (D8), so this graph
+  // owes nothing — deliberately asserted below.
   const complete = await startOutcomeGraph(dir, "audit.outcome.complete");
   settle(complete, "work", "done");
   settle(complete, "ship", "delivered");
@@ -388,17 +389,21 @@ describe("drain audit — classification", () => {
     expect(outcomeRunning.armed).toEqual([
       { nodeId: "work", attemptId: "work#1" },
     ]);
-    expect(outcomeRunning.unsettledEffects).toEqual([]);
+    // The in-flight attempt's dispatch effect is DURABLE and unsettled: the
+    // audit reads it from the ledger rather than inferring it from the state.
+    expect(
+      outcomeRunning.unsettledEffects?.map(
+        (effect) => effect.effectId + "@" + effect.status,
+      ),
+    ).toEqual(["dispatch:work#1@started"]);
 
-    // Readable + terminal (outcome), with the effect nobody settled.
+    // Readable + terminal (outcome), with nothing left unsettled: each
+    // dispatch effect was completed by its attempt's settlement.
     const outcomeComplete = entryOf(report, "engine-audit.outcome.complete.json");
     expect(outcomeComplete.classification).toBe("terminal");
     expect(outcomeComplete.phase).toBe("complete");
     expect(outcomeComplete.armed).toEqual([]);
-    expect(
-      outcomeComplete.unsettledEffects?.map((effect) => effect.effectId),
-    ).toEqual(["dispatch:ship#2"]);
-    expect(outcomeComplete.unsettledEffects?.[0]?.status).toBe("pending");
+    expect(outcomeComplete.unsettledEffects).toEqual([]);
     expect(outcomeComplete.blockerCodes).toEqual([]);
 
     // Unreadable / version-unknown entries: each one its own blocker.
@@ -465,7 +470,10 @@ describe("drain audit — classification", () => {
       blocked: 0,
       legacyInFlight: 1,
       outcomeInFlight: 1,
-      unsettledEffects: 0,
+      // The outcome graph's entry dispatch is a durable, unresolved EFFECT
+      // (started, awaiting its attempt's outcome) — the store owes work on the
+      // ledger as well as in the state.
+      unsettledEffects: 1,
     });
     expect(report.verdict).toBe("in-flight");
     expect(report.drained).toBe(false);
@@ -532,6 +540,19 @@ describe("drain audit — classification", () => {
     const fixture = await startOutcomeGraph(dir, "audit.outcome.complete");
     settle(fixture, "work", "done");
     settle(fixture, "ship", "delivered");
+    // The RUN PATH now completes a dispatch effect with its attempt (D8), so a
+    // completed graph holds none. This fixture writes one unsettled effect of
+    // another kind to keep the audit's own rule covered: a terminal graph whose
+    // ledger still holds an unresolved row is NOT a drained store.
+    fixture.ledger.writeEffect({
+      graphId: fixture.built.graphId,
+      effectId: "notify:final",
+      attemptId: "ship#2",
+      kind: "notify",
+      payload: { nodeId: "ship" },
+      createdAt: NOW,
+      status: "pending",
+    });
     fixture.ledger.close();
 
     const report = await auditGraphStore({ directory: dir });

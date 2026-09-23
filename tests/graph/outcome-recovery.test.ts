@@ -200,9 +200,15 @@ describe("readPersistedOutcomePlan — the saved plan and its binding", () => {
 describe("outcome-protocol restart recovery", () => {
   it("starts the first execution from the saved plan and resumes the restart from the same revision", async () => {
     const dir = makeTmpDir("outcome-recovery-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      // The ingress refuses without a dispatch adapter (D8), so the successor
+      // this test's submission arms is created through this recorder.
+      outcomeDispatch: (request) => {
+        toolRequests.push(request);
+      },
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -219,12 +225,19 @@ describe("outcome-protocol restart recovery", () => {
     expect(first.outcomeProtocol?.resumed).toEqual([]);
     expect(first.outcomeProtocol?.dispatched).toEqual([graphId + ":work#1"]);
     expect(first.outcomeProtocol?.armed).toEqual([graphId + ":work#1"]);
-    expect(first.outcomeProtocol?.unsettledEffects).toEqual([]);
+    // The entry dispatch is a DURABLE INTENT from the same transaction as the
+    // starting state: it is `started` (the create returned) and unsettled
+    // (the attempt has no outcome yet), which is exactly what a later recovery
+    // reads instead of inferring from the state alone.
+    expect(first.outcomeProtocol?.unsettledEffects).toEqual([
+      graphId + ":dispatch:work#1@started",
+    ]);
     expect(startRequests.map((request) => request.attemptId)).toEqual(["work#1"]);
 
     // A worker reports its outcome; the accepted successor is armed with a
-    // durable PENDING dispatch effect. The credential is the one the dispatch
-    // request handed it, and the startup report never echoes it.
+    // durable dispatch effect and CREATED in the same call. The credential is
+    // the one the dispatch request handed it, and the startup report never
+    // echoes it.
     const workCredential = credentialOf(startRequests, "work#1");
     expect(JSON.stringify(first)).not.toContain(workCredential);
     const accepted = await ts.graph_submit_outcome({
@@ -239,15 +252,23 @@ describe("outcome-protocol restart recovery", () => {
     let stateBefore: GraphStateRecord | undefined;
     try {
       stateBefore = beforeRestart.readGraphState(graphId);
-      expect(beforeRestart.pendingEffects(graphId).map((effect) => effect.status)).toEqual([
-        "pending",
-      ]);
+      // The successor's effect is STARTED: the tool set's host created the
+      // execution when the outcome was accepted, and the row says so. It is NOT
+      // left `pending` — that is what a later recovery would have re-created.
+      expect(
+        beforeRestart
+          .pendingEffects(graphId)
+          .map((effect) => effect.effectId + "@" + effect.status),
+      ).toEqual(["dispatch:ship#2@started"]);
+      // The successor was created exactly once, in-process.
+      expect(toolRequests.map((request) => request.attemptId)).toEqual(["ship#2"]);
     } finally {
       beforeRestart.close();
     }
 
     // RESTART — a fresh process sweeps the same store. The graph is RESUMED
-    // from the ledger state, and the pending successor dispatch is launched.
+    // from the ledger state and the successor's effect is RECONCILED against
+    // the host record: it is already started, so NOTHING is created again.
     const restartRequests: OutcomeDispatchRequest[] = [];
     const restarted = await sweep(dir, restartRequests);
     expect(restarted.outcomeProtocol?.started).toEqual([]);
@@ -255,12 +276,15 @@ describe("outcome-protocol restart recovery", () => {
     expect(restarted.outcomeProtocol?.resumed[0]).toContain(declared.plan_revision);
     expect(restarted.outcomeProtocol?.resumed[0]).toContain("phase executing");
     expect(restarted.outcomeProtocol?.resumed[0]).toContain("ship#2");
-    expect(restartRequests.map((request) => request.attemptId)).toEqual(["ship#2"]);
-    expect(restarted.outcomeProtocol?.dispatched).toEqual([graphId + ":ship#2"]);
+    expect(restartRequests).toEqual([]);
+    expect(restarted.outcomeProtocol?.dispatched).toEqual([]);
     expect(restarted.outcomeProtocol?.armed).toEqual([graphId + ":ship#2"]);
-    // The launched effect is STARTED and still unsettled — reported verbatim.
+    // The started row is reported, never re-created and never dropped.
     expect(restarted.outcomeProtocol?.unsettledEffects).toEqual([
       graphId + ":dispatch:ship#2@started",
+    ]);
+    expect(restarted.outcomeProtocol?.reconciled).toEqual([
+      graphId + ":dispatch:ship#2:recorded-started",
     ]);
     expect(restarted.outcomeProtocol?.refused).toEqual([]);
 
@@ -271,6 +295,9 @@ describe("outcome-protocol restart recovery", () => {
     expect(second.outcomeProtocol?.dispatched).toEqual([]);
     expect(second.outcomeProtocol?.unsettledEffects).toEqual([
       graphId + ":dispatch:ship#2@started",
+    ]);
+    expect(second.outcomeProtocol?.reconciled).toEqual([
+      graphId + ":dispatch:ship#2:recorded-started",
     ]);
     expect(secondRequests).toEqual([]);
 
@@ -285,7 +312,7 @@ describe("outcome-protocol restart recovery", () => {
     // The recovered worker's credential is the one the attempt's STATE ENTRY
     // records — the launch payload never carried it — so the submission it was
     // handed settles exactly that attempt and nothing else.
-    const shipCredential = credentialOf(restartRequests, "ship#2");
+    const shipCredential = credentialOf(toolRequests, "ship#2");
     expect(shipCredential.length).toBeGreaterThan(0);
     expect(shipCredential).not.toBe(workCredential);
     const settled = await ts.graph_submit_outcome({
@@ -300,9 +327,13 @@ describe("outcome-protocol restart recovery", () => {
 
   it("reports a started effect a dead process left behind instead of re-launching it", async () => {
     const dir = makeTmpDir("outcome-recovery-started-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      outcomeDispatch: (request) => {
+        toolRequests.push(request);
+      },
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -315,12 +346,20 @@ describe("outcome-protocol restart recovery", () => {
       outcome_id: "done",
       credential: credentialOf(startRequests, "work#1"),
     });
-
-    // A process began the successor dispatch and died before settling it.
+    // The successor's create RETURNED (D8), so the row is `started` — the
+    // exact state a process that began the dispatch and died before the
+    // attempt's outcome would leave behind, with no fixture surgery needed.
+    expect(toolRequests.map((request) => request.attemptId)).toEqual(["ship#2"]);
     const crashed = await openLedger(dir);
     try {
+      expect(
+        crashed
+          .pendingEffects(graphId)
+          .map((effect) => effect.effectId + "@" + effect.status),
+      ).toEqual(["dispatch:ship#2@started"]);
+      // A second "the process began it" write is idempotent, not a rewind.
       expect(crashed.markEffectStarted(graphId, "dispatch:ship#2").kind).toBe(
-        "transitioned",
+        "unchanged",
       );
     } finally {
       crashed.close();
@@ -328,9 +367,13 @@ describe("outcome-protocol restart recovery", () => {
 
     const requests: OutcomeDispatchRequest[] = [];
     const recovery = await sweep(dir, requests);
-    // Not re-launched: a started row is reconciled, never restarted.
+    // Not re-created: a started row is reconciled against the host record,
+    // never restarted.
     expect(requests).toEqual([]);
     expect(recovery.outcomeProtocol?.dispatched).toEqual([]);
+    expect(recovery.outcomeProtocol?.reconciled).toEqual([
+      graphId + ":dispatch:ship#2:recorded-started",
+    ]);
     // Never dropped: the row is the report.
     expect(recovery.outcomeProtocol?.unsettledEffects).toEqual([
       graphId + ":dispatch:ship#2@started",
@@ -402,9 +445,13 @@ describe("outcome-protocol restart recovery", () => {
 
   it("replays a duplicate submission after the restart and writes no second record", async () => {
     const dir = makeTmpDir("outcome-recovery-replay-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      outcomeDispatch: (request) => {
+        toolRequests.push(request);
+      },
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -423,9 +470,15 @@ describe("outcome-protocol restart recovery", () => {
     // Restart: a new sweep and a NEW toolset with no in-memory declared entry.
     const restartRequests: OutcomeDispatchRequest[] = [];
     await sweep(dir, restartRequests);
+    const restartToolRequests: OutcomeDispatchRequest[] = [];
     const restarted = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      // The ingress refuses without a dispatch adapter (D8); a replay settles a
+      // recorded attempt and arms nothing, so this recorder stays empty.
+      outcomeDispatch: (request) => {
+        restartToolRequests.push(request);
+      },
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const replay = await restarted.graph_submit_outcome({
@@ -602,15 +655,23 @@ describe("a stopped run across a restart", () => {
     // attempt of a run that has ended.
     expect(restarted.outcomeProtocol?.armed).toEqual([]);
     expect(restarted.outcomeProtocol?.refused).toEqual([]);
-    // THE EVIDENCE FOR "ZERO RE-DISPATCH": every dispatch effect the run
-    // committed is still PENDING — a launch would have durably marked it
-    // `started` BEFORE calling the seam.
-    expect([...(restarted.outcomeProtocol?.unsettledEffects ?? [])].sort()).toEqual([
-      graphId + ":dispatch:review#2@pending",
-      graphId + ":dispatch:review#4@pending",
-      graphId + ":dispatch:work#3@pending",
-    ]);
+    // THE EVIDENCE FOR "ZERO RE-DISPATCH" is now stronger than "the rows are
+    // still pending": every dispatch effect this run committed was CREATED when
+    // its attempt was armed (D8) and marked DONE when that attempt settled, so
+    // the stopped run leaves NOTHING unsettled for a recovery to resolve — and
+    // the only seam this sweep could have called received nothing.
+    expect(restarted.outcomeProtocol?.unsettledEffects).toEqual([]);
+    expect(restarted.outcomeProtocol?.reconciled).toEqual([]);
     expect(restartRequests).toEqual([]);
+    const stoppedLedger = await openLedger(dir);
+    try {
+      // No row is left `pending` either: a pending row would be a dispatch
+      // intent the run never carried out, which is exactly what this proves
+      // does not exist.
+      expect(stoppedLedger.pendingEffects(graphId)).toEqual([]);
+    } finally {
+      stoppedLedger.close();
+    }
 
     // A SECOND resume is idempotent: same report, same row, still nothing to do.
     const secondRequests: OutcomeDispatchRequest[] = [];
@@ -748,9 +809,14 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
     expect(report.outcomeProtocol?.resumed).toHaveLength(1);
     expect(report.outcomeProtocol?.armed).toEqual([]);
     expect(report.outcomeProtocol?.dispatched).toEqual([]);
-    expect(report.outcomeProtocol?.refused).toHaveLength(1);
-    expect(report.outcomeProtocol?.refused[0]).toContain("[credential-missing]");
-    expect(report.outcomeProtocol?.refused[0]).toContain("no attempt credential");
+    // TWO records name the missing credential: the node entry (which cannot be
+    // armed) and the dispatch effect committed for that same attempt (which
+    // cannot be resolved). Both are durable objects, so both are reported.
+    expect(report.outcomeProtocol?.refused).toHaveLength(2);
+    for (const line of report.outcomeProtocol?.refused ?? []) {
+      expect(line).toContain("[credential-missing]");
+      expect(line).toContain("no attempt credential");
+    }
     expect(requests).toEqual([]);
 
     // The version-1 row was neither rewritten nor downgraded nor advanced.

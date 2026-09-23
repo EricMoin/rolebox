@@ -139,7 +139,7 @@ import {
   type GraphSubmitOutcomeArgs,
   type GraphSubmitOutcomeResult,
 } from "./submit-outcome.ts";
-import type { OutcomeDispatchSeam } from "../outcome/runtime.ts";
+import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
 import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
 import {
@@ -407,12 +407,16 @@ export interface GraphToolSetDeps {
    */
   credentialIsolation?: CredentialIsolationAdapter;
   /**
-   * Optional dispatch seam the OUTCOME run path launches a node through
-   * (`graph_submit_outcome`). Executing the node's agent is the deferred
-   * effect-EXECUTION work, so the default is a no-op: the dispatch effect is
-   * durably recorded `pending`/`started` and a later recovery reconciles it.
+   * The HOST dispatch adapter the OUTCOME run path starts a node through
+   * (`graph_submit_outcome`), with the create channel and the execution query
+   * (D8). A TOOLSET dependency, never a tool argument.
+   *
+   * REQUIRED IN PRACTICE for a declared graph to run: without one the ingress
+   * refuses with `dispatch-unavailable` before it opens a ledger. There is
+   * deliberately no no-op default — it would accept outcomes and record
+   * successor dispatches no host ever created.
    */
-  outcomeDispatch?: OutcomeDispatchSeam;
+  outcomeDispatch?: OutcomeDispatchAdapter;
   /**
    * Optional installed validator implementations for outcome-protocol graphs.
    * The plan pins every acceptance requirement at an exact

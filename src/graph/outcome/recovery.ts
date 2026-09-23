@@ -47,7 +47,7 @@ import type { AcceptanceLedger } from "../ledger/types.ts";
 import type { ExecutionProtocolRegistry } from "../protocol/execution-protocol.ts";
 import {
   OutcomeGraphRuntime,
-  type OutcomeDispatchSeam,
+  type OutcomeDispatchAdapter,
   type OutcomeResumeResult,
   type OutcomeRuntimeRefusal,
 } from "./runtime.ts";
@@ -189,8 +189,13 @@ export interface ResumePersistedOutcomeGraphOptions {
   readonly state: EngineState;
   /** The durable ledger the graph's state and acceptance live in. */
   readonly ledger: AcceptanceLedger;
-  /** Where a launched dispatch goes. Called only from `resume`. */
-  readonly dispatch: OutcomeDispatchSeam;
+  /**
+   * The HOST dispatch adapter (D8) recovery executes through: the create
+   * channel plus the execution query that resolves a crash window. A bare seam
+   * is the degenerate adapter — it can create but cannot be queried, so an
+   * effect whose creation is unknown is reported rather than re-created.
+   */
+  readonly dispatch: OutcomeDispatchAdapter;
   /** The installed validator implementations the plan's gates resolve against. */
   readonly validators: ValidatorRegistry;
   /**

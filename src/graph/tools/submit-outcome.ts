@@ -46,9 +46,16 @@
  * TIME AND EFFECTS. The clock is an explicit protocol input: the toolset may
  * pin it (`outcomeNow`) or the runtime reads it. An accepted outcome's
  * successor dispatch is recorded as a `pending` effect in the SAME transaction
- * that writes the receipt, the accepted event and the graph state; executing
- * that effect beyond the dispatch seam is the deferred work, and the effect row
- * is what a later recovery reconciles.
+ * that writes the receipt, the accepted event and the graph state, and the
+ * effect is then EXECUTED through the host dispatch adapter (D8): the create
+ * returns, the row is marked `started`, and a crash inside that window leaves a
+ * row a later recovery puts to the host's execution query instead of guessing.
+ *
+ * NO DISPATCHER, NO SUBMISSION (D8). This ingress refuses with
+ * `dispatch-unavailable` BEFORE it opens a ledger when no adapter is injected:
+ * a no-op dispatcher would accept the outcome and record a successor dispatch
+ * that no host ever created. `src/graph/outcome/dispatch-effects.ts` owns the
+ * adapter contract.
  */
 
 import { readFileSync } from "node:fs";
@@ -70,7 +77,7 @@ import type {
 } from "../outcome/acceptance.ts";
 import {
   OutcomeGraphRuntime,
-  type OutcomeDispatchSeam,
+  type OutcomeDispatchAdapter,
   type OutcomeRuntimeRefusal,
   type OutcomeSubmissionResult,
 } from "../outcome/runtime.ts";
@@ -242,7 +249,14 @@ export type OutcomeSubmitRefusalReason =
    * this build cannot protect from a same-account reader, so the ingress
    * refuses before it opens a ledger.
    */
-  | "credential-isolation-unavailable";
+  | "credential-isolation-unavailable"
+  /**
+   * This process holds NO dispatch adapter (D8). A dispatch intent has to go
+   * somewhere, and a no-op dispatcher would let the run record an execution
+   * nobody started (and hand no worker its attempt credential), so the ingress
+   * refuses BEFORE it opens a ledger rather than simulating success.
+   */
+  | "dispatch-unavailable";
 
 /**
  * A submission the TOOL cannot address — as opposed to one the runtime refuses.
@@ -415,8 +429,16 @@ function describeLoad(
 
 /** Everything the ingress needs besides the target and the args. */
 export interface SubmitOutcomeDeps {
-  /** Where a launched successor dispatch goes (effect execution is deferred). */
-  readonly dispatch?: OutcomeDispatchSeam;
+  /**
+   * Where a launched successor dispatch goes — the HOST dispatch adapter (D8),
+   * with the create channel and the execution query.
+   *
+   * REQUIRED IN PRACTICE: without one this ingress refuses
+   * (`dispatch-unavailable`) before it opens a ledger. A bare seam is accepted
+   * as the degenerate adapter (it can create but cannot be queried); a recovery
+   * that needs the query reports the effect instead of re-issuing a create.
+   */
+  readonly dispatch?: OutcomeDispatchAdapter;
   /** The installed validator implementations the plan's gates resolve against. */
   readonly validators?: ValidatorRegistry;
   /**
@@ -444,9 +466,6 @@ export interface SubmitOutcomeDeps {
   /** The clock, in epoch milliseconds; omitted → the runtime reads `Date.now()`. */
   readonly now?: number;
 }
-
-/** The dispatch seam used when the caller supplies none (see the sweep's). */
-const NOOP_OUTCOME_DISPATCH: OutcomeDispatchSeam = () => undefined;
 
 /**
  * Submit one worker proposal to a declared graph's outcome run path.
@@ -482,6 +501,21 @@ export async function submitDeclaredOutcome(
         unprotected.message,
     );
   }
+  // THE DISPATCH GATE (D8) RUNS BEFORE ANY STORE IS OPENED, for the same
+  // reason: an accepted outcome can arm a successor, and a run with no adapter
+  // would record that dispatch as performed while no host ever saw it. The
+  // refusal is thrown before `SqliteAcceptanceLedger.create`, so it creates no
+  // directory and no file, exactly like the credential gate.
+  if (deps.dispatch === undefined) {
+    throw new OutcomeSubmissionRefusedError(
+      "dispatch-unavailable",
+      target.graphId,
+      "graph_submit_outcome refused [dispatch-unavailable]: no dispatch adapter is " +
+        "installed for this process — a dispatch intent has to have a host that creates " +
+        "the execution, and a no-op would record a dispatch nobody performed. Nothing " +
+        "was submitted and no ledger was opened.",
+    );
+  }
   // A readable adapter routes the credential store to the root the host
   // declares as protected; the workspace default is used only when no adapter
   // exists, which the gate above already refused.
@@ -495,7 +529,7 @@ export async function submitDeclaredOutcome(
     const runtime = new OutcomeGraphRuntime({
       plan,
       ledger,
-      dispatch: deps.dispatch ?? NOOP_OUTCOME_DISPATCH,
+      dispatch: deps.dispatch,
       validators: deps.validators ?? EMPTY_VALIDATORS,
       artifactRoot: deps.artifactRoot,
       ...(isolation === undefined ? {} : { credentialIsolation: isolation }),

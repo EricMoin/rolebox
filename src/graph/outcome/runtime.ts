@@ -60,14 +60,25 @@
  *
  * RESTART RECOVERY IS `resume()` (C3c). It reads the graph state from the
  * LEDGER, refuses a state bound to another plan revision, and continues the
- * graph from that state: every UNSETTLED dispatch effect is launched through
- * the seam (a pending effect is the crash-after-commit-before-launch window;
- * a `started` effect from a dead process is reported, never re-run and never
- * dropped), and every node the state records as in flight is reported as armed.
- * Running it twice dispatches nothing the second time, because a launched
- * effect is durably marked `started` BEFORE the seam runs. A graph with no
- * state at all is STARTED from this runtime's plan — the same SAVED plan a
- * later recovery continues (the review's D5), never a fresh reinterpretation.
+ * graph from that state: every UNSETTLED dispatch effect is RESOLVED against
+ * the host (D8 below) and every node the state records as in flight is reported
+ * as armed. A graph with no state at all is STARTED from this runtime's plan —
+ * the same SAVED plan a later recovery continues (the review's D5), never a
+ * fresh reinterpretation.
+ *
+ * FIRST DISPATCH, SUCCESSOR DISPATCH AND RECOVERY ARE ONE EXECUTOR (D8). Every
+ * dispatch intent is an effect row written in the SAME transaction as the state
+ * change that arms it — the entry dispatches of `start`, the successor
+ * dispatches of an accepted outcome, and the rows a later process finds — and
+ * every execution goes through the one host adapter. The status of a row is a
+ * record of a host call that RETURNED, never a substitute for making one: a row
+ * is marked `started` after the create returns, so a crash inside the window
+ * leaves a `pending` row. Recovery then asks the host whether an execution
+ * exists — `created` reconciles the row without a second create, `absent`
+ * creates exactly once, and `unknown` (or no query capability at all) reports
+ * the effect as `dispatch-unreconciled` work for the host to reconcile instead
+ * of guessing in either direction. Nothing is re-dispatched blindly and nothing
+ * is recorded as dispatched that a host did not create.
  *
  * A HARD LIMIT ENDS THE RUN IN A DURABLE STOP. When an accepted outcome asks to
  * continue a declared loop past its `max_traversals` cap, the round is NOT taken:
@@ -114,11 +125,14 @@
  *
  * SCOPE, STATED PLAINLY. C3c delivers `resume` here, the model-facing
  * `graph_submit_outcome` ingress (`src/graph/tools/submit-outcome.ts`), and the
- * startup sweep's route onto this runtime. Still DEFERRED: the protocol-aware
- * dispatch COMPLETION BRIDGE (this runtime drives a synchronous scripted seam
- * instead), effect EXECUTION beyond calling that seam, storage format 3 with
- * its `2 -> 3` migrator, and the stage-D/E routing, loop and legacy-retirement
- * work. The legacy v2 run and recovery paths are untouched.
+ * startup sweep's route onto this runtime. D8 delivers the unified dispatch
+ * EFFECT EXECUTOR described above: the durable intent, the one host adapter
+ * (create plus the execution query), the reconciliation of the crash window,
+ * and the refusal of a run with no adapter at all. Still DEFERRED: the
+ * protocol-aware dispatch COMPLETION BRIDGE (this runtime drives a synchronous
+ * host adapter instead), any host IMPLEMENTATION of the adapter, storage format
+ * 3 with its `2 -> 3` migrator, and the stage-D/E routing, loop and
+ * legacy-retirement work. The legacy v2 run and recovery paths are untouched.
  */
 
 import type { CompiledPlan } from "../compiler/plan.ts";
@@ -179,6 +193,18 @@ import {
   type CredentialIsolationAdapter,
 } from "./credential-isolation.ts";
 import {
+  dispatchEffectIdOf,
+  dispatchEffectKeyOf,
+  normalizeOutcomeDispatch,
+  type NormalizedOutcomeDispatch,
+  type OutcomeDispatchAdapter,
+  type OutcomeDispatchEffectKey,
+  type OutcomeDispatchRequest,
+  type OutcomeDispatchSeam,
+  type OutcomeDispatchTarget,
+  type OutcomeExecutionLookup,
+} from "./dispatch-effects.ts";
+import {
   verifyCompletionPolicy,
   type CompletionPolicyRegistry,
 } from "../policy/completion-policy.ts";
@@ -188,54 +214,19 @@ import type { ExecutionIdentity, ValidatorRegistry } from "./validators.ts";
 // ── The dispatch seam ───────────────────────────────────────────────────────
 
 /**
- * The provenance of one dispatch, WITHOUT the attempt credential.
- *
- * Every field is runtime provenance: the graph and plan revision the node
- * belongs to, the attempt id the STATE minted, and the plan's own agent/prompt.
- * Nothing here comes from a worker. This is also the shape the ledger persists
- * as a dispatch effect's payload — deliberately credential-free, so the
- * credential lives in exactly one durable place (the attempt's state entry) and
- * is re-bound from there at launch.
+ * The dispatch-effect contract lives in `dispatch-effects.ts` (D8) and is
+ * re-exported here so every existing import site keeps working: the target, the
+ * request, the plain seam, and the host adapter that adds the one fact only the
+ * host has — whether an execution for a stable effect id was already created.
  */
-export interface OutcomeDispatchTarget {
-  readonly graphId: string;
-  readonly planRevision: string;
-  readonly nodeId: string;
-  readonly attemptId: string;
-  readonly agent: string;
-  readonly prompt: string;
-}
-
-/**
- * One node the runtime asks a dispatcher to run: the target plus the attempt
- * credential this worker must present when it submits.
- *
- * THE CREDENTIAL TRAVELS ONLY OVER THIS CHANNEL. It is handed to the dispatch
- * seam (and to nobody else): it is not in `graph_status`, not in the shared
- * `<graph_state>` block, not in the startup sweep's report, not in a receipt,
- * an accepted event or a dispatch-effect payload, and not in any log line this
- * module writes. The worker receives it here and passes it back through the
- * submission ingress; the store it is checked against is the runtime's own.
- */
-export interface OutcomeDispatchRequest extends OutcomeDispatchTarget {
-  /**
-   * The bearer credential issued for this attempt. A capability, not an
-   * identity: possession proves the holder was handed this attempt's
-   * credential (or copied it); it does not prove the original worker is asking.
-   */
-  readonly credential: string;
-}
-
-/**
- * The dispatch seam: how a node is actually started.
- *
- * Deliberately a plain synchronous function rather than the legacy dispatch
- * bridge. Selecting a protocol-aware completion bridge — one that would make an
- * accepted outcome the bridge's single authoritative completion source — is
- * DEFERRED; this slice proves the run path against a scripted seam, and the
- * seam performs no completion interpretation at all.
- */
-export type OutcomeDispatchSeam = (request: OutcomeDispatchRequest) => void;
+export type {
+  OutcomeDispatchAdapter,
+  OutcomeDispatchHost,
+  OutcomeDispatchRequest,
+  OutcomeDispatchSeam,
+  OutcomeDispatchTarget,
+  OutcomeExecutionLookup,
+} from "./dispatch-effects.ts";
 
 // ── Refusals ────────────────────────────────────────────────────────────────
 
@@ -309,6 +300,23 @@ export type OutcomeRuntimeRefusalCode =
   | "missing-persisted-plan"
   /** A dispatch seam threw while launching an unsettled effect (C3c resume). */
   | "dispatch-failed"
+  /**
+   * No dispatch adapter is installed, so a node cannot be started at all
+   * (D8). Production entry points refuse with this BEFORE opening a ledger
+   * rather than running the graph against a no-op that would record an
+   * execution nobody started. The runtime itself refuses with it too, for a
+   * caller that bypasses the typed option.
+   */
+  | "dispatch-unavailable"
+  /**
+   * The creation of a dispatch effect could not be established from host facts
+   * (D8). The effect stays unsettled and is reported for host/manual
+   * reconciliation: a process may have started the execution and died inside
+   * the window, and this runtime has no query capability (or its host answered
+   * `unknown`) — so it neither re-issues the create (which could duplicate a
+   * started execution) nor reports success.
+   */
+  | "dispatch-unreconciled"
   /**
    * The advance reached a loop group whose plan declares a progress policy, but
    * the projection bound to this submission was missing or belonged to another
@@ -445,6 +453,36 @@ export interface OutcomeArmedNode {
   readonly attemptId: string;
 }
 
+/** Why a resume resolved an unsettled effect without launching it (D8). */
+export type OutcomeReconciledReason =
+  /** The row already recorded a create that returned; nothing was re-created. */
+  | "recorded-started"
+  /** The host answered `created` for a pending row; it was marked, not re-created. */
+  | "host-reported-created"
+  /**
+   * The state records the attempt as SETTLED, so its dispatch is complete: the
+   * effect is marked `done` and nothing is launched. Reachable when a
+   * settlement happened against a row the settle-time transition could not
+   * cover — a create that returned inside the crash window, whose row was still
+   * `pending` when the worker's outcome arrived.
+   */
+  | "attempt-settled";
+
+/**
+ * One unsettled dispatch effect a resume RESOLVED WITHOUT LAUNCHING (D8).
+ *
+ * This is the positive half of the reconciliation report: the runtime asked the
+ * host whether an execution exists and got an answer of `created` (or found a
+ * row that already recorded a returned create), so it neither re-issued the
+ * create nor left the question open. The credential is never part of this
+ * record — it names the effect and the attempt, nothing more.
+ */
+export interface OutcomeReconciledEffect {
+  readonly effectId: string;
+  readonly attemptId: string;
+  readonly reason: OutcomeReconciledReason;
+}
+
 /**
  * What {@link OutcomeGraphRuntime.resume} produced.
  *
@@ -464,17 +502,24 @@ export interface OutcomeArmedNode {
  * - `unsettledEffects` — every effect still `pending` or `started` after this
  *   call, read from the ledger. Nothing in this set is dropped or silently
  *   rewound; a `started` row from a dead process is reported here.
+ * - `reconciled` — every unsettled effect this call RESOLVED WITHOUT
+ *   LAUNCHING, with the host fact that resolved it (D8): the host answered
+ *   `created`, or the row already recorded a create that returned. A
+ *   reconciled effect is not a failure and not a launch; it is the evidence
+ *   that a crash window was closed by asking the host rather than by retrying.
  *
  * `refusals` on a started/resumed answer are per-effect diagnostics (an effect
- * whose payload is unreadable, or whose node the state does not corroborate).
- * They do not stop the rest of the resume; the effect they name stays unsettled
- * and therefore also appears in `unsettledEffects`.
+ * whose payload is unreadable, whose node the state does not corroborate, whose
+ * creation the host cannot establish — `dispatch-unreconciled` — or a create
+ * the host threw on). They do not stop the rest of the resume; the effect they
+ * name stays unsettled and therefore also appears in `unsettledEffects`.
  */
 export type OutcomeResumeResult =
   | {
       readonly kind: "started";
       readonly state: OutcomeGraphState;
       readonly dispatched: readonly OutcomeDispatchRequest[];
+      readonly reconciled: readonly OutcomeReconciledEffect[];
       readonly armed: readonly OutcomeArmedNode[];
       readonly unsettledEffects: readonly PendingEffectRecord[];
       readonly refusals: readonly OutcomeRuntimeRefusal[];
@@ -483,6 +528,7 @@ export type OutcomeResumeResult =
       readonly kind: "resumed";
       readonly state: OutcomeGraphState;
       readonly dispatched: readonly OutcomeDispatchRequest[];
+      readonly reconciled: readonly OutcomeReconciledEffect[];
       readonly armed: readonly OutcomeArmedNode[];
       readonly unsettledEffects: readonly PendingEffectRecord[];
       readonly refusals: readonly OutcomeRuntimeRefusal[];
@@ -515,8 +561,20 @@ export interface OutcomeGraphRuntimeOptions {
   readonly plan: CompiledPlan;
   /** The durable ledger the state and the acceptance share. */
   readonly ledger: AcceptanceLedger;
-  /** Where a dispatched node goes. The runtime calls it after a commit only. */
-  readonly dispatch: OutcomeDispatchSeam;
+  /**
+   * Where a dispatched node goes — the HOST dispatch adapter (D8), called only
+   * after the effect and the state it belongs to have committed together.
+   *
+   * A bare seam is accepted and is the degenerate host: it can create an
+   * execution but cannot answer whether one already exists, so a recovery that
+   * needs that answer reports the effect instead of re-issuing the create.
+   *
+   * OMITTED IS NOT NEUTRAL: `start`, `resume` and `submit` all refuse with
+   * `dispatch-unavailable` before they read or write anything, because a no-op
+   * dispatcher would let this runtime record a dispatch it never performed.
+   * The production entries check the same condition before opening a ledger.
+   */
+  readonly dispatch?: OutcomeDispatchAdapter;
   /** The installed validator implementations the plan's gates resolve against. */
   readonly validators: ValidatorRegistry;
   /** The root every evidence reference must resolve inside. */
@@ -581,7 +639,7 @@ export class OutcomeGraphRuntime {
 
   private readonly plan: CompiledPlan;
   private readonly ledger: AcceptanceLedger;
-  private readonly dispatch: OutcomeDispatchSeam;
+  private readonly dispatch: NormalizedOutcomeDispatch | undefined;
   private readonly validators: ValidatorRegistry;
   private readonly artifactRoot: string;
   private readonly clock: () => number;
@@ -595,7 +653,7 @@ export class OutcomeGraphRuntime {
     this.graphId = options.plan.graphId;
     this.planRevision = options.plan.planRevision;
     this.ledger = options.ledger;
-    this.dispatch = options.dispatch;
+    this.dispatch = normalizeOutcomeDispatch(options.dispatch);
     this.validators = options.validators;
     this.artifactRoot = options.artifactRoot;
     this.clock = options.clock ?? (() => Date.now());
@@ -625,6 +683,11 @@ export class OutcomeGraphRuntime {
     if (unprotectedCredentials !== undefined) {
       return refused([unprotectedCredentials]);
     }
+    // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
+    // any state is read or written: without one, recording a dispatch would
+    // claim an execution this process cannot perform.
+    const undispatchable = this.dispatchCapabilityRefusal();
+    if (undispatchable !== undefined) return refused([undispatchable]);
     // The plan's completion authorization is checked before ANY state is read
     // or written (D6), so a run this process cannot support is blocked with the
     // state preserved rather than started under weaker semantics.
@@ -675,6 +738,7 @@ export class OutcomeGraphRuntime {
     const entryIds = new Set(entries.map((node) => node.id));
     const nodes: OutcomeNodeState[] = [];
     const dispatched: OutcomeDispatchRequest[] = [];
+    const effects: PendingEffectRecord[] = [];
     let attemptSeq = 0;
     for (const node of this.plan.nodes) {
       if (!entryIds.has(node.id)) {
@@ -718,6 +782,21 @@ export class OutcomeGraphRuntime {
       dispatched.push(
         this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
       );
+      // THE INTENT IS PART OF THE SAME SNAPSHOT (D8). The effect names this
+      // attempt under the stable id its host dedupes and looks up by, so a
+      // process that dies between this commit and the create leaves a row a
+      // recovery can reconcile instead of a state that merely looks armed.
+      effects.push(
+        Object.freeze({
+          graphId: this.graphId,
+          effectId: dispatchEffectIdOf(attemptId),
+          attemptId,
+          kind: "dispatch",
+          payload: this.dispatchTargetOf(node.id, attemptId, node.agent, node.prompt),
+          createdAt: at,
+          status: "pending" as const,
+        }),
+      );
     }
     const state: OutcomeGraphState = Object.freeze({
       bodyVersion: CURRENT_OUTCOME_STATE_BODY,
@@ -729,12 +808,14 @@ export class OutcomeGraphRuntime {
       attemptSeq,
       loopProgress: Object.freeze(loopProgress),
     });
-    // ONE transaction for the starting snapshot. There is no acceptance to join
-    // yet, and the entry dispatches are recorded in the state (attempt ids), so
-    // `resume` reads them back as the armed set and reports each one; the seam
-    // runs only after the commit.
+    // ONE transaction for the starting snapshot AND its dispatch intents. There
+    // is no acceptance to join yet; what must not come apart is the state that
+    // records the attempt and the effect that says the attempt is to be
+    // started, so a crash leaves both or neither. The seam runs only after the
+    // commit, and what it cannot deliver stays a durable, reconcilable row.
     this.ledger.runInTransaction((tx) => {
       tx.writeGraphState(stateRecordOf(state, at));
+      for (const effect of effects) tx.writeEffect(effect);
     });
     this.launchDispatches(dispatched);
     return { kind: "started", state, dispatched: Object.freeze(dispatched) };
@@ -761,6 +842,11 @@ export class OutcomeGraphRuntime {
     if (unprotectedCredentials !== undefined) {
       return refused([unprotectedCredentials]);
     }
+    // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
+    // any state is read or written: without one, recording a dispatch would
+    // claim an execution this process cannot perform.
+    const undispatchable = this.dispatchCapabilityRefusal();
+    if (undispatchable !== undefined) return refused([undispatchable]);
     // The plan's completion authorization is checked before ANY state is read
     // or written (D6), so a run this process cannot support is blocked with the
     // state preserved rather than started under weaker semantics.
@@ -911,19 +997,23 @@ export class OutcomeGraphRuntime {
    * 1. reads the state from the LEDGER (never from a caller, never from a
    *    fresh plan-derived default) and refuses a record bound to another graph
    *    or another plan revision;
-   * 2. LAUNCHES every `pending` dispatch effect whose node the state records
-   *    as dispatched on exactly that attempt — the crash-after-commit-before-
-   *    launch window — after durably marking it `started`;
+   * 2. RESOLVES every unsettled dispatch effect the state corroborates by
+   *    asking the host whether an execution exists (D8): `created` marks the
+   *    row `started` without re-creating it, `absent` creates exactly once and
+   *    marks the row AFTER the create returned, and `unknown` — including a
+   *    host with no query capability — reports the effect as
+   *    `dispatch-unreconciled` and creates nothing;
    * 3. reports every effect still `pending` or `started` afterwards, so a
    *    `started` effect a dead process left behind is never dropped and never
-   *    silently re-run;
+   *    silently re-run, and every effect this call resolved WITHOUT launching in
+   *    `reconciled`, with the host fact that resolved it;
    * 4. reports every node the state records as in flight ("armed") with the
    *    attempt a submission must settle.
    *
-   * IDEMPOTENT. Nothing here re-applies a state: the only write is the effect
-   * status transition, and it moves `pending -> started` before the seam runs,
-   * so a second call finds the effect `started`, launches nothing, and reports
-   * the same ledger rows.
+   * IDEMPOTENT. Nothing here re-applies a state: the only writes are effect
+   * status transitions, and a row is marked `started` only after a create
+   * returned (or the host said the execution already exists), so a second call
+   * asks the host again, re-creates nothing, and reports the same ledger rows.
    *
    * A STOPPED RUN IS REPORTED, NEVER CONTINUED. A state carrying a stop (body
    * version 4) short-circuits before any effect is read for launch: the call
@@ -949,6 +1039,11 @@ export class OutcomeGraphRuntime {
     if (unprotectedCredentials !== undefined) {
       return refused([unprotectedCredentials]);
     }
+    // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
+    // any state is read or written: without one, recording a dispatch would
+    // claim an execution this process cannot perform.
+    const undispatchable = this.dispatchCapabilityRefusal();
+    if (undispatchable !== undefined) return refused([undispatchable]);
     // The plan's completion authorization is checked before ANY state is read
     // or written (D6), so a run this process cannot support is blocked with the
     // state preserved rather than started under weaker semantics.
@@ -981,6 +1076,10 @@ export class OutcomeGraphRuntime {
           kind: "started",
           state: started.state,
           dispatched: started.dispatched,
+          // A first execution resolved no crash window: every launch it made is
+          // reported in `dispatched`, and the effects it just wrote are the
+          // same launches.
+          reconciled: Object.freeze([]),
           armed: reading.armed,
           unsettledEffects: effects,
           refusals: reading.refusals,
@@ -1043,6 +1142,9 @@ export class OutcomeGraphRuntime {
         kind: "resumed",
         state,
         dispatched: Object.freeze([]),
+        // A stopped run reconciles nothing: resolving an effect could only
+        // report a launch or a question, and no launch is permitted here.
+        reconciled: Object.freeze([]),
         armed: Object.freeze([]),
         unsettledEffects: effects,
         refusals: stoppedInFlightRefusals(state),
@@ -1050,8 +1152,8 @@ export class OutcomeGraphRuntime {
       };
     }
 
-    const launched = this.launchUnsettledDispatches(state);
-    if ("refusal" in launched) return refused([launched.refusal]);
+    const resolved = this.reconcileUnsettledDispatches(state);
+    if ("refusal" in resolved) return refused([resolved.refusal]);
     const effects = this.unsettledEffectReading();
     if ("code" in effects) return refused([effects]);
     // The armed report is credential-free by construction; an in-flight attempt
@@ -1060,10 +1162,11 @@ export class OutcomeGraphRuntime {
     return {
       kind: "resumed",
       state,
-      dispatched: Object.freeze(launched.launched),
+      dispatched: Object.freeze(resolved.launched),
+      reconciled: resolved.reconciled,
       armed: readable.armed,
       unsettledEffects: effects,
-      refusals: Object.freeze([...launched.refusals, ...readable.refusals]),
+      refusals: Object.freeze([...resolved.refusals, ...readable.refusals]),
     };
   }
 
@@ -1126,11 +1229,48 @@ export class OutcomeGraphRuntime {
   }
 
   /**
-   * Launch the dispatch seam for every request a commit armed.
+   * Check that this runtime holds a dispatch adapter at all (D8).
    *
-   * THE ORDER IS UNCHANGED: the seam is called in order and the first throw
-   * stops the loop, so requests after it stay unlaunched exactly as before.
-   * The one added rule is about what escapes: the seam is the delivery channel
+   * A no-op dispatcher is not a neutral stand-in: the effect ledger would
+   * record an execution that nobody started and the worker would never receive
+   * its attempt credential, while every durable surface reads as if the node
+   * were running. Refusing by name — before any state is read or written, in
+   * `start`, `resume` and `submit` alike — is what makes "a dispatch is only
+   * recorded when a host can perform it" true by construction. Production
+   * entries check the same condition before they open a ledger, so the common
+   * case never reaches this guard.
+   */
+  private dispatchCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
+    if (this.dispatch !== undefined) return undefined;
+    return {
+      code: "dispatch-unavailable",
+      message:
+        "outcome-runtime: graph " +
+        JSON.stringify(this.graphId) +
+        " was given no dispatch adapter — a node's execution has to go somewhere, and a " +
+        "no-op would let this runtime record a dispatch it never performed, so nothing is " +
+        "started, resumed or settled",
+    };
+  }
+
+  /**
+   * Execute the dispatch effects a transaction THIS CALL committed (D8).
+   *
+   * THE ORDER IS UNCHANGED: the host is called in order and the first throw
+   * stops the loop, so requests after it stay unlaunched exactly as before —
+   * but now their effects are durable rows, not lost intentions. Each effect's
+   * row is marked `started` AFTER its create returns: the status is a record of
+   * a create that happened, never a substitute for one, so a crash inside the
+   * call leaves a `pending` row a recovery can put to the host.
+   *
+   * WHY THIS PATH DOES NOT ASK THE HOST FIRST. Every request here belongs to an
+   * effect the SAME transaction committed, under an attempt id minted in that
+   * transaction, so no earlier process can have created it — there is no crash
+   * window to resolve and the create is the first attempt, not a retry. The
+   * reconciliation query exists for the OTHER path (`resume`), where the row
+   * was written by a process that is gone.
+   *
+   * The one added rule is about what escapes: the host is the delivery channel
    * and necessarily receives each request's credential, so a failure text that
    * echoes the request it was given (a plausible adapter bug) must not become
    * the way that credential reaches a *report* — and for `submit` the caller
@@ -1140,10 +1280,66 @@ export class OutcomeGraphRuntime {
    */
   private launchDispatches(requests: readonly OutcomeDispatchRequest[]): void {
     try {
-      for (const request of requests) this.dispatch(request);
+      for (const request of requests) {
+        this.createExecution(request);
+        // THE CREATE RETURNED, SO THE ROW MAY SAY SO. A row that cannot be
+        // marked is a disagreement worth failing on: the execution exists and
+        // the ledger does not record it, which a recovery would otherwise have
+        // to re-derive from the host.
+        const marked = this.markDispatchStarted(request.attemptId);
+        if (marked !== undefined) throw new Error(marked.message);
+      }
     } catch (error) {
       throw this.credentialSafeDispatchError(error, requests);
     }
+  }
+
+  /**
+   * Ask the host to create one effect's execution.
+   *
+   * The request travels with the stable effect key, so a host that dedupes on
+   * it satisfies the contract's idempotency rule without re-deriving the id.
+   */
+  private createExecution(request: OutcomeDispatchRequest): void {
+    const host = this.dispatch;
+    if (host === undefined) {
+      // Unreachable behind {@link dispatchCapabilityRefusal}; kept total so a
+      // caller that bypasses the typed option gets the refusal, not a crash.
+      throw new Error(this.dispatchCapabilityRefusal()?.message ?? "");
+    }
+    host.create(request, dispatchEffectKeyOf(this.graphId, request.attemptId));
+  }
+
+  /**
+   * Record that one attempt's execution was created, or describe why the row
+   * could not say so.
+   *
+   * `transitioned` and `unchanged` both mean the row now reads `started`.
+   * `missing` means the effect row is not there at all and `refused` means a
+   * terminal row would have to be rewound — both are state/ledger disagreements
+   * about an execution the host may already have, so neither is swallowed.
+   */
+  private markDispatchStarted(
+    attemptId: string,
+  ): OutcomeRuntimeRefusal | undefined {
+    const effectId = dispatchEffectIdOf(attemptId);
+    const transition = this.ledger.markEffectStarted(this.graphId, effectId);
+    if (transition.kind === "transitioned" || transition.kind === "unchanged") {
+      return undefined;
+    }
+    return {
+      code: "state-ledger-disagreement",
+      path: "$.effectId",
+      message:
+        "outcome-runtime: the dispatch effect " +
+        JSON.stringify(effectId) +
+        " of graph " +
+        JSON.stringify(this.graphId) +
+        " could not be marked started (" +
+        transition.reason +
+        ") — the host may already hold this execution, so the attempt is not " +
+        "re-launched and the effect stays unsettled",
+    };
   }
 
   /**
@@ -1335,24 +1531,39 @@ export class OutcomeGraphRuntime {
   }
 
   /**
-   * Launch the unsettled dispatch effects the STATE corroborates (C3c resume).
+   * Resolve the unsettled dispatch effects the STATE corroborates (D8 resume).
    *
-   * Only a `pending` effect is a launch: the acceptance committed it and no
-   * process has begun it. `started` is deliberately NOT launched — a dead
-   * process began that work, and the protocol's answer to the
-   * crash-after-launch window is reconciliation by the effect's stable id, not
-   * a second launch; the row is reported as unsettled instead.
+   * EVERY EFFECT GOES THROUGH THE SAME DECISION — ask the host, then act on its
+   * answer — so a restart cannot resolve one crash window two different ways:
    *
-   * The transition to `started` is written BEFORE the seam runs. That ordering
-   * is what makes a resume idempotent: a crash between the write and the launch
-   * leaves a `started` row the next recovery REPORTS rather than re-launches.
+   * - the host answers `created` → the execution exists. The row is marked
+   *   `started` and reported as RECONCILED; the create is NEVER re-issued (a
+   *   second create is exactly what could run one attempt twice);
+   * - the host answers `absent` → the execution definitively does not exist
+   *   (the crash-after-commit-before-launch window). It is created once, and the
+   *   row is marked `started` only AFTER the create returns — the status
+   *   records what happened, it is not a substitute for finding out;
+   * - the host answers `unknown`, or there is no query capability at all →
+   *   the runtime does not know whether the execution exists. NOTHING is
+   *   launched and the effect is reported with `dispatch-unreconciled` as work
+   *   for the host (or a human) to reconcile: re-issuing the create could
+   *   execute an attempt twice, and reporting success would hide an attempt
+   *   that never started.
+   *
+   * A row already `started` is NEVER re-created: a previous process recorded a
+   * create that returned, and the report says so. If the host contradicts that
+   * record with `absent`, the disagreement is REPORTED rather than acted on —
+   * the stored fact and the host fact must be reconciled before either is
+   * trusted with a second create.
+   *
    * The STATE is the authority on the arm set — an effect the state does not
    * corroborate (wrong node, wrong attempt, node not dispatched) is never
    * launched and is reported as a refusal; it stays unsettled.
    */
-  private launchUnsettledDispatches(state: OutcomeGraphState):
+  private reconcileUnsettledDispatches(state: OutcomeGraphState):
     | {
         readonly launched: readonly OutcomeDispatchRequest[];
+        readonly reconciled: readonly OutcomeReconciledEffect[];
         readonly refusals: readonly OutcomeRuntimeRefusal[];
       }
     | { readonly refusal: OutcomeRuntimeRefusal } {
@@ -1362,10 +1573,26 @@ export class OutcomeGraphRuntime {
     } catch (error) {
       return { refusal: this.ledgerRefusal(error) };
     }
+    const host = this.dispatch;
+    if (host === undefined) {
+      // Unreachable behind {@link dispatchCapabilityRefusal}; kept total so an
+      // untyped caller gets the refusal rather than a crash.
+      const unavailable = this.dispatchCapabilityRefusal();
+      return {
+        refusal:
+          unavailable ?? {
+            code: "dispatch-unavailable",
+            message:
+              "outcome-runtime: no dispatch adapter is installed for graph " +
+              JSON.stringify(this.graphId),
+          },
+      };
+    }
     const launched: OutcomeDispatchRequest[] = [];
+    const reconciled: OutcomeReconciledEffect[] = [];
     const refusals: OutcomeRuntimeRefusal[] = [];
     for (const effect of effects) {
-      if (effect.kind !== "dispatch" || effect.status !== "pending") continue;
+      if (effect.kind !== "dispatch") continue;
       const reading = readDispatchRequest(
         effect.payload,
         this.graphId,
@@ -1382,6 +1609,22 @@ export class OutcomeGraphRuntime {
       const target = reading.target;
       const armed = dispatchedNodeOf(state, target.nodeId);
       if (armed === undefined || armed.attemptId !== target.attemptId) {
+        // A SETTLED ATTEMPT IS A COMPLETE DISPATCH. The state records the node
+        // settled on exactly this attempt, so its execution demonstrably ran
+        // (a settlement is only possible with the credential the create handed
+        // out) and the row is closed instead of reported as a disagreement.
+        const recorded = stateNodeOf(state, target.nodeId);
+        if (
+          recorded !== undefined &&
+          recorded.status === "settled" &&
+          recorded.attemptId === target.attemptId
+        ) {
+          this.ledger.markEffectDone(this.graphId, effect.effectId);
+          reconciled.push(
+            this.reconciledEffectOf(effect.effectId, target.attemptId, "attempt-settled"),
+          );
+          continue;
+        }
         refusals.push({
           code: "state-ledger-disagreement",
           path: "$.attemptId",
@@ -1421,43 +1664,90 @@ export class OutcomeGraphRuntime {
         });
         continue;
       }
-      const transition = this.ledger.markEffectStarted(this.graphId, effect.effectId);
-      if (transition.kind === "missing" || transition.kind === "refused") {
+      const key = dispatchEffectKeyOf(this.graphId, target.attemptId);
+      const lookup = this.lookupExecution(key);
+
+      if (effect.status === "started") {
+        // THE ROW SAYS A CREATE RETURNED. Nothing is re-created either way; a
+        // host that contradicts the record turns into a report, not a launch.
+        if (lookup.kind === "absent") {
+          refusals.push({
+            code: "dispatch-unreconciled",
+            path: "$.effectId",
+            message:
+              "outcome-runtime: dispatch effect " +
+              JSON.stringify(effect.effectId) +
+              " is recorded as started, but the host reports no execution for it — the " +
+              "stored fact and the host fact disagree, so the effect is left exactly as it " +
+              "is and reported for reconciliation rather than started a second time",
+          });
+          continue;
+        }
+        reconciled.push(this.reconciledEffectOf(effect.effectId, target.attemptId, "recorded-started"));
+        continue;
+      }
+
+      if (lookup.kind === "unknown") {
         refusals.push({
-          code: "state-ledger-disagreement",
+          code: "dispatch-unreconciled",
           path: "$.effectId",
           message:
             "outcome-runtime: dispatch effect " +
             JSON.stringify(effect.effectId) +
-            " could not be marked started (" +
-            transition.reason +
-            ") — it was not launched and stays unsettled",
+            " (attempt " +
+            JSON.stringify(target.attemptId) +
+            ") was committed but its execution cannot be established: " +
+            // The reason is host text and this refusal is a REPORT, so it is
+            // sanitized against the attempt's own credential like every other
+            // dispatch-failure report.
+            this.withoutCredentials(lookup.reason, [credential]) +
+            " — it was NOT launched and is reported as unsettled work for the host to " +
+            "reconcile; a blind retry could run the attempt twice, and reporting success " +
+            "would hide an attempt that never started",
         });
         continue;
       }
+
+      if (lookup.kind === "created") {
+        const marked = this.markDispatchStarted(target.attemptId);
+        if (marked !== undefined) {
+          refusals.push(marked);
+          continue;
+        }
+        reconciled.push(this.reconciledEffectOf(effect.effectId, target.attemptId, "host-reported-created"));
+        continue;
+      }
+
+      // ABSENT: the host confirms no execution exists, so this is the
+      // commit-then-crash window and the create is the FIRST attempt, not a
+      // retry. The row is marked started only after the create returned.
       try {
-        this.dispatch(this.dispatchRequestOf(
-          target.nodeId,
-          target.attemptId,
-          target.agent,
-          target.prompt,
-          credential,
-        ));
+        this.createExecution(
+          this.dispatchRequestOf(
+            target.nodeId,
+            target.attemptId,
+            target.agent,
+            target.prompt,
+            credential,
+          ),
+        );
       } catch (error) {
         refusals.push({
           code: "dispatch-failed",
           path: "$.effectId",
           message:
-            "outcome-runtime: the dispatch seam threw while launching effect " +
+            "outcome-runtime: the host threw while creating effect " +
             JSON.stringify(effect.effectId) +
             " (" +
-            // This refusal is a REPORT: the seam was handed the attempt's own
-            // credential, so a failure text that echoed its request would
-            // otherwise carry the capability into the caller's report.
             this.withoutCredentials(errorText(error), [credential]) +
-            ") — the effect is durably 'started' and is reported as unsettled rather " +
-            "than silently re-launched or dropped",
+            ") — the effect stays unsettled and is NOT reported as started; the next " +
+            "recovery asks the host again before anything is created",
         });
+        continue;
+      }
+      const marked = this.markDispatchStarted(target.attemptId);
+      if (marked !== undefined) {
+        refusals.push(marked);
         continue;
       }
       launched.push(
@@ -1472,8 +1762,45 @@ export class OutcomeGraphRuntime {
     }
     return {
       launched: Object.freeze(launched),
+      reconciled: Object.freeze(reconciled),
       refusals: Object.freeze(refusals),
     };
+  }
+
+  /**
+   * Ask the host whether one effect's execution exists, with a failure to
+   * answer treated as the honest `unknown` rather than as a decision.
+   *
+   * A host whose lookup throws has not said "absent"; reporting that as a
+   * launch would turn an unanswered question into a second execution.
+   */
+  private lookupExecution(
+    effect: OutcomeDispatchEffectKey,
+  ): OutcomeExecutionLookup {
+    const host = this.dispatch;
+    if (host === undefined) {
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason: "no dispatch adapter is installed",
+      });
+    }
+    try {
+      return host.lookup(effect);
+    } catch (error) {
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason: "the host lookup failed (" + errorText(error) + ")",
+      });
+    }
+  }
+
+  /** One reconciliation record, frozen like every other reported value. */
+  private reconciledEffectOf(
+    effectId: string,
+    attemptId: string,
+    reason: OutcomeReconciledReason,
+  ): OutcomeReconciledEffect {
+    return Object.freeze({ effectId, attemptId, reason });
   }
 
   /**
@@ -1674,7 +2001,7 @@ export class OutcomeGraphRuntime {
       progress,
     });
     const effects = advance.dispatches.map((intent) => ({
-      effectId: "dispatch:" + intent.attemptId,
+      effectId: dispatchEffectIdOf(intent.attemptId),
       kind: "dispatch",
       // CREDENTIAL-FREE payload: the durable effect names the dispatch target
       // and nothing else, so the credential stays in exactly one durable place
@@ -1686,6 +2013,17 @@ export class OutcomeGraphRuntime {
         effects: Object.freeze(effects),
         settle: (writeTx) => {
           writeTx.writeGraphState(stateRecordOf(advance.state, now));
+          // THE ATTEMPT'S DISPATCH IS COMPLETE ONCE ITS OUTCOME IS ACCEPTED
+          // (D8). The transition rides the SAME transaction as the settlement,
+          // so an effect can never be left unsettled by an attempt the state
+          // already records as settled. A missing or already-terminal row is
+          // not an error here: a body that predates the effect (or a row a
+          // fixture stripped) must not fail an acceptance, and a terminal row
+          // is exactly what this transition wants it to be.
+          writeTx.markEffectDone(
+            this.graphId,
+            dispatchEffectIdOf(decision.identity.attemptId),
+          );
         },
       },
       advance,
@@ -1779,13 +2117,34 @@ export class OutcomeGraphRuntime {
   private dispatchPayloadOf(
     intent: OutcomeDispatchIntent,
   ): OutcomeDispatchTarget {
+    return this.dispatchTargetOf(
+      intent.nodeId,
+      intent.attemptId,
+      intent.agent,
+      intent.prompt,
+    );
+  }
+
+  /**
+   * The credential-free target one dispatch is persisted as.
+   *
+   * ONE SPELLING for the first dispatch and a successor: the effect payload of
+   * an entry attempt and of a reducer intent are built by the same function, so
+   * a recovery reads either one exactly the same way.
+   */
+  private dispatchTargetOf(
+    nodeId: string,
+    attemptId: string,
+    agent: string,
+    prompt: string,
+  ): OutcomeDispatchTarget {
     return Object.freeze({
       graphId: this.graphId,
       planRevision: this.planRevision,
-      nodeId: intent.nodeId,
-      attemptId: intent.attemptId,
-      agent: intent.agent,
-      prompt: intent.prompt,
+      nodeId,
+      attemptId,
+      agent,
+      prompt,
     });
   }
 
@@ -1942,9 +2301,23 @@ function dispatchedNodeOf(
   state: OutcomeGraphState,
   nodeId: string,
 ): OutcomeNodeState | undefined {
+  const node = stateNodeOf(state, nodeId);
+  return node?.status === "dispatched" ? node : undefined;
+}
+
+/**
+ * The state's entry for one node, whatever its status.
+ *
+ * Recovery needs the settled case too: an effect whose attempt has settled is
+ * COMPLETE, and reporting it as "the state does not record that attempt as in
+ * flight" would turn a finished dispatch into a disagreement.
+ */
+function stateNodeOf(
+  state: OutcomeGraphState,
+  nodeId: string,
+): OutcomeNodeState | undefined {
   for (const node of state.nodes) {
-    if (node.nodeId !== nodeId) continue;
-    return node.status === "dispatched" ? node : undefined;
+    if (node.nodeId === nodeId) return node;
   }
   return undefined;
 }

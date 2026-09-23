@@ -394,9 +394,13 @@ describe("credential isolation is the outcome run path's enablement condition", 
     const workspace = makeTmpDir("credential-workspace-");
     const protectedRoot = makeTmpDir("credential-protected-");
     const adapter = testHostCredentialIsolation(protectedRoot);
+    const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: workspace,
       outcomeNow: NOW,
+      // The ingress refuses without a dispatch adapter (D8); this one routes
+      // the successor the submission arms.
+      outcomeDispatch: recorder(toolRequests),
       credentialIsolation: adapter,
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
@@ -647,10 +651,21 @@ describe("no report channel carries an attempt credential", () => {
           throw new Error("host dispatch adapter failed on " + JSON.stringify(request));
         }
       };
+      // The adapter is a HOST (D8): the seam creates, and the query answers
+      // `absent` so the recovery's create is the path under test — a create
+      // that throws is the one whose report must be credential-free.
+      let created = 0;
+      const host = {
+        create: (request: OutcomeDispatchRequest): void => {
+          created += 1;
+          seam(request);
+        },
+        lookup: () => ({ kind: "absent" }) as const,
+      };
       const runtime = new OutcomeGraphRuntime({
         plan,
         ledger,
-        dispatch: seam,
+        dispatch: host,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
         clock: () => NOW,
@@ -684,10 +699,14 @@ describe("no report channel carries an attempt credential", () => {
       expect(String(fieldOf(cause, "message"))).toContain(shipCredential);
 
       // The RESUME path reports the same failure as a refusal, sanitized too.
+      // The host still answers `absent` for the successor's effect — the create
+      // that threw left the row PENDING, never falsely `started` — so recovery
+      // re-issues the create, it throws again, and the REPORT must stay clean.
+      const createsBefore = created;
       const restarted = new OutcomeGraphRuntime({
         plan,
         ledger,
-        dispatch: seam,
+        dispatch: host,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
         clock: () => NOW,
@@ -698,6 +717,9 @@ describe("no report channel carries an attempt credential", () => {
       expect(resumed.kind).toBe("resumed");
       if (resumed.kind !== "resumed") return;
       expect(resumed.refusals.map((refusal) => refusal.code)).toContain("dispatch-failed");
+      // The failed create really was re-issued — the row was NOT marked started
+      // by a call that threw (D8), which is why the host saw a second attempt.
+      expect(created).toBe(createsBefore + 1);
       expectNoCredential(
         "resume dispatch-failed refusal",
         JSON.stringify(resumeReport(resumed)),

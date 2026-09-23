@@ -284,6 +284,23 @@ export interface AcceptanceLedgerTx {
    * Terminal effects are never listed; that stream IS the resume set.
    */
   pendingEffects(graphId: string): readonly PendingEffectRecord[];
+  /**
+   * Write one NEW effect as the durable INTENT of work the transaction is
+   * about to do — the atomic half of the outcome protocol's dispatch window.
+   *
+   * Called inside the SAME transaction as the state change the effect belongs
+   * to, so a run that records a successor cannot commit the state without the
+   * intent to start it (or the intent without the state that corroborates it).
+   *
+   * AN INTENT WRITE NEVER REWINDS A ROW. A row that already exists under
+   * `(graphId, effectId)` is left EXACTLY as it is, whatever its status: a
+   * second writer that raced this one must not move a `started` or terminal
+   * effect back to `pending` and turn its settled history into a fresh
+   * launch. The caller that needs a transition uses `markEffectStarted` /
+   * `markEffectDone` / `markEffectFailed`, which carry their own terminal
+   * guard.
+   */
+  writeEffect(record: PendingEffectRecord): void;
   markEffectStarted(graphId: string, effectId: string): EffectTransition;
   markEffectDone(graphId: string, effectId: string): EffectTransition;
   markEffectFailed(graphId: string, effectId: string): EffectTransition;

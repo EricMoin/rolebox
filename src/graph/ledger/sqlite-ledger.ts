@@ -297,6 +297,8 @@ export type LedgerWriteProblem =
   | "unrepresentable-payload"
   /** A graph-state record violates the record model. */
   | "invalid-graph-state"
+  /** A standalone effect record violates the record model. */
+  | "invalid-effect"
   /**
    * A graph-state body JSON cannot represent — the transaction that would have
    * committed it rolled back, so no receipt, event or effect survives either.
@@ -621,6 +623,54 @@ function assertGraphStateShape(record: GraphStateRecord): void {
     "invalid-graph-state",
     "the state was not written",
   );
+}
+
+/**
+ * Validate one standalone effect record before it is stored as an INTENT.
+ *
+ * The record model is the port's, and the status rule is the batch's: an intent
+ * write records work that has NOT begun, so a record that arrives `started` or
+ * terminal is refused rather than stored — a caller that wants a transition
+ * uses `markEffectStarted` / `markEffectDone` / `markEffectFailed`, which
+ * carry the terminal guard this write deliberately does not have.
+ */
+function assertEffectShape(record: PendingEffectRecord): void {
+  requireIdentifier(
+    record.graphId,
+    "effect.graphId",
+    "invalid-effect",
+    "the effect was not written",
+  );
+  requireIdentifier(
+    record.effectId,
+    "effect.effectId",
+    "invalid-effect",
+    "the effect was not written",
+  );
+  requireIdentifier(
+    record.attemptId,
+    "effect.attemptId",
+    "invalid-effect",
+    "the effect was not written",
+  );
+  requireIdentifier(
+    record.kind,
+    "effect.kind",
+    "invalid-effect",
+    "the effect was not written",
+  );
+  requireEpoch(
+    record.createdAt,
+    "effect.createdAt",
+    "invalid-effect",
+    "the effect was not written",
+  );
+  if (record.status !== "pending") {
+    throw new LedgerWriteError(
+      "invalid-effect",
+      `acceptance-ledger: effect ${record.effectId} was offered as ${describeValue(record.status)} — an intent write records work that has not begun, so only a "pending" effect may be written here; a started or terminal effect is a transition, not an intent`,
+    );
+  }
 }
 
 /** Refuse a batch field that disagrees with the receipt it must describe. */
@@ -1526,6 +1576,43 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
     );
   }
 
+  /**
+   * Write one new effect as the durable intent of work this transaction is
+   * about to do.
+   *
+   * `ON CONFLICT DO NOTHING` is the rule, not an optimization: an effect row is
+   * a record of intent that a later transition ADVANCES, so a racing or
+   * repeated writer must never move a `started` or terminal row back to
+   * `pending`. The insert is validated and encoded exactly like the effects a
+   * batch carries, so an unrepresentable payload fails the caller's whole
+   * transaction instead of landing a half-written intent.
+   */
+  writeEffect(record: PendingEffectRecord): void {
+    this.assertOpen("writeEffect");
+    assertEffectShape(record);
+    try {
+      this.db.run(
+        `INSERT INTO ${LEDGER_TABLES.pendingEffects}
+           (graph_id, effect_id, attempt_id, kind, payload, created_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(graph_id, effect_id) DO NOTHING`,
+        record.graphId,
+        record.effectId,
+        record.attemptId,
+        record.kind,
+        encodePayload(record.payload, record.effectId),
+        record.createdAt,
+        record.status,
+      );
+    } catch (error) {
+      if (error instanceof LedgerWriteError) throw error;
+      throw new LedgerWriteError(
+        "write-rejected",
+        `acceptance-ledger: the store rejected effect ${record.effectId} of graph ${record.graphId} (${errorText(error)}) — the transaction rolled back, so nothing from it was committed`,
+      );
+    }
+  }
+
   // ── Effect lifecycle ──────────────────────────────────────────────────────
 
   markEffectStarted(graphId: string, effectId: string): EffectTransition {
@@ -1638,6 +1725,8 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
         this.readGraphState(graphId),
       writeGraphState: (record: GraphStateRecord): void =>
         this.writeGraphState(record),
+      writeEffect: (record: PendingEffectRecord): void =>
+        this.writeEffect(record),
       lookupReceipt: (key: SubmissionKey): ReceiptRecord | undefined =>
         this.lookupReceipt(key),
       acceptedEvents: (graphId: string): readonly AcceptedEventRecord[] =>

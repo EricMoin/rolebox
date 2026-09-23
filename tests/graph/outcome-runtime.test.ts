@@ -647,6 +647,7 @@ function ledgerRefusingStateWrites(
       refuseWrite(record);
       tx.writeGraphState(record);
     },
+    writeEffect: (record) => tx.writeEffect(record),
     lookupReceipt: (key) => tx.lookupReceipt(key),
     acceptedEvents: (graphId) => tx.acceptedEvents(graphId),
     pendingEffects: (graphId) => tx.pendingEffects(graphId),
@@ -662,6 +663,7 @@ function ledgerRefusingStateWrites(
       refuseWrite(record);
       inner.writeGraphState(record);
     },
+    writeEffect: (record) => inner.writeEffect(record),
     lookupReceipt: (key) => inner.lookupReceipt(key),
     acceptedEvents: (graphId) => inner.acceptedEvents(graphId),
     pendingEffects: (graphId) => inner.pendingEffects(graphId),
@@ -725,15 +727,19 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
       expect(events).toHaveLength(1);
       expect(events[0]?.outcomeId).toBe("done");
       expect(events[0]?.attemptId).toBe("work#1");
+      // ONE unsettled effect: `start()` committed the entry attempt's intent
+      // and this acceptance settled that attempt (its effect is DONE) while
+      // committing the successor's. The successor's row is the D8 intent.
       const effects = ledger.pendingEffects(graphId);
       expect(effects).toHaveLength(1);
       expect(effects[0]?.effectId).toBe("dispatch:ship#2");
-      expect(effects[0]?.kind).toBe("dispatch");
+      const successorEffect = effects[0];
+      expect(successorEffect?.kind).toBe("dispatch");
       // The effect row records the attempt that PRODUCED it (the trusted
       // context); the dispatch it carries names the successor's fresh attempt.
-      expect(effects[0]?.attemptId).toBe("work#1");
-      expect(fieldOf(effects[0]?.payload, "nodeId")).toBe("ship");
-      expect(fieldOf(effects[0]?.payload, "attemptId")).toBe("ship#2");
+      expect(successorEffect?.attemptId).toBe("work#1");
+      expect(fieldOf(successorEffect?.payload, "nodeId")).toBe("ship");
+      expect(fieldOf(successorEffect?.payload, "attemptId")).toBe("ship#2");
       expect(runtime.state()).toEqual(first.state);
       expect(ledger.readGraphState(graphId)?.planRevision).toBe(
         runtime.planRevision,
@@ -753,7 +759,9 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
         outcomeId: "delivered",
       });
       expect(ledger.acceptedEvents(graphId)).toHaveLength(2);
-      expect(ledger.pendingEffects(graphId)).toHaveLength(1);
+      // EVERY dispatch effect is settled once its attempt settled (D8): a
+      // terminal graph holds no unsettled row for a recovery to act on.
+      expect(ledger.pendingEffects(graphId)).toEqual([]);
       expect(runtime.state()?.phase).toBe("complete");
       // One dispatch per node attempt — nothing was re-dispatched.
       expect(attemptIds(requests)).toEqual(["work#1", "ship#2"]);
@@ -799,7 +807,11 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
       );
       expect(runtime.state()).toEqual(before);
       expect(ledger.acceptedEvents(graphId)).toHaveLength(0);
-      expect(ledger.pendingEffects(graphId)).toHaveLength(0);
+      // The refusal wrote nothing: the only unsettled effect is the one
+      // `start()` committed with the starting snapshot, not a successor's.
+      expect(ledger.pendingEffects(graphId).map((effect) => effect.effectId)).toEqual([
+        "dispatch:work#1",
+      ]);
       expect(await countTable(dir, "ledger_receipts")).toBe(0);
     });
   });
@@ -950,10 +962,13 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
         ).toEqual(["fail"]);
         expect(result.receipt.decision).toBe("rejected");
         // The receipt records the rejection; the attempt stays open and the
-        // graph does not move: no event, no effect, no state change, no
-        // successor dispatched.
+        // graph does not move: no event, no successor effect, no state change,
+        // no successor dispatched. The only unsettled row is the entry attempt's
+        // own dispatch, committed by `start()`.
         expect(ledger.acceptedEvents(graphId)).toHaveLength(0);
-        expect(ledger.pendingEffects(graphId)).toHaveLength(0);
+        expect(ledger.pendingEffects(graphId).map((effect) => effect.effectId)).toEqual([
+          "dispatch:work#1",
+        ]);
         expect(runtime.state()).toEqual(before);
         expect(attemptIds(requests)).toEqual(["work#1"]);
         expect(await countTable(dir, "ledger_receipts")).toBe(1);
@@ -3321,7 +3336,10 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
 
       // RECOVERY refuses the attempt: it is not armed and not launched, because
       // no submission could ever settle it and recovery never grants a
-      // credential the attempt was not issued.
+      // credential the attempt was not issued. TWO records name the missing
+      // credential — the node entry (unarmed) and the dispatch effect committed
+      // for that attempt (unresolvable) — and each is reported, because each is
+      // a durable object a reader has to be able to find.
       const resumed = runtime.resume(NOW + 2);
       expect(resumed.kind).toBe("resumed");
       if (resumed.kind !== "resumed") return;
@@ -3329,10 +3347,11 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       expect(resumed.dispatched).toEqual([]);
       expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
         "credential-missing",
+        "credential-missing",
       ]);
-      expect(resumed.refusals[0]?.path).toMatch(
-        /^\$\.nodes\[\d+\]\.attemptCredential$/,
-      );
+      const paths = resumed.refusals.map((refusal) => refusal.path);
+      expect(paths).toContain("$.attemptCredential");
+      expect(paths.some((path) => path?.startsWith("$.nodes[") === true)).toBe(true);
 
       // SUBMISSION: the credential the worker holds names no recorded attempt,
       // and the credential-less attempt is never settled in its place.
