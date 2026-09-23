@@ -15,8 +15,11 @@
  * 3. The races resolve by stated rules: a completion that commits first keeps
  *    its accepted result and no cancel is recorded for it; a cancel that commits
  *    first stops the run, refuses the later submission before the acceptance
- *    core, and never arms the successor; a repeated cancel replays the decision
- *    and never rewinds a confirmed effect.
+ *    core, and never arms the successor; a cancel that commits while an ARMED
+ *    successor's create is still in flight names that successor as in-flight,
+ *    leaves its execution visible and unsettled, and is delivered by the next
+ *    window — never reported as cancelled on the cancel's own say-so; a repeated
+ *    cancel replays the decision and never rewinds a confirmed effect.
  * 4. A cancelled run is never re-dispatched by the boot sweep, which instead
  *    DELIVERS the cancel intents a previous process left behind.
  *
@@ -27,11 +30,12 @@
  * port that answers from the test's script and reads the durable cancel effect
  * back INSIDE the ask — that read is what proves the intent was durable first.
  *
- * STRENGTH: adapter + real store, CROSS-PROCESS for the two crash-window cases
- * (a REAL child process records the intent and dies at the platform ask; a REAL
- * second process commits a cancel inside a gated submission's window); the rest
- * is one process. No real dsh/Pi SDK runs in this environment, so nothing here
- * is real-host evidence.
+ * STRENGTH: adapter + real store, CROSS-PROCESS for three cases (a REAL child
+ * process records the intent and dies at the platform ask; a REAL second process
+ * commits a cancel inside a gated submission's window; a REAL second process
+ * commits a cancel while an armed successor's create is in flight); the rest is
+ * one process. No real dsh/Pi SDK runs in this environment, so nothing here is
+ * real-host evidence.
  */
 
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
@@ -284,6 +288,14 @@ async function openHost(options: {
   readonly deliverOnControl?: boolean;
   /** The installed acceptance capabilities, when the fixture declares a gate. */
   readonly validators?: ValidatorRegistry;
+  /**
+   * Runs INSIDE the host's delivery of one dispatch, after the transaction that
+   * committed it and BEFORE the create is acknowledged — the only window in
+   * which a cancel can commit while an armed successor's execution does not yet
+   * exist. The successor race uses it to commit the command from a REAL second
+   * process exactly there.
+   */
+  readonly beforeCreateConfirmed?: (request: OutcomeDispatchRequest) => void;
 }): Promise<{
   readonly host: OutcomeHost;
   readonly toolset: GraphToolSet;
@@ -297,6 +309,7 @@ async function openHost(options: {
     storeRoot: options.storeRoot,
     deliver: (request, effect) => {
       options.dispatches.push(request);
+      options.beforeCreateConfirmed?.(request);
       if (confirm) {
         host?.confirmExecution(effect, { executionId: childSessionOf(request.attemptId) });
       }
@@ -354,6 +367,8 @@ async function openCancelFixture(
       readonly version: number;
       readonly implementation: ValidatorImplementation;
     };
+    /** See {@link openHost}: the window between a committed dispatch and its create. */
+    readonly beforeCreateConfirmed?: (request: OutcomeDispatchRequest) => void;
   } = {},
 ): Promise<CancelFixture> {
   const dir = makeTmpDir("cancel-delivery-");
@@ -381,6 +396,9 @@ async function openCancelFixture(
     ...(options.deliverOnControl === undefined
       ? {}
       : { deliverOnControl: options.deliverOnControl }),
+    ...(options.beforeCreateConfirmed === undefined
+      ? {}
+      : { beforeCreateConfirmed: options.beforeCreateConfirmed }),
   });
   const fixture: CancelFixture = {
     ...opened,
@@ -974,6 +992,92 @@ describe("graph_control cancel — deterministic races", () => {
       expect(second.controlled).toEqual([fixture.graphId + ":cancel"]);
       expect(fixture.dispatches).toHaveLength(dispatchesBefore);
       expect(fixture.platform.asked).toHaveLength(1);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("names an armed successor as in-flight when a cancel commits before its create is issued, and never reports it cancelled", async () => {
+    // THE SUCCESSOR IS ARMED FIRST — the one interleaving the two stated rules
+    // have to settle together. The acceptance transaction commits the dispatch
+    // effect, the armed `review` entry and its credential, and only THEN does
+    // `launchDispatches` issue the create. A cancel committing in that window
+    // finds the successor DISPATCHED in the durable state, so by the one rule
+    // ("whichever COMMITS first stands") it is an in-flight attempt the cancel
+    // must name — never one it may re-label — while the create the acceptance
+    // already committed is issued afterwards. The execution that produces is
+    // NOT hidden and NOT reported as cancelled: its effect stays unsettled, and
+    // the next delivery window turns the durable intent into the platform ask.
+    const holder: { fixture?: CancelFixture } = {};
+    const stopped: string[] = [];
+    const fixture = await openCancelFixture(CHAIN, {
+      beforeCreateConfirmed: (request) => {
+        if (request.nodeId !== "review") return;
+        const opened = holder.fixture;
+        if (opened === undefined) {
+          throw new Error("fixture: the successor's create ran before the fixture was bound");
+        }
+        const report = applyCancelFromAnotherProcess({
+          storeRoot: opened.storeRoot,
+          graphId: opened.graphId,
+          nodeId: request.nodeId,
+          attemptId: request.attemptId,
+          reason: "the operator stopped the run while the successor was being armed",
+        });
+        if (!report.ok || report.verdict !== "recorded") {
+          throw new Error("fixture: the cancel was not recorded: " + JSON.stringify(report));
+        }
+        stopped.push(request.attemptId);
+      },
+    });
+    holder.fixture = fixture;
+    try {
+      fixture.platform.answer = {
+        kind: "confirmed",
+        reason: "the fake platform confirmed the abort",
+      };
+
+      const submitted = await submitWork(fixture);
+      expect(submitted["decision"]).toBe("accepted");
+      // The cancel committed for the attempt the acceptance armed, from a REAL
+      // second process, before that attempt's create was acknowledged.
+      expect(stopped).toEqual(["review#2"]);
+
+      const rows = readRows(fixture);
+      expect(rows.control?.command).toBe("cancel");
+      expect(
+        rows.decisions.map((decision) => decision.attemptId + ":" + decision.command),
+      ).toEqual(["review#2:cancel"]);
+      // NO business result exists for the stopped attempt, and the accepted
+      // result the feeder committed is untouched.
+      expect(rows.events.map((event) => event.attemptId)).toEqual(["work#1"]);
+      expect(rows.receipts).toBe(1);
+      // THE CREATE WAS ISSUED (the acceptance committed first) and its effect is
+      // still UNSETTLED — the execution stays VISIBLE rather than being dropped
+      // to make the stop look converged.
+      expect(rows.effects.map((effect) => effect.effectId + ":" + effect.status)).toEqual([
+        "dispatch:review#2:started",
+      ]);
+      // No delivery window has run yet, so no cancel effect exists: the durable
+      // CONTROL DECISION is the intent, and it is already committed.
+      expect(cancelRowOf(rows, "review#2")).toBeUndefined();
+
+      // THE BOOT SWEEP reports the stop, dispatches NOTHING new, and hands the
+      // durable intent over with the execution id the host now holds.
+      const dispatchesBefore = fixture.dispatches.length;
+      const report = await fixture.host.recoverDeclaredGraphs();
+      expect(report.controlled).toEqual([fixture.graphId + ":cancel"]);
+      expect(report.cancellations).toEqual([
+        expect.objectContaining({ attemptId: "review#2", state: "confirmed" }),
+      ]);
+      expect(fixture.platform.asked).toHaveLength(1);
+      expect(fixture.platform.asked[0]?.effect.attemptId).toBe("review#2");
+      expect(fixture.platform.asked[0]?.execution?.executionId).toBe(childSessionOf("review#2"));
+      expect(fixture.dispatches).toHaveLength(dispatchesBefore);
+      const after = readRows(fixture);
+      expect(cancelRowOf(after, "review#2")?.status).toBe("done");
+      expect(after.events.map((event) => event.attemptId)).toEqual(["work#1"]);
+      expect(after.control?.command).toBe("cancel");
     } finally {
       fixture.host.close();
     }
