@@ -45,6 +45,7 @@ import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
+import { GRAPH_STORE_TABLES } from "../../src/graph/store/index.ts";
 import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.ts";
 import { runGraphControlEntry } from "../../src/graph/tools/control-entry.ts";
 import { createGraphToolSet, type GraphToolSet } from "../../src/graph/tools/graph-tools.ts";
@@ -658,6 +659,187 @@ describe("terminal-graph re-execution — a NEW run", () => {
       ).toBeUndefined();
     } finally {
       fixture.host.close();
+    }
+  });
+});
+
+// ── The run fence and the reserved pre-run generation ───────────────────────
+
+describe("the store's run fence — the pre-run generation closes with the first run", () => {
+  it("names the reserved generation for a closed batch instead of throwing, and keeps its effect row", () => {
+    const store = GraphStore.openFile(makeTmpDir("run-reexecution-pre-run-"));
+    try {
+      const graphId = "pre-run.generation";
+      const ghostEffect = "dispatch:ghost#1";
+      // AN EFFECT WRITTEN BEFORE ANY RUN EXISTS is filed under the reserved
+      // pre-run id — the acceptance-only substrate's implicit run (G3) — and the
+      // substrate is fully usable while it is the graph's only generation.
+      store.writeEffect({
+        graphId,
+        effectId: ghostEffect,
+        attemptId: "ghost#1",
+        kind: "dispatch",
+        payload: { nodeId: "ghost" },
+        createdAt: FIXED_AT,
+        status: "pending",
+      });
+      expect(
+        store.all(
+          `SELECT run_id FROM ${GRAPH_STORE_TABLES.pendingEffects} WHERE graph_id = ?`,
+          graphId,
+        )[0]?.["run_id"],
+      ).toBe("run:unminted");
+      expect(store.markEffectStarted(graphId, ghostEffect).kind).toBe("transitioned");
+
+      // THE FIRST RUN CLOSES THE PRE-RUN GENERATION. An acceptance for the ghost
+      // attempt is refused by the batch write's OWN third guard clause — and the
+      // refusal is NAMED `run-superseded` with the reserved generation as the run
+      // the attempt belongs to, instead of the unexplained `invalid-record`
+      // throw a classifier that mapped the reserved id to "unknown" produced.
+      const runId = graphId + "@1";
+      expect(
+        store.runs.mintRun({
+          graphId,
+          runId,
+          startedAt: FIXED_AT + 1,
+          planRevision: "plan.r1",
+        })?.runId,
+      ).toBe(runId);
+      const verdict = store.commitAccepted({
+        receipt: {
+          graphId,
+          attemptId: "ghost#1",
+          submissionId: "submission:pre-run",
+          planRevision: "plan.r1",
+          proposalDigest: "digest:pre-run",
+          decision: "accepted",
+          committedAt: FIXED_AT + 2,
+        },
+        acceptedEvent: {
+          graphId,
+          attemptId: "ghost#1",
+          submissionId: "submission:pre-run",
+          planRevision: "plan.r1",
+          outcomeId: "done",
+          acceptedAt: FIXED_AT + 2,
+        },
+      });
+      expect(verdict.kind).toBe("run-superseded");
+      if (verdict.kind !== "run-superseded") throw new Error("fixture: expected run-superseded");
+      expect(verdict.runId).toBe("run:unminted");
+      expect(verdict.reason).toContain("reserved pre-run generation");
+      expect(
+        store.lookupReceipt({
+          graphId,
+          attemptId: "ghost#1",
+          submissionId: "submission:pre-run",
+        }),
+      ).toBeUndefined();
+      expect(store.acceptedEvents(graphId)).toEqual([]);
+      expect(store.readAcceptedResult(graphId, "ghost#1")).toBeUndefined();
+
+      // THE GENERATION'S EFFECT ROW IS IMMUTABLE TOO. The conditional UPDATE
+      // refuses it (the reserved id is not the run the graph now addresses) and
+      // the refusal names that run; the row keeps the status it had.
+      const transition = store.markEffectDone(graphId, ghostEffect);
+      expect(transition.kind).toBe("refused");
+      if (transition.kind !== "refused") throw new Error("fixture: expected refused");
+      expect(transition.reason).toContain(runId);
+      expect(transition.effect.status).toBe("started");
+      expect(
+        store.all(
+          `SELECT status FROM ${GRAPH_STORE_TABLES.pendingEffects} WHERE graph_id = ? AND effect_id = ?`,
+          graphId,
+          ghostEffect,
+        )[0]?.["status"],
+      ).toBe("started");
+      // The closed generation's row is NOT offered to the current run's readers.
+      expect(store.pendingEffects(graphId)).toEqual([]);
+      expect(store.pendingEffects(graphId, runId)).toEqual([]);
+
+      // POSITIVE CONTROL: a graph that never minted a run keeps its implicit
+      // generation — the same store, no run identity, still commits and moves.
+      const soloGraph = "pre-run.ledger-only";
+      const soloEffect = "dispatch:solo#1";
+      store.writeEffect({
+        graphId: soloGraph,
+        effectId: soloEffect,
+        attemptId: "solo#1",
+        kind: "dispatch",
+        payload: { nodeId: "solo" },
+        createdAt: FIXED_AT,
+        status: "pending",
+      });
+      expect(store.markEffectStarted(soloGraph, soloEffect).kind).toBe("transitioned");
+      expect(
+        store.commitAccepted({
+          receipt: {
+            graphId: soloGraph,
+            attemptId: "solo#1",
+            submissionId: "submission:ledger-only",
+            planRevision: "plan.s",
+            proposalDigest: "digest:ledger-only",
+            decision: "accepted",
+            committedAt: FIXED_AT + 3,
+          },
+          acceptedEvent: {
+            graphId: soloGraph,
+            attemptId: "solo#1",
+            submissionId: "submission:ledger-only",
+            planRevision: "plan.s",
+            outcomeId: "done",
+            acceptedAt: FIXED_AT + 3,
+          },
+        }).kind,
+      ).toBe("committed");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("never reports a transition the conditional statement did not make", () => {
+    const store = GraphStore.openFile(makeTmpDir("run-reexecution-ignored-"));
+    try {
+      const graphId = "pre-run.ignored";
+      const effectId = "dispatch:work#1";
+      store.runs.mintRun({
+        graphId,
+        runId: graphId + "@1",
+        startedAt: FIXED_AT,
+        planRevision: "plan.r1",
+      });
+      store.writeEffect({
+        graphId,
+        effectId,
+        attemptId: "work#1",
+        kind: "dispatch",
+        payload: { nodeId: "work" },
+        createdAt: FIXED_AT,
+        status: "pending",
+      });
+      expect(store.markEffectStarted(graphId, effectId).kind).toBe("transitioned");
+
+      // A statement that matches the row but writes nothing (SQLite's IGNORE)
+      // must not be reported as a transition: the verdict is answered from
+      // `changes()`, and when neither fence explains the missing write the store
+      // REFUSES to invent one.
+      store.run(
+        "CREATE TEMP TRIGGER p3_effect_ignore BEFORE UPDATE ON " +
+          GRAPH_STORE_TABLES.pendingEffects +
+          " BEGIN SELECT RAISE(IGNORE); END",
+      );
+      try {
+        expect(() => store.markEffectDone(graphId, effectId)).toThrow(
+          "the guarded write and the store disagree",
+        );
+      } finally {
+        store.run("DROP TRIGGER p3_effect_ignore");
+      }
+      expect(store.pendingEffects(graphId).map((effect) => effect.status)).toEqual(["started"]);
+      // CONTROL: with no trigger in the way, the same call moves the row.
+      expect(store.markEffectDone(graphId, effectId).kind).toBe("transitioned");
+    } finally {
+      store.close();
     }
   });
 });

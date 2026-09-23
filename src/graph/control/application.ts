@@ -1523,8 +1523,10 @@ function orderReexecution(
   // batch for one of the closed run's attempts is answered `run-superseded` (the
   // third guard clause of the batch write joins the attempt to its own dispatch
   // effect, filed under a run the graph has replaced) and an effect transition
-  // against one of its effects is refused by name — so neither a receipt nor an
-  // effect row of a closed run is ever rewritten.
+  // against one of its effects is refused by the SAME conditional statement that
+  // would rewrite the row — the run fence is part of the UPDATE's WHERE clause,
+  // not a prior read — so neither a receipt nor an effect row of a closed run is
+  // ever rewritten.
   runs.claimRunControl(
     Object.freeze({
       graphId,

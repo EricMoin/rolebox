@@ -530,25 +530,79 @@ function supersededVerdict(decision: ControlDecisionRecord): CommitResult {
 
 /**
  * The `run-superseded` verdict for a batch whose attempt belongs to a run the
- * graph has replaced.
+ * graph has replaced — or to the reserved PRE-RUN generation, which is closed
+ * the moment the graph holds a run identity.
  *
  * ONE owner of the wording, exactly like {@link controlledVerdict} and
- * {@link supersededVerdict}, so the fast path and the guarded write refuse a
- * batch in the same words.
+ * {@link supersededVerdict}, so the acceptance fast path and the caller of the
+ * guarded write refuse a batch in the same words.
  */
 function supersededRunVerdict(
   graphId: string,
   attemptId: string,
   runId: string,
 ): CommitResult {
+  const belongs =
+    runId === UNMINTED_RUN_ID
+      ? "was filed under the reserved pre-run generation (no run identity), which the graph " +
+        "has SUPERSEDED with a later run"
+      : `belongs to run ${runId}, which the graph has SUPERSEDED with a later run`;
   return {
     kind: "run-superseded",
     runId,
     reason:
-      `attempt ${attemptId} of graph ${graphId} belongs to run ${runId}, which the graph has ` +
-      "SUPERSEDED with a later run — a closed run's attempts accept nothing, so no receipt, " +
-      "accepted event, accepted result or state advance was written; the successor run carries " +
-      "the graph forward",
+      `attempt ${attemptId} of graph ${graphId} ${belongs} — a closed run's attempts accept ` +
+      "nothing, so no receipt, accepted event, accepted result or state advance was written; " +
+      "the successor run carries the graph forward",
+  };
+}
+
+/**
+ * The `refused` transition of an effect row that is already terminal.
+ *
+ * ONE owner of the wording, so the fast-path read and the post-refusal
+ * classification of {@link LedgerTables.transitionEffect} answer in the same
+ * words.
+ */
+function terminalEffectRefusal(
+  graphId: string,
+  effect: PendingEffectRecord,
+  next: EffectStatus,
+): EffectTransition {
+  return {
+    kind: "refused",
+    reason:
+      `effect ${effect.effectId} of graph ${graphId} is ${effect.status} and terminal — a settled effect is never rewound to ${next}; ` +
+      "new work gets a new effect id, and nothing was written",
+    effect,
+  };
+}
+
+/**
+ * The `refused` transition of an effect whose run — or whose reserved PRE-RUN
+ * generation — the graph has replaced.
+ *
+ * ONE owner of the wording, so the fast-path read and the post-refusal
+ * classification of {@link LedgerTables.transitionEffect} answer in the same
+ * words. The refused row is returned as it stands, so the caller can see the
+ * status it kept.
+ */
+function closedRunEffectRefusal(
+  graphId: string,
+  effect: PendingEffectRecord,
+  currentRunId: string,
+): EffectTransition {
+  const belongs =
+    effect.runId === undefined
+      ? "was filed under the reserved pre-run generation (no run identity), which the graph has " +
+        `SUPERSEDED with run ${currentRunId}`
+      : `belongs to run ${effect.runId}, which the graph has SUPERSEDED with run ${currentRunId}`;
+  return {
+    kind: "refused",
+    reason:
+      `effect ${effect.effectId} of graph ${graphId} ${belongs} — a closed run's effects are ` +
+      `immutable, so nothing was written and the row stays ${effect.status}`,
+    effect,
   };
 }
 
@@ -791,7 +845,11 @@ export class LedgerTables {
    *   graph has replaced, so the run is CLOSED and its attempts accept nothing.
    *   The join is on the effect rows this class owns; an attempt that was armed
    *   always has one, and an attempt with no row anywhere is not attributable to
-   *   a closed run here (see {@link CommitResult}'s `run-superseded`).
+   *   a closed run here (see {@link CommitResult}'s `run-superseded`). A row
+   *   filed under the reserved pre-run id counts as replaced wherever the graph
+   *   holds a run identity — `run:unminted` is never that identity — and the
+   *   classifier names the generation rather than leaving the refusal
+   *   unexplained.
    *
    * BEING FIRST IS ALSO WHAT MAKES THE RACE A WAIT. A write statement takes
    * SQLite's RESERVED lock immediately, so a racing control writer WAITS on
@@ -1255,10 +1313,22 @@ export class LedgerTables {
   /**
    * Move one effect to `next`.
    *
-   * The read decides the verdict; the UPDATE repeats the terminal guard in its
-   * own WHERE clause, so a row that settled between the two statements is never
-   * rewritten even though this store assumes the single-writer discipline of a
-   * local file.
+   * THE RUN FENCE IS PART OF THE CONDITIONAL UPDATE. The statement repeats the
+   * terminal guard read above AND carries the run condition itself, so the write
+   * that would rewrite the row is the write that decides whether the row's run
+   * is still the graph's current one: a re-execution committing between the read
+   * below and this statement cannot be overtaken, because the decision and the
+   * write are the same statement and there is no interval between them to race
+   * in. The reads above are the FAST PATH — a row that already NAMES a
+   * superseded run is refused without opening a write, and a run never becomes
+   * current again, so that fact cannot go stale. A row filed under the reserved
+   * pre-run id names no run and is deliberately left to the statement, which is
+   * what keeps the fence structural rather than read-then-write.
+   *
+   * Nothing is reported as `transitioned` until `changes()` says a row moved. A
+   * refusal — or a row that settled between the read and the statement — is
+   * CLASSIFIED from the committed store by re-reading, exactly as the batch
+   * write's caller classifies its own refusal; it is never assumed.
    */
   private transitionEffect(
     graphId: string,
@@ -1276,13 +1346,7 @@ export class LedgerTables {
       return { kind: "unchanged", effect: current };
     }
     if (current.status === "done" || current.status === "failed") {
-      return {
-        kind: "refused",
-        reason:
-          `effect ${effectId} of graph ${graphId} is ${current.status} and terminal — a settled effect is never rewound to ${next}; ` +
-          "new work gets a new effect id, and nothing was written",
-        effect: current,
-      };
+      return terminalEffectRefusal(graphId, current, next);
     }
     // A SUPERSEDED RUN'S EFFECTS ARE IMMUTABLE, exactly like its state (G3,
     // P3 item 2). The row records work ONE run authorized; a re-executed graph's
@@ -1297,25 +1361,57 @@ export class LedgerTables {
       current.runId !== undefined &&
       current.runId !== currentRunId
     ) {
-      return {
-        kind: "refused",
-        reason:
-          `effect ${effectId} of graph ${graphId} belongs to run ${current.runId}, which the graph has ` +
-          `SUPERSEDED with run ${currentRunId} — a closed run's effects are immutable, so nothing was ` +
-          `written and the row stays ${current.status}`,
-        effect: current,
-      };
+      return closedRunEffectRefusal(graphId, current, currentRunId);
     }
     this.db.run(
       `UPDATE ${GRAPH_STORE_TABLES.pendingEffects}
        SET status = ?
-       WHERE graph_id = ? AND effect_id = ? AND status NOT IN ('done', 'failed') AND status <> ?`,
+       WHERE graph_id = ? AND effect_id = ?
+         AND status NOT IN ('done', 'failed') AND status <> ?
+         AND (
+           run_id = (
+             SELECT run_id FROM ${GRAPH_STORE_TABLES.runs}
+             WHERE graph_id = ? ORDER BY run_seq DESC LIMIT 1
+           )
+           OR NOT EXISTS (SELECT 1 FROM ${GRAPH_STORE_TABLES.runs} WHERE graph_id = ?)
+         )`,
       next,
       graphId,
       effectId,
       next,
+      graphId,
+      graphId,
     );
-    return { kind: "transitioned", effect: { ...current, status: next } };
+    if (this.changes() === 1) {
+      return { kind: "transitioned", effect: { ...current, status: next } };
+    }
+    // THE STATEMENT MOVED NO ROW. The row settled in the window, or its run (or
+    // the reserved pre-run generation) is no longer the graph's current one, or
+    // the store contradicts itself — classify from the committed store, and
+    // refuse to invent a verdict when none of the facts explains the refusal.
+    const settled = this.selectEffect(graphId, effectId);
+    if (settled === undefined) {
+      return {
+        kind: "missing",
+        reason: `graph ${graphId} holds no effect ${effectId} — nothing was written`,
+      };
+    }
+    if (settled.status === next) {
+      return { kind: "unchanged", effect: settled };
+    }
+    if (settled.status === "done" || settled.status === "failed") {
+      return terminalEffectRefusal(graphId, settled, next);
+    }
+    const runNow = this.readCurrentRunId(graphId);
+    if (runNow !== undefined && settled.runId !== runNow) {
+      return closedRunEffectRefusal(graphId, settled, runNow);
+    }
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      `acceptance-ledger: the conditional transition of effect ${effectId} in graph ${graphId} ` +
+        "changed no row although the row is open and its run is the graph's current one — the " +
+        "guarded write and the store disagree, so nothing was written and no verdict is reported",
+    );
   }
 
   // ── Selection helpers ─────────────────────────────────────────────────────
@@ -1339,47 +1435,39 @@ export class LedgerTables {
   }
 
   /**
-   * The run id of an effect whose run is NO LONGER the graph's current run — the
-   * `run-superseded` classification of a refused batch, or `undefined` when the
-   * attempt's run is current, unknown, or the graph holds no run identity at
-   * all.
+   * The run id of an effect of one attempt whose run is NO LONGER the graph's
+   * current run — the `run-superseded` classification of a refused batch, or
+   * `undefined` when every effect row of the attempt is current, the attempt
+   * has no effect row here, or the graph holds no run identity at all.
    *
-   * The counterpart of the third guard clause of {@link writeBatch}, read
-   * against the same committed store after that guard refused the batch. It is
-   * deliberately not part of the acceptance preconditions: the guard decides,
-   * this names the fact that decided it.
+   * THE COUNTERPART OF THE THIRD GUARD CLAUSE of {@link writeBatch}, evaluated
+   * against the same committed store after that guard refused the batch: the
+   * clause refuses when ANY effect row of the attempt is filed under a run other
+   * than the current one, and this read answers the first such row in creation
+   * order. It is deliberately not part of the acceptance preconditions: the
+   * guard decides, this names the fact that decided it.
+   *
+   * The reserved pre-run id is a real answer here, not a missing one. A row
+   * filed under it names no run, but it IS filed under a run the graph has
+   * replaced the moment the graph holds a run identity — exactly what the
+   * guard's inequality compares — so the classifier NAMES the pre-run generation
+   * instead of leaving the guard's refusal unexplained. An attempt with no
+   * effect row anywhere is not attributable to a closed run (there is nothing
+   * to compare) and the guard does not refuse it either.
    */
   private supersededRunOf(graphId: string, attemptId: string): string | undefined {
     const current = this.readCurrentRunId(graphId);
     if (current === undefined) return undefined;
-    const attemptRun = this.runOfAttempt(graphId, attemptId);
-    if (attemptRun === undefined || attemptRun === current) return undefined;
-    return attemptRun;
-  }
-
-  /**
-   * The run an attempt's own dispatch effect rows are filed under, or
-   * `undefined` when this store holds no such row for it.
-   *
-   * ONE owner of the join (the effects table's SQL lives in this class), and the
-   * reason the acceptance fence can bind a batch to the run it would settle: an
-   * attempt is armed by writing its dispatch effect in the same transaction that
-   * records the attempt, so an attempt that reached a real acceptance always has
-   * one. An attempt with no effect row anywhere is not attributable to a closed
-   * run by this store, and the guard does not invent one.
-   */
-  private runOfAttempt(graphId: string, attemptId: string): string | undefined {
     const table = GRAPH_STORE_TABLES.pendingEffects;
     const row = this.db
       .query(
         `SELECT run_id FROM ${table}
-         WHERE graph_id = ? AND attempt_id = ?
+         WHERE graph_id = ? AND attempt_id = ? AND run_id <> ?
          ORDER BY created_at LIMIT 1`,
       )
-      .get(graphId, attemptId);
+      .get(graphId, attemptId, current);
     if (isNoRow(row)) return undefined;
-    const runId = readText(asRow(row, this.filePath, table), "run_id", this.filePath, table);
-    return runId === UNMINTED_RUN_ID ? undefined : runId;
+    return readText(asRow(row, this.filePath, table), "run_id", this.filePath, table);
   }
 
   private selectEffect(

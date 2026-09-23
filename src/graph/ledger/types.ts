@@ -728,9 +728,18 @@ export type CommitResult =
        * in the same transaction that records it, so an attempt that reached a
        * real acceptance always has one. An attempt with no effect row anywhere is
        * not attributable to a closed run by this store and is not refused here.
+       *
+       * A row filed under the reserved PRE-RUN generation (the implicit run of a
+       * substrate that never minted one) IS attributable once the graph holds a
+       * run identity: the graph has replaced the generation that row belonged
+       * to, and `runId` reports the reserved id rather than inventing a run.
        */
       readonly kind: "run-superseded";
-      /** The run the attempt belongs to — no longer the graph's current run. */
+      /**
+       * The run the attempt belongs to — no longer the graph's current run; the
+       * reserved pre-run id when the attempt's effect was filed before the graph
+       * had a run identity.
+       */
       readonly runId: string;
       readonly reason: string;
     };
@@ -738,11 +747,16 @@ export type CommitResult =
 /**
  * The verdict of one effect status transition.
  *
- * - `transitioned` — the row moved to the requested status.
+ * - `transitioned` — the row moved to the requested status. The transition and
+ *   the run/terminal fences are ONE conditional statement, so this verdict is
+ *   reported only when that statement really changed a row.
  * - `unchanged` — the row already had that status; nothing was written.
- * - `refused` — the row is TERMINAL and the request would rewind it; nothing
- *   was written. A settled effect is never restarted — new work gets a new
- *   effect id.
+ * - `refused` — nothing was written, for one of two reasons: the row is
+ *   TERMINAL and the request would rewind it (a settled effect is never
+ *   restarted — new work gets a new effect id), or the row belongs to a run —
+ *   or to the reserved pre-run generation — the graph has SUPERSEDED, whose
+ *   effects are immutable. `effect` is the row as it stands, with the status it
+ *   kept; the reason names which fence refused it.
  * - `missing` — no such effect in that graph; nothing was written.
  */
 export type EffectTransition =
