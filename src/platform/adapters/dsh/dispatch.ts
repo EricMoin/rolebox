@@ -1,58 +1,40 @@
 /**
- * DshDispatchAdapter — dsh dispatch seam for the graph engine and loop mode.
+ * DshDispatchAdapter — dsh dispatch seam for loop mode.
  *
- * When rolebox runs as a dsh (DeepSeek Harness) cordis plugin, graph node
- * dispatch and loop worker rounds must go through dsh services instead of the
- * opencode SDK client. This adapter implements BOTH dispatch surfaces rolebox
- * consumes, backed by the same dsh services:
+ * When rolebox runs as a dsh (DeepSeek Harness) cordis plugin, loop worker
+ * rounds must go through dsh services instead of the opencode SDK client. This
+ * adapter implements {@link IDispatchAdapter} (`src/loop/dispatch-adapter.ts`),
+ * the seam the loop coordinator uses to drive rounds, over the same dsh
+ * services.
  *
- *   - {@link NodeDispatchPort}  (`src/graph/engine/engine-advance.ts`) — the
- *     seam every graph engine touches to launch nodes. `executeNode` routes a
- *     graph node to the dsh subagent seam via `SubagentRuntime.start`
- *     (`ctx.subagents`, contract §4.3); results are collected through the dsh
- *     session service (`ctx.sessions`, §4.1) and the run's `result` promise;
- *     cancellation maps to the run's `dispose()` (the dsh abort/task surface);
- *     failures map to the engine's escalate semantics by translating the dsh
- *     `SubagentResult.stopReason` into the engine's `DispatchTaskStatus`
- *     vocabulary (`completed → completed`, `error/refusal → error`, `aborted →
- *     cancelled`, `max-tokens → timeout`) that `mapDispatchStatusToSignal`
- *     (`engine-recovery.ts`) already turns into `answer` / `escalate` signals.
- *   - {@link IDispatchAdapter}  (`src/loop/dispatch-adapter.ts`) — the seam
- *     the loop coordinator uses to drive worker rounds. `dispatchRound` /
- *     `getRoundResult` / `cancelRound` share the SAME run registry as the
- *     graph port, so graph and loop dispatches observe one consistent view.
+ * The adapter's former graph-node surface (`NodeDispatchPort.executeNode`) was
+ * deleted with the legacy graph runtime; a declared (outcome-protocol) graph is
+ * dispatched by the host capability layer (`src/graph/host/dispatch-host.ts`),
+ * not through this loop adapter.
  *
  * ── Per-role agent mapping ────────────────────────────────────────────────
- * A graph node's `agent` (or a loop round's `agent`) IS the rolebox agent id
- * registered by {@link DshAgentRegistrar} (`agent-registrar.ts`) — the
- * registrar registers one `SubagentProvider` per `AgentDefinition` keyed by
- * `definition.id`. The adapter therefore resolves `node.agent` directly as the
- * provider name for `SubagentRuntime.start`; when the agent is not registered
- * the start rejects with a descriptive error (the engine contains it and
- * escalates the node). Per-role tool allowlists / model overrides are applied
- * by the registrar's provider at spawn time (capabilities.toolFilter /
+ * A loop round's `agent` IS the rolebox agent id registered by
+ * {@link DshAgentRegistrar} (`agent-registrar.ts`) — the registrar registers
+ * one `SubagentProvider` per `AgentDefinition` keyed by `definition.id`. The
+ * adapter therefore resolves the agent directly as the provider name for
+ * `SubagentRuntime.start`; when the agent is not registered the start rejects
+ * with a descriptive error. Per-role tool allowlists / model overrides are
+ * applied by the registrar's provider at spawn time (capabilities.toolFilter /
  * agentOptions merge) — not duplicated here.
  *
  * ── Graceful degradations (documented) ───────────────────────────────────
- *   - Budget accounting: dsh has no token/cost budget tracker. The
- *     `getSessionUsage` member of `NodeDispatchPort` is therefore omitted —
- *     the engine's `captureNodeUsage` (engine-recovery.ts) guards on absence
- *     and leaves per-node `tokensConsumed` at its default zero. Graph-level
- *     budget ceilings are likewise not enforced on the dsh path.
  *   - Per-run hard timeout: dsh's `SubagentStartRequest` has no
  *     `timeout_ms` field (the dsh vocabulary is `agentOptions.maxTokens`).
- *     When a node declares `budget.timeout_ms`, the adapter enforces it with
- *     an AbortController timer (abort signal + dispose) that settles the run
- *     as `timeout`; the engine's stale-node watcher backstops hangs otherwise.
+ *     A round that declares `timeoutMs` is enforced with an AbortController
+ *     timer (abort signal + dispose) that settles the run as `timeout`.
  *   - `injectNote` (loop progress markers): dsh has no `prompt` on the
  *     SessionStore (`DshSessionAdapter.prompt` returns null — prompting is
  *     driven by the dsh agent loop), so it is a no-op.
  *   - Result sidecars: the dsh run's output ContentBlocks are materialized to
  *     `{directory}/.rolebox/state/results/{taskId}.txt` (the same layout the
- *     opencode sidecar uses) so `graph_status(node, include_output)` and the
- *     loop `loop_output` tool read node results through the shared
- *     `GraphToolSet.resultText` path. When the sidecar write fails the
- *     MaterializedResultRef carries a `fetchError` and readers degrade.
+ *     opencode sidecar uses) so the loop `loop_output` tool reads round
+ *     results. When the sidecar write fails the MaterializedResultRef carries a
+ *     `fetchError` and readers degrade.
  *
  * This module does NOT import from any host SDK — neither the opencode
  * plugin/SDK nor any dsh package. The dsh surface is consumed structurally
@@ -64,16 +46,13 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { NodeDispatchPort } from "../../../graph/engine/engine-advance.ts";
-import type {
-  DispatchParentContext,
-  TaskTerminatedCallback,
-} from "../../../graph/engine/dispatch-bridge.ts";
+
+/** Fire-once termination listener signature (the loop coordinator's contract). */
+type TaskTerminatedCallback = (taskId: string, status: string) => void;
 import type {
   DispatchTask,
   MaterializedResultRef,
 } from "../../../dispatch/types.ts";
-import type { NodeRuntimeState } from "../../../types.engine-v2.ts";
 import type { IDispatchAdapter } from "../../../loop/dispatch-adapter.ts";
 import { SUMMARY_INPUT_CHAR_CAP } from "../../../loop/constants.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
@@ -106,36 +85,6 @@ export type { DshSubagentResult } from "./agent-registrar.ts";
 export interface DshSubagentDispatchRuntime extends DshSubagentRuntime {
   /** Start a subagent run through the named provider (§4.3 `start`). */
   start(name: string, request: DshSubagentStartRequest): Promise<DshSubagentRun>;
-}
-
-/**
- * Nested-graph liveness seam. The dsh graph toolset is consumed structurally
- * (the adapter never imports the graph subsystem) so a run whose agent launched
- * a nested graph can be settled from THAT graph's outcome instead of the
- * agent's turn completion.
- *
- * A dispatched subagent that calls `graph_run` ends its turn immediately
- * (graph_run is non-blocking), so the run's `result` resolves `completed`
- * while the nested graph is still executing. Without this seam the outer node
- * would report success and the nested graph's eventual failure would be lost.
- */
-export interface DshNestedGraphLiveness {
-  /**
-   * Whether the session still owns a graph that has not reached a terminal
-   * phase (including a quiescent-blocked HITL gate).
-   */
-  hasExecuting(sessionId: string): boolean;
-  /**
-   * Subscribe to graph-terminal events for the graphs the session's agents
-   * launched. Returns an unsubscribe function.
-   */
-  subscribeTerminal(
-    observer: (info: {
-      graphId: string;
-      sessionId?: string;
-      failed: boolean;
-    }) => void,
-  ): () => void;
 }
 
 /**
@@ -204,15 +153,6 @@ export interface DshDispatchAdapterOptions {
    * probed live-agent registry: `(sid) => registry?.get(sid)`.
    */
   parentResolver?: (sessionId: string) => unknown;
-  /**
-   * Optional nested-graph liveness seam (see {@link DshNestedGraphLiveness}).
-   * When wired, a run that settles `completed` while its session still owns an
-   * executing nested graph is held `running` until that graph reaches a
-   * terminal state; a failed nested graph then settles the task as `error`
-   * (the engine's escalate path) instead of a silent success. Absent → the
-   * pre-existing behavior (settle from `stopReason` alone).
-   */
-  graphLiveness?: DshNestedGraphLiveness;
   /**
    * Optional workspace directory for result sidecars
    * (`{directory}/.rolebox/state/results/`). Defaults to `process.cwd()`.
@@ -291,26 +231,17 @@ const DEFAULT_PARENT_SESSION_ID = "dsh";
  * `getSessionUsage` is intentionally absent (dsh has no budget accounting —
  * the engine's `captureNodeUsage` guards on absence).
  */
-export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
+export class DshDispatchAdapter implements IDispatchAdapter {
   private readonly tasks = new Map<string, DshTaskEntry>();
   private readonly log;
   private readonly directory: string;
   /**
-   * Runs whose `result` settled `completed` while their session still owned an
-   * executing nested graph. Keyed by task id → the run's materialized output
-   * text, settled when the nested graph reaches a terminal state.
-   */
-  private readonly pendingNestedSettle = new Map<string, string>();
-  /** Lazily-created nested-graph terminal subscription (one per adapter). */
-  private nestedUnsub?: () => void;
-  /**
    * Dispatch-parent index: child session id (a `SubagentRun.id`) → the REAL
-   * live parent session recorded at spawn (`liveParentSessionId`). Lets the
-   * adapter walk a nested graph's invoking session chain up to the outermost
-   * live session (see {@link resolveSessionChain}) so a blocked
-   * `needs_approval` gate can be surfaced to the user's orchestrator session.
-   * Entries are never evicted (the run registry itself is lifetime-long), so a
-   * chain resolved after the child agent's session has ended still resolves.
+   * live parent session recorded at spawn (`liveParentSessionId`). Lets a
+   * caller walk a dispatched child's session chain up to the outermost live
+   * session (see {@link resolveSessionChain}). Entries are never evicted (the
+   * run registry itself is lifetime-long), so a chain resolved after the child
+   * agent's session has ended still resolves.
    */
   private readonly childToParent = new Map<string, string>();
 
@@ -481,12 +412,6 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     const outputText = blocksToText(result?.output ?? []);
     switch (result?.stopReason) {
       case "completed": {
-        // A subagent that dispatched a nested graph via `graph_run` ends its
-        // turn immediately (graph_run is non-blocking), so `stopReason` is
-        // "completed" while the nested graph is still executing. Hold the task
-        // running until that graph settles; otherwise the outer layer reports
-        // success and the nested graph's failure is lost.
-        if (this.deferUntilNestedGraphsSettle(id, task, outputText)) return;
         task.status = "completed";
         task.completedAt = new Date();
         task.result = this.materialize(id, outputText);
@@ -494,12 +419,10 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
         break;
       }
       case "aborted":
-        this.pendingNestedSettle.delete(id);
         task.status = "cancelled";
         task.completedAt = new Date();
         break;
       case "max-tokens":
-        this.pendingNestedSettle.delete(id);
         task.status = "timeout";
         task.completedAt = new Date();
         task.error = outputText || "dsh subagent exceeded max-tokens";
@@ -507,7 +430,6 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
       case "error":
       case "refusal":
       default: {
-        this.pendingNestedSettle.delete(id);
         task.status = "error";
         task.completedAt = new Date();
         task.error =
@@ -553,85 +475,10 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     task.terminatingSignal = signal ?? SYNTHETIC_ANSWER_SIGNAL;
   }
 
-  /**
-   * Hold a `completed` run open while its session still owns an executing
-   * nested graph. Returns `true` when settlement was deferred (the caller must
-   * NOT settle the task), `false` when the task can settle normally.
-   *
-   * The nested graph is correlated by the run's session id: in dsh a
-   * `SubagentRun.id` IS a `SessionId`, and the graph tool's invoking-session is
-   * the child agent's session — so `task.sessionId` identifies the graphs the
-   * dispatched agent launched.
-   */
-  private deferUntilNestedGraphsSettle(
-    id: string,
-    task: DispatchTask,
-    outputText: string,
-  ): boolean {
-    const liveness = this.opts.graphLiveness;
-    if (!liveness || !liveness.hasExecuting(task.sessionId)) return false;
-    this.pendingNestedSettle.set(id, outputText);
-    if (!this.nestedUnsub) {
-      this.nestedUnsub = liveness.subscribeTerminal((info) => {
-        this.onNestedGraphTerminal(info);
-      });
-    }
-    this.log.debug(
-      "dsh subagent run completed but its session owns an executing nested graph — deferring settlement",
-      { id, sessionId: task.sessionId },
-    );
-    return true;
-  }
-
-  /**
-   * Settle every deferred task whose session has no executing graph left after
-   * a nested graph reached a terminal state. A failed nested graph (escalated /
-   * timed-out node) settles the task `error` so the engine escalates the node
-   * instead of reporting a fabricated success.
-   */
-  private onNestedGraphTerminal(info: {
-    graphId: string;
-    sessionId?: string;
-    failed: boolean;
-  }): void {
-    if (this.pendingNestedSettle.size === 0) return;
-    const liveness = this.opts.graphLiveness;
-    for (const [id, outputText] of [...this.pendingNestedSettle]) {
-      const entry = this.tasks.get(id);
-      if (!entry || entry.task.status !== "running") {
-        this.pendingNestedSettle.delete(id);
-        continue;
-      }
-      if (!info.sessionId || entry.task.sessionId !== info.sessionId) continue;
-      // Another graph owned by the same session is still executing — keep
-      // waiting for its terminal event.
-      if (liveness?.hasExecuting(entry.task.sessionId)) continue;
-      this.pendingNestedSettle.delete(id);
-      if (info.failed) {
-        entry.task.status = "error";
-        entry.task.completedAt = new Date();
-        entry.task.error = `nested graph "${info.graphId}" failed`;
-      } else {
-        entry.task.status = "completed";
-        entry.task.completedAt = new Date();
-        entry.task.result = this.materialize(id, outputText);
-        this.recordTerminatingSignal(entry.task);
-      }
-      void entry.run.dispose().catch(() => undefined);
-      this.log.debug("dsh nested-graph deferral settled", {
-        id,
-        graphId: info.graphId,
-        status: entry.task.status,
-      });
-      this.finishTerminal(id);
-    }
-  }
-
   /** Settle a run as `error` from a rejected result promise (defensive). */
   private settleError(id: string, err: unknown): void {
     const entry = this.tasks.get(id);
     if (!entry || entry.task.status !== "running") return;
-    this.pendingNestedSettle.delete(id);
     entry.task.status = "error";
     entry.task.completedAt = new Date();
     entry.task.error =
@@ -647,7 +494,6 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
   private forceSettle(id: string, status: "cancelled" | "timeout", reason: string): void {
     const entry = this.tasks.get(id);
     if (!entry || entry.task.status !== "running") return;
-    this.pendingNestedSettle.delete(id);
     entry.task.status = status;
     entry.task.completedAt = new Date();
     entry.task.error = reason;
@@ -708,35 +554,6 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     return ref;
   }
 
-  // ── NodeDispatchPort (graph engine) ───────────────────────────────────────
-
-  /** Execute a graph node by starting a dsh subagent run for `node.agent`. */
-  async executeNode(
-    node: NodeRuntimeState,
-    parentContext: DispatchParentContext | undefined,
-    description?: string,
-  ): Promise<DispatchTask> {
-    // Context session stays the EXISTING value — the graph-scoped budget key
-    // (`sessionID`, i.e. the graph id) — so registrar active-role resolution
-    // (agent-registrar.ts) and the graph-id-keyed parent index
-    // (engine-recovery.ts) are unchanged. The live parent `Agent` that dsh
-    // requires is resolved from the REAL parent session when the graph carries
-    // one (`parentContext.parentSessionId`), falling back to the context key.
-    const contextSessionId = parentContext?.sessionID ?? DEFAULT_PARENT_SESSION_ID;
-    const liveParentSessionId =
-      parentContext?.parentSessionId ??
-      parentContext?.sessionID ??
-      DEFAULT_PARENT_SESSION_ID;
-    return this.startRun(
-      node.agent,
-      node.prompt,
-      description ?? `graph node ${node.nodeId}`,
-      contextSessionId,
-      liveParentSessionId,
-      node.budget?.timeout_ms,
-    );
-  }
-
   /**
    * Cancel a running dsh subagent run (the dsh abort surface): dispose the
    * run and settle the task as `cancelled`. Returns `true` when the
@@ -770,8 +587,7 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
    * the caller skips propagation.
    *
    * Cycle-safe: a seen-set stops a malformed parent loop, and the walk is
-   * bounded by the registry size. Consumed (structurally) by the graph
-   * toolset's `resolveSessionChain` seam.
+   * bounded by the registry size.
    */
   resolveSessionChain(sessionId: string): string[] {
     const chain = [sessionId];

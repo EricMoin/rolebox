@@ -1,5 +1,4 @@
 export { ConditionExtensionPoint } from "./conditions.ts";
-export { GraphTopologyExtensionPoint } from "./graph-topologies.ts";
 export { RecoveryStrategyExtensionPoint } from "./recovery-strategies.ts";
 export { RecoveryPatternExtensionPoint } from "./recovery-patterns.ts";
 export { NotificationChannelExtensionPoint } from "./notification-channels.ts";

@@ -5,7 +5,6 @@ import type { ConditionCapability, ObserveCapability } from "./capabilities.ts";
 /** All supported extension scopes. */
 export type ExtensionScope =
   | "conditions"
-  | "graph_topologies"
   | "recovery_strategies"
   | "recovery_patterns"
   | "notification_channels"
@@ -47,7 +46,6 @@ export interface NotificationChannelEntry {
 /** The full extensions: block in role.yaml. */
 export interface ExtensionConfig {
   conditions?: ExtensionEntry[];
-  graph_topologies?: ExtensionEntry[];
   recovery_strategies?: RecoveryStrategyEntry[];
   recovery_patterns?: RecoveryPatternEntry[];
   notification_channels?: NotificationChannelEntry[];

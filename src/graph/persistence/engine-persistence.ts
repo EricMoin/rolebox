@@ -9,41 +9,24 @@
  * file that a later `recover()` can hydrate back into a live engine.
  *
  * Scope:
- * - `save(state)` — write-through, synchronous, atomic (`.tmp` + `renameSync`).
- *   The durability path for **critical** transitions (node lifecycle, graph
- *   phase, frontier, checkpoint records, approval state), invoked from the
- *   advancement critical section's `finally` block.
- * - `scheduleSave(state)` — debounced (500ms) write path for **non-critical**
- *   churn only: signal-ledger history updates and budget / per-node
- *   tokensConsumed counters. Multiple rapid mutations coalesce into a single
- *   atomic write.
- * - `flush()` — force-drain a pending debounced write. Runs when the engine
- *   reaches a terminal phase (`complete`), so no debounced write is lost.
- * - `dispose()` — teardown for a runtime that is being replaced / discarded.
- *   Cancels the debounce timer and DROPS the pending write (no flush): the
- *   disposed runtime's state is stale relative to the successor runtime, so
- *   flushing it would overwrite newer state (review 05-F1/F3, M14/ML1).
- * - `load(graphId)` — read + validate; returns `null` for a missing file (only
- *   ENOENT), a schema-version mismatch, a file whose nodes fail the R2
- *   node-level field gate, or an out-of-vocabulary enum (clean start /
- *   migration point),
- *   mirroring `TaskStateStore.load()` (`src/dispatch/persistence/task-store.ts:125`).
- *   Any other read failure is rethrown — an unreadable state file is an
- *   explicit error, never a silent clean start (review 05-F6, L22).
- * - `loadForResume(graphId)` — the same read + validate path with the non-valid
- *   outcomes kept distinguishable ({@link EngineLoadResult}: absent / corrupt /
- *   unsupported / migration-required / valid). Added for the startup sweep,
- *   which must report those cases differently instead of collapsing them into
- *   one `null` (docs/graph-outcome-protocol.md § Version ownership and load
- *   contract). `load()` delegates to it and stays the null-only compatibility
- *   wrapper.
+ * - `EnginePersistence.save(state)` — synchronous, atomic (`.tmp` +
+ *   `renameSync`) write of a declared graph's record. This is the one write
+ *   path the outcome run path uses: a declaration reaches disk here before the
+ *   host may start it.
+ * - `loadEngineStateForResume(raw, label?, registry?, protocols?)` —
+ *   read + validate with every non-valid outcome kept distinguishable
+ *   ({@link EngineLoadResult}: absent / corrupt / unsupported /
+ *   migration-required / valid). It never throws, so a bad user file surfaces
+ *   as a non-executable result instead of a crash. The store deliberately has
+ *   no null-collapsing read wrapper: a caller that wants "state or nothing"
+ *   can project the structured result itself.
+ * - `serializeEngineState` / `deserializeEngineState` — the pure version-2
+ *   codec (Maps flat, runtime-only flags omitted).
  *
- * Two-tier durability policy (Q2 Option A): critical mutations write through
- * synchronously so a crash never loses node/phase/frontier progress; non-critical
- * churn (signal history, budget/token counters) is debounced to avoid a sync
- * write on every high-frequency update. A critical `save` always cancels any
- * pending debounced write (the sync write already contains the latest state),
- * so the two tiers stay consistent.
+ * The deleted legacy runtime's debounced write path, its two-tier durability
+ * policy and its `load`/`loadForResume` class methods are gone with it; the
+ * outcome path writes a record once per declaration and reads it through the
+ * structured loader.
  *
  * Design reference:
  * - `.rolebox/design/engine-state-machine.md` §4 (persistence model, atomic
@@ -89,7 +72,6 @@ import {
 import {
   classifyExecutionProtocol,
   DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-  LEGACY_SIGNAL_PROTOCOL,
   type ExecutionProtocolRegistry,
   type ExecutionProtocolVerdict,
 } from "../protocol/execution-protocol.ts";
@@ -107,82 +89,8 @@ import {
 /** Schema version of the persisted engine state file. */
 export const ENGINE_PERSISTENCE_VERSION = 2 as const;
 
-/** Debounce window for non-critical state writes (ms). See Q2 Option A. */
-export const NON_CRITICAL_DEBOUNCE_MS = 500 as const;
-
 /** Characters allowed verbatim in the per-graph filename slug. */
 const SAFE_SLUG = /[^A-Za-z0-9._-]/g;
-
-// ── Dirty-flag helpers (write-through batching) ──────────────────────────────
-
-/**
- * Mark the engine state as mutated. Every critical mutation site MUST call
- * this after mutating any persistent field (node lifecycle, phase, frontier,
- * budget, signal ledger, loop group state, checkpoints, etc.). The
- * advancement critical section's `finally` block only persists when the flag
- * is set, avoiding redundant writes on idle sections.
- *
- * This function is the official choke-point — callers never set
- * `state.isDirty` directly. The field is deliberately omitted from the
- * serialization DTO so a deserialized (recovered) state always starts clean.
- */
-export function markDirty(state: EngineState): void {
-  state.isDirty = true;
-}
-
-/**
- * Clear the dirty flag after a successful persist. Called in the advancement
- * critical section's `finally` block immediately after `persistState?.`.
- * The state is now durably on disk and the flag is reset so the next idle
- * section does not re-persist.
- */
-export function clearDirty(state: EngineState): void {
-  state.isDirty = false;
-}
-
-/**
- * Whether the engine state has unpersisted mutations. When `false`, the
- * advancement critical section's `finally` block skips the `persistState?.`
- * call — the section was idle (no mutations occurred).
- */
-export function shouldPersist(state: EngineState): boolean {
-  return state.isDirty;
-}
-
-/**
- * Mark the engine state as carrying **non-critical** churn (signal-ledger
- * history updates, budget / per-node tokensConsumed counters). Unlike
- * {@link markDirty}, this does NOT require a synchronous write-through — the
- * advancement critical section's `finally` block routes a section whose only
- * mutations were non-critical through the debounced write path instead.
- *
- * The official choke-point for non-critical mutations — callers never set
- * `state.isNonCriticalDirty` directly. The field is omitted from the
- * serialization DTO so a deserialized (recovered) state always starts clean.
- */
-export function markNonCriticalDirty(state: EngineState): void {
-  state.isNonCriticalDirty = true;
-}
-
-/**
- * Clear the non-critical dirty flag after the mutation has been accounted for
- * (either coalesced into a synchronous write or handed to the debounced path).
- * Called in the advancement critical section's `finally` block alongside
- * {@link clearDirty}.
- */
-export function clearNonCriticalDirty(state: EngineState): void {
-  state.isNonCriticalDirty = false;
-}
-
-/**
- * Whether the engine state has unpersisted **non-critical** churn. When
- * `true` and the critical {@link shouldPersist} flag is `false`, the
- * advancement critical section's `finally` block schedules a debounced write
- * instead of a synchronous one.
- */
-export function shouldPersistNonCritical(state: EngineState): boolean {
-  return state.isNonCriticalDirty;
-}
 
 // ── Serialization DTO types ─────────────────────────────────────────────────
 
@@ -258,15 +166,6 @@ export type EnginePersistenceFile = {
   version: typeof ENGINE_PERSISTENCE_VERSION;
 } & Omit<EngineState, EngineStateNonSerializedKeys> & {
     nodes: Record<string, NodeRuntimeStateDTO>;
-    /**
-     * LEGACY READ-COMPAT — the dead `EngineState.edges` map was removed (D3),
-     * so new files never carry this key. It is retained here (optional) so
-     * files authored before the removal — which DO carry a top-level `edges`
-     * object — still pass the required-shape gate and hydrate cleanly. The key
-     * is tolerated and ignored: it is never written and never hydrated back
-     * onto a live state.
-     */
-    edges?: Record<string, EdgePayload>;
     loopGroups: Record<string, LoopGroupRuntimeState>;
     signalLedger: Record<string, SignalLedgerEntry>;
   };
@@ -538,7 +437,7 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
   const nodes = new Map<string, NodeRuntimeState>();
   for (const [id, dto] of Object.entries(file.nodes)) {
     // R2 defensive gate (same rule as the never-throw loader's
-    // `hasRequiredShape`, which maps the violation to `null` instead): this
+    // `hasRequiredShape`, which maps the violation to `corrupt` instead): this
     // function's contract returns a state, so a node missing a required field
     // THROWS rather than hydrating a partial node whose `tokensConsumed` /
     // `signalsObserved` would silently become `{}`.
@@ -553,21 +452,13 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     }
     const { upstreamResults: _ur, ...rest } = dto;
     // C1 consumer side: normalize the persisted join strategy into the runtime
-    // vocabulary. A legacy bare "quorum" (persisted by builds that admitted
-    // `JOIN_STRATEGY_VALUES` wholesale) carries no count, so it is normalized
-    // to { quorum: 1 } — the historical runtime default — WITH a warning.
-    // Anything else out of vocabulary was already rejected by assertValidEnums
-    // (load → null); this function's contract returns a state, so it throws.
-    const rawJoinStrategy: unknown = rest.joinStrategy;
-    const joinStrategy = normalizeJoinStrategy(rawJoinStrategy);
+    // vocabulary. Anything out of vocabulary was already rejected by
+    // assertValidEnums (load → corrupt); this function's contract returns a
+    // state, so it throws.
+    const joinStrategy = normalizeJoinStrategy(rest.joinStrategy);
     if (joinStrategy === undefined) {
       throw new Error(
         `engine-persist: node "${id}" joinStrategy is not valid (expected "all", "any", or a { quorum: positive-int } object)`,
-      );
-    }
-    if (rawJoinStrategy === LEGACY_BARE_QUORUM_JOIN_STRATEGY) {
-      logWarn(
-        `engine-persist: node "${id}" carried the legacy bare "quorum" joinStrategy — normalizing to { quorum: 1 } (the old value carried no count)`,
       );
     }
     // R2: no assertion closes this object literal. `tokensConsumed` is a
@@ -601,9 +492,8 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     nodes.set(id, node);
   }
 
-  // D3: a legacy `file.edges` extra key (present in files authored before the
-  // dead-field removal) is deliberately NOT hydrated onto the live state —
-  // `EngineState` no longer has an `edges` member, and nothing reads it.
+  // An extra `edges` key in an old file is deliberately NOT hydrated onto the
+  // live state — `EngineState` has no `edges` member, and nothing reads it.
 
   const loopGroups = new Map<string, LoopGroupRuntimeState>();
   for (const [id, g] of Object.entries(file.loopGroups)) {
@@ -732,27 +622,23 @@ export type EngineLoadDimension =
   | "capability";
 
 /**
- * Outcome of {@link loadEngineStateForResume} / {@link EnginePersistence.loadForResume}.
+ * Outcome of {@link loadEngineStateForResume}.
  *
- * The legacy load path answers a single `null` for four different situations —
- * no file, a corrupt file, an unsupported storage format, and a recognized file
- * that requires a format migration. Callers that must ACT differently (the
- * startup sweep) need those separated; callers that only need "state or clean
- * start" keep using {@link EnginePersistence.load}, which collapses every
- * non-`valid` kind to `null` exactly as before.
+ * Every non-`valid` situation is its own kind — no file, a corrupt file, an
+ * unsupported storage format or execution protocol, and a recognized file that
+ * requires a format migration — so a caller that must ACT differently (the
+ * audit, the startup sweep) never has to guess from a `null`.
  *
  * Every non-`valid` result is non-executable by contract: none may reach
  * `adoptPrior`, dispatch, or automatic fresh-engine provisioning.
  *
  * - `valid` — every gate passed; `storageFormat` is the classified format the
  *   state was hydrated from (today always `STORAGE_FORMAT_V2`) and
- *   `executionProtocol` is the bound protocol identity. Since C3b the shipped
- *   registry holds BOTH protocols, so a valid load may be
- *   `LEGACY_SIGNAL_PROTOCOL` (the legacy run path) or `OUTCOME_PROTOCOL` (the
- *   outcome run path): the protocol identity is what tells a caller WHICH run
- *   path may resume the state, and a caller that only knows the legacy one must
- *   refuse a protocol-2 state rather than adopt it. The hydrated state carries
- *   the same identity explicitly.
+ *   `executionProtocol` is the bound protocol identity. The shipped registry
+ *   holds the outcome handler alone, so a valid load is `OUTCOME_PROTOCOL`;
+ *   a record pinned to any other legal version is `unsupported(execution)`,
+ *   which is how the deleted legacy signal protocol is refused. The hydrated
+ *   state carries the same identity explicitly.
  * - `absent` — no state file exists (ENOENT only). Creation of a graph is a
  *   separate explicit action, never implied by a load.
  * - `corrupt` — a recognized representation violates its schema, required
@@ -806,19 +692,17 @@ export type EngineLoadResult =
  * state file lives under `.rolebox/state/`. The `directory` is injectable so
  * tests can point at a throwaway temp dir and never touch the real state tree.
  *
- * Writes are synchronous and atomic (`.tmp` + `renameSync`), the same crash-safe
- * pattern as `task-store.ts:101-108`. `save` never throws — a failed write is
- * logged as a warning and reported via the boolean return so the caller can
- * gate `clearDirty` on the outcome (M5); a write failure never silently drops
- * the pending state. Two-tier policy: critical transitions use the synchronous
- * {@link save}; non-critical churn uses the debounced {@link scheduleSave} and
- * is drained by {@link flush} on terminal phases — a replaced / discarded
- * runtime calls {@link dispose} instead (cancels the debounce, drops the
- * pending write, never flushes stale state).
+ * The write is synchronous and atomic (`.tmp` + `renameSync`), the same
+ * crash-safe pattern as `task-store.ts:101-108`. `save` never throws — a
+ * failed write is logged as a warning and reported via the boolean return, so
+ * a caller deciding whether a declaration reached disk can gate on the
+ * outcome. Reads go through {@link loadEngineStateForResume}, which keeps
+ * every non-valid outcome distinguishable; this class deliberately holds no
+ * read method and no debounced write path (both belonged to the deleted legacy
+ * runtime, whose two-tier durability policy no longer exists).
  */
 export class EnginePersistence {
   private readonly directory: string;
-  private debounceTimer?: ReturnType<typeof setTimeout>;
 
   constructor(directory?: string) {
     this.directory = directory ?? process.cwd();
@@ -826,235 +710,26 @@ export class EnginePersistence {
 
   /**
    * Write-through save of the current engine state. Synchronous and atomic.
-   * Intended for the advancement critical section's `finally` block so that
-   * critical transitions (node lifecycle, phase, frontier) survive a crash.
-   *
-   * A critical `save` also cancels any pending debounced write — the sync write
-   * already contains the latest state, so coalescing the non-critical churn into
-   * it is safe (see the two-tier policy in the class header).
    *
    * Returns `true` when the state reached disk, `false` on a failed write
-   * (never throws). Callers that gate `clearDirty` on the outcome use this to
-   * keep the dirty flag set so a later section retries the persist.
+   * (never throws).
    */
   save(state: EngineState): boolean {
-    this._cancelDebounce();
     return this._write(state);
   }
 
-  /**
-   * Debounced save (500ms) for **non-critical** updates — signal-ledger history
-   * updates and budget / per-node tokensConsumed counters. Multiple rapid
-   * mutations are coalesced into a single atomic write of the most recent
-   * state. A final {@link save} / {@link flush} is still required to guarantee
-   * durability before process exit (flush-on-terminate is wired into the
-   * engine when a section reaches a terminal phase). A runtime that is
-   * replaced / discarded must call {@link dispose} — which cancels the
-   * debounce and drops the pending write rather than flushing stale state.
-   *
-   * If the debounce timer's write fails, the pending state is RETAINED so the
-   * next {@link flush} / {@link save} retries it — a failed debounced write is
-   * never silently dropped (M5).
-   */
-  scheduleSave(state: EngineState): void {
-    this._writeOnFlush = state; // coalesce to the most recent state
-    if (this.debounceTimer) return;
-    this.debounceTimer = setTimeout(() => {
-      this.debounceTimer = undefined;
-      const s = this._writeOnFlush;
-      this._writeOnFlush = undefined;
-      if (!s) return;
-      if (!this._write(s)) {
-        // Write failed — keep the pending state so the next flush()/save()
-        // retries it instead of losing the mutation.
-        this._writeOnFlush = s;
-      }
-    }, NON_CRITICAL_DEBOUNCE_MS);
-  }
-
-  /**
-   * Force-drain a pending debounced write synchronously. Companion to
-   * {@link scheduleSave} — runs when the engine reaches a terminal phase
-   * (`complete`) or the runtime is disposed / replaced so no debounced
-   * non-critical write is lost. A no-op when no debounced write is pending.
-   *
-   * Returns `true` when there was nothing pending or the drain write reached
-   * disk, `false` when the drain write failed — in which case the pending
-   * state is RETAINED for a later retry (M5).
-   */
-  flush(): boolean {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = undefined;
-    }
-    const s = this._writeOnFlush;
-    this._writeOnFlush = undefined;
-    if (!s) return true; // nothing pending — nothing to fail
-    const ok = this._write(s);
-    if (!ok) {
-      // Retain the pending state so a later flush()/save() can retry it.
-      this._writeOnFlush = s;
-    }
-    return ok;
-  }
-
-  /**
-   * Teardown entry point (review 05-F1/F3, M14/ML1): cancel any pending
-   * debounce timer and DROP the pending-to-flush state — the runtime owning
-   * this store is being disposed / replaced, so its state is stale relative to
-   * whatever writes the successor runtime has already performed. Unlike
-   * {@link flush}, this deliberately does NOT write: flushing a stale snapshot
-   * over the new runtime's state is the exact stale-write race the review
-   * flagged (the "flush-on-replace" contract in the class header only applies
-   * when the engine itself reaches a terminal phase — a dispose is not that
-   * path).
-   *
-   * Idempotent — a second dispose is a no-op. After dispose, a late
-   * {@link scheduleSave} would re-arm the timer, so callers must not keep
-   * using a disposed store.
-   */
-  dispose(): void {
-    this._cancelDebounce();
-  }
-
-  /**
-   * Load a graph's persisted engine state WITHOUT collapsing the non-valid
-   * outcomes. Same gates and same total-hydration contract as {@link load};
-   * only the return shape differs. `load` answers `null` for all four
-   * non-valid situations, so a caller cannot tell a clean start (missing file)
-   * from a corrupt file, an unsupported storage format, or a snapshot that
-   * requires a format migration. The startup sweep needs exactly that
-   * distinction, so it uses this method.
-   *
-   * - ENOENT → `{ kind: "absent" }` (first run / never persisted).
-   * - Any other read failure (EACCES / EISDIR / …) is RETHROWN: a file that
-   *   EXISTS but cannot be read is an explicit error, never "no state" —
-   *   treating it as absent would re-provision a graph whose completed nodes
-   *   would then be re-executed (review 05-F6 / L22).
-   * - Hydration failures come back as their {@link EngineLoadResult} kind
-   *   (corrupt / unsupported / migration-required), attributed to their axis:
-   *   a storage-format mismatch is `dimension: "storage"`, an unregistered or
-   *   malformed execution-protocol identity is `dimension: "execution"`.
-   *   Either way the result is non-executable and the file is preserved. The
-   *   defensive containment catch is unreachable while
-   *   `loadEngineStateForResume` stays total; it exists for the same reason as
-   *   `load`'s and maps an impossible escape to `corrupt` instead of letting
-   *   it crash the sweep.
-   */
-  loadForResume(graphId: string): EngineLoadResult {
-    const filePath = engineStatePath(this.directory, graphId);
-    let raw: string;
-    try {
-      raw = readFileSync(filePath, "utf-8");
-    } catch (err) {
-      // ENOENT — first run / never persisted. Absent, not corrupt.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        return { kind: "absent" };
-      }
-      // Anything else means the file EXISTS but is unreadable — an explicit
-      // failure, never "no state" (see the method doc).
-      throw err;
-    }
-    try {
-      return loadEngineStateForResume(raw, filePath);
-    } catch (err) {
-      // Defensive containment: hydration must never throw past the store. A
-      // structurally invalid file surfaces as `corrupt` (non-executable),
-      // never as a crash that would make the graph permanently unrecoverable.
-      return {
-        kind: "corrupt",
-        dimension: "storage",
-        reason: `containment: ${errorText(err)}`,
-      };
-    }
-  }
-
-  /**
-   * Load a graph's persisted engine state.
-   *
-   * Returns `null` (clean start / caller should provision a fresh engine) when:
-   * - the state file does not exist (ENOENT);
-   * - the JSON is corrupt / not an object;
-   * - the schema version is not decodable under the storage-format registry
-   *   (`DEFAULT_STORAGE_FORMAT_REGISTRY` registers exactly one decoder, for
-   *   `STORAGE_FORMAT_V2` — the version `ENGINE_PERSISTENCE_VERSION` writes —
-   *   and no migrations) — including a version that only a migration could
-   *   convert;
-   * - the file is structurally invalid / missing a required field (total
-   *   hydration — this method NEVER throws, so `recover()` can rely on `null`
-   *   meaning "no valid persisted state");
-   * - the file carries an out-of-vocabulary enum value — `node.status` /
-   *   `node.joinStrategy` / `file.phase` not in their runtime vocabularies
-   *   (R2: a corrupt-but-shape-valid file must not hydrate and crash later in
-   *   `canTransitionNode`);
-   * - a node entry fails the R2 node-level field gate (`agent` / `prompt` /
-   *   `needsApproval` / `signalsObserved` / `upstreamResults` /
-   *   `tokensConsumed` with its three numeric counters) — a previously
-   *   "barely loadable" stub node now yields a clean start.
-   *
-   * A legacy bare `joinStrategy: "quorum"` (no count) is NOT corrupt: it is
-   * normalized to `{ quorum: 1 }` with a `logWarn` (contract C1) — see
-   * `normalizeJoinStrategy`.
-   *
-   * This is the legacy null-only compatibility WRAPPER: it delegates to
-   * {@link loadForResume} and projects every non-`valid` kind onto `null`, so
-   * callers that treat "no valid state" as one clean-start signal keep their
-   * exact behavior. A caller that must distinguish the kinds (the startup
-   * sweep) uses {@link loadForResume} instead.
-   *
-   * It is NOT a protocol filter, and it must not be read as one. The shipped
-   * execution-protocol registry registers BOTH protocols, so a persisted
-   * protocol-2 (outcome) state loads as `valid` and this method returns it
-   * exactly like a legacy record. The guard that keeps a declared graph out of
-   * the legacy runtime lives at the RECOVERY boundary, never here:
-   * `EngineRuntime.recover()` refuses any protocol but the legacy one, and the
-   * startup sweep routes a protocol-2 record to the outcome run path instead of
-   * building a legacy engine. Correcting this comment rather than the loader is
-   * deliberate — a loader that filtered protocols would be a second, weaker
-   * owner of a decision the recovery boundary already makes explicit.
-   *
-   * Non-ENOENT READ failures are NOT clean starts (review 05-F6 / L22): an
-   * unreadable-but-present state file (EACCES, EISDIR, ...) is rethrown so the
-   * caller surfaces the error explicitly instead of silently re-provisioning a
-   * graph whose completed nodes would be re-executed. The engine's `recover()`
-   * wraps this call in its own try/catch and logs the failure, matching the
-   * failure accounting of `recoverInterruptedGraphs` (engine-startup.ts).
-   */
-  load(graphId: string): EngineState | null {
-    // Zero-behavior-change projection of the structured result: `valid` yields
-    // the state, and absent / corrupt / unsupported / migration-required all
-    // yield the same `null` this method always returned. Read errors still
-    // propagate (loadForResume rethrows them).
-    const result = this.loadForResume(graphId);
-    return result.kind === "valid" ? result.state : null;
-  }
-
   // ── Internals ─────────────────────────────────────────────────────────────
-
-  private _writeOnFlush?: EngineState;
-
-  private _cancelDebounce(): void {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = undefined;
-    }
-    this._writeOnFlush = undefined;
-  }
 
   /**
    * Serialize → mkdir → write `.tmp` → atomic rename-over the destination.
    *
    * The destination is replaced by a single `renameSync(tmp, filePath)` —
-   * POSIX rename-over is atomic, so a concurrent reader (e.g. the TUI polling
-   * engine-*.json) can never observe the path missing mid-write: the
-   * destination always holds either the previous snapshot or the new one.
-   * The former unlink-then-rename sequence opened an ENOENT read window
-   * between the two syscalls that made the TUI drop the graph for a tick.
+   * POSIX rename-over is atomic, so a concurrent reader can never observe the
+   * path missing mid-write: the destination always holds either the previous
+   * snapshot or the new one.
    *
-   * Returns `true` on success, `false` on failure. Never throws — write-through
-   * must not break the advancement critical section, so a failed write degrades
-   * gracefully in memory, is surfaced through the boolean (no longer silently
-   * swallowed, M5), and is left to the caller to retry.
+   * Returns `true` on success, `false` on failure. Never throws — a failed
+   * write degrades gracefully in memory and is reported through the boolean.
    */
   private _write(state: EngineState): boolean {
     const filePath = engineStatePath(this.directory, state.graphId);
@@ -1070,8 +745,6 @@ export class EnginePersistence {
       renameSync(tmp, filePath);
       return true;
     } catch (err) {
-      // write-through must never break the engine: degrade gracefully in memory,
-      // but report the failure so callers can gate clearDirty / retry (M5).
       logWarn(`engine-persist: save failed for graph "${state.graphId}": ${errorText(err)}`);
       return false;
     }
@@ -1804,14 +1477,10 @@ function verifyPersistedPlanAgreement(
  * persisted plan binding or compiled-plan record that fails verification (see
  * {@link verifyPersistedPlan}).
  *
- * It is ALSO the single owner of the one legitimate execution-protocol
- * BACKFILL: format 2 IS the legacy signal protocol, so when a validated v2
- * record carries no `executionProtocolVersion`, this decoder — and only this
- * decoder — infers {@link LEGACY_SIGNAL_PROTOCOL} and the hydrated state
- * carries it explicitly. A future format-3 decoder may not do the same: an
- * absent identity there is resolved by nobody, stays `undefined`, and the
- * loader reports `corrupt(execution)` — a new format never inherits the
- * legacy identity by default.
+ * It resolves NO execution-protocol identity: a v2 record must carry its own
+ * `executionProtocolVersion`. An absent value stays `undefined` and the
+ * loader reports `corrupt(execution)` — there is no implicit protocol and no
+ * backfill.
  *
  * Kept module-private: the only supported way to obtain it is through
  * {@link DEFAULT_STORAGE_FORMAT_REGISTRY}, which hands out the same frozen
@@ -1871,20 +1540,11 @@ const STORAGE_FORMAT_V2_DECODER: StorageFormatDecoder = {
           dimension: "contract",
         };
       }
-      // B3 BACKFILL — owned HERE, by the format-2 (legacy) decoder, and
-      // nowhere else. If the record predates the field, format 2 IS the legacy
-      // signal protocol, so the hydrated state is given that identity
-      // explicitly; an explicit value is carried through untouched and the
-      // loader classifies it (bound / unsupported / corrupt). A decoder for a
-      // NEWER format deliberately does not do this, so a missing identity
-      // there surfaces as corrupt(execution) rather than a silent legacy run.
-      return {
-        kind: "ok",
-        state:
-          state.executionProtocolVersion === undefined
-            ? { ...state, executionProtocolVersion: LEGACY_SIGNAL_PROTOCOL }
-            : state,
-      };
+      // No protocol backfill: the persisted identity is carried through
+      // untouched and the loader classifies it (bound / unsupported /
+      // corrupt). An absent identity is a malformed discriminator, never an
+      // implicit protocol.
+      return { kind: "ok", state };
     } catch (err) {
       // Deep structural invalidity (malformed nested shapes) or an
       // out-of-vocabulary enum value is still corrupt — contained here, never
@@ -2019,7 +1679,7 @@ function invalidExecutionProtocolReason(value: unknown): string {
  * `version` getter rejects), and the loader documents a total contract. A
  * throw maps onto `corrupt(execution)`: the file is preserved, the graph
  * stays non-executable, and an identity that could not be verified is never
- * bound to a handler and never silently run under legacy rules.
+ * bound to a handler.
  */
 function classifyProtocolContained(
   value: unknown,
@@ -2064,12 +1724,10 @@ function classifyProtocolContained(
  *      of its own format (graphId / phase presence, the required-shape gate
  *      including its node level, the enum gate and hydration) and is total:
  *      `ok` → the protocol gate below; `invalid` → `corrupt(storage)`
- *      carrying the decoder's reason. The decoder also RESOLVES the record's
- *      execution-protocol identity — the format-2 decoder backfills
- *      `LEGACY_SIGNAL_PROTOCOL` when the field is absent, any other decoder
- *      leaves it unresolved — and VERIFIES the persisted plan records (the B6
- *      binding and the B7 compiled plan), marking the `invalid` verdict with
- *      the `contract` axis when one fails or the two disagree;
+ *      carrying the decoder's reason. The decoder RESOLVES no protocol identity
+ *      (the record must carry its own) and VERIFIES the persisted plan records
+ *      (the B6 binding and the B7 compiled plan), marking the `invalid` verdict
+ *      with the `contract` axis when one fails or the two disagree;
  *    - `migratable` → the registered migration's `validateSource(parsed)` runs
  *      FIRST: a rejected source is `corrupt(storage)` (the body violates the
  *      format it claims to be, so there is nothing safe to convert), and only
@@ -2081,17 +1739,16 @@ function classifyProtocolContained(
  *      the body ("Unknown, structurally valid storage version →
  *      `unsupported(storage)`; do not validate its body against today's
  *      layout").
- * 4. EXECUTION-PROTOCOL gate — the identity the decoder resolved is classified
+ * 4. EXECUTION-PROTOCOL gate — the identity the record carries is classified
  *    by {@link classifyExecutionProtocol} against the protocol registry, with
  *    the SAME legality rule as the storage classifier (positive safe integer,
  *    membership decides support):
  *    - `bound` → `valid{state, storageFormat, executionProtocol}`;
- *    - `invalid` → `corrupt(execution)` naming what was received; an
- *      unresolved identity (a future format that lacks the field) lands here
- *      too, so it is never guessed as legacy;
+ *    - `invalid` → `corrupt(execution)` naming what was received; a record
+ *      with no identity lands here too, so it is never given an implicit one;
  *    - `unsupported` → `unsupported(execution)` carrying the legal version —
- *      a protocol without a registered handler is REFUSED, never run under
- *      legacy rules.
+ *      a protocol without a registered handler (the deleted legacy protocol 1)
+ *      is REFUSED, never run under substituted rules.
  *
  * `_sourceLabel` is retained for signature compatibility with the read path
  * (the file path) and is currently unused — the raw string is the whole input.
@@ -2150,13 +1807,11 @@ export function loadEngineStateForResume(
         reason: decoded.reason,
       };
     }
-    // EXECUTION-PROTOCOL gate (B3). The decoder resolved this format's
-    // protocol identity; the classifier — the single owner of which protocol
-    // identifiers are legal, and of whether one has a registered handler —
-    // turns it into a verdict. The format-2 decoder backfills the legacy
-    // identity for an absent field; a decoder for any other format resolves
-    // nothing, so an absent value is a malformed identity here (corrupt),
-    // never a silent legacy run.
+    // EXECUTION-PROTOCOL gate. The classifier — the single owner of which
+    // protocol identifiers are legal, and of whether one has a registered
+    // handler — turns the record's own identity into a verdict. No decoder
+    // supplies one, so an absent value is a malformed identity here (corrupt),
+    // never an implicit protocol.
     const protocol = classifyProtocolContained(
       decoded.state.executionProtocolVersion,
       protocolRegistry,
@@ -2181,10 +1836,10 @@ export function loadEngineStateForResume(
       };
     }
     if (protocol.kind === "unsupported") {
-      // A legal protocol identity with no registered handler: the file is
-      // intact but this build has no decision rules for it — refuse, never
-      // substitute the legacy handler. (Since C3b the shipped registry holds
-      // both protocols; this arm is what refuses an unregistered future one.)
+      // A legal protocol identity with no registered handler — the deleted
+      // legacy signal protocol, or a reserved future one: the file is intact
+      // but this build has no decision rules for it, so it is refused, never
+      // substituted.
       return {
         kind: "unsupported",
         dimension: "execution",
@@ -2250,40 +1905,6 @@ function validateMigrationSource(
       reason: `validateSource threw: ${errorText(err)}`,
     };
   }
-}
-
-/**
- * Legacy null-shaped compatibility wrapper around
- * {@link loadEngineStateForResume}.
- *
- * New callers that must distinguish `absent` / `corrupt` / `unsupported` /
- * `migration-required` should call {@link loadEngineStateForResume} (or
- * {@link EnginePersistence.loadForResume}) directly. This function exists only
- * so callers that treat "not a valid state" as one clean-start signal keep
- * their exact behavior: it is a strict projection of the structured result —
- * `valid` → the hydrated state, every other kind → `null`.
- *
- * Parse a raw state-file string and return the hydrated {@link EngineState},
- * or `null` when it is not a valid version-`2` engine state file. Shared by
- * {@link EnginePersistence.load} so the version/malformation gate is testable
- * without touching the filesystem.
- *
- * **Total hydration**: this function NEVER throws. A file that is corrupt JSON,
- * a schema-version mismatch, missing a required field, structurally invalid
- * at any deeper level, or carrying an out-of-vocabulary enum value (`status` /
- * `joinStrategy` / `phase`) returns `null` (the documented corrupt-to-null
- * contract in the class header — `load()` doc at `EnginePersistence.load`). A
- * parseable-but-field-incomplete file must never make recovery throw, because
- * that would leave the graph permanently unrecoverable (re-failing every
- * restart). Missing required fields are treated as CORRUPT, not as a
- * migration point — `ENGINE_PERSISTENCE_VERSION` stays `2`.
- */
-export function loadEngineStateFromJson(
-  raw: string,
-  _sourceLabel?: string,
-): EngineState | null {
-  const result = loadEngineStateForResume(raw, _sourceLabel);
-  return result.kind === "valid" ? result.state : null;
 }
 
 /**
@@ -2377,26 +1998,12 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 // ── Join-strategy vocabulary + enum validation (R2 / C1) ────────────────────
 
 /**
- * Legacy bare `"quorum"` marker (contract C1).
- *
- * `JOIN_STRATEGY_VALUES` contains `"quorum"` as a *declaration* vocabulary
- * member, and older persistence builds accepted every member of it — so files
- * on disk may carry the bare string, which carries NO count. It is not
- * runtime-valid (`ResolvedJoinStrategy` has no bare `"quorum"` member): the
- * two consumption points disagreed on it (`evaluateJoin` fell through to the
- * `all` branch, `shouldCancel` to `any`), so it must never reach the runtime
- * again — it is normalized here instead.
- */
-const LEGACY_BARE_QUORUM_JOIN_STRATEGY = "quorum";
-
-/**
  * Normalize a persisted `joinStrategy` into the runtime vocabulary.
  *
  * - `"all"` / `"any"` → unchanged;
- * - a legacy bare `"quorum"` → `{ quorum: 1 }` (the historical runtime
- *   default — validator-v2's old `?? 1`); the caller logs the downgrade;
  * - `{ quorum: positive-int }` → unchanged;
- * - anything else (an unknown string, a non-positive / fractional / non-number
+ * - anything else (an unknown string, the bare `"quorum"` the deleted
+ *   declaration parser tolerated, a non-positive / fractional / non-number
  *   quorum, `null`, an array, …) → `undefined` = out of vocabulary = corrupt.
  *
  * Deliberately does NOT consult `JOIN_STRATEGY_VALUES`: that set is the
@@ -2405,7 +2012,6 @@ const LEGACY_BARE_QUORUM_JOIN_STRATEGY = "quorum";
  */
 function normalizeJoinStrategy(v: unknown): ResolvedJoinStrategy | undefined {
   if (v === "all" || v === "any") return v;
-  if (v === LEGACY_BARE_QUORUM_JOIN_STRATEGY) return { quorum: 1 };
   if (isPlainObject(v)) {
     // `isPlainObject` narrows to Record<string, unknown> — no assertion needed
     // (the previous implementation cast this same read).
@@ -2419,9 +2025,7 @@ function normalizeJoinStrategy(v: unknown): ResolvedJoinStrategy | undefined {
 
 /**
  * Whether a persisted `joinStrategy` value can be normalized into the runtime
- * vocabulary. A legacy bare `"quorum"` counts as valid — it is normalized to
- * `{ quorum: 1 }` on hydration (with a warning), never rejected as corrupt;
- * every other out-of-vocabulary value is corrupt.
+ * vocabulary. Every out-of-vocabulary value is corrupt.
  */
 function isValidJoinStrategy(v: unknown): boolean {
   return normalizeJoinStrategy(v) !== undefined;
@@ -2437,14 +2041,13 @@ function isValidJoinStrategy(v: unknown): boolean {
  * gate rejects out-of-vocabulary values up front:
  * - every node `status` ∈ {@link NODE_STATUS_VALUES};
  * - every node `joinStrategy` ∈ `"all" | "any"` / a `{ quorum: positive-int }`
- *   object / the normalizable legacy bare `"quorum"`;
+ *   object;
  * - `file.phase` ∈ {@link ENGINE_PHASE_VALUES}.
  *
  * Throws a descriptive Error on the first violation, so
  * `deserializeEngineState` (whose contract returns a hydrated state, not
  * `null`) cannot silently hydrate an invalid enum. The never-throw loader
- * calls this BEFORE deserializing and maps any violation to `null` (clean
- * start) — see `loadEngineStateFromJson`.
+ * calls this BEFORE deserializing and maps any violation to `corrupt`.
  */
 function assertValidEnums(file: Partial<EnginePersistenceFile>): void {
   const phase = file.phase;

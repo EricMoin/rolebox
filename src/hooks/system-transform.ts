@@ -1,7 +1,5 @@
 import { applyParams } from "../function/file-resolver.ts";
 import { functionSessionState } from "../function/session-state.ts";
-import { buildEngineGraphStateBlock } from "../graph/engine/graph-state-block.ts";
-import { getLiveGraphToolSet } from "../graph/tools/live-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
@@ -65,14 +63,6 @@ export async function handleSystemTransform(
 
   const agentId = input.agent ?? state.sessionAgentRegistry.get(sid);
 
-  // Engine-v2 graph orientation block — sourced from the live in-memory graph
-  // registry. Resolved once per turn; `""` means no graph is live and every
-  // injection site no-ops cleanly.
-  const liveGraphToolSet = getLiveGraphToolSet();
-  const engineGraphBlock = liveGraphToolSet
-    ? buildEngineGraphStateBlock(liveGraphToolSet.liveEngineStates())
-    : "";
-
   // Available functions block — lists all resolved functions for the current agent
   // even when none are active, so the user can see what's available.
   if (agentId) {
@@ -112,7 +102,6 @@ export async function handleSystemTransform(
 
   const activeNames = functionSessionState.getActive(input.sessionID);
   if (activeNames.size === 0) {
-    if (engineGraphBlock) output.system.push(engineGraphBlock);
     const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
     log.debug("System prompt augmented", { totalChars, addedFunctions: 0 });;
 
@@ -226,7 +215,6 @@ export async function handleSystemTransform(
   guarded.sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
 
   if (guarded.length === 0) {
-    if (engineGraphBlock) output.system.push(engineGraphBlock);
     const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
     log.debug("System prompt augmented", { totalChars, addedFunctions: 0 });
 
@@ -272,8 +260,6 @@ export async function handleSystemTransform(
       if (content) output.system.push(buildActiveArtifactBlock(fn.consumes, content));
     }
   }
-
-  if (engineGraphBlock) output.system.push(engineGraphBlock);
 
   const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
   log.debug("System prompt augmented", { totalChars, addedFunctions: guarded.length });

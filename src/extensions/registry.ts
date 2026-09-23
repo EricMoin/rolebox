@@ -3,7 +3,6 @@ import type { ExtensionPoint } from "./extension-point.ts";
 import { createSubLogger } from "../logger.ts";
 import {
   ConditionExtensionPoint,
-  GraphTopologyExtensionPoint,
   RecoveryStrategyExtensionPoint,
   RecoveryPatternExtensionPoint,
   NotificationChannelExtensionPoint,
@@ -36,7 +35,6 @@ export class ExtensionRegistry {
     // Instantiate all built-in extension points and hold references to
     // the two that expose loaded-module state.
     const conditions = new ConditionExtensionPoint();
-    const graphTopologies = new GraphTopologyExtensionPoint();
     this.strategiesPoint = new RecoveryStrategyExtensionPoint();
     this.patternsPoint = new RecoveryPatternExtensionPoint();
     const notificationChannels = new NotificationChannelExtensionPoint();
@@ -46,7 +44,6 @@ export class ExtensionRegistry {
     // Register every point by its scope name.
     const builtins: ExtensionPoint[] = [
       conditions,
-      graphTopologies,
       this.strategiesPoint,
       this.patternsPoint,
       notificationChannels,

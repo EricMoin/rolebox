@@ -16,10 +16,12 @@
  *
  * Scope:
  * - `scanPersistedStates(stateDir)` — list `.rolebox/state/engine-*.json`,
- *   hydrate each via the exported `loadEngineStateFromJson`, and return the
- *   states that loaded. Corrupt-JSON, schema-version-mismatched, and
- *   unreadable files are skipped honestly (counted, never thrown, never
- *   fabricated). A missing store yields an empty result, never an error.
+ *   hydrate each through the structured loader, and return the states the loader
+ *   BOUND to the outcome protocol. Corrupt-JSON, schema-version-mismatched,
+ *   unrecognized-protocol and unreadable files are skipped honestly (counted,
+ *   never thrown, never fabricated) — the deleted legacy signal protocol among
+ *   them, which is why those records no longer appear in a status view. A
+ *   missing store yields an empty result, never an error.
  * - `buildPersistedSummary(state)` — a pure, JSON-primitive summary of one
  *   hydrated state (graphId, phase, node counts per status, per-node
  *   agent/status/timing, startedAt/updatedAt, frontier).
@@ -41,7 +43,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadEngineStateFromJson } from "../engine/index.ts";
+import { loadEngineStateForResume } from "../persistence/engine-persistence.ts";
 import type { EngineState } from "../../types.engine-v2.ts";
 import type {
   GraphBudgetState,
@@ -147,11 +149,12 @@ export function scanPersistedStates(stateDir: string): PersistedStateScan {
   for (const file of files) {
     try {
       const raw = readFileSync(join(stateDirectory, file), "utf-8");
-      const state = loadEngineStateFromJson(raw, file);
-      if (state) {
-        loaded.push(state);
+      const result = loadEngineStateForResume(raw, file);
+      if (result.kind === "valid") {
+        loaded.push(result.state);
       } else {
-        // Valid read, but corrupt / version-mismatched / not a v2 engine file.
+        // Valid read, but corrupt / version-mismatched / a protocol this build
+        // does not run.
         skippedFiles.push(file);
       }
     } catch {

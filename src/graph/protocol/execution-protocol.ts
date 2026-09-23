@@ -1,8 +1,8 @@
 /**
  * Graph Execution Engine v2 — Execution Protocol Registry
  *
- * Version: 1.0
- * Date: 2026-09-22
+ * Version: 2.0
+ * Date: 2026-09-23
  *
  * The execution-protocol axis of the persistence contract: which SEMANTIC
  * decision rules a persisted graph runs under. This module owns that identity,
@@ -10,22 +10,17 @@
  * instead of comparing a persisted number with a latest-version constant
  * (docs/graph-outcome-protocol.md § "Version ownership and load contract").
  *
- * Scope of this delivery (B stage, third slice; C3b registers the outcome
- * handler):
- * - `LEGACY_SIGNAL_PROTOCOL` / `OUTCOME_PROTOCOL` — the two protocol
- *   identities. Both have handlers in the shipped
- *   {@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY}: the legacy marker and the real
- *   outcome handler (`OUTCOME_PROTOCOL_HANDLER`, whose completion source is the
- *   accepted-outcome submission and whose legacy completion is unreachable).
- *   Naming an identity still grants it nothing — registry MEMBERSHIP does, and
- *   `LEGACY_EXECUTION_PROTOCOL_REGISTRY` remains a legacy-only construction.
- * - `ExecutionProtocolHandler` — the protocol's own capability surface. For the
- *   legacy protocol this is a MARKER identity, not a dispatch seam: the legacy
- *   engine keeps deciding completions from severity-ranked signals exactly as
- *   it does today, so the handler deliberately exposes no completion rule. The
- *   dispatch completion bridge switch-over is deferred until the outcome
- *   protocol has a real handler — with one authoritative completion source,
- *   and protocol selection already enforced at the load boundary.
+ * Scope of this delivery (final slice; the legacy signal runtime is deleted):
+ * - `OUTCOME_PROTOCOL` — the ONE protocol this build runs. The legacy signal
+ *   protocol (version 1) is no longer an identity this module names: a record
+ *   that carries it is a legal version with no registered handler, so the
+ *   loader refuses it as `unsupported(execution)` and it is never run under
+ *   substituted rules. There is no backfill: an absent protocol key is a
+ *   malformed identity, never an implicit protocol 1.
+ * - `OUTCOME_PROTOCOL_HANDLER` — the registered capability surface of that
+ *   protocol: the accepted-outcome submission is its only completion source,
+ *   its submissions arrive at the graph-scoped outcome ingress, and the legacy
+ *   signal completion is unreachable for it.
  * - `createExecutionProtocolRegistry` — the only constructor for a registry
  *   that is consistent by construction: a version is a positive safe integer
  *   and has exactly one owner, the same legality rule the storage-format
@@ -45,24 +40,14 @@
 // ── Protocol identities ─────────────────────────────────────────────────────
 
 /**
- * The legacy signal protocol: completions are interpreted by the existing
- * signal bridge and severity-ranked completion evaluator, and node lifecycle
- * is the pre-outcome engine. Every v2 snapshot written so far runs under this
- * identity, so it is the one protocol the format-2 decoder may backfill when a
- * file predates the field.
- */
-export const LEGACY_SIGNAL_PROTOCOL = 1 as const;
-
-/**
- * The outcome protocol of docs/graph-outcome-protocol.md.
+ * The outcome protocol of docs/graph-outcome-protocol.md — the only execution
+ * protocol this build registers.
  *
- * C3b registers a REAL handler for it ({@link OUTCOME_PROTOCOL_HANDLER}, part of
- * {@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY}): the run path
- * (`src/graph/outcome/runtime.ts`) dispatches the compiled plan's entry nodes,
- * accepts submissions through the graph-scoped outcome ingress and commits the
- * graph state with the acceptance. {@link LEGACY_EXECUTION_PROTOCOL_REGISTRY}
- * deliberately still holds protocol 1 alone — it is a legacy-only construction,
- * and naming this constant does not register anything.
+ * The run path (`src/graph/outcome/runtime.ts`) dispatches the compiled plan's
+ * entry nodes, accepts submissions through the graph-scoped outcome ingress and
+ * commits the graph state with the acceptance. Version 1 (the deleted legacy
+ * signal protocol) has no handler here, so a record pinned to it is
+ * `unsupported(execution)` — intact, refused, never run.
  */
 export const OUTCOME_PROTOCOL = 2 as const;
 
@@ -72,11 +57,8 @@ export const OUTCOME_PROTOCOL = 2 as const;
  * A registered handler for exactly one execution protocol.
  *
  * `version` is the exact protocol identifier this handler owns. The
- * capability surface is deliberately MINIMAL and honest: the legacy handler is
- * a marker identity, not a dispatch seam, and adding a method here is a
- * promise that a real decision rule reads it. A future outcome handler grows
- * this interface with the capabilities it actually implements; it does not
- * inherit a fake one.
+ * capability surface is deliberately MINIMAL and honest: adding a method here
+ * is a promise that a real decision rule reads it.
  */
 export interface ExecutionProtocolHandler {
   /** The exact execution protocol this handler owns. */
@@ -100,8 +82,7 @@ export interface ExecutionProtocolHandler {
  *
  * The outcome run path checks exactly these fields before dispatching anything
  * ({@link isOutcomeProtocolHandler}), so the declaration is enforced where it is
- * used, and the dispatch completion BRIDGE selection rule remains deferred:
- * this handler makes the outcome path runnable, it does not reroute dispatch.
+ * used.
  */
 export interface OutcomeProtocolHandler extends ExecutionProtocolHandler {
   /** The exact execution protocol this handler owns. */
@@ -149,10 +130,9 @@ export const OUTCOME_PROTOCOL_HANDLER: OutcomeProtocolHandler = Object.freeze({
  * build has.
  *
  * Capability — never a numeric comparison or a bare membership check — decides
- * support, so a build that can run protocol 1 cannot accept protocol 2 merely
- * because 2 is a legal, named number. Build one with
- * {@link createExecutionProtocolRegistry}, which enforces the consistency
- * rules the loader relies on.
+ * support, so naming a protocol number somewhere cannot make it runnable. Build
+ * one with {@link createExecutionProtocolRegistry}, which enforces the
+ * consistency rules the loader relies on.
  */
 export interface ExecutionProtocolRegistry {
   /** The installed handlers, one per exact protocol version. */
@@ -219,31 +199,17 @@ export function createExecutionProtocolRegistry(
 }
 
 /**
- * A LEGACY-ONLY registry: exactly one handler, for
- * {@link LEGACY_SIGNAL_PROTOCOL}.
- *
- * Kept because legacy-only selection is a real capability (a caller that must
- * refuse protocol 2 uses it), and because it pins the B3 compatibility posture
- * in one construction. It is NOT the registry the loader defaults to since
- * C3b — see {@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY}.
- */
-export const LEGACY_EXECUTION_PROTOCOL_REGISTRY: ExecutionProtocolRegistry =
-  createExecutionProtocolRegistry({
-    handlers: [{ version: LEGACY_SIGNAL_PROTOCOL }],
-  });
-
-/**
- * The registry this build SHIPS and its loader defaults to: the legacy handler
- * and the real outcome handler.
+ * The registry this build SHIPS and its loader defaults to: the outcome handler
+ * alone.
  *
  * Membership is capability: protocol 2 is supported only because
  * {@link OUTCOME_PROTOCOL_HANDLER} declares the outcome protocol's completion
- * source, ingress and unreachable legacy path — not because the number 2 is
- * named anywhere.
+ * source, ingress and unreachable legacy path. Version 1 is a legal identifier
+ * with no handler — refused as unsupported, never mapped onto a successor.
  */
 export const DEFAULT_EXECUTION_PROTOCOL_REGISTRY: ExecutionProtocolRegistry =
   createExecutionProtocolRegistry({
-    handlers: [{ version: LEGACY_SIGNAL_PROTOCOL }, OUTCOME_PROTOCOL_HANDLER],
+    handlers: [OUTCOME_PROTOCOL_HANDLER],
   });
 
 // ── Classification ──────────────────────────────────────────────────────────
@@ -255,8 +221,8 @@ export const DEFAULT_EXECUTION_PROTOCOL_REGISTRY: ExecutionProtocolRegistry =
  *   CARRIES the handler, so the caller dispatches on a capability instead of
  *   re-deriving support from a number.
  * - `unsupported` — a LEGAL protocol identifier with no installed handler (for
- *   example the reserved {@link OUTCOME_PROTOCOL}, or protocol 1 under an
- *   empty registry). `version` carries the number for diagnostics.
+ *   example the deleted legacy signal protocol, or a reserved future one).
+ *   `version` carries the number for diagnostics.
  * - `invalid` — not a protocol identifier at all: missing, `null`, a string,
  *   a non-integer or non-positive number, `NaN` / `Infinity`, or an integer
  *   outside the safe range. `value` carries the RAW value because it may hold
@@ -283,11 +249,7 @@ export type ExecutionProtocolVerdict =
  *
  * PURE by contract: no I/O, no logging, never throws for a registry object
  * that satisfies {@link ExecutionProtocolRegistry} (in particular one built by
- * {@link createExecutionProtocolRegistry}). The loader additionally contains a
- * throwing handler probe, so a hostile registry surfaces as a non-executable
- * load result rather than as a crash — that containment belongs to the
- * boundary that owns totality, the same way a throwing migration
- * `validateSource` is contained in `engine-persistence.ts`.
+ * {@link createExecutionProtocolRegistry}).
  */
 export function classifyExecutionProtocol(
   version: unknown,

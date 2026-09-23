@@ -1,7 +1,7 @@
 import type { ExtensionEntry } from "./types.ts";
 
 /**
- * A self-registering extension point. Each scope (conditions, graph_topologies,
+ * A self-registering extension point. Each scope (conditions,
  * recovery_strategies, recovery_patterns, notification_channels,
  * notification_events, observe_events) implements this.
  *
@@ -9,7 +9,7 @@ import type { ExtensionEntry } from "./types.ts";
  * Adding a new scope = register a new ExtensionPoint. No core changes needed.
  */
 export interface ExtensionPoint {
-  /** The scope name this point handles (e.g. "conditions", "graph_topologies"). */
+  /** The scope name this point handles (e.g. "conditions", "observe_events"). */
   name: string;
   /**
    * Load and register extension entries for this scope.

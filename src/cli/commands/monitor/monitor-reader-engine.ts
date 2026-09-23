@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { EnginePhase, NodeStatus } from "../../../constants.ts";
-import { loadEngineStateFromJson } from "../../../graph/persistence/engine-persistence.ts";
-import { getLiveGraphToolSet } from "../../../graph/tools/live-state.ts";
+import { loadEngineStateForResume } from "../../../graph/persistence/engine-persistence.ts";
 import type { EngineState } from "../../../types.engine-v2.ts";
 import { listStateFiles } from "./monitor-reader-utils.ts";
 import type {
@@ -147,9 +146,10 @@ function isStaleTerminalGraph(snapshot: EngineGraphSnapshot, now: number): boole
  * Scan every `engine-*.json` file in `stateDir` and return a rich
  * {@link EngineGraphSnapshot} per persisted graph execution engine (v2).
  *
- * Each file is read and parsed via {@link loadEngineStateFromJson}, the same
- * version-gated loader the engine's own persistence layer uses. Files that are
- * corrupt JSON, not a version-`2` engine file, or unreadable are **skipped
+ * Each file is read and parsed via {@link loadEngineStateForResume}, the same
+ * version-gated loader every other consumer uses. Files that are corrupt JSON,
+ * not a version-`2` engine file, pinned to a protocol this build does not run
+ * (the deleted legacy signal protocol included), or unreadable are **skipped
  * honestly** — they never surface an error and never fabricate a snapshot.
  * Terminal graphs whose last update predates {@link TERMINAL_GRAPH_STALE_MS}
  * are gated out (unless a node is running/blocked) so dead persisted graphs
@@ -170,10 +170,11 @@ export function readEngineGraphs(stateDir: string): EngineGraphSnapshot[] {
       // Unreadable (permissions / vanished between listing and read) — skip.
       continue;
     }
-    // `null` → corrupt JSON, non-object, or schema-version mismatch.
-    const state = loadEngineStateFromJson(raw, filePath);
-    if (!state) continue;
-    const snapshot = projectEngineGraph(state);
+    // A non-valid result covers corrupt JSON, a schema-version mismatch, an
+    // unregistered protocol and a failed plan gate — all skipped honestly.
+    const loaded = loadEngineStateForResume(raw, filePath);
+    if (loaded.kind !== "valid") continue;
+    const snapshot = projectEngineGraph(loaded.state);
     if (isStaleTerminalGraph(snapshot, now)) continue;
     snapshots.push(snapshot);
   }
@@ -184,29 +185,15 @@ export function readEngineGraphs(stateDir: string): EngineGraphSnapshot[] {
 // ── Live-state reader (monitor S10) ─────────────────────────────────────────
 
 /**
- * Read engine-graph snapshots from the process's **live** in-memory graph
- * registry, falling back to the disk scan when no live toolset is registered.
+ * Read engine-graph snapshots for the monitor.
  *
- * Live path: the process's active `GraphToolSet` (registered by the platform
- * assembly layer through `src/graph/tools/live-state.ts`'s
- * `registerLiveGraphToolSet`) owns the in-memory graph registry. Each registry
- * runtime is projected through {@link projectEngineGraph} via
- * `EngineRuntime.status()` — the exact same snapshot surface the disk path
- * produces, so the monitor renders live and persisted graphs identically.
- *
- * This is the opencode-platform fix: there the engine runs fully in-memory and
- * never writes `engine-*.json` (see the platform contract in
- * `src/core/services/tool-service.ts`), so a disk scan alone would show an
- * empty engine-graph list while graphs are genuinely executing. When no
- * toolset is registered (no platform assembly / different process), `stateDir`
- * (default `process.cwd()` — matching the graph tools' persisted-scan default)
- * drives the unchanged disk fallback.
+ * A declared (outcome-protocol) graph is PERSISTED at declaration time, so the
+ * store under `stateDir` (default `process.cwd()`) is the single authority
+ * for every graph this process or an earlier one declared. The deleted legacy
+ * runtime's in-memory registry is gone: there is no separate live source to
+ * prefer or merge over the disk view.
  */
 export function readLiveEngineGraphs(stateDir?: string): EngineGraphSnapshot[] {
-  const toolset = getLiveGraphToolSet();
-  if (toolset) {
-    return toolset.liveEngineStates().map(projectEngineGraph);
-  }
   return readEngineGraphs(stateDir ?? process.cwd());
 }
 

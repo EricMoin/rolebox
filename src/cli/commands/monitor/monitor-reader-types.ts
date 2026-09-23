@@ -1,5 +1,11 @@
 import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
-import type { GraphEventType } from "../../../graph/engine/graph-events.ts";
+/** The durable graph-event kinds the deleted legacy recorder wrote. */
+export type GraphEventType =
+  | "node_dispatched"
+  | "node_completed"
+  | "node_blocked"
+  | "graph_terminal"
+  | "notification_degraded";
 import type { EnginePhase, NodeStatus } from "../../../constants.ts";
 
 // ── Public types ────────────────────────────────────────────────────

@@ -31,17 +31,15 @@
  * THE PLAN IS THE PERSISTED ONE. This module never recompiles a declaration and
  * never accepts a declaration argument: it loads the graph's persisted record,
  * requires it to be bound to the OUTCOME protocol, and resolves the node's
- * contract out of the compiled plan inside it. A LEGACY (v2) graph is refused by
- * name — the signal protocol has its own ingress (`signal`), and interpreting a
- * severity-ranked signal as an accepted outcome is exactly what this protocol
- * forbids.
+ * contract out of the compiled plan inside it. A record that is not a valid
+ * outcome-protocol state is refused by name — interpreting a severity-ranked
+ * signal as an accepted outcome is exactly what this protocol forbids.
  *
  * THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE. Nothing here, and
- * nothing in the outcome run path, can settle a node from a legacy dispatch
- * completion: a declared graph is never an entry of the legacy registry, every
- * legacy tool entry point refuses it, and the runtime reads only accepted
- * outcomes committed through this ingress. There is no synthesis step and no
- * severity ranking anywhere on this path.
+ * nothing in the outcome run path, can settle a node from a dispatch
+ * completion: the runtime reads only accepted outcomes committed through this
+ * ingress. There is no synthesis step and no severity ranking anywhere on this
+ * path.
  *
  * TIME AND EFFECTS. The clock is an explicit protocol input: the toolset may
  * pin it (`outcomeNow`) or the runtime reads it. An accepted outcome's
@@ -240,8 +238,6 @@ export interface SubmitOutcomeStop {
 export type OutcomeSubmitRefusalReason =
   /** No declared graph holds the id — this ingress serves declared graphs only. */
   | "unknown-graph"
-  /** The id belongs to a LEGACY (v2) graph, whose ingress is the signal protocol. */
-  | "legacy-graph"
   /** The graph is declared in memory only: its plan never reached the store. */
   | "plan-not-persisted"
   /** The persisted record could not be read as this build's declared plan. */
@@ -300,20 +296,15 @@ export interface SubmitOutcomeTarget {
   readonly graphId: string;
   /** Whether THIS toolset holds the id as a declared (outcome-protocol) graph. */
   readonly declaredInMemory: boolean;
-  /** Whether THIS toolset holds the id as a legacy (v2) graph. */
-  readonly legacyInMemory: boolean;
 }
 
 /**
  * Resolve the PERSISTED compiled plan of a declared graph, or refuse by name.
  *
  * Order is deliberate:
- * 1. a legacy id in this process's registry is refused FIRST — a caller that
- *    points this tool at a legacy graph gets the legacy-graph error even before
- *    any file is read;
- * 2. the persisted record is classified (absent / legacy / declared /
- *    unreadable) so each case gets its own reason;
- * 3. the record is loaded through the SAME loader every other consumer uses —
+ * 1. the persisted record is classified (absent / declared / unreadable) so
+ *    each case gets its own reason;
+ * 2. the record is loaded through the SAME loader every other consumer uses —
  *    storage-format gate, protocol gate and persisted-plan verification — and a
  *    record that is not a valid OUTCOME-protocol state is refused rather than
  *    partially trusted.
@@ -323,9 +314,6 @@ export interface SubmitOutcomeTarget {
  */
 function resolvePersistedPlan(target: SubmitOutcomeTarget): CompiledPlan {
   const { graphId } = target;
-  if (target.legacyInMemory) {
-    throw legacyGraphRefusal(graphId, "this process holds it as a legacy graph");
-  }
   if (target.workspaceDir === undefined) {
     throw new OutcomeSubmissionRefusedError(
       "no-state-directory",
@@ -336,9 +324,6 @@ function resolvePersistedPlan(target: SubmitOutcomeTarget): CompiledPlan {
     );
   }
   const onDisk = readExistingDeclaredGraph(target.workspaceDir, graphId);
-  if (onDisk.kind === "legacy") {
-    throw legacyGraphRefusal(graphId, "a legacy state file owns the id");
-  }
   if (onDisk.kind === "unreadable") {
     throw new OutcomeSubmissionRefusedError(
       "unreadable-plan",
@@ -358,7 +343,7 @@ function resolvePersistedPlan(target: SubmitOutcomeTarget): CompiledPlan {
           " live. Declare it with a stateDir configured and submit again."
         : `graph_submit_outcome refused: graph "${graphId}" is not a declared` +
           " (outcome-protocol) graph. This ingress serves declaration-only graphs; call" +
-          " graph_declare first. Legacy graphs complete through their own signal protocol.",
+          " graph_declare first.",
     );
   }
 
@@ -388,9 +373,12 @@ function resolvePersistedPlan(target: SubmitOutcomeTarget): CompiledPlan {
     );
   }
   if (loaded.executionProtocol !== OUTCOME_PROTOCOL) {
-    throw legacyGraphRefusal(
+    throw new OutcomeSubmissionRefusedError(
+      "unreadable-plan",
       graphId,
-      `its persisted record is bound to execution protocol ${loaded.executionProtocol}`,
+      `graph_submit_outcome refused: the persisted record of graph "${graphId}" is bound to` +
+        ` execution protocol ${loaded.executionProtocol}, not the outcome protocol, so this` +
+        " ingress does not serve it; nothing was submitted.",
     );
   }
   const plan = loaded.state.compiledPlan;
@@ -404,21 +392,6 @@ function resolvePersistedPlan(target: SubmitOutcomeTarget): CompiledPlan {
     );
   }
   return plan;
-}
-
-/** The one legacy refusal, phrased once so no call site drifts. */
-function legacyGraphRefusal(
-  graphId: string,
-  detail: string,
-): OutcomeSubmissionRefusedError {
-  return new OutcomeSubmissionRefusedError(
-    "legacy-graph",
-    graphId,
-    `graph_submit_outcome refused: graph "${graphId}" is not a declaration-only` +
-      ` (outcome-protocol) graph — ${detail}. A legacy v2 graph completes through the LEGACY` +
-      " signal protocol, and this ingress never synthesizes an answer for it or interprets a" +
-      " severity-ranked signal as an accepted outcome. Nothing was submitted.",
-  );
 }
 
 /** Describe a non-valid load result for a diagnostic. */

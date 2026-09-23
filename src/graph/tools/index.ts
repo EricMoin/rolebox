@@ -1,314 +1,35 @@
 /**
  * Graph Execution Engine v2 — Imperative `graph_*` Tool Registration
  *
- * Version: 2.0
- * Date: 2026-07-25
+ * Version: 3.0
+ * Date: 2026-09-23
  *
- * Phase 4, Subtask 6. Wraps the {@link GraphToolSet} tool-logic layer (subtask
- * 5, `graph-tools.ts`) with zod `args` schemas and `defineTool` registrations
- * so the imperative `graph_*` tools become platform-agnostic
- * {@link CanonicalToolDef}s consumable by `buildCanonicalTools`.
+ * Wraps the {@link GraphToolSet} tool-logic layer (`graph-tools.ts`) with zod
+ * `args` schemas and `defineTool` registrations so the imperative `graph_*`
+ * tools become platform-agnostic {@link CanonicalToolDef}s consumable by
+ * `buildCanonicalTools`.
  *
- * C1 adds `graph_declare`, the v3 authoring ingress, and C3c adds
- * `graph_submit_outcome`, the outcome-protocol submission ingress: both are
- * ADDITIVE (a new key in the `graph_*` namespace, nothing repurposed) and every
- * existing tool keeps its exact schema. The E-stage entry `graph_audit` (the
- * read-only drain/migration inventory) is additive in exactly the same way: it
- * reads the store and writes nothing.
+ * The shipped surface is the OUTCOME run path's tool face —
+ * {@link createOutcomeGraphTools}: `graph_declare` (the v3 authoring ingress),
+ * `graph_submit_outcome` (the submission ingress), `graph_audit` (the
+ * read-only store inventory) and `graph_status`. The legacy construction and
+ * execution entries (`graph_create`, `graph_add_node`, `graph_add_edge`,
+ * `graph_add_loop`, `graph_run`, `graph_cancel`, `graph_approve`) and the
+ * `createGraphTools` factory that registered them were deleted with the legacy
+ * runtime; no factory here can build a legacy engine.
  *
- * The arg schemas mirror `.rolebox/design/tool-merge-map.md` §2.2, adapted to
- * the real TypeScript arg shapes exported by `graph-tools.ts` (which are
- * documented as divergences in that module's header — e.g. `join` is the
- * structured `JoinConfig`, edge `retry` accepts `number | RetryConfig`). This
- * module contains **no graph logic** — it only adapts types and error text.
- *
- * ## Precedence contract
- *
- * This factory is additive. Its keys are the `graph_*` namespace, which does
- * not collide with any existing `dispatch_*` / `loop_*` tool key. Registration
- * therefore never overrides a legacy tool. In `tool-assembly.ts` the graph
- * tools are merged with the same additive pattern as `extraTools` /
- * `loopToolsOverride` (Object.assign onto the assembled map).
- *
- * Design reference: `.rolebox/design/tool-merge-map.md` §2.2, §3, §4 (Phase A).
+ * This module contains **no graph logic** — it only adapts types and error text.
  */
 
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { errorText } from "../../utils/error-text.ts";
-import type { DispatchManager } from "../../dispatch/core/manager.ts";
-import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
-import type { ContractRegistry } from "../contracts/resolve.ts";
-import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
-import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import {
-  createGraphToolSet,
-  type GraphToolSet,
   type GraphStatusFormat,
-  type GraphNotifySource,
+  type GraphToolSet,
 } from "./graph-tools.ts";
-import { createGraphApproveTool } from "./approve-tools.ts";
 import { NODE_STATUS_VALUES, type NodeStatus } from "../../constants.ts";
-
-// ── Reusable zod schema fragments ────────────────────────────────────────────
-
-/** Graph-level budget spec (tool-merge-map.md §2.2 `GraphBudget`). */
-const graphBudgetSchema = z
-  .object({
-    max_total_input_tokens: z.number().optional(),
-    max_total_output_tokens: z.number().optional(),
-    max_total_cost_usd: z.number().optional(),
-  })
-  .optional();
-
-/** Per-node budget spec (tool-merge-map.md §2.2 `NodeBudget` + timeout/retry). */
-const nodeBudgetSchema = z
-  .object({
-    max_input_tokens: z.number().optional(),
-    max_output_tokens: z.number().optional(),
-    max_cost_usd: z.number().optional(),
-    // 0 is VALID — the documented per-node "disable staleness watchdog"
-    // opt-out sentinel (engine-recovery.ts deadline resolution, pinned by
-    // engine-recovery.test.ts "skips a running node whose per-node budget
-    // disables staleness (timeout_ms 0)"). Only negatives are rejected: a
-    // negative timeout would silently disable the watchdog for a node that is
-    // NOT opting out, letting it hang forever.
-    timeout_ms: z.number().nonnegative().optional(),
-    // Retry counts are integer thresholds at runtime — fractional is
-    // meaningless, negative is invalid.
-    max_retries: z.number().int().nonnegative().optional(),
-  })
-  .optional();
-
-/**
- * Join/fan-in config — the discriminated form of `JoinConfig` (contract C1,
- * divergence 1). A discriminated union rather than an object with an optional
- * `quorum`: `{ strategy: "quorum" }` without a count is rejected here instead
- * of silently degrading to a count of 1 downstream.
- */
-const joinSchema = z
-  .discriminatedUnion("strategy", [
-    z.object({ strategy: z.literal("all") }),
-    z.object({ strategy: z.literal("any") }),
-    z.object({
-      strategy: z.literal("quorum"),
-      // quorum:N is a required-answer COUNT: it must be a positive integer. A
-      // 0/negative quorum would let a fan-in join be satisfied with ZERO
-      // upstream answers (`answerCount >= n` with n <= 0, join-evaluator.ts:245)
-      // — a DAG-order violation where a convergence node dispatches at graph
-      // start ignoring its declared upstreams. A fractional quorum is meaningless.
-      quorum: z.number().int().positive(),
-    }),
-  ])
-  .optional();
-
-/** Edge retry policy — bare number coerced to `{ max }` (divergence 3). */
-const retrySchema = z
-  .union([
-    // Retry counts are integer thresholds at runtime — a fractional or
-    // negative count is meaningless (a negative one silently reads as "no
-    // retry"), so both branches enforce the same shape as `max_retries` below
-    // (B25).
-    z.number().int().nonnegative(),
-    z.object({
-      max: z.number().int().nonnegative(),
-      backoff_ms: z.number().int().nonnegative().optional(),
-    }),
-  ])
-  .optional();
-
-const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType<GraphStatusFormat>;
-
-// ── createGraphTools ────────────────────────────────────────────────────────
-
-/**
- * Build the imperative `graph_*` tools bound to a dispatch manager and a
- * single in-memory graph registry (one shared `GraphToolSet` instance).
- *
- * @param manager - Active {@link DispatchManager}; required for non dry-run
- *                  execution. Optional for construction/status/cancel/dry-run.
- * @param opts.directory - Working directory for graph node dispatches.
- * @param opts.stateDir - Optional engine-state persistence dir.
- * @param opts.dispatch - Optional dispatch seam (a {@link NodeDispatchPort}).
- *        When present it is threaded into the constructed toolset in place of
- *        the manager-backed bridge — the dsh platform path constructs graph
- *        tools with {@link DshDispatchAdapter} this way, while the opencode
- *        path keeps using `manager` unchanged (additive routing by platform).
- * @param opts.graphNotify - Optional graph node-completion + graph-terminal
- *        notifier (subtask 3): a prebuilt `GraphCompletionHandler` or an owner
- *        config carrying the emperor session + session client. Threaded into
- *        every engine the toolset constructs so graph node completions AND
- *        graph-terminal transitions route to graph-notify targeting the emperor
- *        session. More here in src/graph/tools/graph-tools.ts.
- * @param opts.toolset - Optional prebuilt {@link GraphToolSet} (subtask 2).
- *        When provided, the tools bind to THIS instance instead of
- *        constructing a fresh one — letting a platform assembly layer (e.g.
- *        tool-service / PiLightweightServiceStack) construct the toolset once
- *        and reuse it for both the `graph_*` tools AND the HookDeps
- *        `graphTools` query, so the two surfaces always observe the same
- *        in-memory graph registry.
- * @returns A record of `graph_*` key → {@link CanonicalToolDef}.
- */
-export function createGraphTools(
-  manager: DispatchManager | undefined,
-  opts: {
-    directory?: string;
-    stateDir?: string;
-    graphNotify?: GraphNotifySource;
-    toolset?: GraphToolSet;
-    /**
-     * Optional dispatch seam (a {@link NodeDispatchPort}) threaded into the
-     * constructed toolset in place of the manager-backed bridge. This is the
-     * additive dsh platform path: `createGraphTools(undefined, { dispatch })`
-     * builds a toolset whose engines dispatch through the dsh subagent seam
-     * while the opencode path (`manager` only) is byte-identical. When both
-     * are present, `dispatch` wins over the manager bridge (mirrors
-     * `createEngine`'s explicit > manager precedence).
-     */
-    dispatch?: NodeDispatchPort;
-    // Subtask 6 (node-liveness wiring): optional liveness-monitor stall
-    // thresholds + the node-liveness feed, threaded into the toolset's
-    // engines when the toolset is constructed HERE (a prebuilt `toolset`
-    // carries its own deps — this passthrough only applies when absent).
-    nodeStallWarnMs?: number;
-    nodeStallGraceMs?: number;
-    livenessFeed?: NodeLivenessFeed;
-    /**
-     * Optional platform-provided acting-agent resolver. Mirrors the dispatch
-     * path's `getEffectiveAgent` deps injection (`src/dispatch/tools.ts:70-73`):
-     * on platforms where `context.agent` is never populated (Pi / DSH), the
-     * graph tools fall back to this resolver so the injected `<system-reminder>`
-     * still forwards the orchestrator's real role instead of falling back to
-     * `default_agent`. Receives the invoking session id so a per-session
-     * resolver (e.g. DSH's role switcher) can resolve the active role for that
-     * session. Absent → `context.agent`-only (opencode, unchanged).
-     */
-    getEffectiveAgent?: (sessionID?: string) => string;
-    /**
-     * Optional installed CONTRACT capability (C1), threaded into a toolset
-     * constructed HERE so `graph_declare` can resolve a declaration's node
-     * `contractRef`s. Ignored when a prebuilt `toolset` is provided — that
-     * instance carries its own deps.
-     */
-    contracts?: ContractRegistry;
-    /**
-     * Optional HOST credential-isolation capability (D7), threaded into a
-     * toolset constructed HERE so `graph_submit_outcome` can corroborate the
-     * production enablement condition of the OUTCOME run path. Ignored when a
-     * prebuilt `toolset` is provided — that instance carries its own deps.
-     * Absent means the ingress refuses to settle anything
-     * (`credential-isolation-unavailable`), which is the intended default for
-     * a host that has not provided the store and the per-attempt delivery the
-     * credential itself needs (`src/graph/host/credential-vault.ts`).
-     */
-    credentialIsolation?: CredentialIsolationCapability;
-    /**
-     * Optional HOST invocation-identity capability (D9), threaded into a toolset
-     * constructed HERE so `graph_submit_outcome` can bind an attempt to the host
-     * invocation that dispatched it and check every settlement against that
-     * binding. Ignored when a prebuilt `toolset` is provided — that instance
-     * carries its own deps. Absent means the identity binding is not enabled and
-     * every path behaves exactly as before (the core depends on no host).
-     */
-    hostIdentity?: HostIdentityCapability;
-  } = {},
-): Record<string, CanonicalToolDef> {
-  const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
-    manager,
-    dispatch: opts.dispatch,
-    directory: opts.directory,
-    stateDir: opts.stateDir,
-    graphNotify: opts.graphNotify,
-    ...(opts.contracts !== undefined ? { contracts: opts.contracts } : {}),
-    ...(opts.credentialIsolation !== undefined
-      ? { credentialIsolation: opts.credentialIsolation }
-      : {}),
-    ...(opts.hostIdentity !== undefined
-      ? { hostIdentity: opts.hostIdentity }
-      : {}),
-    ...(opts.nodeStallWarnMs !== undefined
-      ? { nodeStallWarnMs: opts.nodeStallWarnMs }
-      : {}),
-    ...(opts.nodeStallGraceMs !== undefined
-      ? { nodeStallGraceMs: opts.nodeStallGraceMs }
-      : {}),
-    ...(opts.livenessFeed !== undefined
-      ? { livenessFeed: opts.livenessFeed }
-      : {}),
-  });
-
-  return {
-    graph_create: createGraphCreateTool(toolset, opts.getEffectiveAgent),
-    graph_add_node: createGraphAddNodeTool(toolset, opts.getEffectiveAgent),
-    graph_add_edge: createGraphAddEdgeTool(toolset, opts.getEffectiveAgent),
-    graph_add_loop: createGraphAddLoopTool(toolset, opts.getEffectiveAgent),
-    graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
-    graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
-    graph_audit: createGraphAuditTool(toolset),
-    graph_run: createGraphRunTool(toolset, opts.getEffectiveAgent),
-    graph_status: createGraphStatusTool(toolset),
-    graph_cancel: createGraphCancelTool(toolset),
-    graph_approve: createGraphApproveTool(toolset),
-  };
-}
-
-// Re-export the graph-notify config types (subtask 3) for platform assembly
-// layers (tool-assembly.ts) that thread the emperor session + session client
-// down into the engine's completion and graph-terminal seams.
-export type {
-  GraphNotifySource,
-  GraphNotifyConfig,
-} from "./graph-tools.ts";
-
-// Subtask 2: re-export the toolset factory + type so platform assembly layers
-// (tool-service.ts / PiLightweightServiceStack) can construct a single
-// GraphToolSet and thread it into buildCanonicalTools via the `graphTools`
-// option — one instance backing both the graph_* tools and the HookDeps
-// graphTools in-flight query.
-export { createGraphToolSet, type GraphToolSet } from "./graph-tools.ts";
-
-// ── The outcome run path's tool face ────────────────────────────────────────
-
-/**
- * Build the OUTCOME run path's tool face: the four entries that operate on a
- * DECLARED (outcome-protocol) graph and nothing else —
- * `graph_declare`, `graph_submit_outcome`, `graph_audit`, `graph_status`.
- *
- * This is the surface a shipping host registers. It deliberately excludes every
- * legacy construction/execution entry point (`graph_create`, `graph_add_node`,
- * `graph_add_edge`, `graph_add_loop`, `graph_run`, `graph_cancel`,
- * `graph_approve`): a declared graph is dispatched by the host's own outcome
- * dispatch adapter and settled by an accepted outcome, never by the legacy
- * signal registry, so exposing those entries would offer a second execution
- * path that no declared graph can enter.
- *
- * The toolset passed here is expected to be constructed with the outcome deps
- * (dispatch adapter, credential isolation, validators, artifact root) and
- * WITHOUT a legacy `manager`/`dispatch` seam — the legacy entries are not
- * registered, so the toolset never builds a legacy engine.
- */
-export function createOutcomeGraphTools(
-  toolset: GraphToolSet,
-  opts: {
-    /**
-     * Platform-provided acting-agent resolver (Pi / DSH), exactly as in
-     * {@link createGraphTools}: `context.agent` wins when populated, else this
-     * resolver supplies the orchestrator's role for the injected
-     * `<system-reminder>`.
-     */
-    getEffectiveAgent?: (sessionID?: string) => string;
-  } = {},
-): Record<string, CanonicalToolDef> {
-  return {
-    graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
-    graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
-    graph_audit: createGraphAuditTool(toolset),
-    graph_status: createGraphStatusTool(toolset),
-  };
-}
-
-// ── Individual tool factories ───────────────────────────────────────────────
 
 /** Render a plain-object tool result as an agent-readable JSON string. */
 function json(input: unknown): string {
@@ -334,213 +55,29 @@ function resolveEffectiveAgent(
   return resolver?.(sessionID) ?? "";
 }
 
-/** graph_create — open a graph registry slot. */
-function createGraphCreateTool(
-  toolset: GraphToolSet,
-  getEffectiveAgent?: (sessionID?: string) => string,
-): CanonicalToolDef {
-  return defineTool({
-    description:
-      "Create a new graph / orchestration context. Returns a graph_id used " +
-      "by all subsequent graph_add_node / graph_add_edge / graph_add_loop / " +
-      "graph_run / graph_status / graph_cancel calls.",
-    args: {
-      // `.trim().min(1)` rejects a whitespace-only name at the schema boundary
-      // instead of relying on the tool layer's trim (B25).
-      name: z.string().trim().min(1).describe("Human-readable graph name for logging."),
-      budget: graphBudgetSchema.describe("Graph-level resource limits."),
-    },
-    async execute(args, context) {
-      try {
-        // Capture the invoking session id so the graph-notify emperor-session
-        // resolver is wired on the very first engine construction. The acting
-        // agent is forwarded so the injected `<system-reminder>` resumes the
-        // orchestrator as its real role (not default_agent). On Pi/DSH
-        // `context.agent` is empty, so the platform-provided resolver supplies
-        // the orchestrator's active role instead.
-        return json(
-          toolset.graph_create(
-            args,
-            context?.sessionID,
-            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
-          ),
-        );
-      } catch (err) {
-        return `graph_create failed: ${errorText(err)}`;
-      }
-    },
-  });
-}
+const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType<GraphStatusFormat>;
 
-/** graph_add_node — dynamically add a node to the graph. */
-function createGraphAddNodeTool(
-  toolset: GraphToolSet,
-  getEffectiveAgent?: (sessionID?: string) => string,
-): CanonicalToolDef {
-  return defineTool({
-    description:
-      "Add a node to the graph. Nodes are role-agnostic {agent, prompt} " +
-      "tuples. Structural validation runs atomically — an invalid node is " +
-      "rejected without mutating the graph.",
-    args: {
-      graph_id: z.string().describe("Graph to add the node to."),
-      id: z.string().min(1).describe("Unique node identifier within this graph."),
-      agent: z
-        .string()
-        .trim()
-        .min(1)
-        .describe("Agent identifier to dispatch (e.g. a subagent full id)."),
-      // An empty prompt is never a legitimate dispatch (B25): the engine would
-      // happily launch the node with an empty instruction.
-      prompt: z.string().min(1).describe("The prompt this agent executes."),
-      completion_condition: z
-        .string()
-        .optional()
-        .describe("Named condition that auto-completes the node."),
-      needs_approval: z
-        .boolean()
-        .optional()
-        .describe("If true, the engine pauses at this node for human approval."),
-      join: joinSchema.describe("Fan-in convergence strategy."),
-      budget: nodeBudgetSchema.describe("Per-node resource limits."),
-      timeout_ms: z
-        .number()
-        .nonnegative()
-        .optional()
-        .describe("Wall-clock timeout for this node (ms). 0 is the documented per-node 'disable staleness watchdog' opt-out."),
-      max_retries: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe("Auto-retry count on escalate. Now enforced by the engine (previously parsed but ignored)."),
-    },
-    async execute(args, context) {
-      try {
-        return json(
-          toolset.graph_add_node(
-            args,
-            context?.sessionID,
-            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
-          ),
-        );
-      } catch (err) {
-        return `graph_add_node failed: ${errorText(err)}`;
-      }
-    },
-  });
-}
+// ── The outcome run path's tool face ────────────────────────────────────────
 
-/** graph_add_edge — add a directed edge between two nodes. */
-function createGraphAddEdgeTool(
-  toolset: GraphToolSet,
-  getEffectiveAgent?: (sessionID?: string) => string,
-): CanonicalToolDef {
-  return defineTool({
-    description:
-      "Add a directed edge between two nodes. Edges define data flow and " +
-      "signal routing. type 'on_signal' requires signal_filter; type " +
-      "'on_condition' requires condition.",
-    args: {
-      graph_id: z.string().describe("Graph to add the edge to."),
-      from: z.string().describe("Source node ID."),
-      to: z.string().describe("Target node ID."),
-      type: z
-        .enum(["always", "on_signal", "on_condition"])
-        .optional()
-        .describe("Edge activation rule."),
-      signal_filter: z
-        .array(z.string())
-        .optional()
-        .describe("Signal types that activate this edge (required when type=on_signal)."),
-      condition: z
-        .string()
-        .optional()
-        .describe("Named condition that must evaluate true (required when type=on_condition)."),
-      data_passthrough_include: z
-        .array(z.string())
-        .optional()
-        .describe("Whitelist of payload fields to pass downstream."),
-      data_passthrough_exclude: z
-        .array(z.string())
-        .optional()
-        .describe("Blacklist of payload fields to omit from the passed context."),
-      data_passthrough_max_chars: z
-        .number()
-        .optional()
-        .describe("Truncation limit for the passed context."),
-      retry: retrySchema.describe(
-        "Auto-retry count on escalate for either incident node (the source node, or the target when it escalates); backoff_ms honored between attempts.",
-      ),
-    },
-    async execute(args, context) {
-      try {
-        return json(
-          toolset.graph_add_edge(
-            args,
-            context?.sessionID,
-            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
-          ),
-        );
-      } catch (err) {
-        return `graph_add_edge failed: ${errorText(err)}`;
-      }
-    },
-  });
-}
 
-/** graph_add_loop — declare a bounded-cycle loop group. */
-function createGraphAddLoopTool(
+export function createOutcomeGraphTools(
   toolset: GraphToolSet,
-  getEffectiveAgent?: (sessionID?: string) => string,
-): CanonicalToolDef {
-  return defineTool({
-    description:
-      "Declare a loop group — a set of nodes that form a bounded cycle — " +
-      "with a hard traversal cap. " +
-      "Optional 'mode' selects the loop rounds' session-isolation flavor: " +
-      "'inherit' (real) records that rounds re-dispatch within the SAME " +
-      "engine state; 'fresh' (per-round session isolation) is not supported " +
-      "and returns an explicit error — use a separate graph per round for " +
-      "session isolation. Omitting mode keeps default behavior.",
-    args: {
-      graph_id: z.string().describe("Graph to add the loop group to."),
-      id: z.string().describe("Unique loop group identifier."),
-      nodes: z
-        .array(z.string())
-        .min(1)
-        .describe("Node IDs forming the cycle."),
-      max_traversals: z
-        .number()
-        .int()
-        .min(1)
-        .describe("Hard cap — loop exits after this many traversals."),
-      mode: z
-        .enum(["inherit", "fresh"])
-        .optional()
-        .describe(
-          "Session-isolation mode for loop rounds. 'inherit' (real) records that " +
-            "rounds re-dispatch within the same engine state. 'fresh' is " +
-            "documented-unsupported — returns an explicit error naming the " +
-            "alternative path (a separate graph per round). Omit for default.",
-        ),
-    },
-    async execute(args, context) {
-      try {
-        return json(
-          toolset.graph_add_loop(
-            args,
-            context?.sessionID,
-            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
-          ),
-        );
-      } catch (err) {
-        return `graph_add_loop failed: ${errorText(err)}`;
-      }
-    },
-  });
+  opts: {
+    /**
+     * Platform-provided acting-agent resolver (Pi / DSH): `context.agent` wins
+     * when populated, else this resolver supplies the orchestrator's role for
+     * the injected `<system-reminder>`.
+     */
+    getEffectiveAgent?: (sessionID?: string) => string;
+  } = {},
+): Record<string, CanonicalToolDef> {
+  return {
+    graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
+    graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
+    graph_audit: createGraphAuditTool(toolset),
+    graph_status: createGraphStatusTool(toolset),
+  };
 }
-
 /** graph_declare — author a v3 (outcome-protocol) graph and persist its plan. */
 function createGraphDeclareTool(
   toolset: GraphToolSet,
@@ -553,10 +90,8 @@ function createGraphDeclareTool(
       "binding and the outcome-protocol identity. The graph runs under the OUTCOME " +
       "protocol — its declared entry nodes are dispatched from the compiled plan and " +
       "its outcomes are accepted through the graph-scoped outcome submission, which " +
-      "commits the graph state with the acceptance. It is NOT runnable through the " +
-      "LEGACY entry points: graph_run (and every legacy construction/status/cancel " +
-      "call) on a declared graph fails with the outcome-protocol refusal and " +
-      "dispatches nothing; the graph never falls back to the legacy signal protocol. " +
+      "commits the graph state with the acceptance — the outcome submission is its " +
+      "ONLY completion source, and the graph never falls back to signal semantics. " +
       "A declaration that compiles only as a DRAFT " +
       "(acceptance requirements with no resolved validator capability) is refused " +
       "with every unresolved entry named and nothing is persisted; pass " +
@@ -640,9 +175,8 @@ function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
       "identity and the plan revision are runtime provenance and are not " +
       "accepted here. A refusal returns structured " +
       "repair diagnostics (refusals) and writes nothing; a rejection returns the " +
-      "per-requirement outcomes that failed and leaves the attempt open. A LEGACY " +
-      "v2 graph is refused by name — it completes through the legacy signal " +
-      "protocol, never through this ingress.",
+      "per-requirement outcomes that failed and leaves the attempt open. A record " +
+      "that is not this build's declared outcome-protocol state is refused by name.",
     args: {
       graph_id: z
         .string()
@@ -717,8 +251,7 @@ function createGraphAuditTool(toolset: GraphToolSet): CanonicalToolDef {
       "zero non-terminal graphs but one unreadable record is 'blocked', and one " +
       "unsettled effect is 'in-flight'. Strictly read-only: no graph, state, ledger or " +
       "file is written, and the acceptance ledger is opened read-only (never created or " +
-      "initialized). Use it as the evidence for retiring the legacy execution path " +
-      "(phase E).",
+      "initialized).",
     args: {},
     async execute() {
       try {
@@ -730,60 +263,6 @@ function createGraphAuditTool(toolset: GraphToolSet): CanonicalToolDef {
   });
 }
 
-/** graph_run — execute (or dry-run validate) a constructed graph. */
-function createGraphRunTool(
-  toolset: GraphToolSet,
-  getEffectiveAgent?: (sessionID?: string) => string,
-): CanonicalToolDef {
-  return defineTool({
-    description:
-      "Non-blocking — dispatches ready root nodes and returns immediately " +
-      "with phase, active_nodes, and pending_nodes. End your turn after graph_run; the " +
-      "engine emits a [GRAPH COMPLETE] system-reminder when all nodes " +
-      "finish, or [GRAPH BLOCKED] when a node awaits approval. On the " +
-      "next turn, read results once via graph_status(graph_id, " +
-      "include_output=true). Poll graph_status only as a fallback when " +
-      "no reminder arrives. With dry_run=true, validates structure " +
-      "without executing.",
-    args: {
-      graph_id: z.string().describe("Graph to execute."),
-      node_id: z
-        .string()
-        .optional()
-        .describe("If specified, re-run a specific node."),
-      retry: z
-        .boolean()
-        .optional()
-        .describe("When true with node_id, retry that node."),
-      modify_prompt: z
-        .string()
-        .optional()
-        .describe("When retrying, optionally modify the node's prompt."),
-      dry_run: z
-        .boolean()
-        .optional()
-        .describe("Validate the graph structure without executing."),
-    },
-    async execute(args, context) {
-      try {
-        // Subtask 3: forward the invoking session id (the orchestrator/emperor
-        // session running graph_run) so the graph-notify completion seam targets
-        // the correct emperor session at runtime. Also forward the acting agent
-        // so the injected `<system-reminder>` resumes the orchestrator as its
-        // real role. On Pi/DSH `context.agent` is empty, so the platform
-        // resolver supplies the orchestrator's active role instead.
-        const effAgent = resolveEffectiveAgent(
-          context?.agent,
-          context?.sessionID,
-          getEffectiveAgent,
-        );
-        return json(await toolset.graph_run(args, context?.sessionID, effAgent));
-      } catch (err) {
-        return `graph_run failed: ${errorText(err)}`;
-      }
-    },
-  });
-}
 
 /** graph_status — query node, loop, or graph state. */
 function createGraphStatusTool(
@@ -805,11 +284,12 @@ function createGraphStatusTool(
         .enum(["session", "persisted", "all"])
         .optional()
         .describe(
-          "Session-scope of the query. 'session' (default) reads only the in-memory " +
-            "registry. 'persisted' reads graphs hydrated from the on-disk engine-state " +
-            "store (a cross-session view). 'all' merges registry + persisted (registry " +
-            "wins on a graphId collision). With persisted/all, the no-target list shows " +
-            "persisted graphs and query/status/agent/from_date/to_date, group_by, and " +
+          "Scope of the query. 'session' (default) reads the declared graphs this " +
+            "process holds. 'persisted' reads graphs hydrated from the on-disk " +
+            "engine-state store (a cross-session view). 'all' merges declared + " +
+            "persisted (a declared graph wins on a graphId collision). With " +
+            "persisted/all, the no-target list shows persisted graphs and " +
+            "query/status/agent/from_date/to_date, group_by, and " +
             "include_budget aggregate across sessions. An empty store yields an explicit " +
             "honest-empty note — never fabricated rows.",
         ),
@@ -958,18 +438,6 @@ function createGraphStatusTool(
             "signal events at or after this timestamp. Events before since are " +
             "filtered out; if none remain, an explicit 'no events since <ts>' note.",
         ),
-      pending_approvals: z
-        .boolean()
-        .optional()
-        .describe(
-          "First-class 'awaiting human' view: list every blocked needs_approval " +
-            "node across the resolved scope (registry only for scope=session; " +
-            "persisted only for scope=persisted; merged for scope=all). Each row " +
-            "carries the owning graph, the blocked-since timestamp, a truncated " +
-            "approval_payload summary, and a paste-ready graph_approve call. An " +
-            "empty result renders an honest 'no pending approvals' note — never " +
-            "fabricated rows. A distinct view mode; default off.",
-        ),
       max_chars: z
         .number()
         .optional()
@@ -1004,45 +472,6 @@ function createGraphStatusTool(
 }
 
 /** graph_cancel — cancel a graph, node, or loop group. */
-function createGraphCancelTool(
-  toolset: GraphToolSet,
-): CanonicalToolDef {
-  return defineTool({
-    description:
-      "Cancel a graph, node, or loop group. With neither node_id nor " +
-      "loop_id, the entire graph is cancelled. A node_id or loop_id cancels " +
-      "only the scoped target (loop targets resolve to their full member set); " +
-      "when cascade is true, the cancellation propagates to every node " +
-      "transitively downstream of the target (forward closure over edges). " +
-      "Returns the ACTUAL cancelled node ids from the engine, not a guess. " +
-      "Note (semantics, Q3 Option A): this is a human-gated control — graph_cancel " +
-      "is intended for human monitoring and intervention, not for agent-driven " +
-      "self-cancellation of a running workflow.",
-    args: {
-      graph_id: z.string().describe("Graph containing the target."),
-      node_id: z
-        .string()
-        .optional()
-        .describe("Cancel a specific node."),
-      loop_id: z
-        .string()
-        .optional()
-        .describe("Cancel a loop group (resolved to its member node set)."),
-      cascade: z
-        .boolean()
-        .optional()
-        .describe(
-          "When true, also cancel every node transitively downstream of the " +
-            "target (forward closure over graph edges). Default: true for a loop " +
-            "target, false for a bare node_id. Ignored for whole-graph cancel.",
-        ),
-    },
-    async execute(args) {
-      try {
-        return json(await toolset.graph_cancel(args));
-      } catch (err) {
-        return `graph_cancel failed: ${errorText(err)}`;
-      }
-    },
-  });
-}
+// Re-export the toolset factory + type so host assembly layers construct the one
+// instance the outcome tool face is bound to.
+export { createGraphToolSet, type GraphToolSet } from "./graph-tools.ts";

@@ -26,23 +26,21 @@
  *    store (`EnginePersistence`, the same version-2 layout and the same loader
  *    gates).
  *
- * THE BOUNDARY, STATED PLAINLY (C3c): the outcome protocol has a registered
- * handler, a declared graph runs through the outcome run path
+ * THE BOUNDARY, STATED PLAINLY: the outcome protocol has a registered handler
+ * and a declared graph runs through the outcome run path
  * (`src/graph/outcome/runtime.ts`) — entry nodes dispatched from THIS plan,
  * submissions accepted through the graph-scoped ingress, and the graph state
  * committed with the acceptance — and restart recovery resumes that SAME saved
- * plan (`src/graph/outcome/recovery.ts`, driven by the startup sweep). Every
- * LEGACY entry point still refuses the graph with
- * {@link OutcomeProtocolUnavailableError} instead of falling back to the legacy
- * signal protocol. Nothing HERE dispatches, reduces or accepts anything: this
- * module only authors, compiles and persists.
+ * plan (`src/graph/outcome/recovery.ts`, driven by the startup sweep). Nothing
+ * HERE dispatches, reduces or accepts anything: this module only authors,
+ * compiles and persists.
  *
- * The state's `graphDeclaration` is a deliberately EMPTY legacy carrier: the
- * v3 declaration is not a v2 declaration, so none is fabricated. The compiled
- * plan is the graph's topology authority, and the state carries one pending
- * runtime node per compiled node so the persisted plan's node bindings verify
- * against the state that holds them (the B7 load gate requires every topology
- * node id to be a node the state declares).
+ * The state's `graphDeclaration` is a deliberately EMPTY carrier: the v3
+ * declaration is not a v2 declaration, so none is fabricated. The compiled plan
+ * is the graph's topology authority, and the state carries one pending runtime
+ * node per compiled node so the persisted plan's node bindings verify against
+ * the state that holds them (the load gate requires every topology node id to
+ * be a node the state declares).
  */
 
 import { readFileSync } from "node:fs";
@@ -69,15 +67,12 @@ import {
   type PersistedCompiledPlan,
 } from "../compiler/plan.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
-import {
-  LEGACY_SIGNAL_PROTOCOL,
-  OUTCOME_PROTOCOL,
-} from "../protocol/execution-protocol.ts";
+import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import {
   EnginePersistence,
   engineStatePath,
 } from "../persistence/engine-persistence.ts";
-import { createEngineState, registerNode } from "../engine/engine-state.ts";
+import { createEngineState, registerNode } from "../persistence/declared-state.ts";
 
 // ── Args and result ─────────────────────────────────────────────────────────
 
@@ -135,16 +130,14 @@ export interface GraphDeclareResult {
    */
   preserved: boolean;
   /**
-   * Whether a run path exists for this graph. True since C3b: the outcome
-   * protocol has a registered handler and the graph runs through the
-   * graph-scoped outcome submission ingress — NOT through the legacy signal
-   * entry points, which still refuse it.
+   * Whether a run path exists for this graph. True: the outcome protocol has a
+   * registered handler and the graph runs through the graph-scoped outcome
+   * submission ingress.
    */
   runnable: boolean;
   /**
-   * How the graph runs, verbatim. Names the outcome run path and the boundary
-   * the legacy entry points keep: a caller must never interpret this graph with
-   * severity-ranked signals.
+   * How the graph runs, verbatim. Names the outcome run path: a caller must
+   * never interpret this graph with severity-ranked signals.
    */
   run_path: string;
 }
@@ -163,8 +156,6 @@ export type DeclareRefusalReason =
   | "unaddressable-declaration"
   /** The graph id already names a declared graph with DIFFERENT content. */
   | "declaration-changed"
-  /** The graph id already names a legacy (v2) graph. */
-  | "legacy-graph-conflict"
   /**
    * A state file already exists for the graph id but cannot be read as this
    * build's own declared-graph record — overwriting it could destroy a plan
@@ -210,12 +201,13 @@ export class GraphDeclareRefusedError extends Error {
 }
 
 /**
- * Why the outcome protocol is unavailable to a LEGACY entry point.
+ * How a declared graph runs, verbatim.
  *
- * Phrased here, once, so `graph_declare`'s result and the legacy refusal cannot
- * drift apart. Since C3b the graph IS runnable — through the outcome run path —
- * so this text states the two halves a caller must not confuse: the outcome
- * path exists, and the legacy signal path stays unreachable for this graph.
+ * Phrased here, once, so `graph_declare`'s result cannot drift from the run
+ * path it names: the graph runs through the outcome run path, whose ONLY
+ * completion source is the graph-scoped outcome submission that commits its
+ * state with the acceptance. Severity-ranked signals never settle one of its
+ * nodes.
  */
 export function outcomeProtocolUnavailableReason(
   graphId: string,
@@ -225,34 +217,9 @@ export function outcomeProtocolUnavailableReason(
     `graph "${graphId}" is declared under the outcome protocol ` +
     `(executionProtocolVersion ${OUTCOME_PROTOCOL}): it runs through the OUTCOME run ` +
     `path, whose ONLY completion source is the graph-scoped outcome submission that ` +
-    `commits its state with the acceptance. This LEGACY entry point (run, dry-run, ` +
-    `construction, cancel, approve or targeted status) cannot run it: the legacy signal ` +
-    `protocol would interpret completions from severity-ranked signals, which is exactly ` +
-    `what the outcome protocol forbids. Nothing was dispatched. The compiled plan ` +
-    `(revision ${planRevision}) and its binding are the graph's topology authority, and ` +
-    `this graph must never fall back to the legacy signal protocol.`
+    `commits its state with the acceptance. The compiled plan (revision ${planRevision}) ` +
+    `and its binding are the graph's topology authority.`
   );
-}
-
-/**
- * Refusal raised when a LEGACY operation (run / construct / cancel / status)
- * targets a graph DECLARED under the outcome protocol.
- *
- * It names the outcome run path that does own the graph and the persisted plan
- * revision, and it is thrown BEFORE any node is touched, so a declared graph can
- * never be dispatched under legacy rules. The name says what the caller tried to
- * use: the outcome protocol is unavailable to THIS entry point.
- */
-export class OutcomeProtocolUnavailableError extends Error {
-  readonly graphId: string;
-  readonly planRevision: string;
-
-  constructor(graphId: string, planRevision: string) {
-    super(outcomeProtocolUnavailableReason(graphId, planRevision));
-    this.name = "OutcomeProtocolUnavailableError";
-    this.graphId = graphId;
-    this.planRevision = planRevision;
-  }
 }
 
 /** Refuse a declaration the strict front-end rejected. */
@@ -467,11 +434,11 @@ export function buildDeclaredOutcomeGraph(
 /**
  * Build the engine state a declared graph is bound to.
  *
- * The legacy carrier declaration is EMPTY on purpose — no v2 declaration is
- * fabricated for a v3 graph. The state registers one pending runtime node per
- * compiled node (so the persisted plan's topology verifies against the state
- * holding it) and then pins the three identities: the execution protocol, the
- * compiled-plan record and the plan binding.
+ * The carrier declaration is EMPTY on purpose — no v2 declaration is fabricated
+ * for a v3 graph. The state registers one pending runtime node per compiled node
+ * (so the persisted plan's topology verifies against the state holding it) and
+ * then pins the three identities: the execution protocol, the compiled-plan
+ * record and the plan binding.
  */
 function buildDeclaredEngineState(
   plan: CompiledPlan,
@@ -510,9 +477,8 @@ export type ExistingDeclaredGraph =
   | { readonly kind: "absent" }
   /** A declared graph, with the plan revision its file carries. */
   | { readonly kind: "declared"; readonly planRevision: string }
-  /** A LEGACY (protocol 1 / pre-protocol) record owns the id. */
-  | { readonly kind: "legacy" }
-  /** A file exists but is not a readable record — never overwrite it blindly. */
+  /** A file exists but is not this build's declared-graph record — never
+   * overwrite it blindly. */
   | { readonly kind: "unreadable"; readonly reason: string };
 
 /**
@@ -569,15 +535,13 @@ export function readExistingDeclaredGraph(
     };
   }
   const protocol = parsed.executionProtocolVersion;
-  if (protocol === undefined || protocol === LEGACY_SIGNAL_PROTOCOL) {
-    // An absent protocol in this layout IS the legacy protocol (the format-2
-    // decoder's one legitimate backfill), so the id belongs to a legacy graph.
-    return { kind: "legacy" };
-  }
   if (protocol !== OUTCOME_PROTOCOL) {
+    // No inference: an absent key is not an implicit protocol and a different
+    // number is not a convertible predecessor. Either way the file is not a
+    // declared-graph record this build may overwrite.
     return {
       kind: "unreadable",
-      reason: `the state file at ${path} carries executionProtocolVersion ${describeValue(protocol)}, which is neither the legacy nor the outcome protocol`,
+      reason: `the state file at ${path} carries executionProtocolVersion ${describeValue(protocol)}, not the outcome protocol`,
     };
   }
   const plan = parsed.compiledPlan;

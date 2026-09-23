@@ -4,17 +4,13 @@
  * Version: 1.0
  * Date: 2026-09-22
  *
- * The AUDIT half of release-gate step 5 (docs/graph-outcome-protocol.md
- * § "Implementation order and release gates": "Drain or explicitly migrate
- * legacy executions, then remove payload-based decisions from the new engine and
- * retire legacy execution support"). Retiring the legacy execution path is only
- * safe when no graph still depends on it, and "no graph" is a CLAIM that needs
- * evidence. This module produces that evidence: one total, read-only inventory
- * of the persisted graph store, in which every graph is
+ * The read-only inventory of the persisted graph store, kept after the legacy
+ * execution path was retired: it is how a store is shown to hold nothing the
+ * deleted runtime would have been needed for. One total, read-only inventory of
+ * the persisted graph store, in which every graph is
  *
  * - `terminal` — readable and quiescent: the record takes no further step;
- * - `in-flight` — readable and still owed work: the legacy engine (protocol 1)
- *   could still advance it, or the outcome run path (protocol 2) has not
+ * - `in-flight` — readable and still owed work: the outcome run path has not
  *   finished it; or
  * - `blocked` — the record cannot be read, or its version is unknown (a
  *   storage format or execution protocol with no installed capability), or it
@@ -44,18 +40,16 @@
  * THE UNIVERSE IS THE ENGINE-STATE STORE — the same `engine-*.json` set the
  * startup sweep scans (`engineStateDir(directory)`, i.e.
  * `<directory>/.rolebox/state`). One file is one graph, and its
- * `executionProtocolVersion` is the identity the loader BOUND (the format-2
- * decoder backfills the legacy identity for a record written before the field
- * existed, so an old file reports protocol 1 rather than `undefined`). The
- * outcome protocol keeps its run state in the acceptance ledger rather than in
- * that file, so a protocol-2 entry is classified from the ledger's
- * `graphState` row — the state is read against the graph's SAVED compiled plan
- * with the same strict, versioned reader the run path uses.
+ * `executionProtocolVersion` is the identity the loader BOUND. A record pinned
+ * to any protocol this build does not register — the deleted legacy signal
+ * protocol included — is a BLOCKER (`unsupported-version`), never a run this
+ * audit interprets. The outcome protocol keeps its run state in the acceptance
+ * ledger rather than in that file, so a protocol-2 entry is classified from the
+ * ledger's `graphState` row — the state is read against the graph's SAVED
+ * compiled plan with the same strict, versioned reader the run path uses.
  *
- * TERMINAL MEANS QUIESCENT, AND THE PHASE IS ALWAYS REPORTED. A legacy record
- * is terminal exactly when its phase is `complete` — the rule the sweep
- * already uses to decide it has nothing to resume. An outcome record is
- * terminal when its phase is `complete` OR `stopped`: a stopped run is
+ * TERMINAL MEANS QUIESCENT, AND THE PHASE IS ALWAYS REPORTED. An outcome record
+ * is terminal when its phase is `complete` OR `stopped`: a stopped run is
  * deliberately NOT `complete` (it was cut short by a declared hard limit or
  * progress threshold), but it refuses every further advance and launches
  * nothing on recovery, so it takes no further step and is migration-quiescent.
@@ -64,16 +58,13 @@
  * judgement stays checkable.
  *
  * IN-FLIGHT IS MORE THAN "NOT TERMINAL". A readable entry is in flight when it
- * is not quiescent: a legacy record in `idle`/`executing` (the legacy engine
- * could advance it), an outcome record in `ready`/`executing`, or a declared
+ * is not quiescent: an outcome record in `ready`/`executing`, or a declared
  * outcome graph whose ledger holds no state row yet — including a ledger STORE
  * that does not exist at all, which nothing has ever committed to. Its first
  * execution is still owed: the sweep would create the store and start the graph
- * from the saved plan. The entry names the
- * WORK, not just the phase: a legacy entry carries its per-status node counts
- * and the ids of nodes the engine has not settled; an outcome entry carries
- * every node the persisted state records as in flight, with its attempt, and
- * every effect still `pending` or `started`.
+ * from the saved plan. The entry names the WORK, not just the phase: every node
+ * the persisted state records as in flight, with its attempt, and every effect
+ * still `pending` or `started`.
  *
  * UNSETTLED EFFECTS ARE REPORTED FOR EVERY READABLE OUTCOME GRAPH, terminal or
  * not. An effect a process left `started` is real outstanding work even when
@@ -86,7 +77,7 @@
  * graphs but one unreadable record, or one `started` effect nobody settled, is
  * NOT drained — it is `blocked` or `in-flight` respectively. That is the whole
  * point of the report: "nothing looked non-terminal" is not evidence that the
- * legacy path is unused.
+ * store is quiescent.
  *
  * THE IN-FLIGHT SET IS DECIDABLE, NOT MERELY COUNTED (E gate, step 1). "Six
  * graphs are in flight" cannot be acted on; "six records with nothing queued
@@ -97,20 +88,11 @@
  * INFERENCE with a stated basis, never a write: a stale lock is reported, never
  * resolved, and the verdict rules above are unchanged.
  *
- * THE QUEUE FACTS ARE FILE FACTS. A legacy entry's frontier and deferred
- * completions are read from the record's PERSISTED FILE — the raw text the
- * loader just validated — never from the hydrated state, which deliberately
- * resets `pendingCompletions` at the trust boundary
- * (`deserializeEngineState`, R2(c)) and therefore cannot answer whether the
- * process that wrote the file still had completions deferred. That reset is
- * UNCHANGED and is not this audit's to change: recovery still refuses to resume
- * from a persisted deferred queue (the completions describe a critical section
- * no live process holds). The file is the authority for the REPORT and for the
- * stale-lock criterion only.
- *
- * The creation side is owned elsewhere: the legacy construction ingress and
- * its temporary host declaration were removed with the host switch, so the
- * protocol-1 population this audit drains cannot grow silently.
+ * THE QUEUE IS THE OUTCOME STATE'S OWN. An in-flight outcome entry's queue is
+ * its armed attempts plus its unsettled effects, read from the acceptance
+ * ledger through the same strict readers the run path uses. A record the loader
+ * refuses (a deleted protocol, an unknown storage format, a corrupt body) is a
+ * blocker, so there is no queue to guess at.
  *
  * Dependency note: this module reads the loader, the ledger's read-only open and
  * the outcome state reader, and imports no run path. It dispatches nothing,
@@ -120,7 +102,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { EnginePhase, NodeStatus } from "../../constants.ts";
 import { errorText } from "../../utils/error-text.ts";
 import type { EngineState } from "../../types.engine-v2.ts";
 import type { CompiledPlan } from "../compiler/plan.ts";
@@ -144,7 +125,6 @@ import type {
 } from "../ledger/types.ts";
 import {
   DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-  LEGACY_SIGNAL_PROTOCOL,
   OUTCOME_PROTOCOL,
   type ExecutionProtocolRegistry,
 } from "../protocol/execution-protocol.ts";
@@ -237,7 +217,7 @@ export interface DrainAuditBlocker {
 // ── Report model ────────────────────────────────────────────────────────────
 
 /** The protocol an entry is bound to, as far as the audit could read it. */
-export type DrainAuditProtocol = "legacy-signal" | "outcome" | "unknown";
+export type DrainAuditProtocol = "outcome" | "unknown";
 
 /** The three-way classification the drain decision reads. */
 export type DrainAuditClassification = "terminal" | "in-flight" | "blocked";
@@ -282,12 +262,9 @@ export const STALE_LOCK_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
  * re-dispatches nothing and deletes nothing. It answers one question and only
  * that one — "is any live process plausibly advancing this record?":
  *
- * - `stale-lock` — nothing is queued (for a legacy record, no frontier and no
- *   deferred completion IN THE PERSISTED FILE — see
- *   {@link DrainAuditStalenessFacts.pendingCompletionsEmpty}; for an outcome
- *   record, no armed attempt and no unsettled effect) AND the last state update
- *   is at least {@link STALE_LOCK_IDLE_THRESHOLD_MS} old. No live run is
- *   advancing it.
+ * - `stale-lock` — nothing is queued (no armed attempt and no unsettled
+ *   effect) AND the last state update is at least
+ *   {@link STALE_LOCK_IDLE_THRESHOLD_MS} old. No live run is advancing it.
  * - `actively-executing` — something is queued OR the last update is inside
  *   the threshold. The audit REFUSES to call this dead; that is not the same as
  *   observing a live process, and the facts that decided it stay on the entry.
@@ -301,11 +278,9 @@ export type DrainAuditStaleness = "stale-lock" | "actively-executing";
  * Present exactly on a readable `in-flight` entry — never on a `terminal` one
  * (it takes no further step, so there is no lock to judge) and never on a
  * `blocked` one (nothing about it is known well enough to infer anything; the
- * blocker is the answer). The queue facts are the queue vocabulary of the
- * entry's OWN protocol: `frontier` / `pendingCompletions`, read from the
- * record's PERSISTED FILE, for a legacy record (its hydrated state cannot answer
- * that question — the field notes below say why); an outcome entry already
- * carries `armed` / `unsettledEffects`.
+ * blocker is the answer). The queue fact is the entry's OWN protocol's queue:
+ * an outcome entry carries `armed` / `unsettledEffects`, and this block says
+ * whether that queue was empty.
  */
 export interface DrainAuditStalenessFacts {
   /** Epoch ms of the record's own last state update, as persisted. */
@@ -321,29 +296,6 @@ export interface DrainAuditStalenessFacts {
   readonly staleness: DrainAuditStaleness;
   /** Whether the record holds work the engine has not consumed. */
   readonly hasQueuedWork: boolean;
-  /**
-   * Legacy only: whether the record's PERSISTED FILE holds an empty dispatch
-   * frontier. File fact — see {@link pendingCompletionsEmpty}. Absent only when
-   * the file carried no readable queue arrays, in which case the record is
-   * conservatively reported as queued and no size is invented.
-   */
-  readonly frontierEmpty?: boolean;
-  /** Legacy only: how many nodes that persisted frontier holds. */
-  readonly frontierSize?: number;
-  /**
-   * Legacy only: whether the record's PERSISTED FILE defers no completion. Read
-   * from the raw record text the loader just validated — never from the hydrated
-   * state, because the deserializer DELIBERATELY resets the field at the trust
-   * boundary (R2(c): it describes the critical section of the process that wrote
-   * the file, and hydrating it would resurrect completions nobody can replay).
-   * Reading the file keeps the REPORT faithful and the inference safe: a record
-   * whose file still lists a deferred completion is never called a stale lock,
-   * even though recovery would not resume from that queue. The reset itself is
-   * unchanged — this field describes the store, never what a recovery may replay.
-   */
-  readonly pendingCompletionsEmpty?: boolean;
-  /** Legacy only: how many completions the persisted file defers (see above). */
-  readonly pendingCompletionsSize?: number;
 }
 
 /** One node the persisted outcome state records as in flight. */
@@ -382,14 +334,10 @@ export interface DrainAuditEntry {
   readonly executionProtocolVersion?: number;
   readonly protocol: DrainAuditProtocol;
   readonly classification: DrainAuditClassification;
-  /** The persisted phase, exactly as recorded (legacy or outcome vocabulary). */
+  /** The persisted phase, exactly as recorded. */
   readonly phase?: string;
   /** The plan revision, for a protocol-2 record that names one. */
   readonly planRevision?: string;
-  /** Legacy only: node count per lifecycle status. */
-  readonly nodeStatusCounts?: Readonly<Record<string, number>>;
-  /** Legacy only: nodes the engine has not settled (`completed` / `done`). */
-  readonly unsettledNodeIds?: readonly string[];
   /** Outcome only: nodes the persisted state records as in flight. */
   readonly armed?: readonly DrainAuditArmedNode[];
   /** Outcome only: effects still `pending` or `started`. */
@@ -425,8 +373,6 @@ export interface DrainAuditTotals {
   readonly inFlight: number;
   /** Unreadable, version-unknown, or intact-but-migration-required. */
   readonly blocked: number;
-  /** Of the in-flight entries, those bound to the LEGACY signal protocol. */
-  readonly legacyInFlight: number;
   /** Of the in-flight entries, those bound to the outcome protocol. */
   readonly outcomeInFlight: number;
   /**
@@ -513,12 +459,6 @@ export interface DrainAuditOptions {
 /** Matches the per-graph engine-state filenames the store writes. */
 const ENGINE_STATE_FILENAME = /^engine-.+\.json$/;
 
-/** The node statuses that count as SETTLED for the legacy run. */
-const SETTLED_NODE_STATUSES: readonly string[] = Object.freeze([
-  NodeStatus.Completed,
-  NodeStatus.Done,
-]);
-
 /** Is this a file the engine-state store owns? */
 function isEngineStateFile(name: string): boolean {
   return ENGINE_STATE_FILENAME.test(name);
@@ -579,23 +519,13 @@ function toAuditStop(stop: OutcomeStop): DrainAuditStop {
 // ── Entry classification ────────────────────────────────────────────────────
 
 /**
- * One record's queue, in the vocabulary its own protocol keeps it in. Internal:
- * the report exposes the facts through {@link DrainAuditStalenessFacts} and the
- * entry's protocol-specific work fields, never as this alias.
+ * One record's queue. Internal: the report exposes the fact through
+ * {@link DrainAuditStalenessFacts} and the entry's own work fields, never as
+ * this alias.
  */
 interface EntryQueue {
   /** Whether the record holds work the engine has not consumed. */
   readonly hasQueuedWork: boolean;
-  /**
-   * Legacy only: the dispatch frontier, reported as size + emptiness. Elements
-   * are never read — for a FILE-sourced queue they are whatever arrays the
-   * loader's required-shape gate accepted — so they are typed `unknown` rather
-   * than reinterpreted (or filtered, which would make the reported size differ
-   * from the file's).
-   */
-  readonly frontier?: readonly unknown[];
-  /** Legacy only: completions deferred on the unlock queue (see above). */
-  readonly pendingCompletions?: readonly unknown[];
 }
 
 /** Everything a classification pass may add to an entry. */
@@ -625,59 +555,6 @@ interface EntryBody {
     Partial<Record<DrainAuditBlockerCode, string>>
   >;
 }
-
-/**
- * The legacy protocol's queue as the record's PERSISTED FILE carries it.
- *
- * The hydrated `EngineState` cannot answer this question: `deserializeEngineState`
- * deliberately resets `pendingCompletions` (R2(c): it describes the critical
- * section of the process that wrote the file), so reading the loaded state would
- * report an empty queue for a file that queued completions — exactly the record
- * the drain must never call a stale lock. The audit already holds the raw record
- * text and the loader has already validated it against the format's
- * required-shape gate, which REQUIRES both fields to be arrays, so this is the
- * file's own fact rather than a second interpretation of it.
- *
- * Returns `undefined` when the text carries no readable queue arrays. The
- * caller must then treat the queue as UNPROVABLE, never as empty.
- */
-function persistedLegacyQueue(raw: string): EntryQueue | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return undefined;
-  }
-  const record = parsed as {
-    readonly frontier?: unknown;
-    readonly pendingCompletions?: unknown;
-  };
-  const { frontier, pendingCompletions } = record;
-  if (!Array.isArray(frontier) || !Array.isArray(pendingCompletions)) {
-    return undefined;
-  }
-  return Object.freeze({
-    hasQueuedWork: frontier.length > 0 || pendingCompletions.length > 0,
-    frontier,
-    pendingCompletions,
-  });
-}
-
-/**
- * The queue of a valid legacy record whose raw text carried no readable queue
- * arrays. Unreachable for the shipped format-2 decoder — its required-shape gate
- * rejects a file without both arrays (`hasRequiredShape`) — but a future
- * decoder that binds the legacy protocol to another layout lands here, and the
- * audit then REFUSES to call the queue empty: "the file says queued → never
- * stale" cannot be satisfied by a queue nobody could read, so the record stays
- * `actively-executing` with no size fields invented for it.
- */
-const UNPROVABLE_LEGACY_QUEUE: EntryQueue = Object.freeze({
-  hasQueuedWork: true,
-});
 
 /** The outcome protocol's queue: armed attempts and unsettled effects. */
 function outcomeQueue(armedCount: number, effectCount: number): EntryQueue {
@@ -720,52 +597,7 @@ function stalenessFacts(
     staleAfterMs,
     staleness,
     hasQueuedWork: queue.hasQueuedWork,
-    ...(queue.frontier === undefined
-      ? {}
-      : {
-          frontierEmpty: queue.frontier.length === 0,
-          frontierSize: queue.frontier.length,
-        }),
-    ...(queue.pendingCompletions === undefined
-      ? {}
-      : {
-          pendingCompletionsEmpty: queue.pendingCompletions.length === 0,
-          pendingCompletionsSize: queue.pendingCompletions.length,
-        }),
   });
-}
-
-/**
- * Classify one VALID legacy-protocol record.
- *
- * Terminal exactly when the phase is `complete` — the sweep's own rule. Every
- * other phase is in flight, and the entry carries the work: per-status counts
- * plus the ids of nodes the engine has not settled (`completed`/`done`).
- */
-function classifyLegacy(
-  state: EngineState,
-  persistedQueue: EntryQueue | undefined,
-): EntryBody {
-  const nodeStatusCounts: Record<string, number> = {};
-  const unsettledNodeIds: string[] = [];
-  for (const node of state.nodes.values()) {
-    nodeStatusCounts[node.status] = (nodeStatusCounts[node.status] ?? 0) + 1;
-    if (!SETTLED_NODE_STATUSES.includes(node.status)) {
-      unsettledNodeIds.push(node.nodeId);
-    }
-  }
-  unsettledNodeIds.sort();
-  return {
-    graphId: state.graphId,
-    protocol: "legacy-signal",
-    classification: state.phase === EnginePhase.Complete ? "terminal" : "in-flight",
-    phase: state.phase,
-    nodeStatusCounts: Object.freeze(nodeStatusCounts),
-    unsettledNodeIds: Object.freeze(unsettledNodeIds),
-    lastUpdatedAt: state.updatedAt,
-    queue: persistedQueue ?? UNPROVABLE_LEGACY_QUEUE,
-    blockerCodes: [],
-  };
 }
 
 /**
@@ -991,15 +823,6 @@ function entryForLoadResult(
   ledgerBlocker: DrainAuditBlockerCode | undefined,
   now: number,
   staleAfterMs: number,
-  /**
-   * The legacy queue as the RAW record carries it. `undefined` for a non-legacy
-   * record — an outcome record's queue is its ledger's `armed`/`unsettledEffects`,
-   * and its carrier state is built with an empty frontier that nothing advances,
-   * so these legacy fields are not its queue — and for a legacy record whose file
-   * carried no readable queue arrays (then the queue is unprovable, never empty
-   * — see {@link UNPROVABLE_LEGACY_QUEUE}).
-   */
-  persistedQueue: EntryQueue | undefined,
 ): {
   readonly entry: DrainAuditEntry;
   readonly blockers: readonly DrainAuditBlocker[];
@@ -1044,15 +867,12 @@ function entryForLoadResult(
 
   const state = loaded.state;
   const body =
-    loaded.executionProtocol === LEGACY_SIGNAL_PROTOCOL
-      ? classifyLegacy(state, persistedQueue)
-      : loaded.executionProtocol === OUTCOME_PROTOCOL
-        ? classifyOutcome(state, ledger, ledgerBlocker)
-        : classifyUnknownProtocol(state);
-  // The queue facts are INPUTS to the inference, not part of the report: the
-  // staleness block projects them, and a legacy entry's own work fields already
-  // surface the same frontier. Dropped here rather than duplicated as a second
-  // shape that could drift.
+    loaded.executionProtocol === OUTCOME_PROTOCOL
+      ? classifyOutcome(state, ledger, ledgerBlocker)
+      : classifyUnknownProtocol(state);
+  // The queue is an INPUT to the staleness inference, not part of the report:
+  // the entry's own work fields (`armed` / `unsettledEffects`) surface it.
+  // Dropped here rather than duplicated as a second shape that could drift.
   const { lastUpdatedAt, queue, ...reportable } = body;
   const staleness =
     body.classification === "in-flight" &&
@@ -1305,18 +1125,6 @@ export async function auditGraphStore(
         );
         continue;
       }
-      // The staleness criterion's legacy queue facts come from the RAW record,
-      // never from the hydrated state: hydration deliberately resets
-      // `pendingCompletions` at the trust boundary (`deserializeEngineState`,
-      // R2(c)), so a loaded record reports an empty deferred queue even when the
-      // file queued one. The raw text the loader just validated is the authority
-      // for the REPORT and the stale-lock criterion; the reset is unchanged and
-      // recovery still does not resume from that queue.
-      const persistedQueue =
-        loaded.kind === "valid" &&
-        loaded.executionProtocol === LEGACY_SIGNAL_PROTOCOL
-          ? persistedLegacyQueue(raw)
-          : undefined;
       const audited = entryForLoadResult(
         file,
         loaded,
@@ -1324,7 +1132,6 @@ export async function auditGraphStore(
         ledgerBlocker,
         now,
         staleAfterMs,
-        persistedQueue,
       );
       entries.push(audited.entry);
       blockers.push(...audited.blockers);
@@ -1339,7 +1146,6 @@ export async function auditGraphStore(
   let terminal = 0;
   let inFlight = 0;
   let blocked = 0;
-  let legacyInFlight = 0;
   let outcomeInFlight = 0;
   let staleLocks = 0;
   let activelyExecuting = 0;
@@ -1349,7 +1155,6 @@ export async function auditGraphStore(
     if (entry.classification === "terminal") terminal += 1;
     else if (entry.classification === "in-flight") {
       inFlight += 1;
-      if (entry.protocol === "legacy-signal") legacyInFlight += 1;
       if (entry.protocol === "outcome") outcomeInFlight += 1;
       // Every in-flight entry is readable, so every one of them carries the
       // inference: the pair sums to inFlight by construction.
@@ -1382,7 +1187,6 @@ export async function auditGraphStore(
       terminal,
       inFlight,
       blocked,
-      legacyInFlight,
       outcomeInFlight,
       staleLocks,
       activelyExecuting,
