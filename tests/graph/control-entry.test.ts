@@ -22,11 +22,16 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
-import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
+import {
+  createValidatorRegistry,
+  type ValidatorImplementation,
+  type ValidatorRegistry,
+} from "../../src/graph/outcome/validators.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import {
   createGraphToolSet,
@@ -42,12 +47,53 @@ import type {
 
 const EMPTY_VALIDATORS = createValidatorRegistry([]);
 
+/** The checked-in cross-process worker every inverse-race case spawns. */
+const XPROC_WORKER = fileURLToPath(
+  new URL("./helpers/graph-store-xproc-worker.ts", import.meta.url),
+);
+
+/** The one fixed instant the inverse-race worker stamps its decision with. */
+const RACE_AT = 1_700_000_000_000;
+
+/** The gate the inverse-race declaration names on `work`'s accepted outcome. */
+const INVERSE_RACE_GATE = "gate.inverse-race";
+
 /** work -> review: an accepted outcome for `work` arms the `review` attempt. */
 const CHAIN: GraphDeclarationV3 = {
   version: 3,
   name: "control.chain",
   nodes: [
     { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "review",
+      agent: "agent.review",
+      prompt: "Review the work.",
+      outcomes: [{ id: "approve" }],
+    },
+  ],
+  edges: [{ from: "work", to: "review", outcome: "done" }],
+};
+
+/**
+ * The same chain, with `work`'s accepted outcome behind a DECLARED GATE.
+ *
+ * The gate is what opens the inverse-race window: acceptance gates run OUTSIDE
+ * the acceptance transaction, so the test's own implementation can have a REAL
+ * second process commit a trusted control command between the run path's
+ * pre-transaction check and its acceptance transaction.
+ */
+const GATED_CHAIN: GraphDeclarationV3 = {
+  version: 3,
+  name: "control.inverse-race",
+  nodes: [
+    {
+      id: "work",
+      agent: "agent.work",
+      prompt: "Do the work.",
+      outcomes: [
+        { id: "done", acceptance: [{ validator: INVERSE_RACE_GATE, version: 1 }] },
+      ],
+    },
     {
       id: "review",
       agent: "agent.review",
@@ -125,13 +171,37 @@ interface ControlFixture {
  */
 async function openControlFixture(
   declaration: GraphDeclarationV3,
-  options: { readonly confirm?: boolean; readonly declarerSession?: string | undefined } = {},
+  options: {
+    readonly confirm?: boolean;
+    readonly declarerSession?: string | undefined;
+    /**
+     * One validator capability the declaration may name as an acceptance gate.
+     * The interface is INSTALLED here (both on the host and on the toolset, as
+     * the shipped assembly does) and DECLARED to `graph_declare` as a supported
+     * validator, so the compiled plan is executable rather than a draft.
+     */
+    readonly gate?: {
+      readonly validator: string;
+      readonly version: number;
+      readonly implementation: ValidatorImplementation;
+    };
+  } = {},
 ): Promise<ControlFixture> {
   const dir = makeTmpDir("control-entry-");
   const storeRoot = join(dir, "host-store");
   // The host's vault writes under its root, so the root exists before the open.
   mkdirSync(storeRoot, { recursive: true });
   const confirm = options.confirm ?? true;
+  const validators: ValidatorRegistry =
+    options.gate === undefined
+      ? EMPTY_VALIDATORS
+      : createValidatorRegistry([
+          {
+            id: options.gate.validator,
+            version: options.gate.version,
+            implementation: options.gate.implementation,
+          },
+        ]);
   const dispatched: OutcomeDispatchRequest[] = [];
   let host: OutcomeHost | undefined;
   const opened = OutcomeHost.open({
@@ -144,7 +214,7 @@ async function openControlFixture(
         host?.confirmExecution(effect, { executionId: childSessionOf(request.attemptId) });
       }
     },
-    validators: EMPTY_VALIDATORS,
+    validators,
     declareInvocationIdentity: false,
     workerSessionOf: (execution) => execution.executionId,
   });
@@ -154,7 +224,7 @@ async function openControlFixture(
     credentialIsolation: opened.credentialIsolation,
     hostIdentity: opened.workerIdentity,
     outcomeDispatch: opened.dispatch,
-    outcomeValidators: EMPTY_VALIDATORS,
+    outcomeValidators: validators,
     outcomeArtifactRoot: dir,
   });
   const declarerSession =
@@ -172,7 +242,19 @@ async function openControlFixture(
   };
   const declared = String(
     await fixture.tools.graph_declare.execute(
-      { declaration },
+      {
+        declaration,
+        // A gated declaration is only executable when the caller declares the
+        // capability it names; an undeclared gate compiles to a DRAFT and
+        // `graph_declare` refuses it (never a runtime surprise).
+        ...(options.gate === undefined
+          ? {}
+          : {
+              supported_validators: [
+                { validator: options.gate.validator, version: options.gate.version },
+              ],
+            }),
+      },
       fixture.contextOf(declarerSession ?? "", "agent.declarer"),
     ),
   );
@@ -780,7 +862,198 @@ describe("graph_control — idempotency and races", () => {
   });
 });
 
+// ── The inverse race: a command that commits while a gate is running ────────
+
+/** What the inverse-race worker (a REAL second OS process) reported. */
+interface InverseRaceReport {
+  readonly pid: number;
+  readonly ok: boolean;
+  readonly mode: string;
+  readonly verdict?: string;
+  readonly runId?: string;
+  readonly command?: string;
+  readonly attemptId?: string;
+  readonly error?: string;
+}
+
+/**
+ * Apply ONE control command through a REAL second OS process, SYNCHRONOUSLY.
+ *
+ * WHY SYNCHRONOUS. The acceptance gate runs outside the acceptance
+ * transaction, so the only place a test can commit a command INSIDE that
+ * window is a validator — and validation is synchronous by contract.
+ * Bun.spawnSync starts a second bun process that opens the SAME store with
+ * its OWN connection and commits the command before this submission's
+ * transaction opens: exactly the interleaving the run path's pre-transaction
+ * check cannot see.
+ *
+ * The command is applied through the STORE, not through the graph_control
+ * tool: the child holds no host and no platform context, and this case is
+ * about the RACE, not the permission check (that boundary has its own cases
+ * above). The run identity is still the run path's own — the worker adopts
+ * the id the store already holds.
+ */
+function applyControlFromAnotherProcess(options: {
+  readonly storeRoot: string;
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly reason: string;
+}): InverseRaceReport {
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      XPROC_WORKER,
+      "--mode",
+      "apply-control",
+      "--root",
+      options.storeRoot,
+      "--graph",
+      options.graphId,
+      "--node",
+      options.nodeId,
+      "--attempt",
+      options.attemptId,
+      "--command",
+      "failure",
+      "--reason",
+      options.reason,
+      "--at",
+      String(RACE_AT),
+      "--session",
+      "session.declarer",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const stdout = new TextDecoder().decode(result.stdout);
+  const stderr = new TextDecoder().decode(result.stderr);
+  const line = stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith("{"))
+    .pop();
+  if (line === undefined) {
+    throw new Error(
+      "fixture: the inverse-race worker printed no JSON result (exit " +
+        String(result.exitCode) +
+        ", stderr: " +
+        stderr.trim() +
+        ")",
+    );
+  }
+  return JSON.parse(line) as InverseRaceReport;
+}
+
+describe("graph_control — a trusted command that commits while a submission's gate runs", () => {
+  it("refuses the in-flight submission with control-stopped, writes no success and arms no successor", async () => {
+    // The gate needs the fixture's store root, and the fixture needs the gate to
+    // build its host: the holder is filled as soon as the fixture exists, and the
+    // implementation runs only when a submission is validated.
+    const race: { fixture?: ControlFixture; child?: InverseRaceReport } = {};
+    const fixture = await openControlFixture(GATED_CHAIN, {
+      gate: {
+        validator: INVERSE_RACE_GATE,
+        version: 1,
+        implementation: (request) => {
+          const opened = race.fixture;
+          if (opened === undefined) {
+            throw new Error("fixture: the inverse-race fixture was not bound before the gate ran");
+          }
+          const child = applyControlFromAnotherProcess({
+            storeRoot: opened.storeRoot,
+            graphId: request.identity.graphId,
+            nodeId: "work",
+            attemptId: request.identity.attemptId,
+            reason: "the worker process died while the gate was running",
+          });
+          race.child = child;
+          if (child.verdict !== "recorded") {
+            throw new Error(
+              "fixture: the second process did not record the command: " + JSON.stringify(child),
+            );
+          }
+          return { kind: "pass" };
+        },
+      },
+    });
+    race.fixture = fixture;
+    try {
+      const dispatchesBefore = fixture.dispatched.length;
+      const raw = String(
+        await fixture.tools.graph_submit_outcome.execute(
+          {
+            graph_id: fixture.graphId,
+            node_id: "work",
+            outcome_id: "done",
+            credential: credentialOf(fixture, "work"),
+          },
+          fixture.contextOf(childSessionOf("work#1"), "agent.work"),
+        ),
+      );
+      const refused = JSON.parse(raw) as {
+        readonly refusals?: readonly { readonly code: string; readonly message: string }[];
+      };
+      // THE INVERSE RACE. The control fact committed while the gate ran — AFTER
+      // the run path's pre-transaction check and BEFORE its acceptance
+      // transaction — and the answer is the SAME named refusal a command that
+      // commits before the gate produces. Without the in-transaction re-read,
+      // this submission would commit a business success on a stopped run.
+      expect(refused.refusals?.[0]?.code).toBe("control-stopped");
+      expect(refused.refusals?.[0]?.message).toContain("failure");
+      expect(race.child?.verdict).toBe("recorded");
+      expect(race.child?.command).toBe("failure");
+
+      const rows = readControlRows(fixture);
+      // NO BUSINESS SUCCESS: no accepted event, no receipt, and the control fact
+      // is the durable record of why.
+      expect(rows.events).toEqual([]);
+      expect(rows.receipts).toBe(0);
+      expect(rows.control?.command).toBe("failure");
+      expect(rows.control?.reason).toBe("the worker process died while the gate was running");
+      expect(rows.decisions.map((entry) => entry.attemptId)).toEqual(["work#1"]);
+      // The second process recorded the decision against THE RUN the run path
+      // minted: it adopted the stored identity instead of minting a second one.
+      expect(race.child?.runId).toBe(rows.run?.runId);
+      expect(rows.run?.runId).not.toBe("");
+
+      // THE ATTEMPT IS UNTOUCHED and THE PENDING SUCCESSOR IS NOT MIS-STARTED:
+      // the rollback left the state exactly as the dispatch wrote it.
+      const state = readState(fixture);
+      expect(nodeEntry(state, "work")).toMatchObject({
+        status: "dispatched",
+        attemptId: "work#1",
+      });
+      expect(nodeEntry(state, "review")).toMatchObject({ status: "pending" });
+      expect(fixture.dispatched).toHaveLength(dispatchesBefore);
+
+      // THE ROLLBACK LEFT NO TRACE OF THE SUCCESSOR. The join runs the reducer —
+      // which mints the successor attempt's credential record inside the SAME
+      // transaction — before the batch is written, so a rule that merely declined
+      // to write the batch would still commit that minted record. The refusal
+      // THROWS instead, so the only credential record the store holds is the one
+      // the START transaction wrote for the attempt already in flight.
+      const credentials = GraphStore.openFile(fixture.storeRoot);
+      try {
+        expect(
+          credentials
+            .all(
+              "SELECT attempt_id FROM host_attempt_credentials WHERE graph_id = ? ORDER BY attempt_id",
+              fixture.graphId,
+            )
+            .map((row) => row["attempt_id"]),
+        ).toEqual(["work#1"]);
+      } finally {
+        credentials.close();
+      }
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
 // ── Unconfirmed external work ───────────────────────────────────────────────
+
+
 
 describe("graph_control — an unconfirmed external task stays visible", () => {
   it("reports the execution the host never confirmed, across a boot sweep too", async () => {

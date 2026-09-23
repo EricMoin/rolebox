@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
+import type { GraphAcceptanceBatch } from "../../src/graph/store/records.ts";
 import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";
 import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
 import type {
@@ -286,7 +287,100 @@ describe("graph store — the DDL refuses what the record model refuses", () => 
   });
 });
 
-describe("graph store — control facts survive a restart", () => {
+// ── Control and acceptance never both commit (P3 item 1) ────────────────────
+
+/** One acceptance batch for an attempt of GRAPH, as the acceptance core writes it. */
+function acceptanceBatch(attemptId: string): GraphAcceptanceBatch {
+  const submissionId = "submission:" + attemptId;
+  return {
+    receipt: {
+      graphId: GRAPH,
+      attemptId,
+      submissionId,
+      planRevision: "plan.control-store",
+      proposalDigest: "digest:" + attemptId,
+      decision: "accepted",
+      committedAt: 1_700_000_000_000,
+    },
+    acceptedEvent: {
+      graphId: GRAPH,
+      attemptId,
+      submissionId,
+      planRevision: "plan.control-store",
+      outcomeId: "done",
+      acceptedAt: 1_700_000_000_000,
+    },
+  };
+}
+
+describe("graph store — control and acceptance never both commit for one attempt", () => {
+  it("refuses an acceptance whose run is already controlled, and writes NOTHING", () => {
+    const dir = makeDir();
+    const store = GraphStore.openFile(dir);
+    try {
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      const recorded = store.runs.writeControlDecision({
+        decision: decision(),
+        runControl: runControl(),
+      });
+      expect(recorded.kind).toBe("recorded");
+
+      // The run is controlled, so the acceptance is refused BY THE STORE — the
+      // check runs inside the committing transaction — and nothing is written:
+      // no receipt, no accepted event, no effect. This is the structural half of
+      // the rule the run path applies by name (`control-stopped`).
+      const refused = store.commitAccepted(acceptanceBatch("work#1"));
+      expect(refused.kind).toBe("controlled");
+      if (refused.kind !== "controlled") throw new Error("fixture: expected controlled");
+      expect(refused.control).toMatchObject({
+        graphId: GRAPH,
+        runId: RUN,
+        command: "failure",
+        reason: "the execution ended without its outcome",
+      });
+      expect(refused.reason).toContain("controlled run");
+      expect(
+        store.lookupReceipt({
+          graphId: GRAPH,
+          attemptId: "work#1",
+          submissionId: "submission:work#1",
+        }),
+      ).toBeUndefined();
+      expect(store.acceptedEvents(GRAPH)).toEqual([]);
+      expect(store.pendingEffects(GRAPH)).toEqual([]);
+      // The control fact stands, unopposed.
+      expect(store.runs.controlDecisions(GRAPH)).toHaveLength(1);
+      expect(store.runs.readRunControl(GRAPH)?.command).toBe("failure");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("refuses a control decision for an attempt that already settled, and writes nothing", () => {
+    const dir = makeDir();
+    const store = GraphStore.openFile(dir);
+    try {
+      store.runs.mintRun({ graphId: GRAPH, runId: RUN, startedAt: 9 });
+      expect(store.commitAccepted(acceptanceBatch("work#1")).kind).toBe("committed");
+
+      // The inverse direction: the acceptance committed FIRST, so the attempt
+      // carries an accepted event and a control command must not re-label it.
+      const refused = store.runs.writeControlDecision({
+        decision: decision(),
+        runControl: runControl(),
+      });
+      expect(refused.kind).toBe("settled");
+      expect(store.runs.readControlDecision(GRAPH, RUN, "work", "work#1")).toBeUndefined();
+      expect(store.runs.readRunControl(GRAPH)).toBeUndefined();
+      expect(store.runs.controlDecisions(GRAPH)).toEqual([]);
+      expect(store.acceptedEvents(GRAPH).map((event) => event.attemptId)).toEqual(["work#1"]);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe("graph store — control facts are read back by a reopened store", () => {
   it("reads the same run, decision and run-control fact from a second connection", () => {
     const dir = makeDir();
     const first = GraphStore.openFile(dir);

@@ -174,10 +174,13 @@ export interface GraphSubmitOutcomeResult {
   /**
    * The ledger's verdict. `replayed` means this exact submission was already
    * committed and the PERSISTED receipt was returned; `committed` means this
-   * call's decision is the one that landed.
+   * call's decision is the one that landed; `controlled` means a trusted
+   * control command had stopped the run and nothing was written (P3 item 1 —
+   * the run path answers that fact as the named `control-stopped` refusal, so
+   * this verdict is only ever rendered when a refusal was not the answer).
    */
-  readonly verdict?: "committed" | "replayed" | "conflict" | "settled";
-  /** Why a conflict or settlement was refused, verbatim from the ledger. */
+  readonly verdict?: "committed" | "replayed" | "conflict" | "settled" | "controlled";
+  /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
   /** Every required gate's outcome, for an accepted or rejected decision. */
   readonly requirements?: readonly SubmitRequirementOutcome[];
@@ -821,10 +824,13 @@ function renderResult(
   };
   const requirements = requirementOutcomes(decision.requirements);
   if (result.kind === "not-committed") {
-    // A not-committed verdict is a `conflict` or a `settled` (the runtime
-    // narrows it), and both carry the ledger's own reason verbatim.
+    // A not-committed verdict is a `conflict`, a `settled` or a `controlled`
+    // (the runtime narrows it), and each carries the ledger's own reason
+    // verbatim.
     const reason =
-      result.verdict.kind === "conflict" || result.verdict.kind === "settled"
+      result.verdict.kind === "conflict" ||
+      result.verdict.kind === "settled" ||
+      result.verdict.kind === "controlled"
         ? result.verdict.reason
         : undefined;
     return {

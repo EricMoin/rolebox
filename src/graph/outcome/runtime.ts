@@ -910,6 +910,36 @@ interface JoinedReduction {
   readonly advance?: OutcomeAdvance;
 }
 
+/**
+ * The run was STOPPED BY A TRUSTED CONTROL COMMAND while this submission was
+ * between its two control checks (P3 item 1).
+ *
+ * WHY A THROW AND NOT A VERDICT. It is raised from INSIDE the acceptance
+ * transaction, so it rolls the whole transaction back — the acceptance, the
+ * graph state the join reduced and every host record the reducer's credential
+ * mint wrote in the same boundary — leaving nothing that could be read as a
+ * settlement of a controlled run. The caller catches it below and answers with
+ * the SAME named refusal the pre-transaction check produces
+ * ({@link OutcomeGraphRuntime.controlStopRefusal}: `control-stopped`), so a
+ * command that commits before the gates and one that commits during them are
+ * indistinguishable to the caller.
+ */
+class ControlStoppedError extends Error {
+  readonly control: RunControlRecord;
+
+  constructor(control: RunControlRecord) {
+    super(
+      "outcome-runtime: graph " +
+        JSON.stringify(control.graphId) +
+        " was stopped by the trusted control command " +
+        JSON.stringify(control.command) +
+        " while this settlement was in flight",
+    );
+    this.name = "ControlStoppedError";
+    this.control = control;
+  }
+}
+
 // ── The runtime ─────────────────────────────────────────────────────────────
 
 /** Inputs to {@link OutcomeGraphRuntime}. */
@@ -1496,6 +1526,13 @@ export class OutcomeGraphRuntime {
     // BEFORE the state is read and before anything is written, so a late
     // settlement cannot resurrect an attempt control already ended, and the
     // refusal names the command, its reason and who decided it.
+    //
+    // IT IS NOT THE ONLY CHECK. The declared gates, the payload read and the
+    // progress projection below all run OUTSIDE the acceptance transaction, so
+    // a command that commits in that window would be followed by a business
+    // success unless the SAME fact is re-read inside the transaction. It is:
+    // see the join below, which refuses with the identical `control-stopped`
+    // refusal and rolls the whole transaction back.
     const control = this.runControl();
     if (control !== undefined) return refused([this.controlStopRefusal(control)]);
 
@@ -1565,6 +1602,23 @@ export class OutcomeGraphRuntime {
 
     let planned: OutcomeAdvance | undefined;
     const join: AcceptanceJoin = (tx, decision) => {
+      // THE INVERSE RACE IS CLOSED HERE (P3 item 1, plan §3.4). The check above
+      // ran before validation, and validation — the declared gates, the
+      // artifact reads, a human approval — happens OUTSIDE this transaction, so
+      // a `failure`, `timeout` or `cancel` that commits during that window
+      // would otherwise be followed by an accepted event, a receipt, a state
+      // advance and the successor's dispatch effect: a business success forged
+      // on top of a run a trusted command stopped. Re-reading the run's control
+      // fact HERE — on the transaction's own view, through the same ledger port
+      // — refuses it before `tx.commitAccepted` and before any successor can be
+      // launched. The throw rolls the transaction back, so acceptance and
+      // control can never both commit, and the caller is answered with the
+      // named `control-stopped` refusal. This is the same rule the store
+      // enforces structurally for every caller (`commitAccepted` answers
+      // `controlled`); the join applies it where the run path can still name
+      // the refusal and undo the reducer's own writes.
+      const stopped = tx.runs?.readRunControl(this.graphId);
+      if (stopped !== undefined) throw new ControlStoppedError(stopped);
       const joined = this.reduceInTransaction(
         tx,
         decision,
@@ -1584,6 +1638,9 @@ export class OutcomeGraphRuntime {
       // the structured refusal it is. A storage failure is NOT swallowed: the
       // transaction has already rolled back, and the caller must see that the
       // state could not be stored rather than a benign-looking refusal.
+      if (error instanceof ControlStoppedError) {
+        return refused([this.controlStopRefusal(error.control)]);
+      }
       if (error instanceof OutcomeAdvanceRefusedError) {
         return refused([{ code: error.code, message: error.message }]);
       }
@@ -1600,6 +1657,15 @@ export class OutcomeGraphRuntime {
       };
     }
     const { decision: evaluated, verdict } = result;
+    // The STORE refused the batch because the run is controlled (see
+    // `LedgerTables.commitAccepted`). Reachable from here for a REJECTED
+    // decision — the join above runs only for an accepted one — and for any
+    // substrate that enforces the rule at the acceptance write itself. It is
+    // answered exactly like the two checks that read the same fact first:
+    // `control-stopped`, never a settlement.
+    if (verdict.kind === "controlled") {
+      return refused([this.controlStopRefusal(verdict.control)]);
+    }
     if (verdict.kind === "conflict" || verdict.kind === "settled") {
       return { kind: "not-committed", decision: evaluated, verdict };
     }

@@ -64,6 +64,16 @@
  *     pre-P2 pin, which asserted a NON-claimant SUCCEEDING at binding the
  *     execution id (G1).
  *
+ *   --mode apply-control
+ *     --graph --node --attempt --command --reason --at [--run <candidate>]
+ *     [--session <id>]
+ *     Applies ONE control command to an EXISTING run from this process: adopts
+ *     the run identity the store already holds (`mintRun` is idempotent) and
+ *     records the decision plus the run's control fact in one transaction.
+ *     Used with `Bun.spawnSync` from inside a declared acceptance gate, so the
+ *     parent's submission is between its pre-transaction control check and its
+ *     acceptance transaction when the command commits.
+ *
  *   --mode hold-write-lock
  *     --graph --now --lease-ms --marker-dir --hold-ms
  *     Holds the store's WRITE LOCK for `--hold-ms` inside ONE transaction, and
@@ -618,6 +628,66 @@ async function controlRace(store: GraphStore): Promise<void> {
 }
 
 /**
+ * Apply ONE trusted control command to an EXISTING run, from THIS process.
+ *
+ * WHY THIS MODE EXISTS (P3 item 1, the inverse race). A submission's declared
+ * acceptance gate is evaluated OUTSIDE the acceptance transaction, so a control
+ * command that commits in that window is invisible to the run path's
+ * pre-transaction check. The parent's gate spawns this worker SYNCHRONOUSLY
+ * (`Bun.spawnSync`), so a REAL second OS process with its OWN connection
+ * commits the command while the parent's submission has not opened its
+ * transaction yet.
+ *
+ * THE RUN IDENTITY IS THE RUN PATH'S OWN. `mintRun` is idempotent: it answers
+ * the identity the store already holds, so this process ADOPTS the run id
+ * instead of minting a second one — `--run` is only a candidate for a graph
+ * that has none.
+ */
+function applyControl(store: GraphStore): void {
+  const graphId = required("graph");
+  const nodeId = required("node");
+  const attemptId = required("attempt");
+  const command = controlCommandArg("command");
+  const reason = required("reason");
+  const at = numberArg("at");
+  const sessionId = arg("session") ?? "session.declarer";
+  const run = store.runs.mintRun({
+    graphId,
+    runId: arg("run") ?? graphId + "@apply-control",
+    startedAt: at,
+  });
+  const verdict = store.runs.writeControlDecision({
+    decision: {
+      graphId,
+      runId: run.runId,
+      nodeId,
+      attemptId,
+      command,
+      reason,
+      decidedAt: at,
+      decidedBy: { sessionId },
+    },
+    runControl: {
+      graphId,
+      runId: run.runId,
+      command,
+      reason,
+      decidedAt: at,
+      decidedBy: { sessionId },
+    },
+  });
+  emit({
+    ok: true,
+    mode: "apply-control",
+    verdict: verdict.kind,
+    runId: run.runId,
+    command,
+    nodeId,
+    attemptId,
+  });
+}
+
+/**
  * Hold the store's WRITE LOCK for `--hold-ms` and say so from INSIDE the
  * transaction.
  *
@@ -663,6 +733,7 @@ function holdWriteLock(store: GraphStore): void {
 // ── Entry ───────────────────────────────────────────────────────────────────
 
 const MODES = [
+  "apply-control",
   "claim-race",
   "confirm-shape",
   "confirm-stale",
@@ -690,6 +761,9 @@ async function main(): Promise<void> {
   const store = GraphStore.openFile(root);
   try {
     switch (mode) {
+      case "apply-control":
+        applyControl(store);
+        return;
       case "claim-race":
         await claimRace(store);
         return;

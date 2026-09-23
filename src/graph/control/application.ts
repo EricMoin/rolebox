@@ -37,10 +37,14 @@
  *   plus the feeder's current attempt, and a control decision is neither.
  * - CANCEL: the run is stopped (the same run fact) and every attempt still in
  *   flight is named by its own cancel decision — the durable cancel INTENT.
- *   The external executions themselves are NOT cancelled here: the platform
- *   cancel surface is a later work package's obligation, and pretending to have
- *   issued it would be the "declare convergence" the plan forbids. Every
- *   unconfirmed execution the store holds is REPORTED in the result instead.
+ *   The external executions themselves are NOT cancelled HERE: this module
+ *   writes control records and nothing else. The intent is handed to the
+ *   platform by the host's cancel delivery (`src/graph/outcome/cancel.ts`,
+ *   driven by `OutcomeHost.deliverCancelIntents` and the boot sweep), which is
+ *   why the intent must be durable BEFORE any platform call; pretending here to
+ *   have issued a cancel would be the "declare convergence" the plan forbids.
+ *   Every unconfirmed execution the store holds is REPORTED in the result — the
+ *   answer never reads as "nothing is running anywhere".
  * - RETRY / BUDGET-STOP: refused by name (`command-unimplemented`) until their
  *   own work packages exist. The vocabulary is durable; the semantics are not
  *   invented here.
@@ -69,13 +73,18 @@
  *    still recorded PER ATTEMPT (a sibling's failure, a cancel issued after a
  *    failure) because they are facts worth keeping — but the run keeps its
  *    first stop, and the answer always reports the fact that actually stands.
- * 3. AGAINST ACCEPTANCE. This service reads the attempt's accepted events and
- *    writes its decision in ONE store transaction, so an attempt that settled
- *    is refused (`attempt-already-settled`) and an attempt this service stops
- *    can no longer be settled: the run path refuses every settlement of a
- *    controlled run by name (`control-stopped`). Whichever transaction commits
- *    first wins; neither can leave an accepted event and a competing control
- *    fact for the same attempt.
+ * 3. AGAINST ACCEPTANCE, IN BOTH DIRECTIONS. This service reads the attempt's
+ *    accepted events and writes its decision in ONE store transaction, so an
+ *    attempt that settled is refused (`attempt-already-settled`). The inverse
+ *    rule is enforced on the acceptance side and does NOT rest on a value read
+ *    before it: `commitAccepted` refuses a batch whose run already carries a
+ *    control fact (verdict `controlled`, nothing written), and the run path
+ *    refuses the same fact by name (`control-stopped`) both before it validates
+ *    a submission and again INSIDE its acceptance transaction — so a command
+ *    that commits while a submission is between those two checks still wins.
+ *    Whichever COMMITS first is therefore the fact that stands and the loser
+ *    writes NOTHING: one attempt can never carry both an accepted event and a
+ *    control decision.
  *
  * NEVER HIDE AN UNCONFIRMED EXTERNAL TASK. Every answer carries the run's
  * unsettled effects and every execution row of those attempts the host has NOT

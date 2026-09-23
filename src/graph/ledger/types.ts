@@ -446,12 +446,27 @@ export interface AcceptanceBatch {
  * - `settled` — the attempt already has an accepted event and this is a
  *   distinct terminal submission: nothing is written and the accepted result
  *   is never overwritten. `reason` names the settlement.
+ * - `controlled` — the RUN has a trusted control fact (P3 item 1) and this
+ *   batch belongs to it: nothing is written. CONTROL IS NOT OUTCOME (§3.4), so
+ *   a controlled run commits no acceptance at all — no receipt, no accepted
+ *   event, no state advance and no successor effect — and the fact that stopped
+ *   the run is returned instead. It is the STRUCTURAL half of the rule the run
+ *   path applies by name (`control-stopped`) before it settles; the check is
+ *   evaluated inside the committing transaction against the COMMITTED store, so
+ *   whichever of control and acceptance COMMITS first is the fact that stands
+ *   and the loser writes nothing.
  */
 export type CommitResult =
   | { readonly kind: "committed"; readonly receipt: ReceiptRecord }
   | { readonly kind: "replayed"; readonly receipt: ReceiptRecord }
   | { readonly kind: "conflict"; readonly reason: string }
-  | { readonly kind: "settled"; readonly reason: string };
+  | { readonly kind: "settled"; readonly reason: string }
+  | {
+      readonly kind: "controlled";
+      /** The run-level control fact that refused this acceptance. */
+      readonly control: RunControlRecord;
+      readonly reason: string;
+    };
 
 /**
  * The verdict of one effect status transition.

@@ -288,8 +288,14 @@ export class GraphStore {
     this.connectionKey = connectionKey;
     this.db = connection.db;
     this.filePath = filePath;
-    this.ledger = new LedgerTables(connection.db, filePath, (work) =>
-      this.joinOrBegin(work),
+    this.ledger = new LedgerTables(
+      connection.db,
+      filePath,
+      (work) => this.joinOrBegin(work),
+      // The run-control fact is read through THIS store: the acceptance rule
+      // (a controlled run accepts nothing) is evaluated on the same connection
+      // and inside the same transaction as the batch it refuses.
+      (graphId) => this.readRunControl(graphId),
     );
     // THE RUN/CONTROL SURFACE IS ONE OBJECT, bound to this store. It is built
     // before the transaction view because that view hands the SAME object out
@@ -1741,8 +1747,12 @@ export class GraphStore {
    *   acceptance core is reported `settled` and NOTHING is written — decided
    *   against the committed store at the moment of the write, not against a
    *   value read earlier in the transaction. That is what makes a control
-   *   command race an acceptance deterministically: whichever COMMITS first is
-   *   the fact that stands, and the loser writes nothing.
+   *   command race an acceptance deterministically, and the acceptance side
+   *   carries the SYMMETRIC rule: `commitAccepted` refuses a batch whose run
+   *   already has a control fact (verdict `controlled`, nothing written), and
+   *   the run path refuses the same fact by name before it settles. Whichever
+   *   COMMITS first is the fact that stands, the loser writes nothing, and one
+   *   attempt can never carry both an accepted event and a control decision.
    * - THE RUN: the control fact is claimed by `WHERE control_command IS NULL`.
    *   A second command — an identical repeat after an unrelated decision, or a
    *   different command for another attempt — never replaces the first; the

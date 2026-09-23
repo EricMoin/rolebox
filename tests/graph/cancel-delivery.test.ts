@@ -745,15 +745,19 @@ describe("graph_control cancel — deterministic races", () => {
 
 // ── A crash mid-cancel, and the worker boundary ─────────────────────────────
 
-describe("graph_control cancel — a crash mid-cancel and the worker boundary", () => {
-  it("resumes with the intent visible after a process dies mid-cancel, and delivers it on the next boot", async () => {
+describe("graph_control cancel — the window before delivery, and the worker boundary", () => {
+  it("resumes with the intent visible after the recording host instance ends before delivery, and delivers it on the next boot", async () => {
     const dir = makeTmpDir("cancel-restart-");
     const storeRoot = join(dir, "host-store");
     mkdirSync(storeRoot, { recursive: true });
     const contextOf = (sessionID: string, agent: string) => makeContext(sessionID, agent, dir);
 
     // INSTANCE A: no cancel port and no delivery wiring — the window between the
-    // durable decision and the platform call, where the process dies.
+    // durable decision and the platform call, at the point a process would die.
+    // The crash is NOT driven here: this case closes one host instance and opens
+    // another over the same store root IN ONE PROCESS (the file header says so).
+    // What it pins is the ORDER — the intent is durable before any platform call
+    // and the next boot delivers it — not a process boundary.
     const firstDispatches: OutcomeDispatchRequest[] = [];
     const a = await openHost({ dir, storeRoot, dispatches: firstDispatches, deliverOnControl: false });
     try {
@@ -803,8 +807,8 @@ describe("graph_control cancel — a crash mid-cancel and the worker boundary", 
     try {
       const report = await b.host.recoverDeclaredGraphs();
       expect(report.controlled).toEqual([CHAIN.name + ":cancel"]);
-      // The intent the dead process left behind is DELIVERED, and the report says
-      // which fact the delivery established.
+      // The intent the previous host instance left behind is DELIVERED, and the
+      // report says which fact the delivery established.
       expect(report.cancellations).toEqual([
         expect.objectContaining({ attemptId: "work#1", state: "confirmed" }),
       ]);

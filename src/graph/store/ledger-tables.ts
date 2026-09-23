@@ -12,6 +12,13 @@
  * conditional effect transitions — the module seam moved so a host binding can
  * be written in the SAME transaction as the acceptance that authorizes it.
  *
+ * CONTROL IS NOT OUTCOME, AND BOTH DIRECTIONS ARE STRUCTURAL (P3 item 1). The
+ * control write is conditional on the attempt having no accepted event; this
+ * side's acceptance is conditional on the RUN having no control fact. Both are
+ * evaluated against the COMMITTED store inside the committing transaction, so
+ * whichever COMMITS first is the fact that stands and the loser writes nothing —
+ * one attempt can never carry both an accepted event and a control decision.
+ *
  * ATOMICITY IS STILL THE POINT. `commitAccepted` evaluates the rules and then
  * writes the receipt, the accepted event, the accepted result and every pending
  * effect inside ONE transaction that COMMITS before the verdict is returned. A
@@ -38,6 +45,7 @@ import {
   type GraphStateRecord,
   type PendingEffectRecord,
   type ReceiptRecord,
+  type RunControlRecord,
   type SubmissionKey,
 } from "../ledger/types.ts";
 import { GraphStoreWriteError } from "./errors.ts";
@@ -488,15 +496,24 @@ export class LedgerTables {
   private readonly db: DatabaseDriver;
   private readonly filePath: string;
   private readonly join: <R>(work: () => R) => R;
+  /**
+   * The graph's RUN-LEVEL control fact, read through the store that owns the
+   * run tables. Injected rather than re-queried here so the SQL of
+   * `graph_runs` keeps ONE owner and this class only asks the question it
+   * needs answered inside the acceptance transaction (P3 item 1).
+   */
+  private readonly readRunControl: (graphId: string) => RunControlRecord | undefined;
 
   constructor(
     db: DatabaseDriver,
     filePath: string,
     join: <R>(work: () => R) => R,
+    readRunControl: (graphId: string) => RunControlRecord | undefined,
   ) {
     this.db = db;
     this.filePath = filePath;
     this.join = join;
+    this.readRunControl = readRunControl;
   }
 
   // ── Commit ────────────────────────────────────────────────────────────────
@@ -505,10 +522,10 @@ export class LedgerTables {
    * Commit one acceptance batch atomically.
    *
    * The protocol rules are evaluated in this order — replay, conflict,
-   * settled — and only a batch that clears all three reaches the write. The
-   * write itself runs inside ONE transaction and the verdict is returned only
-   * after that transaction committed; a refusal inside it propagates as a
-   * {@link GraphStoreWriteError} with nothing persisted.
+   * settled, controlled — and only a batch that clears all four reaches the
+   * write. The write itself runs inside ONE transaction and the verdict is
+   * returned only after that transaction committed; a refusal inside it
+   * propagates as a {@link GraphStoreWriteError} with nothing persisted.
    */
   commitAccepted(batch: GraphAcceptanceBatch): CommitResult {
     assertBatchShape(batch);
@@ -538,6 +555,29 @@ export class LedgerTables {
         reason:
           `attempt ${receipt.attemptId} of graph ${receipt.graphId} already settled on submission ${settlement.submissionId} ` +
           `with outcome ${settlement.outcomeId} — a distinct terminal submission is refused and nothing was written`,
+      };
+    }
+
+    // CONTROL IS NOT OUTCOME (P3 item 1, plan §3.4). An acceptance for a run a
+    // trusted command STOPPED commits nothing: the check runs on this
+    // connection, inside the caller's transaction, so it reads the control fact
+    // as it is at COMMIT time — a submission whose gates were evaluated before
+    // the command landed cannot write a receipt, an accepted event, a state
+    // advance or a successor effect. The rule is READ-BEFORE-WRITE on purpose:
+    // nothing is written, so there is no partial batch to un-write, and it is
+    // the structural twin of the control write's conditional
+    // `INSERT ... WHERE NOT EXISTS (accepted event)`. The run path refuses the
+    // same fact by name (`control-stopped`) before it reaches this point, so
+    // the two boundaries can never disagree about what was written.
+    const control = this.readRunControl(receipt.graphId);
+    if (control !== undefined) {
+      return {
+        kind: "controlled",
+        control,
+        reason:
+          `run ${control.runId} of graph ${control.graphId} was stopped by the trusted control command ` +
+          `${control.command} (${control.reason}) before this submission committed — a controlled run ` +
+          "accepts nothing, so no receipt, accepted event, state advance or successor effect was written",
       };
     }
 

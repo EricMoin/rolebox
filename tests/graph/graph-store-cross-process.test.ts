@@ -1104,10 +1104,10 @@ describe("trusted control across two real processes", () => {
     expect(fx.store.runs.readRunControl(GRAPH)?.command).toBe(winners[0]);
   });
 
-  it("never records a control decision over an acceptance that committed first", async () => {
+  it("never lets one attempt carry both an accepted event and a control decision", async () => {
     const fx = makeFixture("graph-xproc-control-accept-");
     const rounds = 4;
-    const verdicts: string[] = [];
+    const answers: string[] = [];
     for (let round = 0; round < rounds; round++) {
       const attemptId = `review#${round + 1}`;
       const racers = [
@@ -1127,34 +1127,43 @@ describe("trusted control across two real processes", () => {
       const reports = await raceControlRound(fx, round, racers);
       const acceptance = reports.find((report) => report.role === "acceptance");
       const control = reports.find((report) => report.role === "control");
-      expect(acceptance?.verdict).toBe("committed");
-      verdicts.push(control?.verdict ?? "");
 
+      // THE INVARIANT, read back from the COMMITTED store rather than assumed:
+      // exactly ONE of the two terminal facts exists for this attempt. The
+      // control write refuses an attempt that already settled (`settled`,
+      // nothing written) and the ACCEPTANCE refuses a run that already carries
+      // a control fact (`controlled`, nothing written), so the double fact
+      // this case used to accept is unrepresentable at any interleaving.
+      const settled = fx.store
+        .acceptedEvents(GRAPH)
+        .some((event) => event.attemptId === attemptId);
       const decision = fx.store.runs.readControlDecision(
         GRAPH,
         CONTROL_RUN,
         attemptId.split("#")[0] ?? attemptId,
         attemptId,
       );
-      const settled = fx.store
-        .acceptedEvents(GRAPH)
-        .some((event) => event.attemptId === attemptId);
-      // THE DETERMINISTIC RULE, read back from the store rather than assumed: a
-      // control decision exists EXACTLY when the control write won the race; a
-      // `settled` verdict means the acceptance committed first and the control
-      // write landed NOTHING.
-      expect(settled).toBe(true);
-      if (control?.verdict === "settled") {
-        expect(decision).toBeUndefined();
+      expect([settled, decision !== undefined].filter(Boolean)).toHaveLength(1);
+      if (settled) {
+        expect(acceptance?.verdict).toBe("committed");
+        expect(control?.verdict).toBe("settled");
       } else {
+        expect(acceptance?.verdict).toBe("controlled");
         expect(control?.verdict).toBe("recorded");
         expect(decision?.command).toBe("failure");
       }
+      answers.push(`${acceptance?.verdict}/${control?.verdict}`);
     }
-    // Every round answered one of the two deterministic outcomes.
-    for (const verdict of verdicts) {
-      expect(["recorded", "settled"]).toContain(verdict);
+    // Every round answered one of the two deterministic pairs — whichever
+    // process committed first — and the store holds exactly ONE fact per
+    // raced attempt.
+    for (const answer of answers) {
+      expect(["committed/settled", "controlled/recorded"]).toContain(answer);
     }
+    expect(
+      fx.store.acceptedEvents(GRAPH).length +
+        fx.store.runs.controlDecisions(GRAPH).length,
+    ).toBe(rounds);
   });
 });
 
