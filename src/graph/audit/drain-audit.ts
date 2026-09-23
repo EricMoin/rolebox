@@ -97,6 +97,17 @@
  * INFERENCE with a stated basis, never a write: a stale lock is reported, never
  * resolved, and the verdict rules above are unchanged.
  *
+ * THE QUEUE FACTS ARE FILE FACTS. A legacy entry's frontier and deferred
+ * completions are read from the record's PERSISTED FILE — the raw text the
+ * loader just validated — never from the hydrated state, which deliberately
+ * resets `pendingCompletions` at the trust boundary
+ * (`deserializeEngineState`, R2(c)) and therefore cannot answer whether the
+ * process that wrote the file still had completions deferred. That reset is
+ * UNCHANGED and is not this audit's to change: recovery still refuses to resume
+ * from a persisted deferred queue (the completions describe a critical section
+ * no live process holds). The file is the authority for the REPORT and for the
+ * stale-lock criterion only.
+ *
  * The creation side is owned elsewhere and named here because the two together
  * decide the gate: `src/graph/tools/legacy-creation-gate.ts` refuses a NEW
  * durable protocol-1 record at the tool ingress unless the host declares
@@ -273,10 +284,12 @@ export const STALE_LOCK_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
  * re-dispatches nothing and deletes nothing. It answers one question and only
  * that one — "is any live process plausibly advancing this record?":
  *
- * - `stale-lock` — nothing is queued (no frontier, no deferred completion; for
- *   an outcome record, no armed attempt and no unsettled effect) AND the last
- *   state update is at least {@link STALE_LOCK_IDLE_THRESHOLD_MS} old. No live
- *   run is advancing it.
+ * - `stale-lock` — nothing is queued (for a legacy record, no frontier and no
+ *   deferred completion IN THE PERSISTED FILE — see
+ *   {@link DrainAuditStalenessFacts.pendingCompletionsEmpty}; for an outcome
+ *   record, no armed attempt and no unsettled effect) AND the last state update
+ *   is at least {@link STALE_LOCK_IDLE_THRESHOLD_MS} old. No live run is
+ *   advancing it.
  * - `actively-executing` — something is queued OR the last update is inside
  *   the threshold. The audit REFUSES to call this dead; that is not the same as
  *   observing a live process, and the facts that decided it stay on the entry.
@@ -291,8 +304,10 @@ export type DrainAuditStaleness = "stale-lock" | "actively-executing";
  * (it takes no further step, so there is no lock to judge) and never on a
  * `blocked` one (nothing about it is known well enough to infer anything; the
  * blocker is the answer). The queue facts are the queue vocabulary of the
- * entry's OWN protocol: `frontier` / `pendingCompletions` for a legacy record,
- * whose entry already carries `armed` / `unsettledEffects` for an outcome one.
+ * entry's OWN protocol: `frontier` / `pendingCompletions`, read from the
+ * record's PERSISTED FILE, for a legacy record (its hydrated state cannot answer
+ * that question — the field notes below say why); an outcome entry already
+ * carries `armed` / `unsettledEffects`.
  */
 export interface DrainAuditStalenessFacts {
   /** Epoch ms of the record's own last state update, as persisted. */
@@ -308,21 +323,28 @@ export interface DrainAuditStalenessFacts {
   readonly staleness: DrainAuditStaleness;
   /** Whether the record holds work the engine has not consumed. */
   readonly hasQueuedWork: boolean;
-  /** Legacy only: whether the engine's dispatch frontier is empty. */
+  /**
+   * Legacy only: whether the record's PERSISTED FILE holds an empty dispatch
+   * frontier. File fact — see {@link pendingCompletionsEmpty}. Absent only when
+   * the file carried no readable queue arrays, in which case the record is
+   * conservatively reported as queued and no size is invented.
+   */
   readonly frontierEmpty?: boolean;
-  /** Legacy only: how many nodes the frontier holds. */
+  /** Legacy only: how many nodes that persisted frontier holds. */
   readonly frontierSize?: number;
   /**
-   * Legacy only: whether no completion is deferred on the unlock queue. Read
-   * from a LOADED record, where the deserializer DELIBERATELY resets this field
-   * (R2(c): it describes the critical section of the process that wrote the
-   * file, and hydrating it would resurrect completions nobody can replay), so
-   * `true` here is a property of the load contract, not evidence that the
-   * writing process had nothing deferred. The frontier is the queue fact that
-   * survives a round trip, and it is what carries this half of the inference.
+   * Legacy only: whether the record's PERSISTED FILE defers no completion. Read
+   * from the raw record text the loader just validated — never from the hydrated
+   * state, because the deserializer DELIBERATELY resets the field at the trust
+   * boundary (R2(c): it describes the critical section of the process that wrote
+   * the file, and hydrating it would resurrect completions nobody can replay).
+   * Reading the file keeps the REPORT faithful and the inference safe: a record
+   * whose file still lists a deferred completion is never called a stale lock,
+   * even though recovery would not resume from that queue. The reset itself is
+   * unchanged — this field describes the store, never what a recovery may replay.
    */
   readonly pendingCompletionsEmpty?: boolean;
-  /** Legacy only: how many completions are deferred (see above). */
+  /** Legacy only: how many completions the persisted file defers (see above). */
   readonly pendingCompletionsSize?: number;
 }
 
@@ -566,10 +588,16 @@ function toAuditStop(stop: OutcomeStop): DrainAuditStop {
 interface EntryQueue {
   /** Whether the record holds work the engine has not consumed. */
   readonly hasQueuedWork: boolean;
-  /** Legacy only: the dispatch frontier, reported as size + emptiness. */
-  readonly frontier?: readonly string[];
-  /** Legacy only: completions deferred on the unlock queue. */
-  readonly pendingCompletions?: readonly string[];
+  /**
+   * Legacy only: the dispatch frontier, reported as size + emptiness. Elements
+   * are never read — for a FILE-sourced queue they are whatever arrays the
+   * loader's required-shape gate accepted — so they are typed `unknown` rather
+   * than reinterpreted (or filtered, which would make the reported size differ
+   * from the file's).
+   */
+  readonly frontier?: readonly unknown[];
+  /** Legacy only: completions deferred on the unlock queue (see above). */
+  readonly pendingCompletions?: readonly unknown[];
 }
 
 /** Everything a classification pass may add to an entry. */
@@ -600,15 +628,58 @@ interface EntryBody {
   >;
 }
 
-/** The legacy protocol's queue: the dispatch frontier and the unlock queue. */
-function legacyQueue(state: EngineState): EntryQueue {
+/**
+ * The legacy protocol's queue as the record's PERSISTED FILE carries it.
+ *
+ * The hydrated `EngineState` cannot answer this question: `deserializeEngineState`
+ * deliberately resets `pendingCompletions` (R2(c): it describes the critical
+ * section of the process that wrote the file), so reading the loaded state would
+ * report an empty queue for a file that queued completions — exactly the record
+ * the drain must never call a stale lock. The audit already holds the raw record
+ * text and the loader has already validated it against the format's
+ * required-shape gate, which REQUIRES both fields to be arrays, so this is the
+ * file's own fact rather than a second interpretation of it.
+ *
+ * Returns `undefined` when the text carries no readable queue arrays. The
+ * caller must then treat the queue as UNPROVABLE, never as empty.
+ */
+function persistedLegacyQueue(raw: string): EntryQueue | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const record = parsed as {
+    readonly frontier?: unknown;
+    readonly pendingCompletions?: unknown;
+  };
+  const { frontier, pendingCompletions } = record;
+  if (!Array.isArray(frontier) || !Array.isArray(pendingCompletions)) {
+    return undefined;
+  }
   return Object.freeze({
-    hasQueuedWork:
-      state.frontier.length > 0 || state.pendingCompletions.length > 0,
-    frontier: state.frontier,
-    pendingCompletions: state.pendingCompletions,
+    hasQueuedWork: frontier.length > 0 || pendingCompletions.length > 0,
+    frontier,
+    pendingCompletions,
   });
 }
+
+/**
+ * The queue of a valid legacy record whose raw text carried no readable queue
+ * arrays. Unreachable for the shipped format-2 decoder — its required-shape gate
+ * rejects a file without both arrays (`hasRequiredShape`) — but a future
+ * decoder that binds the legacy protocol to another layout lands here, and the
+ * audit then REFUSES to call the queue empty: "the file says queued → never
+ * stale" cannot be satisfied by a queue nobody could read, so the record stays
+ * `actively-executing` with no size fields invented for it.
+ */
+const UNPROVABLE_LEGACY_QUEUE: EntryQueue = Object.freeze({
+  hasQueuedWork: true,
+});
 
 /** The outcome protocol's queue: armed attempts and unsettled effects. */
 function outcomeQueue(armedCount: number, effectCount: number): EntryQueue {
@@ -673,7 +744,10 @@ function stalenessFacts(
  * other phase is in flight, and the entry carries the work: per-status counts
  * plus the ids of nodes the engine has not settled (`completed`/`done`).
  */
-function classifyLegacy(state: EngineState): EntryBody {
+function classifyLegacy(
+  state: EngineState,
+  persistedQueue: EntryQueue | undefined,
+): EntryBody {
   const nodeStatusCounts: Record<string, number> = {};
   const unsettledNodeIds: string[] = [];
   for (const node of state.nodes.values()) {
@@ -691,7 +765,7 @@ function classifyLegacy(state: EngineState): EntryBody {
     nodeStatusCounts: Object.freeze(nodeStatusCounts),
     unsettledNodeIds: Object.freeze(unsettledNodeIds),
     lastUpdatedAt: state.updatedAt,
-    queue: legacyQueue(state),
+    queue: persistedQueue ?? UNPROVABLE_LEGACY_QUEUE,
     blockerCodes: [],
   };
 }
@@ -919,6 +993,15 @@ function entryForLoadResult(
   ledgerBlocker: DrainAuditBlockerCode | undefined,
   now: number,
   staleAfterMs: number,
+  /**
+   * The legacy queue as the RAW record carries it. `undefined` for a non-legacy
+   * record — an outcome record's queue is its ledger's `armed`/`unsettledEffects`,
+   * and its carrier state is built with an empty frontier that nothing advances,
+   * so these legacy fields are not its queue — and for a legacy record whose file
+   * carried no readable queue arrays (then the queue is unprovable, never empty
+   * — see {@link UNPROVABLE_LEGACY_QUEUE}).
+   */
+  persistedQueue: EntryQueue | undefined,
 ): {
   readonly entry: DrainAuditEntry;
   readonly blockers: readonly DrainAuditBlocker[];
@@ -964,7 +1047,7 @@ function entryForLoadResult(
   const state = loaded.state;
   const body =
     loaded.executionProtocol === LEGACY_SIGNAL_PROTOCOL
-      ? classifyLegacy(state)
+      ? classifyLegacy(state, persistedQueue)
       : loaded.executionProtocol === OUTCOME_PROTOCOL
         ? classifyOutcome(state, ledger, ledgerBlocker)
         : classifyUnknownProtocol(state);
@@ -1224,6 +1307,18 @@ export async function auditGraphStore(
         );
         continue;
       }
+      // The staleness criterion's legacy queue facts come from the RAW record,
+      // never from the hydrated state: hydration deliberately resets
+      // `pendingCompletions` at the trust boundary (`deserializeEngineState`,
+      // R2(c)), so a loaded record reports an empty deferred queue even when the
+      // file queued one. The raw text the loader just validated is the authority
+      // for the REPORT and the stale-lock criterion; the reset is unchanged and
+      // recovery still does not resume from that queue.
+      const persistedQueue =
+        loaded.kind === "valid" &&
+        loaded.executionProtocol === LEGACY_SIGNAL_PROTOCOL
+          ? persistedLegacyQueue(raw)
+          : undefined;
       const audited = entryForLoadResult(
         file,
         loaded,
@@ -1231,6 +1326,7 @@ export async function auditGraphStore(
         ledgerBlocker,
         now,
         staleAfterMs,
+        persistedQueue,
       );
       entries.push(audited.entry);
       blockers.push(...audited.blockers);

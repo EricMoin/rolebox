@@ -1945,7 +1945,8 @@ carries a `staleness` block — the record's own last state update
 (`lastUpdatedAt`), its age (`idleMs`), the threshold that was applied
 (`staleAfterMs`), the queue facts the entry's protocol keeps
 (`frontierSize`/`frontierEmpty` and `pendingCompletionsSize`/
-`pendingCompletionsEmpty` for a legacy record; an outcome entry already
+`pendingCompletionsEmpty` for a legacy record, read from that record's
+PERSISTED FILE — see the next paragraph but one; an outcome entry already
 carries `armed`/`unsettledEffects`) — and the inference itself: `stale-lock`
 when nothing is queued AND the last update is at least the threshold old,
 `actively-executing` otherwise. `totals.staleLocks` and
@@ -1971,11 +1972,19 @@ still reads and never writes: a `stale-lock` resolves no lock, re-dispatches
 nothing and deletes nothing, and `drained` still requires all three halves (no
 blocker, no in-flight entry, no unsettled effect) — a store whose only
 in-flight records are stale locks is `in-flight`, exactly as before. Two facts
-are reported rather than hidden: the deserializer deliberately resets
-`pendingCompletions` (R2(c)), so that half of the queue is structurally empty
-for a LOADED record and the frontier carries the weight; and a declared outcome
-graph that was never started is not a stale lock — its queue is the first
-execution the run path still owes it.
+are reported rather than hidden: THE QUEUE FACTS ARE FILE FACTS — a legacy
+record's `frontier` AND its `pendingCompletions` are read from the record's
+persisted file (the raw text the loader just validated), never from the hydrated
+state, because the deserializer deliberately resets `pendingCompletions`
+(R2(c): it describes the critical section of the process that wrote the file),
+so a loaded record reports an empty deferred queue even when the file queued
+one. The reset itself is UNCHANGED and recovery still does not resume from that
+queue; the file is the authority for the REPORT and the stale-lock criterion
+only, which is what makes "the file says queued → never stale" hold. If a valid
+legacy record's raw text carried no readable queue arrays the record is
+conservatively reported as queued, never as empty. And a declared outcome graph
+that was never started is not a stale lock — its queue is the first execution
+the run path still owes it.
 
 E0 NAMES THE CREATION SIDE, AND MAKES IT FAIL-CLOSED. A drain is decidable
 only if the population being drained cannot grow, and this build could grow

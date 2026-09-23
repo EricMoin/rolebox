@@ -21,6 +21,11 @@
  *    mtime-compared before and after a full audit over the mixed store, and a
  *    missing ledger is shown to stay missing (the read-only open never creates
  *    or initializes a store).
+ * 4. THE QUEUE FACTS ARE FILE FACTS. A legacy record's stale-lock criterion is
+ *    read from the PERSISTED FILE: a record whose file still defers a completion
+ *    is `actively-executing` and reports the file's frontier/deferred sizes,
+ *    even though the loader deliberately resets `pendingCompletions` (R2(c))
+ *    when it hydrates that same record.
  *
  * The verdict is also pinned to be MORE than a count: a store whose only graph
  * is terminal, but which still holds an unsettled ledger effect, is reported
@@ -711,29 +716,76 @@ describe("drain audit — stale-lock inference", () => {
     });
   });
 
-  it("reports the loader's reset of pendingCompletions, not a deferred completion", async () => {
+  it("reads the queue from the record's persisted FILE, not the loader's reset", async () => {
     const dir = makeTmpDir("drain-audit-pending-");
-    // The record is WRITTEN with a deferred completion, but the deserializer
-    // deliberately resets the field (R2(c): it describes the critical section of
-    // the process that wrote the file, and hydrating it would resurrect
-    // completions nobody can replay). The audit therefore reports the loaded
-    // record, and this half of the criterion is structurally empty — the
-    // frontier and the idle age are what decide.
+    // The record is WRITTEN with a deferred completion and it stays in the file:
+    // that is what the process that wrote it actually left behind, and the drain
+    // gate must not lose it.
     persistLegacy(dir, "audit.legacy.pending", EnginePhase.Executing, NodeStatus.Running, {
       updatedAt: NOW - LONG_IDLE_MS,
       frontier: [],
       pendingCompletions: ["A"],
     });
 
+    // ...while the LOADER deliberately resets the field (R2(c): it describes the
+    // critical section of the process that wrote the file, and hydrating it
+    // would resurrect completions nobody can replay). The audit must not read
+    // its queue through that reset.
+    const rawFile = JSON.parse(
+      readFileSync(
+        join(engineStateDir(dir), "engine-audit.legacy.pending.json"),
+        "utf-8",
+      ),
+    ) as { frontier: unknown; pendingCompletions: unknown };
+    expect(rawFile.frontier).toEqual([]);
+    expect(rawFile.pendingCompletions).toEqual(["A"]);
+    expect(
+      new EnginePersistence(dir).load("audit.legacy.pending")?.pendingCompletions,
+    ).toEqual([]);
+
     const report = await auditGraphStore({ directory: dir, now: () => NOW });
 
     const entry = entryOf(report, "engine-audit.legacy.pending.json");
+    expect(entry.classification).toBe("in-flight");
     expect(entry.staleness).toMatchObject({
-      pendingCompletionsEmpty: true,
-      pendingCompletionsSize: 0,
-      hasQueuedWork: false,
-      staleness: "stale-lock",
+      frontierEmpty: true,
+      frontierSize: 0,
+      pendingCompletionsEmpty: false,
+      pendingCompletionsSize: 1,
+      hasQueuedWork: true,
+      staleness: "actively-executing",
     });
+    expect(report.totals).toMatchObject({
+      staleLocks: 0,
+      activelyExecuting: 1,
+      inFlight: 1,
+    });
+  });
+
+  it("refuses stale-lock when EITHER file queue is non-empty, and reports both sizes", async () => {
+    const dir = makeTmpDir("drain-audit-bothqueues-");
+    // The invariant in one record: the FILE queues on both halves, so neither
+    // half may be dropped from the report and the verdict may not be stale.
+    persistLegacy(dir, "audit.legacy.both", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW - LONG_IDLE_MS,
+      frontier: ["A"],
+      pendingCompletions: ["B"],
+    });
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    const entry = entryOf(report, "engine-audit.legacy.both.json");
+    expect(entry.staleness).toMatchObject({
+      frontierEmpty: false,
+      frontierSize: 1,
+      pendingCompletionsEmpty: false,
+      pendingCompletionsSize: 1,
+      hasQueuedWork: true,
+      staleness: "actively-executing",
+    });
+    // ...and the age is still reported, so the caller sees both halves.
+    expect(entry.staleness?.idleMs).toBe(LONG_IDLE_MS);
+    expect(report.totals).toMatchObject({ staleLocks: 0, activelyExecuting: 1 });
   });
 
   it("does not infer staleness for terminal or blocked records", async () => {
