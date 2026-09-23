@@ -50,22 +50,27 @@ import type { DispatchManager } from "../src/dispatch/core/manager.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { CanonicalToolDef } from "../src/platform/types.ts";
 
-// ── The shared opencode tool surface (the parity contract) ──────────────────
-
 /**
  * Every tool the opencode platform registers, minus opencode-only extras
  * (asset_hot_reload) and the withheld dispatch_* / loop_* / task_retry
  * namespaces.
  *
  * Groups and their registration sites on opencode:
- *   1. Core intersection set   — src/platform/tool-assembly.ts:91-104
- *   2. Session tools           — src/platform/tool-assembly.ts:107-121
- *   3. graph_* engine tools    — src/platform/tool-assembly.ts:160-166
- *   4. task_* surface          — src/core/services/tool-service.ts:87-90
+ *   1. Core intersection set   — src/platform/tool-assembly.ts
+ *   2. Session tools           — src/platform/tool-assembly.ts
+ *   3. task_* surface          — src/core/services/tool-service.ts
  *      (createTaskTools minus task_retry)
- *   5. Opencode extras shared  — src/core/services/tool-service.ts:91-106
+ *   4. Opencode extras shared  — src/core/services/tool-service.ts
  *      (memory_update, function_graph, skill_compose, context_assemble;
  *      LSP derived below from the shared createAllLspTools factory)
+ *
+ * The graph orchestration surface is deliberately NOT part of this list. The
+ * legacy construction/execution entries are retired, and the OUTCOME run
+ * path's four entries (graph_declare / graph_submit_outcome / graph_audit /
+ * graph_status) are assembled only by a host that owns the host capability
+ * layer (the dsh and Pi entries), supplied as `outcomeGraphTools`. Neither
+ * the opencode ToolService nor a bare PiLightweightServiceStack registers a
+ * graph tool.
  */
 const OPENCODE_SURFACE: readonly string[] = [
   // 1. Core standalone + asset/reference tools (always registered)
@@ -91,27 +96,14 @@ const OPENCODE_SURFACE: readonly string[] = [
   "session_info",
   "session_diff",
   "session_fork",
-  // 3. Graph Execution Engine v2 tools (gated on dispatchManager — both
-  //    platforms thread the live DispatchManager)
-  "graph_create",
-  "graph_add_node",
-  "graph_add_edge",
-  "graph_add_loop",
-  "graph_declare",
-  "graph_submit_outcome",
-  "graph_audit",
-  "graph_run",
-  "graph_status",
-  "graph_cancel",
-  "graph_approve",
-  // 4. Restored legacy task_* surface (task_retry withheld — see above)
+  // 3. Restored legacy task_* surface (task_retry withheld — see above)
   "task_search",
   "task_budget",
   "task_graph",
   "task_chronology",
   "task_export",
-  // 5. Opencode-side extras forwarded to Pi (pi-extension.ts:928-942 mirrors
-  //    tool-service.ts:91-106)
+  // 4. Opencode-side extras forwarded to Pi (pi-extension.ts mirrors
+  //    tool-service.ts)
   "memory_update",
   "function_graph",
   "skill_compose",

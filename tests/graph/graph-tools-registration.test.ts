@@ -18,6 +18,7 @@ import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import type { BuildToolsOptions } from "../../src/platform/tool-assembly.ts";
+import type { CanonicalToolDef } from "../../src/platform/types.ts";
 import { createGraphTools } from "../../src/graph/tools/index.ts";
 import type { ResolvedRole } from "../../src/types.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
@@ -67,6 +68,35 @@ const GRAPH_KEYS = [
   "graph_cancel",
   "graph_approve",
 ];
+
+/** The OUTCOME run path's tool face a shipping host registers. */
+const OUTCOME_GRAPH_KEYS = [
+  "graph_declare",
+  "graph_submit_outcome",
+  "graph_audit",
+  "graph_status",
+];
+
+/** The legacy execution entries a host does NOT assemble any more. */
+const LEGACY_GRAPH_KEYS = [
+  "graph_create",
+  "graph_add_node",
+  "graph_add_edge",
+  "graph_add_loop",
+  "graph_run",
+  "graph_cancel",
+  "graph_approve",
+];
+
+/** A stand-in for the host-built outcome tool face. */
+function makeOutcomeTools(): Record<string, CanonicalToolDef> {
+  return {
+    graph_declare: makeDummyTool("graph_declare"),
+    graph_submit_outcome: makeDummyTool("graph_submit_outcome"),
+    graph_audit: makeDummyTool("graph_audit"),
+    graph_status: makeDummyTool("graph_status"),
+  };
+}
 
 // ── createGraphTools: schema shape ──────────────────────────────────────────
 
@@ -191,32 +221,39 @@ describe("createGraphTools", () => {
   });
 });
 
-// ── buildCanonicalTools: Phase A coexistence ────────────────────────────────
-
-describe("buildCanonicalTools graph registration (Phase A coexistence)", () => {
-  it("registers every graph_* tool when a dispatchManager is present", () => {
+describe("buildCanonicalTools graph registration (outcome tool face)", () => {
+  it("registers the host's OUTCOME graph tools when the host supplies them", () => {
     const opts = makeBaseOpts();
     opts.dispatchManager = makeDispatchManager();
     opts.resolvedSubagents = new Map();
+    opts.outcomeGraphTools = makeOutcomeTools();
 
     const tools = buildCanonicalTools(opts);
 
-    for (const key of GRAPH_KEYS) {
+    for (const key of OUTCOME_GRAPH_KEYS) {
       expect(tools[key]).toBeDefined();
     }
-  });
-
-  it("omits graph_* tools when no dispatchManager is present", () => {
-    const tools = buildCanonicalTools(makeBaseOpts());
-    for (const key of GRAPH_KEYS) {
+    // The legacy execution entries are NOT part of the assembled surface.
+    for (const key of LEGACY_GRAPH_KEYS) {
       expect(tools[key]).toBeUndefined();
     }
   });
 
-  it("produces exactly the graph_* keys and coexists with loop_*/core keys", () => {
+  it("omits every graph_* tool when the host supplies no outcome tool face", () => {
     const opts = makeBaseOpts();
     opts.dispatchManager = makeDispatchManager();
     opts.resolvedSubagents = new Map();
+    const tools = buildCanonicalTools(opts);
+    for (const key of [...OUTCOME_GRAPH_KEYS, ...LEGACY_GRAPH_KEYS]) {
+      expect(tools[key]).toBeUndefined();
+    }
+  });
+
+  it("produces exactly the supplied graph_* keys and coexists with loop_*/core keys", () => {
+    const opts = makeBaseOpts();
+    opts.dispatchManager = makeDispatchManager();
+    opts.resolvedSubagents = new Map();
+    opts.outcomeGraphTools = makeOutcomeTools();
     // Add a loop tool via loopToolsOverride to prove graph merge coexists.
     opts.loopToolsOverride = {
       loop_start: makeDummyTool("loop_start"),
@@ -225,7 +262,7 @@ describe("buildCanonicalTools graph registration (Phase A coexistence)", () => {
     const tools = buildCanonicalTools(opts);
 
     const graphKeys = Object.keys(tools).filter((k) => k.startsWith("graph_"));
-    expect(graphKeys.sort()).toEqual([...GRAPH_KEYS].sort());
+    expect(graphKeys.sort()).toEqual([...OUTCOME_GRAPH_KEYS].sort());
 
     // loop_* and core keys unchanged — none repurposed by the graph merge.
     for (const key of ["loop_start", "signal"]) {
@@ -237,6 +274,7 @@ describe("buildCanonicalTools graph registration (Phase A coexistence)", () => {
     const opts = makeBaseOpts();
     opts.dispatchManager = makeDispatchManager();
     opts.resolvedSubagents = new Map();
+    opts.outcomeGraphTools = makeOutcomeTools();
     const extraSignal = makeDummyTool("extra_signal");
     const loopSignal = makeDummyTool("loop_signal");
     opts.extraTools = { signal: extraSignal };
@@ -248,7 +286,7 @@ describe("buildCanonicalTools graph registration (Phase A coexistence)", () => {
     expect(tools.signal).toBe(loopSignal);
     expect(tools.signal).not.toBe(extraSignal);
     // And the graph tools were added alongside, not clobbering anything.
-    for (const key of GRAPH_KEYS) {
+    for (const key of OUTCOME_GRAPH_KEYS) {
       expect(tools[key]).toBeDefined();
     }
   });

@@ -19,12 +19,9 @@
  *   - roles are discovered/resolved from a temp rolebox dir and registered
  *     as subagent providers (provider name == role id)
  *   - tools are registered into `ctx.tools` (the compiled dsh tool set,
- *     incl. the graph_* tools)
+ *     incl. the OUTCOME graph tool face: graph_declare / graph_submit_outcome
+ *     / graph_audit / graph_status — and NOT the retired legacy entries)
  *   - an invalid config is rejected by cordis's config validation
- *   - ONE graph dispatch round-trips: graph_create → graph_add_node →
- *     graph_run → graph_status, dispatching through `ctx.subagents.start`
- *     and materializing the node result (output readable via
- *     graph_status include_output)
  *   - fiber dispose cleans up tool registrations + providers
  *   - the REAL `@deepseek-ai/dsh-system-prompt` SystemPrompt service mounted
  *     on the cordis Context: the `rolebox:role` section + `rolebox:context`
@@ -560,14 +557,17 @@ describe("rolebox plugin on a real cordis Context", () => {
     expect([...subagents.providers.keys()]).toContain("tester");
     expect(disposer!.stats.registeredAgents).toBe(subagents.providers.size);
 
-    // Tools registered into ctx.tools — incl. the graph_* orchestration set.
+    // Tools registered into ctx.tools — incl. the OUTCOME graph tool face.
     expect(tools.tools.length).toBeGreaterThanOrEqual(1);
     expect(disposer!.stats.registeredTools).toBe(tools.tools.length);
     const names = new Set(tools.tools.map((t) => t.name));
-    expect(names.has("graph_create")).toBe(true);
-    expect(names.has("graph_add_node")).toBe(true);
-    expect(names.has("graph_run")).toBe(true);
+    expect(names.has("graph_declare")).toBe(true);
+    expect(names.has("graph_submit_outcome")).toBe(true);
+    expect(names.has("graph_audit")).toBe(true);
     expect(names.has("graph_status")).toBe(true);
+    // The legacy construction/execution entries are NOT assembled.
+    expect(names.has("graph_create")).toBe(false);
+    expect(names.has("graph_run")).toBe(false);
 
     fiber.dispose();
     await new Promise((r) => setTimeout(r, 10));
@@ -625,131 +625,6 @@ describe("strict agents double", () => {
   });
 });
 
-// ── Graph dispatch round-trip through the real cordis boot ─────────────────
-
-describe("graph dispatch round-trip on the real cordis boot", () => {
-  it("dispatches one node through ctx.subagents.start and materializes its result", async () => {
-    // A REAL invoking session id — the live-agent registry resolves the
-    // required parent `Agent` from THIS id, never the graph-scoped budget key
-    // and never the `callId` fallback (which is not a session).
-    const INVOKING_SESSION = "e2e-invoking-session";
-    writeRoleYaml("tester", SIMPLE_ROLE);
-    const { tools, subagents, agents, spawn, fiber, disposer } = await bootPlugin({
-      roleboxDir: tmpDir,
-    });
-    // Register the session as live on the strict double so parent resolution
-    // succeeds for the real session and fails for any other id.
-    agents.register(INVOKING_SESSION);
-    const byName = new Map(tools.tools.map((t) => [t.name, t]));
-
-    // 1. graph_create — the dsh execute wrapper resolves the JSON-object
-    // result to a structured envelope, so graph_id is read directly.
-    const created = (await runTool(
-      byName.get("graph_create"),
-      { name: "e2e-graph" },
-      INVOKING_SESSION,
-    )) as { graph_id: string };
-    expect(created.graph_id).toBe("e2e-graph");
-
-    // 2. graph_add_node — agent = the registered provider (role id "tester").
-    await runTool(
-      byName.get("graph_add_node"),
-      {
-        graph_id: created.graph_id,
-        id: "N1",
-        agent: "tester",
-        prompt: "execute this node",
-      },
-      INVOKING_SESSION,
-    );
-
-    // 3. graph_run — non-blocking dispatch through the dsh subagent seam.
-    await runTool(
-      byName.get("graph_run"),
-      { graph_id: created.graph_id },
-      INVOKING_SESSION,
-    );
-
-    // The DshDispatchAdapter called ctx.subagents.start with the per-role
-    // agent mapping and the node prompt as text content.
-    expect(subagents.started).toHaveLength(1);
-    expect(subagents.started[0].name).toBe("tester");
-    expect(subagents.started[0].request.prompt).toEqual([
-      { type: "text", text: "execute this node" },
-    ]);
-    expect(subagents.started[0].request.signal).toBeInstanceOf(AbortSignal);
-    // The adapter resolved the required live parent Agent from ctx.agents
-    // keyed by the INVOKING SESSION (the real live parent) and forwarded it —
-    // never `undefined`. It must NOT request the graph-scoped budget key: the
-    // strict double returns `undefined` for the graph id, so a regression to
-    // the budget key would fail loud with DshParentUnresolvedError.
-    expect(subagents.started[0].request.parent).toBeDefined();
-    expect(agents.requested).toContain(INVOKING_SESSION);
-    expect(agents.requested).not.toContain(created.graph_id);
-
-    // The run the node materializes came from the terminal host `spawn`
-    // provider the rolebox provider delegated to — the chain is
-    // ctx.subagents.start → rolebox provider → host provider. Reverting that
-    // delegation makes the rolebox provider throw DshSpawnNotWiredError, the
-    // node escalates, and `spawn.started` stays empty (this test fails).
-    expect(spawn.started).toHaveLength(1);
-    expect(
-      (spawn.started[0].descriptor as { provider?: string }).provider,
-    ).toBe("tester");
-
-    // 4. graph_status — wait for the run to settle and the engine to advance.
-    let node: { node_id: string; status: string } | undefined;
-    let graph: { phase: string; nodes: Array<{ node_id: string; status: string }> };
-    const deadline = Date.now() + 2000;
-    do {
-      await new Promise((r) => setTimeout(r, 25));
-      // The graph_status JSON snapshot has no top-level `output` key, so the
-      // dsh execute wrapper resolves it to a structured envelope — read it
-      // directly rather than re-parsing `.output`.
-      graph = (await runTool(
-        byName.get("graph_status"),
-        {
-          graph_id: created.graph_id,
-          format: "json",
-        },
-        INVOKING_SESSION,
-      )) as typeof graph;
-      node = graph.nodes.find((n) => n.node_id === "N1");
-    } while (
-      node?.status !== "completed" &&
-      graph.phase !== "complete" &&
-      Date.now() < deadline
-    );
-
-    expect(node?.status).toBe("completed");
-    expect(graph.phase).toBe("complete");
-
-    // The node result is materialized — readable via include_output.
-    const withOutput = JSON.parse(
-      String(
-        await runTool(
-          byName.get("graph_status"),
-          {
-            graph_id: created.graph_id,
-            node_id: "N1",
-            format: "json",
-            include_output: true,
-          },
-          INVOKING_SESSION,
-        ),
-      ),
-    ) as { output?: string };
-    expect(String(withOutput.output ?? "")).toContain(
-      "dsh e2e worker for tester finished",
-    );
-
-    expect(disposer!.stats.dispatchMode).toBe("dsh");
-    fiber.dispose();
-    await new Promise((r) => setTimeout(r, 10));
-  });
-});
-
-// ── Real @deepseek-ai/dsh-system-prompt registry (subtask 6) ────────────────
 
 describe("real @deepseek-ai/dsh-system-prompt registry on the cordis boot", () => {
   const SESSION_ID = "session-6";

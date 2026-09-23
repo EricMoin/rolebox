@@ -11,7 +11,6 @@ import { functionRuntime } from "../src/function/runtime-state";
 import type { ResolvedRole, ResolvedFunction } from "../src/types";
 import { RoleMode } from "../src/constants";
 import { OpencodeSessionAdapter } from "../src/platform/adapters/opencode/session";
-import { GraphToolSet } from "../src/graph/tools/graph-tools.ts";
 import { sessionSignalLedger } from "../src/signal/session-signal-ledger.ts";
 import { createSignalTool } from "../src/signal/signal-tool.ts";
 import { runToolObserve } from "../src/function/observe.ts";
@@ -322,70 +321,7 @@ describe("session.idle CONTINUE", () => {
     expect((promptAsyncMock as any).mock.calls[0][0].body.parts[0].text).toContain("auto-continue");
   });
 
-  it("suppresses auto-continue while the session owns an executing graph (graphTools stub true)", async () => {
-    const client = createMockClient();
-    const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
-    roleFunctionsMap.set("test-primary", [fn]);
 
-    // Stub installed BEFORE createPluginHooks so the GraphToolSet created
-    // during ToolService.init resolves the mocked method via the prototype.
-    const graphSpy = spyOn(GraphToolSet.prototype, "hasInflightGraphsForSession");
-    graphSpy.mockReturnValue(true);
-
-    const hooks = await createPluginHooks({ platformId: "opencode",
-      resolvedRoles: [makePrimaryRole()],
-      session: new OpencodeSessionAdapter(client),
-      roleFunctionsMap,
-      roleGraphMap: new Map(),
-      directory: tmpDir,
-    });
-
-    const sessionID = "test-session";
-    functionSessionState.activate(sessionID, ["plan"]);
-    const st = functionRuntime.init(sessionID, "plan", 1);
-    st.kv["__todos"] = "- [ ] pending task";
-    const ccBefore = st.continuationCount;
-
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
-    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
-
-    expect(graphSpy).toHaveBeenCalledWith(sessionID);
-    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
-    expect(st.continuationCount).toBe(ccBefore);
-  });
-
-  it("continues exactly once when the session owns no executing graph (graphTools stub false)", async () => {
-    const client = createMockClient();
-    const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
-    roleFunctionsMap.set("test-primary", [fn]);
-
-    const graphSpy = spyOn(GraphToolSet.prototype, "hasInflightGraphsForSession");
-    graphSpy.mockReturnValue(false);
-
-    const hooks = await createPluginHooks({ platformId: "opencode",
-      resolvedRoles: [makePrimaryRole()],
-      session: new OpencodeSessionAdapter(client),
-      roleFunctionsMap,
-      roleGraphMap: new Map(),
-      directory: tmpDir,
-    });
-
-    const sessionID = "test-session";
-    functionSessionState.activate(sessionID, ["plan"]);
-    const st = functionRuntime.init(sessionID, "plan", 1);
-    st.kv["__todos"] = "- [ ] pending task";
-
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
-    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
-
-    expect(graphSpy).toHaveBeenCalledWith(sessionID);
-    expect(promptAsyncMock).toHaveBeenCalledTimes(1);
-    expect((promptAsyncMock as any).mock.calls[0][0].body.parts[0].text).toContain("auto-continue");
-  });
 
   it("freezes auto-continue when function state is gated (signal blocked)", async () => {
     const client = createMockClient();
@@ -769,8 +705,8 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
   });
 });
 
-describe("graph-continuation: graph suppression + session-ledger fallback (subtasks 3+4)", () => {
-  it("(b) a session-only signal completes the fn once idle runs after the graph settles", async () => {
+describe("graph-continuation: session-ledger fallback (subtask 4)", () => {
+  it("(b) a session-only signal completes the fn on the next idle", async () => {
     const client = createMockClient();
     const fn = makeResolvedFn({ name: "plan", continue_until: "signal_observed(answer)" });
     roleFunctionsMap.set("test-primary", [fn]);
@@ -782,10 +718,6 @@ describe("graph-continuation: graph suppression + session-ledger fallback (subta
     const signalTool = createSignalTool();
     await signalTool.execute({ type: "answer" }, makeSignalContext(sessionID, tmpDir));
     expect(sessionSignalLedger.hasSignal(sessionID, "answer")).toBe(true);
-
-    // Stub BEFORE createPluginHooks so the GraphToolSet assembled during
-    // ToolService.init resolves the mocked method via the prototype.
-    const graphSpy = spyOn(GraphToolSet.prototype, "hasInflightGraphsForSession");
 
     const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
@@ -802,24 +734,11 @@ describe("graph-continuation: graph suppression + session-ledger fallback (subta
     expect(st.kv["__signals_observed"]).toBeUndefined();
 
     const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
-    const idle = () =>
-      hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
-    // (1) Session owns an executing graph → idle is suppressed entirely
-    //     (subtask 3: hasInflightGraphsForSession) — no continuation, no
-    //     completion evaluation.
-    graphSpy.mockReturnValue(true);
-    await idle();
-    expect(graphSpy).toHaveBeenCalledWith(sessionID);
-    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
-    expect(st.phase).toBe("active");
-    expect(st.continuationCount).toBe(0);
-
-    // (2) Graph settles → idle re-evaluates. signal_observed(answer) has no
-    //     FnState entry but falls back to the session ledger (subtask 4) →
-    //     the fn completes with zero continuation prompts.
-    graphSpy.mockReturnValue(false);
-    await idle();
+    // idle re-evaluates; signal_observed(answer) has no FnState entry but falls
+    // back to the session ledger (subtask 4) → the fn completes with zero
+    // continuation prompts.
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
     expect(st.phase).toBe("complete");
     expect(st.continuationCount).toBe(0);
     expect(promptAsyncMock).toHaveBeenCalledTimes(0);

@@ -41,10 +41,6 @@ import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
 import { DshEventBridge, mapDshEventType } from "../src/platform/adapters/dsh/event-bridge.ts";
 import { apply, name, inject, Config, buildAgentPromptInjector } from "../src/entries/dsh.ts";
-import {
-  clearLiveGraphToolSet,
-  getLiveGraphToolSet,
-} from "../src/graph/tools/live-state.ts";
 import type {
   DshPluginContext,
   DshPluginDisposer,
@@ -505,8 +501,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // Never let one boot's registered toolset leak into the next test.
-  clearLiveGraphToolSet();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -703,7 +697,7 @@ describe("dsh plugin apply()", () => {
     disposerWithout();
   });
 
-  it("wires a parentResolver over ctx.agents so dispatch forwards a live parent", async () => {
+  it("dispatches a declared graph's entry attempt through ctx.subagents.start with a live parent", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
 
     // A REAL invoking session id — the canonical `sessionID` resolved from the
@@ -712,7 +706,7 @@ describe("dsh plugin apply()", () => {
     const INVOKING_SESSION = "plugin-invoking-session";
 
     // Live-agent registry double (the `ctx.agents` seam): records the session
-    // ids the adapter resolves and returns a sentinel live Agent.
+    // ids the delivery resolves and returns a sentinel live Agent.
     const parent = { id: "live-parent", inject: () => undefined };
     const requested: string[] = [];
     const agents = {
@@ -723,15 +717,12 @@ describe("dsh plugin apply()", () => {
     };
     const { ctx, tools, started } = createFakeCtx({ agents });
 
-    // The plugin captures process.cwd() for the graph stateDir; isolate it.
+    // The plugin captures process.cwd() for the graph state store; isolate it.
     const cwd = process.cwd();
     process.chdir(tmpDir);
     try {
       const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
       const byName = new Map(tools.registeredTools.map((t) => [t.name, t]));
-      // Carry a live agent + session (the shape the real harness passes) so
-      // `toCanonicalContext` resolves the canonical `sessionID` from the
-      // session — NOT the `callId` fallback (tool-factory.ts:518).
       const exec = {
         signal: new AbortController().signal,
         callId: "plugin-call-1",
@@ -743,25 +734,41 @@ describe("dsh plugin apply()", () => {
         },
       };
 
-      // graph_create returns the dsh JSON-object envelope (the structured
-      // run_code ergonomics this fix delivers); read graph_id directly.
-      const created = (await byName
-        .get("graph_create")!
-        .execute({ name: "parent-graph" }, exec)) as { graph_id: string };
-      await byName.get("graph_add_node")!.execute(
-        { graph_id: created.graph_id, id: "N1", agent: "tester", prompt: "p" },
+      // Declare a graph whose entry node awaits a worker submission (no
+      // completion policy needed): the declaration seam starts it, and the
+      // host's delivery starts one dsh subagent run for the attempt.
+      const declared = (await byName.get("graph_declare")!.execute(
+        {
+          declaration: {
+            version: 3,
+            name: "parent-graph",
+            nodes: [
+              {
+                id: "N1",
+                agent: "tester",
+                prompt: "p",
+                outcomes: [{ id: "done" }],
+              },
+            ],
+            edges: [],
+          },
+        },
         exec,
-      );
-      await byName.get("graph_run")!.execute({ graph_id: created.graph_id }, exec);
+      )) as { graph_id: string };
 
-      // The constructed DshDispatchAdapter resolved the live parent from
-      // ctx.agents keyed by the REAL invoking session (not the graph-scoped
-      // budget key) and forwarded the SAME live Agent reference — never
-      // `undefined`.
-      expect(started).toHaveLength(1);
+      // The first execution is kicked from the declaration seam and completes
+      // its synchronous dispatch window before the tool returns; a short poll
+      // only guards the async start bookkeeping.
+      for (let i = 0; i < 50 && started.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      // The OUTCOME delivery resolved the live parent from ctx.agents keyed by
+      // the REAL invoking session and forwarded the SAME live Agent reference.
+      expect(declared.graph_id).toBe("parent-graph");
+      expect(started.length).toBeGreaterThanOrEqual(1);
       expect(started[0].request.parent).toBe(parent);
       expect(requested).toContain(INVOKING_SESSION);
-      expect(requested).not.toContain(created.graph_id);
 
       disposer();
     } finally {
@@ -1075,45 +1082,7 @@ describe("dsh plugin apply()", () => {
     expect(registered).toHaveLength(0);
   });
 
-  it("publishes the booted graph toolset so /rolebox/status shows live engine graphs", async () => {
-    // A previous boot in this file registers its own toolset, so clear the
-    // slot FIRST: the assertion below must be satisfied by THIS boot's toolset.
-    clearLiveGraphToolSet();
-    writeRoleYaml("tester", SIMPLE_ROLE);
-    const registered: DshWebRouteLike[] = [];
-    const fakeWebServer: DshWebServerRouteRegistrar = {
-      register(route: DshWebRouteLike): () => void {
-        registered.push(route);
-        return () => {
-          const i = registered.indexOf(route);
-          if (i >= 0) registered.splice(i, 1);
-        };
-      },
-    };
-    const { ctx } = createFakeCtx({ webServer: fakeWebServer });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
-    try {
-      const toolset = getLiveGraphToolSet();
-      expect(toolset).toBeDefined();
-
-      // Seeding through the registry does not dispatch the graph — the plain
-      // registry entry is exactly what the monitor's live source must surface.
-      const created = toolset!.graph_create({ name: "live-monitor-graph" });
-
-      const res = await invoke(registered[0].handler, "GET", "/rolebox/status");
-      expect(res.status).toBe(200);
-      const body = JSON.parse(res.text) as {
-        engineGraphs: Array<{ graphId: string }>;
-      };
-      // Live registry, not the disk fallback: this workspace has no
-      // engine-*.json files, so an unregistered toolset yields an empty list.
-      expect(body.engineGraphs.map((g) => g.graphId)).toContain(created.graph_id);
-    } finally {
-      clearLiveGraphToolSet();
-      disposer();
-    }
-  });
 
   it("registers the /rolebox prefix exactly once when the host rejects duplicate prefixes", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);

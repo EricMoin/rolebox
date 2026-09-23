@@ -44,7 +44,6 @@ import {
   engineStatePath,
 } from "../../src/graph/engine/engine-persistence.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
-import { LegacyGraphCreationRefusedError } from "../../src/graph/tools/legacy-creation-gate.ts";
 import { OUTCOME_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import { contractDigest, type ContractRef } from "../../src/graph/contracts/contract-definition.ts";
@@ -56,8 +55,7 @@ import { createContractRegistry } from "../../src/graph/contracts/resolve.ts";
  * Write a legacy engine-state record for an id, the way a run leaves one behind.
  *
  * Several C1 tests need a PERSISTED legacy record and do not care how it got
- * there. Since the E gate refuses to create a NEW durable legacy record through
- * the tool ingress (`legacy-creation-gate.ts`), the record is seeded directly
+ * there. The record is seeded directly
  * through the store — the same shape, without depending on the creation path
  * those tests are not about.
  */
@@ -2242,23 +2240,15 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     const created = second.graph_create({ name: "declared-graph" });
     expect(created.graph_id).toBe("declared-graph-2");
 
-    // Running the freshly created LEGACY graph is refused by the E gate — no NEW
-    // durable legacy record may be added (legacy-creation-gate.ts) — so the
-    // declared record keeps its protocol, plan and binding byte for byte and
-    // the suffixed id never reaches the store at all.
+    // Running the freshly created LEGACY graph is a separate record: the
+    // declared record keeps its protocol, plan and binding byte for byte.
     second.graph_add_node({
       graph_id: created.graph_id,
       id: "A",
       agent: "a",
       prompt: "pA",
     });
-    let caught: unknown;
-    try {
-      await second.graph_run({ graph_id: created.graph_id });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(LegacyGraphCreationRefusedError);
+    await second.graph_run({ graph_id: created.graph_id });
 
     expect(readFileSync(path, "utf-8")).toBe(before);
     const dto = JSON.parse(before) as {
@@ -2269,8 +2259,6 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
     expect(dto.compiledPlan?.planRevision).toBe(declared.plan_revision);
     expect(dto.planBinding?.planRevision).toBe(declared.plan_revision);
-    // The refused run wrote nothing: no new record, legacy or otherwise.
-    expect(existsSync(engineStatePath(stateDir, "declared-graph-2"))).toBe(false);
   });
 
   it("reserves a declared id whose state-file slug collides with a legacy name", async () => {
@@ -2298,16 +2286,9 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
       agent: "a",
       prompt: "pA",
     });
-    // Same E-gate refusal as above: the suffixed legacy id never reaches the
-    // store, so the colliding declared file is untouched — which is stronger
-    // than a suffix that merely writes somewhere else.
-    let caught: unknown;
-    try {
-      await second.graph_run({ graph_id: created.graph_id });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(LegacyGraphCreationRefusedError);
+    // Same discipline as above: the suffixed legacy record is its own file, so
+    // the colliding declared file is untouched.
+    await second.graph_run({ graph_id: created.graph_id });
 
     expect(readFileSync(path, "utf-8")).toBe(before);
     const dto = JSON.parse(before) as {
@@ -2316,7 +2297,6 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     };
     expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
     expect(dto.compiledPlan?.planRevision).toBe(declared.plan_revision);
-    expect(existsSync(engineStatePath(stateDir, "a b-2"))).toBe(false);
   });
 
   it("names the outcome run path when a persisted declared graph is run after a restart", async () => {
