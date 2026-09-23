@@ -200,13 +200,13 @@ export const ENGINE_PHASE_VALUES: readonly EnginePhase[] = Object.values(EngineP
  *              running → timeout → done (or ready, if retry)
  * Cancel path: pending/ready → cancelled → done
  *
- * The `blocked` state is the human-in-the-loop approval pause: a node
+ * The `blocked` state is the legacy human-in-the-loop approval pause: a node
  * entering it from `running` (via a `need_approval` / `blocked` /
- * `need_clarification` signal) halts downstream dispatch until the human
- * resolves the gate through the approval lifecycle (Phase 3 —
- * engine-advance.ts "Phase 3 approval lifecycle" + graph_approve/
- * approval-handler.ts), after which the node resumes to `completed` (or
- * `ready` on retry).
+ * `need_clarification` signal) halted downstream dispatch until the human
+ * resolved the gate through the approval lifecycle (Phase 3 —
+ * `engine-advance.ts` + `graph_approve` / `approval-handler.ts`). That
+ * lifecycle, the tool and every module it named were deleted with the legacy
+ * signal runtime; the outcome run path never enters this state.
  */
 export const NodeStatus = {
   Pending: "pending",

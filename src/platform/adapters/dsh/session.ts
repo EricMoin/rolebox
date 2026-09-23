@@ -165,7 +165,7 @@ export interface DshPromptInjector {
    * Inject a text reminder into a session's live agent.
    *
    * @param sessionId - The target dsh session id (the emperor/orchestrator
-   *   session that drove `graph_run`, per the graph-notify owner-targeting).
+   *   session that owns the graph run this reminder reports on).
    * @param text      - The `<system-reminder>` body (contains the graph
    *   marker + agent). Already carries the resolved agent inline.
    * @param options   - Optional prompt metadata forwarded from

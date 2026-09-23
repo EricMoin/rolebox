@@ -31,8 +31,8 @@ export class ToolService implements PluginService {
     const resolvedSubagents = dispatchService.getResolvedSubagents();
     const subagentModelKey = dispatchService.getSubagentModelKey();
 
-    // 1.6. loop_* tool registration DISABLED — prevents models from bypassing
-    // the graph engine (graph_add_loop) via bare loop_* calls. LoopService
+    // 1.6. loop_* tool registration DISABLED — prevents models from running
+    // loops outside a declared graph via bare loop_* calls. LoopService
     // remains available internally; only the model-facing tools are withheld.
     // const loopService = ctx.core.getService<LoopService>("loop-service");
     // if (!loopService) throw new Error("loop-service not found");

@@ -332,8 +332,8 @@ export class DshDispatchAdapter implements IDispatchAdapter {
 
     const id = run.id;
     // Record the dispatch-parent edge BEFORE any settlement can fire so the
-    // chain is resolvable even if the run completes immediately (a
-    // `graph_run`-launching subagent ends its turn at once).
+    // chain is resolvable even if the run completes immediately (a subagent
+    // that drives a graph run ends its turn at once).
     this.childToParent.set(id, liveParentSessionId);
     const task: DispatchTask = {
       id,
@@ -579,12 +579,12 @@ export class DshDispatchAdapter implements IDispatchAdapter {
    *
    * In dsh a `SubagentRun.id` IS a `SessionId`; each run records the REAL live
    * parent session that owned its spawn. Starting from a nested graph's
-   * invoking session (the child session that called `graph_run`), this returns
-   * `[sessionId, parent, ..., outermost]` — the chain a blocked approval must
-   * travel to reach the user's orchestrator session. A session with no tracked
-   * dispatcher is its own outermost (`[sessionId]`), so a single-level graph
-   * (whose invoking session IS the orchestrator) yields a length-1 chain and
-   * the caller skips propagation.
+   * invoking session (the child session that declared or drove the run), this
+   * returns `[sessionId, parent, ..., outermost]` — the chain a reminder for a
+   * nested run must travel to reach the user's orchestrator session. A session
+   * with no tracked dispatcher is its own outermost (`[sessionId]`), so a
+   * single-level graph (whose invoking session IS the orchestrator) yields a
+   * length-1 chain and the caller skips propagation.
    *
    * Cycle-safe: a seen-set stops a malformed parent loop, and the walk is
    * bounded by the registry size.

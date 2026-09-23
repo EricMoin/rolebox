@@ -5,18 +5,16 @@
  * Date: 2026-09-18
  *
  * One narrowing vocabulary for signal payloads and the per-node
- * `signalsObserved` ledger. Before this module the same "non-null, non-array
- * object" test was written out five times — twice in `signal-propagation.ts`,
- * three times in `loop-group-executor.ts` — each copy with its own key list and
- * its own handling of arrays, and reads elsewhere asserted their way past the
- * narrowing. Engine code reads payloads through {@link asRecord} or the
- * predicates built on it instead of asserting
- * `payload as Record<string, unknown>`.
+ * `signalsObserved` ledger, kept for the READ-ONLY status surface: the graph
+ * status queries and renderer read a persisted node's ledger through
+ * {@link getSignal} / {@link SIGNAL_KEY} rather than asserting
+ * `payload as Record<string, unknown>`. The legacy engine modules that once
+ * shared this vocabulary (`signal-propagation.ts`, `loop-group-executor.ts`)
+ * were deleted with the legacy signal runtime; the parameter types are
+ * structural, so this module still imports nothing.
  *
- * Dependency rule: this module imports nothing. The engine modules that consume
- * it sit at the bottom of the engine import graph, so a runtime import here
- * would close an import cycle; the parameter types are structural, so not even
- * a type-only import is needed.
+ * Dependency rule: this module imports nothing, so any consumer may depend on
+ * it without an import cycle — not even a type-only import is needed.
  *
  * Contract notes for consumers:
  * - {@link extractReason} answers `undefined` when the payload carries no

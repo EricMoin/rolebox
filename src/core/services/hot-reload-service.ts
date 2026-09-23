@@ -368,8 +368,9 @@ export class HotReloadService implements PluginService {
     // 9. Restart dispatch-service (cascades to tool-service and hook-service,
     //    refreshing the frozen subagent maps and tool registrations).
     //    Awaited: the reload tool only reports completion after this resolves,
-    //    so newly-discovered role agents are resolvable to graph_run/dispatch
-    //    synchronously after the reload returns (no "Agent not found" race).
+    //    so newly-discovered role agents are resolvable to the dispatch and
+    //    graph run paths synchronously after the reload returns (no
+    //    "Agent not found" race).
     await this.ctx.core.restartService("dispatch-service");
 
     log.info("Hot reload complete", {
