@@ -42,11 +42,14 @@
  * answers the host layer asks for:
  *
  * - {@link DshOutcomeDelivery.executionQuery} — the execution query (P2 item 5):
- *   the create call's durable `label` IS the stable key
- *   (`graphId + "/dispatch:" + attemptId`), and `ctx.subagents.listChildren`
- *   finds the child carrying it. The listing is asynchronous, so it is read by
- *   the port's `prime` phase before the run path's synchronous window, and a
- *   child that is not found answers `unknown` — never `absent`, because a
+ *   the create call CARRIES the stable key
+ *   (`graphId + "/dispatch:" + attemptId`) as the documented start-request
+ *   `label`, and `ctx.subagents.listChildren` is asked for the child carrying
+ *   it. Whether a listed child returns that label is unverified in this
+ *   repository; when it does not, the correlation answers `unknown` and the
+ *   effect stays blocked. The listing is asynchronous, so it is read by the
+ *   port's `prime` phase before the run path's synchronous window, and a child
+ *   that is not found answers `unknown` — never `absent`, because a
  *   live-preferred listing cannot prove non-existence;
  * - {@link DshOutcomeDelivery.observeExecution} — the terminal-state read (P2
  *   item 6). dsh has no durable outcome read, so this answers `unknown` with
@@ -83,14 +86,20 @@ import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 
 /**
- * One durable direct-child row, as the dsh subagent listing returns it
- * (contract §4.3 `SubagentListEntry`, structural subset).
+ * One durable direct-child row as rolebox READS a dsh subagent listing row.
+ * The contract extract names `SubagentRuntime.listChildren` (contract §4.3) but
+ * does not define `SubagentListEntry`'s members, so this is a structural
+ * reading, not a quoted contract shape.
  *
- * `label` is the DURABLE creation label the create call carried — for an
- * outcome dispatch it is {@link dispatchIdempotencyKeyOf}, which is what makes
- * the child correlatable with its effect in a later process. `activity` is the
- * listing's own liveness sample and `kind`/`id`/`mode` identify the row;
- * rolebox reads none of them as an outcome.
+ * `label` is the key the create call CARRIED as the documented start-request
+ * `label` — for an outcome dispatch it is {@link dispatchIdempotencyKeyOf},
+ * which is what would make the child correlatable with its effect in a later
+ * process. Whether `listChildren` returns that label is UNVERIFIED in this
+ * repository (`@deepseek-ai/dsh-subagent` is not installed): if it does not,
+ * {@link DshOutcomeDelivery.executionQuery} answers `unknown` and the effect
+ * stays blocked. `activity` is the listing's own liveness sample and
+ * `kind`/`id`/`mode` identify the row; rolebox reads none of them as an
+ * outcome.
  */
 export interface DshSubagentChildRow {
   readonly kind: string;
@@ -372,13 +381,17 @@ export class DshOutcomeDelivery {
 
     const controller = new AbortController();
     const startRequest: DshSubagentStartRequest = {
-      // THE STABLE IDEMPOTENCY KEY IS THE CREATE CALL'S LABEL (P2 item 5). dsh
-      // persists a run's label in the child's durable descriptor and
-      // `listChildren` reads it back, so the key the platform stored is exactly
-      // the string {@link DshOutcomeDelivery.executionQuery} asks for later —
-      // `graphId + "/dispatch:" + attemptId`, derived by the one function both
-      // sides use. (dsh does not DEDUPE on it: at-most-once remains the host's
-      // fenced create right, and the label is the correlation, not the fence.)
+      // THE STABLE IDEMPOTENCY KEY IS THE CREATE CALL'S LABEL (P2 item 5). The
+      // key — `graphId + "/dispatch:" + attemptId`, derived by the one function
+      // both sides use — is CARRIED as the documented start-request `label`,
+      // and it is the string {@link DshOutcomeDelivery.executionQuery} looks for
+      // later. WHETHER the child listing returns that label is UNVERIFIED in
+      // this repository (the contract extract documents `label?` on the start
+      // request only, and `@deepseek-ai/dsh-subagent` is not installed); if it
+      // does not, the correlation answers `unknown` and the effect stays
+      // blocked — fail-closed, never a wrong execution. (dsh does not DEDUPE on
+      // it either: at-most-once remains the host's fenced create right, and the
+      // label is the correlation, not the fence.)
       label: dispatchIdempotencyKeyOf(effect),
       prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request) }],
       parent,
