@@ -141,6 +141,7 @@ import {
 } from "./submit-outcome.ts";
 import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
 import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
+import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
 import {
   auditGraphStore,
@@ -406,6 +407,21 @@ export interface GraphToolSetDeps {
    * opens the ledger at the adapter's declared `credentialStoreRoot`.
    */
   credentialIsolation?: CredentialIsolationAdapter;
+  /**
+   * Optional HOST invocation-identity capability (D9) — the ADDITIONAL
+   * constraint a host may declare on top of per-attempt credentials.
+   *
+   * A TOOLSET dependency, never a tool argument: no declaration and no
+   * submission may grant itself an identity. With a readable capability,
+   * `graph_submit_outcome` records the host identity of the dispatching
+   * invocation on every attempt the run path arms, and a settlement must come
+   * from the same host attribution (`host-identity-mismatch` /
+   * `host-identity-absent`). ABSENT is legal and preserves the behavior this
+   * path had before the rule existed — nothing is recorded, nothing is checked
+   * — while a capability this build cannot read refuses the ingress before it
+   * opens a ledger (`host-identity-unavailable`).
+   */
+  hostIdentity?: HostIdentityCapability;
   /**
    * The HOST dispatch adapter the OUTCOME run path starts a node through
    * (`graph_submit_outcome`), with the create channel and the execution query
@@ -1833,6 +1849,9 @@ export class GraphToolSet {
         ...(this.deps.credentialIsolation === undefined
           ? {}
           : { credentialIsolation: this.deps.credentialIsolation }),
+        ...(this.deps.hostIdentity === undefined
+          ? {}
+          : { hostIdentity: this.deps.hostIdentity }),
         artifactRoot: this.deps.outcomeArtifactRoot ?? this.deps.directory ?? ".",
         ...(this.deps.outcomeNow === undefined
           ? {}

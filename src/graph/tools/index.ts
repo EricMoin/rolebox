@@ -41,6 +41,7 @@ import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
 import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
+import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -201,6 +202,15 @@ export function createGraphTools(
      * a host that has not provided a protected credential store.
      */
     credentialIsolation?: CredentialIsolationAdapter;
+    /**
+     * Optional HOST invocation-identity capability (D9), threaded into a toolset
+     * constructed HERE so `graph_submit_outcome` can bind an attempt to the host
+     * invocation that dispatched it and check every settlement against that
+     * binding. Ignored when a prebuilt `toolset` is provided — that instance
+     * carries its own deps. Absent means the identity binding is not enabled and
+     * every path behaves exactly as before (the core depends on no host).
+     */
+    hostIdentity?: HostIdentityCapability;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -212,6 +222,9 @@ export function createGraphTools(
     ...(opts.contracts !== undefined ? { contracts: opts.contracts } : {}),
     ...(opts.credentialIsolation !== undefined
       ? { credentialIsolation: opts.credentialIsolation }
+      : {}),
+    ...(opts.hostIdentity !== undefined
+      ? { hostIdentity: opts.hostIdentity }
       : {}),
     ...(opts.nodeStallWarnMs !== undefined
       ? { nodeStallWarnMs: opts.nodeStallWarnMs }

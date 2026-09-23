@@ -53,6 +53,7 @@ import {
 } from "./runtime.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type { CredentialIsolationAdapter } from "./credential-isolation.ts";
+import type { HostIdentityCapability } from "./host-identity.ts";
 import type { ValidatorRegistry } from "./validators.ts";
 
 // ── The saved plan and its binding ──────────────────────────────────────────
@@ -216,6 +217,17 @@ export interface ResumePersistedOutcomeGraphOptions {
    * `credential-isolation.ts`.
    */
   readonly credentialIsolation?: CredentialIsolationAdapter;
+  /**
+   * The HOST's invocation-identity capability (D9). Recovery forwards it to the
+   * outcome run path unchanged: a recovered attempt keeps the dispatch identity
+   * its own state entry recorded, recovery NEVER re-binds it to the invocation
+   * that happens to be recovering, and a FIRST execution performed here records
+   * whatever identity the host reports for this sweep. A capability that is
+   * present but unreadable is refused by the runtime (`host-identity-unavailable`)
+   * with the state preserved. Absent → the identity binding is not enabled and
+   * the path behaves exactly as it did before this rule.
+   */
+  readonly hostIdentity?: HostIdentityCapability;
   /** The root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock input, in epoch milliseconds; omitted → `Date.now()`. */
@@ -254,6 +266,9 @@ export function resumePersistedOutcomeGraph(
     ...(options.credentialIsolation === undefined
       ? {}
       : { credentialIsolation: options.credentialIsolation }),
+    ...(options.hostIdentity === undefined
+      ? {}
+      : { hostIdentity: options.hostIdentity }),
   });
   return runtime.resume(options.now);
 }

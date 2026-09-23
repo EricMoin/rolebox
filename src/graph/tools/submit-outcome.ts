@@ -91,6 +91,11 @@ import {
   type CredentialIsolationAdapter,
 } from "../outcome/credential-isolation.ts";
 import {
+  hostIdentityRefusal,
+  readHostIdentityCapability,
+  type HostIdentityCapability,
+} from "../outcome/host-identity.ts";
+import {
   createValidatorRegistry,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
@@ -256,7 +261,14 @@ export type OutcomeSubmitRefusalReason =
    * nobody started (and hand no worker its attempt credential), so the ingress
    * refuses BEFORE it opens a ledger rather than simulating success.
    */
-  | "dispatch-unavailable";
+  | "dispatch-unavailable"
+  /**
+   * This process was handed an UNREADABLE host identity capability (D9). A
+   * declared identity constraint is never downgraded to an unconstrained
+   * submission, so the ingress refuses BEFORE it opens a ledger; a host that
+   * declares no identity capability at all is unaffected (nothing is checked).
+   */
+  | "host-identity-unavailable";
 
 /**
  * A submission the TOOL cannot address — as opposed to one the runtime refuses.
@@ -461,6 +473,17 @@ export interface SubmitOutcomeDeps {
    * declared `credentialStoreRoot` instead of the workspace default.
    */
   readonly credentialIsolation?: CredentialIsolationAdapter;
+  /**
+   * The HOST's invocation-identity capability (D9), threaded to the runtime
+   * unchanged. It is the ADDITIONAL constraint on top of the bearer credential:
+   * an attempt dispatched under a host identity is settled only by a submission
+   * the host attributes to the same invocation. OMITTED is legal and is the
+   * pre-existing behavior — nothing is recorded and nothing is checked — while a
+   * value this build CANNOT READ refuses the ingress before a ledger is opened
+   * (`host-identity-unavailable`), because dropping a declared constraint
+   * silently is the one outcome this rule must not produce.
+   */
+  readonly hostIdentity?: HostIdentityCapability;
   /** Root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock, in epoch milliseconds; omitted → the runtime reads `Date.now()`. */
@@ -501,6 +524,22 @@ export async function submitDeclaredOutcome(
         unprotected.message,
     );
   }
+  // THE HOST IDENTITY GATE (D9) RUNS BEFORE ANY STORE IS OPENED, exactly like
+  // the credential gate: a capability this build cannot read is a declared
+  // constraint it must not silently drop, so the ingress refuses instead of
+  // resolving the submission under an identity check nobody can perform. No
+  // capability at all is NOT a refusal — the binding is simply not enabled.
+  const unreadableHostIdentity = hostIdentityRefusal(deps.hostIdentity);
+  if (unreadableHostIdentity !== undefined) {
+    throw new OutcomeSubmissionRefusedError(
+      "host-identity-unavailable",
+      target.graphId,
+      "graph_submit_outcome refused [" +
+        unreadableHostIdentity.code +
+        "]: " +
+        unreadableHostIdentity.message,
+    );
+  }
   // THE DISPATCH GATE (D8) RUNS BEFORE ANY STORE IS OPENED, for the same
   // reason: an accepted outcome can arm a successor, and a run with no adapter
   // would record that dispatch as performed while no host ever saw it. The
@@ -520,6 +559,9 @@ export async function submitDeclaredOutcome(
   // declares as protected; the workspace default is used only when no adapter
   // exists, which the gate above already refused.
   const isolation = readCredentialIsolationAdapter(deps.credentialIsolation);
+  // The gate above admitted only an ABSENT or READABLE capability, so this
+  // normalization only ever lifts a readable host declaration.
+  const hostIdentity = readHostIdentityCapability(deps.hostIdentity);
   const ledger = await SqliteAcceptanceLedger.create(
     isolation === undefined
       ? engineStateDir(workspaceOf(target))
@@ -533,6 +575,7 @@ export async function submitDeclaredOutcome(
       validators: deps.validators ?? EMPTY_VALIDATORS,
       artifactRoot: deps.artifactRoot,
       ...(isolation === undefined ? {} : { credentialIsolation: isolation }),
+      ...(hostIdentity === undefined ? {} : { hostIdentity }),
       ...(deps.completionPolicies === undefined
         ? {}
         : { completionPolicies: deps.completionPolicies }),

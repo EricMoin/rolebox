@@ -61,6 +61,7 @@ import {
   OUTCOME_STATE_BODY_V4,
   OUTCOME_STATE_BODY_V5,
   OUTCOME_STATE_BODY_V6,
+  OUTCOME_STATE_BODY_V7,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -1065,8 +1066,8 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(extended.message).toContain("round");
   });
 
-  it("installs a reader for versions 1 to 6, and writes version 6", () => {
-    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V6);
+  it("installs a reader for versions 1 to 7, and writes version 7", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V7);
     expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
@@ -1074,6 +1075,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       OUTCOME_STATE_BODY_V4,
       OUTCOME_STATE_BODY_V5,
       OUTCOME_STATE_BODY_V6,
+      OUTCOME_STATE_BODY_V7,
     ]);
     for (const version of [
       OUTCOME_STATE_BODY_V1,
@@ -1082,6 +1084,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       OUTCOME_STATE_BODY_V4,
       OUTCOME_STATE_BODY_V5,
       OUTCOME_STATE_BODY_V6,
+      OUTCOME_STATE_BODY_V7,
     ]) {
       const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
       expect(verdict.kind).toBe("supported");
@@ -1089,6 +1092,112 @@ describe("outcome state body — versioned capability, no silent trimming", () =
         expect(verdict.reader.format).toBe(version);
       }
     }
+  });
+
+  it("reads the version-7 dispatch identity, refuses it on a version that does not define it", () => {
+    // The dispatched entry of this fixture is "ship" (the plan orders nodes by
+    // id) and the pending entry is "work"; the binding belongs to an ATTEMPT.
+    const identity = { sessionId: "session-1", agentId: "agent.ship" };
+
+    // Version 7 DEFINES the field as optional: a present value round-trips and
+    // an absent one stays absent — nothing is invented for the pending entry.
+    const withIdentity = withNodeEntry(stateBodyFixtureRecord(), "ship", (entry) => ({
+      ...entry,
+      dispatchIdentity: identity,
+    }));
+    const state = readOutcomeGraphState(recordOf(withIdentity), STATE_BODY_PLAN);
+    expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V7);
+    expect(state.nodes[0]?.dispatchIdentity).toEqual(identity);
+    expect(state.nodes[1]?.dispatchIdentity).toBeUndefined();
+
+    // Version 6 does NOT define the field, so a body carrying one is refused
+    // rather than read with a binding its declared version never wrote.
+    const onV6 = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf({ ...withIdentity, bodyVersion: OUTCOME_STATE_BODY_V6 }),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(onV6.problem).toBe("malformed-state");
+    expect(onV6.message).toContain("dispatchIdentity");
+
+    // A value the identity reader cannot read is MALFORMED, never "no
+    // identity": dropping it on the next write would erase the binding.
+    const malformed = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf(
+          withNodeEntry(stateBodyFixtureRecord(), "ship", (entry) => ({
+            ...entry,
+            dispatchIdentity: { sessionId: "session-1" },
+          })),
+        ),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(malformed.problem).toBe("malformed-state");
+    expect(malformed.message).toContain("dispatchIdentity");
+
+    // A pending entry has no attempt, so it can carry no binding.
+    const onPending = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf(
+          withNodeEntry(stateBodyFixtureRecord(), "work", (entry) => ({
+            ...entry,
+            dispatchIdentity: identity,
+          })),
+        ),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(onPending.problem).toBe("malformed-state");
+    expect(onPending.message).toContain("pending");
+  });
+
+  it("advances a version-6 body into version 7 without inventing a binding", () => {
+    // The PREVIOUS build's layout, carrying every field this build writes on an
+    // attempt except the optional dispatch identity — which is exactly why it is
+    // advanceable: nothing has to be invented, and the settled entry keeps no
+    // binding (it was dispatched under none).
+    const v6Body = {
+      ...stateBodyFixtureRecord(),
+      bodyVersion: OUTCOME_STATE_BODY_V6,
+    };
+    const state = readOutcomeGraphState(recordOf(v6Body), STATE_BODY_PLAN);
+    expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V6);
+
+    // "ship" is the dispatched attempt of this fixture and "delivered" is its
+    // terminal outcome, so the advance settles it and arms nothing.
+    const advance = advanceOutcomeGraph({
+      plan: STATE_BODY_PLAN,
+      state,
+      decision: {
+        kind: "accepted",
+        identity: {
+          graphId: STATE_BODY_PLAN.graphId,
+          attemptId: "ship#1",
+          submissionId: "submission-v6",
+        },
+        planRevision: STATE_BODY_PLAN.planRevision,
+        proposalDigest: "digest-v6",
+        nodeId: "ship",
+        outcomeId: "delivered",
+        requirements: [],
+      },
+      now: NOW + 1,
+      mintCredential: RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
+    });
+    expect(advance.state.bodyVersion).toBe(OUTCOME_STATE_BODY_V7);
+    expect(advance.dispatches).toEqual([]);
+    const settled = advance.state.nodes.find((node) => node.nodeId === "ship");
+    expect(settled?.status).toBe("settled");
+    expect(settled?.attemptCredential).toBe(FIXTURE_CREDENTIAL);
+    expect(settled?.dispatchIdentity).toBeUndefined();
+
+    // The rewritten body is THIS build's own shape: the reader accepts it and
+    // reads back exactly what the writer produced.
+    const reread = readOutcomeGraphState(recordOf(advance.state), STATE_BODY_PLAN);
+    expect(reread.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+    expect(reread.nodes.find((node) => node.nodeId === "ship")?.dispatchIdentity).toBeUndefined();
   });
 
   it("refuses to advance a body version that cannot carry a credential, arrivals or progress", () => {
@@ -1559,7 +1668,7 @@ describe("outcome state body — the progress record is a declared comparison", 
       const stored = ledger.readGraphState(PROGRESS_BODY_PLAN.graphId);
       if (stored === undefined) throw new Error("fixture: the state row is missing");
       const state = readOutcomeGraphState(stored, PROGRESS_BODY_PLAN);
-      expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V6);
+      expect(state.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
       expect(state.phase).toBe("stopped");
       expect(state.loopProgress?.["revise-loop"]).toEqual({
         loopGroupId: "revise-loop",

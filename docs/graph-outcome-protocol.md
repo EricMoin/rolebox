@@ -35,6 +35,18 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   the state it belongs to, executed through a host adapter that creates the
   execution and answers whether one already exists
   (`src/graph/outcome/dispatch-effects.ts`, `runtime.ts`, `recovery.ts`);
+- host invocation identity as an ADDITIONAL constraint on top of the bearer
+  credential (D9): a host that declares `{ version, id, current() }` gets the
+  identity of the dispatching invocation recorded on the attempt's own state
+  entry (state-body version 7), and a submission that settles that attempt must
+  come from the same host attribution — a mismatch, an absent identity or an
+  unreadable declaration is refused by name and writes nothing
+  (`src/graph/outcome/host-identity.ts`, `graph-state.ts`, `runtime.ts`);
+- restart reconciliation that REPORTS its disagreements (D9): every effect whose
+  persisted local status and the host's fact about the same stable id contradict
+  each other is named in `divergences` with what recovery did about it — never a
+  blind re-dispatch and never a silent drop (`runtime.ts`, `recovery.ts`,
+  `engine/engine-startup.ts`);
 - the durable STOP: hard-limit exhaustion and the declared progress-stalled
   policy end the run inside the same transaction that accepts the outcome
   (`src/graph/outcome/progress.ts`, `graph-state.ts`);
@@ -51,9 +63,11 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
 - the protocol-aware dispatch completion bridge: the outcome runtime is driven by
   a synchronous host adapter, so production dispatch settles no node through it
   and the natural-completion SETTLEMENT path is not executed;
-- any HOST implementation of the dispatch adapter: this build ships the contract
-  and the reconciliation, and no adapter, so every production entry refuses an
-  outcome graph until a deployment injects one (D8);
+- any HOST implementation of the dispatch adapter or of the identity
+  capability: this build ships the contracts and the reconciliation, and no
+  adapter, so every production entry refuses an outcome graph until a
+  deployment injects a dispatcher (D8), and the identity constraint is simply
+  not enabled until one injects an identity capability (D9);
 - the remaining validator capabilities: only the registry and the
   artifact-reference validator exist; the schema, command-check and approval
   validators do not;
@@ -1949,6 +1963,109 @@ DEFERRED by this slice, and not implied by it: any host IMPLEMENTATION of the
 adapter, the protocol-aware dispatch completion bridge, storage format 3 with
 its `2 -> 3` migrator, a cross-process effect executor beyond the adapter
 contract, and stage-E retirement.
+
+D9 ADDS THE HOST INVOCATION IDENTITY AS AN ADDITIONAL CONSTRAINT, AND MAKES
+RESTART RECONCILIATION REPORT ITS DISAGREEMENTS.
+
+THE HOLE THIS NARROWS WAS REPRODUCED IN D7, AND IT IS NOT CLOSABLE INSIDE THE
+SUBMISSION PATH. An attempt credential is a bearer nonce: a process that can
+read the ledger can copy another attempt's credential and submit that attempt's
+outcome. D7 answers that with a store boundary the HOST must provide. D9 adds a
+second, independent constraint for hosts that can attribute an invocation: the
+host declares WHO is asking, the runtime records that attribution on the attempt
+at dispatch, and a submission that settles the attempt must come from the same
+attribution — so a credential copied into a different host invocation no longer
+settles the attempt it was copied from.
+
+THE HOST ADAPTER CONTRACT, IN FULL, IS FOUR ITEMS, EACH WITH ONE RULE. Three
+were delivered by D7 and D8; this slice adds the fourth and states the four
+together, because a host deployment has to satisfy all of them to run an outcome
+graph:
+
+| Capability | What the host declares | When it is absent | When it is unreadable | Refusal codes |
+| --- | --- | --- | --- | --- |
+| Protected credential store (D7, `credential-isolation.ts`) | every persisted attempt credential, and the state body inside the ledger, lies outside every dispatched worker's read and write scope | the run path refuses enablement — start, resume, submit, the ingress and the sweep all refuse before opening a ledger | same: a value this build cannot read is refused, never downgraded | `credential-isolation-unavailable` |
+| Per-attempt credential delivery (D7, same adapter) | a dispatched attempt receives ONLY its own credential, over its own dispatch channel; no report channel is a delivery channel | same as above | same as above | `credential-isolation-unavailable` |
+| Execution create plus stable-id lookup (D8, `dispatch-effects.ts`) | `create(request, effect)` starts an execution idempotently per `(graphId, effectId)`, and `lookup(effect)` answers `created`, `absent` or `unknown` — `unknown` rather than a guess | no dispatcher at all: the run path, the ingress and the sweep refuse enablement; a bare create-only seam is accepted as the DEGENERATE host and its lookup answers `unknown` | — (a bare function IS the degenerate adapter, by design) | `dispatch-unavailable`; `dispatch-unreconciled` when an unsettled effect cannot be established |
+| Host invocation identity (D9, `host-identity.ts`) | the invoking session and agent the host attributes to the operation being performed now; `undefined` when this invocation has none | NO constraint: nothing is recorded and nothing is checked, which is exactly the behavior every path had before this rule — the core protocol depends on no host | the operation is refused before anything is read or written | `host-identity-unavailable` (unreadable declaration, or a recorded binding judged without a capability), `host-identity-mismatch`, `host-identity-absent` |
+
+IDENTITY IS AN ADDITION, AND THE ASYMMETRY IS THE RULE. Identity binding never
+replaces a credential check: the credential resolves the attempt first, and the
+identity is checked against that attempt's OWN dispatch record second. The
+reference is always what the DISPATCH recorded — never the current invocation,
+never the node's current attempt — which yields exactly one asymmetric rule:
+
+- an attempt dispatched under NO host identity carries no binding and is NOT
+  constrained; a later process never fabricates one for it, exactly as this
+  build never invents a credential for an attempt that was issued none;
+- an attempt that DID record one cannot be settled without the check. A
+  mismatch (`host-identity-mismatch`), an invocation the host supplies no
+  identity for (`host-identity-absent`), and a judging process that holds no
+  readable capability (`host-identity-unavailable`) all REFUSE the submission
+  and write nothing. Dropping the constraint to let the submission through is
+  the one outcome this rule must not produce.
+
+THE BINDING IS LAYOUT, NOT AN EXTRA, AND IT SURVIVES A RESTART. The identity is
+recorded on the attempt's own node entry and the state body version becomes 7
+(`OUTCOME_STATE_BODY_V7`). Version 6 and version 5 stay ADVANCEABLE — version 6
+carries every field version 7 requires except the OPTIONAL identity, so
+advancing it invents nothing — while versions 1 to 4 stay readable only
+(`graph-state.ts`). A restart NEVER re-binds a recorded identity to the
+invocation that happens to be recovering: `resume` reports the attempt it finds
+and does not ask the host for the current identity at all. The write -> restart
+-> read -> write round trip is enforced by the regression test below.
+
+THE BOUNDARY IS THE HOST'S, AND THIS DOCUMENT SAYS SO. This build can compare
+the identity the host DECLARES at dispatch with the identity the host DECLARES
+at submission. It cannot verify either declaration, cannot force a host to
+attribute a worker's invocation correctly, and cannot isolate anything at the
+filesystem level: a host that answers the same identity for every call, or whose
+attribution a thief can influence, defeats this constraint and is undetectable
+here — exactly as a host that declares a protected store it does not provide
+defeats D7. A host whose dispatched workers submit under a different
+attribution than the dispatch was made under will see those submissions refused
+BY NAME; that is the constraint working, and such a host must not declare the
+capability (or must fix its attribution) rather than have the check disappear.
+No adapter ships in this build, so a deployment that has not injected one gets
+the unconstrained (pre-D9) behavior by construction.
+
+RESTART RECONCILIATION NOW REPORTS ITS DISAGREEMENTS. D8 resolves the
+commit-then-crash window by asking the host, but a resolution is not a report:
+`resume` also carries `divergences`, one entry per effect whose persisted LOCAL
+status and the host's FACT about the same stable id contradict each other.
+
+| Local row | Host fact | Reported as | Recovery action |
+| --- | --- | --- | --- |
+| `pending` | `created` | `divergences[] = { local: pending, host: created, resolution: reconciled-started }`, and `reconciled[]` names the positive resolution | mark `started`; **never** create a second execution |
+| `started` | `absent` | `divergences[] = { local: started, host: absent, resolution: reported-unreconciled }`, and `refusals[]` carries `dispatch-unreconciled` | change NOTHING; report for host/manual reconciliation |
+| `pending` | `absent` | not a divergence — the ordinary commit-then-crash window | create exactly ONCE, then mark `started` |
+| `pending` | `unknown` (or no query capability) | not a divergence — the host stated no fact | create nothing; report `dispatch-unreconciled` |
+| `started` | `created` | not a divergence — the two records agree | `reconciled: recorded-started`, nothing launched |
+
+A SECOND RECOVERY IS IDEMPOTENT: the reconciled row now AGREES with the host and
+reports no fresh divergence, while a contradiction that no host fact has
+resolved is reported again with NOTHING written either time. The startup sweep
+carries the same records in `outcomeProtocol.divergences`, so the restart report
+names the contradictions instead of leaving them to be inferred from the
+reconciled/refused buckets.
+
+ENFORCED BY TESTS. `tests/graph/host-identity.test.ts` covers the strict reader
+and the four shapes of a missing/malformed declaration; the write -> restart ->
+read -> write round trip with the recorded identity surviving and the successor
+being bound to the submitting invocation; a mismatch refused with no receipt, no
+event and no state change; the unverifiable cases (`absent` identity, no
+capability, unreadable capability) refused instead of settled; an attempt
+dispatched under NO identity left unconstrained; the ingress and the sweep
+refusing an unreadable capability before opening a ledger; and both divergence
+directions with an idempotent second recovery.
+`tests/graph/ledger-graph-state.test.ts` pins the version-7 reader, the refusal
+of the field on a version that does not define it, and the malformed-identity
+refusal.
+
+DEFERRED by this slice, and not implied by it: any host IMPLEMENTATION of the
+identity capability or of the dispatch adapter (this build ships the contracts),
+a signature over a submission, platform-level process isolation, and the
+protocol-aware dispatch completion bridge.
 
 ### Definitions, locations, and comparison owners
 

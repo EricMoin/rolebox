@@ -123,6 +123,15 @@
  * credential is issued once, at dispatch, and inventing one on read would
  * fabricate the very binding the credential exists to prove.
  *
+ * VERSION 7 ADDS THE OPTIONAL HOST INVOCATION IDENTITY. A `dispatched` or
+ * `settled` entry records the host identity its dispatch ran under when the
+ * runtime held a readable host identity capability (`host-identity.ts`, D9).
+ * The field is OPTIONAL because a host that declares no identity capability
+ * records none — absence is the complete statement "no host identity was in
+ * effect", and no later process back-fills one onto an attempt that predates
+ * the field. Versions 5 and 6 stay ADVANCEABLE (they carry everything version 7
+ * needs except that optional binding); versions 1 to 4 stay readable only.
+ *
  * Dependency leaf on the outcome side: the compiler's plan TYPES, the ledger's
  * record TYPE and the acceptance core's decision type, all type-only, so the
  * reducer can be tested without a ledger and the runtime can own the wiring.
@@ -150,6 +159,10 @@ import {
   type ProgressProjection,
   type ProgressReport,
 } from "./progress.ts";
+import {
+  readHostInvocationIdentity,
+  type HostInvocationIdentity,
+} from "./host-identity.ts";
 
 // ── The state model ─────────────────────────────────────────────────────────
 
@@ -192,6 +205,24 @@ export interface OutcomeNodeState {
    * credential does and does not prove).
    */
   readonly attemptCredential?: string;
+  /**
+   * The HOST INVOCATION IDENTITY this attempt was dispatched under (body
+   * version 7 and later), present exactly when the runtime that dispatched it
+   * held a readable host identity capability that named an invocation — see
+   * `host-identity.ts` and the D9 section of the protocol.
+   *
+   * A submission that settles this attempt must come from the SAME host
+   * attribution; the run path checks the host's current identity against this
+   * record before it settles anything. Absence is a FACT, not a gap: an attempt
+   * dispatched when the host supplied no identity has no binding, and neither a
+   * reader nor a recovery ever fabricates one for it — the reference is what
+   * the dispatch recorded, never what a later invocation happens to be.
+   *
+   * A settled node keeps the identity of the attempt that settled it, exactly
+   * as it keeps that attempt's credential, so a repeated submission is checked
+   * against the same attribution rather than a newer one.
+   */
+  readonly dispatchIdentity?: HostInvocationIdentity;
   /** The accepted outcome that settled this node; present only when settled. */
   readonly outcomeId?: string;
   /** Epoch milliseconds this attempt was dispatched at. */
@@ -515,9 +546,42 @@ export const OUTCOME_STATE_BODY_V5 = 5 as const;
  * fabricate one) and happens ONCE per body, because a version-6 counter is
  * produced by the comparison alone.
  *
- * This is the layout this build writes.
+ * This was the layout this build wrote before version 7 added the recorded host
+ * invocation identity; it stays readable and is still advanced.
  */
 export const OUTCOME_STATE_BODY_V6 = 6 as const;
+
+/**
+ * The seventh versioned state-body layout: a `dispatched` or `settled` node
+ * entry MAY carry the `dispatchIdentity` the runtime recorded when it
+ * dispatched that attempt — the host invocation identity a submission for that
+ * attempt must come from (see `host-identity.ts`).
+ *
+ * WHY A DISPATCH IDENTITY IS LAYOUT AND NOT AN EXTRA. The identity is the
+ * reference half of the binding: it is recorded by the process that dispatched
+ * the attempt and checked by the process that settles it, which may be a
+ * DIFFERENT process after a restart. A body version that has no field for it
+ * cannot carry the reference across that restart, so a later process could
+ * neither enforce the host's constraint nor tell "this attempt was dispatched
+ * without a host identity" from "the field was dropped on the way" — and a
+ * field silently dropped from a state that is written back is exactly the
+ * defect the version gate exists to prevent.
+ *
+ * THE FIELD IS OPTIONAL WITHIN THE VERSION, unlike the credential: a host that
+ * declares no identity capability records none, and an attempt dispatched by
+ * such a host keeps no binding. Absence says "no host identity was in effect",
+ * which is a complete and honest statement; it never means "unchecked".
+ *
+ * Versions 1 to 6 stay READABLE and versions 5 and 6 stay ADVANCEABLE: version
+ * 6 carries every field version 7 requires except this optional one, so
+ * advancing it invents nothing — the already-recorded attempts keep no identity
+ * (which is what they were dispatched with) and only attempts armed from now on
+ * record one. A body is never migrated in place, and no identity is ever
+ * back-filled onto an attempt that predates the field.
+ *
+ * This is the layout this build writes.
+ */
+export const OUTCOME_STATE_BODY_V7 = 7 as const;
 
 /**
  * The state-body format this build writes.
@@ -528,7 +592,7 @@ export const OUTCOME_STATE_BODY_V6 = 6 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V6;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V7;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -756,6 +820,44 @@ function readOptionalEpoch(
 }
 
 /**
+ * Read one optional `dispatchIdentity` field against the declared layout (v7).
+ *
+ * `defined` — the field may be ABSENT (an attempt dispatched by a host that
+ * declared no identity records none), but a value that is present must be a
+ * readable `{ sessionId, agentId }` identity: an unreadable binding is refused
+ * rather than read partially, because the state it is written back from would
+ * otherwise drop the reference a submission is checked against. `forbidden` —
+ * a version that does not define the field refuses an entry that carries one.
+ */
+function readDispatchIdentity(
+  raw: Record<string, unknown>,
+  where: string,
+  layout: OutcomeStateLayout,
+): HostInvocationIdentity | undefined {
+  const value = raw.dispatchIdentity;
+  if (layout.dispatchIdentity === "defined") {
+    if (value === undefined) return undefined;
+    const identity = readHostInvocationIdentity(value);
+    if (identity === undefined) {
+      throw malformedState(
+        where + ".dispatchIdentity is " + describeValue(value) +
+          ", not a { sessionId, agentId } host invocation identity — the binding a " +
+          "submission for this attempt is checked against is refused rather than read " +
+          "partially",
+      );
+    }
+    return identity;
+  }
+  if (value !== undefined) {
+    throw malformedState(
+      where + " carries a dispatchIdentity, which body version " + layout.version +
+        " does not define — the host binding is refused rather than dropped",
+    );
+  }
+  return undefined;
+}
+
+/**
  * One state-body layout: the NODE fields the version defines per status, the
  * BODY fields it defines, the phases its writer can produce, and whether it
  * requires the attempt credential the run path checks a submission against.
@@ -796,6 +898,16 @@ interface OutcomeStateLayout {
    * field this version never wrote.
    */
   readonly loopProgress: "required" | "forbidden";
+  /**
+   * `defined` — the version defines the per-entry `dispatchIdentity` record
+   * (version 7 and later), which its writer writes EXACTLY when the runtime
+   * that dispatched the attempt held a host identity for that invocation; it is
+   * OPTIONAL within the version, because a host that declares no identity
+   * capability records none. `forbidden` — the version does not define the
+   * field, so an entry that carries one is refused rather than read with a
+   * field this version never wrote.
+   */
+  readonly dispatchIdentity: "defined" | "forbidden";
 }
 
 /**
@@ -831,6 +943,7 @@ const OUTCOME_STATE_LAYOUT_V1: OutcomeStateLayout = Object.freeze({
   bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "forbidden" as const,
+  dispatchIdentity: "forbidden" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
   loopProgress: "forbidden" as const,
@@ -865,6 +978,7 @@ const OUTCOME_STATE_LAYOUT_V2: OutcomeStateLayout = Object.freeze({
   bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "required" as const,
+  dispatchIdentity: "forbidden" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
   loopProgress: "forbidden" as const,
@@ -903,6 +1017,7 @@ const OUTCOME_STATE_LAYOUT_V3: OutcomeStateLayout = Object.freeze({
   bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "required" as const,
+  dispatchIdentity: "forbidden" as const,
   arrivals: "required" as const,
   stop: "forbidden" as const,
   loopProgress: "forbidden" as const,
@@ -944,6 +1059,7 @@ const OUTCOME_STATE_LAYOUT_V4: OutcomeStateLayout = Object.freeze({
   ]),
   phases: OUTCOME_STATE_PHASES_V4,
   credential: "required" as const,
+  dispatchIdentity: "forbidden" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
   loopProgress: "forbidden" as const,
@@ -987,6 +1103,7 @@ const OUTCOME_STATE_LAYOUT_V5: OutcomeStateLayout = Object.freeze({
   ]),
   phases: OUTCOME_STATE_PHASES_V4,
   credential: "required" as const,
+  dispatchIdentity: "forbidden" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
   loopProgress: "required" as const,
@@ -1025,6 +1142,30 @@ const OUTCOME_STATE_LAYOUT_V5: OutcomeStateLayout = Object.freeze({
 const OUTCOME_STATE_LAYOUT_V6: OutcomeStateLayout = Object.freeze({
   ...OUTCOME_STATE_LAYOUT_V5,
   version: OUTCOME_STATE_BODY_V6,
+});
+
+/**
+ * The node fields body version 7 defines: version 6's fields plus the OPTIONAL
+ * `dispatchIdentity` a dispatched or settled entry carries when the runtime
+ * that dispatched it held a host identity for that invocation (see
+ * {@link OUTCOME_STATE_BODY_V7}). The key lists are built FROM version 6's, so
+ * the two layouts cannot drift apart in the fields they share.
+ */
+const OUTCOME_STATE_LAYOUT_V7: OutcomeStateLayout = Object.freeze({
+  ...OUTCOME_STATE_LAYOUT_V6,
+  version: OUTCOME_STATE_BODY_V7,
+  dispatchIdentity: "defined" as const,
+  keys: Object.freeze({
+    pending: Object.freeze([...OUTCOME_STATE_LAYOUT_V6.keys.pending]),
+    dispatched: Object.freeze([
+      ...OUTCOME_STATE_LAYOUT_V6.keys.dispatched,
+      "dispatchIdentity",
+    ]),
+    settled: Object.freeze([
+      ...OUTCOME_STATE_LAYOUT_V6.keys.settled,
+      "dispatchIdentity",
+    ]),
+  }),
 });
 
 /**
@@ -1090,6 +1231,7 @@ function readNodeState(
   const attemptId = raw.attemptId;
   const attemptSeq = raw.attemptSeq;
   const attemptCredential = raw.attemptCredential;
+  const dispatchIdentity = readDispatchIdentity(raw, where, layout);
   const outcomeId = raw.outcomeId;
   const dispatchedAt = readOptionalEpoch(raw, "dispatchedAt", where);
   const settledAt = readOptionalEpoch(raw, "settledAt", where);
@@ -1109,13 +1251,14 @@ function readNodeState(
       attemptId !== undefined ||
       attemptSeq !== undefined ||
       attemptCredential !== undefined ||
+      dispatchIdentity !== undefined ||
       outcomeId !== undefined ||
       dispatchedAt !== undefined ||
       settledAt !== undefined
     ) {
       throw malformedState(
-        where + " is pending but carries attempt, credential, outcome or timestamp fields — a " +
-          "node that was never dispatched has no attempt identity",
+        where + " is pending but carries attempt, credential, host binding, outcome or " +
+          "timestamp fields — a node that was never dispatched has no attempt identity",
       );
     }
     return Object.freeze({
@@ -1175,6 +1318,7 @@ function readNodeState(
       attemptId,
       attemptSeq,
       ...(credential === undefined ? {} : { attemptCredential: credential }),
+      ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
       outcomeId,
       dispatchedAt,
       settledAt,
@@ -1192,6 +1336,7 @@ function readNodeState(
     attemptId,
     attemptSeq,
     ...(credential === undefined ? {} : { attemptCredential: credential }),
+    ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     dispatchedAt,
     ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
   });
@@ -2173,17 +2318,19 @@ const OUTCOME_STATE_BODY_V3_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V3);
 const OUTCOME_STATE_BODY_V4_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V4);
 const OUTCOME_STATE_BODY_V5_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V5);
 const OUTCOME_STATE_BODY_V6_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V6);
+const OUTCOME_STATE_BODY_V7_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V7);
 
 /**
- * The state-body capabilities this build installs: version 6 (what it writes,
- * with attempt credentials, join arrivals, the stop a capped run ends on, the
- * per-group progress record a declared policy is compared against, and counters
- * that an unknown comparison clears), version 5 as the READABLE predecessor whose
- * counters are recomputed before it is advanced (see
- * {@link OUTCOME_STATE_BODY_V6}), and versions 4, 3, 2 and 1 as readable older
- * layouts whose attempts the run path refuses to advance — version 4 records no
- * progress baseline, version 3 cannot record a stop, version 2 records no
- * arrivals and version 1 no credential, and none of those is migrated.
+ * The state-body capabilities this build installs: version 7 (what it writes,
+ * everything version 6 carries plus the OPTIONAL host invocation identity a
+ * dispatched or settled attempt was bound to), version 6 and version 5 as the
+ * ADVANCEABLE predecessors (version 5's counters are recomputed before it is
+ * advanced — see {@link OUTCOME_STATE_BODY_V6} — and version 6 carries every
+ * field version 7 requires except the optional identity, so advancing it
+ * invents nothing), and versions 4, 3, 2 and 1 as readable older layouts whose
+ * attempts the run path refuses to advance — version 4 records no progress
+ * baseline, version 3 cannot record a stop, version 2 records no arrivals and
+ * version 1 no credential, and none of those is migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
@@ -2195,6 +2342,7 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
       OUTCOME_STATE_BODY_V4_READER,
       OUTCOME_STATE_BODY_V5_READER,
       OUTCOME_STATE_BODY_V6_READER,
+      OUTCOME_STATE_BODY_V7_READER,
     ],
   });
 
@@ -2565,6 +2713,21 @@ function verifyArrivals(
 
 // ── The reducer ─────────────────────────────────────────────────────────────
 
+/**
+ * The state-body versions this build ADVANCES. A body written by an older
+ * layout is advanced only when it carries everything this build writes on an
+ * attempt: version 5 (counters recomputed, see {@link OUTCOME_STATE_BODY_V6})
+ * and version 6 (which carries every field version 7 requires except the
+ * OPTIONAL dispatch identity, so nothing is invented). Versions 1 to 4 cannot
+ * carry a credential, a join arrival list or a progress baseline, so they stay
+ * readable and are refused by name rather than advanced into a newer layout.
+ */
+const ADVANCEABLE_STATE_BODY_VERSIONS: readonly number[] = Object.freeze([
+  OUTCOME_STATE_BODY_V5,
+  OUTCOME_STATE_BODY_V6,
+  OUTCOME_STATE_BODY_V7,
+]);
+
 /** Why an accepted outcome could not be applied to the state. */
 export type OutcomeAdvanceRefusalCode =
   /** The decision names a node the plan does not declare. */
@@ -2679,6 +2842,14 @@ export interface OutcomeAdvanceInput {
    * projection is REFUSED (`progress-unbound`) rather than skipped.
    */
   readonly progress?: readonly ProgressProjection[];
+  /**
+   * The HOST invocation identity in effect for this advance (D9), recorded on
+   * every attempt it arms. Absent — no readable host identity capability, or an
+   * invocation the host supplies no identity for — arms attempts with NO
+   * binding, which is a complete statement: the runtime never invents one, and
+   * the absence is exactly what a later submission's check reads.
+   */
+  readonly dispatchIdentity?: HostInvocationIdentity;
 }
 
 /**
@@ -2896,11 +3067,13 @@ function describeProjectionBinding(projection: ProgressProjection): string {
  * advance.
  *
  * The rules, in order:
- * 0. the state must be written in the CURRENT body layout — a version that
- *    cannot carry attempt credentials and join arrivals is refused instead of
- *    being advanced and rewritten in a newer one — and it must not already be
- *    STOPPED: a stopped run takes no further step, so the advance is refused
- *    with the reason the run ended rather than quietly clearing it;
+ * 0. the state must be written in a body layout this build ADVANCES (version 5
+ *    with its counters recomputed, version 6, or the current version 7) — a
+ *    version that cannot carry attempt credentials, join arrivals or progress
+ *    baselines is refused instead of being advanced and rewritten in a newer
+ *    one — and it must not already be STOPPED: a stopped run takes no further
+ *    step, so the advance is refused with the reason the run ended rather than
+ *    quietly clearing it;
  * 1. the decision's node must be a plan node, currently dispatched, on the
  *    attempt the decision names — otherwise the acceptance does not describe
  *    the state in hand and the advance is refused;
@@ -2920,25 +3093,24 @@ function describeProjectionBinding(projection: ProgressProjection): string {
  *    {@link joinSatisfiedFor} for why waiting, not refusal, is the outcome
  *    protocol's answer), and a satisfied one arms EXACTLY ONCE, so two feeders
  *    completing out of order cannot overwrite the attempt in flight;
- * 6. an armed successor gets a FRESH attempt minted from the graph-wide counter
- *    AND a fresh credential from the injected source; a settled successor is
- *    re-armed only when source and target share a declared loop group;
+ * 6. an armed successor gets a FRESH attempt minted from the graph-wide counter,
+ *    a fresh credential from the injected source, and — when this advance was
+ *    given one — the host invocation identity the attempt is bound to; a settled
+ *    successor is re-armed only when source and target share a declared loop
+ *    group;
  * 7. the arrival list is re-materialized for every node once the advance is
  *    applied, so the state carries the durable, canonical record of who has
  *    arrived at every join.
  */
 export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance {
   const { plan, state, decision, now } = input;
-  if (
-    state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY &&
-    state.bodyVersion !== OUTCOME_STATE_BODY_V5
-  ) {
+  if (!ADVANCEABLE_STATE_BODY_VERSIONS.includes(state.bodyVersion)) {
     throw new OutcomeAdvanceRefusedError(
       "unsupported-state-version",
       "outcome-advance: the state was written in body version " + state.bodyVersion +
-        ", which this build does not advance (it advances body version " +
-        OUTCOME_STATE_BODY_V5 + ", whose counters it recomputes, and version " +
-        CURRENT_OUTCOME_STATE_BODY + ") — a version before " + OUTCOME_STATE_BODY_V5 +
+        ", which this build does not advance (it advances body versions " +
+        ADVANCEABLE_STATE_BODY_VERSIONS.join(", ") +
+        ") — a version before " + OUTCOME_STATE_BODY_V5 +
         " cannot carry the attempt credentials, join arrivals and progress baselines this " +
         "build writes on every attempt, and a newer one is not read by this build — the " +
         "state is refused rather than advanced and rewritten in body version " +
@@ -3035,6 +3207,13 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     ...(current.attemptCredential === undefined
       ? {}
       : { attemptCredential: current.attemptCredential }),
+    // The host identity the attempt was DISPATCHED under is kept for the same
+    // reason its credential is: a repeated submission resolves back to this
+    // attempt (and its receipt) and must still be checked against the binding
+    // that attempt was made under, never against a newer invocation.
+    ...(current.dispatchIdentity === undefined
+      ? {}
+      : { dispatchIdentity: current.dispatchIdentity }),
     outcomeId: decision.outcomeId,
     ...(current.dispatchedAt === undefined ? {} : { dispatchedAt: current.dispatchedAt }),
     settledAt: now,
@@ -3217,6 +3396,13 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         attemptId,
         attemptSeq,
         attemptCredential: credential,
+        // The invocation identity IN EFFECT for this advance, recorded with the
+        // attempt so a later process can require the submission to come from the
+        // same host attribution (D9). Absent when the host declared none: the
+        // absence is the record, and no later process back-fills one.
+        ...(input.dispatchIdentity === undefined
+          ? {}
+          : { dispatchIdentity: input.dispatchIdentity }),
         dispatchedAt: now,
         // The canonical arrival list is materialized once the whole advance is
         // applied (below); an armed node's list is the arrivals that armed it.

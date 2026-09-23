@@ -123,6 +123,29 @@
  * unprotected process mints, persists, hands out and settles NOTHING — the
  * capability is the enablement condition, not a hardening option.
  *
+ * A HOST IDENTITY IS AN ADDITIONAL CONSTRAINT, NEVER A PREREQUISITE (D9). A
+ * host may inject a host identity capability naming the invoking session and
+ * agent. With one, every attempt this runtime dispatches records the identity
+ * of the invocation that dispatched it, and a submission that settles that
+ * attempt must come from the SAME host attribution: a mismatch
+ * (`host-identity-mismatch`), an absent identity where one was recorded
+ * (`host-identity-absent`) or an unreadable declaration
+ * (`host-identity-unavailable`) is refused before anything is written. WITHOUT
+ * one, nothing is recorded and nothing is checked — the core protocol depends
+ * on no host, and every path that existed before this rule behaves exactly as
+ * it did. The reference is always the identity the DISPATCH recorded on the
+ * attempt's own entry: a restart never re-binds it, and an attempt dispatched
+ * under no identity is never given one on read.
+ *
+ * RESTART RECONCILIATION REPORTS ITS DISAGREEMENTS (D9). `resume` compares each
+ * unsettled effect's persisted LOCAL status with the host's fact about the same
+ * stable effect id and reports every contradiction in `divergences`: a `pending`
+ * row the host reports `created` is marked `started` without a second create
+ * (`reconciled-started`), and a `started` row the host reports `absent` is left
+ * exactly as it is and reported for reconciliation (`reported-unreconciled`).
+ * A host that answers `unknown` stated no fact and is reported as unsettled
+ * work instead, never as a divergence.
+ *
  * SCOPE, STATED PLAINLY. C3c delivers `resume` here, the model-facing
  * `graph_submit_outcome` ingress (`src/graph/tools/submit-outcome.ts`), and the
  * startup sweep's route onto this runtime. D8 delivers the unified dispatch
@@ -192,6 +215,14 @@ import {
   credentialIsolationRefusal,
   type CredentialIsolationAdapter,
 } from "./credential-isolation.ts";
+import {
+  hostIdentityCheckRefusal,
+  hostIdentityRefusal,
+  readCurrentHostIdentity,
+  type HostIdentityCapability,
+  type HostIdentityReading,
+  type HostInvocationIdentity,
+} from "./host-identity.ts";
 import {
   dispatchEffectIdOf,
   dispatchEffectKeyOf,
@@ -366,7 +397,28 @@ export type OutcomeRuntimeRefusalCode =
    * or settle anything rather than run with credentials this build cannot
    * protect; nothing is written and no fallback is taken.
    */
-  | "credential-isolation-unavailable";
+  | "credential-isolation-unavailable"
+  /**
+   * The host identity capability this process holds is unreadable (D9): a value
+   * was injected that is not a version-1 `{ version, id, current }` capability.
+   * A declared identity constraint is never downgraded to an unconstrained run,
+   * so the operation is refused rather than performed without the check.
+   */
+  | "host-identity-unavailable"
+  /**
+   * The host reports an invocation identity for this submission that differs
+   * from the identity recorded when the attempt was dispatched (D9). The
+   * attempt's own record is the reference, so nothing is written and no
+   * rebinding to the current invocation is attempted.
+   */
+  | "host-identity-mismatch"
+  /**
+   * The attempt recorded a dispatch identity and the host reports NO identity
+   * for this submission (D9), so the binding cannot be checked. Distinct from a
+   * mismatch: there is nothing to compare, and settling anyway would drop the
+   * constraint the host declared at dispatch.
+   */
+  | "host-identity-absent";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -484,11 +536,43 @@ export interface OutcomeReconciledEffect {
 }
 
 /**
+ * One restart DIVERGENCE: the persisted local effect status and a host FACT
+ * about the same stable effect id disagree (D9).
+ *
+ * The two reachable shapes are opposite directions of the same crash window:
+ * `pending` locally while the host reports the execution `created` (the create
+ * returned and the row was not marked, so the host is AHEAD), and `started`
+ * locally while the host reports `absent` (the row records a returned create
+ * the host cannot corroborate, so the record is AHEAD).
+ *
+ * A host that answers `unknown` is NOT a divergence: it stated no fact, so
+ * there is nothing to disagree with — the effect is reported as unsettled work
+ * (`dispatch-unreconciled`) instead.
+ */
+export interface OutcomeEffectDivergence {
+  /** The stable effect id both records name. */
+  readonly effectId: string;
+  /** The attempt the effect belongs to. */
+  readonly attemptId: string;
+  /** The status the LEDGER recorded before this recovery. */
+  readonly local: "pending" | "started";
+  /** The fact the HOST reported for the same effect id. */
+  readonly host: "created" | "absent";
+  /**
+   * What this recovery did about it — never a re-dispatch and never a silent
+   * drop: `reconciled-started` marked the row started without creating (the
+   * host is ahead), `reported-unreconciled` changed nothing and reported the
+   * disagreement for host/manual reconciliation (the record is ahead).
+   */
+  readonly resolution: "reconciled-started" | "reported-unreconciled";
+}
+
+/**
  * What {@link OutcomeGraphRuntime.resume} produced.
  *
- * `started` and `resumed` carry the SAME three reports, because the first
- * execution and a restart recovery must be indistinguishable to the caller that
- * owns the effects:
+ * `started` and `resumed` carry the SAME reports, because the first execution
+ * and a restart recovery must be indistinguishable to the caller that owns the
+ * effects:
  * - `dispatched` — the dispatch requests this call actually launched (every
  *   one a formerly `pending` effect, whose node the state already records as
  *   in flight). A `started` effect is NEVER re-launched.
@@ -507,6 +591,14 @@ export interface OutcomeReconciledEffect {
  *   `created`, or the row already recorded a create that returned. A
  *   reconciled effect is not a failure and not a launch; it is the evidence
  *   that a crash window was closed by asking the host rather than by retrying.
+ * - `divergences` — every effect whose persisted LOCAL status and the host's
+ *   FACT about it disagree (D9), with what this call did about it. The pair is
+ *   always the same crash window seen from both sides: a `pending` row the host
+ *   reports `created` (reconciled to `started`, never re-created) or a
+ *   `started` row the host reports `absent` (left exactly as it is and reported
+ *   for reconciliation). A host that answers `unknown` states no fact and is
+ *   therefore not a divergence; a first execution (`started`) has no earlier
+ *   record to diverge from and reports none.
  *
  * `refusals` on a started/resumed answer are per-effect diagnostics (an effect
  * whose payload is unreadable, whose node the state does not corroborate, whose
@@ -520,6 +612,7 @@ export type OutcomeResumeResult =
       readonly state: OutcomeGraphState;
       readonly dispatched: readonly OutcomeDispatchRequest[];
       readonly reconciled: readonly OutcomeReconciledEffect[];
+      readonly divergences: readonly OutcomeEffectDivergence[];
       readonly armed: readonly OutcomeArmedNode[];
       readonly unsettledEffects: readonly PendingEffectRecord[];
       readonly refusals: readonly OutcomeRuntimeRefusal[];
@@ -529,6 +622,7 @@ export type OutcomeResumeResult =
       readonly state: OutcomeGraphState;
       readonly dispatched: readonly OutcomeDispatchRequest[];
       readonly reconciled: readonly OutcomeReconciledEffect[];
+      readonly divergences: readonly OutcomeEffectDivergence[];
       readonly armed: readonly OutcomeArmedNode[];
       readonly unsettledEffects: readonly PendingEffectRecord[];
       readonly refusals: readonly OutcomeRuntimeRefusal[];
@@ -620,6 +714,24 @@ export interface OutcomeGraphRuntimeOptions {
    * this module.
    */
   readonly credentialIsolation?: CredentialIsolationAdapter;
+  /**
+   * The HOST's invocation-identity capability (D9) — the ADDITIONAL constraint
+   * a host may declare on top of the bearer credential.
+   *
+   * With a readable capability, every attempt this runtime dispatches records
+   * the host identity of the invocation that dispatched it, and a submission
+   * that settles that attempt must come from the SAME host attribution; a
+   * mismatched, absent or unverifiable identity is refused by name and nothing
+   * is written. A capability that is present but UNREADABLE refuses the
+   * operation (`host-identity-unavailable`) rather than running unconstrained.
+   *
+   * OMITTED IS NOT A DOWNGRADE: without the capability nothing is recorded and
+   * nothing is checked, which is exactly how every path behaved before this
+   * slice — the core protocol depends on no host and works without one. The
+   * constraint is additive: it binds attempts dispatched under a host identity
+   * and leaves every other attempt exactly as it was.
+   */
+  readonly hostIdentity?: HostIdentityCapability;
 }
 
 /**
@@ -647,6 +759,7 @@ export class OutcomeGraphRuntime {
   private readonly mintCredential: AttemptCredentialSource;
   private readonly completionPolicies: CompletionPolicyRegistry | undefined;
   private readonly credentialIsolation: CredentialIsolationAdapter | undefined;
+  private readonly hostIdentity: HostIdentityCapability | undefined;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -662,6 +775,7 @@ export class OutcomeGraphRuntime {
       options.mintCredential ?? RUNTIME_ATTEMPT_CREDENTIAL_SOURCE;
     this.completionPolicies = options.completionPolicies;
     this.credentialIsolation = options.credentialIsolation;
+    this.hostIdentity = options.hostIdentity;
   }
 
   /**
@@ -683,6 +797,23 @@ export class OutcomeGraphRuntime {
     if (unprotectedCredentials !== undefined) {
       return refused([unprotectedCredentials]);
     }
+    // The host identity capability (D9), if any, must be READABLE before this
+    // call records anything: attempts dispatched under a declared identity
+    // constraint are exactly what a later submission is checked against, so an
+    // unreadable declaration refuses the operation rather than arming attempts
+    // nobody can verify.
+    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
+    if (unreadableHostIdentity !== undefined) {
+      return refused([unreadableHostIdentity]);
+    }
+    // The identity of THIS invocation, read ONCE for the whole operation. A
+    // `refused` reading is a host failure (a throwing `current()`, a malformed
+    // answer) and refuses the operation: recording the attempts with no binding
+    // under a host that declared one would drop the constraint silently.
+    const hostIdentity = readCurrentHostIdentity(this.hostIdentity);
+    if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
+    const dispatchIdentity =
+      hostIdentity.kind === "identified" ? hostIdentity.identity : undefined;
     // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
     // any state is read or written: without one, recording a dispatch would
     // claim an execution this process cannot perform.
@@ -775,6 +906,10 @@ export class OutcomeGraphRuntime {
           attemptId,
           attemptSeq,
           attemptCredential: credential,
+          // The host attribution this attempt is bound to (D9). Absent when the
+          // host declared no identity for this invocation — the absence IS the
+          // record, and no later process back-fills one.
+          ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
           dispatchedAt: at,
           arrivals: Object.freeze([]),
         }),
@@ -842,6 +977,17 @@ export class OutcomeGraphRuntime {
     if (unprotectedCredentials !== undefined) {
       return refused([unprotectedCredentials]);
     }
+    // The host identity capability (D9) must be READABLE, and the CURRENT
+    // invocation's identity must be answerable, before anything is read: a
+    // submission is checked against the identity its attempt recorded, and
+    // neither an unreadable declaration nor an unanswered host is allowed to
+    // turn that check into a pass.
+    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
+    if (unreadableHostIdentity !== undefined) {
+      return refused([unreadableHostIdentity]);
+    }
+    const hostIdentity = readCurrentHostIdentity(this.hostIdentity);
+    if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
     // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
     // any state is read or written: without one, recording a dispatch would
     // claim an execution this process cannot perform.
@@ -881,7 +1027,7 @@ export class OutcomeGraphRuntime {
       return refused([this.stateRefusal(error)]);
     }
 
-    const identity = this.identityFor(proposal, state);
+    const identity = this.identityFor(proposal, state, hostIdentity);
     if ("refusal" in identity) return refused([identity.refusal]);
 
     const submission = {
@@ -914,7 +1060,13 @@ export class OutcomeGraphRuntime {
 
     let planned: OutcomeAdvance | undefined;
     const join: AcceptanceJoin = (tx, decision) => {
-      const joined = this.reduceInTransaction(tx, decision, at, projections);
+      const joined = this.reduceInTransaction(
+        tx,
+        decision,
+        at,
+        projections,
+        hostIdentity.kind === "identified" ? hostIdentity.identity : undefined,
+      );
       planned = joined.advance;
       return joined.result;
     };
@@ -1039,6 +1191,15 @@ export class OutcomeGraphRuntime {
     if (unprotectedCredentials !== undefined) {
       return refused([unprotectedCredentials]);
     }
+    // The host identity capability (D9), if any, must be READABLE before this
+    // call reads or launches anything. Recovery does NOT ask for the current
+    // identity: a recovered attempt keeps the binding its dispatch recorded,
+    // and a restart never re-binds it to the invocation that happens to be
+    // recovering. Only a FIRST execution (delegated to `start`) records one.
+    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
+    if (unreadableHostIdentity !== undefined) {
+      return refused([unreadableHostIdentity]);
+    }
     // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
     // any state is read or written: without one, recording a dispatch would
     // claim an execution this process cannot perform.
@@ -1080,6 +1241,9 @@ export class OutcomeGraphRuntime {
           // reported in `dispatched`, and the effects it just wrote are the
           // same launches.
           reconciled: Object.freeze([]),
+          // Nothing to diverge from either: a first execution has no earlier
+          // local record and no host fact about one.
+          divergences: Object.freeze([]),
           armed: reading.armed,
           unsettledEffects: effects,
           refusals: reading.refusals,
@@ -1143,8 +1307,10 @@ export class OutcomeGraphRuntime {
         state,
         dispatched: Object.freeze([]),
         // A stopped run reconciles nothing: resolving an effect could only
-        // report a launch or a question, and no launch is permitted here.
+        // report a launch or a question, and no launch is permitted here — so
+        // it asks the host nothing and reports no divergence either.
         reconciled: Object.freeze([]),
+        divergences: Object.freeze([]),
         armed: Object.freeze([]),
         unsettledEffects: effects,
         refusals: stoppedInFlightRefusals(state),
@@ -1164,6 +1330,7 @@ export class OutcomeGraphRuntime {
       state,
       dispatched: Object.freeze(resolved.launched),
       reconciled: resolved.reconciled,
+      divergences: resolved.divergences,
       armed: readable.armed,
       unsettledEffects: effects,
       refusals: Object.freeze([...resolved.refusals, ...readable.refusals]),
@@ -1226,6 +1393,21 @@ export class OutcomeGraphRuntime {
     | OutcomeRuntimeRefusal
     | undefined {
     return credentialIsolationRefusal(this.credentialIsolation);
+  }
+
+  /**
+   * Check that the host identity capability this process holds is READABLE (D9).
+   *
+   * NO CAPABILITY IS NOT A FAILURE — without one the identity binding is simply
+   * not enabled, which is the core protocol's independence from any host. A
+   * capability that IS present but unreadable is refused by name instead of
+   * being ignored: dropping a constraint the host declared is exactly the
+   * silent downgrade this gate exists to prevent. Rule and wording live in
+   * `host-identity.ts` so the runtime, the tool ingress and the startup sweep
+   * report one refusal.
+   */
+  private hostIdentityCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
+    return hostIdentityRefusal(this.hostIdentity);
   }
 
   /**
@@ -1564,6 +1746,7 @@ export class OutcomeGraphRuntime {
     | {
         readonly launched: readonly OutcomeDispatchRequest[];
         readonly reconciled: readonly OutcomeReconciledEffect[];
+        readonly divergences: readonly OutcomeEffectDivergence[];
         readonly refusals: readonly OutcomeRuntimeRefusal[];
       }
     | { readonly refusal: OutcomeRuntimeRefusal } {
@@ -1590,6 +1773,7 @@ export class OutcomeGraphRuntime {
     }
     const launched: OutcomeDispatchRequest[] = [];
     const reconciled: OutcomeReconciledEffect[] = [];
+    const divergences: OutcomeEffectDivergence[] = [];
     const refusals: OutcomeRuntimeRefusal[] = [];
     for (const effect of effects) {
       if (effect.kind !== "dispatch") continue;
@@ -1681,6 +1865,13 @@ export class OutcomeGraphRuntime {
               "stored fact and the host fact disagree, so the effect is left exactly as it " +
               "is and reported for reconciliation rather than started a second time",
           });
+          // THE DIVERGENCE IS ITS OWN REPORT (D9). The refusal above says what was
+          // NOT done; this record names the disagreement itself (local record
+          // ahead of the host), so a caller reading only divergences still sees
+          // the contradiction instead of inferring it from a refusal code.
+          divergences.push(
+            this.divergenceOf(effect.effectId, target.attemptId, "started", "absent"),
+          );
           continue;
         }
         reconciled.push(this.reconciledEffectOf(effect.effectId, target.attemptId, "recorded-started"));
@@ -1715,6 +1906,14 @@ export class OutcomeGraphRuntime {
           continue;
         }
         reconciled.push(this.reconciledEffectOf(effect.effectId, target.attemptId, "host-reported-created"));
+        // AND THE DISAGREEMENT THAT WAS RECONCILED IS REPORTED AS ONE (D9): the
+        // local row said `pending` while the host already had the execution, so
+        // the row is marked and NEVER re-created. Reporting it here — rather than
+        // only as a positive reconciliation — is what makes "the host was ahead"
+        // observable instead of inferred.
+        divergences.push(
+          this.divergenceOf(effect.effectId, target.attemptId, "pending", "created"),
+        );
         continue;
       }
 
@@ -1763,8 +1962,33 @@ export class OutcomeGraphRuntime {
     return {
       launched: Object.freeze(launched),
       reconciled: Object.freeze(reconciled),
+      divergences: Object.freeze(divergences),
       refusals: Object.freeze(refusals),
     };
+  }
+
+  /**
+   * One restart divergence: the local effect status and the contradicting host
+   * fact, with what this recovery did about it — `reconciled-started` when the
+   * host was ahead and the row was marked without a create, and
+   * `reported-unreconciled` when the record was ahead and nothing was changed.
+   */
+  private divergenceOf(
+    effectId: string,
+    attemptId: string,
+    local: "pending" | "started",
+    host: "created" | "absent",
+  ): OutcomeEffectDivergence {
+    return Object.freeze({
+      effectId,
+      attemptId,
+      local,
+      host,
+      resolution:
+        local === "pending" && host === "created"
+          ? ("reconciled-started" as const)
+          : ("reported-unreconciled" as const),
+    });
   }
 
   /**
@@ -1833,10 +2057,15 @@ export class OutcomeGraphRuntime {
    * settled — a settled one is the replay path); a malformed one carries a
    * placeholder identity so the acceptance core — the owner of the proposal
    * shape gate — refuses it with its own diagnostics.
+   *
+   * AND THEN THE HOST IDENTITY IS CHECKED (D9), against the attempt's OWN
+   * recorded dispatch identity: a submission from another host invocation is
+   * refused by name before any gate runs and before anything is written.
    */
   private identityFor(
     proposal: unknown,
     state: OutcomeGraphState,
+    hostIdentity: HostIdentityReading,
   ): ExecutionIdentity | { readonly refusal: OutcomeRuntimeRefusal } {
     const reading = readOutcomeProposal(proposal);
     if (reading.kind === "malformed") {
@@ -1932,6 +2161,18 @@ export class OutcomeGraphRuntime {
         },
       };
     }
+    // THE HOST IDENTITY IS THE ADDITIONAL CONSTRAINT (D9), checked AFTER the
+    // credential resolved the attempt and BEFORE any decision is taken. The
+    // reference is the identity the DISPATCH recorded on this attempt's entry —
+    // never the current invocation and never the node's current attempt — so an
+    // attempt dispatched under no identity is unconstrained (the compatibility
+    // rule) while an attempt that recorded one is settled only by a submission
+    // the host attributes to the same invocation.
+    const identityCheck = hostIdentityCheckRefusal(
+      holder.dispatchIdentity,
+      hostIdentity,
+    );
+    if (identityCheck !== undefined) return { refusal: identityCheck };
     return {
       graphId: this.graphId,
       attemptId,
@@ -1953,6 +2194,7 @@ export class OutcomeGraphRuntime {
     decision: AcceptanceDecision,
     now: number,
     progress: readonly ProgressProjection[],
+    dispatchIdentity: HostInvocationIdentity | undefined,
   ): JoinedReduction {
     const record = tx.readGraphState(this.graphId);
     if (record === undefined) {
@@ -1999,6 +2241,10 @@ export class OutcomeGraphRuntime {
       now,
       mintCredential: this.mintCredential,
       progress,
+      // The invocation identity in effect for THIS submission (D9), written
+      // onto every attempt this advance arms. Absent records nothing, which is
+      // the honest statement for a host that declared no identity.
+      ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     });
     const effects = advance.dispatches.map((intent) => ({
       effectId: dispatchEffectIdOf(intent.attemptId),

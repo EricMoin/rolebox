@@ -114,6 +114,11 @@ import {
   readCredentialIsolationAdapter,
   type CredentialIsolationAdapter,
 } from "../outcome/credential-isolation.ts";
+import {
+  hostIdentityRefusal,
+  readHostIdentityCapability,
+  type HostIdentityCapability,
+} from "../outcome/host-identity.ts";
 import type {
   OutcomeDispatchAdapter,
   OutcomeResumeResult,
@@ -182,6 +187,17 @@ export interface OutcomeRecoveryReport {
   dispatched: string[];
   /** Unsettled effects this sweep resolved without launching, with the reason. */
   reconciled: string[];
+  /**
+   * Every DISAGREEMENT this sweep found between a persisted local effect status
+   * and the host's fact about the same stable effect id (D9), each naming the
+   * effect, the two sides and what the sweep did about it. A divergence is never
+   * a re-dispatch and never a silent drop: the local-ahead case (`started` while
+   * the host reports `absent`) is also a `refused[]` entry, and the host-ahead
+   * case (`pending` while the host reports `created`) is also a `reconciled[]`
+   * entry — this bucket names the disagreement itself, so a reader that only
+   * wants the contradictions finds them without reverse-engineering the others.
+   */
+  divergences: string[];
   /** Nodes the persisted state records as in flight, with their attempts. */
   armed: string[];
   /** Effects still pending or started after this sweep. */
@@ -369,6 +385,18 @@ export interface RecoverInterruptedGraphsOptions {
   outcomeCredentialIsolation?: CredentialIsolationAdapter;
 
   /**
+   * Optional HOST invocation-identity capability (D9) for the outcome run path.
+   * The sweep forwards it to `resumePersistedOutcomeGraph` unchanged: a recovered
+   * attempt keeps the dispatch identity its own state recorded (a restart never
+   * re-binds it), a FIRST execution the sweep performs records whatever identity
+   * the host reports for this invocation, and a capability that is present but
+   * UNREADABLE is reported in `outcomeProtocol.refused` with
+   * `host-identity-unavailable` before the ledger is opened. ABSENT is legal: the
+   * identity binding is not enabled and the sweep behaves exactly as before.
+   */
+  outcomeHostIdentity?: HostIdentityCapability;
+
+  /**
    * Root every outcome evidence reference must resolve inside (C3c). Defaults
    * to `directory` — the workspace whose `.rolebox/state` store was scanned.
    */
@@ -401,6 +429,7 @@ function emptyOutcomeRecoveryReport(): OutcomeRecoveryReport {
     resumed: [],
     dispatched: [],
     reconciled: [],
+    divergences: [],
     armed: [],
     unsettledEffects: [],
     stopped: [],
@@ -453,6 +482,12 @@ function recordOutcomeRecovery(
   }
   for (const effect of result.reconciled) {
     bucket.reconciled.push(`${graphId}:${effect.effectId}:${effect.reason}`);
+  }
+  for (const divergence of result.divergences) {
+    bucket.divergences.push(
+      `${graphId}:${divergence.effectId}:` +
+        `local-${divergence.local}-host-${divergence.host}:${divergence.resolution}`,
+    );
   }
   for (const node of result.armed) {
     bucket.armed.push(`${graphId}:${node.attemptId}`);
@@ -646,6 +681,21 @@ export async function recoverInterruptedGraphs(
         );
         continue;
       }
+      // THE HOST IDENTITY GATE (D9) RUNS BEFORE THE LEDGER IS OPENED, exactly
+      // like the credential gate: a capability this build cannot read is a
+      // declared constraint the sweep must not silently drop, so it reports the
+      // refusal and leaves the record exactly as it found it. No capability at
+      // all is NOT a refusal — the identity binding is simply not enabled.
+      const unreadableHostIdentity = hostIdentityRefusal(
+        opts.outcomeHostIdentity,
+      );
+      if (unreadableHostIdentity !== undefined) {
+        bucket.refused.push(
+          `${label} (graph ${loaded.state.graphId}: [${unreadableHostIdentity.code}] ` +
+            `${unreadableHostIdentity.message})`,
+        );
+        continue;
+      }
       // NO DISPATCH ADAPTER, NO RESUME (D8). A dispatch intent recorded without
       // a host that can create the execution is a dispatch this sweep would be
       // claiming it performed, so the graph is REPORTED and the store is left
@@ -664,6 +714,9 @@ export async function recoverInterruptedGraphs(
       const isolation = readCredentialIsolationAdapter(
         opts.outcomeCredentialIsolation,
       );
+      // The gate above admitted only an ABSENT or READABLE identity capability,
+      // so this normalization only ever lifts a readable host declaration.
+      const hostIdentity = readHostIdentityCapability(opts.outcomeHostIdentity);
       let ledger: SqliteAcceptanceLedger | undefined;
       try {
         ledger = await SqliteAcceptanceLedger.create(
@@ -686,6 +739,7 @@ export async function recoverInterruptedGraphs(
             ...(isolation === undefined
               ? {}
               : { credentialIsolation: isolation }),
+            ...(hostIdentity === undefined ? {} : { hostIdentity }),
           }),
         );
       } catch (err) {
