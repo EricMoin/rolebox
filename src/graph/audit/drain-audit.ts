@@ -428,6 +428,16 @@ export interface DrainAuditReport {
 export interface DrainAuditOptions {
   /** Workspace directory whose `.rolebox/state` store is audited. */
   readonly directory: string;
+  /**
+   * The directory the acceptance ledger is opened from. Defaults to the
+   * workspace state directory (`engineStateDir(directory)`).
+   *
+   * A host that keeps its protected store at its OWN declared root — the same
+   * root the submission ingress opens its ledger at — passes that root here, so
+   * the audit reads the ledger the run actually wrote instead of reporting a
+   * healthy graph as "ledger absent".
+   */
+  readonly ledgerDirectory?: string;
   /** Storage-format capabilities; defaults to the shipped registry. */
   readonly storageFormatRegistry?: StorageFormatRegistry;
   /** Execution-protocol capabilities; defaults to the shipped registry. */
@@ -1005,7 +1015,11 @@ export async function auditGraphStore(
   options: DrainAuditOptions,
 ): Promise<DrainAuditReport> {
   const stateDirectory = engineStateDir(options.directory);
-  const filePath = ledgerFilePath(stateDirectory);
+  // The ledger may live at a different root than the engine-state files (a host
+  // that declares its own protected store); the engine-state listing below
+  // always reads the workspace store.
+  const ledgerDirectory = options.ledgerDirectory ?? stateDirectory;
+  const filePath = ledgerFilePath(ledgerDirectory);
   const storageFormats =
     options.storageFormatRegistry ?? DEFAULT_STORAGE_FORMAT_REGISTRY;
   const protocols =
@@ -1028,7 +1042,7 @@ export async function auditGraphStore(
   let ledgerBlocker: DrainAuditBlockerCode | undefined;
   let opened: LedgerReadOpenResult;
   try {
-    opened = await openLedger(stateDirectory);
+    opened = await openLedger(ledgerDirectory);
   } catch (error) {
     opened = {
       kind: "unreadable",

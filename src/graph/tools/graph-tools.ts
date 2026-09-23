@@ -654,8 +654,9 @@ export class GraphToolSet {
       if (this.declaredGraphs.size === 0) {
         return "No declared graphs exist. Call graph_declare to declare one.";
       }
+      const persisted = this.persistedById();
       const lines = [...this.declaredGraphs.entries()].map(([id, entry]) => {
-        const s = entry.graph.state;
+        const s = this.liveDeclaredState(entry, persisted);
         return `  ${id}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`;
       });
       return `Graphs (${this.declaredGraphs.size}):\n${lines.join("\n")}`;
@@ -689,6 +690,32 @@ export class GraphToolSet {
 
   // ── Cross-session (persisted/all) helpers ─────────────────────────────────
 
+  /**
+   * The persisted records of every graph in the store, keyed by graph id — the
+   * run's own record for a declared graph, refreshed by the projection the host
+   * and the submission ingress write after each committed transition.
+   */
+  private persistedById(): Map<string, EngineState> {
+    return new Map(this.persistedScan().loaded.map((s) => [s.graphId, s]));
+  }
+
+  /**
+   * The NEWEST recorded state for a declared graph.
+   *
+   * The in-memory snapshot is what `graph_declare` built; the run's position is
+   * written back into the graph's own persisted record as it advances. When the
+   * record exists it IS that graph's state — a declaration with no store has
+   * only the snapshot, and a record that a reader refuses never reaches here
+   * (the scan skips it).
+   */
+  private liveDeclaredState(
+    entry: DeclaredGraphEntry,
+    persisted: Map<string, EngineState>,
+  ): EngineState {
+    const base = entry.graph.state;
+    return persisted.get(base.graphId) ?? base;
+  }
+
   /** Resolve a DECLARED graph's state, or throw the missing-graph error. */
   private resolveDeclaredState(graphId: string): EngineState {
     const entry = this.declaredGraphs.get(graphId);
@@ -698,13 +725,16 @@ export class GraphToolSet {
           "or query scope=persisted for a graph another process declared.",
       );
     }
-    return entry.graph.state;
+    return this.liveDeclaredState(entry, this.persistedById());
   }
 
   /** The declared graphs' states, in declaration order. */
   private declaredStates(): EngineState[] {
+    const persisted = this.persistedById();
     const out: EngineState[] = [];
-    for (const [, entry] of this.declaredGraphs) out.push(entry.graph.state);
+    for (const [, entry] of this.declaredGraphs) {
+      out.push(this.liveDeclaredState(entry, persisted));
+    }
     return out;
   }
 
@@ -716,16 +746,17 @@ export class GraphToolSet {
   /** Declared states followed by persisted states, deduped by graphId (a
    * declared graph wins) — the node set the `all` scope aggregates over. */
   private collectAllStates(): EngineState[] {
+    const persisted = this.persistedById();
     const seen = new Set<string>();
     const out: EngineState[] = [];
     for (const [, entry] of this.declaredGraphs) {
-      const s = entry.graph.state;
+      const s = this.liveDeclaredState(entry, persisted);
       if (!seen.has(s.graphId)) {
         seen.add(s.graphId);
         out.push(s);
       }
     }
-    for (const p of this.persistedScan().loaded) {
+    for (const p of persisted.values()) {
       if (!seen.has(p.graphId)) {
         seen.add(p.graphId);
         out.push(p);
@@ -896,11 +927,14 @@ export class GraphToolSet {
   /** Resolve a single graph target for persisted/all scope (a declared graph
    * wins for `all`; persisted store only for `persisted`). */
   private resolveState(graphId: string, scope: GraphStatusScope): EngineState {
+    const persisted = this.persistedById();
     if (scope === "all") {
       const entry = this.declaredGraphs.get(graphId);
-      if (entry) return entry.graph.state;
+      // A declared graph resolves through its LIVE record, never the
+      // declaration snapshot the registry holds.
+      if (entry) return this.liveDeclaredState(entry, persisted);
     }
-    const found = this.persistedScan().loaded.find((s) => s.graphId === graphId);
+    const found = persisted.get(graphId);
     if (found) return found;
     throw new Error(
       `graph_status: graph "${graphId}" not found in ${scope} scope.`,
@@ -1554,8 +1588,16 @@ export class GraphToolSet {
    * halves: no blocker AND nothing in flight.
    */
   async graph_audit(): Promise<DrainAuditReport> {
+    const isolation = this.deps.credentialIsolation;
     return auditGraphStore({
       directory: this.deps.stateDir ?? process.cwd(),
+      // The host's declared credential-store root IS where the run opens its
+      // ledger (the submission ingress reads the same declaration), so the
+      // audit must read it there too — otherwise a completed graph audits as
+      // "ledger absent, in flight" while its ledger sits one directory away.
+      ...(isolation === undefined
+        ? {}
+        : { ledgerDirectory: isolation.credentialStoreRoot }),
     });
   }
 }

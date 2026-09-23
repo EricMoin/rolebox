@@ -56,6 +56,7 @@ import {
   loadEngineStateForResume,
 } from "../persistence/engine-persistence.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
+import { persistOutcomeProjection } from "../persistence/outcome-projection.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import { readPersistedOutcomePlan } from "../outcome/recovery.ts";
 import {
@@ -265,7 +266,15 @@ export class OutcomeHost {
     const previous = this.holder.current();
     if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
     try {
-      return await bridge.complete({ graphId, attemptId });
+      const report = await bridge.complete({ graphId, attemptId });
+      if (report.kind === "settled") {
+        const { runtime } = await this.runtimeFor(graphId);
+        const state = runtime.state();
+        if (state !== undefined) {
+          persistOutcomeProjection(this.workspaceDir, state, this.clock());
+        }
+      }
+      return report;
     } finally {
       if (previous === undefined) {
         this.holder.clear();
@@ -293,7 +302,14 @@ export class OutcomeHost {
     const { runtime } = await this.runtimeFor(graphId);
     this.setInvocation(invocation);
     try {
-      return runtime.resume(this.clock());
+      const result = runtime.resume(this.clock());
+      // The run just advanced; refresh the operator view of the graph's own
+      // record so graph_status reads what the ledger holds (best-effort, and
+      // never part of the transaction: the ledger already committed).
+      if (result.kind !== "refused") {
+        persistOutcomeProjection(this.workspaceDir, result.state, this.clock());
+      }
+      return result;
     } finally {
       this.holder.clear();
     }

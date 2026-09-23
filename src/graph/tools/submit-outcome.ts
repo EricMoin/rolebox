@@ -68,6 +68,7 @@ import {
   type EngineLoadResult,
 } from "../persistence/engine-persistence.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
+import { persistOutcomeProjection } from "../persistence/outcome-projection.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import type {
   AcceptanceDecision,
@@ -562,6 +563,17 @@ export async function submitDeclaredOutcome(
         : { evidenceRefs: [...args.evidence_refs] }),
     };
     const result = runtime.submit(proposal, deps.now);
+    // Refresh the operator view of the graph's own persisted record from the
+    // state this acceptance committed, so graph_status reads the run's real
+    // position. Best-effort and AFTER the transaction: the ledger is already
+    // the authority and a failed projection changes no decision.
+    if (result.kind === "accepted") {
+      persistOutcomeProjection(
+        workspaceOf(target),
+        result.state,
+        deps.now ?? Date.now(),
+      );
+    }
     return renderResult(plan, args, result);
   } finally {
     ledger.close();
