@@ -26,6 +26,15 @@ import type {
   ContractRef,
 } from "./graph/contracts/contract-definition.ts";
 import type { PersistedCompiledPlan } from "./graph/compiler/plan.ts";
+import type { ResolvedJoinStrategy } from "./graph/domain/join.ts";
+import type { GraphBudgetState } from "./graph/domain/budget.ts";
+
+// The generic join/budget vocabulary now lives in the neutral domain module
+// (`src/graph/domain/`); these names are re-exported so every existing importer
+// keeps its import path WITHOUT a second definition (P1 item 2). Exactly one
+// definition of each name exists in the build.
+export type { ResolvedJoinStrategy };
+export type { GraphBudgetState };
 
 // ── Engine State ────────────────────────────────────────────────────────
 
@@ -283,18 +292,10 @@ export interface PlanBinding {
 
 // ── Join Strategy (runtime) ─────────────────────────────────────────────
 
-/**
- * Runtime join strategy for a convergence node — the resolved projection of
- * the declaration's `JoinConfig` (C1).
- *
- * `"all"` / `"any"` stay strings; `quorum:N` becomes `{ quorum: N }` so the
- * required count travels with the strategy. The declared union forces
- * `quorum` to exist on the quorum branch, so a bare `"quorum"` string is not
- * representable at either boundary. `readQuorum` in `src/graph/join-strategy.ts`
- * is the single reader of the count; the outcome-protocol reducer goes through
- * it (its legacy callers were deleted with the legacy runtime).
- */
-export type ResolvedJoinStrategy = "all" | "any" | { quorum: number };
+// `ResolvedJoinStrategy` is declared in the neutral domain module
+// (`src/graph/domain/join.ts`) and re-exported above, beside the ONE resolver
+// (`resolveJoinStrategy`) and reader (`readQuorum`) that own it. Only the home
+// of its single definition moved out of this retired container.
 
 // ── Node Runtime State ──────────────────────────────────────────────────
 
@@ -558,17 +559,10 @@ export interface CheckpointRecord {
   note?: string;
 }
 
-/** Cumulative graph-level budget consumption state. */
-export interface GraphBudgetState {
-  /** Total dispatch sessions spawned across all nodes */
-  sessionsSpawned: number;
-  /** Total input tokens consumed across all nodes */
-  totalInputTokens: number;
-  /** Total output tokens consumed across all nodes */
-  totalOutputTokens: number;
-  /** Total cost consumed across all nodes (USD) */
-  totalCost: number;
-}
+// Cumulative graph-level budget consumption state (`GraphBudgetState`) is
+// declared in the neutral domain module (`src/graph/domain/budget.ts`, as
+// `BudgetState`) and re-exported above under its historical name. Only the home
+// of its single definition moved out of this retired container.
 
 /** Entry in the per-node signal ledger. */
 export interface SignalLedgerEntry {

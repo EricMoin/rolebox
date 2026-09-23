@@ -14,6 +14,15 @@
  */
 
 import type { GraphTemplate } from "./constants.ts";
+import type { JoinConfig } from "./graph/domain/join.ts";
+import type { GraphBudgetSpec, NodeBudgetSpec } from "./graph/domain/budget.ts";
+
+// The generic join/budget vocabulary now lives in the neutral domain module
+// (`src/graph/domain/`); these names are re-exported so every existing importer
+// keeps its import path WITHOUT a second definition (P1 item 2). Exactly one
+// definition of each name exists in the build.
+export type { JoinConfig };
+export type { GraphBudgetSpec, NodeBudgetSpec };
 
 // ── Graph Declaration ───────────────────────────────────────────────────
 
@@ -142,40 +151,11 @@ export interface RetryConfig {
 
 // ── Join Model ──────────────────────────────────────────────────────────
 
-/**
- * Fan-in (convergence) configuration for nodes with multiple upstream edges.
- *
- * Convergence is a pure graph-theoretic mechanism. The join strategy
- * determines when all required upstream results are received. What the
- * node does with the merged input (validate, synthesize, approve) is
- * the agent's business — the engine only enforces the join.
- *
- * A DISCRIMINATED union (C1): `quorum` exists exactly on the `"quorum"`
- * branch, so a quorum strategy cannot be declared without its required-answer
- * count. The former optional `quorum?: number` made `{ strategy: "quorum" }`
- * type-check and then silently degrade to a count of 1 at runtime; the
- * declaration side (the deleted v2 validator's rule 9, and now the v3 parser)
- * rejects a missing count instead.
- */
-export type JoinConfig =
-  | {
-      /** Wait for every upstream to signal `answer`. */
-      strategy: "all";
-    }
-  | {
-      /** Proceed as soon as one upstream signals `answer`. */
-      strategy: "any";
-    }
-  | {
-      /** Proceed when N upstreams signal `answer`. */
-      strategy: "quorum";
-      /**
-       * Number of required answers (N in `quorum:N`). Must be a positive
-       * integer; the v3 declaration parser enforces that (the deleted v2
-       * validator additionally bounded it by the node's in-degree).
-       */
-      quorum: number;
-    };
+// `JoinConfig` is declared in the neutral domain module
+// (`src/graph/domain/join.ts`) and re-exported above, together with the ONE
+// resolver and the runtime projection that read it. The declaration's semantics
+// are unchanged — only the home of its single definition moved out of this
+// retired container.
 
 // ── Loop Group ──────────────────────────────────────────────────────────
 
@@ -222,32 +202,7 @@ export interface LoopGroupDecl {
 
 // ── Budget ──────────────────────────────────────────────────────────────
 
-/** Per-node resource budget (maps to DispatchManager per-session limits). */
-export interface NodeBudgetSpec {
-  /** Max input tokens for this node */
-  max_input_tokens?: number;
-  /** Max output tokens for this node */
-  max_output_tokens?: number;
-  /** Max cumulative cost for this node (USD) */
-  max_cost_usd?: number;
-  /** Wall-clock timeout for this node (ms) */
-  timeout_ms?: number;
-  /** Automatic retries on escalate */
-  max_retries?: number;
-}
-
-/**
- * Graph-level resource budget (cumulative across all nodes).
- *
- * The orchestrating agent sub-allocates the graph budget to child nodes.
- * Overbooking is allowed (sum of per-node budgets may exceed graph budget),
- * but actual consumption is bounded by the graph budget.
- */
-export interface GraphBudgetSpec {
-  /** Max total input tokens across all nodes */
-  max_total_input_tokens?: number;
-  /** Max total output tokens across all nodes */
-  max_total_output_tokens?: number;
-  /** Max total cost across all nodes (USD) */
-  max_total_cost_usd?: number;
-}
+// `NodeBudgetSpec` and `GraphBudgetSpec` are declared in the neutral domain
+// module (`src/graph/domain/budget.ts`) and re-exported above; the graph-level
+// consumption state lives there too. The declared semantics are unchanged — only
+// the home of their single definitions moved out of this retired container.
