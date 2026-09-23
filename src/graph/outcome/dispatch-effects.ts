@@ -39,6 +39,34 @@
  * the effect instead of re-issuing it. The restriction is honest and is
  * documented at every entry (`dispatch-unreconciled`).
  *
+ * THE PLATFORM QUERY PORT (P2 item 5). `lookup` above is the runtime's
+ * question; {@link OutcomeExecutionQuery} is the PLATFORM'S OWN answer, and it
+ * is a separate seam because a host can hold durable records of what it created
+ * and still be unable to ask the platform about an execution whose create
+ * outcome it never saw. Only the platform can prove that a stranded `creating`
+ * effect has no execution — and only a PROOF of that may release the create
+ * right and license one more create (P2 item 4). A host that has no such port
+ * omits it, and every effect whose create outcome is unknown stays `unknown`
+ * and is BLOCKED: never blind-retried.
+ *
+ * WHAT A PORT MUST ANSWER FOR. The SAME stable correlation key the create
+ * carried: {@link OutcomeDispatchEffectKey.graphId} plus
+ * {@link OutcomeDispatchEffectKey.effectId} (`"dispatch:" + attemptId`), or the
+ * one-string spelling {@link dispatchIdempotencyKeyOf} when the platform needs
+ * a single token (a task label, a query argument). A platform that cannot
+ * correlate that key with certainty — no listing, no per-task lookup, a control
+ * plane it does not own — MUST answer `unknown`, and the effect stays blocked.
+ * `absent` is a proof, not a guess.
+ *
+ * THIS BUILD IMPLEMENTS THE LOCAL HALF. `HostOutcomeDispatch` accepts a port
+ * and joins its answer with the host's own registry, and it uses an `absent`
+ * answer to release a stranded claim. Neither shipped platform adapter supplies
+ * one yet: dsh has `ctx.subagents.listChildren` and Pi has
+ * `dispatchManager.getTask`, but nothing maps a stable effect id onto them, so
+ * the shipped hosts answer `unknown` for a `creating` row and block. That
+ * platform half is an open P2 gap named in
+ * `docs/graph-v3-execution-plan.md` §8.1.
+ *
  * Dependency leaf except for the request type: this module imports nothing at
  * runtime, so the runtime, the recovery seam and any adapter may depend on it
  * without a cycle.
@@ -148,6 +176,19 @@ export interface OutcomeDispatchHost {
 export type OutcomeDispatchAdapter = OutcomeDispatchSeam | OutcomeDispatchHost;
 
 /**
+ * The PLATFORM'S answer about the execution of one stable effect identity
+ * (P2 item 5): the port a host needs to turn "the create outcome is unknown"
+ * into a FACT it can act on.
+ *
+ * It answers for the same stable key the create call carried — see the module
+ * header for the full contract. `absent` is a proof; a platform that cannot
+ * correlate the key answers `unknown` and the effect stays blocked.
+ */
+export type OutcomeExecutionQuery = (
+  effect: OutcomeDispatchEffectKey,
+) => OutcomeExecutionLookup;
+
+/**
  * One adapter, seen through one interface: a create call that always receives
  * the stable effect identity, and a lookup that always answers.
  *
@@ -213,4 +254,20 @@ export function dispatchEffectKeyOf(
     effectId: dispatchEffectIdOf(attemptId),
     attemptId,
   });
+}
+
+/**
+ * The stable idempotency key of one dispatch, as ONE string.
+ *
+ * For a platform whose create call and whose execution query take a single
+ * token (a task label, a lookup argument) rather than the key's parts. It is
+ * derived from the SAME two fields the key is, so a platform that stores this
+ * string can correlate the create with the query, and it names an EFFECT rather
+ * than a worker: it carries no credential and no caller identity.
+ *
+ * Deterministic: the same effect always spells this the same way, in every
+ * process, before and after a crash.
+ */
+export function dispatchIdempotencyKeyOf(effect: OutcomeDispatchEffectKey): string {
+  return effect.graphId + "/" + effect.effectId;
 }

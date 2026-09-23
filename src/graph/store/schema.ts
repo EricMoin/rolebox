@@ -37,6 +37,12 @@
  * EVERY UNIQUENESS THE PROTOCOL NEEDS IS STRUCTURAL, not a code path:
  * - one row per `(graph_id, effect_id)` (primary key of the execution table);
  * - `created` is impossible without a non-empty execution id (the CHECK);
+ * - every claim of that row carries a GENERATION (`owner_generation`, minted at 1
+ *   and raised by one on each ownership transition), so a superseded claim's
+ *   late write is refused by the conditional update rather than applied;
+ * - the last write a row refused — a stale confirmation, a divergent execution,
+ *   an unproven delivery failure — is recorded on the row with a count, so the
+ *   refusal outlives the process that asked;
  * - one credential record per `(graph_id, node_id, attempt_id)` (primary key),
  *   and a `retained` record cannot exist without a value (the CHECK);
  * - one accepted event per `(graph_id, attempt_id)` (primary key) — the same
@@ -232,12 +238,22 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      attempt_id TEXT NOT NULL,
      state TEXT NOT NULL CHECK (state IN ('pending', 'creating', 'created')),
      owner_id TEXT NOT NULL,
+     owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1),
      execution_id TEXT,
      task_id TEXT,
      claimed_at INTEGER NOT NULL,
      updated_at INTEGER NOT NULL,
+     released_at INTEGER,
+     refused_kind TEXT CHECK (refused_kind IS NULL OR refused_kind IN ('stale-confirmation', 'conflicting-execution', 'unproven-failure')),
+     refused_owner_id TEXT,
+     refused_generation INTEGER CHECK (refused_generation IS NULL OR refused_generation >= 1),
+     refused_execution_id TEXT,
+     refused_at INTEGER,
+     refused_count INTEGER NOT NULL DEFAULT 0 CHECK (refused_count >= 0),
      PRIMARY KEY (graph_id, effect_id),
-     CHECK ((state = 'created') = (execution_id IS NOT NULL))
+     CHECK ((state = 'created') = (execution_id IS NOT NULL)),
+     CHECK ((refused_kind IS NULL) = (refused_at IS NULL)),
+     CHECK (released_at IS NULL OR state = 'pending')
    )`,
   `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.credentials} (
      graph_id TEXT NOT NULL,
@@ -350,10 +366,18 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "attempt_id", affinity: "text", primaryKey: 0, notNull: true },
     { name: "state", affinity: "text", primaryKey: 0, notNull: true },
     { name: "owner_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "owner_generation", affinity: "integer", primaryKey: 0, notNull: true },
     { name: "execution_id", affinity: "text", primaryKey: 0, notNull: false },
     { name: "task_id", affinity: "text", primaryKey: 0, notNull: false },
     { name: "claimed_at", affinity: "integer", primaryKey: 0, notNull: true },
     { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "released_at", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "refused_kind", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "refused_owner_id", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "refused_generation", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "refused_execution_id", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "refused_at", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "refused_count", affinity: "integer", primaryKey: 0, notNull: true },
   ],
   credentials: [
     { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },

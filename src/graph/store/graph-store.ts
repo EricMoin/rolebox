@@ -98,6 +98,7 @@ import {
   GRAPH_STORE_TABLES,
   graphStoreFilePath,
 } from "./schema.ts";
+import type { HostExecutionRefusal } from "../host/execution-index.ts";
 import type {
   AcceptedResultRecord,
   CredentialRecordIdentity,
@@ -105,7 +106,10 @@ import type {
   DefinitionWriteResult,
   ExecutionBindingRecord,
   ExecutionClaim,
+  ExecutionConfirmation,
   ExecutionIdentity,
+  ExecutionNotCreated,
+  ExecutionRefusalKind,
   GraphAcceptanceBatch,
   GraphDefinitionRecord,
   InvocationOriginRecord,
@@ -135,11 +139,35 @@ export interface GraphStoreTx extends AcceptanceLedgerTx {
   /** Take the create right for one effect, or learn that it is held. */
   claimExecution(effect: StoreEffectKey, ownerId: string, now: number, leaseMs: number): ExecutionClaim;
   /** Record that the create request is about to be handed to the platform. */
-  markExecutionCreating(effect: StoreEffectKey, ownerId: string, now: number): boolean;
-  /** Record the execution the platform CONFIRMED (requires a non-empty id). */
-  confirmExecution(effect: StoreEffectKey, execution: ExecutionIdentity, now: number): boolean;
-  /** Drop this owner's claim after a delivery that demonstrably did not start. */
-  releaseExecution(effect: StoreEffectKey, ownerId: string): boolean;
+  markExecutionCreating(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    now: number,
+  ): boolean;
+  /** Record the execution the platform CONFIRMED, fenced by (ownerId, generation). */
+  confirmExecution(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    execution: ExecutionIdentity,
+    now: number,
+  ): ExecutionConfirmation;
+  /** Drop this (owner, generation)'s claim, ONLY with a not-created proof. */
+  releaseExecution(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    proof: ExecutionNotCreated,
+    now: number,
+  ): boolean;
+  /** Record a delivery failure that proved nothing; the claim is KEPT. */
+  recordUnprovenFailure(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    now: number,
+  ): void;
   /** One effect's binding row, or `undefined`. */
   readExecution(effect: StoreEffectKey): ExecutionBindingRecord | undefined;
   /** Upsert one attempt's credential RECORD; the value only when retained. */
@@ -295,17 +323,30 @@ export class GraphStore {
       markExecutionCreating: (
         effect: StoreEffectKey,
         ownerId: string,
+        generation: number,
         now: number,
-      ): boolean => this.markExecutionCreating(effect, ownerId, now),
+      ): boolean => this.markExecutionCreating(effect, ownerId, generation, now),
       confirmExecution: (
         effect: StoreEffectKey,
+        ownerId: string,
+        generation: number,
         execution: ExecutionIdentity,
         now: number,
-      ): boolean => this.confirmExecution(effect, execution, now),
+      ): ExecutionConfirmation =>
+        this.confirmExecution(effect, ownerId, generation, execution, now),
       releaseExecution: (
         effect: StoreEffectKey,
         ownerId: string,
-      ): boolean => this.releaseExecution(effect, ownerId),
+        generation: number,
+        proof: ExecutionNotCreated,
+        now: number,
+      ): boolean => this.releaseExecution(effect, ownerId, generation, proof, now),
+      recordUnprovenFailure: (
+        effect: StoreEffectKey,
+        ownerId: string,
+        generation: number,
+        now: number,
+      ): void => this.recordUnprovenFailure(effect, ownerId, generation, now),
       readExecution: (effect: StoreEffectKey): ExecutionBindingRecord | undefined =>
         this.readExecution(effect),
       rememberCredential: (
@@ -887,6 +928,19 @@ export class GraphStore {
    * instances racing for the same stale claim cannot both win. The primary key
    * `(graph_id, effect_id)` is the cross-instance uniqueness the create-once
    * rule needs.
+   *
+   * THE CLAIM GENERATION IS MINTED HERE (P2 item 3). A fresh row starts at 1 and
+   * every ownership transition raises it by one, so the generation identifies
+   * the CLAIM rather than the owner: a process restarted under the same owner id
+   * presents a generation the row has moved past, and every later conditional
+   * write it attempts is refused. The claimed answer reports it; the store never
+   * hands out a claim without one.
+   *
+   * A RELEASED CLAIM IS FREE IMMEDIATELY. A claim released after a PROVEN
+   * not-created (`released_at` set) can be taken over by the next claimant
+   * without waiting for the lease: by the proof that released it, no execution
+   * exists and nobody is mid-handoff. A live claim is still taken over only once
+   * its lease has lapsed.
    */
   claimExecution(
     effect: StoreEffectKey,
@@ -902,8 +956,8 @@ export class GraphStore {
       // lock. Inserting after a read would let a deferred transaction see a
       // stale snapshot and fail on promotion instead of answering.
       this.db.run(
-        `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.executions} (graph_id, effect_id, attempt_id, state, owner_id, execution_id, task_id, claimed_at, updated_at)
-         VALUES (?, ?, ?, 'pending', ?, NULL, NULL, ?, ?)`,
+        `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.executions} (graph_id, effect_id, attempt_id, state, owner_id, owner_generation, execution_id, task_id, claimed_at, updated_at, released_at)
+         VALUES (?, ?, ?, 'pending', ?, 1, NULL, NULL, ?, ?, NULL)`,
         effect.graphId,
         effect.effectId,
         effect.attemptId,
@@ -922,25 +976,39 @@ export class GraphStore {
       }
       if (row.state !== "pending") return heldClaim(row);
       if (row.ownerId === ownerId) {
-        return Object.freeze({ kind: "claimed" as const, ownerId });
+        return Object.freeze({
+          kind: "claimed" as const,
+          ownerId,
+          generation: row.generation,
+        });
       }
-      if (row.claimedAt + leaseMs > now) return heldClaim(row);
+      if (row.releasedAt === undefined && row.claimedAt + leaseMs > now) return heldClaim(row);
+      // ONE conditional takeover, naming the claim it observed: a racing
+      // instance wins or loses this statement, and the generation moves with it.
       this.db.run(
-        `UPDATE ${GRAPH_STORE_TABLES.executions} SET owner_id = ?, claimed_at = ?, updated_at = ?
-         WHERE graph_id = ? AND effect_id = ? AND state = 'pending' AND owner_id = ?`,
+        `UPDATE ${GRAPH_STORE_TABLES.executions}
+            SET owner_id = ?, owner_generation = owner_generation + 1, claimed_at = ?, updated_at = ?, released_at = NULL
+          WHERE graph_id = ? AND effect_id = ? AND state = 'pending' AND owner_id = ? AND owner_generation = ? AND released_at IS ` +
+          (row.releasedAt === undefined ? "NULL" : "NOT NULL"),
         ownerId,
         now,
         now,
         effect.graphId,
         effect.effectId,
         row.ownerId,
+        row.generation,
       );
       if (this.changes() === 1) {
-        return Object.freeze({ kind: "claimed" as const, ownerId });
+        const claimed = this.readExecution(effect);
+        return Object.freeze({
+          kind: "claimed" as const,
+          ownerId,
+          generation: claimed?.generation ?? row.generation + 1,
+        });
       }
       const after = this.readExecution(effect);
       return after === undefined
-        ? Object.freeze({ kind: "claimed" as const, ownerId })
+        ? Object.freeze({ kind: "claimed" as const, ownerId, generation: row.generation + 1 })
         : heldClaim(after);
     });
   }
@@ -952,16 +1020,29 @@ export class GraphStore {
    * the whole window in which the platform may have received the request, so a
    * crash inside that window leaves `unknown` rather than a claim that looks
    * safely retryable.
+   *
+   * FENCED BY THE CLAIM. The row must be THIS `(owner_id, owner_generation)`'s
+   * pending claim: a superseded claim cannot hand anything over, and the
+   * conditional update is what decides. A claim that was released is re-armed
+   * here too (`released_at` is cleared in the same statement), because handing a
+   * request over is exactly what a released claim has not done yet.
    */
-  markExecutionCreating(effect: StoreEffectKey, ownerId: string, now: number): boolean {
+  markExecutionCreating(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    now: number,
+  ): boolean {
     this.assertOpen("markExecutionCreating");
     this.db.run(
-      `UPDATE ${GRAPH_STORE_TABLES.executions} SET state = 'creating', updated_at = ?
-       WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND state = 'pending'`,
+      `UPDATE ${GRAPH_STORE_TABLES.executions}
+          SET state = 'creating', released_at = NULL, updated_at = ?
+        WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND owner_generation = ? AND state = 'pending'`,
       now,
       effect.graphId,
       effect.effectId,
       ownerId,
+      generation,
     );
     return this.changes() === 1;
   }
@@ -971,15 +1052,28 @@ export class GraphStore {
    *
    * The execution id is required and non-empty: `created` is the one state a
    * lookup reports as a fact, so it may only be written with the fact — the
-   * store's own CHECK makes the alternative unrepresentable. A row that is not
-   * in `creating` is not touched (the confirmation belongs to the process
-   * whose request was in flight).
+   * store's own CHECK makes the alternative unrepresentable.
+   *
+   * FENCED, AND THE REFUSAL IS KEPT (P2 item 3). The conditional update names
+   * the CLAIM that is confirming — `(owner_id, owner_generation)` — and the row
+   * must be that claim's `creating` row. A confirmation from an owner whose
+   * claim was taken over, or from a process that never held one, writes NOTHING;
+   * the attempt (kind, owner, generation, execution id, instant) is recorded on
+   * the row with `refused_count` raised, so a stale write is diagnosable after
+   * the fact instead of being dropped on the floor.
+   *
+   * The verdict distinguishes the idempotent re-report (`replayed`: the same
+   * execution the row already records) from a DIVERGENT execution (`conflict`:
+   * two executions for one stable effect id, reported and recorded rather than
+   * overwritten).
    */
   confirmExecution(
     effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
     execution: ExecutionIdentity,
     now: number,
-  ): boolean {
+  ): ExecutionConfirmation {
     this.assertOpen("confirmExecution");
     if (typeof execution.executionId !== "string" || execution.executionId.length === 0) {
       throw new GraphStoreWriteError(
@@ -991,31 +1085,179 @@ export class GraphStore {
           "cannot be reconciled against the platform",
       );
     }
+    return this.joinOrBegin(() => {
+      const row = this.readExecution(effect);
+      if (row === undefined) return Object.freeze({ kind: "absent" as const });
+      const current = row.ownerId === ownerId && row.generation === generation;
+      if (current && row.state === "created" && row.execution !== undefined) {
+        if (row.execution.executionId === execution.executionId) {
+          return Object.freeze({ kind: "replayed" as const, execution: row.execution });
+        }
+        this.recordExecutionRefusal(
+          effect,
+          "conflicting-execution",
+          ownerId,
+          generation,
+          execution.executionId,
+          now,
+        );
+        return Object.freeze({
+          kind: "conflict" as const,
+          recorded: row.execution,
+          reported: identityOf(execution),
+        });
+      }
+      if (!current || row.state !== "creating") {
+        this.recordExecutionRefusal(
+          effect,
+          "stale-confirmation",
+          ownerId,
+          generation,
+          execution.executionId,
+          now,
+        );
+        return Object.freeze({
+          kind: "fenced" as const,
+          reason: fencedReason(row, ownerId, generation),
+          state: row.state,
+          ownerId: row.ownerId,
+          generation: row.generation,
+          attemptedOwnerId: ownerId,
+          attemptedGeneration: generation,
+        });
+      }
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.executions} SET state = 'created', execution_id = ?, task_id = ?, updated_at = ?
+         WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND owner_generation = ? AND state = 'creating'`,
+        execution.executionId,
+        execution.taskId ?? null,
+        now,
+        effect.graphId,
+        effect.effectId,
+        ownerId,
+        generation,
+      );
+      if (this.changes() !== 1) {
+        // Unreachable on this transaction's own connection (the row was read and
+        // written here), kept total: a write that did not apply is a refusal,
+        // never a reported success.
+        const after = this.readExecution(effect);
+        return Object.freeze({
+          kind: "fenced" as const,
+          reason:
+            "the conditional confirmation applied to no row — the claim stopped being the row's current one",
+          state: after?.state ?? row.state,
+          ownerId: after?.ownerId ?? row.ownerId,
+          generation: after?.generation ?? row.generation,
+          attemptedOwnerId: ownerId,
+          attemptedGeneration: generation,
+        });
+      }
+      return Object.freeze({ kind: "confirmed" as const, execution: identityOf(execution) });
+    });
+  }
+
+  /**
+   * Record a delivery failure that proved NOTHING about whether an execution
+   * exists, WITHOUT touching the claim (P2 item 4).
+   *
+   * The row stays exactly as it was — `creating`, every lookup answering
+   * `unknown` — and the failure is recorded as an `unproven-failure` refusal so
+   * the reason a re-dispatch did not happen is durable rather than inferred. An
+   * asynchronous rejection and a timeout take this path; only a proven
+   * not-created releases the claim (see {@link releaseExecution}).
+   */
+  recordUnprovenFailure(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    now: number,
+  ): void {
+    this.assertOpen("recordUnprovenFailure");
+    this.recordExecutionRefusal(
+      effect,
+      "unproven-failure",
+      ownerId,
+      generation,
+      undefined,
+      now,
+    );
+  }
+
+  /**
+   * Record one refused write on a row, without changing its claim or its state.
+   *
+   * The last refusal is kept (`refused_*`) with a count, so "this row refused
+   * owner A's claim 3 for execution X at T" survives the process that asked.
+   * `generation` 0 — the caller held no claim at all — is stored as NULL, which
+   * is what the column's own CHECK allows.
+   */
+  private recordExecutionRefusal(
+    effect: StoreEffectKey,
+    kind: ExecutionRefusalKind,
+    ownerId: string,
+    generation: number,
+    executionId: string | undefined,
+    now: number,
+  ): void {
     this.db.run(
-      `UPDATE ${GRAPH_STORE_TABLES.executions} SET state = 'created', execution_id = ?, task_id = ?, updated_at = ?
-       WHERE graph_id = ? AND effect_id = ? AND state = 'creating'`,
-      execution.executionId,
-      execution.taskId ?? null,
+      `UPDATE ${GRAPH_STORE_TABLES.executions}
+          SET refused_kind = ?, refused_owner_id = ?, refused_generation = ?, refused_execution_id = ?, refused_at = ?, refused_count = refused_count + 1
+        WHERE graph_id = ? AND effect_id = ?`,
+      kind,
+      ownerId,
+      generation >= 1 ? generation : null,
+      executionId ?? null,
       now,
       effect.graphId,
       effect.effectId,
     );
-    return this.changes() === 1;
   }
 
   /**
-   * Drop this owner's claim after a delivery that THREW: the execution
-   * demonstrably did not start, so a later recovery may create it. A `created`
-   * row is never released — that execution exists.
+   * Drop this claim after a delivery that PROVED no execution was created.
+   *
+   * THE PROOF IS AN ARGUMENT, NOT A CONVENTION (P2 item 4). There is no
+   * overload without it and this method refuses one at runtime, so a caller
+   * cannot drop a create right on an unproven failure: an asynchronous rejection
+   * or a timeout has to report itself with {@link recordUnprovenFailure}, which
+   * keeps the claim.
+   *
+   * THE ROW IS KEPT, NOT DELETED. Its identity, its confirmed-execution history
+   * and its refusal record stay readable, the claim becomes `pending` with
+   * `released_at` set (every reader answers `absent`), and the generation moves
+   * on. Keeping the row is what fences a LATE confirmation from the claim this
+   * release ended: it presents the old generation, the store finds a newer one,
+   * and the write is refused and recorded rather than binding a second
+   * execution. A `created` row is never released — that execution exists.
    */
-  releaseExecution(effect: StoreEffectKey, ownerId: string): boolean {
+  releaseExecution(
+    effect: StoreEffectKey,
+    ownerId: string,
+    generation: number,
+    proof: ExecutionNotCreated,
+    now: number,
+  ): boolean {
     this.assertOpen("releaseExecution");
+    if (proof === undefined || proof.kind !== "not-created") {
+      throw new GraphStoreWriteError(
+        "invalid-record",
+        "graph-store: refusing to release the create right of effect " +
+          JSON.stringify(effect.effectId) +
+          " without a not-created proof — 'the create failed' and 'no execution exists' are " +
+          "different facts, and only the second one licenses a later create",
+      );
+    }
     this.db.run(
-      `DELETE FROM ${GRAPH_STORE_TABLES.executions}
-       WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND state IN ('pending', 'creating')`,
+      `UPDATE ${GRAPH_STORE_TABLES.executions}
+          SET state = 'pending', released_at = ?, owner_generation = owner_generation + 1, execution_id = NULL, task_id = NULL, updated_at = ?
+        WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND owner_generation = ? AND state IN ('pending', 'creating')`,
+      now,
+      now,
       effect.graphId,
       effect.effectId,
       ownerId,
+      generation,
     );
     return this.changes() === 1;
   }
@@ -1025,7 +1267,8 @@ export class GraphStore {
     this.assertOpen("readExecution");
     const row = this.db
       .query(
-        `SELECT graph_id, effect_id, attempt_id, state, owner_id, execution_id, task_id, claimed_at, updated_at
+        `SELECT graph_id, effect_id, attempt_id, state, owner_id, owner_generation, execution_id, task_id, claimed_at, updated_at,
+                released_at, refused_kind, refused_owner_id, refused_generation, refused_execution_id, refused_at, refused_count
          FROM ${GRAPH_STORE_TABLES.executions} WHERE graph_id = ? AND effect_id = ?`,
       )
       .get(effect.graphId, effect.effectId);
@@ -1051,13 +1294,36 @@ export class GraphStore {
             ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
           })
         : undefined;
+    const generation = readStoreEpoch(entry, "owner_generation", this.filePath, table);
+    if (generation < 1) {
+      throw new GraphStoreFormatError(
+        "malformed-row",
+        this.filePath,
+        `graph-store: the execution binding for effect ${JSON.stringify(effect.effectId)} carries claim generation ${String(generation)}, which is not a claim this store mints — refusing to read it approximately`,
+        generation,
+        GRAPH_STORE_FORMAT_VERSION,
+      );
+    }
+    const releasedAt = readOptionalStoreEpoch(entry, "released_at", this.filePath, table);
+    if (releasedAt !== undefined && state !== "pending") {
+      throw new GraphStoreFormatError(
+        "malformed-row",
+        this.filePath,
+        `graph-store: the execution binding for effect ${JSON.stringify(effect.effectId)} is ${state} and carries a release instant — a released claim is pending, so refusing to read it approximately`,
+        state,
+        GRAPH_STORE_FORMAT_VERSION,
+      );
+    }
     return Object.freeze({
       graphId: readStoreText(entry, "graph_id", this.filePath, table),
       effectId: readStoreText(entry, "effect_id", this.filePath, table),
       attemptId: readStoreText(entry, "attempt_id", this.filePath, table),
       state,
       ownerId: readStoreText(entry, "owner_id", this.filePath, table),
+      generation,
       ...(execution === undefined ? {} : { execution }),
+      ...(releasedAt === undefined ? {} : { releasedAt }),
+      ...refusalOf(entry, effect, this.filePath, table),
       claimedAt: readStoreEpoch(entry, "claimed_at", this.filePath, table),
       updatedAt: readStoreEpoch(entry, "updated_at", this.filePath, table),
     });
@@ -1418,6 +1684,133 @@ function requireStoreEpoch(value: unknown, field: string): void {
 /** The explicit refusal the create-once rule needs. */
 function heldClaim(row: ExecutionBindingRecord): ExecutionClaim {
   return Object.freeze({ kind: "held" as const, row });
+}
+
+/** One host execution identity, normalized (the task id only when it is named). */
+function identityOf(execution: ExecutionIdentity): ExecutionIdentity {
+  return Object.freeze({
+    executionId: execution.executionId,
+    ...(typeof execution.taskId === "string" && execution.taskId.length > 0
+      ? { taskId: execution.taskId }
+      : {}),
+  });
+}
+
+/** Why one confirmation was fenced, as host-authored (credential-free) text. */
+function fencedReason(
+  row: ExecutionBindingRecord,
+  ownerId: string,
+  generation: number,
+): string {
+  if (row.ownerId !== ownerId) {
+    return (
+      "the row belongs to owner " +
+      JSON.stringify(row.ownerId) +
+      " and not to " +
+      JSON.stringify(ownerId)
+    );
+  }
+  if (row.generation !== generation) {
+    return (
+      "the row belongs to claim " +
+      String(row.generation) +
+      " of this owner and not to the presented claim " +
+      String(generation)
+    );
+  }
+  return (
+    "the row is " +
+    JSON.stringify(row.state) +
+    ", not 'creating' — a confirmation records the execution a claim handed over"
+  );
+}
+
+/**
+ * The refusal one row carries, as the projection reads it, or nothing to add.
+ *
+ * The group is all-or-nothing: a row that names a refusal KIND without recording
+ * when it happened (or the reverse) is a half-written record and is refused by
+ * name. `refused_generation` is NULL when the refused write held no claim, and
+ * the projection reports that as 0.
+ */
+function refusalOf(
+  entry: Record<string, unknown>,
+  effect: StoreEffectKey,
+  filePath: string,
+  table: string,
+): { readonly refused?: HostExecutionRefusal } {
+  const kind = readOptionalStoreText(entry, "refused_kind", filePath, table);
+  const at = readOptionalStoreEpoch(entry, "refused_at", filePath, table);
+  if ((kind === undefined) !== (at === undefined)) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      filePath,
+      `graph-store: the execution binding for effect ${JSON.stringify(effect.effectId)} carries half a refusal record (kind ${describeValue(kind)}, at ${describeValue(at)}) — refusing to read it approximately`,
+      kind ?? at,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  if (kind === undefined || at === undefined) return Object.freeze({});
+  if (
+    kind !== "stale-confirmation" &&
+    kind !== "conflicting-execution" &&
+    kind !== "unproven-failure"
+  ) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      filePath,
+      `graph-store: the execution binding for effect ${JSON.stringify(effect.effectId)} records refusal kind ${describeValue(kind)}, which this build does not write — refusing to read it approximately`,
+      kind,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  const ownerId = readOptionalStoreText(entry, "refused_owner_id", filePath, table);
+  if (ownerId === undefined) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      filePath,
+      `graph-store: the execution binding for effect ${JSON.stringify(effect.effectId)} records a refusal without the owner that asked — refusing to read it approximately`,
+      kind,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  const generation = readOptionalStoreEpoch(entry, "refused_generation", filePath, table);
+  const executionId = readOptionalStoreText(entry, "refused_execution_id", filePath, table);
+  const count = readStoreEpoch(entry, "refused_count", filePath, table);
+  return Object.freeze({
+    refused: Object.freeze({
+      kind,
+      ownerId,
+      generation: generation ?? 0,
+      ...(executionId === undefined ? {} : { executionId }),
+      at,
+      count,
+    }),
+  });
+}
+
+/** Read one nullable TEXT column, or `undefined` when SQL NULL. */
+function readOptionalStoreText(
+  row: Record<string, unknown>,
+  column: string,
+  path: string,
+  table: string,
+): string | undefined {
+  const value = row[column];
+  if (value === null || value === undefined) return undefined;
+  return readStoreText(row, column, path, table);
+}
+
+/** Read one nullable INTEGER column, or `undefined` when SQL NULL. */
+function readOptionalStoreEpoch(
+  row: Record<string, unknown>,
+  column: string,
+  path: string,
+  table: string,
+): number | undefined {
+  const value = row[column];
+  if (value === null || value === undefined) return undefined;
+  return readStoreEpoch(row, column, path, table);
 }
 
 /** One borrow of a shared connection: the entry and the registry key. */

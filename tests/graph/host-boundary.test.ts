@@ -38,7 +38,10 @@ import { join } from "node:path";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
-import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
+import {
+  HostExecutionIndex,
+  hostExecutionNotCreated,
+} from "../../src/graph/host/execution-index.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import {
@@ -142,8 +145,15 @@ describe("host boundary — the reproduced defects stay closed", () => {
     // The other instance may not create while the right is held.
     expect(other.lookup(effect).kind).toBe("unknown");
     expect(() => other.create(REQUEST, effect)).toThrow();
-    // The holder gives the right back and runs the real create path.
-    expect(registryA.release(effect, "host-a")).toBe(true);
+    // The holder gives the right back — with a PROOF that nothing was created
+    // (the store refuses a release without one) — and runs the real create path.
+    expect(
+      registryA.release(
+        effect,
+        "host-a",
+        hostExecutionNotCreated("fixture: the holder withdrew before handing anything over"),
+      ),
+    ).toBe(true);
 
     // THE CRASH WINDOW: host-a hands the request over and dies before the
     // platform names the execution. Exactly ONE dispatch happened.
@@ -166,13 +176,23 @@ describe("host boundary — the reproduced defects stay closed", () => {
     expect(() => reopened.create(REQUEST, effect)).toThrow();
     expect(deliveries).toEqual(["host-a"]);
 
-    // STATE 3 — created: the platform names the execution, and only then does
-    // the registry answer with a fact.
-    expect(reopened.confirmStarted(effect, { executionId: "dsh-run-42" })).toBe(true);
+    // STATE 3 — created: the platform names the execution, and only the CLAIM
+    // that handed the request over may record it. The recovered instance
+    // (host-c, which never held this claim) is REFUSED by the store's
+    // conditional update — the G1 defect's adapter-level fence — and the stale
+    // attempt is recorded on the row instead of being silently dropped.
+    expect(reopened.confirmStarted(effect, { executionId: "dsh-run-42" })).toBe(false);
+    expect(reopened.lookup(effect).kind).toBe("unknown");
+    expect(owner.confirmStarted(effect, { executionId: "dsh-run-42" })).toBe(true);
     expect(reopened.lookup(effect).kind).toBe("created");
     const row = HostExecutionIndex.open({ root: dir, ownerId: "host-d" }).read(effect);
     expect(row?.state).toBe("created");
     expect(row?.execution?.executionId).toBe("dsh-run-42");
+    expect(row?.ownerId).toBe("host-a");
+    expect(row?.refused?.kind).toBe("stale-confirmation");
+    expect(row?.refused?.ownerId).toBe("host-c");
+    expect(row?.refused?.executionId).toBe("dsh-run-42");
+    expect(row?.refused?.count).toBe(1);
   });
 
   it("a delivery that threw frees the right, so the next instance creates exactly once", () => {
@@ -201,6 +221,19 @@ describe("host boundary — the reproduced defects stay closed", () => {
     expect(deliveries).toEqual(["host-a", "host-b"]);
     expect(next.confirmStarted(effect, { executionId: "dsh-run-1" })).toBe(true);
     expect(next.lookup(effect).kind).toBe("created");
+
+    // THE CLAIM THAT WAS RELEASED CANNOT COME BACK: its owner holds no claim any
+    // more, so a late confirmation of a different execution is fenced and
+    // recorded rather than binding a second execution to next's row.
+    expect(failing.confirmStarted(effect, { executionId: "dsh-run-0" })).toBe(false);
+    const row = HostExecutionIndex.open({ root: dir, ownerId: "host-e" }).read(effect);
+    expect(row?.state).toBe("created");
+    expect(row?.ownerId).toBe("host-b");
+    expect(row?.execution?.executionId).toBe("dsh-run-1");
+    expect(row?.refused?.kind).toBe("stale-confirmation");
+    expect(row?.refused?.ownerId).toBe("host-a");
+    expect(row?.refused?.executionId).toBe("dsh-run-0");
+    expect(row?.refused?.count).toBe(1);
   });
 
   it("interleaved instances lose neither credential values nor their mapping", () => {

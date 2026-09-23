@@ -15,9 +15,10 @@
  *    answers `created` only with a real host execution id, gives the create
  *    right to exactly one instance, and a memory-only registry never guesses
  *    `absent` for what an earlier process may have created;
- * 3. a dispatch adapter delivers at most once per stable effect id, and a
- *    delivery that threw leaves the effect un-recorded so exactly one recovery
- *    create can follow;
+ * 3. a dispatch adapter delivers at most once per stable effect id; a delivery
+ *    that refused synchronously is released so exactly one recovery create can
+ *    follow, while a failure that PROVES nothing (an asynchronous rejection, a
+ *    timeout) keeps the claim and blocks;
  * 4. the completion bridge settles a full two-node graph through
  *    `settleNatural` — dispatches, natural completions, successor arming,
  *    accepted events and effect closure — idempotently, and it hands over a
@@ -55,7 +56,10 @@ import {
   type CompletionPolicyBody,
 } from "../../src/graph/policy/completion-policy.ts";
 import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
-import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
+import {
+  HostExecutionIndex,
+  hostExecutionNotCreated,
+} from "../../src/graph/host/execution-index.ts";
 import { GRAPH_STORE_FILE } from "../../src/graph/store/schema.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import {
@@ -342,9 +346,16 @@ describe("host execution registry — three states, one owner, a real host fact"
       expect(first.lookup(effect).kind).toBe("absent");
 
       // A delivery that threw releases the claim; from there the other
-      // instance may create, and it is the ONLY create.
+      // instance may create, and it is the ONLY create. The release carries the
+      // PROOF the store demands — nothing was handed to the platform.
       expect(first.markCreating(effect, "host-a")).toBe(true);
-      expect(first.release(effect, "host-a")).toBe(true);
+      expect(
+        first.release(
+          effect,
+          "host-a",
+          hostExecutionNotCreated("fixture: the delivery never reached the platform"),
+        ),
+      ).toBe(true);
       expect(second.lookup(effect).kind).toBe("absent");
       const retaken = second.claim(effect);
       expect(retaken.kind).toBe("claimed");
@@ -600,6 +611,223 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         ),
       ).toThrow();
       expect(delivered).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the create right when a failure proves nothing, and releases it only on a platform proof", () => {
+    const dir = makeTmpDir("host-dispatch-unproven-");
+    try {
+      const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
+      const request: OutcomeDispatchRequest = {
+        graphId: GRAPH_ID,
+        planRevision: "rev-1",
+        nodeId: "work",
+        attemptId: "work#1",
+        agent: "agent.work",
+        prompt: "Do the work.",
+        credential: "cred-work-1",
+      };
+      let platformSaysAbsent = false;
+      const deliveries: OutcomeDispatchRequest[] = [];
+      const index = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
+      const host = new HostOutcomeDispatch({
+        executions: index,
+        deliver: (delivered) => {
+          deliveries.push(delivered);
+        },
+        // A port that can only say "no answer" until the test flips it.
+        query: () =>
+          platformSaysAbsent
+            ? { kind: "absent" }
+            : { kind: "unknown", reason: "the control plane is unreachable" },
+      });
+
+      host.create(request, effect);
+      expect(deliveries).toHaveLength(1);
+      expect(index.read(effect)?.state).toBe("creating");
+
+      // THE ASYNCHRONOUS FAILURE REPORT: no proof, so nothing is released and
+      // nothing is re-dispatched — the row stays CREATING, every lookup answers
+      // UNKNOWN, and the failure is recorded on the row.
+      expect(index.release(effect, "host-a")).toBe(false);
+      expect(index.read(effect)?.state).toBe("creating");
+      expect(host.lookup(effect).kind).toBe("unknown");
+      expect(index.read(effect)?.refused?.kind).toBe("unproven-failure");
+      expect(index.read(effect)?.refused?.generation).toBe(1);
+      expect(() => host.create(request, effect)).toThrow();
+      expect(deliveries).toHaveLength(1);
+
+      // THE PROOF: the platform's own query reports no execution, so the
+      // stranded claim may be released and the attempt created EXACTLY once —
+      // and the generation moves, which is what fences the old claim out.
+      platformSaysAbsent = true;
+      expect(host.lookup(effect).kind).toBe("absent");
+      host.create(request, effect);
+      expect(deliveries).toHaveLength(2);
+      const adopted = index.read(effect);
+      expect(adopted?.state).toBe("creating");
+      expect(adopted?.generation).toBeGreaterThan(1);
+
+      // The request is with the platform again: an honest port no longer calls
+      // it absent, so the effect is unresolved rather than re-created.
+      platformSaysAbsent = false;
+      expect(host.lookup(effect).kind).toBe("unknown");
+      expect(() => host.create(request, effect)).toThrow();
+      expect(deliveries).toHaveLength(2);
+
+      // And the platform's confirmation is accepted from the claim that made
+      // the delivery, exactly as for a first dispatch.
+      expect(host.confirmStarted(effect, { executionId: "dsh-run-9" })).toBe(true);
+      expect(host.lookup(effect).kind).toBe("created");
+      expect(index.read(effect)?.generation).toBe(adopted?.generation);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fences a late confirmation from a superseded claim and records the stale attempt", () => {
+    const dir = makeTmpDir("host-dispatch-fence-");
+    try {
+      const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
+      const now = 1_700_000_000_000;
+      const first = HostExecutionIndex.open({ root: dir, ownerId: "host-a", now: () => now });
+      const second = HostExecutionIndex.open({ root: dir, ownerId: "host-b", now: () => now });
+
+      const firstClaim = first.claim(effect);
+      expect(firstClaim.kind).toBe("claimed");
+      if (firstClaim.kind !== "claimed") return;
+      expect(firstClaim.generation).toBe(1);
+      expect(first.markCreating(effect, "host-a")).toBe(true);
+
+      // THE PLATFORM PROVED the stranded claim empty, so the second instance
+      // releases it BY THE CLAIM IT OBSERVED and takes over on a new generation.
+      expect(
+        second.releaseStale(
+          effect,
+          firstClaim,
+          hostExecutionNotCreated("the platform proved this claim created nothing"),
+        ),
+      ).toBe(true);
+      expect(first.read(effect)?.releasedAt).toBe(now);
+      const secondClaim = second.claim(effect);
+      expect(secondClaim.kind).toBe("claimed");
+      if (secondClaim.kind !== "claimed") return;
+      expect(secondClaim.generation).toBe(3);
+      expect(second.markCreating(effect, "host-b")).toBe(true);
+      expect(second.confirm(effect, { executionId: "task-b" })).toBe(true);
+
+      // THE LATE CONFIRMATION: the first instance never learned it lost the
+      // claim, so it reports the execution IT believed it created. The store's
+      // conditional write refuses it and records it.
+      const verdict = first.confirmExecution(effect, { executionId: "task-a-late" });
+      expect(verdict.kind).toBe("fenced");
+      if (verdict.kind !== "fenced") return;
+      expect(verdict.attemptedOwnerId).toBe("host-a");
+      expect(verdict.attemptedGeneration).toBe(1);
+      expect(verdict.ownerId).toBe("host-b");
+      expect(verdict.generation).toBe(3);
+      expect(verdict.state).toBe("created");
+
+      // THE NEW OWNER'S RECORD IS UNTOUCHED, and the stale attempt is durable.
+      const row = second.read(effect);
+      expect(row?.state).toBe("created");
+      expect(row?.ownerId).toBe("host-b");
+      expect(row?.generation).toBe(3);
+      expect(row?.execution?.executionId).toBe("task-b");
+      expect(row?.refused).toEqual({
+        kind: "stale-confirmation",
+        ownerId: "host-a",
+        generation: 1,
+        executionId: "task-a-late",
+        at: now,
+        count: 1,
+      });
+
+      // A SECOND refusal counts rather than overwriting the first silently.
+      expect(first.confirm(effect, { executionId: "task-a-again" })).toBe(false);
+      expect(second.read(effect)?.refused?.count).toBe(2);
+      expect(second.read(effect)?.refused?.executionId).toBe("task-a-again");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("runs a first dispatch, a successor, a retry and a recovery through ONE create path", () => {
+    const dir = makeTmpDir("host-dispatch-one-path-");
+    try {
+      const deliveries: string[] = [];
+      const bindings: string[] = [];
+      let platformSaysAbsent = false;
+      const index = HostExecutionIndex.open({ root: dir, ownerId: "host-one" });
+      const host = new HostOutcomeDispatch({
+        executions: index,
+        deliver: (request) => {
+          deliveries.push(request.attemptId);
+        },
+        query: () =>
+          platformSaysAbsent
+            ? { kind: "absent" }
+            : { kind: "unknown", reason: "no answer from the platform" },
+        completions: {
+          bind: (binding) => {
+            bindings.push(binding.attemptId);
+          },
+        },
+      });
+      const requestOf = (nodeId: string, attemptId: string): OutcomeDispatchRequest => ({
+        graphId: GRAPH_ID,
+        planRevision: "rev-1",
+        nodeId,
+        attemptId,
+        agent: "agent." + nodeId,
+        prompt: "Do the work.",
+        credential: "cred-" + attemptId,
+      });
+      const keyOf = (attemptId: string) => dispatchEffectKeyOf(GRAPH_ID, attemptId);
+
+      // FIRST DISPATCH.
+      host.create(requestOf("work", "work#1"), keyOf("work#1"));
+      // SUCCESSOR: an accepted outcome armed ship, so ship is a NEW effect.
+      host.create(requestOf("ship", "ship#2"), keyOf("ship#2"));
+      // RETRY (P3's window): a new ATTEMPT of work is a new effect key too —
+      // never the row the first attempt owns.
+      host.create(requestOf("work", "work#3"), keyOf("work#3"));
+      expect(deliveries).toEqual(["work#1", "ship#2", "work#3"]);
+      expect(bindings).toEqual(["work#1", "ship#2", "work#3"]);
+      expect(host.confirmStarted(keyOf("work#1"), { executionId: "dsh-run-1" })).toBe(true);
+      expect(host.lookup(keyOf("work#1")).kind).toBe("created");
+      expect(() => host.create(requestOf("work", "work#1"), keyOf("work#1"))).toThrow();
+      expect(deliveries).toHaveLength(3);
+
+      // RECOVERY: ship#2's create outcome was never confirmed and the failure
+      // proved nothing, so the effect is BLOCKED — the same path, the same
+      // steps. Only the platform's own proof frees it, and then the create
+      // adopts the stranded claim and delivers ONE more time.
+      expect(index.release(keyOf("ship#2"), "host-one")).toBe(false);
+      expect(host.lookup(keyOf("ship#2")).kind).toBe("unknown");
+      expect(() => host.create(requestOf("ship", "ship#2"), keyOf("ship#2"))).toThrow();
+      expect(deliveries.filter((attempt) => attempt === "ship#2")).toHaveLength(1);
+
+      platformSaysAbsent = true;
+      expect(host.lookup(keyOf("ship#2")).kind).toBe("absent");
+      host.create(requestOf("ship", "ship#2"), keyOf("ship#2"));
+      expect(deliveries.filter((attempt) => attempt === "ship#2")).toHaveLength(2);
+      expect(index.read(keyOf("ship#2"))?.generation).toBeGreaterThan(1);
+      // The platform has the request again; an honest port stops claiming absence.
+      platformSaysAbsent = false;
+      expect(host.confirmStarted(keyOf("ship#2"), { executionId: "dsh-run-2" })).toBe(true);
+      expect(host.lookup(keyOf("ship#2")).kind).toBe("created");
+
+      // ONE ROW PER EFFECT, one delivery per attempt, and no effect created
+      // twice without a proof.
+      expect(index.size).toBe(3);
+      for (const attempt of ["work#1", "ship#2", "work#3"]) {
+        expect(index.read(keyOf(attempt))?.attemptId).toBe(attempt);
+        expect(() => host.create(requestOf("work", attempt), keyOf(attempt))).toThrow();
+      }
+      expect(deliveries).toEqual(["work#1", "ship#2", "work#3", "ship#2"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

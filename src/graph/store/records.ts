@@ -25,7 +25,14 @@
  */
 
 import type { AcceptedResult, GraphDefinition } from "../domain/model.ts";
-import type { HostDispatchExecution, HostExecutionIdentity } from "../host/execution-index.ts";
+import type {
+  HostDispatchExecution,
+  HostExecutionConfirmation,
+  HostExecutionIdentity,
+  HostExecutionNotCreated,
+  HostExecutionRefusal,
+  HostExecutionRefusalKind,
+} from "../host/execution-index.ts";
 import type { HostInvocationOrigin } from "../host/invocation-origins.ts";
 import type { CredentialStoreIdentity } from "../outcome/credential-isolation.ts";
 import type { AcceptanceBatch, CommitResult } from "../ledger/types.ts";
@@ -135,6 +142,25 @@ export type ExecutionBindingRecord = HostDispatchExecution;
 export type ExecutionIdentity = HostExecutionIdentity;
 
 /**
+ * A delivery's PROOF that no execution was created for one effect (P2 item 4).
+ *
+ * ALIAS of the host registry's own proof shape: the host adapter mints it (a
+ * synchronous delivery refusal, or the platform's execution query answering
+ * `absent`) and every release statement this store owns REQUIRES it, so an
+ * unproven failure cannot drop a create right even by mistake.
+ */
+export type ExecutionNotCreated = HostExecutionNotCreated;
+
+/** What one conditional confirmation did (confirmed / replayed / fenced / ...). */
+export type ExecutionConfirmation = HostExecutionConfirmation;
+
+/** The kind of write one registry row refused (see ExecutionRefusal). */
+export type ExecutionRefusalKind = HostExecutionRefusalKind;
+
+/** The last refused write of one registry row. */
+export type ExecutionRefusal = HostExecutionRefusal;
+
+/**
  * The answer to "may THIS instance create the execution?".
  *
  * `held` is the explicit refusal the create-once rule needs: the effect is
@@ -142,7 +168,16 @@ export type ExecutionIdentity = HostExecutionIdentity;
  * to the platform again.
  */
 export type ExecutionClaim =
-  | { readonly kind: "claimed"; readonly ownerId: string }
+  | {
+      readonly kind: "claimed";
+      readonly ownerId: string;
+      /**
+       * WHICH claim of that owner this is. The store mints it with the row and
+       * moves it on every ownership transition; a caller must present it on
+       * every later write, which is what fences a superseded claim out.
+       */
+      readonly generation: number;
+    }
   | { readonly kind: "held"; readonly row: ExecutionBindingRecord };
 
 /** One attempt's credential record, keyed by the runtime's attempt identity. */

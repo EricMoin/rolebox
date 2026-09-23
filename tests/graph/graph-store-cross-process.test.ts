@@ -27,8 +27,14 @@
  *   - "created is reachable only through a non-empty execution id...": ONE
  *     worker performs the transitions; the parent's own connection verifies
  *     the rows and the DDL CHECK.
- *   - "PINNED TODAY (G1/P2)...": the parent claims and marks creating; a
- *     WORKER that never claimed the effect binds the execution id.
+ *   - "fences a NON-claimant...": the parent claims and marks creating; a
+ *     WORKER that never claimed the effect tries to bind the execution id and
+ *     is refused, with the stale attempt recorded on the row.
+ *   - "fences a LATE confirmation from an expired owner...": the parent walks
+ *     one effect through claim → proven release → takeover → create, then a
+ *     WORKER still holding the FIRST claim confirms its own execution; the new
+ *     owner's row is unchanged, the refusal is durable, and a THIRD process
+ *     reads it back.
  *   - "a committed receipt...": worker A commits, worker B replays and worker C
  *     conflicts, each in its own process; the parent reads the durable rows.
  *
@@ -50,11 +56,17 @@
  * `afterEach` closes the parent's store, kills any surviving child and
  * removes the directory, so no test leaves a stray file.
  *
- * G1 IS PINNED, NOT PRETENDED. §8.2 records that `confirmExecution`
- * conditions on `state = 'creating'` and does NOT check the owner, so a
- * non-claimant can bind an execution id; P2 owns the fix. The G1 case asserts
- * that behaviour EXACTLY as it is today, with the P2 note in place, so the fix
- * makes the case fail loudly instead of arriving unnoticed.
+ * G1 IS CLOSED HERE, DELIBERATELY. §8.2 recorded that `confirmExecution`
+ * conditioned on `state = 'creating'` and NOT on the owner, so a non-claimant
+ * could bind an execution id (reproduced cross-process as
+ * `owner=owner-A execution=exec-B`). The old case pinned that behaviour with a
+ * "P2 owns the fix" note; it is REPLACED here by the fencing case that pins the
+ * fix: the confirmation now names the claim it believes is current — the
+ * store's `owner_generation` is what decides — a stale write is refused by
+ * name, and the refused attempt is recorded ON the row
+ * (`refused_kind`/`refused_owner_id`/`refused_generation`/
+ * `refused_execution_id`/`refused_at`/`refused_count`) so it survives the
+ * process that asked.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -64,6 +76,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { GraphStore, GRAPH_STORE_TABLES } from "../../src/graph/store/index.ts";
+import { hostExecutionNotCreated } from "../../src/graph/host/execution-index.ts";
 import type { ReceiptRecord } from "../../src/graph/ledger/types.ts";
 
 /** The checked-in worker every case spawns as a REAL separate process. */
@@ -89,13 +102,6 @@ interface WorkerReport {
   readonly error?: string;
 }
 
-interface RowView {
-  readonly state: string;
-  readonly ownerId: string;
-  readonly executionId?: string;
-  readonly claimedAt: number;
-}
-
 interface ClaimReport {
   readonly round: number;
   readonly effectId: string;
@@ -103,29 +109,63 @@ interface ClaimReport {
   readonly kind: "claimed" | "held";
   readonly state: string;
   readonly ownerId: string;
+  /** The claim generation the store minted (or the row's, when held). */
+  readonly generation?: number;
   readonly marked?: boolean;
   readonly confirmed?: boolean;
+  readonly confirmedKind?: string;
   readonly executionId?: string;
+}
+
+interface RowView {
+  readonly state: string;
+  readonly ownerId: string;
+  readonly generation: number;
+  readonly executionId?: string;
+  readonly taskId?: string;
+  readonly releasedAt?: number;
+  readonly refused?: {
+    readonly kind: string;
+    readonly ownerId: string;
+    readonly generation: number;
+    readonly executionId?: string;
+    readonly at: number;
+    readonly count: number;
+  };
+  readonly claimedAt: number;
+  readonly updatedAt: number;
 }
 
 interface ShapeReport extends WorkerReport {
   readonly claim: string;
+  readonly generation: number;
   readonly marked: boolean;
   readonly emptyIdError: { readonly name: string; readonly problem?: string };
   readonly afterEmptyId: RowView | null;
-  readonly confirmed: boolean;
+  readonly confirmed: string;
   readonly afterConfirm: RowView | null;
   readonly markedAgain: boolean;
   readonly released: boolean;
+  readonly releasedRowState?: string;
+  readonly releasedRowGeneration?: number;
+  readonly afterRelease: RowView | null;
   readonly secondClaim: string;
+  readonly secondClaimOwner?: string;
+  readonly secondClaimGeneration?: number;
   readonly secondClaimState?: string;
   readonly afterSecond: RowView | null;
 }
 
-interface NonOwnerReport extends WorkerReport {
+interface StaleConfirmReport extends WorkerReport {
   readonly owner: string;
+  readonly generation: number;
   readonly executionId: string;
-  readonly confirmed: boolean;
+  readonly verdict: string;
+  readonly verdictDetail: Record<string, unknown>;
+  readonly row: RowView | null;
+}
+
+interface ExecutionReadReport extends WorkerReport {
   readonly row: RowView | null;
 }
 
@@ -533,6 +573,9 @@ describe("GraphStore — cross-process create right and conditional updates", ()
     );
 
     expect(report.claim).toBe("claimed");
+    // THE STORE MINTS THE CLAIM: a fresh row starts at generation 1, and every
+    // later write in this process names it.
+    expect(report.generation).toBe(1);
     expect(report.marked).toBe(true);
 
     // THE REFUSED SHAPE: "created" claims a host FACT, so an empty execution id
@@ -545,7 +588,7 @@ describe("GraphStore — cross-process create right and conditional updates", ()
     expect(report.afterEmptyId?.executionId).toBeUndefined();
 
     // THE POSITIVE SHAPE: a non-empty id is the only way to created.
-    expect(report.confirmed).toBe(true);
+    expect(report.confirmed).toBe("confirmed");
     expect(report.afterConfirm?.state).toBe("created");
     expect(report.afterConfirm?.executionId).toBe("exec-shape");
 
@@ -563,6 +606,7 @@ describe("GraphStore — cross-process create right and conditional updates", ()
     // writer cannot bypass from another process.
     expect(fx.store.readExecution(effect)?.state).toBe("created");
     expect(fx.store.readExecution(effect)?.execution?.executionId).toBe("exec-shape");
+    expect(fx.store.readExecution(effect)?.generation).toBe(1);
     expect(() =>
       fx.store.run(
         `UPDATE ${GRAPH_STORE_TABLES.executions} SET state = 'created', execution_id = NULL WHERE graph_id = ? AND effect_id = ?`,
@@ -574,46 +618,172 @@ describe("GraphStore — cross-process create right and conditional updates", ()
     expect(countRows(fx, GRAPH_STORE_TABLES.executions)).toBe(1);
   });
 
-  it("PINNED TODAY (G1/P2): a process that never claimed the effect can still bind its execution id", async () => {
-    const fx = makeFixture("graph-xproc-g1-");
-    const effect = raceKey("effect-g1", 0);
+  it("fences a NON-claimant's confirmation and records the stale attempt on the row", async () => {
+    const fx = makeFixture("graph-xproc-fence-nonclaimant-");
+    const effect = raceKey("effect-fence", 0);
 
-    // The parent is the claimant: it takes the create right and marks the
-    // effect creating, then leaves the window open.
-    expect(fx.store.claimExecution(effect, "owner-A", NOW, LEASE_MS).kind).toBe("claimed");
-    expect(fx.store.markExecutionCreating(effect, "owner-A", NOW)).toBe(true);
+    // The parent is the claimant: it takes the create right (generation 1) and
+    // marks the effect creating, then leaves the window open.
+    const claimed = fx.store.claimExecution(effect, "owner-A", NOW, LEASE_MS);
+    expect(claimed.kind).toBe("claimed");
+    if (claimed.kind !== "claimed") throw new Error("fixture: the claim was not granted");
+    expect(claimed.generation).toBe(1);
+    expect(fx.store.markExecutionCreating(effect, "owner-A", claimed.generation, NOW)).toBe(true);
 
     // A DIFFERENT real process — owner-B, which never claimed this effect —
-    // confirms the host execution.
-    const report = await runWorker<NonOwnerReport>(
-      "non-owner",
+    // presents the no-claim generation and tries to bind the execution id.
+    const report = await runWorker<StaleConfirmReport>(
+      "non-claimant",
       workerArgs(fx, {
-        mode: "confirm-non-owner",
+        mode: "confirm-stale",
         graph: GRAPH,
         effect: effect.effectId,
         attempt: effect.attemptId,
         owner: "owner-B",
+        generation: "0",
         "execution-id": "exec-B",
         now: String(NOW),
       }),
     );
     expect(report.pid).not.toBe(process.pid);
 
-    // TODAY'S HONEST BEHAVIOUR, PINNED. §8.2 G1: confirmExecution conditions
-    // on state='creating' and NOT on the owner, so a non-claimant binds
-    // exec-B to owner-A's row. P2 owns the owner-fencing fix; when it lands,
-    // confirmed must become false (or the signature must demand the owner)
-    // and THIS CASE MUST FAIL LOUDLY rather than be relaxed.
-    expect(
-      report.confirmed,
-      "G1 pin: today a non-claimant CAN bind the execution id; if this is false, P2's fencing landed and the assertion (not the behaviour) is what changed",
-    ).toBe(true);
-    expect(report.row?.state).toBe("created");
-    // The claimant is unchanged; only the host fact was written by someone else.
+    // THE FENCE: refused by name, and NOTHING about the claim moved. This is
+    // the G1 reproduction's exact inputs (`owner=owner-A`, attempted
+    // `execution=exec-B`) with the answer the fix must give.
+    expect(report.verdict).toBe("fenced");
+    expect(report.verdictDetail["attemptedOwnerId"]).toBe("owner-B");
+    expect(report.verdictDetail["ownerId"]).toBe("owner-A");
+    expect(report.verdictDetail["generation"]).toBe(1);
+    expect(report.row?.state).toBe("creating");
     expect(report.row?.ownerId).toBe("owner-A");
-    expect(report.row?.executionId).toBe("exec-B");
-    expect(fx.store.readExecution(effect)?.ownerId).toBe("owner-A");
-    expect(fx.store.readExecution(effect)?.execution?.executionId).toBe("exec-B");
+    expect(report.row?.generation).toBe(1);
+    expect(report.row?.executionId).toBeUndefined();
+
+    // THE STALE ATTEMPT IS OBSERVABLE, cross-process: the parent's OWN
+    // connection reads the refusal the worker's write left on the row (whose
+    // attempt, which generation, which execution, when, how many).
+    const row = fx.store.readExecution(effect);
+    expect(row?.state).toBe("creating");
+    expect(row?.execution).toBeUndefined();
+    expect(row?.refused).toEqual({
+      kind: "stale-confirmation",
+      ownerId: "owner-B",
+      generation: 0,
+      executionId: "exec-B",
+      at: NOW,
+      count: 1,
+    });
+
+    // The claimant is still the one that can record the host fact.
+    expect(
+      fx.store.confirmExecution(
+        effect,
+        "owner-A",
+        claimed.generation,
+        { executionId: "exec-A" },
+        NOW,
+      ).kind,
+    ).toBe("confirmed");
+    expect(fx.store.readExecution(effect)?.execution?.executionId).toBe("exec-A");
+    expect(fx.store.readExecution(effect)?.refused?.executionId).toBe("exec-B");
+    expect(countRows(fx, GRAPH_STORE_TABLES.executions)).toBe(1);
+  });
+
+  it("fences a LATE confirmation from an expired owner, keeps the new owner's binding, and leaves both readable to a third process", async () => {
+    const fx = makeFixture("graph-xproc-fence-late-");
+    const effect = raceKey("effect-late", 0);
+
+    // OWNER A: claim (generation 1), mark creating, then a delivery that PROVED
+    // no execution was created — the one case that may release the right.
+    const first = fx.store.claimExecution(effect, "owner-A", NOW, LEASE_MS);
+    expect(first.kind).toBe("claimed");
+    if (first.kind !== "claimed") throw new Error("fixture: the claim was not granted");
+    expect(first.generation).toBe(1);
+    expect(fx.store.markExecutionCreating(effect, "owner-A", first.generation, NOW)).toBe(true);
+    expect(
+      fx.store.releaseExecution(
+        effect,
+        "owner-A",
+        first.generation,
+        hostExecutionNotCreated("the platform proved no execution exists for this effect"),
+        NOW,
+      ),
+    ).toBe(true);
+
+    // THE ROW IS KEPT, NOT DELETED: released, still readable, and on a NEW
+    // generation — which is what fences the expired claim.
+    const released = fx.store.readExecution(effect);
+    expect(released?.state).toBe("pending");
+    expect(released?.releasedAt).toBe(NOW);
+    expect(released?.generation).toBe(2);
+    expect(released?.refused).toBeUndefined();
+
+    // OWNER B: a released claim is free immediately (no lease wait), and B
+    // creates and confirms ITS execution on the next generation.
+    const second = fx.store.claimExecution(effect, "owner-B", NOW, LEASE_MS);
+    expect(second.kind).toBe("claimed");
+    if (second.kind !== "claimed") throw new Error("fixture: the takeover was not granted");
+    expect(second.generation).toBe(3);
+    expect(fx.store.markExecutionCreating(effect, "owner-B", second.generation, NOW)).toBe(true);
+    expect(
+      fx.store.confirmExecution(
+        effect,
+        "owner-B",
+        second.generation,
+        { executionId: "exec-B" },
+        NOW,
+      ).kind,
+    ).toBe("confirmed");
+
+    // THE LATE CONFIRMATION, from a REAL other process still holding owner-A's
+    // FIRST claim (generation 1): the execution it believed it created must not
+    // reach owner-B's row.
+    const late = await runWorker<StaleConfirmReport>(
+      "late-owner",
+      workerArgs(fx, {
+        mode: "confirm-stale",
+        graph: GRAPH,
+        effect: effect.effectId,
+        attempt: effect.attemptId,
+        owner: "owner-A",
+        generation: "1",
+        "execution-id": "exec-A-late",
+        now: String(NOW + 1_000),
+      }),
+    );
+    expect(late.pid).not.toBe(process.pid);
+    expect(late.verdict).toBe("fenced");
+    expect(late.verdictDetail["attemptedGeneration"]).toBe(1);
+    expect(late.verdictDetail["generation"]).toBe(3);
+    expect(late.verdictDetail["state"]).toBe("created");
+
+    // THE NEW OWNER'S RECORD IS UNCHANGED, and the stale attempt is kept.
+    expect(late.row?.state).toBe("created");
+    expect(late.row?.ownerId).toBe("owner-B");
+    expect(late.row?.generation).toBe(3);
+    expect(late.row?.executionId).toBe("exec-B");
+    expect(late.row?.refused).toEqual({
+      kind: "stale-confirmation",
+      ownerId: "owner-A",
+      generation: 1,
+      executionId: "exec-A-late",
+      at: NOW + 1_000,
+      count: 1,
+    });
+
+    // A THIRD process reads the DURABLE binding and the refusal back: what
+    // survives the process that wrote them is the row itself, not a map.
+    const readBack = await runWorker<ExecutionReadReport>(
+      "reader",
+      workerArgs(fx, {
+        mode: "read-execution",
+        graph: GRAPH,
+        effect: effect.effectId,
+        attempt: effect.attemptId,
+      }),
+    );
+    expect(readBack.pid).not.toBe(late.pid);
+    expect(readBack.row).toEqual(late.row);
     expect(countRows(fx, GRAPH_STORE_TABLES.executions)).toBe(1);
   });
 });

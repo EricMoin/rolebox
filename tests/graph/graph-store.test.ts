@@ -176,9 +176,30 @@ describe("GraphStore — ONE workspace database", () => {
           tx.writeDefinition(definition());
           const claim = tx.claimExecution(EFFECT, "host-a", NOW, 60_000);
           expect(claim.kind).toBe("claimed");
-          expect(tx.confirmExecution(EFFECT, { executionId: "dsh-run-1" }, NOW)).toBe(false);
-          expect(tx.markExecutionCreating(EFFECT, "host-a", NOW)).toBe(true);
-          expect(tx.confirmExecution(EFFECT, { executionId: "dsh-run-1" }, NOW)).toBe(true);
+          if (claim.kind !== "claimed") throw new Error("fixture: the claim was not granted");
+          // The store MINTS the claim generation, and every later write names it.
+          expect(claim.generation).toBe(1);
+          // A confirmation before the claim marked the effect creating is
+          // refused BY NAME (and recorded), never applied.
+          expect(
+            tx.confirmExecution(
+              EFFECT,
+              "host-a",
+              claim.generation,
+              { executionId: "dsh-run-1" },
+              NOW,
+            ).kind,
+          ).toBe("fenced");
+          expect(tx.markExecutionCreating(EFFECT, "host-a", claim.generation, NOW)).toBe(true);
+          expect(
+            tx.confirmExecution(
+              EFFECT,
+              "host-a",
+              claim.generation,
+              { executionId: "dsh-run-1" },
+              NOW,
+            ),
+          ).toEqual({ kind: "confirmed", execution: { executionId: "dsh-run-1" } });
           tx.rememberCredential(
             { graphId: GRAPH, nodeId: "work", attemptId: ATTEMPT },
             "not-retained",
@@ -420,14 +441,23 @@ describe("GraphStore — the invariants P0 pinned", () => {
     await withTempDir((dir) => {
       const store = GraphStore.openFile(dir);
       try {
-        store.claimExecution(EFFECT, "host-a", NOW, 60_000);
-        store.markExecutionCreating(EFFECT, "host-a", NOW);
-        expect(() => store.confirmExecution(EFFECT, { executionId: "" }, NOW)).toThrow(
-          GraphStoreWriteError,
-        );
+        const claim = store.claimExecution(EFFECT, "host-a", NOW, 60_000);
+        if (claim.kind !== "claimed") throw new Error("fixture: the claim was not granted");
+        store.markExecutionCreating(EFFECT, "host-a", claim.generation, NOW);
+        expect(() =>
+          store.confirmExecution(EFFECT, "host-a", claim.generation, { executionId: "" }, NOW),
+        ).toThrow(GraphStoreWriteError);
         expect(store.readExecution(EFFECT)?.state).toBe("creating");
 
-        store.confirmExecution(EFFECT, { executionId: "dsh-run-1" }, NOW);
+        expect(
+          store.confirmExecution(
+            EFFECT,
+            "host-a",
+            claim.generation,
+            { executionId: "dsh-run-1" },
+            NOW,
+          ).kind,
+        ).toBe("confirmed");
         // The DDL CHECK makes the unrepresentable state unrepresentable even
         // for a direct SQL writer.
         expect(() =>
@@ -699,6 +729,58 @@ describe("GraphStore — the format gate (P1 item 6)", () => {
       expect(await storeTables(graphStoreFilePath(dir))).not.toContain(
         GRAPH_STORE_TABLES.executions,
       );
+    });
+  });
+
+  it("refuses the PRE-P2 execution layout by name instead of widening it", async () => {
+    await withTempDir(async (dir) => {
+      const store = GraphStore.openFile(dir);
+      store.close();
+      // THE LAYOUT BEFORE THE OWNER GENERATION: same table name and primary key,
+      // no `owner_generation` and no refusal record. A pre-P2 process could have
+      // written this file, and reading it as this build's layout would answer
+      // "no claim generation" for every row.
+      await tamper(graphStoreFilePath(dir), (db) => {
+        db.exec(
+          "ALTER TABLE " + GRAPH_STORE_TABLES.executions + " RENAME TO executions_pre_p2",
+        );
+        db.exec(
+          "CREATE TABLE " +
+            GRAPH_STORE_TABLES.executions +
+            " (graph_id TEXT NOT NULL, effect_id TEXT NOT NULL, attempt_id TEXT NOT NULL, " +
+            "state TEXT NOT NULL CHECK (state IN ('pending', 'creating', 'created')), " +
+            "owner_id TEXT NOT NULL, execution_id TEXT, task_id TEXT, " +
+            "claimed_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, " +
+            "PRIMARY KEY (graph_id, effect_id), " +
+            "CHECK ((state = 'created') = (execution_id IS NOT NULL)))",
+        );
+      });
+      expect(loadGraphStoreSync(dir).kind).toBe("corrupt");
+      const refused = (() => {
+        try {
+          GraphStore.openFile(dir);
+        } catch (caught) {
+          return caught;
+        }
+      })();
+      expect(refused).toBeInstanceOf(GraphStoreFormatError);
+      if (refused instanceof GraphStoreFormatError) {
+        expect(refused.problem).toBe("incomplete-store");
+        expect(String(refused.message)).toContain("owner_generation is missing");
+      }
+      // REFUSED, NOT REBUILT: the file still holds the layout it had.
+      await tamper(graphStoreFilePath(dir), (db) => {
+        const names: string[] = [];
+        for (const row of db
+          .query("PRAGMA table_info(" + GRAPH_STORE_TABLES.executions + ")")
+          .all()) {
+          if (typeof row === "object" && row !== null && "name" in row) {
+            const name = (row as { readonly name?: unknown }).name;
+            if (typeof name === "string") names.push(name);
+          }
+        }
+        expect(names).not.toContain("owner_generation");
+      });
     });
   });
 

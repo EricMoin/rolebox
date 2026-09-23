@@ -80,6 +80,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { hostExecutionNotCreated } from "../../../src/graph/host/execution-index.ts";
 import {
   GraphStore,
   GraphStoreWriteError,
@@ -135,8 +136,13 @@ function rowView(row: ExecutionBindingRecord | undefined): Record<string, unknow
   return {
     state: row.state,
     ownerId: row.ownerId,
+    generation: row.generation,
     executionId: row.execution?.executionId,
+    taskId: row.execution?.taskId,
+    releasedAt: row.releasedAt,
+    refused: row.refused,
     claimedAt: row.claimedAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -216,6 +222,7 @@ async function claimRace(store: GraphStore): Promise<void> {
         kind: "held",
         state: claim.row.state,
         ownerId: claim.row.ownerId,
+        generation: claim.row.generation,
         executionId: claim.row.execution?.executionId,
       });
       continue;
@@ -223,14 +230,24 @@ async function claimRace(store: GraphStore): Promise<void> {
 
     let marked: boolean | undefined;
     let confirmed: boolean | undefined;
+    let confirmedKind: string | undefined;
     let executionId: string | undefined;
     if (confirm) {
       executionId = `exec-${id}-${round}`;
-      // Two conditional updates, each its own transaction, from a real second
-      // connection: "creating" is only reachable from this owner's pending
-      // row, and "created" only from a row that is creating.
-      marked = store.markExecutionCreating(effect, owner, now);
-      confirmed = store.confirmExecution(effect, { executionId }, now);
+      // Three conditional updates, each naming the generation THIS claim was
+      // granted, from a real second connection: "creating" is only reachable
+      // from this claim's pending row, and "created" only from a row that is
+      // creating AND still this claim's.
+      marked = store.markExecutionCreating(effect, owner, claim.generation, now);
+      const verdict = store.confirmExecution(
+        effect,
+        owner,
+        claim.generation,
+        { executionId },
+        now,
+      );
+      confirmedKind = verdict.kind;
+      confirmed = verdict.kind === "confirmed" || verdict.kind === "replayed";
     }
     claims.push({
       round,
@@ -239,8 +256,10 @@ async function claimRace(store: GraphStore): Promise<void> {
       kind: "claimed",
       state: "pending",
       ownerId: owner,
+      generation: claim.generation,
       marked,
       confirmed,
+      confirmedKind,
       executionId,
     });
   }
@@ -268,11 +287,12 @@ function confirmShape(store: GraphStore): void {
   const leaseMs = numberArg("lease-ms");
 
   const claim = store.claimExecution(effect, owner, now, leaseMs);
-  const marked = store.markExecutionCreating(effect, owner, now);
+  if (claim.kind !== "claimed") throw new Error("fixture: the claim was not granted");
+  const marked = store.markExecutionCreating(effect, owner, claim.generation, now);
 
   let emptyIdError: { name: string; problem?: string };
   try {
-    store.confirmExecution(effect, { executionId: "" }, now);
+    store.confirmExecution(effect, owner, claim.generation, { executionId: "" }, now);
     emptyIdError = { name: "none" };
   } catch (error) {
     emptyIdError =
@@ -282,19 +302,40 @@ function confirmShape(store: GraphStore): void {
   }
   const afterEmptyId = store.readExecution(effect);
 
-  const confirmed = store.confirmExecution(effect, { executionId: "exec-shape" }, now);
+  const confirmedVerdict = store.confirmExecution(
+    effect,
+    owner,
+    claim.generation,
+    { executionId: "exec-shape" },
+    now,
+  );
+  const confirmed = confirmedVerdict.kind;
   const afterConfirm = store.readExecution(effect);
 
-  // The refused transitions: a `created` row is not `pending` again.
-  const markedAgain = store.markExecutionCreating(effect, owner, now);
-  const released = store.releaseExecution(effect, owner);
+  // The refused transitions: a `created` row is not `pending` again, and a
+  // RELEASE demands a proof — a proven-not-created drops the claim, and a
+  // proof-less call is refused by the statement itself.
+  const markedAgain = store.markExecutionCreating(effect, owner, claim.generation, now);
+  const released = store.releaseExecution(
+    effect,
+    owner,
+    claim.generation,
+    hostExecutionNotCreated("fixture: the delivery refused before handing anything over"),
+    now,
+  );
+  const afterRelease = store.readExecution(effect);
   const secondClaim = store.claimExecution(effect, "owner-other", now, leaseMs);
   const afterSecond = store.readExecution(effect);
+  // AFTER the release the row is free: the other owner takes it over on a new
+  // generation, which is what the fenced-takeover assertions read.
+  const releasedRowState = afterRelease?.state;
+  const releasedRowGeneration = afterRelease?.generation;
 
   emit({
     ok: true,
     mode: "confirm-shape",
     claim: claim.kind,
+    generation: claim.generation,
     marked,
     emptyIdError,
     afterEmptyId: rowView(afterEmptyId),
@@ -302,21 +343,28 @@ function confirmShape(store: GraphStore): void {
     afterConfirm: rowView(afterConfirm),
     markedAgain,
     released,
+    releasedRowState,
+    releasedRowGeneration,
+    afterRelease: rowView(afterRelease),
     secondClaim: secondClaim.kind,
+    secondClaimOwner: secondClaim.kind === "claimed" ? secondClaim.ownerId : undefined,
+    secondClaimGeneration: secondClaim.kind === "claimed" ? secondClaim.generation : undefined,
     secondClaimState: secondClaim.kind === "held" ? secondClaim.row.state : undefined,
     afterSecond: rowView(afterSecond),
   });
 }
 
 /**
- * The G1 pin: a NON-claimant binds the execution id (today's honest behaviour).
+ * The FENCING probe (P2 item 3): present a claim the row may no longer carry and
+ * try to bind an execution id. The store must refuse by name, write nothing to
+ * the claim, and RECORD the stale attempt on the row.
  *
- * `confirmExecution`'s conditional update names `state = 'creating'` and NOT
- * the owner, so a process that never claimed this effect can still make the
- * host fact real. P2 owns the fencing fix; the parent asserts the current
- * outcome so the fix fails loudly instead of arriving unnoticed.
+ * This is the case the G1 pin used to assert as "a non-claimant CAN bind the
+ * execution id": the same real second process, the same call, now presenting a
+ * claim — its own (owner, generation) or the no-claim generation 0 when it never
+ * claimed the effect at all.
  */
-function confirmNonOwner(store: GraphStore): void {
+function confirmStale(store: GraphStore): void {
   const effect: StoreEffectKey = {
     graphId: required("graph"),
     effectId: required("effect"),
@@ -324,13 +372,34 @@ function confirmNonOwner(store: GraphStore): void {
   };
   const now = numberArg("now");
   const executionId = required("execution-id");
-  const confirmed = store.confirmExecution(effect, { executionId }, now);
+  const owner = required("owner");
+  const generation = numberArg("generation");
+  const verdict = store.confirmExecution(effect, owner, generation, { executionId }, now);
   emit({
     ok: true,
-    mode: "confirm-non-owner",
-    owner: required("owner"),
+    mode: "confirm-stale",
+    owner,
+    generation,
     executionId,
-    confirmed,
+    verdict: verdict.kind,
+    verdictDetail: verdict,
+    row: rowView(store.readExecution(effect)),
+  });
+}
+
+/**
+ * Read one effect's DURABLE row from a real second process (P2 item 4): what the
+ * binding holds after the process that wrote it exited.
+ */
+function readExecution(store: GraphStore): void {
+  const effect: StoreEffectKey = {
+    graphId: required("graph"),
+    effectId: required("effect"),
+    attemptId: required("attempt"),
+  };
+  emit({
+    ok: true,
+    mode: "read-execution",
     row: rowView(store.readExecution(effect)),
   });
 }
@@ -415,7 +484,13 @@ function receipt(store: GraphStore): void {
 
 // ── Entry ───────────────────────────────────────────────────────────────────
 
-const MODES = ["claim-race", "confirm-shape", "confirm-non-owner", "receipt"] as const;
+const MODES = [
+  "claim-race",
+  "confirm-shape",
+  "confirm-stale",
+  "read-execution",
+  "receipt",
+] as const;
 type Mode = (typeof MODES)[number];
 
 function isMode(value: string): value is Mode {
@@ -441,8 +516,11 @@ async function main(): Promise<void> {
       case "confirm-shape":
         confirmShape(store);
         return;
-      case "confirm-non-owner":
-        confirmNonOwner(store);
+      case "confirm-stale":
+        confirmStale(store);
+        return;
+      case "read-execution":
+        readExecution(store);
         return;
       case "receipt":
         receipt(store);
