@@ -99,13 +99,21 @@ import {
 } from "./engine-persistence.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
-import { resumePersistedOutcomeGraph } from "../outcome/recovery.ts";
+import {
+  readPersistedOutcomePlan,
+  resumePersistedOutcomeGraph,
+} from "../outcome/recovery.ts";
 import { describeOutcomeStop } from "../outcome/graph-state.ts";
 import {
   createValidatorRegistry,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
+import {
+  credentialIsolationRefusal,
+  readCredentialIsolationAdapter,
+  type CredentialIsolationAdapter,
+} from "../outcome/credential-isolation.ts";
 import type {
   OutcomeDispatchSeam,
   OutcomeResumeResult,
@@ -336,6 +344,17 @@ export interface RecoverInterruptedGraphsOptions {
    * as it is. A graph whose plan pins none is unaffected.
    */
   outcomeCompletionPolicies?: CompletionPolicyRegistry;
+
+  /**
+   * Optional HOST credential-isolation capability (D7) for the outcome run
+   * path. The sweep is one of that path's entry points, so it consults the
+   * capability BEFORE it opens the ledger: without a readable adapter the
+   * graph is reported in `outcomeProtocol.refused` with
+   * `credential-isolation-unavailable` and NOTHING is opened, launched or
+   * written. With one, the ledger is opened at the adapter's declared
+   * `credentialStoreRoot` instead of the scanned workspace's default.
+   */
+  outcomeCredentialIsolation?: CredentialIsolationAdapter;
 
   /**
    * Root every outcome evidence reference must resolve inside (C3c). Defaults
@@ -592,9 +611,43 @@ export async function recoverInterruptedGraphs(
     if (loaded.executionProtocol === OUTCOME_PROTOCOL) {
       if (outcome === undefined) outcome = emptyOutcomeRecoveryReport();
       const bucket = outcome;
+      // THE RECORD'S OWN IDENTITY IS READ FIRST, AND NO STORE IS OPENED FOR
+      // IT. A record that carries no persisted plan, or a plan/binding
+      // disagreement, is a fact about THAT record; it is reported by name
+      // before the environment's capability is judged — the same order the
+      // submission ingress uses, so a broken record is never hidden behind an
+      // environment refusal.
+      const planReading = readPersistedOutcomePlan(loaded.state);
+      if (planReading.kind === "refused") {
+        recordOutcomeRecovery(bucket, label, loaded.state.graphId, {
+          kind: "refused",
+          refusals: planReading.refusals,
+        });
+        continue;
+      }
+      // THE HOST CAPABILITY GATE (D7) RUNS BEFORE THE LEDGER IS OPENED. This
+      // build persists attempt credentials in a store it cannot keep out of a
+      // same-account reader's reach, so a sweep with no readable host adapter
+      // must not create, read or resume anything: it reports the refusal and
+      // leaves the persisted record exactly as it found it. With an adapter,
+      // the ledger opens at the root the host declared as protected.
+      const unprotected = credentialIsolationRefusal(
+        opts.outcomeCredentialIsolation,
+      );
+      if (unprotected !== undefined) {
+        bucket.refused.push(
+          `${label} (graph ${loaded.state.graphId}: [${unprotected.code}] ${unprotected.message})`,
+        );
+        continue;
+      }
+      const isolation = readCredentialIsolationAdapter(
+        opts.outcomeCredentialIsolation,
+      );
       let ledger: SqliteAcceptanceLedger | undefined;
       try {
-        ledger = await SqliteAcceptanceLedger.create(stateDir);
+        ledger = await SqliteAcceptanceLedger.create(
+          isolation?.credentialStoreRoot ?? stateDir,
+        );
         recordOutcomeRecovery(
           bucket,
           label,
@@ -609,6 +662,9 @@ export async function recoverInterruptedGraphs(
             ...(opts.outcomeCompletionPolicies === undefined
               ? {}
               : { completionPolicies: opts.outcomeCompletionPolicies }),
+            ...(isolation === undefined
+              ? {}
+              : { credentialIsolation: isolation }),
           }),
         );
       } catch (err) {

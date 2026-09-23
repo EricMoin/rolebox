@@ -41,6 +41,7 @@ import {
 } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { createGraphTools } from "../../src/graph/tools/index.ts";
+import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
@@ -153,6 +154,7 @@ function sweep(
     stateDir: dir,
     outcomeNow: NOW,
     outcomeDispatch: recorder(requests),
+    outcomeCredentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
   });
 }
 
@@ -190,6 +192,7 @@ describe("graph_submit_outcome — the vertical path", () => {
       stateDir: dir,
       outcomeNow: NOW,
       outcomeDispatch: recorder(toolRequests),
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
@@ -278,7 +281,11 @@ describe("graph_submit_outcome — the vertical path", () => {
 
   it("derives identity and the plan revision itself: forged args cannot move them", async () => {
     const dir = makeTmpDir("submit-outcome-forge-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
     const startRequests: OutcomeDispatchRequest[] = [];
@@ -351,7 +358,11 @@ describe("graph_submit_outcome — the vertical path", () => {
 
   it("returns structured repair diagnostics for a refusal and writes nothing", async () => {
     const dir = makeTmpDir("submit-outcome-refusal-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
     const startRequests: OutcomeDispatchRequest[] = [];
@@ -436,6 +447,7 @@ describe("graph_submit_outcome — the vertical path", () => {
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
       outcomeValidators: createValidatorRegistry([
         { id: GATE_ID, version: GATE_VERSION, implementation: () => gate },
       ]),
@@ -596,7 +608,11 @@ describe("graph_submit_outcome — registration and completion authority", () =>
 
   it("executes through the registered tool and renders a legacy refusal as a clear failure", async () => {
     const dir = makeTmpDir("submit-outcome-registered-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const startRequests: OutcomeDispatchRequest[] = [];
     await sweep(dir, startRequests);
@@ -641,6 +657,7 @@ describe("graph_submit_outcome — registration and completion authority", () =>
       stateDir: dir,
       dispatch: legacyPort,
       outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;

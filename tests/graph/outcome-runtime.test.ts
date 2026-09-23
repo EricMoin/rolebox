@@ -73,6 +73,7 @@ import {
   type ExecutionProtocolRegistry,
 } from "../../src/graph/protocol/execution-protocol.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 import { engineStatePath } from "../../src/graph/engine/engine-persistence.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
@@ -520,6 +521,7 @@ async function withHarness<T>(
       },
       validators: options.validators ?? EMPTY_VALIDATORS,
       artifactRoot: dir,
+      credentialIsolation: testHostCredentialIsolation(dir),
       clock: () => NOW,
       mintCredential: options.mintCredential ?? TEST_CREDENTIAL_SOURCE,
       ...(options.protocols === undefined ? {} : { protocols: options.protocols }),
@@ -1236,6 +1238,7 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
           dispatch: () => {},
           validators: EMPTY_VALIDATORS,
           artifactRoot: dir,
+          credentialIsolation: testHostCredentialIsolation(dir),
           clock: () => NOW,
           mintCredential: TEST_CREDENTIAL_SOURCE,
         });
@@ -2468,6 +2471,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           },
           validators: EMPTY_VALIDATORS,
           artifactRoot: dir,
+          credentialIsolation: testHostCredentialIsolation(dir),
           clock: () => NOW,
           mintCredential: TEST_CREDENTIAL_SOURCE,
         });
@@ -2573,6 +2577,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           },
           validators: EMPTY_VALIDATORS,
           artifactRoot: dir,
+          credentialIsolation: testHostCredentialIsolation(dir),
           clock: () => NOW,
           mintCredential: TEST_CREDENTIAL_SOURCE,
         });
@@ -2771,6 +2776,7 @@ describe("OutcomeGraphRuntime — a convergence node is armed by its join", () =
           },
           validators: EMPTY_VALIDATORS,
           artifactRoot: dir,
+          credentialIsolation: testHostCredentialIsolation(dir),
           clock: () => NOW,
           mintCredential: TEST_CREDENTIAL_SOURCE,
         });
@@ -3190,6 +3196,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
         },
         validators: EMPTY_VALIDATORS,
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(dir),
         clock: () => NOW,
       });
       runtime.start(NOW);
@@ -3234,6 +3241,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
         dispatch: () => undefined,
         validators: EMPTY_VALIDATORS,
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(dir),
         clock: () => NOW,
       });
       const resumed = restarted.resume(NOW + 2);

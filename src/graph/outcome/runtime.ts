@@ -102,6 +102,16 @@
  * completion bridge); what this slice fixes is that a plan whose authorization
  * this process cannot support never runs at all.
  *
+ * CREDENTIAL ISOLATION IS THE FIRST RUN PRECONDITION (D7). This build persists
+ * attempt credentials in an ordinary file that any same-account process can
+ * read, so `start`, `resume` and `submit` all refuse with
+ * `credential-isolation-unavailable` unless the HOST injected a readable
+ * credential-isolation adapter declaring a protected store and per-attempt
+ * delivery (`credential-isolation.ts`). It is checked before the plan's
+ * completion authorization and before any state is read or written, so an
+ * unprotected process mints, persists, hands out and settles NOTHING — the
+ * capability is the enablement condition, not a hardening option.
+ *
  * SCOPE, STATED PLAINLY. C3c delivers `resume` here, the model-facing
  * `graph_submit_outcome` ingress (`src/graph/tools/submit-outcome.ts`), and the
  * startup sweep's route onto this runtime. Still DEFERRED: the protocol-aware
@@ -164,6 +174,10 @@ import {
   mintAttemptCredential,
   type AttemptCredentialSource,
 } from "./attempt-credential.ts";
+import {
+  credentialIsolationRefusal,
+  type CredentialIsolationAdapter,
+} from "./credential-isolation.ts";
 import {
   verifyCompletionPolicy,
   type CompletionPolicyRegistry,
@@ -336,7 +350,15 @@ export type OutcomeRuntimeRefusalCode =
    * something else. The plan's pinned digest is the authority, so this is
    * refused rather than re-bound to the installed body.
    */
-  | "completion-policy-digest-mismatch";
+  | "completion-policy-digest-mismatch"
+  /**
+   * This process was given no readable HOST credential-isolation capability
+   * (D7), so the attempt credentials it persists cannot be held to lie outside
+   * a dispatched worker's reach. The outcome run path REFUSES to start, resume
+   * or settle anything rather than run with credentials this build cannot
+   * protect; nothing is written and no fallback is taken.
+   */
+  | "credential-isolation-unavailable";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -520,6 +542,26 @@ export interface OutcomeGraphRuntimeOptions {
    * part of the run's declared semantics and this process cannot check it.
    */
   readonly completionPolicies?: CompletionPolicyRegistry;
+  /**
+   * The HOST's credential-isolation capability (D7) — the production
+   * enablement condition of this run path.
+   *
+   * An attempt credential is a bearer nonce this build persists in the
+   * acceptance ledger, which it writes as an ordinary file: any process that
+   * can read that file — including a dispatched worker on the same account —
+   * can read another attempt's credential and be accepted, and no path check
+   * or mount option this build could apply would change that. The boundary
+   * therefore belongs to the host, which declares it here
+   * (`credential-isolation.ts`): a protected credential store and
+   * per-attempt delivery.
+   *
+   * OMITTED IS NOT NEUTRAL: every entry — `start`, `resume` and `submit` —
+   * refuses with `credential-isolation-unavailable` before it reads or writes
+   * anything, because an unprotected run is exactly the defect this gate
+   * exists to prevent. There is no default adapter and no test-only bypass in
+   * this module.
+   */
+  readonly credentialIsolation?: CredentialIsolationAdapter;
 }
 
 /**
@@ -546,6 +588,7 @@ export class OutcomeGraphRuntime {
   private readonly protocols: ExecutionProtocolRegistry | undefined;
   private readonly mintCredential: AttemptCredentialSource;
   private readonly completionPolicies: CompletionPolicyRegistry | undefined;
+  private readonly credentialIsolation: CredentialIsolationAdapter | undefined;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -560,6 +603,7 @@ export class OutcomeGraphRuntime {
     this.mintCredential =
       options.mintCredential ?? RUNTIME_ATTEMPT_CREDENTIAL_SOURCE;
     this.completionPolicies = options.completionPolicies;
+    this.credentialIsolation = options.credentialIsolation;
   }
 
   /**
@@ -574,6 +618,13 @@ export class OutcomeGraphRuntime {
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
+    // Credential isolation is checked FIRST (D7): a process with no protected
+    // host capability would mint and persist attempt credentials it cannot
+    // keep out of another worker's reach, so it does not start at all.
+    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
+    if (unprotectedCredentials !== undefined) {
+      return refused([unprotectedCredentials]);
+    }
     // The plan's completion authorization is checked before ANY state is read
     // or written (D6), so a run this process cannot support is blocked with the
     // state preserved rather than started under weaker semantics.
@@ -685,7 +736,7 @@ export class OutcomeGraphRuntime {
     this.ledger.runInTransaction((tx) => {
       tx.writeGraphState(stateRecordOf(state, at));
     });
-    for (const request of dispatched) this.dispatch(request);
+    this.launchDispatches(dispatched);
     return { kind: "started", state, dispatched: Object.freeze(dispatched) };
   }
 
@@ -703,6 +754,13 @@ export class OutcomeGraphRuntime {
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
+    // Credential isolation is checked FIRST (D7): a process with no protected
+    // host capability would resolve a submission against credentials it cannot
+    // keep out of another worker's reach, so it settles nothing.
+    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
+    if (unprotectedCredentials !== undefined) {
+      return refused([unprotectedCredentials]);
+    }
     // The plan's completion authorization is checked before ANY state is read
     // or written (D6), so a run this process cannot support is blocked with the
     // state preserved rather than started under weaker semantics.
@@ -822,7 +880,7 @@ export class OutcomeGraphRuntime {
         // Keep the state the transaction just wrote.
       }
     }
-    for (const request of dispatched) this.dispatch(request);
+    this.launchDispatches(dispatched);
     // The comparisons THIS call made. A replay re-runs none (the join is skipped
     // for an already-settled node) and writes nothing, so it reports none: the
     // persisted state is the authority, and a replay has already been reported.
@@ -884,6 +942,13 @@ export class OutcomeGraphRuntime {
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
+    // Credential isolation is checked FIRST (D7): a process with no protected
+    // host capability would hand attempt credentials to a channel it cannot
+    // hold to a single worker, so it resumes nothing.
+    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
+    if (unprotectedCredentials !== undefined) {
+      return refused([unprotectedCredentials]);
+    }
     // The plan's completion authorization is checked before ANY state is read
     // or written (D6), so a run this process cannot support is blocked with the
     // state preserved rather than started under weaker semantics.
@@ -1033,6 +1098,95 @@ export class OutcomeGraphRuntime {
       };
     }
     return at;
+  }
+
+  /**
+   * Check that this process holds the HOST credential-isolation capability the
+   * run path requires (D7).
+   *
+   * THE FACT THIS ENCODES, NOT A CHECK IT PERFORMS. This build persists every
+   * attempt credential in the acceptance ledger and writes that ledger as an
+   * ordinary file, so a process that can read the file can read another
+   * attempt's credential and be accepted; no path comparison, permission or
+   * mount this code could inspect would change what another process can read.
+   * The boundary is therefore the HOST's to provide and to DECLARE, and the
+   * only honest gate available here is the presence of a readable adapter
+   * (`credential-isolation.ts`). Rule and wording live in that module so the
+   * runtime, the tool ingress and the startup sweep report one refusal.
+   *
+   * Refusing HERE — before any state is read or written, in `start`, `resume`
+   * and `submit` alike — is what makes "no protected host, no new execution
+   * path" true instead of aspirational: an unprotected process cannot mint,
+   * persist, hand out or settle an attempt credential at all.
+   */
+  private credentialIsolationCapabilityRefusal():
+    | OutcomeRuntimeRefusal
+    | undefined {
+    return credentialIsolationRefusal(this.credentialIsolation);
+  }
+
+  /**
+   * Launch the dispatch seam for every request a commit armed.
+   *
+   * THE ORDER IS UNCHANGED: the seam is called in order and the first throw
+   * stops the loop, so requests after it stay unlaunched exactly as before.
+   * The one added rule is about what escapes: the seam is the delivery channel
+   * and necessarily receives each request's credential, so a failure text that
+   * echoes the request it was given (a plausible adapter bug) must not become
+   * the way that credential reaches a *report* — and for `submit` the caller
+   * that would receive it is the submitting worker, which is not entitled to a
+   * successor's credential. The message is therefore checked against the
+   * launch set before it leaves this class.
+   */
+  private launchDispatches(requests: readonly OutcomeDispatchRequest[]): void {
+    try {
+      for (const request of requests) this.dispatch(request);
+    } catch (error) {
+      throw this.credentialSafeDispatchError(error, requests);
+    }
+  }
+
+  /**
+   * The error a failed dispatch launch is reported as, with every credential
+   * the seam was handed removed from its message.
+   *
+   * The original name is carried over and the original value is attached as
+   * `cause`, so an in-process caller that genuinely needs the unsanitized text
+   * still has an explicit handle on it while the REPORTED message stays
+   * credential-free. When nothing was replaced the original message is used
+   * verbatim — sanitizing is visible, never silent.
+   */
+  private credentialSafeDispatchError(
+    error: unknown,
+    requests: readonly OutcomeDispatchRequest[],
+  ): Error {
+    const raw = errorText(error);
+    const sanitized = this.withoutCredentials(
+      raw,
+      requests.map((request) => request.credential),
+    );
+    const reported =
+      sanitized === raw
+        ? raw
+        : "outcome-runtime: the dispatch seam failed and its message echoed an attempt " +
+          "credential, which was removed from this report: " +
+          sanitized;
+    const wrapped = new Error(reported, { cause: error });
+    if (error instanceof Error) wrapped.name = error.name;
+    return wrapped;
+  }
+
+  /** Every given credential value in `text`, replaced by one fixed marker. */
+  private withoutCredentials(
+    text: string,
+    credentials: readonly string[],
+  ): string {
+    let out = text;
+    for (const credential of credentials) {
+      if (credential.length === 0 || !out.includes(credential)) continue;
+      out = out.split(credential).join("[redacted attempt credential]");
+    }
+    return out;
   }
 
   /**
@@ -1297,7 +1451,10 @@ export class OutcomeGraphRuntime {
             "outcome-runtime: the dispatch seam threw while launching effect " +
             JSON.stringify(effect.effectId) +
             " (" +
-            errorText(error) +
+            // This refusal is a REPORT: the seam was handed the attempt's own
+            // credential, so a failure text that echoed its request would
+            // otherwise carry the capability into the caller's report.
+            this.withoutCredentials(errorText(error), [credential]) +
             ") — the effect is durably 'started' and is reported as unsettled rather " +
             "than silently re-launched or dropped",
         });

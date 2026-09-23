@@ -21,6 +21,11 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
 - runtime-issued scoped attempt credentials and the submission check that binds
   a submission to the attempt it was dispatched for
   (`src/graph/outcome/attempt-credential.ts`);
+- credential isolation as the outcome run path's ENABLEMENT CONDITION: the run
+  path refuses to start, resume or settle anything, and the submission ingress
+  and the startup sweep refuse before opening a ledger, unless a host-injected
+  capability declares a protected credential store and per-attempt delivery
+  (`src/graph/outcome/credential-isolation.ts`, D7);
 - the submission and acceptance core: proposal shape gate, the closed validator
   registry with the artifact-reference validator, receipt replay, and the atomic
   commit of receipt, accepted event, state and pending effects
@@ -35,6 +40,9 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
 
+- any host credential-isolation adapter: none ships in this build and this build
+  cannot provide one (it writes the ledger as an ordinary file), so the outcome
+  run path refuses by default until a deployment injects its own (D7);
 - the protocol-aware dispatch completion bridge: the outcome runtime is driven by
   a synchronous scripted seam, so production dispatch settles no node through it
   and the natural-completion SETTLEMENT path is not executed;
@@ -1145,22 +1153,31 @@ capability the worker does not hold.
 WHAT A BEARER CREDENTIAL PROVES — STATED HONESTLY. It proves POSSESSION of the
 nonce: guessing it is infeasible, and it cannot be re-aimed at another attempt
 because the binding is checked against the runtime's own state. It does NOT
-prove that the presenter is the original worker: whoever can read the dispatch
-channel holds the same bearer token and is indistinguishable. The store
-boundary is a REQUIREMENT ON THE HOST, not a property of this build. The
-binding lives in the acceptance ledger under the configured store root
-(`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`), and the
-guarantee above holds only while the dispatched worker cannot write those
-bytes: a process that can write them can read the nonce, rebind it to another
-attempt and be accepted, and the protocol cannot tell the difference. THIS
-REPOSITORY'S DEFAULT DOES NOT MEET THE REQUIREMENT: `stateDir` defaults to the
-workspace, so the ledger sits inside the tree a worker with ordinary file tools
-can read and rewrite. A host must keep the ledger outside the worker's write
-scope (a separate account, a read-only mount, or a worker with no file access
-to it) and inject that root as `stateDir`; nothing in the protocol verifies
-the boundary. A trusted host invocation context (session, agent) can only ADD a
-constraint — this build records none on an attempt and therefore claims none;
-the core depends on no host.
+prove that the presenter is the original worker: whoever can READ the
+credential — the dispatch channel, or the store it is persisted in — holds the
+same bearer token and is indistinguishable. This build writes the ledger as an
+ordinary file under the configured store root
+(`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`), so a
+same-account process — including a dispatched worker with ordinary file tools —
+can read every resident attempt's credential and be accepted for it. NOTHING IN
+THIS BUILD PREVENTS THAT READ, and the two gestures that are sometimes offered
+as a boundary do not create one: moving the file to another directory of the
+same account changes no access, and a read-only mount stops writes, not reads.
+THIS REPOSITORY'S DEFAULT DOES NOT MEET THE REQUIREMENT; `stateDir` defaults to
+the workspace, so the ledger sits inside the tree a worker can read.
+
+BECAUSE THE BOUNDARY CANNOT BE A PROPERTY OF THIS BUILD, IT IS AN ENABLEMENT
+CONDITION (D7). The outcome run path — `start`, `resume`, `submit`, the
+`graph_submit_outcome` ingress and the startup sweep — refuses with
+`credential-isolation-unavailable`, BEFORE reading or writing anything, unless
+the HOST injects a version-1 credential-isolation adapter declaring a protected
+credential store (`credentialStoreRoot`, where the ledger is then opened) and
+per-attempt delivery. The adapter is an ASSERTION by the host, not a proof:
+this build checks its shape and presence, never the filesystem, because no path
+comparison is evidence about what another process can read. A trusted host
+invocation context (session, agent) can only ADD a constraint — this build
+records none on an attempt and therefore claims none; the core depends on no
+host.
 
 ENFORCED BY TESTS. A late credential across a loop round is refused (the
 reproduced defect), a cross-node credential is refused, a tampered credential is
@@ -1751,6 +1768,88 @@ with its `2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
 draining or converting any graph, retiring any legacy execution path, effect
 EXECUTION beyond the dispatch seam (an unsettled effect is reported, never
 retried or settled by the audit), and any `src/dispatch/**` change.
+
+D7 MAKES CREDENTIAL ISOLATION AN EXPLICIT HOST CAPABILITY AND REFUSES TO RUN
+THE OUTCOME PATH WITHOUT ONE.
+
+THE DEFECT THIS CLOSES WAS REPRODUCED END TO END. With the credential gate
+absent, a process that only READ the acceptance ledger — a read-only open of
+the SQLite file, no write and no rebind, the file byte-identical afterwards —
+extracted one attempt's credential and submitted that attempt's outcome with
+it: ACCEPTED. A worker holding only its own credential settled another
+attempt's node. A bearer token cannot tell who read it, so no check inside the
+submission path can fix this: the property lives at the store boundary, and
+this build does not have one (see D2).
+
+THE CAPABILITY IS HOST-INJECTED, AND ITS ABSENCE REFUSES THE PATH.
+`src/graph/outcome/credential-isolation.ts` owns the contract:
+`CredentialIsolationAdapter = { version: 1, id, credentialStoreRoot,
+guarantees: { protectedCredentialStore: true, perAttemptDelivery: true } }`,
+read by a STRICT closed-shape reader (exact keys, exact version, literal-true
+guarantees, non-empty id and root). `credentialIsolationRefusal(adapter)` is
+the ONE rule every entry consults; it answers
+`credential-isolation-unavailable` with a diagnostic naming the host
+obligation, both for an absent capability and for a value this build cannot
+read (never downgraded to "it runs anyway"):
+
+- `OutcomeGraphRuntime` takes `credentialIsolation` and checks it FIRST in
+  `start`, `resume` and `submit`, before any state is read or written, so an
+  unprotected process mints, persists, hands out and settles NOTHING;
+- `graph_submit_outcome` refuses BEFORE it opens a ledger, carrying the same
+  code and message as its typed `OutcomeSubmissionRefusedError.reason`;
+- the startup sweep checks it before opening the ledger and reports the refusal
+  in `outcomeProtocol.refused`, leaving the record exactly as it found it — but
+  only AFTER the record's own identity (a missing persisted plan, a
+  plan/binding disagreement) has been reported by name, so an environment
+  refusal never hides a broken record;
+- `graph_declare` is deliberately NOT gated: a declaration writes no
+  credential, and a declared plan that cannot run is refused at the run path by
+  name.
+
+WHERE `credentialStoreRoot` POINTS, THE LEDGER IS OPENED. The ingress and the
+sweep open the acceptance ledger at the adapter's declared root instead of the
+workspace default, so the host's protected store is the one actually used. It
+is a ROUTING instruction, never a check: this build does not compare the root
+against the tree, a mount table or permissions, because none of those is
+evidence about another process's read access.
+
+THE GATE IS AN ASSERTION, NOT A PROOF, AND THIS DOCUMENT SAYS SO. This build
+verifies that a READABLE adapter was injected; it cannot verify that the host's
+declaration is true. A host that declares guarantees it does not provide is
+lying to the protocol and is undetectable here — which is exactly why the
+declaration is the gate rather than a comment. No adapter ships in this build:
+`createGraphToolSet`/`createGraphTools` and `recoverInterruptedGraphs` accept
+one and nothing installs a default, so a deployment that has not provided a
+protected host gets the refusal by construction.
+
+THE EXPOSURE SURFACE IS CLOSED WHERE THIS BUILD OWNS IT. The credential is a
+field of `OutcomeDispatchRequest` and of nothing else, and the committed REPORT
+surfaces carry none: the ingress result, `graph_status`, the shared
+`<graph_state>` block, `graph_audit`, the startup sweep's report, the
+runtime's `armed`/`unsettledEffects`/refusal readings and the
+`graph_declare` result. The one place the runtime could relay a credential is a
+FAILING DISPATCH SEAM: the seam is handed the attempt's credential, and a
+failure text that echoes the request (a plausible adapter bug) would otherwise
+travel back into the submitting worker's transcript — for `submit` the
+launched request is a SUCCESSOR's credential, which the submitter is not
+entitled to. `start` and `submit` now sanitize that error text against the
+launch set before it escapes (the value is replaced by a fixed marker and the
+original is kept as `cause`), and the `dispatch-failed` refusal sanitizes the
+text it reports.
+
+ENFORCED BY TESTS. `tests/graph/credential-isolation.test.ts` covers the
+refusal at `start`/`resume`/`submit` and at the ingress and the sweep with
+nothing written and no ledger created; the strict reader against a version
+mismatch, an extra key, a false guarantee and a missing one; the enabled path
+end to end with the ledger opened at the declared root; the read-only theft
+that is still possible (the honest limitation, with the store byte-identical
+across the read); every report channel listed above with a positive control
+proving the probe sees credentials where they DO travel; and the seam-failure
+redaction.
+
+DEFERRED by this slice, and not implied by it: any host implementation of the
+adapter, a store this build protects itself, per-worker filesystem isolation,
+platform identity and a signature over submissions, and stage-E retirement.
 
 ### Definitions, locations, and comparison owners
 

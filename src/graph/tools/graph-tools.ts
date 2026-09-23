@@ -140,6 +140,7 @@ import {
   type GraphSubmitOutcomeResult,
 } from "./submit-outcome.ts";
 import type { OutcomeDispatchSeam } from "../outcome/runtime.ts";
+import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
 import {
   auditGraphStore,
@@ -391,6 +392,20 @@ export interface GraphToolSetDeps {
    * revision must not be able to authorize it.
    */
   completionPolicies?: CompletionPolicyRegistry;
+  /**
+   * Optional HOST credential-isolation capability (D7) — the production
+   * enablement condition of the OUTCOME run path's dispatch of attempt
+   * credentials.
+   *
+   * A TOOLSET dependency, never a tool argument: a graph declaration or a
+   * submission must not be able to grant itself the capability. Without it
+   * `graph_submit_outcome` refuses with `credential-isolation-unavailable`
+   * before it opens a ledger (the startup sweep refuses the same way before it
+   * opens one), because this build persists attempt credentials in a store it
+   * cannot keep out of a same-account process's reach. With it, the ingress
+   * opens the ledger at the adapter's declared `credentialStoreRoot`.
+   */
+  credentialIsolation?: CredentialIsolationAdapter;
   /**
    * Optional dispatch seam the OUTCOME run path launches a node through
    * (`graph_submit_outcome`). Executing the node's agent is the deferred
@@ -1811,6 +1826,9 @@ export class GraphToolSet {
         ...(this.deps.completionPolicies === undefined
           ? {}
           : { completionPolicies: this.deps.completionPolicies }),
+        ...(this.deps.credentialIsolation === undefined
+          ? {}
+          : { credentialIsolation: this.deps.credentialIsolation }),
         artifactRoot: this.deps.outcomeArtifactRoot ?? this.deps.directory ?? ".",
         ...(this.deps.outcomeNow === undefined
           ? {}

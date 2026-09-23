@@ -23,24 +23,28 @@
  * context (the invoking session or agent id) can only ADD a constraint on top:
  * a host that has one MAY require it to agree with the attempt's own dispatch
  * record. This build records no host context on an attempt, so it makes no such
- * claim, and the core below depends on no host and works without one.
+ * claim, and the credential core below depends on no host and works without
+ * one — the ENABLEMENT of the run path that uses it is a separate gate, and
+ * that one requires a declaring host (`credential-isolation.ts`).
  *
- * WHERE ISSUANCE AND STORAGE LIVE — A REQUIREMENT ON THE HOST, NOT A PROPERTY
- * OF THIS BUILD. Minting happens in the runtime process, and the bound nonce
- * lives in the graph-state row of the acceptance ledger under the configured
- * store root (`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`),
- * which only an acceptance transaction writes. The bearer guarantee above
- * PRESUPPOSES that this row is out of the dispatched worker's write scope: a
- * process that can write those bytes can read the nonce, rebind it to another
- * attempt and be accepted, and the protocol has nothing left to refuse it
- * with. The host must therefore keep the ledger where the worker cannot write
- * (a separate account, a read-only mount, or a worker with no file access to
- * it) and inject that root as the toolset's `stateDir`. THIS REPOSITORY'S
- * DEFAULT DOES NOT MEET THE REQUIREMENT: `stateDir` defaults to the
- * workspace, so the ledger sits under `<workspace>/.rolebox/state` inside the
- * tree a worker with ordinary file tools can read and rewrite. Nothing in this
- * module checks the boundary, so the credential's resistance to guessing and
- * to re-aiming is real but contingent on that deployment requirement.
+ * WHERE ISSUANCE AND STORAGE LIVE — AN ENABLEMENT CONDITION ON THE HOST, NOT A
+ * PROPERTY OF THIS BUILD. Minting happens in the runtime process, and the bound
+ * nonce lives in the graph-state row of the acceptance ledger under the
+ * configured store root
+ * (`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`). This build
+ * writes that ledger as an ordinary file, so a same-account process — including
+ * a dispatched worker with ordinary file tools — can READ every resident
+ * attempt credential, rebind one to another attempt and be accepted. Moving the
+ * file to another directory of the same account, or mounting it read-only,
+ * stops neither the read nor the rebind, and nothing in this module can detect
+ * the difference: the boundary is real only when the HOST provides it. The host
+ * therefore DECLARES a protected store and per-attempt delivery through the
+ * credential-isolation capability (`credential-isolation.ts`), and the outcome
+ * run path refuses with `credential-isolation-unavailable` without a readable
+ * adapter — BEFORE it mints, persists, hands out or settles anything. THIS
+ * REPOSITORY'S DEFAULT DOES NOT MEET THE REQUIREMENT: it ships no adapter, so
+ * the credential's resistance to guessing and to re-aiming is real but
+ * conditional on a deployment that injects one.
  *
  * THE CREDENTIAL NAMES NOTHING. The run path resolves the attempt FROM the
  * persisted binding, refuses a credential that names no recorded attempt, and

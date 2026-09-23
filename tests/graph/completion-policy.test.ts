@@ -68,6 +68,7 @@ import {
   buildDeclaredOutcomeGraph,
 } from "../../src/graph/tools/declare-graph.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -871,6 +872,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
         completionPolicies: AUTHORIZED,
       });
       const started = runtime.start(NOW);
@@ -898,6 +900,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
       });
       const started = runtime.start(NOW);
       expect(started.kind).toBe("refused");
@@ -927,6 +930,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
         now: NOW,
       });
       expect(refused.kind).toBe("refused");
@@ -947,6 +951,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
         now: NOW,
         completionPolicies: AUTHORIZED,
       });
@@ -969,6 +974,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
           dispatch: () => undefined,
           validators: createValidatorRegistry([]),
           artifactRoot: dir,
+          credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
           ...(registry === undefined ? {} : { completionPolicies: registry }),
         });
         const result = runtime.resume(NOW);
@@ -993,6 +999,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
       });
       const submitted = runtime.submit(
         { nodeId: "work", outcomeId: "done", credential: "not-a-credential" },

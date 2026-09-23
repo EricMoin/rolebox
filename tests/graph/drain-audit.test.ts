@@ -79,6 +79,7 @@ import {
   type DrainAuditReport,
 } from "../../src/graph/audit/drain-audit.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 import { createGraphTools } from "../../src/graph/tools/index.ts";
 
 // ── Temp workspaces ─────────────────────────────────────────────────────────
@@ -181,6 +182,7 @@ async function startOutcomeGraph(
     },
     validators: createValidatorRegistry([]),
     artifactRoot: dir,
+    credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     clock: () => NOW,
   });
   const started = runtime.start(NOW);

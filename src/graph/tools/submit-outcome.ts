@@ -79,6 +79,11 @@ import type {
   OutcomeStop,
 } from "../outcome/graph-state.ts";
 import {
+  credentialIsolationRefusal,
+  readCredentialIsolationAdapter,
+  type CredentialIsolationAdapter,
+} from "../outcome/credential-isolation.ts";
+import {
   createValidatorRegistry,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
@@ -230,7 +235,14 @@ export type OutcomeSubmitRefusalReason =
   /** The persisted record could not be read as this build's declared plan. */
   | "unreadable-plan"
   /** No state directory is configured, so the ledger has no place to live. */
-  | "no-state-directory";
+  | "no-state-directory"
+  /**
+   * This process holds no readable HOST credential-isolation capability (D7):
+   * the attempt credentials this ingress would resolve against live in a store
+   * this build cannot protect from a same-account reader, so the ingress
+   * refuses before it opens a ledger.
+   */
+  | "credential-isolation-unavailable";
 
 /**
  * A submission the TOOL cannot address — as opposed to one the runtime refuses.
@@ -415,6 +427,18 @@ export interface SubmitOutcomeDeps {
    * none does not need it.
    */
   readonly completionPolicies?: CompletionPolicyRegistry;
+  /**
+   * The HOST's credential-isolation capability (D7) — the production
+   * enablement condition of this ingress, exactly as it is of the runtime.
+   *
+   * WITHOUT it this ingress refuses (`credential-isolation-unavailable`)
+   * BEFORE it opens a ledger: the compiled plan would still be read, but a
+   * submission could not honestly be accepted against credentials this build
+   * cannot keep out of another worker's reach, so nothing is opened and
+   * nothing is written. With it, the ledger is opened at the adapter's
+   * declared `credentialStoreRoot` instead of the workspace default.
+   */
+  readonly credentialIsolation?: CredentialIsolationAdapter;
   /** Root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock, in epoch milliseconds; omitted → the runtime reads `Date.now()`. */
@@ -441,8 +465,31 @@ export async function submitDeclaredOutcome(
   deps: SubmitOutcomeDeps,
 ): Promise<GraphSubmitOutcomeResult> {
   const plan = resolvePersistedPlan(target);
+  // THE HOST CAPABILITY GATE (D7) RUNS BEFORE ANY STORE IS OPENED. Without a
+  // readable host credential-isolation capability this build cannot keep the
+  // attempt credentials it persists out of another same-account process's
+  // reach, so the ingress refuses instead of resolving a submission under a
+  // protection it does not have. The refusal is thrown before
+  // `SqliteAcceptanceLedger.create`, so it creates no directory and no file.
+  const unprotected = credentialIsolationRefusal(deps.credentialIsolation);
+  if (unprotected !== undefined) {
+    throw new OutcomeSubmissionRefusedError(
+      "credential-isolation-unavailable",
+      target.graphId,
+      "graph_submit_outcome refused [" +
+        unprotected.code +
+        "]: " +
+        unprotected.message,
+    );
+  }
+  // A readable adapter routes the credential store to the root the host
+  // declares as protected; the workspace default is used only when no adapter
+  // exists, which the gate above already refused.
+  const isolation = readCredentialIsolationAdapter(deps.credentialIsolation);
   const ledger = await SqliteAcceptanceLedger.create(
-    engineStateDir(workspaceOf(target)),
+    isolation === undefined
+      ? engineStateDir(workspaceOf(target))
+      : isolation.credentialStoreRoot,
   );
   try {
     const runtime = new OutcomeGraphRuntime({
@@ -451,6 +498,7 @@ export async function submitDeclaredOutcome(
       dispatch: deps.dispatch ?? NOOP_OUTCOME_DISPATCH,
       validators: deps.validators ?? EMPTY_VALIDATORS,
       artifactRoot: deps.artifactRoot,
+      ...(isolation === undefined ? {} : { credentialIsolation: isolation }),
       ...(deps.completionPolicies === undefined
         ? {}
         : { completionPolicies: deps.completionPolicies }),

@@ -52,6 +52,7 @@ import {
   type OutcomeRuntimeRefusal,
 } from "./runtime.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
+import type { CredentialIsolationAdapter } from "./credential-isolation.ts";
 import type { ValidatorRegistry } from "./validators.ts";
 
 // ── The saved plan and its binding ──────────────────────────────────────────
@@ -200,6 +201,16 @@ export interface ResumePersistedOutcomeGraphOptions {
    * A plan that pins none does not need it.
    */
   readonly completionPolicies?: CompletionPolicyRegistry;
+  /**
+   * The HOST's credential-isolation capability (D7). The outcome run path this
+   * seam continues refuses to start, resume or settle anything without it
+   * (`credential-isolation-unavailable`) — this build persists attempt
+   * credentials in a store it cannot protect from a same-account reader, so
+   * the capability is the production enablement condition and recovery is one
+   * of its entry points. Recovery just forwards it; the rule lives in
+   * `credential-isolation.ts`.
+   */
+  readonly credentialIsolation?: CredentialIsolationAdapter;
   /** The root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock input, in epoch milliseconds; omitted → `Date.now()`. */
@@ -235,6 +246,9 @@ export function resumePersistedOutcomeGraph(
     ...(options.completionPolicies === undefined
       ? {}
       : { completionPolicies: options.completionPolicies }),
+    ...(options.credentialIsolation === undefined
+      ? {}
+      : { credentialIsolation: options.credentialIsolation }),
   });
   return runtime.resume(options.now);
 }

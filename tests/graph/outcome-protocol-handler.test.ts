@@ -47,6 +47,7 @@ import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
@@ -147,6 +148,7 @@ describe("execution-protocol registry — the outcome handler (C3b)", () => {
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(dir),
         protocols: markerOnly,
       });
       const started = runtime.start(NOW);
@@ -220,6 +222,7 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
         },
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(dir),
         clock: () => NOW,
       });
       /** The credential one dispatched attempt was handed, for the submission. */

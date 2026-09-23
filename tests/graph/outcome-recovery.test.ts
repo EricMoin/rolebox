@@ -49,6 +49,7 @@ import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
 import type { GraphSubmitOutcomeResult } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -129,6 +130,7 @@ function sweep(
     outcomeDispatch: (request) => {
       requests.push(request);
     },
+    outcomeCredentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
   });
 }
 
@@ -201,6 +203,7 @@ describe("outcome-protocol restart recovery", () => {
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
@@ -297,7 +300,11 @@ describe("outcome-protocol restart recovery", () => {
 
   it("reports a started effect a dead process left behind instead of re-launching it", async () => {
     const dir = makeTmpDir("outcome-recovery-started-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
     const startRequests: OutcomeDispatchRequest[] = [];
@@ -343,7 +350,11 @@ describe("outcome-protocol restart recovery", () => {
 
   it("refuses a state bound to another plan revision and never starts from scratch", async () => {
     const dir = makeTmpDir("outcome-recovery-mismatch-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
 
@@ -391,7 +402,11 @@ describe("outcome-protocol restart recovery", () => {
 
   it("replays a duplicate submission after the restart and writes no second record", async () => {
     const dir = makeTmpDir("outcome-recovery-replay-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
     const startRequests: OutcomeDispatchRequest[] = [];
@@ -408,7 +423,11 @@ describe("outcome-protocol restart recovery", () => {
     // Restart: a new sweep and a NEW toolset with no in-memory declared entry.
     const restartRequests: OutcomeDispatchRequest[] = [];
     await sweep(dir, restartRequests);
-    const restarted = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const restarted = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const replay = await restarted.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
@@ -497,6 +516,7 @@ describe("a stopped run across a restart", () => {
     const ts = createGraphToolSet({
       stateDir: dir,
       outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
       outcomeDispatch: (request) => {
         requests.push(request);
       },
@@ -642,7 +662,11 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
     readonly started: GraphStateRecord;
   }> {
     const dir = makeTmpDir(prefix);
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
     await sweep(dir, []);
@@ -679,7 +703,11 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
 
   it("refuses a version-1 body's in-flight attempt instead of arming it", async () => {
     const dir = makeTmpDir("outcome-recovery-body-v1-");
-    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
     const startRequests: OutcomeDispatchRequest[] = [];

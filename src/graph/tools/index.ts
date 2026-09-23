@@ -40,6 +40,7 @@ import { errorText } from "../../utils/error-text.ts";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
+import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -190,6 +191,16 @@ export function createGraphTools(
      * instance carries its own deps.
      */
     contracts?: ContractRegistry;
+    /**
+     * Optional HOST credential-isolation capability (D7), threaded into a
+     * toolset constructed HERE so `graph_submit_outcome` can corroborate the
+     * production enablement condition of the OUTCOME run path. Ignored when a
+     * prebuilt `toolset` is provided — that instance carries its own deps.
+     * Absent means the ingress refuses to settle anything
+     * (`credential-isolation-unavailable`), which is the intended default for
+     * a host that has not provided a protected credential store.
+     */
+    credentialIsolation?: CredentialIsolationAdapter;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -199,6 +210,9 @@ export function createGraphTools(
     stateDir: opts.stateDir,
     graphNotify: opts.graphNotify,
     ...(opts.contracts !== undefined ? { contracts: opts.contracts } : {}),
+    ...(opts.credentialIsolation !== undefined
+      ? { credentialIsolation: opts.credentialIsolation }
+      : {}),
     ...(opts.nodeStallWarnMs !== undefined
       ? { nodeStallWarnMs: opts.nodeStallWarnMs }
       : {}),
