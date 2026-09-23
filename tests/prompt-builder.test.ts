@@ -226,11 +226,9 @@ describe("buildAgentPrompt", () => {
       subagents: [{ id: "a", name: "A", description: "Agent A" }],
     });
     expect(result).toContain(
-      "You can delegate tasks to these sub-agents via the graph execution engine.",
+      "You can delegate tasks to these sub-agents through the graph outcome protocol.",
     );
-    expect(result).toContain(
-      'graph_add_node(',
-    );
+    expect(result).toContain("graph_submit_outcome(");
   });
 
   it("includes multiple subagents", () => {
@@ -290,10 +288,10 @@ describe("buildAgentPrompt", () => {
       publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
     });
     expect(result).toContain(
-      "You can dispatch tasks to these open roles of other roles via the graph execution engine.",
+      "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.",
     );
     expect(result).toContain('agent="<open-role-id>"');
-    expect(result).toContain("graph_add_node(");
+    expect(result).toContain("graph_submit_outcome(");
   });
 });
 
@@ -465,11 +463,9 @@ describe("buildSubagentBlock", () => {
   it("contains the static instruction text", () => {
     const result = buildSubagentBlock([makeSubagent()]);
     expect(result).toContain(
-      "You can delegate tasks to these sub-agents via the graph execution engine.",
+      "You can delegate tasks to these sub-agents through the graph outcome protocol.",
     );
-    expect(result).toContain(
-      'graph_add_node(',
-    );
+    expect(result).toContain("graph_submit_outcome(");
   });
 
   it("escapes special characters in description", () => {
@@ -531,14 +527,10 @@ describe("buildPublicAgentsBlock", () => {
   it("contains the static instruction text", () => {
     const result = buildPublicAgentsBlock([makePublicAgent()]);
     expect(result).toContain(
-      "You can dispatch tasks to these open roles of other roles via the graph execution engine.",
+      "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.",
     );
-    expect(result).toContain(
-      'agent="<open-role-id>"',
-    );
-    expect(result).toContain(
-      "graph_add_node(",
-    );
+    expect(result).toContain('agent="<open-role-id>"');
+    expect(result).toContain("graph_submit_outcome(");
   });
 
   it("escapes special characters in description", () => {

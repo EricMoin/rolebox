@@ -160,18 +160,20 @@ export function buildMemoryBlock(memories: MemorySummary[]): string {
   );
 }
 
-const SUBAGENT_INSTRUCTIONS = `You can delegate tasks to these sub-agents via the graph execution engine.
-Model each delegated task as a graph node. Use graph_create to start a graph, then
-graph_add_node(graph_id=..., id=..., agent=<sub-agent id>, prompt="...") to register a
-worker node, then graph_run(graph_id=..., node_id=...) to launch it.
-graph_run is non-blocking — it dispatches ready nodes and returns immediately
-(phase + active_nodes + pending_nodes). End your turn after graph_run. The engine emits a
-[GRAPH COMPLETE] system-reminder when all nodes finish (or [GRAPH BLOCKED]
-when a node awaits approval). On the next turn, read results once via
-graph_status(graph_id=..., include_output=true). Poll graph_status only as a
-fallback when no reminder arrives; never poll in a loop.
-For multi-step work that must run together, add edges (graph_add_edge) between nodes and
-run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.`;
+const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents through the graph outcome protocol.\n" +
+  "Declare the work as a graph with graph_declare: a version-3 declaration naming each\n" +
+  "node\u0027s agent, prompt and the outcomes it may report, plus the edges that route an\n" +
+  "accepted outcome to the next node. Declaring persists the plan and starts nothing\n" +
+  "itself: the host dispatches the entry nodes and hands each worker the attempt\n" +
+  "credential it settles with, so end your turn after graph_declare. A worker settles\n" +
+  "its node with graph_submit_outcome(graph_id=..., node_id=..., outcome_id=...,\n" +
+  "credential=...); the accepted outcome commits the node\u0027s state together with the\n" +
+  "graph\u0027s, and the declared edge arms the next node — no further call is needed to\n" +
+  "advance the graph. Read the recorded state with graph_status(graph_id=...,\n" +
+  "include_output=true) and inventory the store with graph_audit; both are read-only,\n" +
+  "and a node\u0027s status changes only when a settlement commits. A transition comes\n" +
+  "from a declared outcome and edge only: free-form reports are never ranked, merged\n" +
+  "or interpreted as progress.";
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,
@@ -187,18 +189,21 @@ export function buildSubagentBlock(
   );
 }
 
-const PUBLIC_AGENT_INSTRUCTIONS = `You can dispatch tasks to these open roles of other roles via the graph execution engine.
-Model each dispatch as a graph node. Use graph_create to start a graph, then
-graph_add_node(graph_id=..., id=..., agent="<open-role-id>", prompt="...") to register a
-worker node, then graph_run(graph_id=..., node_id=...) to launch it.
-graph_run is non-blocking — it dispatches ready nodes and returns immediately
-(phase + active_nodes + pending_nodes). End your turn after graph_run. The engine emits a
-[GRAPH COMPLETE] system-reminder when all nodes finish (or [GRAPH BLOCKED]
-when a node awaits approval). On the next turn, read results once via
-graph_status(graph_id=..., include_output=true). Poll graph_status only as a
-fallback when no reminder arrives; never poll in a loop.
-For multi-step work that must run together, add edges (graph_add_edge) between nodes and
-run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.`;
+const PUBLIC_AGENT_INSTRUCTIONS = "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.\n" +
+  "Declare the work as a graph with graph_declare: a version-3 declaration naming each\n" +
+  "node\u0027s agent (for an open role, the open-role id, e.g. agent=\"<open-role-id>\"),\n" +
+  "prompt and the outcomes it may report, plus the edges that route an accepted\n" +
+  "outcome to the next node. Declaring persists the plan and starts nothing itself:\n" +
+  "the host dispatches the entry nodes and hands each worker the attempt credential it\n" +
+  "settles with, so end your turn after graph_declare. A worker settles its node with\n" +
+  "graph_submit_outcome(graph_id=..., node_id=..., outcome_id=..., credential=...); the\n" +
+  "accepted outcome commits the node\u0027s state together with the graph\u0027s, and the\n" +
+  "declared edge arms the next node — no further call is needed to advance the graph.\n" +
+  "Read the recorded state with graph_status(graph_id=..., include_output=true) and\n" +
+  "inventory the store with graph_audit; both are read-only, and a node\u0027s status\n" +
+  "changes only when a settlement commits. A transition comes from a declared outcome\n" +
+  "and edge only: free-form reports are never ranked, merged or interpreted as\n" +
+  "progress.";
 
 export function buildPublicAgentsBlock(
   agents: Array<{ id: string; name: string; description: string }>,

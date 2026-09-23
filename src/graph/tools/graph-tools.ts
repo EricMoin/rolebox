@@ -741,7 +741,7 @@ export class GraphToolSet {
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
     if (states.length === 0) {
       if (scope === "persisted") return persistedEmptyNote(scan);
-      return "No graphs exist. Call graph_create to open a graph registry slot.";
+      return "No graphs exist. Call graph_declare to declare one, which starts its entry nodes.";
     }
     const lines = states.map((s) => `  ${s.graphId}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`);
     const header =
@@ -761,7 +761,7 @@ export class GraphToolSet {
 
     if (states.length === 0) {
       if (scope === "persisted") return persistedEmptyNote(scan);
-      return "No graphs exist. Call graph_create to open a graph registry slot.";
+      return "No graphs exist. Call graph_declare to declare one, which starts its entry nodes.";
     }
 
     const query: StatusQuery = {
