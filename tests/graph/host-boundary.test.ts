@@ -18,6 +18,14 @@
  *    whole-file-overwrite data loss), and a recovery that cannot produce a
  *    credential reports the attempt as not-retained rather than inventing one.
  *
+ * A FOURTH CASE, added by the P0 convergence work, is the fifth counterexample
+ * of the previous review round: a completion that arrives after a restart. The
+ * completion bridge keeps its bindings in process memory, so a second host over
+ * the same durable root reports the completion UNBOUND; the case pins that
+ * honest fact — and the two things NOT fabricated — instead of claiming a
+ * recovery this build does not have. Its section comment states which
+ * acceptance-matrix entries stay open.
+ *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
  */
@@ -27,13 +35,20 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
+import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
+import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import {
   dispatchEffectKeyOf,
   type OutcomeDispatchRequest,
 } from "../../src/graph/outcome/dispatch-effects.ts";
+import {
+  buildDeclaredOutcomeGraph,
+  persistDeclaredGraph,
+} from "../../src/graph/tools/declare-graph.ts";
 
 const GRAPH_ID = "graph.host-boundary";
 const WORK = { graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" } as const;
@@ -232,5 +247,187 @@ describe("host boundary — the reproduced defects stay closed", () => {
     expect(records.resolve(x)).toBeUndefined();
     expect(records.resolve(y)).toBeUndefined();
     expect(records.resolve(z)).toBeUndefined();
+  });
+});
+
+// ── The fifth counterexample: a completion that arrives after a restart ─────
+//
+// THE MISSING BINDING, PINNED HONESTLY. `HostDispatchCompletionBridge` keeps its
+// attempt bindings in an in-process `Map` and the ONLY production bind site is
+// the dispatch adapter, so a completion that arrives after the process which
+// dispatched the attempt exited has no binding to resolve. The case below builds
+// TWO genuinely different object graphs over ONE durable store root — a new
+// vault, a new execution index, a new dispatch adapter and a new host — and asks
+// the second to complete the attempt the first dispatched. It reports UNBOUND.
+//
+// WHAT IS ASSERTED, EXACTLY: the report is `unbound`; the persisted graph state
+// still shows the attempt in flight with no accepted event (no fabricated
+// completion); the host's durable FACT about the platform execution survives the
+// restart; and the restarted host creates NO second execution for the effect —
+// not on the completion, and not on the boot sweep either. The sweep's own
+// per-effect refusal (`credential-missing`: the shipped vault keeps no
+// credential VALUE on disk) is carried in the report rather than dropped.
+//
+// NOTHING HERE CLAIMS A RECOVERY THIS BUILD DOES NOT HAVE. Acceptance-matrix
+// entries A06/A07 (the pending/creating/created restart windows; a completion
+// after a host restart binding and settling once) stay OPEN until P2 provides a
+// durable completion binding and a restart credential authorization; this case
+// is the regression that must change shape when it does.
+
+const RESTART_GRAPH_ID = "graph.host-boundary.restart";
+
+/** One node with one explicit outcome: only a worker submission settles it. */
+function restartDeclaration(): GraphDeclarationV3 {
+  return {
+    version: 3,
+    name: RESTART_GRAPH_ID,
+    nodes: [
+      { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    ],
+    edges: [],
+  };
+}
+
+interface RestartReading {
+  readonly phase: string | undefined;
+  readonly node: Record<string, unknown> | undefined;
+  readonly events: number;
+  readonly effects: readonly string[];
+}
+
+/** The AUTHORITATIVE record of the restart graph, read with a fresh connection. */
+async function readRestartRecord(storeRoot: string): Promise<RestartReading> {
+  const ledger = await SqliteAcceptanceLedger.create(storeRoot);
+  try {
+    const record = ledger.readGraphState(RESTART_GRAPH_ID);
+    const body =
+      typeof record?.body === "object" && record.body !== null
+        ? (record.body as Record<string, unknown>)
+        : undefined;
+    const entries = Array.isArray(body?.["nodes"]) ? (body["nodes"] as unknown[]) : [];
+    let node: Record<string, unknown> | undefined;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null) continue;
+      if ((entry as Record<string, unknown>)["nodeId"] === "work") {
+        node = entry as Record<string, unknown>;
+        break;
+      }
+    }
+    return {
+      phase: typeof body?.["phase"] === "string" ? (body["phase"] as string) : undefined,
+      node,
+      events: ledger.acceptedEvents(RESTART_GRAPH_ID).length,
+      effects: ledger
+        .pendingEffects(RESTART_GRAPH_ID)
+        .map((effect) => effect.effectId + "@" + effect.status),
+    };
+  } finally {
+    ledger.close();
+  }
+}
+
+describe("host boundary — a completion after a restart has no durable binding", () => {
+  it("reports the post-restart completion as UNBOUND, fabricates no completion and creates no second execution", async () => {
+    const dir = makeTmpDir("host-boundary-restart-");
+    const storeRoot = join(dir, "host-store");
+    persistDeclaredGraph(
+      buildDeclaredOutcomeGraph({ declaration: restartDeclaration() }),
+      dir,
+    );
+    const effect = dispatchEffectKeyOf(RESTART_GRAPH_ID, "work#1");
+    const platformExecutionId = "platform-run-after-restart";
+
+    // ── INSTANCE ONE: the host that dispatches the entry attempt ────────────
+    const deliveriesOne: OutcomeDispatchRequest[] = [];
+    const hostOne = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      deliver: (request) => {
+        deliveriesOne.push(request);
+      },
+      // THE SHIPPED CONFIGURATION: file durability, no durable credential value,
+      // and no declaration of an identity capability the host cannot substantiate.
+      declareInvocationIdentity: false,
+    });
+    try {
+      const started = await hostOne.startDeclaredGraph(RESTART_GRAPH_ID, {
+        sessionId: "session-declarer",
+        agent: "agent.declarer",
+      });
+      expect(started.kind).toBe("started");
+      expect(deliveriesOne.map((request) => request.attemptId)).toEqual(["work#1"]);
+      // The platform named the execution it created; the host records the FACT.
+      expect(
+        hostOne.confirmExecution(effect, { executionId: platformExecutionId }),
+      ).toBe(true);
+      expect(hostOne.dispatch.lookup(effect).kind).toBe("created");
+    } finally {
+      hostOne.close();
+    }
+
+    // ── INSTANCE TWO: NEW objects over the SAME root (a restart) ────────────
+    const deliveriesTwo: OutcomeDispatchRequest[] = [];
+    const hostTwo = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      deliver: (request) => {
+        deliveriesTwo.push(request);
+      },
+      declareInvocationIdentity: false,
+    });
+    try {
+      // A genuinely different object graph, not a reopened variable.
+      expect(hostTwo).not.toBe(hostOne);
+      expect(hostTwo.dispatch).not.toBe(hostOne.dispatch);
+      expect(hostTwo.credentials).not.toBe(hostOne.credentials);
+
+      // THE HOST FACT SURVIVES THE RESTART: the platform execution is still
+      // recorded, by the id the platform minted rather than a local guess.
+      expect(hostTwo.dispatch.lookup(effect).kind).toBe("created");
+      const row = HostExecutionIndex.open({ root: storeRoot }).read(effect);
+      expect(row?.state).toBe("created");
+      expect(row?.execution?.executionId).toBe(platformExecutionId);
+
+      // ── THE COMPLETION ARRIVES AFTER THE RESTART ─────────────────────────
+      const report = await hostTwo.complete(RESTART_GRAPH_ID, "work#1");
+      // THE HONEST FACT: this process holds no binding for the attempt, so the
+      // completion bridge reports it UNBOUND — it never parses the attempt id
+      // and never substitutes the node's current attempt.
+      expect(report.kind).toBe("unbound");
+      if (report.kind === "unbound") {
+        expect(report.attemptId).toBe("work#1");
+      }
+
+      // NO FABRICATED COMPLETION: the authoritative record still shows the
+      // attempt in flight, with no accepted event appended.
+      const after = await readRestartRecord(storeRoot);
+      expect(after.phase).toBe("executing");
+      expect(after.node?.["attemptId"]).toBe("work#1");
+      expect(after.node?.["status"]).toBe("dispatched");
+      expect(after.events).toBe(0);
+
+      // NO SECOND EXECUTION: the boot sweep re-visits the graph and issues no
+      // create at all. The shipped vault keeps no credential VALUE, so the
+      // attempt's effect is refused by name and stays unsettled rather than
+      // being re-delivered with an invented credential.
+      const sweep = await hostTwo.recoverDeclaredGraphs();
+      expect(sweep.started).toEqual([]);
+      expect(sweep.resumed).toEqual([RESTART_GRAPH_ID + ":executing"]);
+      expect(sweep.refused).toEqual([]);
+      expect(sweep.divergences).toEqual([]);
+      expect(sweep.effectRefusals.map((refusal) => refusal.code)).toEqual([
+        "credential-missing",
+      ]);
+      expect(deliveriesTwo).toEqual([]);
+
+      // The effect is exactly where the first process left it: started, not
+      // re-launched and not silently dropped.
+      const final = await readRestartRecord(storeRoot);
+      expect(final.effects).toEqual(["dispatch:work#1@started"]);
+      expect(final.events).toBe(0);
+      expect(hostTwo.dispatch.lookup(effect).kind).toBe("created");
+    } finally {
+      hostTwo.close();
+    }
   });
 });

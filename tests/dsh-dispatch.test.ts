@@ -22,11 +22,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DshOutcomeDelivery } from "../src/platform/adapters/dsh/outcome-dispatch.ts";
 import { OutcomeHost } from "../src/graph/host/outcome-host.ts";
+import { HostExecutionIndex } from "../src/graph/host/execution-index.ts";
+import {
+  dispatchEffectKeyOf,
+  type OutcomeDispatchEffectKey,
+} from "../src/graph/outcome/dispatch-effects.ts";
+import { createSubLogger, getRootLogger } from "../src/logger.ts";
 import type { GraphDeclarationV3 } from "../src/graph/compiler/declaration-v3.ts";
 import {
   buildDeclaredOutcomeGraph,
@@ -520,6 +526,266 @@ describe("outcome dispatch through the dsh subagent seam", () => {
   });
 });
 
+// ── The real host execution-id flow over the production delivery ────────────
+//
+// DshOutcomeDelivery is PRODUCTION code (src/platform/adapters/dsh/), not a
+// test double; the dsh subagent service is the controllable platform boundary
+// (the existing FakeSubagentService). The id asserted below is READ FROM THE
+// PLATFORM — the run the fake provider created — never a literal this test
+// chose. The host runs DURABLE (durability: "file", the shipped default), so
+// a second host over the same store root is the restart half of the same fact:
+// the platform's execution id is durable, not a local invention.
+//
+// THE CREDENTIAL SURFACE IS ASSERTED BY SEARCHING THE VALUE, and the value is
+// never written into a test name or an assertion message: it reaches the
+// delivered start request (the ONE channel that addresses a single worker) and
+// appears in no durable artifact, no host report and no log line.
+
+describe("the real host execution-id flow over the production dsh delivery", () => {
+  const ID_GRAPH = "dsh.outcome.id-flow";
+  const ID_POLICY_ID = "dsh.outcome.id-flow.policy";
+  const ID_POLICY_REVISION = "1";
+  const ID_POLICY_BODY: CompletionPolicyBody = {
+    version: 1,
+    default: "ungranted",
+    rules: [{ graphId: ID_GRAPH, nodeId: "work", outcome: "done", decision: "allow" }],
+  };
+  const ID_AUTHORIZED = createCompletionPolicyRegistry({
+    policies: [
+      {
+        ref: completionPolicyRefOf({
+          id: ID_POLICY_ID,
+          revision: ID_POLICY_REVISION,
+          body: ID_POLICY_BODY,
+        }),
+        body: ID_POLICY_BODY,
+      },
+    ],
+  });
+  const ID_DECLARATION: GraphDeclarationV3 = {
+    version: 3,
+    name: ID_GRAPH,
+    nodes: [
+      {
+        id: "work",
+        agent: "worker-agent",
+        prompt: "Do the work.",
+        outcomes: [{ id: "done" }],
+        completion: { mode: "natural", outcome: "done" },
+      },
+    ],
+    edges: [],
+    completion_policy: { id: ID_POLICY_ID, revision: ID_POLICY_REVISION },
+  };
+
+  /** Every regular file under one root, for a byte-level redaction scan. */
+  function filesUnder(root: string): string[] {
+    const found: string[] = [];
+    const walk = (dir: string): void => {
+      let entries;
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.isFile()) found.push(path);
+      }
+    };
+    walk(root);
+    return found;
+  }
+
+  /**
+   * Throw — never expect — when a surface carries the credential, so a
+   * failure names the SURFACE and never prints the value or a machine path.
+   */
+  function expectNoCredential(label: string, text: string, credential: string): void {
+    if (text.includes(credential)) {
+      throw new Error(label + " carried the attempt credential value");
+    }
+  }
+
+  function expectNoCredentialBytes(label: string, root: string, credential: string): void {
+    const needle = Buffer.from(credential, "utf8");
+    for (const file of filesUnder(root)) {
+      if (readFileSync(file).includes(needle)) {
+        throw new Error(label + " carried the attempt credential value");
+      }
+    }
+  }
+
+  interface IdFlow {
+    readonly host: OutcomeHost;
+    readonly storeRoot: string;
+    readonly effect: OutcomeDispatchEffectKey;
+    readonly platformRunId: string;
+    readonly credential: string;
+    readonly startRequestText: string;
+  }
+
+  /** Start ONE attempt through the real delivery and read what the platform minted. */
+  async function startOneAttempt(): Promise<IdFlow> {
+    persistDeclaredGraph(
+      buildDeclaredOutcomeGraph({
+        declaration: ID_DECLARATION,
+        completionPolicies: ID_AUTHORIZED,
+      }),
+      tmpDir,
+    );
+    service.seedProvider("worker-agent");
+    const storeRoot = join(tmpDir, "host-store");
+    let host: OutcomeHost | undefined;
+    const delivery = new DshOutcomeDelivery({
+      subagents: service,
+      parentResolver: () => fakeParent,
+      onStartFailed: () => {},
+      // THE PRODUCTION WIRING (src/entries/dsh.ts): the platform's own id is
+      // what turns the execution registry's 'creating' row into 'created'.
+      onStarted: (_request, effect, execution) => {
+        host?.confirmExecution(effect, execution);
+      },
+      onSettled: () => {},
+    });
+    host = OutcomeHost.open({
+      workspaceDir: tmpDir,
+      storeRoot,
+      deliver: delivery.deliver,
+      validators: createValidatorRegistry([]),
+      completionPolicies: ID_AUTHORIZED,
+      // The shipped decision (see src/entries/dsh.ts): no identity capability.
+      declareInvocationIdentity: false,
+    });
+    const started = await host.startDeclaredGraph(ID_GRAPH, {
+      sessionId: "origin-1",
+      agent: "emperor",
+    });
+    if (started.kind !== "started") {
+      throw new Error("fixture: the graph did not start (" + started.kind + ")");
+    }
+    const effect = dispatchEffectKeyOf(ID_GRAPH, "work#1");
+    await settle();
+    // THE PLATFORM'S OWN ID: the run the fake provider created, read from the
+    // platform side rather than chosen by this test.
+    const runIds = [...service.runs.keys()];
+    if (runIds.length !== 1) {
+      throw new Error(
+        "fixture: expected exactly one platform run, observed " + runIds.length,
+      );
+    }
+    const platformRunId = runIds[0];
+    const credential = host.credentials.resolve({
+      graphId: ID_GRAPH,
+      nodeId: "work",
+      attemptId: "work#1",
+    });
+    if (credential === undefined) {
+      throw new Error("fixture: the host vault holds no credential for work#1");
+    }
+    const startRequestText = JSON.stringify(service.started[0]?.request ?? null);
+    return { host, storeRoot, effect, platformRunId, credential, startRequestText };
+  }
+
+  it("records the platform-minted dsh run id as the durable execution id of the effect", async () => {
+    // LOG CAPTURE FIRST, on the root the delivery's sub-logger inherits from.
+    const logLines: string[] = [];
+    getRootLogger().attachTransport((entry) => {
+      try {
+        logLines.push(JSON.stringify(entry));
+      } catch {
+        // A log object this test cannot serialize is not the credential channel.
+      }
+    });
+    const logMark = logLines.length;
+    const flow = await startOneAttempt();
+    const scenarioLogLines = logLines.slice(logMark);
+    try {
+      // THE DURABLE REGISTRY ANSWERS THE PLATFORM'S ID, in the 'created' state —
+      // not 'pending', not 'creating', and not an id this test invented.
+      const row = HostExecutionIndex.open({ root: flow.storeRoot }).read(flow.effect);
+      expect(row?.state).toBe("created");
+      expect(row?.execution?.executionId).toBe(flow.platformRunId);
+      expect(flow.host.dispatch.lookup(flow.effect).kind).toBe("created");
+
+      // THE CREDENTIAL REACHES THE DISPATCH REQUEST — the one channel that
+      // addresses a single worker — and no surface below does.
+      if (!flow.startRequestText.includes(flow.credential)) {
+        throw new Error(
+          "the delivered dsh start request did not carry the attempt credential",
+        );
+      }
+      expectNoCredentialBytes("the host store root", flow.storeRoot, flow.credential);
+      expectNoCredentialBytes(
+        "the persisted workspace state",
+        engineStateDir(tmpDir),
+        flow.credential,
+      );
+
+      // A LOG-CAPTURE SELF-CHECK: a probe through the same sub-logger channel
+      // the delivery uses is captured, so the check below is about the CHANNEL
+      // rather than about a transport that was never attached. This success
+      // path emits no log line at all, which the count pins.
+      createSubLogger("test:p0-log-probe").info("p0-log-probe-marker");
+      expect(
+        logLines.slice(logMark).some((line) => line.includes("p0-log-probe-marker")),
+      ).toBe(true);
+      expect(scenarioLogLines.length).toBe(0);
+      for (const line of scenarioLogLines) {
+        expectNoCredential("a log line", line, flow.credential);
+      }
+
+      // THE COMPLETION REPORT: the platform's run finishes, the host settles the
+      // attempt through the real complete entry, and the report it returns
+      // carries no credential.
+      service.completeRun(flow.platformRunId, {
+        stopReason: "completed",
+        output: outputBlock("done"),
+      });
+      await settle();
+      const report = await flow.host.complete(ID_GRAPH, "work#1");
+      expect(report.kind).toBe("settled");
+      if (report.kind === "settled") {
+        expect(report.settlement.kind).toBe("accepted");
+      }
+      expectNoCredential("the host completion report", JSON.stringify(report), flow.credential);
+      expectNoCredentialBytes("the host store root", flow.storeRoot, flow.credential);
+      expectNoCredentialBytes(
+        "the persisted workspace state",
+        engineStateDir(tmpDir),
+        flow.credential,
+      );
+    } finally {
+      flow.host.close();
+    }
+  });
+
+  it("a second host instance over the same store root answers the SAME platform execution id", async () => {
+    const flow = await startOneAttempt();
+    const platformRunId = flow.platformRunId;
+    flow.host.close();
+    // A NEW host over the SAME durable root — the restart half of the fact.
+    const second = OutcomeHost.open({
+      workspaceDir: tmpDir,
+      storeRoot: flow.storeRoot,
+      deliver: () => {
+        throw new Error("a restarted host must not dispatch during this check");
+      },
+      validators: createValidatorRegistry([]),
+      completionPolicies: ID_AUTHORIZED,
+      declareInvocationIdentity: false,
+    });
+    try {
+      expect(second.dispatch.lookup(flow.effect).kind).toBe("created");
+      const row = HostExecutionIndex.open({ root: flow.storeRoot }).read(flow.effect);
+      expect(row?.state).toBe("created");
+      expect(row?.execution?.executionId).toBe(platformRunId);
+    } finally {
+      second.close();
+    }
+  });
+});
 // ── Parent resolution ─────────────────────────────────────────────────
 
 describe("dsh dispatch parent resolution", () => {
