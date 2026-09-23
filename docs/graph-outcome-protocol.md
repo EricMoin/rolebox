@@ -64,6 +64,12 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   event, so a repeated delivery replays the first receipt and a worker's claimed
   submission can never wear the natural label
   (`src/graph/outcome/natural-completion.ts`, `runtime.ts`);
+- the COMBINATION of that settlement with the run semantics already in the
+  reducer: one `loopTraversals` counter and one hard-cap stop, natural
+  completions as durable join ARRIVALS armed exactly once, the progress refusal
+  that never enters `loopProgress`, and a field-by-field restart invariant over
+  everything the channel persists
+  (`tests/graph/natural-completion-combination.test.ts`);
 - the read-only drain audit (`src/graph/audit/drain-audit.ts`).
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
@@ -1746,13 +1752,62 @@ in the ONE transaction the acceptance core owns. Because the envelope is
 content-addressed, a repeated delivery derives the same key and the ledger
 REPLAYS the first receipt — one settlement, one accepted event — while a
 delivery for an attempt already settled by a different logical submission is
-reported `not-committed` with the ledger's `settled` verdict. A natural
-continuation advances the same loop counters and stops through the same durable
-stop (`loop-exhausted`, `progress-stalled`) as any other accepted outcome; a
-continuation of a progress-governed loop, whose declared comparison subject the
-payload-free envelope cannot carry, is refused `progress-subject-missing`
-exactly as a submission without that subject is, because a declared comparison
-is never skipped.
+reported `not-committed` with the ledger's `settled` verdict.
+
+THE COMBINATION WITH LOOPS, JOINS, STOPS AND RESTART IS ONE STATE AND ONE
+TRANSACTION, and it has its own regression suite
+(`tests/graph/natural-completion-combination.test.ts`) rather than being
+asserted here:
+
+- LOOPS. A natural continuation advances the ONE `loopTraversals` counter an
+  explicit submission advances — there is no per-channel counter, because both
+  channels reach the same reducer — and it stops through the same durable stop
+  when the declared cap binds: the outcome is accepted, the node settles, the
+  round is not taken and nothing the outcome routes is armed, inside the
+  transaction that accepted it.
+- JOINS. A natural completion is a predecessor ARRIVAL: the shared reducer
+  materializes it into the durable inbox the join is decided from, the
+  convergence node is armed only when its declared strategy (all/any/quorum) is
+  satisfied by the arrivals, and it is armed EXACTLY ONCE — an already
+  dispatched target is never re-armed and a repeated delivery replays its
+  receipt without touching the state. A feeder that has been re-armed is no
+  longer settled, so the answer it gave before its new attempt began stops
+  counting the moment that attempt starts, while a node still waiting at an
+  unsatisfied join keeps the arrivals that are its reason to wait.
+- PROGRESS. A continuation a declared progress policy governs is REFUSED
+  `progress-subject-missing` (`$.data.<subject>`), exactly as a submission
+  without that subject is, because the payload-free envelope carries no
+  comparison object and a declared comparison is never skipped. The refused
+  round enters `loopProgress` NOT AT ALL — it is refused before the acceptance
+  transaction opens, so it can neither grow the unchanged streak nor clear it,
+  and the next comparable round still answers against the untouched baseline
+  (the combination suite pins this by making that next round reach the declared
+  threshold). A natural completion therefore reaches `loop-exhausted` when the
+  hard cap binds and can NEVER reach `progress-stalled`: no natural round is
+  ever compared. An outcome the policy does not govern — the loop's exit
+  outcome, for example — needs no subject and is measured by nothing, exactly
+  as an explicit exit is.
+- STOP. A completion fact delivered for an attempt the state still records in
+  flight after the run has stopped is refused `graph-stopped` and writes
+  nothing — no receipt, no accepted event, no state advance — while a repeat of
+  the very delivery that stopped the run replays its receipt. The stop and the
+  arrivals the stopping round materialized are durable facts, so both read back
+  after a restart.
+- RESTART. The settled state reads back field for field: the raw state record,
+  the parsed state, the accepted-event stream, the effect rows and every
+  receipt. Recovery reconciles dispatch EFFECTS only and has no completion
+  channel, so an undelivered completion fact is never fabricated into a
+  settlement by a restart, and a second resume reports the same state and
+  dispatches nothing. A completion fact delivered to a NEW process still
+  settles the attempt it was issued for, because the credential binding is
+  persisted on the attempt's own state entry, and its repeated delivery replays
+  the first receipt across the process boundary.
+
+NO NEW PERSISTED FIELD CARRIES THE COMBINATION. The natural channel writes the
+same state body the submission channel writes, and its provenance is the
+`natural-completion:<digest>` submission key on the receipt and the accepted
+event — not a parallel state field — so the durability rules of the existing
+body version cover it unchanged.
 
 THE SOURCE IS READABLE BACK FROM THE DURABLE RECORD. A natural completion is a
 distinct logical submission in its own key namespace: the ordinary ingress
@@ -1781,7 +1836,12 @@ revision is not installed merely because it exists, an edited body fails the
 authorized digest, rules cannot be smuggled through the request, a repository
 `@1` request is an ungranted draft while `@2` is refused, and
 `graph_declare` refuses the draft by name without the host capability and
-persists with it.
+persists with it. The settlement's combination with the existing run semantics
+has its own cases: the one loop counter and its cap stop (with the stop and a
+still-in-flight attempt read back after a restart), a natural arrival arming a
+join exactly once (and a re-armed feeder's earlier arrival no longer counting),
+the progress refusal that leaves the unchanged streak untouched, and the
+field-by-field write -> restart -> read -> write-again invariant.
 
 DEFERRED by this slice, and not implied by it: the HOST implementation of the
 dispatch completion bridge that would observe a dispatched attempt completing,
