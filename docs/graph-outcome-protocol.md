@@ -162,8 +162,20 @@ revision-staleness path. Unknown progress remains subject to hard limits.
 Repeated unchanged results may trigger an explicitly configured stopping policy;
 they are not a proof that the underlying task is impossible.
 
+"Consecutive" counts consecutive COMPARABLE results. An unknown never increments
+the counter and never triggers the soft stop, and it CLEARS the unchanged streak:
+it is not a round in which the run was observed to stand still. The baseline and
+the evaluator identity/version it was recorded under are kept, so the next
+comparison still answers against the right token. A streak carried across an
+unknown would stop a run on repetition nobody observed back to back.
+
 Persist evaluator version, comparison baseline, and counters. Recovery must
 continue the same decision semantics instead of resetting progress accidentally.
+A body written before the counter cleared on unknown cannot attest that its
+counts mean that; its counters are recomputed from zero — the baselines and
+identities are kept — by the first advance, which rewrites the body in the
+current state-body version (see the state-body version rule below). That rule is
+conservative in one direction only: it can delay a stop, never fabricate one.
 
 ## Compatibility and migration
 
@@ -1193,12 +1205,13 @@ join cannot be satisfied by round N's evidence.
 
 BODY VERSION 3 ADDS THE FIELD, AND VERSIONS 1 AND 2 STAY READABLE. `arrivals`
 is required on every node entry from body version 3 onward — the current layout
-is version 5 — and forbidden on versions 1 and 2, whose readers refuse it
+is version 6 — and forbidden on versions 1 and 2, whose readers refuse it
 rather than dropping it (a version-2 body carrying an `arrivals` list is
-`malformed-state`). No older version can be advanced: version 1 records no
-credential, version 2 no arrivals, and a body below the current version is
-refused with `unsupported-state-version` rather than rewritten in a newer
-layout. As
+`malformed-state`). A body of version 1 to 4 is refused with
+`unsupported-state-version` rather than rewritten in a newer layout: version 1
+records no credential, version 2 no arrivals and version 4 no progress baseline.
+Version 5 is the one older layout that IS advanced, and only by recomputing its
+progress counters (see the loop-progress rule below). As
 with the credential, there is no migrator: an arrival is a fact about an attempt
 that already settled.
 
@@ -1387,9 +1400,11 @@ in the SAME batch as the receipt, the accepted event and the pending effects:
 - `unknown` — the comparison could not be made: the persisted entry was recorded
   under another evaluator identity, version or subject
   (`evaluator-identity-mismatch`), or the observation is truncated or
-  incomparable. The entry is returned EXACTLY as it was — the counter is not
-  incremented, the streak is not cleared and the baseline is not replaced — and
-  an unknown never reaches the threshold, so it never triggers the soft stop.
+  incomparable. The counter is CLEARED, while the baseline and the recorded
+  identity and version are kept. An unknown never reaches the threshold itself,
+  so it never triggers the soft stop; clearing is what makes the threshold mean
+  consecutive COMPARABLE repetition, because a streak carried across a round
+  nobody compared would stop the run on repetitions never observed back to back.
   The declared HARD limits still apply to the run.
 
 A MODEL-SUPPLIED REVISION IS NOT PROGRESS BY ITSELF. The comparison object, the
@@ -1436,8 +1451,9 @@ plan revision or proposal, is refused (`progress-unbound`) rather than skipping
 the declared comparison: skipping it would decide the stopping policy from data
 the run never measured.
 
-STATE-BODY VERSION 5 ADDS THE RECORD, AND VERSIONS 1 TO 4 STAY READABLE. The body
-carries `loopProgress`, one entry per loop group whose plan declares a policy
+STATE-BODY VERSION 5 ADDS THE RECORD, VERSION 6 FIXES WHAT A COUNTER MEANS, AND
+VERSIONS 1 TO 5 STAY READABLE. The body carries `loopProgress`, one entry per loop
+group whose plan declares a policy
 (`{ loopGroupId, evaluator, version, subject, unchanged, baseline? }`),
 materialized at `start()` so a body that never compared anything still says so;
 a version that does not define the field refuses one rather than dropping it, and
@@ -1447,18 +1463,34 @@ subject) and against the stop (count, baseline, version) and refuses a counter
 above its threshold or standing ON it without the stop. There is NO MIGRATOR, as
 with the credential, the arrivals and the stop: a baseline is a fact about
 comparisons the run actually made, and one invented on read would decide
-stagnation from data the run never observed. The reducer refuses to advance a
-version-4 body with `unsupported-state-version`, because advancing it would
+stagnation from data the run never observed.
+
+VERSION 6 HAS THE SAME SHAPE AS VERSION 5 AND A DIFFERENT COUNTER MEANING. Version
+5 was written before an unknown cleared the streak, so a persisted version-5 count
+may span a round nobody compared and cannot be told apart from a trustworthy one.
+Version 6 attests the corrected meaning. A version-5 body is READABLE — its
+completed graphs report cleanly and its stop is verified against its own record —
+and it is ADVANCED only by recomputing every counter from zero, keeping the
+baselines, the evaluator identity and the version, in the same transaction that
+rewrites the body in version 6. The recomputation is conservative in one direction
+only: it can delay a stop, never fabricate one, and it happens once per body
+because a version-6 counter is produced by the comparison alone. Versions 1 to 4
+are never advanced: version 4 has no baseline at all, and advancing it would
 silently restart the counters and re-baseline the comparison — the accidental
-reset recovery must not perform.
+reset recovery must not perform — so such a body is refused with
+`unsupported-state-version`.
 
 ENFORCED BY TESTS. The three answers each have a case (a first token establishes
 the baseline and answers progressed, a repeated token is unchanged, a truncated
 or non-token value is unknown); a truncated value that STARTS WITH the baseline
-is still unknown, never a prefix match; unknown neither increments nor clears the
-streak and does not stop the run while a later comparable unchanged token does; a
-baseline recorded under another evaluator version answers unknown and is left
-exactly as it was; a continuation without the declared subject is refused with
+is still unknown, never a prefix match; an unknown CLEARS the streak, so the next
+comparable unchanged token counts one and only the one after it reaches a
+threshold of two, and an unknown itself never stops the run; a baseline recorded
+under another evaluator version answers unknown with its identity and baseline
+kept and its counter cleared; a version-5 body's counter is recomputed rather
+than trusted, so a count that would have reached the threshold under the old
+counting does not stop the run and the advance rewrites the body in version 6; a
+continuation without the declared subject is refused with
 `progress-subject-missing` and the repaired submission settles the same attempt;
 a plan declaring an unimplemented evaluator is refused by name; a replayed
 continuation does not move the counter, so a threshold of three is not reached by

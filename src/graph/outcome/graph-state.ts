@@ -485,9 +485,39 @@ export const OUTCOME_STATE_BODY_V4 = 4 as const;
  * the run actually made, and inventing one on read would decide stagnation from
  * data the run never observed.
  *
- * This is the layout this build writes.
+ * ITS COUNTER IS NOT TRUSTWORTHY, AND THAT IS WHY VERSION 6 EXISTS. This version's
+ * writer did NOT clear the consecutive-unchanged counter when a comparison could
+ * not be made, so a persisted version-5 count may span a round nobody judged. The
+ * SHAPE of the record is identical in version 6; what changed is the MEANING of
+ * the counter (see {@link OUTCOME_STATE_BODY_V6}), and a version is the only place
+ * a body attests that meaning.
  */
 export const OUTCOME_STATE_BODY_V5 = 5 as const;
+
+/**
+ * The sixth versioned state-body layout: the SAME shape as version 5, written and
+ * read for the CORRECTED meaning of the per-group unchanged counter — it counts
+ * consecutive COMPARABLE unchanged comparisons only, and an unknown comparison
+ * clears it to zero while keeping the baseline.
+ *
+ * WHY A NEW VERSION FOR AN UNCHANGED SHAPE. Until this version the counter
+ * survived an unknown, so a persisted count could stand for a run of unchanged
+ * rounds that an unjudged round interrupted. That number cannot be told apart
+ * from one this build would produce, and continuing it would let a declared
+ * stopping policy fire on repetitions nobody observed back to back. The counter
+ * is not layout, but its MEANING is part of what the body records. A version-5
+ * counter is therefore never trusted: a version-5 body stays READABLE (its
+ * completed graphs report cleanly, and its stop is verified against its own
+ * record), and is advanced only by RECOMPUTING every counter from zero — the
+ * baseline, the evaluator identity and its version are kept exactly as they were
+ * — in the same transaction that rewrites the body in version 6. The
+ * recomputation is conservative in one direction only (it can delay a stop, never
+ * fabricate one) and happens ONCE per body, because a version-6 counter is
+ * produced by the comparison alone.
+ *
+ * This is the layout this build writes.
+ */
+export const OUTCOME_STATE_BODY_V6 = 6 as const;
 
 /**
  * The state-body format this build writes.
@@ -498,7 +528,7 @@ export const OUTCOME_STATE_BODY_V5 = 5 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V5;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V6;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -986,6 +1016,18 @@ const OUTCOME_STATE_LAYOUT_V5: OutcomeStateLayout = Object.freeze({
 });
 
 /**
+ * The node fields body version 6 defines: version 5's fields, unchanged. The new
+ * axis is the MEANING of the per-group unchanged counter (see
+ * {@link OUTCOME_STATE_BODY_V6}), so an entry of this version is exactly an entry
+ * of version 5 — spread from it deliberately, so the two cannot drift apart in
+ * shape while they differ in what a counter means.
+ */
+const OUTCOME_STATE_LAYOUT_V6: OutcomeStateLayout = Object.freeze({
+  ...OUTCOME_STATE_LAYOUT_V5,
+  version: OUTCOME_STATE_BODY_V6,
+});
+
+/**
  * Refuse every node field the declared body version does not define for this
  * status.
  *
@@ -1313,7 +1355,7 @@ function readLoopProgress(
     throw malformedState(
       "loopProgress is " + describeValue(raw) +
         ", not a record of per-loop-group progress (body version " +
-        OUTCOME_STATE_BODY_V5 + " defines one entry per declared progress policy)",
+        CURRENT_OUTCOME_STATE_BODY + " defines one entry per declared progress policy)",
     );
   }
   const policies = new Map<string, CompiledProgressPolicy>();
@@ -2130,15 +2172,18 @@ const OUTCOME_STATE_BODY_V2_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V2);
 const OUTCOME_STATE_BODY_V3_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V3);
 const OUTCOME_STATE_BODY_V4_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V4);
 const OUTCOME_STATE_BODY_V5_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V5);
+const OUTCOME_STATE_BODY_V6_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V6);
 
 /**
- * The state-body capabilities this build installs: version 5 (what it writes,
- * with attempt credentials, join arrivals, the stop a capped run ends on AND the
- * per-group progress record a declared policy is compared against), and versions
- * 4, 3, 2 and 1 as readable older layouts whose attempts the run path refuses to
- * advance — version 4 records no progress baseline, version 3 cannot record a
- * stop, version 2 records no arrivals and version 1 no credential, and none is
- * migrated.
+ * The state-body capabilities this build installs: version 6 (what it writes,
+ * with attempt credentials, join arrivals, the stop a capped run ends on, the
+ * per-group progress record a declared policy is compared against, and counters
+ * that an unknown comparison clears), version 5 as the READABLE predecessor whose
+ * counters are recomputed before it is advanced (see
+ * {@link OUTCOME_STATE_BODY_V6}), and versions 4, 3, 2 and 1 as readable older
+ * layouts whose attempts the run path refuses to advance — version 4 records no
+ * progress baseline, version 3 cannot record a stop, version 2 records no
+ * arrivals and version 1 no credential, and none of those is migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
@@ -2149,6 +2194,7 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
       OUTCOME_STATE_BODY_V3_READER,
       OUTCOME_STATE_BODY_V4_READER,
       OUTCOME_STATE_BODY_V5_READER,
+      OUTCOME_STATE_BODY_V6_READER,
     ],
   });
 
@@ -2677,12 +2723,36 @@ function continuationGroups(
 }
 
 /**
+ * The SAME progress record with every counter reset to zero: the entries, their
+ * baselines and their evaluator identities are kept, because those are facts this
+ * build can still stand behind, while the count is not.
+ *
+ * This is the version-5 compatibility rule in one function (see
+ * {@link OUTCOME_STATE_BODY_V6}): the old build let a streak span an unknown
+ * comparison, so the number is replaced rather than trusted. Nothing is invented
+ * in its place — a zero counter claims no repetition at all, which is exactly
+ * what this build knows about rounds it never compared.
+ */
+function recomputedLegacyProgress(
+  record: Readonly<Record<string, OutcomeLoopProgress>>,
+): Readonly<Record<string, OutcomeLoopProgress>> {
+  const entries: Record<string, OutcomeLoopProgress> = {};
+  for (const [groupId, entry] of Object.entries(record)) {
+    entries[groupId] = Object.freeze({ ...entry, unchanged: 0 });
+  }
+  return Object.freeze(entries);
+}
+
+/**
  * Compare every declared progress policy this continuation is measured by.
  *
- * Runs INSIDE the acceptance transaction, against the state that transaction is
+ * Runs INSIDE the acceptance transaction, against the record that transaction is
  * committing: the entries it returns are written in the same batch that carries
  * the receipt, the accepted event and the stop, so a crash cannot commit an
- * acceptance without the progress it implied (or the progress without it).
+ * acceptance without the progress it implied (or the progress without it). The
+ * record is the caller's TRUSTED one — a version-5 body's counters are recomputed
+ * before they reach this function (see {@link OUTCOME_STATE_BODY_V6}), so a
+ * comparison here never continues a streak the old build measured by other rules.
  *
  * Every group with a declared policy is compared — the comparison is a fact
  * about the accepted outcome, so a group that ran the comparison records it even
@@ -2697,7 +2767,7 @@ function continuationGroups(
 function measureProgress(
   plan: CompiledPlan,
   groups: readonly CompiledPlan["loopGroups"][number][],
-  state: OutcomeGraphState,
+  recorded: Readonly<Record<string, OutcomeLoopProgress>>,
   decision: AcceptanceDecision,
   projections: readonly ProgressProjection[] | undefined,
   now: number,
@@ -2706,8 +2776,6 @@ function measureProgress(
   readonly reports: readonly ProgressReport[];
   readonly stop?: OutcomeProgressStalledStop;
 } {
-  const recorded: Readonly<Record<string, OutcomeLoopProgress>> =
-    state.loopProgress ?? Object.freeze({});
   const entries: Record<string, OutcomeLoopProgress> = { ...recorded };
   const reports: ProgressReport[] = [];
   let stop: OutcomeProgressStalledStop | undefined;
@@ -2861,13 +2929,20 @@ function describeProjectionBinding(projection: ProgressProjection): string {
  */
 export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance {
   const { plan, state, decision, now } = input;
-  if (state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY) {
+  if (
+    state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY &&
+    state.bodyVersion !== OUTCOME_STATE_BODY_V5
+  ) {
     throw new OutcomeAdvanceRefusedError(
       "unsupported-state-version",
       "outcome-advance: the state was written in body version " + state.bodyVersion +
-        ", which cannot carry the attempt credentials, join arrivals and progress baselines " +
-        "this build writes on every attempt — the state is refused rather than advanced and " +
-        "rewritten in body version " + CURRENT_OUTCOME_STATE_BODY,
+        ", which this build does not advance (it advances body version " +
+        OUTCOME_STATE_BODY_V5 + ", whose counters it recomputes, and version " +
+        CURRENT_OUTCOME_STATE_BODY + ") — a version before " + OUTCOME_STATE_BODY_V5 +
+        " cannot carry the attempt credentials, join arrivals and progress baselines this " +
+        "build writes on every attempt, and a newer one is not read by this build — the " +
+        "state is refused rather than advanced and rewritten in body version " +
+        CURRENT_OUTCOME_STATE_BODY,
     );
   }
   if (state.loopProgress === undefined) {
@@ -2879,6 +2954,18 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         "this build could not read back",
     );
   }
+  // THE VERSION-5 COUNTER IS NOT TRUSTED; THE BASELINE IS. Version 5 was written
+  // before an unknown comparison cleared the streak, so a persisted count may span
+  // a round nobody judged. It is never carried into this build's state: every
+  // counter is RECOMPUTED from zero (the baseline, the evaluator identity and its
+  // version are kept exactly as they were) in the same transaction that rewrites
+  // the body in the current version. Conservative in one direction only — it can
+  // delay a stop, never fabricate one — and it happens ONCE per body, because a
+  // current-version counter is produced by the comparison alone.
+  const recordedProgress: Readonly<Record<string, OutcomeLoopProgress>> =
+    state.bodyVersion === OUTCOME_STATE_BODY_V5
+      ? recomputedLegacyProgress(state.loopProgress)
+      : state.loopProgress;
   // A STOPPED RUN TAKES NO FURTHER STEP. The stop is a decision the run already
   // committed to, so a later acceptance on ANY branch — the branch that hit the
   // limit included — is refused rather than applied, and the refusal names the
@@ -2954,7 +3041,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
   });
 
   let loopTraversals = state.loopTraversals;
-  let loopProgress: Readonly<Record<string, OutcomeLoopProgress>> = state.loopProgress;
+  let loopProgress: Readonly<Record<string, OutcomeLoopProgress>> = recordedProgress;
   let attemptSeq = state.attemptSeq;
   const dispatches: OutcomeDispatchIntent[] = [];
   /** Every comparison this advance made, in plan loop-group order. */
@@ -3039,7 +3126,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       const measured = measureProgress(
         plan,
         groups,
-        state,
+        recordedProgress,
         decision,
         input.progress,
         now,

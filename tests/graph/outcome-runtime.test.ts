@@ -53,6 +53,7 @@ import type {
 } from "../../src/graph/outcome/progress.ts";
 import {
   CURRENT_OUTCOME_STATE_BODY,
+  OUTCOME_STATE_BODY_V5,
   OutcomeStateError,
   type OutcomeGraphState,
 } from "../../src/graph/outcome/graph-state.ts";
@@ -1889,7 +1890,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
     );
   });
 
-  it("does not let unknown accumulate, break the streak, or trigger the stop", async () => {
+  it("clears the streak on an unknown, and never stops on it", async () => {
     await withHarness(
       progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
       async ({ runtime, ledger, requests, graphId, dir }) => {
@@ -1901,8 +1902,9 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         if (same.kind !== "accepted") return;
         expect(onlyProgress(same.progress)).toMatchObject({ verdict: "unchanged", unchanged: 1 });
 
-        // UNKNOWN: the counter is left EXACTLY as it was — it neither counts
-        // the unknown nor clears the streak it cannot judge.
+        // UNKNOWN: the streak is CLEARED. The round could not be compared, so it
+        // is not a round in which the run was observed to stand still, and the
+        // streak must not span it. The baseline is kept for the next comparison.
         const unknown = reviseRound(
           runtime,
           requests,
@@ -1916,7 +1918,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         expect(onlyProgress(unknown.progress)).toMatchObject({
           verdict: "unknown",
           unknownReason: "incomparable-value",
-          unchanged: 1,
+          unchanged: 0,
           baseline: "r1",
           stalled: false,
         });
@@ -1927,14 +1929,30 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           evaluator: "revision-token",
           version: 1,
           subject: "revision",
-          unchanged: 1,
+          unchanged: 0,
           baseline: "r1",
         });
 
-        // The next COMPARABLE unchanged token reaches the declared threshold:
-        // the outcome is still accepted, the refused round is not taken, and the
-        // run ends on the closed stop vocabulary.
-        const workedAgain = workStep(runtime, requests, "work#7", NOW + 7);
+        // The next COMPARABLE unchanged token counts ONE, not two: it does not
+        // reach the declared threshold, so the run continues. A counter that had
+        // carried the interrupted streak would have stopped the run here, on a
+        // repetition nobody observed twice.
+        const restarted = reviseRound(runtime, requests, "work#7", "review#8", "r1", NOW + 7);
+        expect(restarted.kind).toBe("accepted");
+        if (restarted.kind !== "accepted") return;
+        expect(onlyProgress(restarted.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 1,
+          baseline: "r1",
+          stalled: false,
+        });
+        expect(restarted.state.phase).toBe("executing");
+        expect(restarted.stop).toBeUndefined();
+
+        // Only the SECOND consecutive comparable unchanged token reaches the
+        // declared threshold: the outcome is still accepted, the refused round
+        // is not taken, and the run ends on the closed stop vocabulary.
+        const workedAgain = workStep(runtime, requests, "work#9", NOW + 9);
         expect(workedAgain.kind).toBe("accepted");
         const receiptsBefore = await countTable(dir, "ledger_receipts");
         const eventsBefore = ledger.acceptedEvents(graphId).length;
@@ -1944,10 +1962,10 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           {
             nodeId: "review",
             outcomeId: "revise",
-            credential: credentialOf(requests, "review#8"),
+            credential: credentialOf(requests, "review#10"),
             data: { revision: "r1" },
           },
-          NOW + 8,
+          NOW + 10,
         );
         expect(stalled.kind).toBe("accepted");
         if (stalled.kind !== "accepted") return;
@@ -1964,21 +1982,21 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           loopGroupId: "revise-loop",
           nodeId: "review",
           outcomeId: "revise",
-          attemptId: "review#8",
+          attemptId: "review#10",
           unchanged: 2,
           maxUnchanged: 2,
           evaluator: "revision-token",
           evaluatorVersion: 1,
           subject: "revision",
           baseline: "r1",
-          stoppedAt: NOW + 8,
+          stoppedAt: NOW + 10,
         });
         // The accepted outcome settled its own node and nothing else, and the
         // receipt/event/state committed together as for any other acceptance.
         expect(nodeOf(stalled.state, "review")).toMatchObject({
           status: "settled",
           outcomeId: "revise",
-          attemptId: "review#8",
+          attemptId: "review#10",
         });
         expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
         expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore + 1);
@@ -2182,8 +2200,10 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         expect(progressEntry(seeded ?? same.state, "revise-loop").version).toBe(2);
 
         // The same revision as the baseline, under different comparison
-        // semantics: unknown, never "unchanged" (nor "progressed"), and the
-        // persisted record is left exactly as it was.
+        // semantics: unknown, never "unchanged" (nor "progressed"). The recorded
+        // identity and the baseline are kept, so a restart still compares against
+        // the same token, while the count is CLEARED — the streak cannot span a
+        // round this comparison could not judge.
         const changed = reviseRound(runtime, requests, "work#5", "review#6", "r1", NOW + 11);
         expect(changed.kind).toBe("accepted");
         if (changed.kind !== "accepted") return;
@@ -2191,7 +2211,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           verdict: "unknown",
           unknownReason: "evaluator-identity-mismatch",
           version: 2,
-          unchanged: 1,
+          unchanged: 0,
           baseline: "r1",
           stalled: false,
         });
@@ -2200,10 +2220,96 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           evaluator: "revision-token",
           version: 2,
           subject: "revision",
-          unchanged: 1,
+          unchanged: 0,
           baseline: "r1",
         });
         expect(changed.state.phase).toBe("executing");
+      },
+    );
+  });
+
+  it("recomputes a version-5 counter instead of trusting a streak that may span an unknown", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
+      async ({ runtime, ledger, requests, graphId }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        const same = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(same.kind).toBe("accepted");
+        if (same.kind !== "accepted") return;
+        expect(progressEntry(same.state, "revise-loop").unchanged).toBe(1);
+
+        // An OLDER BUILD wrote this body: body version 5, whose counter did NOT
+        // clear on an unknown, so "unchanged: 1" may stand for a streak an
+        // unjudged round interrupted. It cannot be told apart from a trustworthy
+        // one, so the count is not trusted at all.
+        const stored = ledger.readGraphState(graphId);
+        if (stored === undefined) throw new Error("fixture: the state row is missing");
+        const body = recordOf(stored.body, "the state body");
+        expect(body.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+        ledger.writeGraphState({
+          ...stored,
+          body: { ...body, bodyVersion: OUTCOME_STATE_BODY_V5 },
+          updatedAt: NOW + 10,
+        });
+        const seeded = runtime.state();
+        expect(seeded?.bodyVersion).toBe(OUTCOME_STATE_BODY_V5);
+        expect(progressEntry(seeded ?? same.state, "revise-loop").unchanged).toBe(1);
+
+        // An advance that measures NOTHING still replaces the untrusted count:
+        // the work step below is not a loop continuation, so no comparison runs
+        // and the rewritten body must not carry the old number forward.
+        const workedAgain = workStep(runtime, requests, "work#5", NOW + 11);
+        expect(workedAgain.kind).toBe("accepted");
+        if (workedAgain.kind !== "accepted") return;
+        expect(workedAgain.state.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+        expect(progressEntry(workedAgain.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 0,
+          baseline: "r1",
+        });
+
+        // The next comparable unchanged token: TRUSTED, the old count plus this
+        // one would be the declared threshold and stop the run; RECOMPUTED, it is
+        // one, and the run continues. The baseline is kept, so the comparison
+        // still answers against the same token.
+        const next = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#6"),
+            data: { revision: "r1" },
+          },
+          NOW + 12,
+        );
+        expect(next.kind).toBe("accepted");
+        if (next.kind !== "accepted") return;
+        expect(onlyProgress(next.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 1,
+          baseline: "r1",
+          stalled: false,
+        });
+        expect(next.state.phase).toBe("executing");
+        expect(next.stop).toBeUndefined();
+
+        // The recomputation is committed WITH the acceptance and rewrites the
+        // body in the current version, so it happens once per body and a restart
+        // from here trusts a counter this build measured itself.
+        const rewritten = runtime.state();
+        expect(rewritten?.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+        expect(progressEntry(rewritten ?? next.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 1,
+          baseline: "r1",
+        });
       },
     );
   });

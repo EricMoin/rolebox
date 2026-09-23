@@ -60,6 +60,7 @@ import {
   OUTCOME_STATE_BODY_V3,
   OUTCOME_STATE_BODY_V4,
   OUTCOME_STATE_BODY_V5,
+  OUTCOME_STATE_BODY_V6,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -1064,14 +1065,15 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(extended.message).toContain("round");
   });
 
-  it("installs a reader for versions 1 to 5, and writes version 5", () => {
-    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V5);
+  it("installs a reader for versions 1 to 6, and writes version 6", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V6);
     expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
       OUTCOME_STATE_BODY_V3,
       OUTCOME_STATE_BODY_V4,
       OUTCOME_STATE_BODY_V5,
+      OUTCOME_STATE_BODY_V6,
     ]);
     for (const version of [
       OUTCOME_STATE_BODY_V1,
@@ -1079,6 +1081,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       OUTCOME_STATE_BODY_V3,
       OUTCOME_STATE_BODY_V4,
       OUTCOME_STATE_BODY_V5,
+      OUTCOME_STATE_BODY_V6,
     ]) {
       const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
       expect(verdict.kind).toBe("supported");
@@ -1556,7 +1559,7 @@ describe("outcome state body — the progress record is a declared comparison", 
       const stored = ledger.readGraphState(PROGRESS_BODY_PLAN.graphId);
       if (stored === undefined) throw new Error("fixture: the state row is missing");
       const state = readOutcomeGraphState(stored, PROGRESS_BODY_PLAN);
-      expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V5);
+      expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V6);
       expect(state.phase).toBe("stopped");
       expect(state.loopProgress?.["revise-loop"]).toEqual({
         loopGroupId: "revise-loop",

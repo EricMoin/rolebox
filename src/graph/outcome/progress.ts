@@ -39,11 +39,16 @@
  *   progress-stalled stop, the run stopping policy);
  * - UNKNOWN — the comparison COULD NOT BE MADE: the persisted baseline was
  *   recorded under another evaluator identity or version, or the observation is
- *   truncated or not a comparable token. Unknown is NOT "equal": it never
- *   increments the unchanged streak, never triggers the soft stop, and never
- *   replaces the baseline. An unknown leaves the persisted progress EXACTLY as
- *   it was, so the decision semantics survive a restart even when the comparison
- *   could not be made, and the declared HARD limits still apply to the run.
+ *   truncated or not a comparable token. Unknown is NOT "equal", and it never
+ *   triggers the soft stop — but it is also NOT a round in which the run stood
+ *   still: it CLEARS the streak. "Consecutive" means consecutive COMPARABLE
+ *   observations, so a round nobody could judge breaks the run of repetitions and
+ *   the next comparable unchanged token starts counting from zero again. The
+ *   BASELINE is kept (it is the last comparable revision the run observed, with
+ *   the evaluator identity and version it was recorded under), so the next
+ *   comparison still answers against the right token and a restart continues the
+ *   same semantics; only the COUNT cannot span a round that was not compared. The
+ *   declared HARD limits still apply to the run.
  *
  * WHAT IS COMPARABLE. The declared subject value must be a NON-EMPTY STRING — a
  * revision token, compared for exact equality. A value of any other JSON type (a
@@ -127,7 +132,7 @@ export interface OutcomeLoopProgress {
   readonly version: number;
   /** The comparison object: the outcome-data field the token was read from. */
   readonly subject: string;
-  /** Consecutive unchanged comparisons; never an unknown. */
+  /** Consecutive COMPARABLE unchanged comparisons; an unknown clears it to zero. */
   readonly unchanged: number;
   /** The last comparable token, absent until one has been recorded. */
   readonly baseline?: string;
@@ -408,20 +413,23 @@ export interface ProgressComparisonInput {
  *    ones. Any disagreement (in practice a baseline recorded under a different
  *    evaluator VERSION, since the reader ties identity and subject to the plan) is
  *    unknown: a change of comparison semantics is not evidence that the revision
- *    stood still, and it is never answered as unchanged or progressed. The entry
- *    is returned exactly as it was, so the baseline and the counters survive a
- *    restart rather than being silently reset;
- * 2. OBSERVATION — a truncated or incomparable observation is unknown, and the
- *    entry is returned exactly as it was (nothing is recorded that could be
- *    compared later);
+ *    stood still, and it is never answered as unchanged or progressed. The
+ *    baseline — and the identity and version it was recorded under — is kept, so a
+ *    restart still compares against the same token, while the counter is CLEARED;
+ * 2. OBSERVATION — a truncated or incomparable observation is unknown with the
+ *    same answer: baseline kept, counter cleared (nothing that could be compared
+ *    later is recorded, and no streak survives a round nobody compared);
  * 3. TOKEN — with no baseline recorded yet the comparison is progressed: the
  *    baseline is ESTABLISHED (there was no earlier value to stand still against,
  *    so the run has not been observed to repeat itself). With a baseline,
  *    equality is unchanged and inequality is progressed.
  *
- * Only unchanged increments the counter, so an unknown can never reach the
- * threshold: the soft stop is decided by repeated COMPARABLE repetition alone,
- * and the declared hard limits remain the run outer bound.
+ * Only unchanged increments the counter, and every unknown CLEARS it, so the
+ * counter is the number of consecutive COMPARABLE unchanged comparisons: an
+ * unknown can neither reach the threshold itself nor let a streak that spans it
+ * reach the threshold later — the soft stop is decided by repetition the run
+ * actually observed back to back, and the declared hard limits remain the run
+ * outer bound.
  */
 export function compareProgress(
   input: ProgressComparisonInput,
@@ -432,16 +440,13 @@ export function compareProgress(
     entry.version !== projection.version ||
     entry.subject !== projection.subject
   ) {
-    return {
-      report: reportOf(entry, "unknown", "evaluator-identity-mismatch", false),
-      entry,
-    };
+    return unknownComparison(entry, "evaluator-identity-mismatch");
   }
   if (projection.observation.kind === "truncated") {
-    return { report: reportOf(entry, "unknown", "truncated-value", false), entry };
+    return unknownComparison(entry, "truncated-value");
   }
   if (projection.observation.kind === "incomparable") {
-    return { report: reportOf(entry, "unknown", "incomparable-value", false), entry };
+    return unknownComparison(entry, "incomparable-value");
   }
   const token = projection.observation.value;
   if (entry.baseline === undefined) {
@@ -470,6 +475,26 @@ export function compareProgress(
     report: reportOf(progressed, "progressed", undefined, false),
     entry: progressed,
   };
+}
+
+/**
+ * One unknown comparison: the report, and the entry to persist — the SAME entry
+ * with the unchanged streak CLEARED.
+ *
+ * The baseline (and the evaluator identity and version it was recorded under) is
+ * kept, because it is the last comparable revision the run observed and the next
+ * comparison still has to answer against it. The COUNTER is reset, because
+ * "consecutive" counts consecutive COMPARABLE rounds and this round was not
+ * compared: a streak carried across an unknown would let a stopping policy fire
+ * on repetitions nobody observed back to back, which is exactly the decision the
+ * unknown could not make.
+ */
+function unknownComparison(
+  entry: OutcomeLoopProgress,
+  reason: ProgressUnknownReason,
+): ProgressComparison {
+  const cleared: OutcomeLoopProgress = Object.freeze({ ...entry, unchanged: 0 });
+  return { report: reportOf(cleared, "unknown", reason, false), entry: cleared };
 }
 
 /** Assemble one frozen report from the entry a comparison produced. */
