@@ -8,11 +8,13 @@
  * exercises them the way a host does — through the public runtime — and pins
  * the properties that make them worth having:
  *
- * 1. a credential is resolvable for EXACTLY the attempt it was issued, and a
- *    restart of the host process can still resolve it from the mirror file;
- * 2. the execution index answers `created` / `absent` / `unknown`, and a
- *    memory-only index never guesses `absent` for what an earlier process may
- *    have created;
+ * 1. a credential is resolvable for EXACTLY the attempt it was issued, NO
+ *    credential value is on disk by default, and only a host that declares a
+ *    platform-isolated store can resolve one again after a restart;
+ * 2. the execution registry distinguishes `pending` / `creating` / `created`,
+ *    answers `created` only with a real host execution id, gives the create
+ *    right to exactly one instance, and a memory-only registry never guesses
+ *    `absent` for what an earlier process may have created;
  * 3. a dispatch adapter delivers at most once per stable effect id, and a
  *    delivery that threw leaves the effect un-recorded so exactly one recovery
  *    create can follow;
@@ -29,7 +31,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,14 +54,9 @@ import {
   createCompletionPolicyRegistry,
   type CompletionPolicyBody,
 } from "../../src/graph/policy/completion-policy.ts";
-import {
-  HOST_CREDENTIAL_MIRROR_FILE,
-  HostCredentialVault,
-} from "../../src/graph/host/credential-vault.ts";
-import {
-  HOST_EXECUTION_INDEX_FILE,
-  HostExecutionIndex,
-} from "../../src/graph/host/execution-index.ts";
+import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
+import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
+import { HOST_STORE_FILE } from "../../src/graph/host/host-store.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import {
   createHostInvocationHolder,
@@ -169,11 +166,14 @@ describe("host credential vault — the credential lives here and nowhere else",
         vault.resolve({ graphId: "other", nodeId: "work", attemptId: "work#1" }),
       ).toBeUndefined();
 
-      // The capability it backs is a readable version-2 adapter whose store is
-      // the vault's own two functions.
+      // The capability it backs is a readable version-3 adapter whose store is
+      // the vault's own two functions, and whose durable-store disclosure is
+      // the honest default: nothing durable holds a value.
       const read = readCredentialIsolationAdapter(vault.capability());
-      expect(read?.version).toBe(2);
-      if (read?.version !== 2) return;
+      expect(read?.version).toBe(3);
+      if (read?.version !== 3) return;
+      expect(read.durableCredentialStore).toBe("none");
+      expect(read.guarantees.digestOnlyPersistedState).toBe(true);
       expect(read.store.resolve({ graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" })).toBe(
         "cred-work-1",
       );
@@ -189,40 +189,81 @@ describe("host credential vault — the credential lives here and nowhere else",
     }
   });
 
-  it("mirrors to a separate 0600 file so a restarted host can still re-deliver", () => {
-    const dir = makeTmpDir("host-vault-restart-");
+  it("keeps no credential value on disk by default, and a restart reports the loss", () => {
+    const dir = makeTmpDir("host-vault-nodisk-");
+    const identity = { graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" };
     try {
       const first = HostCredentialVault.open({ root: dir });
-      first.remember({ graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" }, "cred-work-1");
+      first.remember(identity, "cred-work-1");
+      expect(first.resolve(identity)).toBe("cred-work-1");
 
-      // A SECOND host process over the same root — a restart — resolves it from
-      // the mirror file. The file is separate from every ledger and report.
+      // THE ENFORCED HALF OF THE BOUNDARY: the attempt is recorded durably, the
+      // VALUE is not — so a same-account reader of the whole root obtains
+      // nothing to present.
+      expect(first.durableRecord(identity)).toBe("not-retained");
+      for (const entry of readdirSync(dir)) {
+        expect(readFileSync(join(dir, entry), "utf8")).not.toContain("cred-work-1");
+      }
+
+      // A SECOND host process over the same root — a restart — sees the attempt
+      // and cannot produce the value: it reports the loss instead of inventing
+      // one, and its capability says exactly that.
       const restarted = HostCredentialVault.open({ root: dir });
-      expect(
-        restarted.resolve({ graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" }),
-      ).toBe("cred-work-1");
-      expect(readFileSync(join(dir, HOST_CREDENTIAL_MIRROR_FILE), "utf8")).toContain(
-        "cred-work-1",
-      );
+      expect(restarted.resolve(identity)).toBeUndefined();
+      expect(restarted.has(identity)).toBe(false);
+      expect(restarted.durableRecord(identity)).toBe("not-retained");
+      expect(restarted.size).toBe(0);
+      const capability = restarted.capability();
+      expect(capability.durableCredentialStore).toBe("none");
+      expect(readCredentialIsolationAdapter(capability)?.version).toBe(3);
 
-      // A MEMORY-ONLY vault holds nothing across processes: it can only ever
-      // answer for what it remembered itself. That is the honest trade the
-      // module documents, pinned here so it cannot silently change.
+      // A MEMORY-ONLY vault holds nothing across processes either: it can only
+      // ever answer for what it remembered itself.
       const memory = HostCredentialVault.open({ root: dir, durability: "memory" });
-      expect(
-        memory.resolve({ graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" }),
-      ).toBeUndefined();
+      expect(memory.resolve(identity)).toBeUndefined();
       expect(memory.size).toBe(0);
-      expect(readCredentialIsolationAdapter(memory.capability())?.version).toBe(2);
+      expect(readCredentialIsolationAdapter(memory.capability())?.version).toBe(3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("refuses a mirror file it cannot read instead of opening as empty", () => {
+  it("retains values only for a host that declares a platform-isolated store", () => {
+    const dir = makeTmpDir("host-vault-retained-");
+    const identity = { graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" };
+    try {
+      const first = HostCredentialVault.open({
+        root: dir,
+        durableCredentialStore: "platform-isolated",
+      });
+      first.remember(identity, "cred-work-1");
+      expect(first.durableRecord(identity)).toBe("retained");
+
+      const restarted = HostCredentialVault.open({
+        root: dir,
+        durableCredentialStore: "platform-isolated",
+      });
+      expect(restarted.resolve(identity)).toBe("cred-work-1");
+      expect(restarted.capability().durableCredentialStore).toBe("platform-isolated");
+
+      // The contradiction is REFUSED rather than declared: a store that does
+      // not outlive the process cannot be a durable credential store.
+      expect(() =>
+        HostCredentialVault.open({
+          root: dir,
+          durability: "memory",
+          durableCredentialStore: "platform-isolated",
+        }),
+      ).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a store file it cannot read instead of opening as empty", () => {
     const dir = makeTmpDir("host-vault-corrupt-");
     try {
-      writeFileSync(join(dir, HOST_CREDENTIAL_MIRROR_FILE), "{ not json", "utf8");
+      writeFileSync(join(dir, HOST_STORE_FILE), "{ not json", "utf8");
       expect(() => HostCredentialVault.open({ root: dir })).toThrow();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -230,42 +271,170 @@ describe("host credential vault — the credential lives here and nowhere else",
   });
 });
 
-// ── The execution index ─────────────────────────────────────────────────────
+// ── The execution registry ──────────────────────────────────────────────────
 
-describe("host execution index — facts about what the host created", () => {
-  it("answers created, absent and unknown without guessing", () => {
-    const dir = makeTmpDir("host-index-");
+describe("host execution registry — three states, one owner, a real host fact", () => {
+  it("answers absent, then unknown while a create is in flight, then created only with an id", () => {
+    const dir = makeTmpDir("host-index-states-");
     try {
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
-      const durable = HostExecutionIndex.open({ root: dir });
-      // A durable index wrote every create it ever made, so an unrecorded
-      // effect is genuinely absent — which is what lets a recovery create once.
-      expect(durable.lookup(effect).kind).toBe("absent");
-      expect(durable.record(effect)).toBe(true);
-      expect(durable.lookup(effect).kind).toBe("created");
-      expect(durable.record(effect)).toBe(false);
+      const registry = HostExecutionIndex.open({ root: dir });
+      // A durable registry wrote every create it ever made, so an effect with
+      // no row is genuinely absent — which is what lets a recovery create once.
+      expect(registry.lookup(effect).kind).toBe("absent");
 
-      // A memory-only index cannot see an earlier process's creations, so it
-      // says so rather than answering "absent" and risking a second execution.
+      const claim = registry.claim(effect);
+      expect(claim.kind).toBe("claimed");
+      if (claim.kind !== "claimed") return;
+      // PENDING: the right is held and nothing was handed to the platform, so
+      // no execution can exist.
+      expect(registry.read(effect)?.state).toBe("pending");
+      expect(registry.lookup(effect).kind).toBe("absent");
+
+      expect(registry.markCreating(effect, claim.ownerId)).toBe(true);
+      // CREATING: the request is with the platform and its result is UNKNOWN.
+      expect(registry.read(effect)?.state).toBe("creating");
+      const unknown = registry.lookup(effect);
+      expect(unknown.kind).toBe("unknown");
+      if (unknown.kind === "unknown") expect(unknown.reason).toContain("UNKNOWN");
+
+      // CREATED IS A HOST FACT, AND REQUIRES ONE.
+      expect(() => registry.confirm(effect, { executionId: "" })).toThrow();
+      expect(registry.confirm(effect, { executionId: "dsh-run-7" })).toBe(true);
+      expect(registry.lookup(effect).kind).toBe("created");
+
+      // The row survives a reopen WITH the host's own id, so a restart can
+      // reconcile the effect against the platform instead of guessing.
+      const reopened = HostExecutionIndex.open({ root: dir });
+      expect(reopened.lookup(effect).kind).toBe("created");
+      expect(reopened.read(effect)?.execution?.executionId).toBe("dsh-run-7");
+      expect(reopened.has(effect)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("gives the create right to exactly one of two instances and says so to the other", () => {
+    const dir = makeTmpDir("host-index-owner-");
+    try {
+      const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
+      const first = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
+      const second = HostExecutionIndex.open({ root: dir, ownerId: "host-b" });
+
+      const owned = first.claim(effect);
+      expect(owned.kind).toBe("claimed");
+      const refused = second.claim(effect);
+      expect(refused.kind).toBe("held");
+      if (refused.kind !== "held") return;
+      expect(refused.state).toBe("pending");
+      expect(refused.ownerId).toBe("host-a");
+
+      // The second instance is told it cannot tell — never "absent", which
+      // would license a second create.
+      const unknown = second.lookup(effect);
+      expect(unknown.kind).toBe("unknown");
+      if (unknown.kind === "unknown") {
+        expect(unknown.reason).toContain("another host process");
+      }
+      // The first owner's own view is unaffected.
+      expect(first.lookup(effect).kind).toBe("absent");
+
+      // A delivery that threw releases the claim; from there the other
+      // instance may create, and it is the ONLY create.
+      expect(first.markCreating(effect, "host-a")).toBe(true);
+      expect(first.release(effect, "host-a")).toBe(true);
+      expect(second.lookup(effect).kind).toBe("absent");
+      const retaken = second.claim(effect);
+      expect(retaken.kind).toBe("claimed");
+      expect(second.size).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("takes over only a stale PENDING claim, never a creating one", () => {
+    const dir = makeTmpDir("host-index-lease-");
+    try {
+      const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
+      let clock = 1_000;
+      const first = HostExecutionIndex.open({
+        root: dir,
+        ownerId: "host-a",
+        leaseMs: 100,
+        now: () => clock,
+      });
+      const second = HostExecutionIndex.open({
+        root: dir,
+        ownerId: "host-b",
+        leaseMs: 100,
+        now: () => clock,
+      });
+      expect(first.claim(effect).kind).toBe("claimed");
+      expect(second.claim(effect).kind).toBe("held");
+
+      clock = 1_200; // the claim's lease expired
+      const taken = second.claim(effect);
+      expect(taken.kind).toBe("claimed");
+      if (taken.kind !== "claimed") return;
+      expect(taken.ownerId).toBe("host-b");
+      // The old owner lost the right: its transitions do not apply.
+      expect(first.markCreating(effect, "host-a")).toBe(false);
+      expect(second.markCreating(effect, "host-b")).toBe(true);
+
+      // A claim that was handed to the platform is NEVER taken over, however
+      // long it has been: the execution may exist.
+      clock = 1_000_000;
+      expect(second.claim(effect).kind).toBe("held");
+      const resumed = second.lookup(effect);
+      expect(resumed.kind).toBe("unknown");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not lose one instance's rows to another instance's writes", () => {
+    const dir = makeTmpDir("host-index-interleaved-");
+    try {
+      const a = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
+      const b = HostExecutionIndex.open({ root: dir, ownerId: "host-b" });
+      const x = dispatchEffectKeyOf(GRAPH_ID, "x#1");
+      const y = dispatchEffectKeyOf(GRAPH_ID, "y#1");
+      const z = dispatchEffectKeyOf(GRAPH_ID, "z#1");
+      // The reproduced defect: two live instances each rewrote the whole file
+      // from their own snapshot, so the later writer erased the other's rows.
+      expect(a.claim(x).kind).toBe("claimed");
+      expect(b.claim(y).kind).toBe("claimed");
+      expect(a.claim(z).kind).toBe("claimed");
+
+      const reopened = HostExecutionIndex.open({ root: dir, ownerId: "host-c" });
+      expect(reopened.size).toBe(3);
+      for (const effect of [x, y, z]) expect(reopened.has(effect)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is unknown, never absent, when a memory-only registry cannot see an earlier process", () => {
+    const dir = makeTmpDir("host-index-memory-");
+    try {
+      const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
       const memory = HostExecutionIndex.open({ root: dir, durability: "memory" });
       const unknown = memory.lookup(effect);
       expect(unknown.kind).toBe("unknown");
       if (unknown.kind === "unknown") {
         expect(unknown.reason).toContain("in memory only");
       }
-      expect(memory.record(effect)).toBe(true);
+      const claim = memory.claim(effect);
+      expect(claim.kind).toBe("claimed");
+      if (claim.kind !== "claimed") return;
+      expect(memory.markCreating(effect, claim.ownerId)).toBe(true);
+      expect(memory.confirm(effect, { executionId: "pi-task-1", taskId: "pi-task-1" })).toBe(true);
       expect(memory.lookup(effect).kind).toBe("created");
+      expect(memory.read(effect)?.execution?.taskId).toBe("pi-task-1");
 
-      // The durable record survives a reopen.
-      const reopened = HostExecutionIndex.open({ root: dir });
-      expect(reopened.lookup(effect).kind).toBe("created");
-      expect(readFileSync(join(dir, HOST_EXECUTION_INDEX_FILE), "utf8")).toContain(
-        effect.effectId,
-      );
-
-      // Un-recording is the delivery-failure path: the effect becomes absent
-      // again so a recovery can create it exactly once.
-      durable.unrecord(effect);
+      // A DURABLE registry over the same root sees none of it: the memory-only
+      // rows never reached the store.
+      const durable = HostExecutionIndex.open({ root: dir });
       expect(durable.lookup(effect).kind).toBe("absent");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -304,24 +473,35 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
 
       host.create(request, effect);
-      host.create(request, effect);
-      // A second create for the SAME effect is a no-op — the contract's
-      // idempotency rule is enforced here, not assumed of the caller.
+      // The delivery is made, and the registry says the create is IN FLIGHT:
+      // the platform has the request and has not named the execution yet.
       expect(deliveries).toHaveLength(1);
       expect(bindings).toEqual(["work@work#1"]);
+      expect(host.lookup(effect).kind).toBe("unknown");
+
+      // A second create for the SAME effect is REFUSED — the contract's
+      // idempotency rule is enforced by the registry, not assumed of the caller.
+      expect(() => host.create(request, effect)).toThrow();
+      expect(deliveries).toHaveLength(1);
+
+      // The platform names the execution, and only then is the effect created.
+      expect(host.confirmStarted(effect, { executionId: "dsh-run-1" })).toBe(true);
       expect(host.lookup(effect).kind).toBe("created");
+      expect(() => host.create(request, effect)).toThrow();
+      expect(deliveries).toHaveLength(1);
 
       // A different attempt is a different effect and IS delivered.
       const second = dispatchEffectKeyOf(GRAPH_ID, "ship#2");
       host.create({ ...request, nodeId: "ship", attemptId: "ship#2" }, second);
       expect(deliveries.map((entry) => entry.attemptId)).toEqual(["work#1", "ship#2"]);
+      expect(host.confirmStarted(second, { executionId: "dsh-run-2" })).toBe(true);
       expect(host.lookup(second).kind).toBe("created");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("un-records a delivery that threw, so exactly one later create can follow", () => {
+  it("releases a delivery that threw, so exactly one later create can follow", () => {
     const dir = makeTmpDir("host-dispatch-fail-");
     try {
       let attempts = 0;
@@ -346,12 +526,48 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
 
       expect(() => host.create(request, effect)).toThrow();
-      // The execution demonstrably did not start, so the effect is ABSENT
-      // again: a recovery creates exactly once rather than never.
+      // The execution demonstrably did not start, so the claim is released and
+      // the effect is ABSENT again: a recovery creates exactly once rather than
+      // never.
       expect(host.lookup(effect).kind).toBe("absent");
       host.create(request, effect);
       expect(attempts).toBe(2);
+      expect(host.confirmStarted(effect, { executionId: "dsh-run-1" })).toBe(true);
       expect(host.lookup(effect).kind).toBe("created");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("delivers nothing when ANOTHER instance owns the effect", () => {
+    const dir = makeTmpDir("host-dispatch-owned-");
+    try {
+      const first = new HostOutcomeDispatch({
+        executions: HostExecutionIndex.open({ root: dir, ownerId: "host-a" }),
+        deliver: () => undefined,
+      });
+      const secondDeliveries: OutcomeDispatchRequest[] = [];
+      const second = new HostOutcomeDispatch({
+        executions: HostExecutionIndex.open({ root: dir, ownerId: "host-b" }),
+        deliver: (request) => {
+          secondDeliveries.push(request);
+        },
+      });
+      const request = {
+        graphId: GRAPH_ID,
+        planRevision: "rev-1",
+        nodeId: "work",
+        attemptId: "work#1",
+        agent: "agent.work",
+        prompt: "Do the work.",
+        credential: "cred-work-1",
+      };
+      const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
+
+      first.create(request, effect);
+      expect(() => second.create(request, effect)).toThrow();
+      expect(secondDeliveries).toEqual([]);
+      expect(second.lookup(effect).kind).toBe("unknown");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -607,9 +823,18 @@ describe("host completion bridge — a dispatched attempt settles through settle
       }).plan;
       // FIRST PROCESS: the runtime commits the effect and the state, then the
       // platform refuses the delivery — the commit-then-crash window D8 exists
-      // for. The adapter un-records the effect, so the durable index says
+      // for. The adapter releases the claim, so the durable registry says
       // absent, and the ledger row stays pending.
-      const firstVault = HostCredentialVault.open({ root: join(dir, "host-store") });
+      //
+      // BOTH PROCESSES DECLARE A PLATFORM-ISOLATED STORE HERE, because the test
+      // is ABOUT restart re-delivery: re-delivering a crash-window attempt needs
+      // the credential the first process minted, and the honest default
+      // (`durableCredentialStore: "none"`) keeps no value on disk. The shipped
+      // entries take the default; a host with a real platform boundary opts in.
+      const firstVault = HostCredentialVault.open({
+        root: join(dir, "host-store"),
+        durableCredentialStore: "platform-isolated",
+      });
       const firstDeliveries: OutcomeDispatchRequest[] = [];
       const firstHost = new HostOutcomeDispatch({
         executions: HostExecutionIndex.open({ root: join(dir, "host-store") }),
@@ -637,12 +862,18 @@ describe("host completion bridge — a dispatched attempt settles through settle
       // SECOND PROCESS: fresh vault, fresh index and a fresh runtime over the
       // same roots. The host looks the effect up, reports the truth (absent),
       // and the recovery creates it EXACTLY once.
-      const secondVault = HostCredentialVault.open({ root: join(dir, "host-store") });
+      const secondVault = HostCredentialVault.open({
+        root: join(dir, "host-store"),
+        durableCredentialStore: "platform-isolated",
+      });
       const deliveries: OutcomeDispatchRequest[] = [];
       const secondHost = new HostOutcomeDispatch({
         executions: HostExecutionIndex.open({ root: join(dir, "host-store") }),
-        deliver: (request) => {
+        deliver: (request, effect) => {
           deliveries.push(request);
+          // The platform names the execution it created, so the registry holds
+          // the host fact from here on.
+          secondHost.confirmStarted(effect, { executionId: "task:" + request.attemptId });
         },
       });
       const secondRuntime = new OutcomeGraphRuntime({

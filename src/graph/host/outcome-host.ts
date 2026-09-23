@@ -74,7 +74,10 @@ import {
   OutcomeGraphRuntime,
   type OutcomeResumeResult,
 } from "../outcome/runtime.ts";
-import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
+import type {
+  CredentialIsolationCapability,
+  DurableCredentialStore,
+} from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import {
   createValidatorRegistry,
@@ -91,7 +94,10 @@ import type {
   OutcomeRuntimeRefusal,
 } from "../outcome/runtime.ts";
 import { HostOutcomeDispatch } from "./dispatch-host.ts";
-import { HostExecutionIndex } from "./execution-index.ts";
+import {
+  HostExecutionIndex,
+  type HostExecutionIdentity,
+} from "./execution-index.ts";
 import { HostCredentialVault } from "./credential-vault.ts";
 import { HostInvocationOrigins } from "./invocation-origins.ts";
 import {
@@ -135,6 +141,17 @@ export interface OutcomeHostOptions {
   readonly clock?: () => number;
   /** Vault/index durability. Defaults to `"file"` (restart-recoverable). */
   readonly durability?: OutcomeHostDurability;
+  /**
+   * What the durable credential store holds — see
+   * `HostCredentialVaultOptions.durableCredentialStore`. Defaults to `"none"`:
+   * the durable store records each attempt and no credential value, so a
+   * same-account reader obtains nothing and a recovery that needs a lost
+   * credential reports the effect as unsettled. A host that provides a real
+   * platform boundary (a different OS account, a container or mount namespace
+   * the worker is not in) may declare `"platform-isolated"` to keep values
+   * durable so a crash-window attempt can be re-delivered after a restart.
+   */
+  readonly durableCredentialStore?: DurableCredentialStore;
   /**
    * Whether this host DECLARES the invocation-identity capability (D9) to the
    * run path. Defaults to `true`.
@@ -235,7 +252,13 @@ export class OutcomeHost {
     this.validators = options.validators ?? createValidatorRegistry([]);
     this.completionPolicies = options.completionPolicies;
     const durability = options.durability ?? "file";
-    this.vault = HostCredentialVault.open({ root: options.storeRoot, durability });
+    this.vault = HostCredentialVault.open({
+      root: options.storeRoot,
+      durability,
+      ...(options.durableCredentialStore === undefined
+        ? {}
+        : { durableCredentialStore: options.durableCredentialStore }),
+    });
     this.executions = HostExecutionIndex.open({ root: options.storeRoot, durability });
     this.origins = HostInvocationOrigins.open({ root: options.storeRoot, durability });
     this.holder = createHostInvocationHolder();
@@ -483,13 +506,27 @@ export class OutcomeHost {
   }
 
   /**
+   * Record the host execution the platform confirmed for one effect.
+   *
+   * The platform adapter calls this as soon as it learns the platform's own
+   * execution/task id, which is what turns the registry row from `creating`
+   * (result unknown) into `created` (a host fact). A host that never calls it
+   * leaves the effect `unknown` — reported as unsettled, never re-dispatched.
+   */
+  confirmExecution(
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
+  ): boolean {
+    return this.executions.confirm(effect, execution);
+  }
+
+  /**
    * Report a delivery that failed asynchronously: no execution was created, so
-   * the record the adapter took before delivery is dropped. A later recovery
-   * then asks the host and gets `absent` instead of treating the effect as
-   * started.
+   * this host's claim is released. A later recovery then asks the host and gets
+   * `absent` instead of treating the effect as started.
    */
   reportDeliveryFailure(effect: OutcomeDispatchEffectKey, reason: string): void {
-    this.executions.unrecord(effect);
+    this.executions.release(effect, this.executions.ownerId);
     logWarn(
       "outcome-host: delivery failed for graph " +
         JSON.stringify(effect.graphId) +

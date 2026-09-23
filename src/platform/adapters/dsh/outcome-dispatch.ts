@@ -50,6 +50,7 @@ import type {
 import { DshParentUnresolvedError } from "./dispatch.ts";
 import type { DshSubagentStartRequest } from "./agent-registrar.ts";
 import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
+import type { HostExecutionIdentity } from "../../../graph/host/execution-index.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
@@ -75,12 +76,23 @@ export interface DshOutcomeDeliveryOptions {
   readonly onSettled: (settlement: DshOutcomeSettlement) => void;
   /**
    * Reports a start that failed asynchronously, with the stable effect key so
-   * the host can drop the execution-index record it took before delivery.
+   * the host can release the claim it took before delivery.
    */
   readonly onStartFailed: (
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
     reason: string,
+  ) => void;
+  /**
+   * Reports the dsh subagent run the platform actually created, as soon as its
+   * id is known. This is the host fact that turns the execution registry's
+   * `creating` row into `created`; a host that omits it leaves the effect
+   * `unknown` after a restart — reported as unsettled, never re-dispatched.
+   */
+  readonly onStarted?: (
+    request: OutcomeDispatchRequest,
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
   ) => void;
   /** Optional logger name override. */
   readonly loggerName?: string;
@@ -150,6 +162,10 @@ export class DshOutcomeDelivery {
     // rejection is reported as a failed start (nothing was observed running).
     void Promise.resolve(this.opts.subagents.start(agent, startRequest)).then(
       (run) => {
+        // The platform named the execution, so the host can record the fact it
+        // created. Reported before the result is observed: a completion that
+        // arrives immediately still finds a `created` row.
+        this.opts.onStarted?.(request, effect, { executionId: run.id });
         void Promise.resolve(run.result).then(
           (result: DshSubagentResult) => {
             this.opts.onSettled(

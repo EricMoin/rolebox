@@ -16,6 +16,8 @@
  * @module
  */
 
+import { createRequire } from "node:module";
+
 /** How a database file is opened. */
 export interface DatabaseOpenOptions {
   /**
@@ -72,6 +74,163 @@ export async function createDatabase(
     return createBunDatabase(path, options);
   }
   return createNodeDatabase(path, options);
+}
+
+/**
+ * Create a database handle SYNCHRONOUSLY, over the same two drivers.
+ *
+ * WHY A SYNC TWIN EXISTS. The async factory above is the right shape for a
+ * caller that can await (the memory store and the acceptance ledger both do),
+ * but a host capability is constructed synchronously — `HostExecutionIndex.open`
+ * and `HostCredentialVault.open` are called from an entry's synchronous setup
+ * and from tests that then query them on the same tick. Rather than duplicating
+ * a sqlite binding in the host layer, this factory loads the SAME two modules
+ * through `createRequire` (Bun's `bun:sqlite`, Node's `node:sqlite`) and
+ * returns the identical {@link DatabaseDriver} surface.
+ *
+ * BEHAVIOUR IS THE ASYNC FACTORY'S, MODULO TIMING: same runtime detection, same
+ * open options, same transaction semantics (Bun's `db.transaction` wrapper,
+ * Node's explicit BEGIN/COMMIT/ROLLBACK), same method set. Nothing is cached
+ * process-wide: every call opens its own connection, so a test that opens two
+ * handles over one file gets two real connections.
+ *
+ * `":memory:"` opens a private in-memory database, which is how the host's
+ * `durability: "memory"` mode gets a real store with the same SQL semantics
+ * instead of a second, hand-rolled code path.
+ */
+export function createDatabaseSync(
+  path: string,
+  options: DatabaseOpenOptions = {},
+): DatabaseDriver {
+  if (isBunRuntime()) {
+    return createBunDatabaseSync(path, options);
+  }
+  return createNodeDatabaseSync(path, options);
+}
+
+// ── Sync module loading ────────────────────────────────────────────────────
+
+/** Resolve one module synchronously, without a static import of either driver. */
+function requireModule(specifier: string): unknown {
+  return createRequire(import.meta.url)(specifier);
+}
+
+/** The `bun:sqlite` surface this driver uses. */
+interface BunSqliteStatement {
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+  run(...params: unknown[]): unknown;
+}
+
+interface BunSqliteDatabase {
+  exec(sql: string): unknown;
+  query(sql: string): BunSqliteStatement;
+  transaction<R>(fn: () => R): () => R;
+  close(): unknown;
+}
+
+/** The `node:sqlite` surface this driver uses. */
+interface NodeSqliteStatement {
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+  run(...params: unknown[]): unknown;
+}
+
+interface NodeSqliteDatabase {
+  exec(sql: string): unknown;
+  prepare(sql: string): NodeSqliteStatement;
+  close(): unknown;
+}
+
+function createBunDatabaseSync(
+  path: string,
+  options: DatabaseOpenOptions,
+): DatabaseDriver {
+  const { Database } = requireModule("bun:sqlite") as {
+    Database: new (
+      path: string,
+      options?: { readonly?: boolean },
+    ) => BunSqliteDatabase;
+  };
+  const db =
+    options.readonly === true
+      ? new Database(path, { readonly: true })
+      : new Database(path);
+  return {
+    exec(sql: string): void {
+      db.exec(sql);
+    },
+    run(sql: string, ...params: unknown[]): void {
+      db.query(sql).run(...params);
+    },
+    query(sql: string): StatementDriver {
+      const stmt = db.query(sql);
+      return {
+        get: (...params: unknown[]) => stmt.get(...params),
+        all: (...params: unknown[]) => stmt.all(...params),
+        run: (...params: unknown[]) => {
+          stmt.run(...params);
+        },
+      };
+    },
+    transaction<R>(fn: () => R): () => R {
+      return db.transaction(fn);
+    },
+    close(): void {
+      db.close();
+    },
+  };
+}
+
+function createNodeDatabaseSync(
+  path: string,
+  options: DatabaseOpenOptions,
+): DatabaseDriver {
+  const { DatabaseSync } = requireModule("node:sqlite") as {
+    DatabaseSync: new (
+      path: string,
+      options?: { readOnly?: boolean },
+    ) => NodeSqliteDatabase;
+  };
+  const db =
+    options.readonly === true
+      ? new DatabaseSync(path, { readOnly: true })
+      : new DatabaseSync(path);
+  const statement = (sql: string): NodeSqliteStatement => db.prepare(sql);
+  return {
+    exec(sql: string): void {
+      db.exec(sql);
+    },
+    run(sql: string, ...params: unknown[]): void {
+      statement(sql).run(...(params.length > 0 ? params : []));
+    },
+    query(sql: string): StatementDriver {
+      const stmt = statement(sql);
+      return {
+        get: (...params: unknown[]) => stmt.get(...(params.length > 0 ? params : [])),
+        all: (...params: unknown[]) => stmt.all(...(params.length > 0 ? params : [])),
+        run: (...params: unknown[]) => {
+          stmt.run(...(params.length > 0 ? params : []));
+        },
+      };
+    },
+    transaction<R>(fn: () => R): () => R {
+      return () => {
+        db.exec("BEGIN");
+        try {
+          const result = fn();
+          db.exec("COMMIT");
+          return result;
+        } catch (e) {
+          db.exec("ROLLBACK");
+          throw e;
+        }
+      };
+    },
+    close(): void {
+      db.close();
+    },
+  };
 }
 
 // ── Bun driver ─────────────────────────────────────────────────────────────

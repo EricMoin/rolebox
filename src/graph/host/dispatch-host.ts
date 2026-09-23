@@ -9,10 +9,12 @@
  * belongs to in ONE transaction, then calls this adapter to start the node:
  *
  * - `create(request, effect)` starts one execution, IDEMPOTENTLY per
- *   `(graphId, effectId)`. A second create for an effect this host already
- *   recorded is a NO-OP: it never delivers a second time. That is what makes
- *   "at most one execution" a property of the adapter rather than a hope about
- *   the caller.
+ *   `(graphId, effectId)`. The registry's unique key and conditional claim are
+ *   what make "at most one execution" a property of the STORE: a second create
+ *   — from this process or another one — is told the effect is held and delivers
+ *   nothing. `confirmStarted(effect, execution)` records the platform's real
+ *   execution id once it is known, which is the only way the registry reports
+ *   the effect as `created`.
  * - `lookup(effect)` answers whether an execution for that stable id exists —
  *   `created`, `absent` or `unknown` — from {@link HostExecutionIndex},
  *   never from a guess.
@@ -26,12 +28,13 @@
  * the text against the request it already holds.
  *
  * WHAT A DELIVERY FAILURE MEANS. If `deliver` throws, the execution did not
- * start, so the effect is UN-RECORDED and the error is rethrown: the ledger row
- * the runtime committed stays `pending`, its later recovery asks this adapter
- * again and creates exactly once from there. The reverse window — a crash
- * between the record and the delivery — is described in
- * `execution-index.ts`: the host prefers a reported attempt over a second
- * execution, because running one attempt twice is the failure the contract
+ * start, so the claim is RELEASED and the error is rethrown: the ledger row the
+ * runtime committed stays `pending`, its later recovery asks this adapter again
+ * and creates exactly once from there. The reverse window — a crash after the
+ * request was handed over and before the platform named the execution — is
+ * described in `execution-index.ts`: the row stays `creating`, `lookup`
+ * answers `unknown`, and the host reports the attempt rather than running it a
+ * second time, because running one attempt twice is the failure the contract
  * exists to prevent.
  *
  * THE INVOCATION TRAVELS WITH THE DELIVERY. A platform starts a worker under a
@@ -52,7 +55,11 @@ import type {
   OutcomeExecutionLookup,
 } from "../outcome/dispatch-effects.ts";
 import type { HostInvocationIdentity } from "../outcome/host-identity.ts";
-import { HostExecutionIndex } from "./execution-index.ts";
+import {
+  HostExecutionIndex,
+  type HostExecutionClaim,
+  type HostExecutionIdentity,
+} from "./execution-index.ts";
 
 // ── The seam and the completion sink ────────────────────────────────────────
 
@@ -169,12 +176,24 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   /**
    * Start one effect's execution, at most once per `(graphId, effectId)`.
    *
-   * A recorded effect is NOT delivered again — that is the idempotency rule the
-   * contract states, enforced here rather than assumed of the caller. An
-   * unrecorded one is recorded FIRST (so a crash inside the delivery leaves the
-   * attempt reported rather than re-dispatched) and un-recorded when the
-   * delivery throws (so the execution that did not start can be created once by
-   * the next recovery).
+   * THE THREE STEPS, IN THE ONLY SAFE ORDER. The registry is asked for the
+   * create right (`claim`); the row is moved to `creating` BEFORE the platform
+   * is handed anything, so the whole window in which the platform may have
+   * received the request is recorded as unknown; and the delivery follows. A
+   * delivery that THROWS releases the claim — the execution demonstrably did
+   * not start — so the next recovery creates it once.
+   *
+   * AN EFFECT THAT IS HELD IS NOT DELIVERED, AND SAID SO. The previous shape
+   * returned silently for an already-recorded effect, which made "another
+   * process owns this create" indistinguishable from "nothing to do" at the
+   * caller. A held effect now throws with the holder's state, so the runtime
+   * reports the effect as unsettled instead of marking it started.
+   *
+   * CONFIRMATION IS SEPARATE. A synchronous delivery cannot know the platform's
+   * execution id, so `create` leaves the row `creating` and
+   * {@link confirmStarted} records the host fact when the platform names it. A
+   * host that never confirms leaves the effect `unknown` — reported as
+   * unsettled, never re-dispatched.
    */
   create(request: OutcomeDispatchRequest, effect: OutcomeDispatchEffectKey): void {
     if (effect.graphId !== request.graphId || effect.attemptId !== request.attemptId) {
@@ -188,8 +207,27 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
           " — the effect key and the request must describe the same execution",
       );
     }
-    if (this.executions.has(effect)) return;
-    this.executions.record(effect);
+    const claim = this.executions.claim(effect);
+    if (claim.kind === "held") {
+      throw new Error(
+        "host-dispatch: refusing to create effect " +
+          JSON.stringify(effect.effectId) +
+          " for graph " +
+          JSON.stringify(effect.graphId) +
+          " — " +
+          describeHeldClaim(claim) +
+          "; a second execution for one stable effect id is exactly what the create-once " +
+          "rule forbids, so the request was NOT delivered",
+      );
+    }
+    if (!this.executions.markCreating(effect, claim.ownerId)) {
+      throw new Error(
+        "host-dispatch: the create right for effect " +
+          JSON.stringify(effect.effectId) +
+          " was lost to another host process between the claim and the delivery — nothing " +
+          "was delivered and the effect is reported rather than started a second time",
+      );
+    }
     // The platform invocation is read HERE, inside the runtime's dispatch
     // window, and from the GRAPH's recorded origin rather than from the ambient
     // attribution: a successor settled out of band must run under the invocation
@@ -198,7 +236,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     try {
       this.deliver(request, effect, dispatchInvocation);
     } catch (error) {
-      this.executions.unrecord(effect);
+      this.executions.release(effect, claim.ownerId);
       throw error;
     }
     // The identity is read HERE, synchronously inside the runtime's dispatch
@@ -213,8 +251,50 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     });
   }
 
+  /**
+   * Record the host execution the platform confirmed for one effect.
+   *
+   * This is the ONLY way a row becomes `created`, and it takes the platform's
+   * real execution/task id: the registry refuses an empty one, so
+   * `lookup(...).kind === "created"` always stands for a named host
+   * execution. Returns `false` when no delivery of this host was in flight
+   * (already confirmed, released, or never created here).
+   */
+  confirmStarted(
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
+  ): boolean {
+    return this.executions.confirm(effect, execution);
+  }
+
   /** Whether an execution for this effect exists, as the host can tell. */
   lookup(effect: OutcomeDispatchEffectKey): OutcomeExecutionLookup {
     return this.executions.lookup(effect);
   }
+}
+
+/** One held claim, described for the refusal without quoting a row wholesale. */
+function describeHeldClaim(
+  claim: Extract<HostExecutionClaim, { kind: "held" }>,
+): string {
+  if (claim.state === "created") {
+    const executionId = claim.execution?.executionId;
+    return (
+      "a host execution for it already exists" +
+      (executionId === undefined ? "" : " (" + JSON.stringify(executionId) + ")")
+    );
+  }
+  if (claim.state === "creating") {
+    return (
+      "the create request was already handed to the platform and its result is UNKNOWN " +
+      "(owner " +
+      JSON.stringify(claim.ownerId) +
+      ")"
+    );
+  }
+  return (
+    "another host process holds the create right (owner " +
+    JSON.stringify(claim.ownerId) +
+    ")"
+  );
 }

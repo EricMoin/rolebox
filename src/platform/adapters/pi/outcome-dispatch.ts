@@ -41,6 +41,7 @@ import type {
 import type { DispatchInput, DispatchTask } from "../../../dispatch/types.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
 import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
+import type { HostExecutionIdentity } from "../../../graph/host/execution-index.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 
@@ -79,6 +80,17 @@ export interface PiOutcomeDeliveryOptions {
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
     reason: string,
+  ) => void;
+  /**
+   * Reports the dispatch task the platform actually created, as soon as its id
+   * is known. This is the host fact that turns the execution registry's
+   * `creating` row into `created`; a host that omits it leaves the effect
+   * `unknown` after a restart — reported as unsettled, never re-dispatched.
+   */
+  readonly onStarted?: (
+    request: OutcomeDispatchRequest,
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
   ) => void;
   /** The workspace directory dispatched tasks run against. */
   readonly directory: string;
@@ -137,6 +149,13 @@ export class PiOutcomeDelivery {
     void Promise.resolve(launched).then(
       (task) => {
         this.attempts.set(task.id, request);
+        // The platform named the task, so the host can record the execution it
+        // created; the terminal callback below may then settle against a
+        // `created` row instead of an unknown one.
+        this.opts.onStarted?.(request, effect, {
+          executionId: task.id,
+          taskId: task.id,
+        });
         this.opts.manager.onTaskTerminated(task.id, (taskId, status) => {
           const observed = this.attempts.get(taskId);
           this.attempts.delete(taskId);

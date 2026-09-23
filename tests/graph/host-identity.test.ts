@@ -187,7 +187,13 @@ function runtimeOver(
     artifactRoot: dir,
     clock: () => NOW,
     mintCredential: CREDENTIAL_SOURCE,
-    credentialIsolation: testHostCredentialIsolation(dir),
+    // This file's restart cases compare two host PROCESSES over one store
+    // root, so the credential the first minted has to survive: the fixture
+    // declares a platform-isolated store. The shipped entries keep the honest
+    // default (`"none"`), and the boundary tests pin that.
+    credentialIsolation: testHostCredentialIsolation(dir, {
+      durableCredentialStore: "platform-isolated",
+    }),
     ...(hostIdentity === undefined ? {} : { hostIdentity }),
   });
 }

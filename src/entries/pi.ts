@@ -82,6 +82,8 @@ import {
   createOutcomeGraphTools,
 } from "../graph/tools/index.ts";
 import { OutcomeHost } from "../graph/host/outcome-host.ts";
+import { hostStoreRoot } from "../graph/host/host-store.ts";
+import { getDataDir } from "../cli/paths.ts";
 import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
 import { createValidatorRegistry } from "../graph/outcome/validators.ts";
 import {
@@ -775,9 +777,12 @@ export default async function (pi: any): Promise<void> {
     // (`src/graph/host/outcome-host.ts`), never by a legacy engine: the
     // `PiOutcomeDelivery` starts one dispatch-manager task per attempt (the
     // credential travels in that worker's prompt — the one channel it belongs
-    // to), and the `OutcomeHost` holds the protected vault, the durable
+    // to), and the `OutcomeHost` holds the credential vault, the durable
     // execution index, the invocation identity (D9) and the completion bridge
-    // that settles a finished attempt through `settleNatural`.
+    // that settles a finished attempt through `settleNatural`. The vault keeps
+    // the `durableCredentialStore: "none"` default: no durable artifact holds a
+    // credential value, and a crash-window attempt whose value is gone is
+    // reported as unsettled rather than re-delivered with an invented one.
     //
     // The store root is a host directory beside the workspace state (workers are
     // not handed its path): see `credential-vault.ts` for what that can and
@@ -788,6 +793,12 @@ export default async function (pi: any): Promise<void> {
       directory: process.cwd(),
       onStartFailed: (_request, effect, reason) => {
         outcomeHost?.reportDeliveryFailure(effect, reason);
+      },
+      onStarted: (_request, effect, execution) => {
+        // The platform named the dispatch task it created: the host records the
+        // FACT, which is what lets a restart reconcile the effect instead of
+        // reporting it as an unknown create.
+        outcomeHost?.confirmExecution(effect, execution);
       },
       onSettled: (settlement) => {
         const { request } = settlement;
@@ -828,7 +839,13 @@ export default async function (pi: any): Promise<void> {
     // weakened, and no identity is recorded on an attempt.
     outcomeHost = OutcomeHost.open({
       workspaceDir: process.cwd(),
-      storeRoot: join(process.cwd(), ".rolebox", "state", "host"),
+      // THE HOST'S OWN STATE ROOT IS NOT THE WORKSPACE. A dispatched worker runs
+      // with the workspace as its root, so keeping the store under
+      // `<workspace>/.rolebox/state` handed every worker the directory. This is
+      // the one path-shaped part of the boundary — `credential-vault.ts` states
+      // why it is not isolation by itself and what the vault does NOT put on
+      // disk.
+      storeRoot: hostStoreRoot(getDataDir(), process.cwd()),
       deliver: outcomeDelivery.deliver,
       validators: createValidatorRegistry([]),
       declareInvocationIdentity: false,

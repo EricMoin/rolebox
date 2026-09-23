@@ -1,64 +1,66 @@
 /**
- * Graph Execution Engine v2 — the host's durable dispatch-execution index
+ * Graph Execution Engine v2 — the host's durable dispatch-execution registry
  *
- * Version: 1.0
+ * Version: 2.0
  * Date: 2026-09-23
  *
  * THE FACTS HALF OF THE DISPATCH HOST (D8). `src/graph/outcome/dispatch-effects.ts`
  * gives the runtime two answers it cannot derive on its own: create this
- * effect's execution (idempotently per `(graphId, effectId)`) and say whether
- * an execution for that stable id ALREADY EXISTS. This module owns the second
- * one for a real host: the record of what the host actually created.
+ * effect's execution (idempotently per `(graphId, effectId)`) and say whether an
+ * execution for that stable id ALREADY EXISTS. This module owns both for a real
+ * host, over the host's authoritative SQLite store
+ * ({@link HostStore}, `host-store.ts`).
  *
- * WHY THE RECORD EXISTS AT ALL. A dispatch effect is committed atomically with
- * the state it belongs to, and the create call happens after that commit. A
- * process that dies inside that window leaves an effect the ledger records and
- * the runtime cannot resolve: the execution may or may not exist. Neither
- * pre-marking the effect "started" nor re-issuing the create blindly answers
- * that question, so the runtime ASKS the host — and the host can only answer
- * because it writes down what it created, keyed by the stable effect id the
- * runtime derives from the attempt.
+ * THE THREE STATES, AND WHY TWO WERE NOT ENOUGH. A create is not a single
+ * event: the host first takes the right to create, then hands the request to a
+ * platform it cannot see into, then (maybe) learns what the platform made. The
+ * registry therefore records WHICH of those steps happened:
  *
- * HONEST ANSWERS, INCLUDING "I CANNOT TELL".
+ * - `pending` — a create right is held and NOTHING has been handed to the
+ *   platform. No execution can exist, so a stale claim may be taken over and
+ *   the effect is a genuine `absent`.
+ * - `creating` — the request WAS handed over and the result is unknown. A crash
+ *   here leaves an execution that may or may not exist; `lookup` answers
+ *   `unknown` and NEVER `absent`, because a blind retry could run the attempt
+ *   twice. This is the state the previous design could not express: it wrote
+ *   its "preparing to create" record into the same set as "created", so a fresh
+ *   reader answered `created` for an execution nobody had confirmed.
+ * - `created` — the platform CONFIRMED the execution and named a real host
+ *   execution/task id ({@link HostExecutionIdentity}). The store's own CHECK
+ *   constraint makes `created` without an id unrepresentable, so `lookup` can
+ *   answer `created` only from a host fact.
  *
- * - `durability: "file"` (the default) writes the index to a separate file
- *   under `root` (atomic replace, 0600, created 0700), so the host can answer
- *   for effects created by an EARLIER process too: an id it never recorded is
- *   genuinely `absent`, which is what lets a recovery create exactly once.
- * - `durability: "memory"` keeps the record in this process only. It can then
- *   answer `created` for what IT created, and it answers `unknown` for
- *   everything else — never `absent` — because an execution created by a
- *   previous process is exactly what it cannot see. The runtime reports those
- *   effects as unsettled work instead of dispatching them a second time.
+ * CROSS-INSTANCE UNIQUENESS IS STRUCTURAL. The primary key
+ * `(graph_id, effect_id)` and a conditional `UPDATE ... WHERE owner_id = ?`
+ * are what make "only one instance gets the create right" a property of the
+ * store rather than of a lock in one process: a second instance's `claim`
+ * either loses the conditional update and is told the effect is HELD, or takes
+ * over a claim whose lease expired — it is never silently granted a second
+ * dispatch. Two processes each keeping an in-memory snapshot and rewriting one
+ * file (the previous shape) could not express either guarantee, and the
+ * reproduced defect was exactly that: the later writer erased the other's rows.
  *
- * THE INDEX RECORDS THE DECISION TO CREATE, NOT THE DELIVERY'S OUTCOME. The
- * dispatch host records an effect BEFORE it hands the execution to the
- * platform seam and un-records it if the seam throws, so the two failure
- * windows are not symmetric: a crash between the record and the delivery
- * leaves the attempt reported as created-but-never-run (visible in the
- * runtime's unsettled/armed reports and in the drain audit) rather than
- * silently re-dispatched, because running one attempt twice is the outcome
- * this whole contract exists to prevent. The residual duplicate window is the
- * seam itself: a platform whose dispatch cannot dedupe on the stable effect id
- * can run an attempt twice if the host process dies inside the delivery, and
- * the documentation says so instead of implying a guarantee the host cannot
- * give.
+ * WHAT THE REGISTRY IS NOT. It is not a completion source and not a scheduler:
+ * nothing here executes, cancels or settles anything. A confirmed execution is
+ * a FACT a recovery may reconcile against, not a promise that the attempt ran.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
 import type {
   OutcomeDispatchEffectKey,
   OutcomeExecutionLookup,
 } from "../outcome/dispatch-effects.ts";
+import { HostStore } from "./host-store.ts";
 
-// ── Options and format ──────────────────────────────────────────────────────
+// ── Options and record shapes ───────────────────────────────────────────────
 
-/** How long the index outlives the process that wrote it. */
+/** How long the registry outlives the process that wrote it. */
 export type HostExecutionIndexDurability =
   /**
-   * A separate file under `root` (the default): the host can answer for an
-   * earlier process's creations, so an unrecorded effect is a real `absent`.
+   * The durable host store under `root` (the default): the host can answer for
+   * an earlier process's creations, so an unrecorded effect is a real
+   * `absent`.
    */
   | "file"
   /**
@@ -66,21 +68,80 @@ export type HostExecutionIndexDurability =
    */
   | "memory";
 
+/** The three states one dispatch effect can be in. */
+export type HostExecutionState = "pending" | "creating" | "created";
+
+/**
+ * What the HOST's platform named the execution it started.
+ *
+ * A dsh subagent run id, a Pi dispatch task id — the token a recovery can ask
+ * the platform about. It is required for `created`: a state that says "the
+ * execution exists" without naming it would be a claim the host could not
+ * substantiate.
+ */
+export interface HostExecutionIdentity {
+  /** The platform's own id for the started execution. */
+  readonly executionId: string;
+  /** The platform's task id, when it names the execution and the task apart. */
+  readonly taskId?: string;
+}
+
+/** One effect's registry row, as read back. */
+export interface HostDispatchExecution {
+  readonly graphId: string;
+  readonly effectId: string;
+  readonly attemptId: string;
+  readonly state: HostExecutionState;
+  /** The host instance that held (or holds) the create right. */
+  readonly ownerId: string;
+  /** The confirmed host execution, present exactly when `state` is `created`. */
+  readonly execution?: HostExecutionIdentity;
+  readonly claimedAt: number;
+  readonly updatedAt: number;
+}
+
+/**
+ * The answer to "may THIS instance create the execution?".
+ *
+ * `held` is the explicit refusal the create-once rule needs: the effect is
+ * owned by another claim or already exists, and this instance must not hand it
+ * to the platform again.
+ */
+export type HostExecutionClaim =
+  | { readonly kind: "claimed"; readonly ownerId: string }
+  | {
+      readonly kind: "held";
+      readonly state: HostExecutionState;
+      readonly ownerId: string;
+      readonly execution?: HostExecutionIdentity;
+    };
+
 /** Inputs to {@link HostExecutionIndex.open}. */
 export interface HostExecutionIndexOptions {
-  /** The host-owned directory the index file lives in (created 0700 when absent). */
+  /** The host-owned directory the store file lives in (created 0700 when absent). */
   readonly root: string;
   /** Defaults to `"file"` (see {@link HostExecutionIndexDurability}). */
   readonly durability?: HostExecutionIndexDurability;
+  /**
+   * This instance's identity inside the store. Defaults to a fresh random id,
+   * so two instances in one process are two owners.
+   */
+  readonly ownerId?: string;
+  /**
+   * How long a `pending` claim stays its owner's before another instance may
+   * take it over. A claim that never handed anything to the platform can be
+   * abandoned safely, so the lease is what keeps a dead process from blocking a
+   * recovery forever. Defaults to one minute.
+   */
+  readonly leaseMs?: number;
+  /** The clock; defaults to `Date.now`. Injected so a lease is testable. */
+  readonly now?: () => number;
 }
 
-/** The index file's name inside {@link HostExecutionIndexOptions.root}. */
-export const HOST_EXECUTION_INDEX_FILE = "host-dispatch-executions.json" as const;
+/** The default claim lease. */
+export const HOST_EXECUTION_CLAIM_LEASE_MS = 60_000;
 
-/** The index file's own format version, refused rather than read approximately. */
-export const HOST_EXECUTION_INDEX_VERSION = 1 as const;
-
-// ── The index ───────────────────────────────────────────────────────────────
+// ── The registry ────────────────────────────────────────────────────────────
 
 /**
  * The host's record of the dispatch executions it has created, addressed by the
@@ -88,162 +149,309 @@ export const HOST_EXECUTION_INDEX_VERSION = 1 as const;
  * (`dispatch:<attemptId>`, scoped by graph).
  */
 export class HostExecutionIndex {
-  private readonly root: string;
+  private readonly store: HostStore;
   private readonly durability: HostExecutionIndexDurability;
-  /** Recorded effect keys, exactly as the runtime spelled them. */
-  private readonly recorded = new Set<string>();
-  private readonly indexPath: string;
+  private readonly leaseMs: number;
+  private readonly now: () => number;
+  /** This instance's owner id inside the store. */
+  readonly ownerId: string;
 
-  private constructor(options: HostExecutionIndexOptions) {
-    this.root = options.root;
-    this.durability = options.durability ?? "file";
-    this.indexPath = join(this.root, HOST_EXECUTION_INDEX_FILE);
-    if (this.durability === "file") this.load();
+  private constructor(
+    store: HostStore,
+    durability: HostExecutionIndexDurability,
+    options: HostExecutionIndexOptions,
+  ) {
+    this.store = store;
+    this.durability = durability;
+    this.leaseMs = options.leaseMs ?? HOST_EXECUTION_CLAIM_LEASE_MS;
+    this.now = options.now ?? (() => Date.now());
+    this.ownerId = options.ownerId ?? randomUUID();
   }
 
-  /** Open one index over `root`, reading the durable record when present. */
+  /** Open one registry over `root`, reading the durable store when present. */
   static open(options: HostExecutionIndexOptions): HostExecutionIndex {
-    return new HostExecutionIndex(options);
+    const durability = options.durability ?? "file";
+    const store =
+      durability === "memory" ? HostStore.openMemory() : HostStore.openFile(options.root);
+    return new HostExecutionIndex(store, durability, options);
   }
 
   /**
-   * Record that this effect's execution was created (or is being created — see
-   * the module header). Idempotent: recording an already-recorded effect
-   * changes nothing and answers `false`.
-   */
-  record(effect: OutcomeDispatchEffectKey): boolean {
-    const key = effectKey(effect);
-    if (this.recorded.has(key)) return false;
-    this.recorded.add(key);
-    if (this.durability === "file") this.persist();
-    return true;
-  }
-
-  /**
-   * Drop one effect's record, so the host will create it again. Used by the
-   * dispatch host when its delivery seam THREW: the execution demonstrably did
-   * not start, and a later recovery must be allowed to create it.
-   */
-  unrecord(effect: OutcomeDispatchEffectKey): void {
-    if (!this.recorded.delete(effectKey(effect))) return;
-    if (this.durability === "file") this.persist();
-  }
-
-  /** Whether this effect is recorded as created. */
-  has(effect: OutcomeDispatchEffectKey): boolean {
-    return this.recorded.has(effectKey(effect));
-  }
-
-  /**
-   * Whether an execution for this effect exists.
+   * Take the right to create this effect's execution, or be told it is held.
    *
-   * A recorded effect is `created` in every mode. An unrecorded one is
-   * `absent` only when this index is authoritative for the graph — the durable
-   * mode, where every create this host ever performed is in the file — and
-   * `unknown` otherwise, with the reason, because a memory-only index cannot
-   * see what an earlier process created.
+   * ONE transaction, THREE outcomes: the effect is new (`claimed`), this
+   * instance already holds it (`claimed`, idempotent), or another claim/execution
+   * owns it (`held`). A `pending` claim whose lease expired is taken over
+   * INSIDE the transaction with a conditional update, so two instances racing
+   * for the same stale claim cannot both win.
+   */
+  claim(effect: OutcomeDispatchEffectKey): HostExecutionClaim {
+    const now = this.now();
+    return this.store.transaction(() => {
+      // The insert is FIRST and IGNORES a conflict, so the transaction takes
+      // the write lock before it reads: a racing instance's insert either wins
+      // (this one reads the winner's row and is told "held") or waits on the
+      // lock. Inserting after a read would let a deferred transaction see a
+      // stale snapshot and fail on promotion instead of answering.
+      this.store.run(
+        `INSERT OR IGNORE INTO ${EXECUTIONS} (graph_id, effect_id, attempt_id, state, owner_id, execution_id, task_id, claimed_at, updated_at)
+         VALUES (?, ?, ?, 'pending', ?, NULL, NULL, ?, ?)`,
+        effect.graphId,
+        effect.effectId,
+        effect.attemptId,
+        this.ownerId,
+        now,
+        now,
+      );
+      const row = this.read(effect);
+      if (row === undefined) {
+        throw new Error(
+          "host-execution-index: the registry row for effect " +
+            JSON.stringify(effect.effectId) +
+            " could not be written or read back — refusing to report a claim this store " +
+            "does not hold",
+        );
+      }
+      if (row.state !== "pending") return heldClaim(row);
+      if (row.ownerId === this.ownerId) {
+        return Object.freeze({ kind: "claimed" as const, ownerId: this.ownerId });
+      }
+      if (row.claimedAt + this.leaseMs > now) return heldClaim(row);
+      this.store.run(
+        `UPDATE ${EXECUTIONS} SET owner_id = ?, claimed_at = ?, updated_at = ?
+         WHERE graph_id = ? AND effect_id = ? AND state = 'pending' AND owner_id = ?`,
+        this.ownerId,
+        now,
+        now,
+        effect.graphId,
+        effect.effectId,
+        row.ownerId,
+      );
+      if (this.store.changes() === 1) {
+        return Object.freeze({ kind: "claimed" as const, ownerId: this.ownerId });
+      }
+      const after = this.read(effect);
+      return after === undefined
+        ? Object.freeze({ kind: "claimed" as const, ownerId: this.ownerId })
+        : heldClaim(after);
+    });
+  }
+
+  /**
+   * Record that the create request is ABOUT TO BE handed to the platform.
+   *
+   * Called BEFORE the delivery, never after: the row must say `creating` for
+   * the whole window in which the platform may have received the request, so a
+   * crash inside that window leaves `unknown` rather than a claim that looks
+   * safely retryable.
+   */
+  markCreating(effect: OutcomeDispatchEffectKey, ownerId: string): boolean {
+    this.store.run(
+      `UPDATE ${EXECUTIONS} SET state = 'creating', updated_at = ?
+       WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND state = 'pending'`,
+      this.now(),
+      effect.graphId,
+      effect.effectId,
+      ownerId,
+    );
+    return this.store.changes() === 1;
+  }
+
+  /**
+   * Record the host execution the platform CONFIRMED.
+   *
+   * The execution id is required and non-empty: `created` is the one state
+   * `lookup` reports as a fact, so it may only be written with the fact. A row
+   * that is not in `creating` is not touched (the confirmation belongs to the
+   * process whose request was in flight).
+   */
+  confirm(effect: OutcomeDispatchEffectKey, execution: HostExecutionIdentity): boolean {
+    if (typeof execution.executionId !== "string" || execution.executionId.length === 0) {
+      throw new Error(
+        "host-execution-index: refusing to record effect " +
+          JSON.stringify(effect.effectId) +
+          " as created without a non-empty host execution id — 'created' is the host's " +
+          "confirmed fact, and a state that claims one without naming the execution " +
+          "cannot be reconciled against the platform",
+      );
+    }
+    this.store.run(
+      `UPDATE ${EXECUTIONS} SET state = 'created', execution_id = ?, task_id = ?, updated_at = ?
+       WHERE graph_id = ? AND effect_id = ? AND state = 'creating'`,
+      execution.executionId,
+      execution.taskId ?? null,
+      this.now(),
+      effect.graphId,
+      effect.effectId,
+    );
+    return this.store.changes() === 1;
+  }
+
+  /**
+   * Drop this owner's claim after a delivery that THREW: the execution
+   * demonstrably did not start, so a later recovery may create it. A `created`
+   * row is never released — that execution exists.
+   */
+  release(effect: OutcomeDispatchEffectKey, ownerId: string): boolean {
+    this.store.run(
+      `DELETE FROM ${EXECUTIONS}
+       WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND state IN ('pending', 'creating')`,
+      effect.graphId,
+      effect.effectId,
+      ownerId,
+    );
+    return this.store.changes() === 1;
+  }
+
+  /**
+   * Whether an execution for this effect exists, as the host can tell.
+   *
+   * A durable store answers for every create this host ever performed, so an
+   * effect with no row is `absent`. A memory-only store cannot see an earlier
+   * process's rows, so it answers `unknown` for everything it does not hold —
+   * never `absent` for what it cannot see.
    */
   lookup(effect: OutcomeDispatchEffectKey): OutcomeExecutionLookup {
-    if (this.recorded.has(effectKey(effect))) {
-      return Object.freeze({ kind: "created" as const });
+    const row = this.read(effect);
+    if (row === undefined) {
+      if (this.durability === "file") {
+        return Object.freeze({ kind: "absent" as const });
+      }
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason:
+          "this host keeps its execution registry in memory only, so it cannot say whether " +
+          "graph " +
+          JSON.stringify(effect.graphId) +
+          " already had an execution for effect " +
+          JSON.stringify(effect.effectId) +
+          " created by an earlier process",
+      });
     }
-    if (this.durability === "file") {
+    if (row.state === "created") {
+      if (row.execution !== undefined) {
+        return Object.freeze({ kind: "created" as const });
+      }
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason:
+          "the host registry records effect " +
+          JSON.stringify(effect.effectId) +
+          " as created but carries no host execution id, so the fact cannot be " +
+          "reconciled against the platform",
+      });
+    }
+    if (row.state === "creating") {
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason:
+          "the host handed effect " +
+          JSON.stringify(effect.effectId) +
+          " to the platform and has no confirmation naming the execution it created, so " +
+          "whether it exists is UNKNOWN — a blind retry could run the attempt twice",
+      });
+    }
+    // pending: nothing was handed to the platform, so no execution can exist.
+    if (row.ownerId === this.ownerId || row.claimedAt + this.leaseMs <= this.now()) {
       return Object.freeze({ kind: "absent" as const });
     }
     return Object.freeze({
       kind: "unknown" as const,
       reason:
-        "this host keeps its execution index in memory only, so it cannot say whether " +
-        "graph " +
-        JSON.stringify(effect.graphId) +
-        " already had an execution for effect " +
+        "another host process (owner " +
+        JSON.stringify(row.ownerId) +
+        ") holds the create right for effect " +
         JSON.stringify(effect.effectId) +
-        " created by an earlier process",
+        " and has not yet handed it to the platform",
     });
   }
 
-  /** How many executions this host has recorded. A count, never a listing. */
-  get size(): number {
-    return this.recorded.size;
-  }
-
-  // ── Internals ─────────────────────────────────────────────────────────────
-
-  /** Read the index file, refusing a shape this build cannot read. */
-  private load(): void {
-    if (!existsSync(this.indexPath)) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(this.indexPath, "utf8"));
-    } catch (error) {
-      throw new Error(
-        "host-execution-index: the index file " +
-          JSON.stringify(this.indexPath) +
-          " is not readable JSON (" +
-          (error instanceof Error ? error.message : String(error)) +
-          ") — refusing to open the index as if it were empty, because every unrecorded " +
-          "effect would then look absent and could be dispatched a second time",
-      );
-    }
-    if (!isRecord(parsed) || parsed.version !== HOST_EXECUTION_INDEX_VERSION) {
-      throw new Error(
-        "host-execution-index: the index file " +
-          JSON.stringify(this.indexPath) +
-          " does not declare format version " +
-          HOST_EXECUTION_INDEX_VERSION +
-          " — refusing to read it approximately",
-      );
-    }
-    if (!Array.isArray(parsed.effects)) {
-      throw new Error(
-        "host-execution-index: the index file " +
-          JSON.stringify(this.indexPath) +
-          " carries no effects list",
-      );
-    }
-    for (const entry of parsed.effects) {
-      if (
-        !isRecord(entry) ||
-        typeof entry.graphId !== "string" ||
-        typeof entry.effectId !== "string"
-      ) {
-        throw new Error(
-          "host-execution-index: the index file " +
-            JSON.stringify(this.indexPath) +
-            " carries an entry this build cannot read — refusing the whole file rather " +
-            "than dropping one execution record",
-        );
-      }
-      this.recorded.add(entry.graphId + "\u0000" + entry.effectId);
-    }
-  }
-
-  /** Write the index atomically (temp file, then rename) with mode 0600. */
-  private persist(): void {
-    mkdirSync(this.root, { recursive: true, mode: 0o700 });
-    const effects = [...this.recorded].map((key) => {
-      const [graphId, effectId] = key.split("\u0000");
-      return { graphId, effectId };
-    });
-    const text = JSON.stringify(
-      { version: HOST_EXECUTION_INDEX_VERSION, effects },
-      null,
-      2,
+  /** One effect's row, or `undefined`. */
+  read(effect: OutcomeDispatchEffectKey): HostDispatchExecution | undefined {
+    const row = this.store.get(
+      `SELECT graph_id, effect_id, attempt_id, state, owner_id, execution_id, task_id, claimed_at, updated_at
+       FROM ${EXECUTIONS} WHERE graph_id = ? AND effect_id = ?`,
+      effect.graphId,
+      effect.effectId,
     );
-    const temporary = this.indexPath + "." + process.pid + ".tmp";
-    writeFileSync(temporary, text, { encoding: "utf8", mode: 0o600 });
-    renameSync(temporary, this.indexPath);
+    if (row === undefined) return undefined;
+    const graphId = row["graph_id"];
+    const effectId = row["effect_id"];
+    const attemptId = row["attempt_id"];
+    const state = row["state"];
+    const ownerId = row["owner_id"];
+    const claimedAt = row["claimed_at"];
+    const updatedAt = row["updated_at"];
+    if (
+      typeof graphId !== "string" ||
+      typeof effectId !== "string" ||
+      typeof attemptId !== "string" ||
+      typeof ownerId !== "string" ||
+      typeof claimedAt !== "number" ||
+      typeof updatedAt !== "number" ||
+      !isExecutionState(state)
+    ) {
+      throw new Error(
+        "host-execution-index: the registry row for effect " +
+          JSON.stringify(effect.effectId) +
+          " is not a shape this build writes — refusing to read it approximately",
+      );
+    }
+    const executionId = row["execution_id"];
+    const taskId = row["task_id"];
+    const execution =
+      typeof executionId === "string" && executionId.length > 0
+        ? Object.freeze({
+            executionId,
+            ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
+          })
+        : undefined;
+    return Object.freeze({
+      graphId,
+      effectId,
+      attemptId,
+      state,
+      ownerId,
+      ...(execution === undefined ? {} : { execution }),
+      claimedAt,
+      updatedAt,
+    });
+  }
+
+  /** Whether this effect has a row at all (any state). */
+  has(effect: OutcomeDispatchEffectKey): boolean {
+    return this.read(effect) !== undefined;
+  }
+
+  /** How many effects this host has rows for. A count, never a listing. */
+  get size(): number {
+    const row = this.store.get(`SELECT COUNT(*) AS total FROM ${EXECUTIONS}`);
+    const total = row?.["total"];
+    return typeof total === "number" ? total : 0;
+  }
+
+  /** Close the underlying store connection. Idempotent. */
+  close(): void {
+    this.store.close();
   }
 }
 
-// ── Primitives ──────────────────────────────────────────────────────────────
+// ── Internals ───────────────────────────────────────────────────────────────
 
-/** The index's set key: graph + stable effect id, joined unambiguously. */
-function effectKey(effect: OutcomeDispatchEffectKey): string {
-  return effect.graphId + "\u0000" + effect.effectId;
+/** The table this registry owns, exported for tests that fabricate a store. */
+export const HOST_EXECUTION_TABLE = "host_dispatch_executions" as const;
+
+const EXECUTIONS = HOST_EXECUTION_TABLE;
+
+function heldClaim(row: HostDispatchExecution): HostExecutionClaim {
+  return Object.freeze({
+    kind: "held" as const,
+    state: row.state,
+    ownerId: row.ownerId,
+    ...(row.execution === undefined ? {} : { execution: row.execution }),
+  });
 }
 
-/** Whether a value is a plain, non-array record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isExecutionState(value: unknown): value is HostExecutionState {
+  return value === "pending" || value === "creating" || value === "created";
 }

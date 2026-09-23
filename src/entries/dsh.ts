@@ -110,6 +110,8 @@ import {
   createOutcomeGraphTools,
 } from "../graph/tools/index.ts";
 import { OutcomeHost } from "../graph/host/outcome-host.ts";
+import { hostStoreRoot } from "../graph/host/host-store.ts";
+import { getDataDir } from "../cli/paths.ts";
 import { DshOutcomeDelivery } from "../platform/adapters/dsh/outcome-dispatch.ts";
 import { createValidatorRegistry } from "../graph/outcome/validators.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
@@ -1137,9 +1139,13 @@ export async function apply(
   //   - `DshOutcomeDelivery` starts one dsh subagent run per attempt and
   //     observes its terminal result (the attempt's credential travels in that
   //     worker's prompt — the one channel it belongs to);
-  //   - the `OutcomeHost` holds the protected credential vault, the durable
-  //     execution index, the invocation identity (D9) and the completion
-  //     bridge that settles a finished attempt through `settleNatural`;
+  //   - the `OutcomeHost` holds the credential vault, the durable execution
+  //     index, the invocation identity (D9) and the completion bridge that
+  //     settles a finished attempt through `settleNatural`. The vault keeps the
+  //     `durableCredentialStore: "none"` default: this host cannot
+  //     substantiate a platform-isolated store, so no durable artifact holds a
+  //     credential value and a crash-window attempt whose value is gone is
+  //     reported as unsettled rather than re-delivered with an invented one;
   //   - `graph_declare` reports the persisted plan through `onGraphDeclared`,
   //     which starts (or resumes) the graph through the runtime's own
   //     `resume` — the same entry the boot sweep uses.
@@ -1153,6 +1159,12 @@ export async function apply(
     parentResolver: (sid) => agentRegistry?.get(sid),
     onStartFailed: (_request, effect, reason) => {
       outcomeHost?.reportDeliveryFailure(effect, reason);
+    },
+    onStarted: (_request, effect, execution) => {
+      // The platform named the subagent run it created: the host records the
+      // FACT, which is what lets a restart reconcile the effect instead of
+      // reporting it as an unknown create.
+      outcomeHost?.confirmExecution(effect, execution);
     },
     onSettled: (settlement) => {
       const { request } = settlement;
@@ -1185,7 +1197,12 @@ export async function apply(
         });
     },
   });
-  const outcomeStoreRoot = join(process.cwd(), ".rolebox", "state", "host");
+  // THE HOST'S OWN STATE ROOT IS NOT THE WORKSPACE. A dispatched worker runs
+  // with the workspace as its root, so keeping the store under
+  // `<workspace>/.rolebox/state` handed every worker the directory. This is the
+  // one path-shaped part of the boundary — `credential-vault.ts` states why it
+  // is not isolation by itself and what the vault does NOT put on disk.
+  const outcomeStoreRoot = hostStoreRoot(getDataDir(), process.cwd());
   // D9 IS NOT DECLARED BY THIS HOST, and that is the honest decision: the dsh
   // platform attributes a dispatched worker's own tool call to the WORKER's
   // session and agent (tool-factory.ts builds the context from the executing
@@ -1198,6 +1215,9 @@ export async function apply(
     workspaceDir: process.cwd(),
     storeRoot: outcomeStoreRoot,
     deliver: outcomeDelivery.deliver,
+    // The registry and the credential RECORDS are durable; no credential VALUE
+    // is (the vault default), because this host cannot substantiate the
+    // platform boundary a durable value would need.
     validators: createValidatorRegistry([]),
     declareInvocationIdentity: false,
   });

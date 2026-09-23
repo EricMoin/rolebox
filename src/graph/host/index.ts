@@ -7,12 +7,17 @@
  * The SHIPPED host-side implementations of the four capabilities the outcome
  * run path requires (`docs/graph-outcome-protocol.md`, the D7/D8/D9 sections):
  *
- * - `credential-vault.ts` — the protected store and per-attempt delivery half
- *   of the credential-isolation capability (version 2), with the honest
- *   boundary of what a same-account host platform can and cannot isolate;
- * - `execution-index.ts` — the host's record of the executions it created, so
- *   a restart can answer `created` / `absent` / `unknown` about a dispatch
- *   effect instead of guessing;
+ * - `host-store.ts` — the host's authoritative SQLite store (execution rows
+ *   and attempt-credential rows), with the format gate, the uniqueness and the
+ *   transactions the two record-keeping modules below rely on;
+ * - `credential-vault.ts` — the store and per-attempt delivery half of the
+ *   credential-isolation capability (version 3), whose default keeps NO
+ *   credential value on disk and whose capability states that honestly;
+ * - `execution-index.ts` — the host's record of the executions it created
+ *   (`pending` / `creating` / `created`, with a real host execution id only in
+ *   the last), so a restart can answer `created` / `absent` / `unknown` about
+ *   a dispatch effect instead of guessing, and two host processes cannot both
+ *   claim one effect;
  * - `dispatch-host.ts` — the `OutcomeDispatchHost` implementation: create at
  *   most once per stable effect id, look up the host's fact;
  * - `identity.ts` — the invocation-identity capability (version 1) a host
@@ -30,18 +35,29 @@
  */
 
 export {
-  HOST_CREDENTIAL_MIRROR_FILE,
-  HOST_CREDENTIAL_MIRROR_VERSION,
+  HostStore,
+  HostStoreFormatError,
+  hostStoreRoot,
+  HOST_STORE_FILE,
+  HOST_STORE_FORMAT_VERSION,
+  HOST_STORE_TABLES,
+} from "./host-store.ts";
+export {
+  HOST_CREDENTIAL_TABLE,
   HostCredentialVault,
   type HostCredentialDurability,
   type HostCredentialVaultOptions,
 } from "./credential-vault.ts";
 export {
-  HOST_EXECUTION_INDEX_FILE,
-  HOST_EXECUTION_INDEX_VERSION,
+  HOST_EXECUTION_CLAIM_LEASE_MS,
+  HOST_EXECUTION_TABLE,
   HostExecutionIndex,
+  type HostDispatchExecution,
+  type HostExecutionClaim,
+  type HostExecutionIdentity,
   type HostExecutionIndexDurability,
   type HostExecutionIndexOptions,
+  type HostExecutionState,
 } from "./execution-index.ts";
 export {
   HostOutcomeDispatch,

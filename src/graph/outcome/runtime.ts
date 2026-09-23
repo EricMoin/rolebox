@@ -234,7 +234,7 @@ import {
   type AttemptCredentialSource,
 } from "./attempt-credential.ts";
 import {
-  CREDENTIAL_ISOLATION_VERSION_V2,
+  CREDENTIAL_ISOLATION_VERSION_V3,
   credentialIsolationRefusal,
   readCredentialIsolationAdapter,
   type CredentialIsolationCapability,
@@ -2441,7 +2441,7 @@ export class OutcomeGraphRuntime {
         kind: "unavailable" as const,
         reason:
           "this process holds no version-" +
-          CREDENTIAL_ISOLATION_VERSION_V2 +
+          CREDENTIAL_ISOLATION_VERSION_V3 +
           " credential-isolation capability with a { remember, resolve } store",
       });
     }
@@ -3233,7 +3233,7 @@ function readCredentialStore(
 ): CredentialIsolationStore | undefined {
   if (capability === undefined) return undefined;
   const read = readCredentialIsolationAdapter(capability);
-  if (read === undefined || read.version !== CREDENTIAL_ISOLATION_VERSION_V2) {
+  if (read === undefined || read.version !== CREDENTIAL_ISOLATION_VERSION_V3) {
     return undefined;
   }
   return read.store;

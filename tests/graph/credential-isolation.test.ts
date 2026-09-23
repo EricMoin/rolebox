@@ -288,9 +288,10 @@ describe("credential isolation is the outcome run path's enablement condition", 
       expect(started.refusals[0]?.path).toBe("$.credentialIsolation");
       // The diagnostic names the exact host obligation, not just the code.
       const message = started.refusals[0]?.message ?? "";
-      expect(message).toContain("protectedCredentialStore");
+      expect(message).toContain("digestOnlyPersistedState");
       expect(message).toContain("perAttemptDelivery");
       expect(message).toContain("credentialStoreRoot");
+      expect(message).toContain("durableCredentialStore");
 
       const resumed = runtime.resume(NOW);
       expect(resumed.kind).toBe("refused");
@@ -321,109 +322,133 @@ describe("credential isolation is the outcome run path's enablement condition", 
   });
 
   it("reads a capability strictly: no shape, no version, no false guarantee", () => {
-    const valid: unknown = {
-      version: 1,
-      id: "host:protected-ledger",
-      credentialStoreRoot: "/protected/credential-store",
-      guarantees: { protectedCredentialStore: true, perAttemptDelivery: true },
-    };
-    const read = readCredentialIsolationAdapter(valid);
-    expect(JSON.stringify(read)).toBe(JSON.stringify(valid));
-    expect(read?.version).toBe(1);
-    expect(read?.id).toBe("host:protected-ledger");
-    expect(read?.credentialStoreRoot).toBe("/protected/credential-store");
-    expect(Object.isFrozen(read)).toBe(true);
-    expect(Object.isFrozen(read?.guarantees)).toBe(true);
-    expect(credentialIsolationRefusal(read)).toBeUndefined();
-
-    // VERSION 2 ADDS THE STORE, AND IT IS READ EXACTLY LIKE VERSION 1: the two
-    // functions, both of them, or no capability at all. The store object is
-    // frozen and hands back the host's own functions.
+    // THE STORE IS EXACTLY { remember, resolve }: the store object is frozen and
+    // hands back the host's own functions.
     const store = {
       remember: (): void => undefined,
       resolve: (): string | undefined => undefined,
     };
-    const validV2: unknown = {
-      version: 2,
+    const guarantees = { digestOnlyPersistedState: true, perAttemptDelivery: true };
+    const validV3: unknown = {
+      version: 3,
       id: "host:credential-vault",
-      credentialStoreRoot: "/protected/credential-store",
-      guarantees: { protectedCredentialStore: true, perAttemptDelivery: true },
+      credentialStoreRoot: "/host/credential-store",
+      guarantees,
+      durableCredentialStore: "none",
       store,
     };
-    const readV2 = readCredentialIsolationAdapter(validV2);
-    expect(readV2?.version).toBe(2);
-    if (readV2?.version !== 2) {
-      throw new Error("fixture: the version-2 capability was not read");
+    const read = readCredentialIsolationAdapter(validV3);
+    expect(read?.version).toBe(3);
+    if (read?.version !== 3) {
+      throw new Error("fixture: the version-3 capability was not read");
     }
-    expect(readV2.store.remember).toBe(store.remember);
-    expect(readV2.store.resolve).toBe(store.resolve);
-    expect(Object.isFrozen(readV2)).toBe(true);
-    expect(Object.isFrozen(readV2.store)).toBe(true);
-    expect(credentialIsolationRefusal(readV2)).toBeUndefined();
+    expect(read.id).toBe("host:credential-vault");
+    expect(read.credentialStoreRoot).toBe("/host/credential-store");
+    expect(read.durableCredentialStore).toBe("none");
+    expect(read.store.remember).toBe(store.remember);
+    expect(read.store.resolve).toBe(store.resolve);
+    expect(Object.isFrozen(read)).toBe(true);
+    expect(Object.isFrozen(read.guarantees)).toBe(true);
+    expect(Object.isFrozen(read.store)).toBe(true);
+    expect(credentialIsolationRefusal(read)).toBeUndefined();
 
-    const guarantees = { protectedCredentialStore: true, perAttemptDelivery: true };
+    // THE LEGACY DECLARATIONS ARE STILL READ, AND NO LONGER ENABLE THE PATH.
+    // Versions 1 and 2 asked the host to assert a protected credential store
+    // this build cannot inspect; they are diagnosed by name, not downgraded.
+    const legacy: readonly unknown[] = [
+      {
+        version: 1,
+        id: "host:protected-ledger",
+        credentialStoreRoot: "/p",
+        guarantees: { protectedCredentialStore: true, perAttemptDelivery: true },
+      },
+      {
+        version: 2,
+        id: "host:protected-ledger",
+        credentialStoreRoot: "/p",
+        guarantees: { protectedCredentialStore: true, perAttemptDelivery: true },
+        store,
+      },
+    ];
+    for (const value of legacy) {
+      const legacyRead = readCredentialIsolationAdapter(value);
+      expect(legacyRead).toBeDefined();
+      const refusal = credentialIsolationRefusal(legacyRead);
+      expect(refusal?.code).toBe("credential-isolation-unavailable");
+      expect(refusal?.message).toContain(
+        "no longer accepts as the enablement condition",
+      );
+    }
+
     const rejected: readonly (readonly [string, unknown])[] = [
       ["absent", undefined],
-      ["a non-record", "host:protected-ledger"],
+      ["a non-record", "host:credential-vault"],
       ["an array", []],
       [
-        "a version-2 shape without its store",
-        { version: 2, id: "h", credentialStoreRoot: "/p", guarantees },
+        "a version-3 shape without its store",
+        {
+          version: 3,
+          id: "h",
+          credentialStoreRoot: "/p",
+          guarantees,
+          durableCredentialStore: "none",
+        },
       ],
-      ["an empty id", { version: 1, id: "", credentialStoreRoot: "/p", guarantees }],
+      ["an empty id", { version: 3, id: "", credentialStoreRoot: "/p", guarantees, durableCredentialStore: "none", store }],
       [
         "an empty store root",
-        { version: 1, id: "h", credentialStoreRoot: "", guarantees },
+        { version: 3, id: "h", credentialStoreRoot: "", guarantees, durableCredentialStore: "none", store },
       ],
       [
         "an extra key",
-        { version: 1, id: "h", credentialStoreRoot: "/p", guarantees, extra: true },
+        { version: 3, id: "h", credentialStoreRoot: "/p", guarantees, durableCredentialStore: "none", store, extra: true },
       ],
       [
-        "a false store guarantee",
+        "a false digest guarantee",
         {
-          version: 1,
+          version: 3,
           id: "h",
           credentialStoreRoot: "/p",
-          guarantees: { protectedCredentialStore: false, perAttemptDelivery: true },
+          guarantees: { digestOnlyPersistedState: false, perAttemptDelivery: true },
+          durableCredentialStore: "none",
+          store,
         },
       ],
       [
         "a missing delivery guarantee",
         {
-          version: 1,
+          version: 3,
           id: "h",
           credentialStoreRoot: "/p",
-          guarantees: { protectedCredentialStore: true },
+          guarantees: { digestOnlyPersistedState: true },
+          durableCredentialStore: "none",
+          store,
         },
       ],
       [
-        "a version-2 store with no resolve",
-        {
-          version: 2,
-          id: "h",
-          credentialStoreRoot: "/p",
-          guarantees,
-          store: { remember: (): void => undefined },
-        },
+        "a durable-store token that is not in the closed set",
+        { version: 3, id: "h", credentialStoreRoot: "/p", guarantees, durableCredentialStore: "protected", store },
       ],
       [
-        "a version-2 store with a non-function member",
-        {
-          version: 2,
-          id: "h",
-          credentialStoreRoot: "/p",
-          guarantees,
-          store: { remember: (): void => undefined, resolve: "not-a-function" },
-        },
+        "a missing durable-store disclosure",
+        { version: 3, id: "h", credentialStoreRoot: "/p", guarantees, store },
       ],
       [
-        "a version-2 store with an extra key",
+        "a version-3 store with no resolve",
+        { version: 3, id: "h", credentialStoreRoot: "/p", guarantees, durableCredentialStore: "none", store: { remember: (): void => undefined } },
+      ],
+      [
+        "a version-3 store with a non-function member",
+        { version: 3, id: "h", credentialStoreRoot: "/p", guarantees, durableCredentialStore: "none", store: { remember: (): void => undefined, resolve: "not-a-function" } },
+      ],
+      [
+        "a version-3 store with an extra key",
         {
-          version: 2,
+          version: 3,
           id: "h",
           credentialStoreRoot: "/p",
           guarantees,
+          durableCredentialStore: "none",
           store: {
             remember: (): void => undefined,
             resolve: (): string | undefined => undefined,

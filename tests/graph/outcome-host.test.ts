@@ -296,6 +296,10 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
       workspaceDir: dir,
       storeRoot,
       durability: "file",
+      // A RESTART CASE: the second host must re-deliver the credential the
+      // first process minted, so this fixture declares a platform-isolated
+      // store. The shipped entries keep the honest default ("none").
+      durableCredentialStore: "platform-isolated",
       validators: EMPTY_VALIDATORS,
       deliver: () => {
         throw new Error("the platform has no live parent for this graph");
@@ -325,6 +329,10 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
       workspaceDir: dir,
       storeRoot,
       durability: "file",
+      // A RESTART CASE: the second host must re-deliver the credential the
+      // first process minted, so this fixture declares a platform-isolated
+      // store. The shipped entries keep the honest default ("none").
+      durableCredentialStore: "platform-isolated",
       validators: EMPTY_VALIDATORS,
       deliver: (_request, _effect, invocation) => {
         invocations.push(invocation);
@@ -357,6 +365,10 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
       workspaceDir: dir,
       storeRoot,
       durability: "file",
+      // A RESTART CASE: the second host must re-deliver the credential the
+      // first process minted, so this fixture declares a platform-isolated
+      // store. The shipped entries keep the honest default ("none").
+      durableCredentialStore: "platform-isolated",
       validators: EMPTY_VALIDATORS,
       deliver: () => {
         throw new Error("nothing can be started here");
@@ -381,6 +393,10 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
       workspaceDir: dir,
       storeRoot,
       durability: "file",
+      // A RESTART CASE: the second host must re-deliver the credential the
+      // first process minted, so this fixture declares a platform-isolated
+      // store. The shipped entries keep the honest default ("none").
+      durableCredentialStore: "platform-isolated",
       validators: EMPTY_VALIDATORS,
       deliver: () => {
         throw new Error("nothing can be started here either");

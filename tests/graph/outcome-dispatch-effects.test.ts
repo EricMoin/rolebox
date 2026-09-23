@@ -147,7 +147,16 @@ function bareSeam(onCreate?: (request: OutcomeDispatchRequest, call: number) => 
   return { seam, creates };
 }
 
-/** Build one runtime over a ledger; every option the suite needs. */
+/**
+ * Build one runtime over a ledger; every option the suite needs.
+ *
+ * THIS FILE'S HOST DECLARES A PLATFORM-ISOLATED STORE, because its cases are
+ * ABOUT restart re-delivery: each `runtimeOver` call is a separate host process
+ * over the same store root, and one of them has to produce the credential the
+ * other minted. The honest default (`durableCredentialStore: "none"`) keeps no
+ * value on disk, which is what the shipped entries take and what the dedicated
+ * boundary tests pin; a fixture that never restarts uses the default.
+ */
 function runtimeOver(
   dir: string,
   ledger: SqliteAcceptanceLedger,
@@ -161,7 +170,9 @@ function runtimeOver(
     artifactRoot: dir,
     clock: () => NOW,
     mintCredential: CREDENTIAL_SOURCE,
-    credentialIsolation: testHostCredentialIsolation(dir),
+    credentialIsolation: testHostCredentialIsolation(dir, {
+      durableCredentialStore: "platform-isolated",
+    }),
   });
 }
 
