@@ -200,6 +200,60 @@ function reportCall(raw: string, storeRoot: string): CallReport {
   };
 }
 
+/** One node of a parsed `graph_status` body: its id and its durable status. */
+interface StatusNodeReport {
+  readonly node_id: string;
+  readonly status: string;
+}
+
+/**
+ * What one tool answer answered as a POSITIVE body — the declarer's control.
+ *
+ * `parsed` is true only when the answer is a JSON OBJECT: a body answer is one
+ * and an error string is not (`src/graph/tools/index.ts` renders a failed
+ * `graph_status` as the plain text `graph_status failed: …`). The parsed
+ * graph id and node statuses are what an error string cannot satisfy — unlike
+ * {@link reportCall}'s `refused: false`, which ANY answer that is not the
+ * boundary's own refusal gets, a body that never ran included.
+ */
+interface BodyReport {
+  readonly refused: boolean;
+  readonly parsed: boolean;
+  readonly graph_id: string | null;
+  readonly nodes: readonly StatusNodeReport[] | null;
+  readonly leaks_store_root: boolean;
+}
+
+/** Parse one tool answer as the positive body it either is or is not. */
+function reportBody(raw: string, storeRoot: string): BodyReport {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  const body =
+    typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  const nodes =
+    body !== null && Array.isArray(body["nodes"])
+      ? body["nodes"].flatMap((entry): readonly StatusNodeReport[] => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const node = entry as Record<string, unknown>;
+          return typeof node["node_id"] === "string" && typeof node["status"] === "string"
+            ? [{ node_id: node["node_id"], status: node["status"] }]
+            : [];
+        })
+      : null;
+  return {
+    refused:
+      body !== null && body["refused"] === true && body["code"] === WORKER_TOOL_FORBIDDEN_CODE,
+    parsed: body !== null,
+    graph_id: body !== null && typeof body["graph_id"] === "string" ? body["graph_id"] : null,
+    nodes,
+    leaks_store_root: raw.includes(storeRoot),
+  };
+}
+
 /**
  * The host and the bound face both modes use, assembled exactly as the entries
  * assemble it: the shipped `declareInvocationIdentity: false` +
@@ -317,7 +371,9 @@ async function modeDispatch(): Promise<ModeOutcome> {
  * it knows about a worker comes from the durable execution row. It reports the
  * refusal of the SETTLED attempt's worker (whose effect is no longer pending),
  * of the still-open attempt's worker, and that the declaring session still gets
- * the face — plus whether the refused declaration landed anywhere.
+ * the face: its `scope: "persisted"` answer is reported PARSED (graph id, node
+ * ids and durable node statuses), not as a refusal boolean an error string
+ * could satisfy — plus whether the refused declaration landed anywhere.
  */
 async function modeFace(): Promise<ModeOutcome> {
   const storeRoot = required("root");
@@ -335,6 +391,17 @@ async function modeFace(): Promise<ModeOutcome> {
       const def = tools[tool];
       if (def === undefined) throw new Error("worker-face-xproc-worker: no tool " + tool);
       return reportCall(String(await def.execute(args, context)), storeRoot);
+    };
+    // The declarer's leg is judged as a BODY: it must parse, not merely avoid
+    // the boundary's refusal.
+    const callBody = async (
+      tool: string,
+      args: Record<string, unknown>,
+      context: CanonicalToolContext,
+    ): Promise<BodyReport> => {
+      const def = tools[tool];
+      if (def === undefined) throw new Error("worker-face-xproc-worker: no tool " + tool);
+      return reportBody(String(await def.execute(args, context)), storeRoot);
     };
 
     const settledStatus = await call(
@@ -357,9 +424,16 @@ async function modeFace(): Promise<ModeOutcome> {
       { declaration: workerFaceOtherDeclaration() },
       workerContext(XPROC_FACE_SETTLED_ATTEMPT),
     );
-    const declarerStatus = await call(
+    // The DECLARER's positive control. This process never called
+    // `graph_declare`, so a session-scope query answers the plain-text error
+    // `graph "…" is not a declared graph in this process` — an answer the old
+    // `refused: false` check accepted. `scope: "persisted"` reads the graph
+    // the OTHER process declared from the store, and the report carries the
+    // parsed graph id and the durable node position, which an error string has
+    // none of.
+    const declarerStatus = await callBody(
       "graph_status",
-      { graph_id: graphId, format: "json" },
+      { graph_id: graphId, format: "json", scope: "persisted" },
       makeContext("session.declarer", "agent.declarer", workspaceDir),
     );
     return {
@@ -370,6 +444,9 @@ async function modeFace(): Promise<ModeOutcome> {
       declared_other: readStoredDefinition(storeRoot, XPROC_FACE_OTHER_ID).kind,
       declarer: {
         refused: declarerStatus.refused,
+        parsed: declarerStatus.parsed,
+        graph_id: declarerStatus.graph_id,
+        nodes: declarerStatus.nodes,
         leaks_store_root: declarerStatus.leaks_store_root,
       },
     };

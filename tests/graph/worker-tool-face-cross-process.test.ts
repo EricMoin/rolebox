@@ -27,7 +27,9 @@
  * 4. The refused `graph_declare` lands nowhere (`absent`), which is what makes
  *    the refusal a pre-body check and not a post-hoc report.
  * 5. The declaring session in that fresh process still gets the face — the
- *    boundary refuses a bound worker, not a tool.
+ *    boundary refuses a bound worker, not a tool — and its `scope: "persisted"`
+ *    query PARSES to the graph's durable position (graph id, node ids, live
+ *    node statuses), which an error string cannot satisfy.
  *
  * STRENGTH: cross-process (real OS processes, real SQLite store). Still NO
  * real dsh/Pi SDK run and NO OS/account/container boundary — the platform half
@@ -83,7 +85,13 @@ interface FaceReport {
   readonly open?: { readonly status: CallReport };
   readonly worker_declare?: CallReport;
   readonly declared_other?: string;
-  readonly declarer?: { readonly refused: boolean; readonly leaks_store_root: boolean };
+  readonly declarer?: {
+    readonly refused: boolean;
+    readonly parsed: boolean;
+    readonly graph_id: string | null;
+    readonly nodes: readonly { readonly node_id: string; readonly status: string }[] | null;
+    readonly leaks_store_root: boolean;
+  };
 }
 
 // ── Fixture and child harness ───────────────────────────────────────────────
@@ -274,7 +282,24 @@ describe("the worker tool face judged by a process that never dispatched anythin
     expect(judged.declared_other).toBe("absent");
 
     // 3. The boundary refuses a bound worker, not a tool: the declaring session
-    // in the SAME fresh process still gets the face and sees the graph.
+    // in the SAME fresh process still gets the face — and gets a REAL body for
+    // the graph the DISPATCHING process declared, PARSED, not an error string
+    // that merely carries the graph's name. The old check here asserted only
+    // `refused === false`, which the plain-text "graph_status failed: graph
+    // \"…\" is not a declared graph in this process" also satisfies (a
+    // session-scope query in a process that never declared anything).
     expect(judged.declarer?.refused).toBe(false);
+    expect(judged.declarer?.parsed).toBe(true);
+    expect(judged.declarer?.graph_id).toBe(XPROC_FACE_GRAPH_ID);
+    expect(judged.declarer?.nodes?.map((node) => node.node_id).sort()).toEqual(["alpha", "beta"]);
+    // The position is the DURABLE one the dispatching process left: alpha#1's
+    // outcome was accepted there, so alpha is `completed`; beta's attempt was
+    // dispatched and never settled, so beta is `running`. A declaration
+    // snapshot would read every node `pending`.
+    expect(
+      judged.declarer?.nodes?.map((node) => node.node_id + ":" + node.status).sort(),
+    ).toEqual(["alpha:completed", "beta:running"]);
+    // The positive control's answer is a body, and it never names the store.
+    expect(judged.declarer?.leaks_store_root).toBe(false);
   });
 });
