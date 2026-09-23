@@ -1276,18 +1276,25 @@ present: the submission path hashes what a worker presents and compares it to
 the recorded value, which is what closed the read-theft this document used to
 record here. The credential ITSELF lives in the HOST's store (D7), is handed to
 exactly one dispatch channel, and is resolved from that store when a recovery
-re-delivers an attempt. The store's own confidentiality is the platform's:
-a `0600` mirror file is not isolated from the same account, and the shipped host
-says so in `src/graph/host/credential-vault.ts`.
+re-delivers an attempt. By default the shipped store keeps NO credential value
+on disk at all (`durableCredentialStore: "none"`): the attempt is recorded and
+the value is not, so a same-account reader obtains nothing presentable, and a
+recovery that can no longer produce the value reports the effect as unsettled
+instead of inventing one. A host that really has a platform boundary may opt
+into a durable value and says so; this build records that statement and cannot
+check it (`src/graph/host/credential-vault.ts`).
 
 BECAUSE THE STORE AND THE DELIVERY CANNOT BE A PROPERTY OF THIS BUILD, THEY ARE
 AN ENABLEMENT CONDITION (D7). The outcome run path — `start`, `resume`,
 `submit`, the `graph_submit_outcome` ingress and the startup sweep — refuses
 with `credential-isolation-unavailable`, BEFORE reading or writing anything,
-unless the HOST injects a credential-isolation capability declaring a protected
-credential store (`credentialStoreRoot`, where the ledger is then opened) and
-per-attempt delivery — version 1 as the declaration, version 2 adding the
-`{ remember, resolve }` store the shipped vault implements. The capability is an
+unless the HOST injects a credential-isolation capability of version 3: the two
+guarantees this build's own code can hold a host to (the ledger and every report
+surface carry only a DIGEST; one dispatch channel carries each attempt only its
+own credential), the `{ remember, resolve }` store, and the
+`durableCredentialStore` disclosure of what that store keeps on disk. Versions
+1 and 2 are read for diagnosis and refused: they asked the host to assert a
+protected credential store this build cannot inspect. The capability is an
 ASSERTION by the host, not a proof: this build checks its shape and presence,
 never the filesystem, because no path comparison is evidence about what another
 process can read. A trusted host invocation context (session, agent) can only
@@ -2102,15 +2109,31 @@ channel. That is what the capability declares — and, since the host layer
 below, what it provides.
 
 THE CAPABILITY IS HOST-INJECTED, AND ITS ABSENCE REFUSES THE PATH.
-`src/graph/outcome/credential-isolation.ts` owns the contract:
-`CredentialIsolationAdapter = { version: 1, id, credentialStoreRoot,
-guarantees: { protectedCredentialStore: true, perAttemptDelivery: true } }`,
+`src/graph/outcome/credential-isolation.ts` owns the contract. The ENABLING
+shape is version 3:
+
+```
+CredentialIsolationAdapterV3 = {
+  version: 3, id, credentialStoreRoot,
+  guarantees: { digestOnlyPersistedState: true, perAttemptDelivery: true },
+  durableCredentialStore: "none" | "platform-isolated",
+  store: { remember, resolve },
+}
+```
+
 read by a STRICT closed-shape reader (exact keys, exact version, literal-true
-guarantees, non-empty id and root). `credentialIsolationRefusal(adapter)` is
+guarantees, a `durableCredentialStore` token from the closed set, and a store
+of exactly `{ remember, resolve }`). `credentialIsolationRefusal(adapter)` is
 the ONE rule every entry consults; it answers
 `credential-isolation-unavailable` with a diagnostic naming the host
 obligation, both for an absent capability and for a value this build cannot
-read (never downgraded to "it runs anyway"):
+read (never downgraded to "it runs anyway"). VERSIONS 1 AND 2 ARE STILL READ
+AND NO LONGER ENABLE THE PATH: both asked the host to assert
+`protectedCredentialStore: true` — a property of the host platform this build
+cannot inspect and that a same-account deployment cannot provide honestly — so
+the gate refuses them by name and the diagnostic says which version replaced
+them. A run path enabled by a false or unverifiable claim was the defect, not
+the gate.
 
 - `OutcomeGraphRuntime` takes `credentialIsolation` and checks it FIRST in
   `start`, `resume` and `submit`, before any state is read or written, so an
@@ -2129,58 +2152,89 @@ read (never downgraded to "it runs anyway"):
 `credentialStoreRoot` IS WHERE THE LEDGER IS OPENED AND THE HOST'S STORE LIVES.
 The ingress and the sweep open the acceptance ledger at the capability's
 declared root instead of the workspace default, so the host's store root is the
-one actually used; the shipped vault declares the same root and keeps its
-separate mirror file there. It is a ROUTING instruction, never a check: this
-build does not compare the root against the tree, a mount table or permissions,
-because none of those is evidence about another process's read access.
+one actually used; the shipped vault keeps its state in the same root. The
+shipped ENTRIES compute that root from rolebox's own data directory
+(`hostStoreRoot(getDataDir(), workspace)`, hashed per workspace), NOT from
+`<workspace>/.rolebox/state`: a dispatched worker runs with the workspace as
+its root, so the old location handed every worker the directory. That is the
+one path-shaped part of the boundary and it is explicitly NOT the protection —
+the root is a ROUTING instruction, never a check, and this build does not
+compare it against the tree, a mount table or permissions, because none of
+those is evidence about another process's read access.
 
-THE VERSION-2 STORE IS WHAT MAKES RECOVERY POSSIBLE. The runtime ADOPTS every
-credential it mints into the capability's `{ remember, resolve }` store before
-the state recording its digest is committed, and a recovery resolves the
-credential from that store to re-create an effect whose execution never
-started. A store that cannot produce one — a memory-only vault after a restart,
-a pruned one — leaves the effect UNSETTLED and reported (`credential-missing`)
-rather than launching it with a fabricated credential. A version-1 adapter (the
-declaration alone) still enables the path, but a recovery then has no store to
-resolve through and reports those effects instead of re-delivering them.
+THE VERSION-3 STORE IS WHAT MAKES RECOVERY POSSIBLE, AND IT SAYS WHAT IT HOLDS.
+The runtime ADOPTS every credential it mints into the capability's
+`{ remember, resolve }` store before the state recording its digest is
+committed, and a recovery resolves the credential from that store to re-create
+an effect whose execution never started. `durableCredentialStore` states what
+the durable side of that store contains:
 
-THE GATE IS AN ASSERTION, NOT A PROOF, AND THIS DOCUMENT SAYS SO. This build
-verifies that a READABLE capability was injected; it cannot verify that the
-host's declaration is true. A host that declares guarantees it does not provide
-is lying to the protocol and is undetectable here — which is exactly why the
-declaration is the gate rather than a comment. What this build DOES now enforce
-itself is the storage half: the ledger carries only a digest, so the read-theft
-above is closed whether or not the host is honest. Nothing installs a default:
+- `"none"` (the SHIPPED DEFAULT, and the strongest form this build can enforce
+  on a same-account platform): the store records each attempt durably and NO
+  credential value. Reading every file of the host root yields nothing
+  presentable; a recovery that needs a value the process no longer holds leaves
+  the effect UNSETTLED and reported (`credential-missing`) — the store knows
+  the attempt and reports `not-retained` — instead of launching it with a
+  fabricated credential.
+- `"platform-isolated"` (OPT-IN, and the host's assertion, not this build's):
+  values stay durable so a crash-window attempt can be re-delivered after a
+  restart. This build cannot verify that the host's platform keeps the store
+  from the worker — a different OS account, a container or mount namespace is
+  the platform's to provide — so the capability states the assertion and
+  nothing here pretends to check it. The vault REFUSES the option together with
+  `durability: "memory"`, because that combination would declare a store that
+  does not exist.
+- A legacy version-1 or version-2 adapter no longer enables the path at all;
+  the gate names version 3 as the replacement.
+
+THE GATE ASKS ONLY FOR WHAT THIS BUILD CAN HOLD A HOST TO. The two literal-true
+guarantees are the build's own storage discipline and the host's per-attempt
+delivery — the ledger carries only a digest, so the read-theft above is closed
+whether or not the host is honest. The one part this build cannot verify —
+whether a durable store is protected from a same-account worker — is no longer
+asserted as `true`: it is the `durableCredentialStore` disclosure, and the
+default is the enforceable strong form (`"none"`). A host that declares
+`"platform-isolated"` is making a statement this build records and cannot
+check; nothing here pretends otherwise. Nothing installs a default:
 `createGraphToolSet`/`createGraphTools` and `recoverInterruptedGraphs` accept a
-capability and no entry injects one yet, so a deployment that has not provided a
-host gets the refusal by construction.
+capability and the shipped entries inject the vault's version-3 capability, so a
+deployment that has not provided a host gets the refusal by construction.
 
 THE SHIPPED HOST LAYER (`src/graph/host/**`). The host half now exists as
 reviewable source rather than as a deployment's private code:
 
 | Module | What it is |
 | --- | --- |
-| `credential-vault.ts` | the version-2 store: process memory as the authority, a separate `0600` mirror file (atomic replace, `0700` directory) for restart re-delivery, and an exact-attempt lookup that cannot re-aim a credential |
-| `execution-index.ts` | the durable record of the executions the host created, keyed by the stable effect id; a memory-only index answers `unknown` rather than `absent` for what an earlier process may have created |
-| `dispatch-host.ts` | `create` at most once per `(graphId, effectId)` plus the lookup; the record is taken before the delivery and dropped when the delivery threw, so a failed create leaves a `pending` row a recovery resolves; the delivery is handed the graph's declaring invocation as a third argument on every create |
+| `host-store.ts` | the host's AUTHORITATIVE SQLite store (`rolebox-host-store.sqlite` under the host root): the execution rows and the attempt-credential rows, with the format gate (a foreign/older/half-shaped file is refused, never recreated), the primary keys that make one effect one row, and the transactions the two modules below build on |
+| `credential-vault.ts` | the version-3 store: process memory as the authority, a per-attempt row in the host store that by DEFAULT records no value at all (`durableCredentialStore: "none"`), an explicit `"platform-isolated"` opt-in for a host that can really protect a durable value, and an exact-attempt lookup that cannot re-aim a credential |
+| `execution-index.ts` | the durable registry of the host's dispatch executions, keyed by the stable effect id, with THREE states — `pending` (a create right is held, nothing handed over), `creating` (handed over, result UNKNOWN), `created` (the platform confirmed and named the execution) — a claim lease that lets a dead `pending` claim be taken over, and a `created` state that is structurally impossible without a real host execution id |
+| `dispatch-host.ts` | `create` at most once per `(graphId, effectId)` plus the lookup; the claim is taken, moved to `creating` BEFORE the delivery, released when the delivery threw, and turned into `created` only by `confirmStarted(effect, { executionId, taskId })`; an effect another instance owns is refused BY NAME instead of silently no-op'd; the delivery is handed the graph's declaring invocation as a third argument on every create |
 | `identity.ts` | the version-1 invocation-identity capability over a holder the host moves per invocation |
 | `invocation-origins.ts` | the host's per-graph record of the DECLARING invocation (atomic `0600` file under the host root, `0700` directory, refused rather than read approximately), so a successor armed out of band and a restart sweep start the worker under the same parent the entry attempt ran under |
 | `completion-bridge.ts` | resolves the attempt's binding and credential and calls `settleNatural`; reports a completion it cannot bind or whose credential the store cannot produce, instead of guessing |
 
-THE BOUNDARY THAT REMAINS, STATED PLAINLY. The vault's mirror file is not
-per-worker isolated: a same-account process can read it, exactly as it could
-read the ledger before. The same boundary applies to the invocation-origins
-record: it holds a graph id and the `{ sessionId, agent }` attribution of the
-declaring call — no credential, no prompt — and a same-account process can read
-it; what it buys is that a successor dispatched out of band, or after a restart,
+THE BOUNDARY THAT REMAINS, STATED PLAINLY. With the shipped default
+(`durableCredentialStore: "none"`) there is NO credential value on disk to
+read: the store holds the attempt and its binding, not the value. What remains
+the platform's is the FRESHNESS of a delivered credential and the isolation of
+the process itself: a credential is a bearer token, so anything that can read
+the dispatch channel (a leaked transcript, a copied payload, a process the
+worker handed its state to) can present it and be indistinguishable from the
+worker — and a host that opts into `"platform-isolated"` puts the value back on
+disk, where only its platform boundary protects it. What this build cannot do
+is make a same-account worker unable to read a file; the strongest form it can
+enforce is therefore the one it ships: the value is not on disk at all, and a
+recovery that cannot produce one reports the effect as unsettled instead of
+inventing it.
+
+The same boundary applies to the invocation-origins record: it holds a graph id
+and the `{ sessionId, agent }` attribution of the declaring call — no credential,
+no prompt — and a same-account process can read it; what it buys is that a
+successor dispatched out of band, or after a restart,
 is attributed to the invocation that actually declared the graph instead of to
 whichever call happens to be current. A graph whose origin this process can
 neither remember nor read is dispatched under NO invocation, and the platform's
-refusal is reported per effect. The honest strongest forms on a single machine are the
-host process's memory plus a root the workers are not given a path to, or
-`durability: "memory"`, which holds nothing durable and therefore loses
-in-flight credentials on restart (the runtime then reports those effects
-instead of re-delivering them). A different OS account, a container or a mount
+refusal is reported per effect. A different OS account, a container or a mount
 namespace is the platform's to provide, and this build does not pretend to
 check for one.
 
@@ -2201,19 +2255,26 @@ text it reports.
 
 ENFORCED BY TESTS. `tests/graph/credential-isolation.test.ts` covers the
 refusal at `start`/`resume`/`submit` and at the ingress and the sweep with
-nothing written and no ledger created; the strict reader against a version
-mismatch, an extra key, a false guarantee, a missing one, a version-2 store
-without its `resolve`, and a store with an extra key; the enabled path end to
-end with the ledger opened at the declared root; the READ-ONLY READ that now
-yields only a digest — the credential's bytes are absent from the store, the
-digest settles nothing, and the vault resolves each credential for its own
-attempt only (the file is still byte-identical across the read); every report
-channel listed above with a positive control proving the probe sees credentials
-where they DO travel; and the seam-failure redaction. The shipped host layer
-itself is covered by `tests/graph/host-capabilities.test.ts`, including a full
-two-node graph settled through the completion bridge and the credential-leak
-scan over the bridge reports, the sweep report, the audit, the state body and
-the ledger bytes.
+nothing written and no ledger created; the strict version-3 reader against a
+version mismatch, an extra key, a false guarantee, a missing one, a missing
+`durableCredentialStore`, an unknown durable-store token, a store without its
+`resolve`, and a store with an extra key; the LEGACY versions 1 and 2 being
+read and refused by name; the enabled path end to end with the ledger opened at
+the declared root; the READ-ONLY READ that now yields only a digest — the
+credential's bytes are absent from the store, the digest settles nothing, and
+the vault resolves each credential for its own attempt only (the file is still
+byte-identical across the read); every report channel listed above with a
+positive control proving the probe sees credentials where they DO travel; and
+the seam-failure redaction. The shipped host layer itself is covered by
+`tests/graph/host-capabilities.test.ts` (the vault's no-value default, the
+opt-in retained mode, the format refusal, the three registry states, ownership
+and lease takeover, and a full two-node graph settled through the completion
+bridge with the credential-leak scan over the bridge reports, the sweep report,
+the audit, the state body and the ledger bytes) and by
+`tests/graph/host-boundary.test.ts`, which pins the three REPRODUCED DEFECTS
+themselves: a same-account read of the whole host root yielding no credential
+value, two instances plus a crash window dispatching exactly once with the three
+states distinguishable, and interleaved writers losing neither values nor rows.
 
 DEFERRED by this slice, and not implied by it: per-worker filesystem isolation
 (the platform's, as stated above), a signature over submissions, injecting the
@@ -2257,6 +2318,31 @@ execution — and `lookup` answers `created`, `absent` or `unknown` (with a
 reason), and says `unknown` rather than guessing. A bare `(request) => void`
 seam remains accepted as the degenerate host: it can create, its `lookup` is
 `unknown`, and the restriction is visible at every entry rather than hidden.
+
+THE SHIPPED HOST KEEPS THREE STATES, AND `created` REQUIRES A HOST FACT. The
+previous registry wrote one undifferentiated "recorded" set into one JSON file
+BEFORE the platform was asked for anything, so a fresh reader answered
+`created` for an execution nobody had confirmed, and two live processes each
+rewriting that file from their own snapshot ERASED each other's rows.
+`HostExecutionIndex` (`src/graph/host/execution-index.ts`) now keeps one row
+per `(graphId, effectId)` in the authoritative store
+(`src/graph/host/host-store.ts`, SQLite, primary key `(graph_id, effect_id)`):
+
+| State | What happened | `lookup` answers |
+| --- | --- | --- |
+| `pending` | a create right is held and NOTHING was handed to the platform | `absent` for the holder or an expired lease; `unknown` while another live owner holds it |
+| `creating` | the request WAS handed over and the result is unknown (the crash window) | `unknown`, with the reason — NEVER `absent` |
+| `created` | the platform confirmed the execution and named it | `created`; the row's own `CHECK` makes this state impossible without a non-empty execution id |
+
+OWNERSHIP IS STRUCTURAL, NOT A LOCK IN ONE PROCESS. `claim` inserts the row or
+takes over a `pending` claim whose lease expired, inside one transaction and
+with a conditional `UPDATE ... WHERE owner_id = ?`; every other outcome is
+`held`, and `create` REFUSES a held effect by name instead of silently
+no-op'ing it, so the runtime reports the effect unsettled rather than marking it
+started. A `creating` claim is never taken over: the execution may exist.
+`confirmStarted(effect, { executionId, taskId })` is the only path to
+`created`, and the platform adapters call it as soon as the platform names the
+run (`DshSubagentRun.id`, `DispatchTask.id`).
 
 RECOVERY ASKS THE HOST, THEN ACTS ON THE ANSWER — three answers, three actions:
 
@@ -2328,7 +2414,7 @@ graph:
 
 | Capability | What the host declares | When it is absent | When it is unreadable | Refusal codes |
 | --- | --- | --- | --- | --- |
-| Protected credential store (D7, `credential-isolation.ts`; shipped as `host/credential-vault.ts`) | the credential ITSELF lies outside every dispatched worker's read and write scope, and the credential the ledger persists is only a digest (state-body version 8, enforced by this build) | the run path refuses enablement — start, resume, submit, the ingress and the sweep all refuse before opening a ledger | same: a value this build cannot read is refused, never downgraded | `credential-isolation-unavailable` |
+| Credential isolation, version 3 (D7, `credential-isolation.ts`; shipped as `host/credential-vault.ts` + `host/host-store.ts`) | the two ENFORCED guarantees — the credential the ledger and every report surface persist is only a digest (state-body version 8), and one dispatch channel carries each attempt only its own credential — plus `durableCredentialStore`: `"none"` (the shipped default) means NO durable artifact holds a value, `"platform-isolated"` is the host's assertion that its durable store is protected | the run path refuses enablement — start, resume, submit, the ingress and the sweep all refuse before opening a ledger | same: a value this build cannot read, or a legacy version 1/2 declaration, is refused by name, never downgraded | `credential-isolation-unavailable` |
 | Per-attempt credential delivery (D7, same capability) | a dispatched attempt receives ONLY its own credential, over its own dispatch channel; no report channel is a delivery channel | same as above | same as above | `credential-isolation-unavailable`; `credential-missing` when a recovery's store cannot produce the credential |
 | Execution create plus stable-id lookup (D8, `dispatch-effects.ts`) | `create(request, effect)` starts an execution idempotently per `(graphId, effectId)`, and `lookup(effect)` answers `created`, `absent` or `unknown` — `unknown` rather than a guess | no dispatcher at all: the run path, the ingress and the sweep refuse enablement; a bare create-only seam is accepted as the DEGENERATE host and its lookup answers `unknown` | — (a bare function IS the degenerate adapter, by design) | `dispatch-unavailable`; `dispatch-unreconciled` when an unsettled effect cannot be established |
 | Host invocation identity (D9, `host-identity.ts`) | the invoking session and agent the host attributes to the operation being performed now; `undefined` when this invocation has none | NO constraint: nothing is recorded and nothing is checked, which is exactly the behavior every path had before this rule — the core protocol depends on no host | the operation is refused before anything is read or written | `host-identity-unavailable` (unreadable declaration, or a recorded binding judged without a capability), `host-identity-mismatch`, `host-identity-absent` |
