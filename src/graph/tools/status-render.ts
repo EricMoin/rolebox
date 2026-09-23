@@ -288,19 +288,21 @@ export function persistedEmptyNote(scan: PersistedStateScan): string {
 /**
  * Extract a node's recorded `progress` signal, if any, from the engine state.
  *
- * The graph engine records every signal a node emits into both
- * `node.signalsObserved[type]` and the graph-level `state.signalLedger[nodeId]`
- * (`signal-bridge.ts:record`). `progress` is an INFO signal (one of
- * `INFO_SIGNALS`), so — when a node emitted progress during execution — its
- * latest payload is genuinely available here. The ledger read goes through the
- * shared `getSignal` / `SIGNAL_KEY` seam (contract C2 / Y8), so a missing or
- * malformed ledger answers `undefined` instead of throwing. Note this is the
+ * The DELETED legacy signal engine recorded every signal a node emitted into
+ * both `node.signalsObserved[type]` and the graph-level
+ * `state.signalLedger[nodeId]` (via `signal-bridge.ts:record`); the outcome run
+ * path records no signals, so this reads whatever a persisted record carries.
+ * `progress` is an INFO signal (one of `INFO_SIGNALS`), so — on a record the
+ * legacy runtime wrote — its latest payload is genuinely available here. The
+ * ledger read goes through the shared `getSignal` / `SIGNAL_KEY` seam
+ * (contract C2 / Y8), so a missing or malformed ledger answers `undefined`
+ * instead of throwing. Note this is the
  * **latest** payload per node, not a timestamped multi-event history (the
  * design's `dispatch_stream`-style `since`-based history is unbacked — see
  * `UNSUPPORTED_GRAPH_STATUS_FLAGS` `stream`/`since`).
  *
  * `lastSignalAt` is the node's LAST SIGNAL time of ANY type — the graph-level
- * `SignalLedgerEntry.lastSignalAt` (updated by signal-bridge.ts:record on
+ * `SignalLedgerEntry.lastSignalAt` (written by the deleted recorder on
  * every signal, progress or not), NOT a progress-specific stamp. It rides along
  * with the progress payload so a consumer gets a recency anchor, but it is
  * named for what it actually is.

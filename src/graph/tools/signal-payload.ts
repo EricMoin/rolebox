@@ -26,8 +26,8 @@
  *   `""` for a payload with no text at all (null / number / boolean); both are
  *   falsy, which is how its only consumer tests the result.
  * - {@link getSignal} looks the key up exactly as given. Normalizing an
- *   author-supplied condition argument (trim + lowercase, as
- *   `condition-resolver.ts` does for `signal_observed`) stays the caller's job.
+ *   author-supplied condition argument (trim + lowercase) stays the caller's
+ *   job.
  */
 
 // ── Key vocabulary ──────────────────────────────────────────────────────────
