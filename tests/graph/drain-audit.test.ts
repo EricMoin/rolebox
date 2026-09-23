@@ -75,6 +75,7 @@ import {
 } from "../../src/graph/outcome/runtime.ts";
 import {
   auditGraphStore,
+  STALE_LOCK_IDLE_THRESHOLD_MS,
   type DrainAuditEntry,
   type DrainAuditReport,
 } from "../../src/graph/audit/drain-audit.ts";
@@ -117,6 +118,16 @@ function persistLegacy(
   graphId: string,
   phase: EnginePhase,
   nodeStatus: NodeStatus,
+  /**
+   * Extra state the staleness fixtures need: the record's own last-update
+   * timestamp and its queue. Omitted by every pre-existing caller, so the
+   * default fixture is byte-identical to what it always was.
+   */
+  overrides?: {
+    readonly updatedAt?: number;
+    readonly frontier?: readonly string[];
+    readonly pendingCompletions?: readonly string[];
+  },
 ): void {
   const state = createEngineState(legacyDeclaration(graphId), graphId);
   provision(state);
@@ -124,6 +135,11 @@ function persistLegacy(
   const node = state.nodes.get("A");
   if (node === undefined) throw new Error("fixture: node A was not registered");
   node.status = nodeStatus;
+  if (overrides?.updatedAt !== undefined) state.updatedAt = overrides.updatedAt;
+  if (overrides?.frontier !== undefined) state.frontier = [...overrides.frontier];
+  if (overrides?.pendingCompletions !== undefined) {
+    state.pendingCompletions = [...overrides.pendingCompletions];
+  }
   new EnginePersistence(dir).save(state);
 }
 
@@ -566,6 +582,180 @@ describe("drain audit — classification", () => {
   });
 });
 
+// ── Stale-lock inference (is the lock real, or is the process dead?) ─────────
+
+/** Ten days: past the threshold by two orders of magnitude. */
+const LONG_IDLE_MS = 10 * 24 * 60 * 60 * 1000;
+
+describe("drain audit — stale-lock inference", () => {
+  it("calls an in-flight record with nothing queued and no recent update a stale lock", async () => {
+    const dir = makeTmpDir("drain-audit-stale-");
+    persistLegacy(dir, "audit.legacy.stale", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW - LONG_IDLE_MS,
+      // The node is RUNNING, so the engine consumed the frontier: this record
+      // has nothing queued at all (the shape the real store shows).
+      frontier: [],
+    });
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    const entry = entryOf(report, "engine-audit.legacy.stale.json");
+    expect(entry.classification).toBe("in-flight");
+    expect(entry.phase).toBe(EnginePhase.Executing);
+    // The inference, with every fact it was drawn from.
+    expect(entry.staleness).toEqual({
+      lastUpdatedAt: NOW - LONG_IDLE_MS,
+      idleMs: LONG_IDLE_MS,
+      staleAfterMs: STALE_LOCK_IDLE_THRESHOLD_MS,
+      staleness: "stale-lock",
+      hasQueuedWork: false,
+      frontierEmpty: true,
+      frontierSize: 0,
+      pendingCompletionsEmpty: true,
+      pendingCompletionsSize: 0,
+    });
+    expect(report.totals.staleLocks).toBe(1);
+    expect(report.totals.activelyExecuting).toBe(0);
+    // The inference is NOT a rewrite: the entry is still in flight and the
+    // verdict still refuses to call the store drained.
+    expect(report.verdict).toBe("in-flight");
+    expect(report.drained).toBe(false);
+  });
+
+  it("never calls a record with queued work stale, however old it is", async () => {
+    const dir = makeTmpDir("drain-audit-queued-");
+    // The frontier is the queue fact that survives a round trip; "A" is ready
+    // for dispatch, so a live engine could still be advancing this record.
+    persistLegacy(dir, "audit.legacy.queued", EnginePhase.Executing, NodeStatus.Ready, {
+      updatedAt: NOW - LONG_IDLE_MS,
+      // Ready for dispatch: the engine has not consumed it, so a live process
+      // could still be advancing this record.
+      frontier: ["A"],
+    });
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    const entry = entryOf(report, "engine-audit.legacy.queued.json");
+    expect(entry.staleness?.staleness).toBe("actively-executing");
+    expect(entry.staleness?.hasQueuedWork).toBe(true);
+    expect(entry.staleness?.frontierEmpty).toBe(false);
+    expect(entry.staleness?.frontierSize).toBe(1);
+    // ...and the age is still reported, so the caller sees both halves.
+    expect(entry.staleness?.idleMs).toBe(LONG_IDLE_MS);
+    expect(report.totals.staleLocks).toBe(0);
+    expect(report.totals.activelyExecuting).toBe(1);
+  });
+
+  it("never calls a recently updated record stale, however empty its queue", async () => {
+    const dir = makeTmpDir("drain-audit-recent-");
+    persistLegacy(dir, "audit.legacy.recent", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW - 1000,
+      frontier: [],
+    });
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    const entry = entryOf(report, "engine-audit.legacy.recent.json");
+    expect(entry.staleness).toMatchObject({
+      idleMs: 1000,
+      staleness: "actively-executing",
+      hasQueuedWork: false,
+    });
+    expect(report.totals.staleLocks).toBe(0);
+    expect(report.totals.activelyExecuting).toBe(1);
+  });
+
+  it("splits exactly at the threshold: idle == threshold is stale, one ms less is not", async () => {
+    const dir = makeTmpDir("drain-audit-threshold-");
+    persistLegacy(dir, "audit.legacy.at", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW - STALE_LOCK_IDLE_THRESHOLD_MS,
+      frontier: [],
+    });
+    persistLegacy(dir, "audit.legacy.under", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW - STALE_LOCK_IDLE_THRESHOLD_MS + 1,
+      frontier: [],
+    });
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    expect(entryOf(report, "engine-audit.legacy.at.json").staleness?.staleness).toBe(
+      "stale-lock",
+    );
+    expect(
+      entryOf(report, "engine-audit.legacy.under.json").staleness?.staleness,
+    ).toBe("actively-executing");
+    expect(report.totals).toMatchObject({ staleLocks: 1, activelyExecuting: 1, inFlight: 2 });
+  });
+
+  it("reports the threshold it applied, and clamps a future timestamp to zero idle", async () => {
+    const dir = makeTmpDir("drain-audit-override-");
+    // A record whose next update would be in the future (clock skew between the
+    // writer and this reader) must read as "just now", never as ancient.
+    persistLegacy(dir, "audit.legacy.future", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW + 60_000,
+      frontier: [],
+    });
+
+    const report = await auditGraphStore({
+      directory: dir,
+      now: () => NOW,
+      staleAfterMs: 1000,
+    });
+
+    const entry = entryOf(report, "engine-audit.legacy.future.json");
+    expect(entry.staleness).toMatchObject({
+      lastUpdatedAt: NOW + 60_000,
+      idleMs: 0,
+      staleAfterMs: 1000,
+      staleness: "actively-executing",
+    });
+  });
+
+  it("reports the loader's reset of pendingCompletions, not a deferred completion", async () => {
+    const dir = makeTmpDir("drain-audit-pending-");
+    // The record is WRITTEN with a deferred completion, but the deserializer
+    // deliberately resets the field (R2(c): it describes the critical section of
+    // the process that wrote the file, and hydrating it would resurrect
+    // completions nobody can replay). The audit therefore reports the loaded
+    // record, and this half of the criterion is structurally empty — the
+    // frontier and the idle age are what decide.
+    persistLegacy(dir, "audit.legacy.pending", EnginePhase.Executing, NodeStatus.Running, {
+      updatedAt: NOW - LONG_IDLE_MS,
+      frontier: [],
+      pendingCompletions: ["A"],
+    });
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    const entry = entryOf(report, "engine-audit.legacy.pending.json");
+    expect(entry.staleness).toMatchObject({
+      pendingCompletionsEmpty: true,
+      pendingCompletionsSize: 0,
+      hasQueuedWork: false,
+      staleness: "stale-lock",
+    });
+  });
+
+  it("does not infer staleness for terminal or blocked records", async () => {
+    const dir = makeTmpDir("drain-audit-noinfer-");
+    await buildMixedStore(dir);
+
+    const report = await auditGraphStore({ directory: dir, now: () => NOW });
+
+    // A terminal record is quiescent: there is no lock to judge.
+    expect(entryOf(report, "engine-audit.legacy.complete.json").staleness).toBeUndefined();
+    // A blocked record is unreadable: nothing may be inferred from it.
+    expect(entryOf(report, "engine-audit.corrupt.json").staleness).toBeUndefined();
+    expect(entryOf(report, "engine-audit.outcome.stateversion.json").staleness).toBeUndefined();
+
+    // The pair is the in-flight partition and nothing else.
+    expect(report.totals.staleLocks + report.totals.activelyExecuting).toBe(
+      report.totals.inFlight,
+    );
+    expect(report.totals.inFlight).toBe(2);
+  });
+});
+
 // ── The ledger boundary ─────────────────────────────────────────────────────
 
 describe("drain audit — the acceptance ledger", () => {
@@ -768,8 +958,11 @@ describe("drain audit — zero writes", () => {
     const before = fingerprintTree(dir);
     expect(Object.keys(before).length).toBeGreaterThanOrEqual(9);
 
-    const first = await auditGraphStore({ directory: dir });
-    const second = await auditGraphStore({ directory: dir });
+    // A fixed clock: the staleness block is a function of (store, now), so two
+    // reports of an unchanged store agree only against the same instant. The
+    // zero-write property under test does not depend on it either way.
+    const first = await auditGraphStore({ directory: dir, now: () => NOW });
+    const second = await auditGraphStore({ directory: dir, now: () => NOW });
 
     const after = fingerprintTree(dir);
     expect(Object.keys(after)).toEqual(Object.keys(before));

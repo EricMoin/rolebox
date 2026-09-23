@@ -76,7 +76,8 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   that never enters `loopProgress`, and a field-by-field restart invariant over
   everything the channel persists
   (`tests/graph/natural-completion-combination.test.ts`);
-- the read-only drain audit (`src/graph/audit/drain-audit.ts`).
+- the read-only drain audit (`src/graph/audit/drain-audit.ts`) and the
+  stale-lock reading that makes its in-flight count decidable.
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
 
@@ -98,8 +99,10 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
   validators do not;
 - storage format 3 and its `2 -> 3` migrator — `ENGINE_PERSISTENCE_VERSION` is
   still the literal `2` — and the `src/graph/persistence/load.ts` module move;
-- stage-E retirement: the legacy signal path and the legacy v2 run and recovery
-  paths are untouched and still run.
+- stage-E retirement, draining and migration: stage E is NOT complete. The
+  legacy signal path, the legacy v2 run path and the legacy recovery path are
+  untouched and still run for every record that already exists. Nothing is
+  deleted and no existing record is resolved, converted or retired.
 
 ## Objective and scope
 
@@ -1929,6 +1932,46 @@ its first execution. The regression test snapshots
 every file under the audited workspace (SHA-256, size, mtime) before and after
 a full audit over a mixed legacy/outcome store INCLUDING the SQLite ledger and
 fails on any new, changed or touched file.
+
+THE STALE-LOCK READING MAKES THE FIRST GATE QUESTION DECIDABLE. "Six graphs
+are in flight" decides nothing on its own: a record a live process is still
+advancing and a record a dead process left behind are the same four lines of
+JSON until the audit says which is which. Every readable IN-FLIGHT entry now
+carries a `staleness` block — the record's own last state update
+(`lastUpdatedAt`), its age (`idleMs`), the threshold that was applied
+(`staleAfterMs`), the queue facts the entry's protocol keeps
+(`frontierSize`/`frontierEmpty` and `pendingCompletionsSize`/
+`pendingCompletionsEmpty` for a legacy record; an outcome entry already
+carries `armed`/`unsettledEffects`) — and the inference itself: `stale-lock`
+when nothing is queued AND the last update is at least the threshold old,
+`actively-executing` otherwise. `totals.staleLocks` and
+`totals.activelyExecuting` split the in-flight count and sum to it, because
+every in-flight entry is readable and every one of them is classified.
+
+THE THRESHOLD IS ONE NAMED CONSTANT WITH A STATED BASIS, NOT A NUMBER IN A
+BRANCH. `STALE_LOCK_IDLE_THRESHOLD_MS` is 24 hours, and it is defensible from
+the engine's own contract rather than from the store it was first applied to:
+a live engine writes its state synchronously on every critical mutation, so
+silence is evidence, and the build's own liveness rule already declares a
+`running` node dead after `DEFAULT_NODE_STALE_TIMEOUT_MS` (15 minutes,
+configured on every engine the tool surface builds, persisting a `timeout`
+transition when it fires). 24 hours is 96x that deadline — above any plausible
+single declared `budget.timeout_ms`, and two orders of magnitude below the age
+of the records this reading was written for. It is still a judgement, and the
+report says so: the applied value is on every classified entry, a caller can
+override it (`DrainAuditOptions.staleAfterMs`), and `now` is injectable so a
+reviewer can recompute a report by hand instead of trusting it.
+
+THE INFERENCE IS NOT A REWRITE, AND IT DOES NOT MOVE THE VERDICT. The audit
+still reads and never writes: a `stale-lock` resolves no lock, re-dispatches
+nothing and deletes nothing, and `drained` still requires all three halves (no
+blocker, no in-flight entry, no unsettled effect) — a store whose only
+in-flight records are stale locks is `in-flight`, exactly as before. Two facts
+are reported rather than hidden: the deserializer deliberately resets
+`pendingCompletions` (R2(c)), so that half of the queue is structurally empty
+for a LOADED record and the frontier carries the weight; and a declared outcome
+graph that was never started is not a stale lock — its queue is the first
+execution the run path still owes it.
 
 DEFERRED by this slice, and not implied by it: every MIGRATION (a
 `migration-required` record is reported, never converted), storage format 3

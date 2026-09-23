@@ -88,6 +88,21 @@
  * point of the report: "nothing looked non-terminal" is not evidence that the
  * legacy path is unused.
  *
+ * THE IN-FLIGHT SET IS DECIDABLE, NOT MERELY COUNTED (E gate, step 1). "Six
+ * graphs are in flight" cannot be acted on; "six records with nothing queued
+ * and no state update for 9 to 13 days" can. Every readable in-flight entry
+ * carries a `staleness` block — the record's own last update, its age, the
+ * threshold that was applied, the queue facts and the inference — and `totals`
+ * splits the in-flight count into `staleLocks` / `activelyExecuting`. It is an
+ * INFERENCE with a stated basis, never a write: a stale lock is reported, never
+ * resolved, and the verdict rules above are unchanged.
+ *
+ * The creation side is owned elsewhere and named here because the two together
+ * decide the gate: `src/graph/tools/legacy-creation-gate.ts` refuses a NEW
+ * durable protocol-1 record at the tool ingress unless the host declares
+ * `allowNewLegacyGraphs`, so the population this audit drains cannot grow
+ * silently.
+ *
  * Dependency note: this module reads the loader, the ledger's read-only open and
  * the outcome state reader, and imports no run path. It dispatches nothing,
  * recovers nothing, migrates nothing and compiles nothing.
@@ -218,6 +233,99 @@ export type DrainAuditProtocol = "legacy-signal" | "outcome" | "unknown";
 /** The three-way classification the drain decision reads. */
 export type DrainAuditClassification = "terminal" | "in-flight" | "blocked";
 
+/**
+ * How long a readable in-flight record must have gone without a state update
+ * before the audit will call it a STALE LOCK rather than work that may still be
+ * moving. It is the whole threshold — nothing else in this module hard-codes an
+ * idle duration — and every entry reports the value that was applied
+ * ({@link DrainAuditStalenessFacts.staleAfterMs}), so a reader can recompute the
+ * classification by hand instead of trusting it.
+ *
+ * THE BASIS, stated so it can be argued with rather than guessed at:
+ *
+ * - A live engine writes its state SYNCHRONOUSLY on every critical mutation
+ *   (node lifecycle, phase, frontier, checkpoint, approval), so the only window
+ *   in which a running graph produces no state update is while a dispatched
+ *   task is executing. Silence is therefore evidence, not noise.
+ * - The build's own liveness rule is that a `running` node past its staleness
+ *   deadline is dead: `DEFAULT_NODE_STALE_TIMEOUT_MS` is 15 minutes and the
+ *   tool surface configures it on every engine it builds, persisting a
+ *   `timeout` transition when it fires. A record older than that deadline,
+ *   with nothing queued, is one whose own watchdog never fired — which is what
+ *   a process that is no longer alive looks like.
+ * - 24 hours is 96x that default deadline. The multiple is deliberate: a node
+ *   may declare a `budget.timeout_ms` longer than the default, and a single
+ *   long dispatch is the one legitimate reason for silence, so the threshold is
+ *   set far above any plausible single task rather than just above the default.
+ * - It is a JUDGEMENT, not a protocol invariant, and it is not derived from the
+ *   store it is applied to. For the reading that motivated it — records 9 to 13
+ *   days old — it is decisive with two orders of magnitude to spare, and a
+ *   caller that disagrees passes its own value through
+ *   {@link DrainAuditOptions.staleAfterMs} rather than editing this module.
+ */
+export const STALE_LOCK_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a readable in-flight record looks dead or may still be moving.
+ *
+ * This is an INFERENCE from the facts below, never a rewrite: the audit reads
+ * the store and changes nothing, so a `stale-lock` verdict resolves no lock,
+ * re-dispatches nothing and deletes nothing. It answers one question and only
+ * that one — "is any live process plausibly advancing this record?":
+ *
+ * - `stale-lock` — nothing is queued (no frontier, no deferred completion; for
+ *   an outcome record, no armed attempt and no unsettled effect) AND the last
+ *   state update is at least {@link STALE_LOCK_IDLE_THRESHOLD_MS} old. No live
+ *   run is advancing it.
+ * - `actively-executing` — something is queued OR the last update is inside
+ *   the threshold. The audit REFUSES to call this dead; that is not the same as
+ *   observing a live process, and the facts that decided it stay on the entry.
+ */
+export type DrainAuditStaleness = "stale-lock" | "actively-executing";
+
+/**
+ * The staleness reading for one readable in-flight record: the inference, the
+ * threshold applied, and every fact it was drawn from.
+ *
+ * Present exactly on a readable `in-flight` entry — never on a `terminal` one
+ * (it takes no further step, so there is no lock to judge) and never on a
+ * `blocked` one (nothing about it is known well enough to infer anything; the
+ * blocker is the answer). The queue facts are the queue vocabulary of the
+ * entry's OWN protocol: `frontier` / `pendingCompletions` for a legacy record,
+ * whose entry already carries `armed` / `unsettledEffects` for an outcome one.
+ */
+export interface DrainAuditStalenessFacts {
+  /** Epoch ms of the record's own last state update, as persisted. */
+  readonly lastUpdatedAt: number;
+  /**
+   * How long ago that was, in ms. Clamped at 0: a timestamp in the future
+   * (clock skew between the writing and reading process) is reported as "just
+   * now", never as a negative age that would read as ancient.
+   */
+  readonly idleMs: number;
+  /** The threshold this entry was classified against. */
+  readonly staleAfterMs: number;
+  readonly staleness: DrainAuditStaleness;
+  /** Whether the record holds work the engine has not consumed. */
+  readonly hasQueuedWork: boolean;
+  /** Legacy only: whether the engine's dispatch frontier is empty. */
+  readonly frontierEmpty?: boolean;
+  /** Legacy only: how many nodes the frontier holds. */
+  readonly frontierSize?: number;
+  /**
+   * Legacy only: whether no completion is deferred on the unlock queue. Read
+   * from a LOADED record, where the deserializer DELIBERATELY resets this field
+   * (R2(c): it describes the critical section of the process that wrote the
+   * file, and hydrating it would resurrect completions nobody can replay), so
+   * `true` here is a property of the load contract, not evidence that the
+   * writing process had nothing deferred. The frontier is the queue fact that
+   * survives a round trip, and it is what carries this half of the inference.
+   */
+  readonly pendingCompletionsEmpty?: boolean;
+  /** Legacy only: how many completions are deferred (see above). */
+  readonly pendingCompletionsSize?: number;
+}
+
 /** One node the persisted outcome state records as in flight. */
 export interface DrainAuditArmedNode {
   readonly nodeId: string;
@@ -274,6 +382,12 @@ export interface DrainAuditEntry {
    * not that it is unreadable — a state this build cannot read is a blocker.
    */
   readonly hasState?: boolean;
+  /**
+   * In-flight only: the stale-lock inference and the facts behind it. Absent on
+   * a terminal entry (quiescent, so no lock exists) and on a blocked one
+   * (unreadable, so nothing may be inferred).
+   */
+  readonly staleness?: DrainAuditStalenessFacts;
   /** Every blocker code observed for this entry, in report order. */
   readonly blockerCodes: readonly DrainAuditBlockerCode[];
 }
@@ -295,6 +409,20 @@ export interface DrainAuditTotals {
   readonly legacyInFlight: number;
   /** Of the in-flight entries, those bound to the outcome protocol. */
   readonly outcomeInFlight: number;
+  /**
+   * Of the in-flight entries, those the staleness inference calls
+   * `stale-lock`: nothing queued and no state update for at least the applied
+   * threshold. A count of READABLE records, not a write: the audit resolves no
+   * lock and retires nothing.
+   */
+  readonly staleLocks: number;
+  /**
+   * Of the in-flight entries, those it refuses to call dead — something is
+   * queued or the last update is inside the threshold. `staleLocks` and this
+   * field always sum to {@link inFlight}, which is what makes the pair
+   * checkable rather than merely informative.
+   */
+  readonly activelyExecuting: number;
   /** Unsettled effects across every outcome entry, terminal included. */
   readonly unsettledEffects: number;
   /** Blocker count per code, over the whole report. */
@@ -345,6 +473,19 @@ export interface DrainAuditOptions {
    * returns is closed before the audit resolves.
    */
   readonly openLedger?: (directory: string) => Promise<LedgerReadOpenResult>;
+  /**
+   * Read "now" for the staleness inference; defaults to `Date.now`. Injected
+   * by a caller (or a test) that must classify against a fixed instant instead
+   * of the wall clock — the audit is read-only either way.
+   */
+  readonly now?: () => number;
+  /**
+   * Override the idle threshold the staleness inference applies; defaults to
+   * {@link STALE_LOCK_IDLE_THRESHOLD_MS}. The value actually used is reported on
+   * every classified entry, so an override is visible in the report and a
+   * reviewer can recompute the classification.
+   */
+  readonly staleAfterMs?: number;
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────
@@ -417,6 +558,20 @@ function toAuditStop(stop: OutcomeStop): DrainAuditStop {
 
 // ── Entry classification ────────────────────────────────────────────────────
 
+/**
+ * One record's queue, in the vocabulary its own protocol keeps it in. Internal:
+ * the report exposes the facts through {@link DrainAuditStalenessFacts} and the
+ * entry's protocol-specific work fields, never as this alias.
+ */
+interface EntryQueue {
+  /** Whether the record holds work the engine has not consumed. */
+  readonly hasQueuedWork: boolean;
+  /** Legacy only: the dispatch frontier, reported as size + emptiness. */
+  readonly frontier?: readonly string[];
+  /** Legacy only: completions deferred on the unlock queue. */
+  readonly pendingCompletions?: readonly string[];
+}
+
 /** Everything a classification pass may add to an entry. */
 interface EntryBody {
   readonly graphId?: string;
@@ -430,6 +585,10 @@ interface EntryBody {
   readonly unsettledEffects?: readonly DrainAuditEffect[];
   readonly stop?: DrainAuditStop;
   readonly hasState?: boolean;
+  /** The record's own last state-update timestamp, when it holds one. */
+  readonly lastUpdatedAt?: number;
+  /** The record's queue, when it holds one. Internal — never reported as-is. */
+  readonly queue?: EntryQueue;
   readonly blockerCodes: readonly DrainAuditBlockerCode[];
   /**
    * Per-code detail that OVERRIDES the generic sentence, for a blocker whose
@@ -439,6 +598,72 @@ interface EntryBody {
   readonly blockerDetails?: Readonly<
     Partial<Record<DrainAuditBlockerCode, string>>
   >;
+}
+
+/** The legacy protocol's queue: the dispatch frontier and the unlock queue. */
+function legacyQueue(state: EngineState): EntryQueue {
+  return Object.freeze({
+    hasQueuedWork:
+      state.frontier.length > 0 || state.pendingCompletions.length > 0,
+    frontier: state.frontier,
+    pendingCompletions: state.pendingCompletions,
+  });
+}
+
+/** The outcome protocol's queue: armed attempts and unsettled effects. */
+function outcomeQueue(armedCount: number, effectCount: number): EntryQueue {
+  return Object.freeze({ hasQueuedWork: armedCount > 0 || effectCount > 0 });
+}
+
+/**
+ * The queue of an outcome record that was declared but never started. Its queue
+ * is the FIRST EXECUTION ITSELF: the run path starts the graph from the saved
+ * plan at any time, so the record is not a dead lock and must never be reported
+ * as one. No frontier exists to report — there is no engine state yet — so only
+ * `hasQueuedWork` is carried.
+ */
+const UNSTARTED_OUTCOME_QUEUE: EntryQueue = Object.freeze({
+  hasQueuedWork: true,
+});
+
+/**
+ * Decide one in-flight record's staleness — the SINGLE owner of the rule.
+ *
+ * `stale-lock` requires BOTH halves: nothing queued and no state update for at
+ * least the threshold. Either half alone keeps the entry
+ * `actively-executing`, because the audit must not call a record dead on
+ * evidence that does not support it.
+ */
+function stalenessFacts(
+  lastUpdatedAt: number,
+  queue: EntryQueue,
+  now: number,
+  staleAfterMs: number,
+): DrainAuditStalenessFacts {
+  const idleMs = Math.max(0, now - lastUpdatedAt);
+  const staleness: DrainAuditStaleness =
+    queue.hasQueuedWork || idleMs < staleAfterMs
+      ? "actively-executing"
+      : "stale-lock";
+  return Object.freeze({
+    lastUpdatedAt,
+    idleMs,
+    staleAfterMs,
+    staleness,
+    hasQueuedWork: queue.hasQueuedWork,
+    ...(queue.frontier === undefined
+      ? {}
+      : {
+          frontierEmpty: queue.frontier.length === 0,
+          frontierSize: queue.frontier.length,
+        }),
+    ...(queue.pendingCompletions === undefined
+      ? {}
+      : {
+          pendingCompletionsEmpty: queue.pendingCompletions.length === 0,
+          pendingCompletionsSize: queue.pendingCompletions.length,
+        }),
+  });
 }
 
 /**
@@ -465,6 +690,8 @@ function classifyLegacy(state: EngineState): EntryBody {
     phase: state.phase,
     nodeStatusCounts: Object.freeze(nodeStatusCounts),
     unsettledNodeIds: Object.freeze(unsettledNodeIds),
+    lastUpdatedAt: state.updatedAt,
+    queue: legacyQueue(state),
     blockerCodes: [],
   };
 }
@@ -550,6 +777,8 @@ function classifyOutcome(
         hasState: false,
         armed: Object.freeze([]),
         unsettledEffects: Object.freeze([]),
+        lastUpdatedAt: state.updatedAt,
+        queue: UNSTARTED_OUTCOME_QUEUE,
         blockerCodes: [],
       };
     }
@@ -611,6 +840,8 @@ function classifyOutcome(
       hasState: false,
       armed: Object.freeze([]),
       unsettledEffects: effects.effects,
+      lastUpdatedAt: state.updatedAt,
+      queue: UNSTARTED_OUTCOME_QUEUE,
       blockerCodes: [],
     };
   }
@@ -654,6 +885,8 @@ function classifyOutcome(
     hasState: true,
     armed: Object.freeze(armed),
     unsettledEffects: effects.effects,
+    lastUpdatedAt: record.updatedAt,
+    queue: outcomeQueue(armed.length, effects.effects.length),
     ...(outcomeState.stop === undefined
       ? {}
       : { stop: toAuditStop(outcomeState.stop) }),
@@ -684,6 +917,8 @@ function entryForLoadResult(
   loaded: EngineLoadResult,
   ledger: AcceptanceLedgerReader | undefined,
   ledgerBlocker: DrainAuditBlockerCode | undefined,
+  now: number,
+  staleAfterMs: number,
 ): {
   readonly entry: DrainAuditEntry;
   readonly blockers: readonly DrainAuditBlocker[];
@@ -733,9 +968,21 @@ function entryForLoadResult(
       : loaded.executionProtocol === OUTCOME_PROTOCOL
         ? classifyOutcome(state, ledger, ledgerBlocker)
         : classifyUnknownProtocol(state);
+  // The queue facts are INPUTS to the inference, not part of the report: the
+  // staleness block projects them, and a legacy entry's own work fields already
+  // surface the same frontier. Dropped here rather than duplicated as a second
+  // shape that could drift.
+  const { lastUpdatedAt, queue, ...reportable } = body;
+  const staleness =
+    body.classification === "in-flight" &&
+    lastUpdatedAt !== undefined &&
+    queue !== undefined
+      ? stalenessFacts(lastUpdatedAt, queue, now, staleAfterMs)
+      : undefined;
   const entry = Object.freeze({
     file,
-    ...body,
+    ...reportable,
+    ...(staleness === undefined ? {} : { staleness }),
     executionProtocolVersion: loaded.executionProtocol,
     blockerCodes: Object.freeze([...body.blockerCodes]),
   });
@@ -863,6 +1110,11 @@ export async function auditGraphStore(
   const protocols =
     options.protocolRegistry ?? DEFAULT_EXECUTION_PROTOCOL_REGISTRY;
   const openLedger = options.openLedger ?? SqliteAcceptanceLedger.openReadOnly;
+  // "Now" is read ONCE: every entry in one report is classified against the
+  // same instant, so two entries with the same age cannot land on opposite sides
+  // of the threshold because the audit took a while.
+  const now = (options.now ?? Date.now)();
+  const staleAfterMs = options.staleAfterMs ?? STALE_LOCK_IDLE_THRESHOLD_MS;
 
   const blockers: DrainAuditBlocker[] = [];
   const entries: DrainAuditEntry[] = [];
@@ -972,7 +1224,14 @@ export async function auditGraphStore(
         );
         continue;
       }
-      const audited = entryForLoadResult(file, loaded, ledger, ledgerBlocker);
+      const audited = entryForLoadResult(
+        file,
+        loaded,
+        ledger,
+        ledgerBlocker,
+        now,
+        staleAfterMs,
+      );
       entries.push(audited.entry);
       blockers.push(...audited.blockers);
     }
@@ -988,6 +1247,8 @@ export async function auditGraphStore(
   let blocked = 0;
   let legacyInFlight = 0;
   let outcomeInFlight = 0;
+  let staleLocks = 0;
+  let activelyExecuting = 0;
   let unsettledEffects = 0;
   const blockersByCode: Record<string, number> = {};
   for (const entry of entries) {
@@ -996,6 +1257,10 @@ export async function auditGraphStore(
       inFlight += 1;
       if (entry.protocol === "legacy-signal") legacyInFlight += 1;
       if (entry.protocol === "outcome") outcomeInFlight += 1;
+      // Every in-flight entry is readable, so every one of them carries the
+      // inference: the pair sums to inFlight by construction.
+      if (entry.staleness?.staleness === "stale-lock") staleLocks += 1;
+      else activelyExecuting += 1;
     } else blocked += 1;
     unsettledEffects += entry.unsettledEffects?.length ?? 0;
   }
@@ -1025,6 +1290,8 @@ export async function auditGraphStore(
       blocked,
       legacyInFlight,
       outcomeInFlight,
+      staleLocks,
+      activelyExecuting,
       unsettledEffects,
       blockersByCode: Object.freeze(blockersByCode),
     }),
