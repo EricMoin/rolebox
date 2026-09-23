@@ -211,6 +211,14 @@ export function createGraphTools(
      * every path behaves exactly as before (the core depends on no host).
      */
     hostIdentity?: HostIdentityCapability;
+    /**
+     * Optional HOST declaration that this deployment still creates NEW durable
+     * legacy graphs (E-gate step 1, `./legacy-creation-gate.ts`). Threaded into
+     * a toolset constructed HERE; ignored when a prebuilt `toolset` is provided,
+     * because that instance carries its own deps. Absent means the creation
+     * ingress refuses by default.
+     */
+    allowNewLegacyGraphs?: boolean;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -234,6 +242,9 @@ export function createGraphTools(
       : {}),
     ...(opts.livenessFeed !== undefined
       ? { livenessFeed: opts.livenessFeed }
+      : {}),
+    ...(opts.allowNewLegacyGraphs !== undefined
+      ? { allowNewLegacyGraphs: opts.allowNewLegacyGraphs }
       : {}),
   });
 

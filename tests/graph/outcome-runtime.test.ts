@@ -20,7 +20,8 @@
  * fabricates no accepted event, and a stop whose state write fails rolls the
  * whole acceptance back with it),
  * the missing-handler refusal, and the legacy v2 run path still working through
- * the file store.
+ * the file store over an existing record (a NEW durable legacy record is
+ * refused by the E gate — see tests/graph/legacy-creation-gate.test.ts).
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
@@ -74,7 +75,12 @@ import {
 } from "../../src/graph/protocol/execution-protocol.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
-import { engineStatePath } from "../../src/graph/engine/engine-persistence.ts";
+import {
+  EnginePersistence,
+  engineStatePath,
+} from "../../src/graph/engine/engine-persistence.ts";
+import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
+import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
@@ -3619,14 +3625,39 @@ describe("OutcomeGraphRuntime — the state body is gated by its declared versio
 });
 
 describe("legacy v2 graphs keep the file store and their run path", () => {
-  it("runs a legacy graph through the state directory unchanged", async () => {
+  it("runs a legacy graph over an existing record through the state directory unchanged", async () => {
     const dir = mkdtempSync(join(tmpdir(), "legacy-file-store-"));
     try {
+      // The record already exists, so this run is a resume/rebuild of a legacy
+      // graph — NOT the creation of one. Creating a NEW durable legacy record
+      // through the tool ingress is refused by the E gate
+      // (`tests/graph/legacy-creation-gate.test.ts`); what this case pins is
+      // that the legacy path itself is not retired: it still executes and still
+      // owns the JSON file store.
+      const seeded = createEngineState(
+        {
+          version: 2,
+          name: "legacy-graph",
+          nodes: [{ id: "A", agent: "a", prompt: "pA" }],
+          edges: [],
+        },
+        "legacy-graph",
+      );
+      provision(seeded);
+      seeded.phase = EnginePhase.Executing;
+      const seededNode = seeded.nodes.get("A");
+      if (seededNode === undefined) throw new Error("fixture: node A was not registered");
+      seededNode.status = NodeStatus.Running;
+      seeded.frontier = [];
+      new EnginePersistence(dir).save(seeded);
+      expect(existsSync(engineStatePath(dir, "legacy-graph"))).toBe(true);
+
       const ts = createGraphToolSet({
         stateDir: dir,
         dispatch: new CompletingDispatch(),
       });
       const { graph_id } = ts.graph_create({ name: "legacy-graph" });
+      expect(graph_id).toBe("legacy-graph");
       ts.graph_add_node({
         graph_id,
         id: "A",

@@ -76,8 +76,10 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   that never enters `loopProgress`, and a field-by-field restart invariant over
   everything the channel persists
   (`tests/graph/natural-completion-combination.test.ts`);
-- the read-only drain audit (`src/graph/audit/drain-audit.ts`) and the
-  stale-lock reading that makes its in-flight count decidable.
+- the read-only drain audit (`src/graph/audit/drain-audit.ts`), the stale-lock
+  reading that makes its in-flight count decidable, and the creation-side
+  refusal that keeps the legacy population from growing
+  (`src/graph/tools/legacy-creation-gate.ts`).
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
 
@@ -101,8 +103,10 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
   still the literal `2` — and the `src/graph/persistence/load.ts` module move;
 - stage-E retirement, draining and migration: stage E is NOT complete. The
   legacy signal path, the legacy v2 run path and the legacy recovery path are
-  untouched and still run for every record that already exists. Nothing is
-  deleted and no existing record is resolved, converted or retired.
+  untouched and still run for every record that already exists; what E0 closes
+  is the creation SOURCE, so the protocol-1 population cannot grow while it is
+  being drained (see the E0 sections below). Nothing is deleted and no existing
+  record is resolved, converted or retired.
 
 ## Objective and scope
 
@@ -1973,12 +1977,47 @@ for a LOADED record and the frontier carries the weight; and a declared outcome
 graph that was never started is not a stale lock — its queue is the first
 execution the run path still owes it.
 
+E0 NAMES THE CREATION SIDE, AND MAKES IT FAIL-CLOSED. A drain is decidable
+only if the population being drained cannot grow, and this build could grow
+it: `graph_create` + `graph_run` with a configured `stateDir` persisted a fresh
+legacy state carrying NO `executionProtocolVersion` at all, and the format-2
+decoder then BOUND that record to protocol 1 by backfill — the one legitimate
+use of which is a record written before the field existed. Reproduced through
+the tool surface before the fix: a new graph produced `engine-<id>.json` with
+no protocol key, which the audit reports as `protocol: "legacy-signal"`,
+indistinguishable from a record written years earlier.
+`src/graph/tools/legacy-creation-gate.ts` owns the decision now: unless the
+HOST declares `allowNewLegacyGraphs`, a `graph_run` for an id with no record in
+the configured store is refused with the stable code
+`legacy-graph-creation-refused` (`LegacyGraphCreationRefusedError` carries the
+code, the graph and the record path as data), before any dispatch and before
+any write — the store directory is not even created. The boundary is exact: an
+existing record (legacy, declared or unreadable) is never refused, so recovery,
+resume, approval rebuild and the legacy run path itself are untouched and still
+execute; a tool set with no `stateDir` writes nothing and is untouched; and a
+dry run is allowed because it writes nothing.
+
+THE DEFAULT IS THE GATE; THE DECLARATION IS WHAT REMAINS OPEN, AND IT IS
+ENUMERABLE. The two shipped hosts that configure a store — the Pi service
+stack and the dsh entry — still declare `allowNewLegacyGraphs`, because the
+outcome path refuses by default without a host credential-isolation adapter
+(D7) and the legacy run path is therefore production's only one. That
+declaration is the honest state of the gate in this build: new durable legacy
+graphs are STILL created by those two hosts, now by an explicit, greppable
+decision rather than by an accident of the writer, and removing the declaration
+is the whole of stage E step 1 for that host. Nothing above claims step 1 is
+done for the shipped deployment. `graph_declare`, by contrast, pins
+`executionProtocolVersion = OUTCOME_PROTOCOL` on every record it writes, so the
+outcome ingress needs no such declaration.
 DEFERRED by this slice, and not implied by it: every MIGRATION (a
 `migration-required` record is reported, never converted), storage format 3
 with its `2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
-draining or converting any graph, retiring any legacy execution path, effect
-EXECUTION beyond the dispatch seam (an unsettled effect is reported, never
-retried or settled by the audit), and any `src/dispatch/**` change.
+draining or converting any graph, retiring any legacy execution path, CLOSING
+the creation ingress for a host that still declares `allowNewLegacyGraphs`
+(step 1 of the stage-E order, and the one-line change each declaration above
+defers), effect EXECUTION beyond the dispatch seam (an unsettled effect is
+reported, never retried or settled by the audit), and any `src/dispatch/**`
+change.
 
 D7 MAKES CREDENTIAL ISOLATION AN EXPLICIT HOST CAPABILITY AND REFUSES TO RUN
 THE OUTCOME PATH WITHOUT ONE.

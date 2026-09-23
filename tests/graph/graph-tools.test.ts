@@ -39,12 +39,46 @@ import {
   OutcomeProtocolUnavailableError,
   type DeclareRefusalReason,
 } from "../../src/graph/tools/declare-graph.ts";
-import { engineStatePath } from "../../src/graph/engine/engine-persistence.ts";
+import {
+  EnginePersistence,
+  engineStatePath,
+} from "../../src/graph/engine/engine-persistence.ts";
+import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
+import { LegacyGraphCreationRefusedError } from "../../src/graph/tools/legacy-creation-gate.ts";
 import { OUTCOME_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
+import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import { contractDigest, type ContractRef } from "../../src/graph/contracts/contract-definition.ts";
 import { createContractRegistry } from "../../src/graph/contracts/resolve.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Write a legacy engine-state record for an id, the way a run leaves one behind.
+ *
+ * Several C1 tests need a PERSISTED legacy record and do not care how it got
+ * there. Since the E gate refuses to create a NEW durable legacy record through
+ * the tool ingress (`legacy-creation-gate.ts`), the record is seeded directly
+ * through the store — the same shape, without depending on the creation path
+ * those tests are not about.
+ */
+function seedLegacyRecordFile(stateDir: string, graphId: string): void {
+  const state = createEngineState(
+    {
+      version: 2,
+      name: graphId,
+      nodes: [{ id: "A", agent: "a", prompt: "pA" }],
+      edges: [],
+    },
+    graphId,
+  );
+  provision(state);
+  state.phase = EnginePhase.Executing;
+  const node = state.nodes.get("A");
+  if (node === undefined) throw new Error("fixture: node A was not registered");
+  node.status = NodeStatus.Running;
+  state.frontier = [];
+  new EnginePersistence(stateDir).save(state);
+}
 
 /** Build a review-team-plus style topology via the imperative tools. */
 function buildReviewTeamPlus(ts: GraphToolSet, graphId: string): void {
@@ -2016,14 +2050,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
 
   it("refuses to declare over a persisted legacy graph id", async () => {
     const stateDir = tempDir("graph-declare-legacy-disk-");
-    const legacy = new GraphToolSet({
-      dispatch: new CompletingDispatch(),
-      stateDir,
-    });
-    const { graph_id } = legacy.graph_create({ name: "legacy-on-disk" });
-    legacy.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
-    await legacy.graph_run({ graph_id });
-    await settle();
+    seedLegacyRecordFile(stateDir, "legacy-on-disk");
     expect(existsSync(engineStatePath(stateDir, "legacy-on-disk"))).toBe(true);
 
     // A fresh toolset has no registry entry, but the persisted legacy record
@@ -2215,16 +2242,23 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     const created = second.graph_create({ name: "declared-graph" });
     expect(created.graph_id).toBe("declared-graph-2");
 
-    // Running the freshly created LEGACY graph writes its OWN file; the
-    // declared record keeps its protocol, plan and binding byte for byte.
+    // Running the freshly created LEGACY graph is refused by the E gate — no NEW
+    // durable legacy record may be added (legacy-creation-gate.ts) — so the
+    // declared record keeps its protocol, plan and binding byte for byte and
+    // the suffixed id never reaches the store at all.
     second.graph_add_node({
       graph_id: created.graph_id,
       id: "A",
       agent: "a",
       prompt: "pA",
     });
-    await second.graph_run({ graph_id: created.graph_id });
-    await settle();
+    let caught: unknown;
+    try {
+      await second.graph_run({ graph_id: created.graph_id });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(LegacyGraphCreationRefusedError);
 
     expect(readFileSync(path, "utf-8")).toBe(before);
     const dto = JSON.parse(before) as {
@@ -2235,7 +2269,8 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
     expect(dto.compiledPlan?.planRevision).toBe(declared.plan_revision);
     expect(dto.planBinding?.planRevision).toBe(declared.plan_revision);
-    expect(existsSync(engineStatePath(stateDir, "declared-graph-2"))).toBe(true);
+    // The refused run wrote nothing: no new record, legacy or otherwise.
+    expect(existsSync(engineStatePath(stateDir, "declared-graph-2"))).toBe(false);
   });
 
   it("reserves a declared id whose state-file slug collides with a legacy name", async () => {
@@ -2263,8 +2298,16 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
       agent: "a",
       prompt: "pA",
     });
-    await second.graph_run({ graph_id: created.graph_id });
-    await settle();
+    // Same E-gate refusal as above: the suffixed legacy id never reaches the
+    // store, so the colliding declared file is untouched — which is stronger
+    // than a suffix that merely writes somewhere else.
+    let caught: unknown;
+    try {
+      await second.graph_run({ graph_id: created.graph_id });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(LegacyGraphCreationRefusedError);
 
     expect(readFileSync(path, "utf-8")).toBe(before);
     const dto = JSON.parse(before) as {
@@ -2273,7 +2316,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     };
     expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
     expect(dto.compiledPlan?.planRevision).toBe(declared.plan_revision);
-    expect(existsSync(engineStatePath(stateDir, "a b-2"))).toBe(true);
+    expect(existsSync(engineStatePath(stateDir, "a b-2"))).toBe(false);
   });
 
   it("names the outcome run path when a persisted declared graph is run after a restart", async () => {
@@ -2302,14 +2345,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
 
   it("does NOT treat a persisted LEGACY record as a collision (same-id resume)", async () => {
     const stateDir = tempDir("graph-declare-legacy-resume-");
-    const legacy = new GraphToolSet({
-      dispatch: new CompletingDispatch(),
-      stateDir,
-    });
-    const { graph_id } = legacy.graph_create({ name: "legacy-resume" });
-    legacy.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
-    await legacy.graph_run({ graph_id });
-    await settle();
+    seedLegacyRecordFile(stateDir, "legacy-resume");
     expect(existsSync(engineStatePath(stateDir, "legacy-resume"))).toBe(true);
 
     // A legacy record this build can resume is NOT a reservation: a fresh

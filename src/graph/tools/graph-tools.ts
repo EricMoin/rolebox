@@ -139,6 +139,10 @@ import {
   type GraphSubmitOutcomeArgs,
   type GraphSubmitOutcomeResult,
 } from "./submit-outcome.ts";
+import {
+  LegacyGraphCreationRefusedError,
+  legacyGraphCreationRefusal,
+} from "./legacy-creation-gate.ts";
 import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
 import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
@@ -299,6 +303,28 @@ export interface GraphToolSetDeps {
   directory?: string;
   /** Optional engine-state persistence dir (`.rolebox/state/...`). */
   stateDir?: string;
+  /**
+   * Whether this HOST still declares that it creates NEW durable legacy graphs.
+   *
+   * DEFAULTS TO `false`, AND THAT IS THE GATE: with a `stateDir` configured, a
+   * `graph_run` for a graph whose id has no record in that store is refused
+   * with the stable code `legacy-graph-creation-refused`
+   * (`./legacy-creation-gate.ts`), because the first durable write would mint a
+   * protocol-1 record through the format-2 decoder's backfill — a brand-new
+   * legacy graph no drain can tell apart from a historical one.
+   *
+   * Stage E opens with "stop creating new legacy graphs", and this declaration
+   * is the ONE switch that closes it: a host that still needs the legacy
+   * ingress while the outcome path cannot run in production (it refuses by
+   * default until a deployment injects a credential-isolation adapter, D7)
+   * declares that reliance here, explicitly and greppably, instead of relying
+   * on an accident of the writer. Removing the declaration is the whole of the
+   * step-1 change for that host.
+   *
+   * It cannot create anything on its own: a record that already exists is never
+   * refused either way, and a toolset with no `stateDir` writes nothing.
+   */
+  allowNewLegacyGraphs?: boolean;
   /**
    * Optional per-node staleness deadline (ms) for every engine this toolset
    * builds (F2). Defaults to {@link DEFAULT_NODE_STALE_TIMEOUT_MS} (15 min) —
@@ -1895,6 +1921,24 @@ export class GraphToolSet {
         `graph_run: no dispatch manager (or injected dispatch seam) available. ` +
           `Graph execution requires a DispatchManager or dispatch seam; construct the GraphToolSet with one (or use dry_run=true).`,
       );
+    }
+
+    // E GATE STEP 1 — no NEW durable legacy record (see
+    // ./legacy-creation-gate.ts). A fresh legacy state is persisted without an
+    // execution-protocol identity and the format-2 decoder then BINDS it to
+    // protocol 1 by backfill, so allowing this run would add a brand-new
+    // protocol-1 graph that no drain can distinguish from a historical one.
+    // Placed AFTER the dry-run short-circuit (a dry run writes nothing) and
+    // after the dispatch-seam check, so the refusal answers a run that would
+    // otherwise proceed. Resuming an existing record is never refused: the
+    // decision reads the store and refuses only where no record exists.
+    const creationRefusal = legacyGraphCreationRefusal({
+      stateDir: this.deps.stateDir,
+      graphId: args.graph_id,
+      allowedByHost: this.deps.allowNewLegacyGraphs === true,
+    });
+    if (creationRefusal !== null) {
+      throw new LegacyGraphCreationRefusedError(creationRefusal);
     }
 
     // Sticky notifier session: prefer the graph-captured (stored) invoking

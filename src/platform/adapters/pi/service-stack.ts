@@ -205,6 +205,13 @@ export class PiLightweightServiceStack implements IHookProvider {
         // Subtask 6: thread the shared node-liveness feed into the toolset's
         // engines (absent → engine behavior unchanged).
         ...(livenessFeed !== undefined ? { livenessFeed } : {}),
+        // E-GATE STEP 1 DECLARATION (allowNewLegacyGraphs): this host still
+        // creates new durable legacy graphs. Removing this one line closes the
+        // creation ingress for the Pi surface — it is NOT removed here because
+        // the outcome path still refuses by default without a host
+        // credential-isolation adapter, so the legacy run path is production's
+        // only one (see graph-tools.ts GraphToolSetDeps).
+        allowNewLegacyGraphs: true,
       });
     }
   }

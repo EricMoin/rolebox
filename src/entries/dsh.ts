@@ -1183,6 +1183,13 @@ export async function apply(
     // nested graph has already ended. Single-level graphs resolve to a
     // length-1 chain and behave exactly as before.
     resolveSessionChain: (sid) => dshDispatch.resolveSessionChain(sid),
+    // E-GATE STEP 1 DECLARATION (allowNewLegacyGraphs): this host still creates
+    // new durable legacy graphs. Removing this one line closes the creation
+    // ingress for the dsh surface — it is NOT removed here because the outcome
+    // path still refuses by default without a host credential-isolation
+    // adapter, so the legacy run path is production's only one (see
+    // graph-tools.ts GraphToolSetDeps).
+    allowNewLegacyGraphs: true,
   });
   // Monitor S10 (live-state): register the toolset as the process's live
   // graph-registry source so the monitor's `readLiveEngineGraphs` projects

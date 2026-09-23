@@ -372,6 +372,11 @@ describe("needs_approval gate through the compiled surface", () => {
         sessionClient: client,
         emperorSessionId: (invokingSessionId) => invokingSessionId,
       },
+      // The Pi host's own E-gate step-1 declaration, mirrored so this replica
+      // stays "the exact toolset the Pi stack builds internally"
+      // (service-stack.ts sets the same flag). Without it a NEW durable legacy
+      // record is refused — see tests/graph/legacy-creation-gate.test.ts.
+      allowNewLegacyGraphs: true,
     });
 
     const { graph_id } = ts.graph_create({ name: "approval-e2e" }, EMPEROR_SESSION);
