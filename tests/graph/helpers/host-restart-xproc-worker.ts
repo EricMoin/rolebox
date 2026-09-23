@@ -269,8 +269,10 @@ async function modeDispatch(): Promise<ModeOutcome> {
  * `--mode recover`: a FRESH process runs the boot sweep over the same root.
  *
  * `--observe terminal` installs the platform observation port and answers
- * `terminal` for the confirmed execution; `--observe none` installs none, which
- * is the shipped adapter's position today.
+ * `terminal` for the confirmed execution; `--observe running` installs it and
+ * answers `running` (the execution has not finished yet — the sweep must report
+ * it as AWAITED, naming the platform's execution id, and must not settle it);
+ * `--observe none` installs none, which is the shipped adapter's position today.
  */
 async function modeRecover(): Promise<ModeOutcome> {
   const storeRoot = required("root");
@@ -288,7 +290,9 @@ async function modeRecover(): Promise<ModeOutcome> {
     completionPolicies: XPROC_POLICIES,
     ...(observe === "terminal"
       ? { observeExecution: () => Object.freeze({ kind: "terminal" as const }) }
-      : {}),
+      : observe === "running"
+        ? { observeExecution: () => Object.freeze({ kind: "running" as const }) }
+        : {}),
   });
   try {
     const report = await host.recoverDeclaredGraphs();
@@ -303,6 +307,16 @@ async function modeRecover(): Promise<ModeOutcome> {
         (refusal) => refusal.graphId + ":" + refusal.code,
       ),
       storeBlocked: report.storeBlocked ?? null,
+      // THE LISTENING INVENTORY (P2 item 6): every confirmed execution the
+      // sweep is still waiting on, named by the platform's own id — what a host
+      // adapter re-subscribes to after the dispatching process exited.
+      awaitingCompletion: report.awaitingCompletion.map((entry) => ({
+        graphId: entry.graphId,
+        nodeId: entry.nodeId,
+        attemptId: entry.attemptId,
+        executionId: entry.executionId,
+        status: entry.status,
+      })),
       record: await readRecord(storeRoot, graphId),
       executionRow: readExecutionRow(storeRoot, graphId, "work#1"),
     };

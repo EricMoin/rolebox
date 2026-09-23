@@ -25,7 +25,11 @@
  *   exited is resolved from the host's own record (the ONE store's execution row
  *   plus the dispatch effect that names the node), and an execution that already
  *   reached its end while nobody was listening is READ from the platform and
- *   applied idempotently instead of waiting for a callback that will never come;
+ *   applied idempotently instead of waiting for a callback that will never come.
+ *   An execution the platform reports STILL RUNNING is not settled and not
+ *   forgotten either: the sweep names it (with the platform's own execution id)
+ *   in `awaitingCompletion`, which is the inventory a host adapter re-subscribes
+ *   to or keeps re-querying after the process that held the subscription exited;
  * - the host's COMPLETION AUTHORITY (P2 item 7) — the confirmed execution the
  *   host's durable record carries is what authenticates a completion the
  *   worker's bearer value can no longer vouch for, and the run path refuses a
@@ -301,6 +305,31 @@ export interface OutcomeHostEffectRefusal {
 }
 
 /**
+ * ONE CONFIRMED HOST EXECUTION THE SWEEP IS STILL WAITING ON (P2 item 6).
+ *
+ * The execution id is the PLATFORM's own, read from the host's durable record —
+ * never a caller-supplied value and never parsed out of an attempt id — so a
+ * host adapter can re-subscribe to that execution or keep querying it.
+ */
+export interface OutcomeHostAwaitingCompletion {
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  /** The platform's own id for the execution the host confirmed. */
+  readonly executionId: string;
+  /** The platform's task id, when it names the execution and the task apart. */
+  readonly taskId?: string;
+  /**
+   * What the platform said: `running` (it answered that the execution has not
+   * finished) or `unknown` (it could not be asked, or did not answer). Never
+   * `terminal`: a terminal execution is settled, not awaited.
+   */
+  readonly status: "running" | "unknown";
+  /** Why it is still awaited — the platform's own reason for `unknown`. */
+  readonly reason: string;
+}
+
+/**
  * What a boot sweep over the declared graphs did.
  *
  * A STARTED OR RESUMED GRAPH STILL CARRIES ITS PER-EFFECT DIAGNOSTICS. A
@@ -341,6 +370,27 @@ export interface OutcomeHostRecoveryReport {
    * and the ledger decided — never that a completion was fabricated.
    */
   readonly completed: readonly string[];
+  /**
+   * EVERY CONFIRMED HOST EXECUTION THIS SWEEP IS STILL WAITING ON (P2 item 6).
+   *
+   * A graph is resumed as soon as its own state is continued, but an attempt
+   * whose platform execution has NOT finished cannot be settled from a terminal
+   * read: it is settled by the platform's LATER announcement, through the
+   * durable binding the resume re-established. That only works while the host
+   * keeps listening — and after a restart the process that held the platform's
+   * subscription is gone. This is the inventory such a host re-subscribes to,
+   * or keeps re-querying, named by the platform's own execution id: item 6's
+   * "rebuild the binding AND the listening" does not stop at the binding.
+   *
+   * IT IS NOT A CLAIM THAT A SUBSCRIPTION HAPPENED. The sweep asked and the
+   * platform answered `running` (or could not answer), so the attempt stays in
+   * flight and is named here. An attempt the platform reported TERMINAL that
+   * the host could not settle is deliberately ABSENT — there is nothing left to
+   * listen to; the `completion-unsettled` refusal names that one instead. So is
+   * an attempt whose own host execution record could not be read: there is no
+   * execution id to subscribe to, and the refusal names it.
+   */
+  readonly awaitingCompletion: readonly OutcomeHostAwaitingCompletion[];
   /**
    * Set when the workspace's store could not be read AT ALL, so the sweep had no
    * inventory to visit. A store the format gate refuses must not read as "no
@@ -730,6 +780,7 @@ export class OutcomeHost {
     const effectRefusals: OutcomeHostEffectRefusal[] = [];
     const divergences: (OutcomeEffectDivergence & { graphId: string })[] = [];
     const completed: string[] = [];
+    const awaiting: OutcomeHostAwaitingCompletion[] = [];
     const inventory = this.declaredGraphInventory();
     for (const graphId of inventory.graphIds) {
       try {
@@ -803,8 +854,44 @@ export class OutcomeHost {
             continue;
           }
           const observation = this.observeExecutionOf(execution);
-          if (observation.kind === "running") continue;
+          if (observation.kind === "running") {
+            // STILL RUNNING, SO STILL LISTENED FOR (P2 item 6). The durable
+            // binding above survives the restart, but nothing subscribes to the
+            // execution the dead process was watching: naming it here is what
+            // lets a host adapter re-subscribe (or keep re-querying) the
+            // platform's own execution instead of waiting for an announcement
+            // this process can no longer receive.
+            awaiting.push(
+              Object.freeze({
+                graphId,
+                nodeId: node.nodeId,
+                attemptId,
+                executionId: execution.executionId,
+                ...(execution.taskId === undefined ? {} : { taskId: execution.taskId }),
+                status: "running" as const,
+                reason:
+                  "the platform reports host execution " +
+                  JSON.stringify(execution.executionId) +
+                  " still running, so its completion is awaited rather than settled",
+              }),
+            );
+            continue;
+          }
           if (observation.kind === "unknown") {
+            // The fate of a CONFIRMED execution is unknown: it is reported as
+            // unsettled AND named for the host to re-subscribe to, because
+            // "cannot tell now" must not be rounded into "nothing to watch".
+            awaiting.push(
+              Object.freeze({
+                graphId,
+                nodeId: node.nodeId,
+                attemptId,
+                executionId: execution.executionId,
+                ...(execution.taskId === undefined ? {} : { taskId: execution.taskId }),
+                status: "unknown" as const,
+                reason: observation.reason,
+              }),
+            );
             effectRefusals.push(
               Object.freeze({
                 graphId,
@@ -883,7 +970,8 @@ export class OutcomeHost {
       refused.length > 0 ||
       effectRefusals.length > 0 ||
       divergences.length > 0 ||
-      completed.length > 0
+      completed.length > 0 ||
+      awaiting.length > 0
     ) {
       logWarn(
         "outcome-host: declared-graph sweep — started=[" +
@@ -911,6 +999,10 @@ export class OutcomeHost {
             .join(", ") +
           "] completed=[" +
           completed.join(", ") +
+          "] awaiting=[" +
+          awaiting
+            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status)
+            .join(", ") +
           "]",
       );
     }
@@ -921,6 +1013,11 @@ export class OutcomeHost {
       effectRefusals: Object.freeze(effectRefusals),
       divergences: Object.freeze(divergences),
       completed: Object.freeze(completed),
+      // THE EXECUTIONS THE HOST MUST KEEP LISTENING TO (P2 item 6): confirmed
+      // and named by the platform's own id, so a host adapter can re-subscribe
+      // or re-query instead of waiting for an announcement a restarted process
+      // can no longer receive.
+      awaitingCompletion: Object.freeze(awaiting),
       // A store the format gate refuses is a BLOCK, never an empty sweep: the
       // audit and the status surface already refuse it, and the boot sweep must
       // not answer "nothing to do" for the same workspace. A store that simply

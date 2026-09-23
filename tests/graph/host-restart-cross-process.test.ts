@@ -30,6 +30,11 @@
  * 5. A child with NO observation port must not silently strand the attempt: the
  *    sweep reports an explicit per-effect refusal (`completion-unsettled`) and
  *    leaves the one accepted event count untouched.
+ * 6. A confirmed execution the platform reports STILL RUNNING is not settled and
+ *    not dropped: the sweep names it (with the platform's own execution id) in
+ *    `awaitingCompletion` — the inventory a restarted host adapter re-subscribes
+ *    to or keeps re-querying — and a LATER sweep that reads the same execution
+ *    terminal settles the same attempt exactly once.
  *
  * The same windows are covered in-process by `host-boundary.test.ts` (binding)
  * and `host-restart-authorization.test.ts` (authorization policy); THIS file is
@@ -79,6 +84,13 @@ interface WorkerReport {
   readonly completed?: readonly string[];
   readonly divergences?: number;
   readonly effectRefusals?: readonly string[];
+  readonly awaitingCompletion?: readonly {
+    readonly graphId: string;
+    readonly nodeId: string;
+    readonly attemptId: string;
+    readonly executionId: string;
+    readonly status: string;
+  }[];
   readonly storeBlocked?: string | null;
   readonly kind?: string;
   readonly nodeId?: string | null;
@@ -347,6 +359,71 @@ describe("host restart — a real process boundary recovers the completion bindi
     expect(replayed.record?.events).toBe(1);
   });
 
+  it("names a confirmed execution the platform reports RUNNING, then settles it once a later sweep reads it terminal", async () => {
+    const fixture = makeFixture("restart-xproc-running-");
+
+    // ── PROCESS ONE: dispatch and confirm, then EXIT ─────────────────────
+    const dispatched = await runWorker("dispatch-running", [
+      ...workerArgs(fixture, {
+        mode: "dispatch",
+        execution: PLATFORM_EXECUTION_ID,
+        "marker-dir": fixture.markerDir,
+      }),
+    ]);
+    expect(dispatched.pid).not.toBe(process.pid);
+    expect(dispatched.executionRow?.state).toBe("created");
+    await waitForMarker(
+      join(fixture.markerDir, "dispatched-work#1.marker"),
+      "the dispatching process's marker",
+    );
+
+    // ── PROCESS TWO: the platform says the execution has NOT finished. The
+    // attempt must not be settled on that answer — and it must not be dropped
+    // either: the sweep NAMES the confirmed execution it is still waiting on.
+    const running = await runWorker("recover-running", [
+      ...workerArgs(fixture, { mode: "recover", observe: "running" }),
+    ]);
+    expect(running.pid).not.toBe(dispatched.pid);
+    expect(running.pid).not.toBe(process.pid);
+    expect(running.completed).toEqual([]);
+    expect(running.delivered).toEqual([]);
+    expect(running.awaitingCompletion).toEqual([
+      {
+        graphId: XPROC_GRAPH_ID,
+        nodeId: "work",
+        attemptId: "work#1",
+        executionId: PLATFORM_EXECUTION_ID,
+        status: "running",
+      },
+    ]);
+    // A RUNNING execution is not a refusal — it is work still in flight — so
+    // the only per-effect refusal is the lost credential, which is never
+    // re-issued for an effect the platform may already hold.
+    expect(running.effectRefusals).toEqual([
+      XPROC_GRAPH_ID + ":credential-reissue-forbidden",
+    ]);
+    // The attempt is EXACTLY where the dispatching process left it.
+    expect(running.record?.status).toBe("dispatched");
+    expect(running.record?.events).toBe(0);
+    expect(running.record?.pendingEffects).toEqual(["dispatch:work#1@started"]);
+    expect(running.executionRow?.state).toBe("created");
+    expect(running.executionRow?.executionId).toBe(PLATFORM_EXECUTION_ID);
+
+    // ── PROCESS THREE: the SAME attempt, now read as TERMINAL. The inventory is
+    // what a host adapter re-subscribes to; the durable binding is what makes the
+    // later observation settle it exactly once.
+    const terminal = await runWorker("recover-running-terminal", [
+      ...workerArgs(fixture, { mode: "recover", observe: "terminal" }),
+    ]);
+    expect(terminal.pid).not.toBe(running.pid);
+    expect(terminal.completed).toEqual([XPROC_GRAPH_ID + ":work#1:accepted"]);
+    expect(terminal.delivered).toEqual([]);
+    expect(terminal.awaitingCompletion).toEqual([]);
+    expect(terminal.record?.status).toBe("settled");
+    expect(terminal.record?.events).toBe(1);
+    expect(terminal.executionRow?.executionId).toBe(PLATFORM_EXECUTION_ID);
+  });
+
   it("reports an OBSERVABLE block, never a silent strand, when the platform cannot be asked", async () => {
     const fixture = makeFixture("restart-xproc-unobserved-");
 
@@ -379,6 +456,19 @@ describe("host restart — a real process boundary recovers the completion bindi
     expect(unobserved.effectRefusals).toEqual([
       XPROC_GRAPH_ID + ":credential-reissue-forbidden",
       XPROC_GRAPH_ID + ":completion-unsettled",
+    ]);
+    // AND IT IS NAMED FOR THE HOST TO KEEP LISTENING TO (P2 item 6): the
+    // confirmed execution is reported as AWAITED, by the platform's own id, so
+    // a host adapter can re-subscribe or re-query instead of waiting for an
+    // announcement a restarted process can no longer receive.
+    expect(unobserved.awaitingCompletion).toEqual([
+      {
+        graphId: XPROC_GRAPH_ID,
+        nodeId: "work",
+        attemptId: "work#1",
+        executionId: PLATFORM_EXECUTION_ID,
+        status: "unknown",
+      },
     ]);
     // The attempt is EXACTLY where the dispatching process left it: in flight,
     // with no fabricated settlement and no re-dispatch.
