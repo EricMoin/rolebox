@@ -396,8 +396,9 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     // OPTIONAL-ADDITIVE (B3 execution protocol): the bound protocol identity,
     // written only when the state actually holds one. A state that never set
     // the field produces NO key at all — the object and its JSON text are
-    // exactly what the previous writer produced — while a hydrated legacy
-    // state keeps the identity its decoder backfilled across the round trip.
+    // exactly what the previous writer produced — and a hydrated state keeps
+    // the identity its own record carried across the round trip. Nothing is
+    // backfilled: a record that carried no identity stays without one.
     ...(state.executionProtocolVersion !== undefined
       ? { executionProtocolVersion: state.executionProtocolVersion }
       : {}),
@@ -539,10 +540,10 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
       ? { ...file.terminalNotified }
       : undefined,
     // OPTIONAL-ADDITIVE (B3 execution protocol): carried through verbatim, NOT
-    // defaulted here. This function is a pure DTO→state projection; the
-    // format-2 decoder owns the one legitimate backfill (see
-    // STORAGE_FORMAT_V2_DECODER) and the loader owns classification, so an
-    // absent value stays absent until the decoder resolves it.
+    // defaulted here. This function is a pure DTO→state projection, the decoder
+    // resolves NO protocol identity and the loader owns classification, so an
+    // absent value stays absent and is reported corrupt(execution) — there is no
+    // backfill to wait for.
     executionProtocolVersion: file.executionProtocolVersion,
     // OPTIONAL-ADDITIVE (B6 plan binding): carried through VERBATIM, never
     // copied, defaulted or inspected here. This function is a pure DTO→state

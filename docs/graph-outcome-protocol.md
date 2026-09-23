@@ -84,18 +84,28 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   everything the channel persists
   (`tests/graph/natural-completion-combination.test.ts`);
 - the read-only drain audit (`src/graph/audit/drain-audit.ts`), the stale-lock
-  reading that makes its in-flight count decidable, and the creation-side
-  refusal that keeps the legacy population from growing
-  (`src/graph/tools/legacy-creation-gate.ts`).
+  reading that makes its in-flight count decidable, and the ledger/state roots it
+  reads (the host's declared store root and the graph's own record);
+- the SHIPPED host layer IS INJECTED BY BOTH HOSTS: `src/entries/dsh.ts` and
+  `src/entries/pi.ts` assemble the outcome tool face (`graph_declare`,
+  `graph_submit_outcome`, `graph_audit`, `graph_status`) over
+  `src/graph/host/outcome-host.ts`, each through its own platform delivery
+  adapter. The legacy construction/execution entries, the legacy runtime and the
+  `allowNewLegacyGraphs` creation gate no longer exist anywhere in the tree.
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
 
-- the host layer is SHIPPED AND TESTED (`src/graph/host/**`,
-  `tests/graph/host-capabilities.test.ts`) but NOT YET INJECTED by the dsh or
-  Pi entries: both still declare `allowNewLegacyGraphs` and run their graphs on
-  the legacy v2 path, so no production deployment yet reaches the outcome run
-  path. Switching those entries is the next slice and is deliberately not done
-  here;
+- D9 (host invocation identity) is IMPLEMENTED AND TESTED but NOT DECLARED by
+  the two shipped hosts, deliberately. The platform attributes a dispatched
+  worker's own tool call to the WORKER's session and agent, never to the
+  declaring invocation that armed the attempt, so a declared capability would
+  refuse exactly the `graph_submit_outcome` call the delivery handoff asks the
+  worker to make (`host-identity-mismatch`). Both entries therefore pass
+  `declareInvocationIdentity: false` and say why in code; the host assembly
+  still settles a completion under the attribution its attempt was dispatched
+  with, and a host that CAN substantiate a single-invocation attribution opts in
+  by leaving the default. The bearer credential remains the binding on every
+  submission; nothing else is weakened and no identity is recorded.
 - PER-WORKER FILESYSTEM ISOLATION: the vault keeps the credential in host
   process memory plus a separate `0600` mirror file, and the ledger carries
   only a digest — but a same-account process can still read the mirror file
@@ -123,6 +133,15 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
   narratives below (C1-E0) are HISTORICAL: statements that the legacy runtime,
   its tool entries, its registry or a protocol-1 handler still exist describe
   the tree before the deletion.
+- ARCHIVE DECISION (2026-09-23): deletion is NOT a migration. No persisted
+  legacy record is converted, adopted or rewritten — a protocol-1 record simply
+  loads as `unsupported(execution)` and stays on disk exactly as it was. The
+  workspace's runtime-era graph-event artifact was moved out of the live store to
+  `.rolebox/archive/legacy-graph-runtime-20260923/` (that directory is
+  gitignored, so the archive is intentionally outside version control) with a
+  `MANIFEST.md` recording the moved file's sha256, before/after listings and a
+  hash of every state file at archive time; the operator-level state directory
+  outside this workspace was inspected READ-ONLY and not modified.
 
 ## Objective and scope
 
@@ -371,26 +390,23 @@ the decoder needs v2 hydration, so it cannot live in the dependency-leaf
 
 B3 binds the EXECUTION-PROTOCOL identity and refuses it at load when it is
 unregistered. `src/graph/protocol/execution-protocol.ts` owns
-`LEGACY_SIGNAL_PROTOCOL = 1` and the reserved `OUTCOME_PROTOCOL = 2`, the
+`OUTCOME_PROTOCOL = 2` — the only protocol this build registers — plus the
 deeply frozen `createExecutionProtocolRegistry` (a duplicate version and a
 non-positive-safe-integer version are rejected — the same legality rule as
-storage formats), and the pure, capability-carrying
-`classifyExecutionProtocol`. Support is registry MEMBERSHIP, not comparison
-with a latest-version constant: the shipped
-`LEGACY_EXECUTION_PROTOCOL_REGISTRY` holds exactly one handler, for protocol
-1, so a persisted `executionProtocolVersion: 2` classifies as
-`unsupported(execution)` and the load is refused before anything hydrates.
-Naming `OUTCOME_PROTOCOL` grants it nothing; the handler interface is today a
-marker identity, not a dispatch seam.
+storage formats), the capability-carrying `classifyExecutionProtocol` and the
+`OutcomeProtocolHandler` surface the run path reads instead of trusting a bare
+version number. Protocol 1 (the deleted legacy signal protocol) has NO handler
+and no constant of its own any more: a persisted `executionProtocolVersion: 1`
+classifies as `unsupported(execution)` and the load is refused before anything
+hydrates.
 
 The durable identity is an OPTIONAL-ADDITIVE field on the persisted state
 (`executionProtocolVersion`) with no storage-format bump:
 `ENGINE_PERSISTENCE_VERSION` stays the literal `2`, no format 3 exists, and a
-state that never bound an identity serializes exactly as before. Only the
-FORMAT-2 decoder may backfill protocol 1 when the field is absent — format 2
-IS the legacy layout — and it does so on a state that has already been
-validated. A decoder for any newer format resolves nothing, so an absent
-identity there is `corrupt(execution)`, never a guessed legacy run. An
+state that never bound an identity serializes exactly as before. There is NO backfill: the
+format-2 decoder resolves no protocol identity and infers none from the storage
+format, so an absent identity is `corrupt(execution)` on every format and is
+never read as a guessed legacy run. An
 illegal identity (`0`, `-1`, `1.5`, `"1"`, `null`, an unsafe integer) is also
 `corrupt(execution)`, naming what was received, and a valid file whose
 protocol 1 has no registered handler is `unsupported(execution)`. The loader
@@ -2011,47 +2027,34 @@ conservatively reported as queued, never as empty. And a declared outcome graph
 that was never started is not a stale lock — its queue is the first execution
 the run path still owes it.
 
-E0 NAMES THE CREATION SIDE, AND MAKES IT FAIL-CLOSED. A drain is decidable
-only if the population being drained cannot grow, and this build could grow
-it: `graph_create` + `graph_run` with a configured `stateDir` persisted a fresh
-legacy state carrying NO `executionProtocolVersion` at all, and the format-2
-decoder then BOUND that record to protocol 1 by backfill — the one legitimate
-use of which is a record written before the field existed. Reproduced through
-the tool surface before the fix: a new graph produced `engine-<id>.json` with
-no protocol key, which the audit reports as `protocol: "legacy-signal"`,
-indistinguishable from a record written years earlier.
-`src/graph/tools/legacy-creation-gate.ts` owns the decision now: unless the
-HOST declares `allowNewLegacyGraphs`, a `graph_run` for an id with no record in
-the configured store is refused with the stable code
-`legacy-graph-creation-refused` (`LegacyGraphCreationRefusedError` carries the
-code, the graph and the record path as data), before any dispatch and before
-any write — the store directory is not even created. The boundary is exact: an
-existing record (legacy, declared or unreadable) is never refused, so recovery,
-resume, approval rebuild and the legacy run path itself are untouched and still
-execute; a tool set with no `stateDir` writes nothing and is untouched; and a
-dry run is allowed because it writes nothing.
+E0 NAMED THE CREATION SIDE AND MADE IT FAIL-CLOSED — AND STAGE E THEN DELETED
+THE WHOLE SIDE. A drain is decidable only if the population being drained cannot
+grow, and at the time this build could grow it: `graph_create` + `graph_run`
+with a configured `stateDir` persisted a fresh legacy state carrying NO
+`executionProtocolVersion` at all, and the format-2 decoder then BOUND that
+record to protocol 1 by backfill — the one legitimate use of which is a record
+written before the field existed. Reproduced through the tool surface before the
+fix: a new graph produced `engine-<id>.json` with no protocol key, which the
+audit reported as `protocol: "legacy-signal"`, indistinguishable from a record
+written years earlier. The gate below and the backfill it depended on are BOTH
+DELETED with the runtime they protected; the historical paragraph is kept so the
+defect class is not forgotten.
+`src/graph/tools/legacy-creation-gate.ts` owned that decision while the legacy
+path existed: unless the HOST declared `allowNewLegacyGraphs`, a `graph_run`
+for an id with no record in the configured store was refused with the stable
+code `legacy-graph-creation-refused`, before any dispatch and before any write.
+THAT MODULE, THE `allowNewLegacyGraphs` DECLARATION AND `graph_run` ITSELF ARE
+DELETED. The creation side is now structurally closed rather than gated: the
+only durable-graph ingress is `graph_declare`, which pins
+`executionProtocolVersion = OUTCOME_PROTOCOL` on every record it writes, and no
+tool in the shipped surface can produce a legacy record at all.
 
-THE DEFAULT IS THE GATE; THE DECLARATION IS WHAT REMAINS OPEN, AND IT IS
-ENUMERABLE. The two shipped hosts that configure a store — the Pi service
-stack and the dsh entry — still declare `allowNewLegacyGraphs`, because the
-outcome path refuses by default without a host credential-isolation adapter
-(D7) and the legacy run path is therefore production's only one. That
-declaration is the honest state of the gate in this build: new durable legacy
-graphs are STILL created by those two hosts, now by an explicit, greppable
-decision rather than by an accident of the writer, and removing the declaration
-is the whole of stage E step 1 for that host. Nothing above claims step 1 is
-done for the shipped deployment. `graph_declare`, by contrast, pins
-`executionProtocolVersion = OUTCOME_PROTOCOL` on every record it writes, so the
-outcome ingress needs no such declaration.
 DEFERRED by this slice, and not implied by it: every MIGRATION (a
 `migration-required` record is reported, never converted), storage format 3
 with its `2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
-draining or converting any graph, retiring any legacy execution path, CLOSING
-the creation ingress for a host that still declares `allowNewLegacyGraphs`
-(step 1 of the stage-E order, and the one-line change each declaration above
-defers), effect EXECUTION beyond the dispatch seam (an unsettled effect is
-reported, never retried or settled by the audit), and any `src/dispatch/**`
-change.
+draining or converting any graph (deletion is not a migration — a protocol-1
+record is refused, never rewritten), and any `src/dispatch/**` change beyond
+removing the markers the deleted runtime introduced.
 
 D7 MAKES CREDENTIAL ISOLATION AN EXPLICIT HOST CAPABILITY AND REFUSES TO RUN
 THE OUTCOME PATH WITHOUT ONE.
@@ -2257,8 +2260,9 @@ before reading or writing anything; `graph_submit_outcome` refuses with the same
 code BEFORE it opens a ledger (`OutcomeSubmissionRefusedError.reason`); and the
 startup sweep reports `[dispatch-unavailable]` in `outcomeProtocol.refused`
 before opening one, after the record's own identity has been checked, so an
-environment refusal never hides a broken record. No adapter ships in this build,
-so a deployment that has not injected one gets the refusal by construction.
+environment refusal never hides a broken record. The shipped host layer provides
+the adapter, and a deployment that injects none gets the refusal by
+construction.
 
 ENFORCED BY TESTS. `tests/graph/outcome-dispatch-effects.test.ts` reproduces
 both defects as probes (the failed first dispatch leaves
@@ -2342,8 +2346,10 @@ defeats D7. A host whose dispatched workers submit under a different
 attribution than the dispatch was made under will see those submissions refused
 BY NAME; that is the constraint working, and such a host must not declare the
 capability (or must fix its attribution) rather than have the check disappear.
-No adapter ships in this build, so a deployment that has not injected one gets
-the unconstrained (pre-D9) behavior by construction.
+BOTH SHIPPED HOSTS ARE EXACTLY THAT CASE and therefore do not declare it (see
+"Implementation status"); the capability implementation ships and is tested, and
+a deployment that injects no capability at all gets the unconstrained (pre-D9)
+behavior by construction.
 
 RESTART RECONCILIATION NOW REPORTS ITS DISAGREEMENTS. D8 resolves the
 commit-then-crash window by asking the host, but a resolution is not a report:
@@ -2388,7 +2394,7 @@ identity holder is `identity.ts`.)
 | Axis | Definition owner | Durable location | Comparison owner and rule |
 | --- | --- | --- | --- |
 | Storage format | `src/graph/persistence/storage-format.ts`: `CURRENT_STORAGE_FORMAT = 3`; explicit decoder and migration registries | Root `storageFormatVersion`; transactional-store metadata carries the same format identity | `src/graph/persistence/load.ts` selects an exact registered decoder, then determines whether the store can be resumed as-is or requires a registered format migration. No numeric less-than compatibility rule. |
-| Execution protocol | `src/graph/protocol/execution-protocol.ts`: `LEGACY_SIGNAL_PROTOCOL = 1`, `OUTCOME_PROTOCOL = 2`; handler registry keyed by exact version | Each graph's root `executionProtocolVersion`; compiled plans, attempts, and receipts belong to that graph and cannot change its protocol | Loader selects an exact handler before semantic hydration; dispatcher and reducer use that bound handler. Registry membership, not equality with a latest-version constant, decides support. |
+| Execution protocol | `src/graph/protocol/execution-protocol.ts`: `OUTCOME_PROTOCOL = 2` (the only registered protocol); handler registry keyed by exact version | Each graph's root `executionProtocolVersion`; compiled plans, attempts, and receipts belong to that graph and cannot change its protocol | Loader selects an exact handler before semantic hydration; dispatcher and reducer use that bound handler. Registry membership, not equality with a latest-version constant, decides support. |
 | Contract revision | `src/graph/contracts/contract-definition.ts`: `ContractRef = { id, revision, digest }`; no global current-contract constant | Immutable contract snapshots plus node bindings in each retained compiled plan revision; attempts and receipts refer to their exact plan revision | `src/graph/contracts/resolve.ts` resolves exact references during compilation and verifies snapshots/bindings during load. Revision is an opaque immutable identifier; compare identity and content digest, never ordering or a semver range. |
 
 All three proposed modules are dependency leaves; the loader depends on their
