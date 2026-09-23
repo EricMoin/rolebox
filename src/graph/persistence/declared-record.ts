@@ -463,7 +463,10 @@ export interface StoredEngineStateListing {
   readonly verdict: GraphStoreLoadResult;
   /** The decoded definitions, each projected to the query-boundary shape. */
   readonly states: readonly EngineState[];
-  /** Graph ids whose definition the store holds but this build cannot read. */
+  /**
+   * Graph ids the store holds a definition for but this build cannot read — the
+   * stored definition itself, or the run state recorded against it.
+   */
   readonly skipped: readonly string[];
 }
 
@@ -473,8 +476,16 @@ export interface StoredEngineStateListing {
  *
  * READ-ONLY and TOTAL: a missing store is an empty list, a store this build may
  * not read is reported by its verdict (never as "no graphs"), and a definition
- * that fails a gate is named in `skipped` instead of being approximated. The
- * projection it applies is the TEMPORARY one above.
+ * that fails a gate is named in `skipped` instead of being approximated.
+ *
+ * EVERY COUNTED DEFINITION LANDS IN EXACTLY ONE OF `states` / `skipped`. A graph
+ * whose stored run state cannot be decoded is a SKIP, never a projected
+ * `idle`/all-`pending` carrier: the definition is real and the recorded
+ * position is not, and showing a pending graph for it would be the fabricated
+ * position the mapping must never produce (A19). `states.length +
+ * skipped.length` is therefore the number of stored definitions.
+ *
+ * The projection it applies is the TEMPORARY one above.
  */
 export function listStoredEngineStates(
   storeDirectory: string,
@@ -498,12 +509,16 @@ export function listStoredEngineStates(
         skipped.push(graphId);
         continue;
       }
-      const run = readStoredRunState(store, decoded.declared, graphId, skipped);
+      const run = readStoredRunStateOf(store, decoded.declared);
+      if (run.kind === "unreadable") {
+        skipped.push(graphId);
+        continue;
+      }
       states.push(
         declaredEngineStateOf(
           decoded.declared,
-          run.state,
-          run.updatedAt ?? decoded.declared.recordedAt,
+          run.kind === "recorded" ? run.state : undefined,
+          run.kind === "recorded" ? run.updatedAt : decoded.declared.recordedAt,
         ),
       );
     }
@@ -519,36 +534,13 @@ export function listStoredEngineStates(
 }
 
 /**
- * The run-state body of one stored graph, decoded against its own plan.
- *
- * A row this build cannot decode is a SKIP, not a fabricated `idle` graph: the
- * definition is real and the run state is not, so the caller must be told the
- * graph could not be read rather than shown a pending one.
- */
-function readStoredRunState(
-  store: GraphStore,
-  declared: StoredDeclaredGraph,
-  graphId: string,
-  skipped: string[],
-): { readonly state: OutcomeGraphState | undefined; readonly updatedAt?: number } {
-  let row: GraphStateRecord | undefined;
-  try {
-    row = store.readGraphState(graphId);
-  } catch {
-    skipped.push(graphId);
-    return { state: undefined };
-  }
-  if (row === undefined) return { state: undefined };
-  try {
-    return { state: readOutcomeGraphState(row, declared.plan), updatedAt: row.updatedAt };
-  } catch {
-    skipped.push(graphId);
-    return { state: undefined };
-  }
-}
-
-/**
  * The run-state body one stored graph recorded, or a structured outcome.
+ *
+ * The DISCRIMINATION is load-bearing: `unstarted` (no row) is a declared graph
+ * that never ran and projects as `idle`/all-`pending`, while `unreadable` (a
+ * row this build cannot decode against its own plan) must never be projected as
+ * a position at all — the two are different facts and collapsing them is what
+ * let `graph_status` fabricate an `idle` graph for a damaged record.
  *
  * The host's first-execution path needs the PLAN, not the body, so it uses
  * {@link readStoredDefinition}; this exists for a caller that already holds the

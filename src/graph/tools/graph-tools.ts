@@ -800,15 +800,28 @@ export class GraphToolSet {
     return out;
   }
 
+  /**
+   * The honest answer for a scope that yielded no readable graph.
+   *
+   * A scope that read the store and found definitions it cannot decode is NOT
+   * "no graphs": `persistedEmptyNote` names the skipped definitions, and it is
+   * the answer for `all` as well as `persisted` (an `all` query over a damaged
+   * store must not claim the workspace holds nothing). Only a store that truly
+   * holds no graph gets the `graph_declare` line.
+   */
+  private emptyScopeNote(scan: PersistedStateScan, scope: GraphStatusScope): string {
+    if (scope === "persisted" || scan.blocked !== undefined || scan.skipped > 0) {
+      return persistedEmptyNote(scan);
+    }
+    return "No graphs exist. Call graph_declare to declare one, which starts its entry nodes.";
+  }
+
   /** No-target list for persisted/all scope: persisted graphs are shown, and an
    * empty store yields an explicit honest-empty note. */
   private renderScopedGraphList(scope: GraphStatusScope): string {
     const scan = this.persistedScan();
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
-    if (states.length === 0) {
-      if (scope === "persisted") return persistedEmptyNote(scan);
-      return "No graphs exist. Call graph_declare to declare one, which starts its entry nodes.";
-    }
+    if (states.length === 0) return this.emptyScopeNote(scan, scope);
     const lines = states.map((s) => `  ${s.graphId}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`);
     const header =
       scope === "persisted" ? `Persisted graphs (${states.length}):` : `Graphs (${states.length}):`;
@@ -825,10 +838,7 @@ export class GraphToolSet {
     const scan = this.persistedScan();
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
 
-    if (states.length === 0) {
-      if (scope === "persisted") return persistedEmptyNote(scan);
-      return "No graphs exist. Call graph_declare to declare one, which starts its entry nodes.";
-    }
+    if (states.length === 0) return this.emptyScopeNote(scan, scope);
 
     const query: StatusQuery = {
       query: args.query,
@@ -959,10 +969,18 @@ export class GraphToolSet {
     return lines.join("\n");
   }
 
-  /** Resolve a single graph target for persisted/all scope (a declared graph
-   * wins for `all`; persisted store only for `persisted`). */
+  /**
+   * Resolve a single graph target for persisted/all scope (a declared graph
+   * wins for `all`; persisted store only for `persisted`).
+   *
+   * A graph the store HOLDS but this build cannot read is refused BY NAME
+   * rather than answered as "not found": the audit and the boot sweep already
+   * call that condition unreadable, and no position may be invented for it
+   * (A19). Genuinely unknown ids keep the not-found error.
+   */
   private resolveState(graphId: string, scope: GraphStatusScope): EngineState {
-    const persisted = this.persistedById();
+    const scan = this.persistedScan();
+    const persisted = new Map(scan.loaded.map((s) => [s.graphId, s]));
     if (scope === "all") {
       const entry = this.declaredGraphs.get(graphId);
       // A declared graph resolves through its LIVE record, never the
@@ -971,6 +989,18 @@ export class GraphToolSet {
     }
     const found = persisted.get(graphId);
     if (found) return found;
+    if (scan.blocked !== undefined) {
+      throw new Error(
+        `graph_status: the graph store at ${scan.storeDirectory} cannot be read: ${scan.blocked}.`,
+      );
+    }
+    if (scan.skippedGraphs.includes(graphId)) {
+      throw new Error(
+        `graph_status: graph "${graphId}" is stored at ${scan.storeDirectory} but this build ` +
+          "cannot read it (a stored definition or its run state failed a gate). " +
+          "graph_audit names the blocker; no position is reported for it.",
+      );
+    }
     throw new Error(
       `graph_status: graph "${graphId}" not found in ${scope} scope.`,
     );

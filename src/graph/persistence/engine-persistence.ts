@@ -45,7 +45,11 @@
  *   modified).
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// READ-ONLY on purpose: the container's writer (class EnginePersistence) and the
+// outcome projection are deleted, so this module must not be able to create or
+// rewrite an `engine-<slug>.json` even by accident (plan §3.6). Only the loader
+// and the retired-record refusal remain; P6.1 deletes the codec itself.
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { ENGINE_PHASE_VALUES, NODE_STATUS_VALUES } from "../../constants.ts";

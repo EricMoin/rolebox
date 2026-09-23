@@ -196,6 +196,29 @@ describe("stored-graph scanner", () => {
     expect(scan.skippedGraphs).toEqual([GRAPH_ONE]);
   });
 
+  it("skips a graph whose run state cannot be decoded instead of projecting idle", async () => {
+    // The definition is intact; the RECORDED POSITION is bound to a foreign
+    // plan revision — a foreign writer or corruption, the condition A19 names.
+    // That is not a position this build may report, so the graph is skipped
+    // (counted once) instead of being projected as an idle, all-pending graph.
+    const graph = declareGraph(dir, GRAPH_ONE);
+    await runToSecondNode(dir, graph, 100);
+    const store = GraphStore.openFile(dir);
+    try {
+      const row = store.readGraphState(GRAPH_ONE);
+      if (row === undefined) throw new Error("fixture: no run-state row");
+      store.writeGraphState({ ...row, planRevision: "foreign-plan-revision" });
+    } finally {
+      store.close();
+    }
+
+    const scan = scanPersistedStates(dir);
+    expect(scan.count).toBe(1);
+    expect(scan.loaded).toEqual([]);
+    expect(scan.skipped).toBe(1);
+    expect(scan.skippedGraphs).toEqual([GRAPH_ONE]);
+  });
+
   it("reports an unreadable store by its verdict, never as an empty one", () => {
     // A zero-byte authoritative file is a damaged store.
     mkdirSync(dir, { recursive: true });

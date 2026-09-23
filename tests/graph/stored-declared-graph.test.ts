@@ -200,6 +200,86 @@ describe("the stored graph record", () => {
     expect(persistDeclaredGraph(graph, storeRoot)).toBe(false);
     expect(existsSync(graphStoreFilePath(storeRoot))).toBe(false);
   });
+
+  it("agrees with the audit and the sweep that an unreadable run state is unreadable", async () => {
+    const dir = makeTmpDir("outcome-host-unreadable-state-");
+    const storeRoot = join(dir, "host-store");
+    const deliveries: OutcomeDispatchRequest[] = [];
+    const host = openHost({ dir, storeRoot, deliveries, completionPolicies: AUTHORIZED });
+    const declaring = createGraphToolSet({
+      stateDir: dir,
+      credentialIsolation: host.credentialIsolation,
+      outcomeDispatch: host.dispatch,
+      outcomeValidators: EMPTY_VALIDATORS,
+      completionPolicies: AUTHORIZED,
+    });
+    declaring.graph_declare({ declaration: naturalDeclaration() });
+    try {
+      await host.startDeclaredGraph(GRAPH_ID, {
+        sessionId: "session-1",
+        agent: "agent.orchestrator",
+      });
+
+      // The run HAS a real recorded position; bind its run-state ROW to a
+      // foreign plan revision — a foreign writer or corruption, the condition
+      // A19 names. Nothing else about the record changes.
+      const store = GraphStore.openFile(storeRoot);
+      try {
+        const recorded = store.readGraphState(GRAPH_ID);
+        if (recorded === undefined) throw new Error("fixture: no run-state row");
+        store.writeGraphState({ ...recorded, planRevision: "foreign-plan-revision" });
+      } finally {
+        store.close();
+      }
+
+      // A reader that does NOT hold the graph in its session registry: the
+      // post-restart shape, where every answer must come from the store.
+      const reader = createGraphToolSet({
+        stateDir: dir,
+        credentialIsolation: host.credentialIsolation,
+        outcomeDispatch: () => undefined,
+        outcomeValidators: EMPTY_VALIDATORS,
+        completionPolicies: AUTHORIZED,
+      });
+
+      // SESSION: nothing is declared in this process, so no position is shown.
+      expect(reader.graph_status({ scope: "session" })).not.toContain("[phase: idle]");
+
+      // PERSISTED and ALL: the graph is stored but unreadable, so the answer
+      // names the skipped definition instead of inventing an idle position.
+      for (const scope of ["persisted", "all"] as const) {
+        const list = reader.graph_status({ scope });
+        expect(list).not.toContain("[phase: idle]");
+        expect(list).toContain(GRAPH_ID);
+        expect(list).not.toContain("No graphs exist");
+      }
+
+      // TARGETED: no position either — the refusal names the condition.
+      let caught: unknown;
+      try {
+        reader.graph_status({ graph_id: GRAPH_ID, scope: "persisted" });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(String(caught)).toContain("cannot read it");
+      expect(String(caught)).not.toContain("[phase: idle]");
+
+      // THE AUDIT names the same condition by blocker...
+      const audit = await reader.graph_audit();
+      expect(audit.ledger).toBe("opened");
+      expect(audit.verdict).toBe("blocked");
+      expect(audit.blockers.map((blocker) => blocker.code)).toContain("state-malformed");
+
+      // ...and the BOOT SWEEP refuses the graph instead of re-running it.
+      const report = await host.recoverDeclaredGraphs();
+      expect(report.started).toEqual([]);
+      expect(report.resumed).toEqual([]);
+      expect(report.refused.join(" ")).toContain(GRAPH_ID + ": plan-revision-mismatch");
+    } finally {
+      host.close();
+    }
+  });
 });
 
 /** The phase one stored run-state row records, or `undefined`. */

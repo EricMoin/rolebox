@@ -20,8 +20,10 @@
  * Scope:
  * - `scanPersistedStates(storeDirectory)` — read every stored definition, decode
  *   it, project the recorded run position, and return the graphs this build can
- *   read. A definition that fails a gate is named in `skippedGraphs` (counted,
- *   never thrown, never fabricated). A store this build may not read at all is
+ *   read. A definition — or a run state — that fails a gate is named in
+ *   `skippedGraphs` (counted, never thrown, never fabricated: a graph whose
+ *   recorded position is unreadable is NOT projected as an `idle` one). A store
+ *   this build may not read at all is
  *   reported by its own verdict in `blocked` — never as "no graphs", which is
  *   the answer that would license a new run beside an unreadable one. A missing
  *   store yields an empty result, never an error.
@@ -62,11 +64,15 @@ import {
 export interface PersistedStateScan {
   /** The directory holding the authoritative store that was read. */
   storeDirectory: string;
-  /** How many graph definitions the store holds. */
+  /**
+   * How many graph definitions the store holds. Every stored definition is
+   * counted exactly once: one that failed a gate is in `skipped`, never in both
+   * `loaded` and `skipped` (the double count A19 caught).
+   */
   count: number;
   /** Successfully decoded graphs, projected to the query-boundary shape. */
   loaded: EngineState[];
-  /** Number of stored definitions skipped (failed a decode or state gate). */
+  /** Number of stored definitions skipped (failed a definition or run-state gate). */
   skipped: number;
   /** Graph ids of the skipped definitions, in scan order. */
   skippedGraphs: string[];
@@ -115,9 +121,11 @@ export interface PersistedStateSummary {
  * Scan the workspace's graph store and read every declared graph it holds.
  *
  * A definition that fails a gate is skipped honestly: counted in `skipped` /
- * named in `skippedGraphs` and never included in `loaded`. A missing store is a
- * clean empty result; a store this build may not read is an empty result with
- * `blocked` set. `scanPersistedStates` never throws.
+ * named in `skippedGraphs` and never included in `loaded` — and so is a stored
+ * graph whose RUN STATE cannot be decoded, which must not be reported as an
+ * `idle` graph. A missing store is a clean empty result; a store this build may
+ * not read is an empty result with `blocked` set. `scanPersistedStates` never
+ * throws.
  *
  * @param storeDirectory - The directory holding
  *   `graph-acceptance-ledger.sqlite` (the root the run path opens).
@@ -146,6 +154,8 @@ export function scanPersistedStates(storeDirectory: string): PersistedStateScan 
   const listing = listStoredEngineStates(storeDirectory);
   return {
     storeDirectory,
+    // Each stored definition is in exactly one bucket, so this is the store's
+    // definition count (see listStoredEngineStates).
     count: listing.states.length + listing.skipped.length,
     loaded: [...listing.states],
     skipped: listing.skipped.length,
