@@ -54,13 +54,24 @@
  *     and a `created` row refuses `markExecutionCreating`, `releaseExecution`
  *     and a second `claimExecution`.
  *
- *   --mode confirm-non-owner
- *     --graph --effect --attempt --owner --execution-id --now
- *     The G1 pin: a process that does NOT hold the claim calls
- *     `confirmExecution` on a row another owner left `creating`. Today the
- *     store's conditional update is on `state = 'creating'` only, so this
- *     SUCCEEDS; P2 owns the owner-fencing fix and this report is what makes
- *     that fix visible.
+ *   --mode confirm-stale
+ *     --graph --effect --attempt --owner --generation --execution-id --now
+ *     A process presents a claim it believes is current — one it never held
+ *     (generation 0), or one the row has moved past. The store's conditional
+ *     update names `(owner_id, owner_generation)`, so the confirmation is
+ *     REFUSED (`fenced`), the row is untouched, and the attempt is recorded on
+ *     it as a `stale-confirmation` refusal. This is the case that replaced the
+ *     pre-P2 pin, which asserted a NON-claimant SUCCEEDING at binding the
+ *     execution id (G1).
+ *
+ *   --mode hold-write-lock
+ *     --graph --now --lease-ms --marker-dir --hold-ms
+ *     Holds the store's WRITE LOCK for `--hold-ms` inside ONE transaction, and
+ *     says so from inside it (`lock-held.marker`). A transaction that reads
+ *     first and writes afterwards must PROMOTE its shared lock, and SQLite
+ *     refuses that promotion immediately while another connection holds the
+ *     write lock; the parent uses this mode to prove that a confirmation
+ *     arriving in that window WAITS instead of failing.
  *
  *   --mode receipt
  *     --graph --attempt --submission --effect --plan-revision --outcome
@@ -482,12 +493,56 @@ function receipt(store: GraphStore): void {
   });
 }
 
+/**
+ * Hold the store's WRITE LOCK for `--hold-ms` and say so from INSIDE the
+ * transaction.
+ *
+ * WHY THIS MODE EXISTS. A transaction that reads first and writes afterwards
+ * must PROMOTE its shared lock to a reserved one, and SQLite refuses that
+ * promotion immediately while another connection holds the write lock — it does
+ * not wait on `busy_timeout`. This mode is that other connection: it takes the
+ * lock with a REAL store write (a claim for its own, unrelated effect key inside
+ * one explicit transaction) and keeps it, so the parent can prove that a
+ * confirmation arriving in that window waits rather than failing. The marker is
+ * written after the write and before the commit, so the parent never has to
+ * guess whether the lock was held.
+ */
+function holdWriteLock(store: GraphStore): void {
+  const graphId = required("graph");
+  const markerDir = required("marker-dir");
+  const now = numberArg("now");
+  const leaseMs = numberArg("lease-ms");
+  const holdMs = numberArg("hold-ms");
+
+  store.transaction(() => {
+    // The FIRST operation is a WRITE, so this transaction already holds the
+    // store's write lock when the marker below announces it. `claimExecution`
+    // joins this open transaction instead of opening a second one.
+    store.claimExecution(
+      { graphId, effectId: "lock-holder", attemptId: "lock-holder" },
+      "owner-lock-holder",
+      now,
+      leaseMs,
+    );
+    writeFileSync(join(markerDir, "lock-held.marker"), "1");
+    // Hold the lock for a fixed window. The wait is BLOCKING on purpose: the lock
+    // belongs to this synchronous transaction, so yielding to the event loop
+    // would not end the hold, and an async sleep could not be awaited inside it.
+    const until = Date.now() + holdMs;
+    while (Date.now() < until) {
+      // spin: the transaction stays open for exactly `holdMs`
+    }
+  });
+  emit({ ok: true, mode: "hold-write-lock", holdMs });
+}
+
 // ── Entry ───────────────────────────────────────────────────────────────────
 
 const MODES = [
   "claim-race",
   "confirm-shape",
   "confirm-stale",
+  "hold-write-lock",
   "read-execution",
   "receipt",
 ] as const;
@@ -518,6 +573,9 @@ async function main(): Promise<void> {
         return;
       case "confirm-stale":
         confirmStale(store);
+        return;
+      case "hold-write-lock":
+        holdWriteLock(store);
         return;
       case "read-execution":
         readExecution(store);

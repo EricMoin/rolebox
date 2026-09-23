@@ -35,6 +35,12 @@
  *     WORKER still holding the FIRST claim confirms its own execution; the new
  *     owner's row is unchanged, the refusal is durable, and a THIRD process
  *     reads it back.
+ *   - "WAITS out a concurrent writer...": the parent seeds a `creating` row, a
+ *     WORKER holds the store's write lock from INSIDE a real transaction, and
+ *     the parent's confirmation must wait for it. A confirmation that read
+ *     before it wrote would fail the shared-to-reserved lock promotion
+ *     immediately (`database is locked`, reproduced cross-process); this case
+ *     pins the write-first order that removes it.
  *   - "a committed receipt...": worker A commits, worker B replays and worker C
  *     conflicts, each in its own process; the parent reads the durable rows.
  *
@@ -69,7 +75,7 @@
  * process that asked.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -92,6 +98,22 @@ const LEASE_MS = 60_000;
 const CHILD_DEADLINE_MS = 30_000;
 /** The parent's deadline for one barrier round. */
 const BARRIER_DEADLINE_MS = 15_000;
+/** How long the lock-holder worker keeps the store's write lock (see its case). */
+const HOLD_MS = 1_000;
+
+/**
+ * THE HARNESS BUDGET MUST EXCEED THIS FILE'S OWN DEADLINES. Bun's default is
+ * 5000ms per test, while one child here is deliberately given
+ * `CHILD_DEADLINE_MS` (30s) and one barrier round `BARRIER_DEADLINE_MS` (15s).
+ * A child that is merely SLOW — spawn latency under load, a `busy_timeout` wait
+ * on the shared store file — therefore had the CASE killed at 5s, its children
+ * reaped as "dangling", and the case's own diagnosis (which child overran,
+ * which marker never arrived) never written: a failure that said nothing about
+ * the store. The budget below lets the child deadline fire first, so what this
+ * file reports is always the store's behaviour. It asserts nothing about the
+ * store and weakens no case.
+ */
+setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
 
 // ── Worker protocol ─────────────────────────────────────────────────────────
 
@@ -785,6 +807,73 @@ describe("GraphStore — cross-process create right and conditional updates", ()
     expect(readBack.pid).not.toBe(late.pid);
     expect(readBack.row).toEqual(late.row);
     expect(countRows(fx, GRAPH_STORE_TABLES.executions)).toBe(1);
+  });
+
+  it("WAITS out a concurrent writer instead of failing the confirmation's lock promotion", async () => {
+    const fx = makeFixture("graph-xproc-lockwait-");
+    const effect = raceKey("effect-lockwait", 0);
+
+    // The row is owner-A's and `creating`, and the confirmation below presents
+    // that very claim — so the ONLY thing that can decide the outcome is locking.
+    const claimed = fx.store.claimExecution(effect, "owner-A", NOW, LEASE_MS);
+    expect(claimed.kind).toBe("claimed");
+    if (claimed.kind !== "claimed") throw new Error("fixture: the claim was not granted");
+    expect(fx.store.markExecutionCreating(effect, "owner-A", claimed.generation, NOW)).toBe(true);
+
+    // A REAL second process takes the store's WRITE LOCK — one transaction
+    // whose first operation writes — and says so from inside it.
+    const holder = spawnWorker(
+      "lock-holder",
+      workerArgs(fx, {
+        mode: "hold-write-lock",
+        graph: GRAPH,
+        now: String(NOW),
+        "lease-ms": String(LEASE_MS),
+        "marker-dir": fx.markerDir,
+        "hold-ms": String(HOLD_MS),
+      }),
+    );
+    await waitForMarkers([
+      {
+        path: join(fx.markerDir, "lock-held.marker"),
+        what: "the lock holder's write-lock marker",
+      },
+    ]);
+
+    // THE PIN. A transaction that reads first and writes afterwards must PROMOTE
+    // its shared lock, and SQLite refuses that immediately while the holder owns
+    // the write lock — this call used to throw `database is locked` from exactly
+    // this window. Taking the write lock first waits the holder out instead.
+    const started = Date.now();
+    const verdict = fx.store.confirmExecution(
+      effect,
+      "owner-A",
+      claimed.generation,
+      { executionId: "exec-lockwait" },
+      NOW,
+    );
+    const waited = Date.now() - started;
+    expect(verdict.kind).toBe("confirmed");
+    expect(
+      waited,
+      `the confirmation returned after ${waited}ms while another process held the write ` +
+        `lock for ${HOLD_MS}ms — it must WAIT for the lock, and this case must not pass ` +
+        "vacuously by racing past a holder that had already committed",
+    ).toBeGreaterThanOrEqual(HOLD_MS / 2);
+    expect(fx.store.readExecution(effect)?.state).toBe("created");
+    expect(fx.store.readExecution(effect)?.execution?.executionId).toBe("exec-lockwait");
+    expect((await holder.done).pid).not.toBe(process.pid);
+    // Two rows, and neither is a duplicate of the other: this effect's, and the
+    // unrelated key the HOLDER claimed to take the write lock. The confirmation
+    // bound its own row rather than inserting a second one for the same key.
+    expect(countRows(fx, GRAPH_STORE_TABLES.executions)).toBe(2);
+    expect(
+      fx.store.readExecution({
+        graphId: GRAPH,
+        effectId: "lock-holder",
+        attemptId: "lock-holder",
+      })?.state,
+    ).toBe("pending");
   });
 });
 

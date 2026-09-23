@@ -1086,6 +1086,35 @@ export class GraphStore {
       );
     }
     return this.joinOrBegin(() => {
+      // THE CONDITIONAL WRITE GOES FIRST, AND THAT ORDER IS THE POINT.
+      // A transaction that READS first and writes afterwards has to PROMOTE its
+      // shared lock to a reserved one, and while a racing process holds the
+      // store's write lock SQLite refuses that promotion IMMEDIATELY — the busy
+      // handler never runs — so this statement raised `database is locked` from a
+      // real second process instead of waiting its turn. It is the only
+      // read-then-write statement on the dispatch path, and the one a claim race
+      // exercises hardest. Writing first takes the reserved lock the way
+      // `claimExecution`'s leading `INSERT OR IGNORE` does, so a contended
+      // confirmation waits on `busy_timeout` and then decides on the row. The
+      // WHERE clause is the whole fence: a replayed, conflicting or stale
+      // confirmation changes nothing, so the read below still classifies the
+      // row the caller was refused by.
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.executions} SET state = 'created', execution_id = ?, task_id = ?, updated_at = ?
+         WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND owner_generation = ? AND state = 'creating'`,
+        execution.executionId,
+        execution.taskId ?? null,
+        now,
+        effect.graphId,
+        effect.effectId,
+        ownerId,
+        generation,
+      );
+      if (this.changes() === 1) {
+        return Object.freeze({ kind: "confirmed" as const, execution: identityOf(execution) });
+      }
+      // The write applied to NO row, so this call left the row untouched and the
+      // read below only classifies WHY it was refused.
       const row = this.readExecution(effect);
       if (row === undefined) return Object.freeze({ kind: "absent" as const });
       const current = row.ownerId === ownerId && row.generation === generation;
@@ -1126,34 +1155,21 @@ export class GraphStore {
           attemptedGeneration: generation,
         });
       }
-      this.db.run(
-        `UPDATE ${GRAPH_STORE_TABLES.executions} SET state = 'created', execution_id = ?, task_id = ?, updated_at = ?
-         WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND owner_generation = ? AND state = 'creating'`,
-        execution.executionId,
-        execution.taskId ?? null,
-        now,
-        effect.graphId,
-        effect.effectId,
-        ownerId,
-        generation,
-      );
-      if (this.changes() !== 1) {
-        // Unreachable on this transaction's own connection (the row was read and
-        // written here), kept total: a write that did not apply is a refusal,
-        // never a reported success.
-        const after = this.readExecution(effect);
-        return Object.freeze({
-          kind: "fenced" as const,
-          reason:
-            "the conditional confirmation applied to no row — the claim stopped being the row's current one",
-          state: after?.state ?? row.state,
-          ownerId: after?.ownerId ?? row.ownerId,
-          generation: after?.generation ?? row.generation,
-          attemptedOwnerId: ownerId,
-          attemptedGeneration: generation,
-        });
-      }
-      return Object.freeze({ kind: "confirmed" as const, execution: identityOf(execution) });
+      // Unreachable on this transaction's own connection: the write above names
+      // exactly this claim and this state, and a failed write still took the
+      // reserved lock, so no other process can move the row in between. Kept
+      // total — a conditional write that applied to no row is a refusal, never a
+      // reported success.
+      return Object.freeze({
+        kind: "fenced" as const,
+        reason:
+          "the conditional confirmation applied to no row — the claim stopped being the row's current one",
+        state: row.state,
+        ownerId: row.ownerId,
+        generation: row.generation,
+        attemptedOwnerId: ownerId,
+        attemptedGeneration: generation,
+      });
     });
   }
 
