@@ -102,16 +102,32 @@
  *
  * THE PLAN'S COMPLETION AUTHORIZATION IS A RUN PRECONDITION (D6). A plan body
  * that pins natural-completion authorizations was compiled against exact policy
- * revisions; `start`, `resume` and `submit` all corroborate every pinned ref
- * against the HOST-INSTALLED completion-policy capability BEFORE they read or
- * write anything. A missing capability is `completion-policy-unavailable`, a
- * missing id or revision is reported by name, and a revision installed with
- * different content is `completion-policy-digest-mismatch` — the plan's pinned
- * digest is the authority and is never re-bound. A plan that pins no
- * authorization needs no capability, so this gate changes nothing for it. The
- * natural-completion SETTLEMENT path itself is still deferred (the dispatch
- * completion bridge); what this slice fixes is that a plan whose authorization
- * this process cannot support never runs at all.
+ * revisions; `start`, `resume`, `submit` and `settleNatural` all corroborate
+ * every pinned ref against the HOST-INSTALLED completion-policy capability
+ * BEFORE they read or write anything. A missing capability is
+ * `completion-policy-unavailable`, a missing id or revision is reported by
+ * name, and a revision installed with different content is
+ * `completion-policy-digest-mismatch` — the plan's pinned digest is the
+ * authority and is never re-bound. A plan that pins no authorization needs no
+ * capability, so this gate changes nothing for it.
+ *
+ * A NATURAL COMPLETION SETTLES THROUGH THE SAME TRANSACTION, NOT A SECOND ONE.
+ * `settleNatural` is the entry point the host's dispatch completion bridge
+ * calls when a dispatched attempt REACHES ITS END: the delivery names the
+ * attempt and presents its bearer credential, and the runtime resolves the
+ * OUTCOME from the plan's pinned authorization — the delivery cannot name an
+ * outcome and carries no payload at all (`natural-completion.ts`). The
+ * settlement then runs through the same acceptance core, the same declared
+ * acceptance gates, the same reducer (loop counters and hard caps included) and
+ * the same atomic receipt/event/state/effects transaction as `submit`
+ * (`settleSubmission` is the one implementation of that path). A node with no
+ * pinned authorization is refused `natural-completion-unauthorized` — never
+ * downgraded to the explicit path. The settlement's provenance is READABLE BACK
+ * from the durable record: its submission key lives in the
+ * `natural-completion:<digest>` namespace that the ordinary ingress cannot
+ * mint, and the receipt, the accepted event and the decision all carry it. The
+ * production dispatch completion bridge that would deliver these facts is still
+ * HOST-side work: this build implements and tests the run path it calls.
  *
  * CREDENTIAL ISOLATION IS THE FIRST RUN PRECONDITION (D7). This build persists
  * attempt credentials in an ordinary file that any same-account process can
@@ -237,9 +253,17 @@ import {
 } from "./dispatch-effects.ts";
 import {
   verifyCompletionPolicy,
+  type CompletionPolicyRef,
   type CompletionPolicyRegistry,
 } from "../policy/completion-policy.ts";
 import { proposalDigest, readOutcomeProposal } from "./proposal.ts";
+import {
+  naturalCompletionProposalOf,
+  naturalCompletionSettlementOf,
+  naturalCompletionSubmissionId,
+  readNaturalCompletionDelivery,
+  type NaturalCompletionSettlement,
+} from "./natural-completion.ts";
 import type { ExecutionIdentity, ValidatorRegistry } from "./validators.ts";
 
 // ── The dispatch seam ───────────────────────────────────────────────────────
@@ -418,7 +442,27 @@ export type OutcomeRuntimeRefusalCode =
    * mismatch: there is nothing to compare, and settling anyway would drop the
    * constraint the host declared at dispatch.
    */
-  | "host-identity-absent";
+  | "host-identity-absent"
+  /**
+   * A natural-completion delivery is not the closed record this protocol
+   * defines: it is missing `nodeId` or `attemptId`, names a credential that is
+   * not a non-empty string, or carries a field the envelope does not define.
+   * The last case is the NO-DATA-CHANNEL rule: an `outcomeId`, a payload or an
+   * evidence list offered alongside a completion fact is refused by name, never
+   * dropped, because a completion fact that could carry a result would be a
+   * second submission channel.
+   */
+  | "malformed-natural-delivery"
+  /**
+   * The plan pins NO natural-completion authorization for the delivered node
+   * (D6): either the node is not in the plan, or it is not declared with a
+   * `natural` completion policy, or the mapping the plan pinned does not agree
+   * with the node's own declared mapping. The delivery is refused — a completion
+   * is NEVER re-interpreted as an explicit submission and the policy is never
+   * ignored, because the outcome a natural completion settles is exactly the
+   * mapping the plan was authorized for.
+   */
+  | "natural-completion-unauthorized";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -487,6 +531,70 @@ export type OutcomeSubmissionResult =
   /** A conflict or a settlement: this submission's decision was not committed. */
   | {
       readonly kind: "not-committed";
+      readonly decision: AcceptanceDecision;
+      readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
+    };
+
+/**
+ * Which trusted channel settles one attempt.
+ *
+ * A CLOSED, runtime-owned vocabulary. It is never read from a proposal or a
+ * delivery: `submit` is the worker's claimed outcome, `settleNatural` is the
+ * attempt's completion fact, and each entry point labels its own settlements.
+ * The label reaches the durable record through the submission KEY (the natural
+ * channel derives a `natural-completion:` key the ordinary ingress can never
+ * mint), so a caller cannot claim the other channel's provenance.
+ */
+type SettlementSource = "submission" | "natural-completion";
+
+/**
+ * What {@link OutcomeGraphRuntime.settleNatural} produced.
+ *
+ * The variants mirror {@link OutcomeSubmissionResult} because a natural
+ * completion IS a settlement through the same acceptance core and the same
+ * atomic transaction — one attempt, the plan's pinned authorization, the
+ * outcome's declared acceptance gates, one receipt, one accepted event. Each
+ * non-refused variant adds the {@link NaturalCompletionSettlement} record: the
+ * attempt, the outcome the PLAN authorized, the exact policy revision behind
+ * it, and the namespaced submission key the receipt persists.
+ */
+export type OutcomeNaturalSettlementResult =
+  /** The delivery was refused before anything was written. */
+  | {
+      readonly kind: "refused";
+      readonly refusals: readonly OutcomeRuntimeRefusal[];
+    }
+  /** The natural completion settled the attempt through the shared transaction. */
+  | {
+      readonly kind: "accepted";
+      readonly completion: NaturalCompletionSettlement;
+      readonly decision: AcceptanceDecision;
+      readonly receipt: ReceiptRecord;
+      readonly state: OutcomeGraphState;
+      readonly dispatched: readonly OutcomeDispatchRequest[];
+      readonly replayed: boolean;
+      readonly stop?: OutcomeStop;
+      readonly progress?: readonly ProgressReport[];
+    }
+  /**
+   * A declared acceptance gate did not pass, so the attempt is NOT settled: the
+   * receipt records the rejection, no accepted event exists, and the attempt
+   * stays open for the ordinary submission path.
+   */
+  | {
+      readonly kind: "rejected";
+      readonly completion: NaturalCompletionSettlement;
+      readonly decision: AcceptanceDecision;
+      readonly receipt: ReceiptRecord;
+    }
+  /**
+   * The attempt was already settled by a DIFFERENT logical submission (the
+   * worker's own claimed outcome, for example), so this delivery's decision was
+   * not committed and the original settlement stands.
+   */
+  | {
+      readonly kind: "not-committed";
+      readonly completion: NaturalCompletionSettlement;
       readonly decision: AcceptanceDecision;
       readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
     };
@@ -964,8 +1072,42 @@ export class OutcomeGraphRuntime {
    * digest names the submission. A refusal or a rejected gate writes no state
    * change; an accepted outcome's state write, receipt, accepted event and
    * pending effects share ONE transaction.
+   *
+   * This is the WORKER-CLAIMED channel: the proposal is untrusted input and its
+   * submission key is `submission:<digest>`. {@link settleNatural} is the
+   * attempt-completion channel and shares every line below through
+   * {@link settleSubmission} — there is deliberately no second settlement
+   * implementation to drift from this one.
    */
   submit(proposal: unknown, now?: number): OutcomeSubmissionResult {
+    return this.settleSubmission(proposal, now, "submission");
+  }
+
+  /**
+   * THE ONE SETTLEMENT PATH. Both entry points — a worker's claimed outcome
+   * (`submit`) and an attempt's completion fact (`settleNatural`) — reach the
+   * acceptance core here, so the attempt resolution, the run preconditions, the
+   * declared acceptance gates, the join into the ONE acceptance transaction and
+   * the ledger's replay rules are literally the same code.
+   *
+   * `source` labels the settlement for the SUBMISSION KEY only: the natural
+   * channel derives `natural-completion:<digest>` where the ordinary ingress
+   * derives `submission:<digest>`, which is how the persisted receipt and
+   * accepted event say which channel committed (see
+   * `natural-completion.ts`). It is runtime-owned, never proposal content.
+   *
+   * `expectedAttemptId` is the natural channel's additional cross-check: a
+   * delivery NAMES the attempt it is about, and that name must agree with the
+   * attempt the credential resolves to. The check runs HERE, against the same
+   * state read that settles, so a delivery cannot be resolved against one state
+   * and committed against another.
+   */
+  private settleSubmission(
+    proposal: unknown,
+    now: number | undefined,
+    source: SettlementSource,
+    expectedAttemptId?: string,
+  ): OutcomeSubmissionResult {
     const at = this.readClock(now);
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
@@ -1027,7 +1169,13 @@ export class OutcomeGraphRuntime {
       return refused([this.stateRefusal(error)]);
     }
 
-    const identity = this.identityFor(proposal, state, hostIdentity);
+    const identity = this.identityFor(
+      proposal,
+      state,
+      hostIdentity,
+      source,
+      expectedAttemptId,
+    );
     if ("refusal" in identity) return refused([identity.refusal]);
 
     const submission = {
@@ -1136,6 +1284,186 @@ export class OutcomeGraphRuntime {
       ...(persisted.stop === undefined ? {} : { stop: persisted.stop }),
       ...(progress.length === 0 ? {} : { progress }),
     };
+  }
+
+  /**
+   * Settle one attempt from its COMPLETION FACT — the natural-completion entry
+   * point the host's dispatch completion bridge calls.
+   *
+   * WHAT THIS IS NOT. It is not a second submission channel. The delivery names
+   * the attempt and presents that attempt's bearer credential; it does NOT name
+   * an outcome and cannot carry a payload. The outcome is resolved from the
+   * plan's PINNED natural-completion authorization (D6), and the settlement then
+   * runs through the SAME acceptance core, the same declared acceptance gates
+   * and the same atomic transaction as `submit` — see
+   * {@link settleSubmission}. A node with no pinned authorization is refused
+   * (`natural-completion-unauthorized`); it is never downgraded to the explicit
+   * path and its policy is never skipped.
+   *
+   * THE CREDENTIAL RESOLVES THE ATTEMPT, NOT THE DELIVERY. The delivery's
+   * `nodeId` and `attemptId` are CROSS-CHECKS against the binding the runtime
+   * persisted at dispatch: a credential that names no recorded attempt is
+   * `credential-unknown`, one issued for another node is
+   * `credential-node-mismatch`, and one issued for another attempt of the same
+   * node is `attempt-mismatch` (with `$.attemptId`). A missing credential is
+   * `credential-missing`. Nothing falls back to "the node's current attempt".
+   *
+   * IDEMPOTENT BY CONTENT. The synthesized submission is the canonical
+   * `{ nodeId, outcomeId, credential }` of the authorized mapping, so a
+   * repeated delivery derives the SAME `natural-completion:<digest>` key and
+   * the ledger REPLAYS the first receipt: no second settlement, no second
+   * accepted event, no state advance. A delivery for an attempt already settled
+   * by a different logical submission is reported `not-committed` with the
+   * ledger's `settled` verdict; the original settlement is never overwritten.
+   *
+   * THE RUN'S OWN SEMANTICS APPLY UNCHANGED. A natural completion that
+   * continues a declared loop advances the same counters through the same
+   * reducer and stops through the same durable stop (`loop-exhausted`,
+   * `progress-stalled`) as any other accepted outcome — and a continuation of a
+   * progress-governed loop, whose declared comparison subject the payload-free
+   * envelope cannot carry, is refused `progress-subject-missing` exactly as a
+   * submission without it is, because a declared comparison is never skipped.
+   *
+   * The delivery envelope is read by the TOTAL gate in `natural-completion.ts`
+   * before anything else: an extra field, an outcome or a payload offered
+   * alongside the completion fact is `malformed-natural-delivery` at its own
+   * path.
+   */
+  settleNatural(delivery: unknown, now?: number): OutcomeNaturalSettlementResult {
+    // The envelope is read FIRST because a malformed delivery is not a delivery:
+    // an unknown key is refused by name before the plan, the capability or the
+    // ledger is consulted.
+    const reading = readNaturalCompletionDelivery(delivery);
+    if (reading.kind === "malformed") {
+      return refused(
+        reading.issues.map((issue) => ({
+          code: issue.code,
+          path: issue.path,
+          message: issue.message,
+        })),
+      );
+    }
+    const at = this.readClock(now);
+    if (typeof at !== "number") return refused([at]);
+    // The authorization is a PLAN-LEVEL fact, so the mapping is resolved before
+    // any state is touched. An unauthorized node is refused here and can never
+    // reach the settlement path at all.
+    const authorization = this.naturalCompletionAuthorityOf(reading.delivery.nodeId);
+    if ("refusal" in authorization) return refused([authorization.refusal]);
+    const result = this.settleSubmission(
+      naturalCompletionProposalOf({
+        nodeId: reading.delivery.nodeId,
+        outcomeId: authorization.outcome,
+        credential: reading.delivery.credential,
+      }),
+      at,
+      "natural-completion",
+      reading.delivery.attemptId,
+    );
+    if (result.kind === "refused") return result;
+    // The provenance record is derived from the canonical proposal digest the
+    // decision was content-addressed by, so it names the very submission key the
+    // receipt persists.
+    const completion = naturalCompletionSettlementOf({
+      nodeId: reading.delivery.nodeId,
+      attemptId: reading.delivery.attemptId,
+      outcomeId: authorization.outcome,
+      proposalDigest: result.decision.proposalDigest,
+      policy: authorization.policy,
+    });
+    switch (result.kind) {
+      case "accepted":
+        return { ...result, completion };
+      case "rejected":
+        return { ...result, completion };
+      case "not-committed":
+        return { ...result, completion };
+    }
+  }
+
+  /**
+   * The natural-completion authorization the plan pinned for one node, or the
+   * refusal that says why this node may not be settled by a completion fact.
+   *
+   * Three answers, one of which is a refusal by NAME — never a fallback:
+   * - the plan declares no such node → `unknown-node`;
+   * - the node is declared but its `completion` policy is not `natural`, or
+   *   the plan pinned no authorization for it at all →
+   *   `natural-completion-unauthorized`;
+   * - the plan pinned an authorization whose outcome disagrees with the node's
+   *   own declared mapping → `natural-completion-unauthorized` too: a plan that
+   *   claims authority for an outcome the topology does not declare is refused
+   *   rather than resolved in either direction.
+   *
+   * The outcome returned is the AUTHORIZATION's, never a caller's, which is what
+   * makes "one attempt maps to exactly one outcome" structural.
+   */
+  private naturalCompletionAuthorityOf(
+    nodeId: string,
+  ):
+    | { readonly outcome: string; readonly policy: CompletionPolicyRef }
+    | { readonly refusal: OutcomeRuntimeRefusal } {
+    const node = this.plan.nodes.find((entry) => entry.id === nodeId);
+    if (node === undefined) {
+      return {
+        refusal: {
+          code: "unknown-node",
+          path: "$.nodeId",
+          message:
+            "outcome-runtime: node " +
+            JSON.stringify(nodeId) +
+            " is not declared by plan revision " +
+            this.planRevision +
+            " — a natural completion can only settle a node the compiled plan declares",
+        },
+      };
+    }
+    const authorization = (this.plan.completionAuthorizations ?? []).find(
+      (entry) => entry.nodeId === nodeId,
+    );
+    const declared = node.completion;
+    if (authorization === undefined || declared?.mode !== "natural") {
+      return {
+        refusal: {
+          code: "natural-completion-unauthorized",
+          path: "$.nodeId",
+          message:
+            "outcome-runtime: node " +
+            JSON.stringify(nodeId) +
+            " declares " +
+            (declared === undefined
+              ? "no completion policy"
+              : declared.mode === "natural"
+                ? "natural completion of outcome " + JSON.stringify(declared.outcome)
+                : "explicit completion") +
+            " and plan revision " +
+            this.planRevision +
+            " pins no natural-completion authorization for it — a completion fact is never " +
+            "re-interpreted as an explicit submission and the completion policy is never " +
+            "ignored, so nothing was settled",
+        },
+      };
+    }
+    if (declared.outcome !== authorization.outcome) {
+      return {
+        refusal: {
+          code: "natural-completion-unauthorized",
+          path: "$.nodeId",
+          message:
+            "outcome-runtime: node " +
+            JSON.stringify(nodeId) +
+            " declares natural completion of outcome " +
+            JSON.stringify(declared.outcome) +
+            ", but plan revision " +
+            this.planRevision +
+            " pins an authorization for outcome " +
+            JSON.stringify(authorization.outcome) +
+            " — the pinned mapping and the topology disagree, and neither is resolved in the " +
+            "other's favour",
+        },
+      };
+    }
+    return { outcome: authorization.outcome, policy: authorization.policy };
   }
 
   /**
@@ -2061,11 +2389,21 @@ export class OutcomeGraphRuntime {
    * AND THEN THE HOST IDENTITY IS CHECKED (D9), against the attempt's OWN
    * recorded dispatch identity: a submission from another host invocation is
    * refused by name before any gate runs and before anything is written.
+   *
+   * THE SOURCE LABELS THE SUBMISSION KEY, AND ONLY THE KEY. `source` decides
+   * whether the content address is `submission:<digest>` or the
+   * `natural-completion:` namespace; it never widens or narrows what the
+   * credential may settle. `expectedAttemptId` is the natural channel's
+   * cross-check: the delivery's own attempt NAME must agree with the attempt the
+   * credential resolves to, so a credential can never be re-aimed at another
+   * attempt by relabelling the delivery.
    */
   private identityFor(
     proposal: unknown,
     state: OutcomeGraphState,
     hostIdentity: HostIdentityReading,
+    source: SettlementSource,
+    expectedAttemptId?: string,
   ): ExecutionIdentity | { readonly refusal: OutcomeRuntimeRefusal } {
     const reading = readOutcomeProposal(proposal);
     if (reading.kind === "malformed") {
@@ -2161,6 +2499,28 @@ export class OutcomeGraphRuntime {
         },
       };
     }
+    // THE DELIVERY'S ATTEMPT NAME MUST AGREE WITH THE CREDENTIAL'S ATTEMPT
+    // (the natural-completion cross-check): the delivery says WHICH attempt
+    // completed, and that name is checked against the attempt the credential
+    // resolved to — never used to choose one. A credential issued for another
+    // attempt of the SAME node is caught here rather than settling the attempt
+    // the credential really belongs to.
+    if (expectedAttemptId !== undefined && attemptId !== expectedAttemptId) {
+      return {
+        refusal: {
+          code: "attempt-mismatch",
+          path: "$.attemptId",
+          message:
+            "outcome-runtime: the delivery names attempt " +
+            JSON.stringify(expectedAttemptId) +
+            " of node " +
+            JSON.stringify(reading.proposal.nodeId) +
+            ", but its credential was issued for attempt " +
+            JSON.stringify(attemptId) +
+            " — a credential is bound to one attempt, and the delivery's name never selects it",
+        },
+      };
+    }
     // THE HOST IDENTITY IS THE ADDITIONAL CONSTRAINT (D9), checked AFTER the
     // credential resolved the attempt and BEFORE any decision is taken. The
     // reference is the identity the DISPATCH recorded on this attempt's entry —
@@ -2176,7 +2536,7 @@ export class OutcomeGraphRuntime {
     return {
       graphId: this.graphId,
       attemptId,
-      submissionId: submissionIdOf(proposal),
+      submissionId: submissionIdOf(proposal, source),
     };
   }
 
@@ -2668,20 +3028,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 /**
- * The submission id of one proposal: its canonical content digest.
+ * The submission id of one proposal: its canonical content digest, in the
+ * namespace of the channel that settled.
  *
  * CONTENT-ADDRESSED on purpose. One logical submission is one proposal content
  * for one attempt, so a retried submission derives the SAME key and the ledger
- * replays the persisted decision instead of writing a second receipt. A
- * proposal that cannot be digested at all gets a placeholder key: the digest
+ * replays the persisted decision instead of writing a second receipt. The
+ * NAMESPACE is the provenance: the ordinary ingress always derives
+ * `submission:<digest>`, the natural-completion channel derives
+ * `natural-completion:<digest>` (see `natural-completion.ts`), and the
+ * persisted receipt and accepted event therefore say which channel committed.
+ * The two namespaces cannot collide, and a proposal's content cannot choose
+ * one — only the runtime's own `source` can.
+ *
+ * A proposal that cannot be digested at all gets a placeholder key: the digest
  * failure is the acceptance core's refusal to report, and nothing is written
  * under either key.
  */
-function submissionIdOf(proposal: unknown): string {
+function submissionIdOf(proposal: unknown, source: SettlementSource): string {
   const reading = readOutcomeProposal(proposal);
   if (reading.kind !== "ok") return "unclaimed-submission";
   try {
-    return "submission:" + proposalDigest(reading.proposal);
+    const digest = proposalDigest(reading.proposal);
+    return source === "natural-completion"
+      ? naturalCompletionSubmissionId(digest)
+      : "submission:" + digest;
   } catch {
     return "unrepresentable-submission";
   }

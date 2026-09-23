@@ -53,6 +53,17 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
 - natural-completion AUTHORIZATION as a run precondition: a plan that pins a
   policy revision this host did not install never starts, resumes or settles
   (`src/graph/policy/completion-policy.ts`, `src/graph/outcome/runtime.ts`);
+- the natural-completion SETTLEMENT run path (`settleNatural`): a STRICTLY
+  closed completion-fact envelope (the node, the attempt, and that attempt's
+  bearer credential — no outcome, no payload, no evidence), the settled outcome
+  resolved from the plan's pinned authorization, the outcome's declared
+  acceptance gates run through the SAME registry, and the settlement committed
+  through the SAME atomic receipt/event/state/effects transaction a submission
+  uses; the channel's provenance is a namespaced content-addressed submission
+  key (`natural-completion:<digest>`) persisted in the receipt and the accepted
+  event, so a repeated delivery replays the first receipt and a worker's claimed
+  submission can never wear the natural label
+  (`src/graph/outcome/natural-completion.ts`, `runtime.ts`);
 - the read-only drain audit (`src/graph/audit/drain-audit.ts`).
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
@@ -60,9 +71,11 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
 - any host credential-isolation adapter: none ships in this build and this build
   cannot provide one (it writes the ledger as an ordinary file), so the outcome
   run path refuses by default until a deployment injects its own (D7);
-- the protocol-aware dispatch completion bridge: the outcome runtime is driven by
-  a synchronous host adapter, so production dispatch settles no node through it
-  and the natural-completion SETTLEMENT path is not executed;
+- the protocol-aware dispatch completion BRIDGE: the runtime exposes
+  `settleNatural` for a host that observes a dispatched attempt completing, but
+  this build ships no host bridge, and the run path is driven by a synchronous
+  host adapter — so production dispatch still settles no node through it and the
+  bridge itself remains HOST-side work;
 - any HOST implementation of the dispatch adapter or of the identity
   capability: this build ships the contracts and the reconciliation, and no
   adapter, so every production entry refuses an outcome graph until a
@@ -1701,14 +1714,62 @@ node is bound to the exact policy revision its plan pinned, republishing the
 policy produces a different plan revision and so a different attempt identity,
 and there is no second channel in which an old attempt could meet new
 authorization semantics. The capability check is a precondition of the ONE run
-path: `start`, `resume` and `submit` all consult it before any state is
-read, so a plan this process cannot support does not advance one step under
-weaker semantics — the blocked recovery writes nothing, including no effect
-transition (the D4 atomic boundary) — and a natural mapping never acquires a
-settlement channel of its own. The natural-completion SETTLEMENT path itself
-(the dispatch completion bridge) remains deferred: what D6 fixes is that a plan
-whose completion authorization is missing, denied or unsupported can never run,
-reach a receipt, or pass a stop boundary at all.
+path: `start`, `resume`, `submit` and `settleNatural` all consult it
+before any state is read, so a plan this process cannot support does not advance
+one step under weaker semantics — the blocked recovery writes nothing, including
+no effect transition (the D4 atomic boundary) — and a natural mapping never
+acquires a settlement channel of its own. What D6 fixes is that a plan whose
+completion authorization is missing, denied or unsupported can never run, reach
+a receipt, or pass a stop boundary at all.
+
+THE SETTLEMENT RUN PATH REUSES THAT ATTEMPT AND THAT ATOMIC ENTRY. The runtime
+entry point it compiles for is `settleNatural(delivery)`: the host's dispatch
+completion bridge presents one attempt's completion fact as a STRICTLY closed
+envelope — the node, the attempt, and that attempt's bearer credential, and
+nothing else. The envelope names no outcome and carries no payload, no evidence
+list and no completion metadata (an extra field is `malformed-natural-delivery`
+at its own path), because a completion fact that could route a result would be a
+second submission channel in disguise. The node and attempt are CROSS-CHECKS
+against the binding the runtime persisted at dispatch (`credential-missing`,
+`credential-unknown`, `credential-node-mismatch`, `attempt-mismatch` with the
+offending field's path), never selectors: the attempt is resolved from the
+credential. The outcome is then the pinned authorization's — a node with no
+pinned authorization, or a node the plan does not declare, is refused
+(`natural-completion-unauthorized` / `unknown-node`) and is NEVER downgraded to
+the explicit path or settled under a policy that was not authorized. From there
+the settlement is the SAME path a submission takes: the proposal is the
+canonical `{ nodeId, outcomeId, credential }`, the outcome's declared
+acceptance gates run through the same validator registry (a failing gate or an
+indeterminate one writes a rejection receipt and leaves the attempt open), and
+the receipt, the accepted event, the graph state and the pending effects commit
+in the ONE transaction the acceptance core owns. Because the envelope is
+content-addressed, a repeated delivery derives the same key and the ledger
+REPLAYS the first receipt — one settlement, one accepted event — while a
+delivery for an attempt already settled by a different logical submission is
+reported `not-committed` with the ledger's `settled` verdict. A natural
+continuation advances the same loop counters and stops through the same durable
+stop (`loop-exhausted`, `progress-stalled`) as any other accepted outcome; a
+continuation of a progress-governed loop, whose declared comparison subject the
+payload-free envelope cannot carry, is refused `progress-subject-missing`
+exactly as a submission without that subject is, because a declared comparison
+is never skipped.
+
+THE SOURCE IS READABLE BACK FROM THE DURABLE RECORD. A natural completion is a
+distinct logical submission in its own key namespace: the ordinary ingress
+always derives `submission:<digest>`, the natural channel derives
+`natural-completion:<digest>`, and the receipt row, the accepted-event row and
+the acceptance decision all carry that key. The namespace is derived from the
+canonical proposal digest (so replay is content-addressed) and can only be
+minted by the runtime's own settlement source — a proposal's content cannot
+choose it — so "settled by a completion fact" and "settled by a worker's claimed
+submission" are told apart without a second store, a log line or a payload
+convention.
+
+WHAT IS STILL HOST-SIDE. This build implements and tests the run path above; it
+does not ship the production dispatch completion BRIDGE that would observe a
+dispatched attempt reaching its end and deliver the fact. Until a deployment
+injects one, no natural completion is delivered in production, and the run path
+is exercised by the settlement tests instead.
 
 ENFORCED BY TESTS. The four rows each have a case (the codes under a missing
 capability and each unresolvable request; a denial by rule and by default; an
@@ -1722,12 +1783,13 @@ authorized digest, rules cannot be smuggled through the request, a repository
 `graph_declare` refuses the draft by name without the host capability and
 persists with it.
 
-DEFERRED by this slice, and not implied by it: the protocol-aware dispatch
-completion bridge that would settle a naturally completed node (and therefore
-the runtime's own use of the pinned authorization), effect EXECUTION beyond the
-dispatch seam, storage format 3 with its `2 -> 3` migrator, the
-`src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
-typed-predicate vocabulary, and any `src/dispatch/**` change.
+DEFERRED by this slice, and not implied by it: the HOST implementation of the
+dispatch completion bridge that would observe a dispatched attempt completing,
+deliver that fact to `settleNatural` and report the settlement it produced;
+effect EXECUTION beyond the dispatch seam, storage format 3 with its
+`2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
+adapters/schema compatibility, the typed-predicate vocabulary, and any
+`src/dispatch/**` change.
 
 E0 DELIVERS THE READ-ONLY DRAIN AUDIT — THE PHASE-E ENTRY POINT, AND NOTHING
 ELSE. Stage E is "drain or explicitly migrate legacy executions, then retire
@@ -2244,6 +2306,9 @@ versioned or rewritten rather than constraining the new protocol to old defects.
 - [Node declarations](../src/types.graph-v2.ts): role-independent configuration.
 - [Condition resolver](../src/graph/engine/condition-resolver.ts):
   `signal_observed` tests a defined ledger value, not payload content.
+- [Natural-completion settlement](../src/graph/outcome/natural-completion.ts):
+  the closed completion-fact envelope and the `natural-completion:` provenance
+  namespace the run path persists.
 - [Loop execution](../src/graph/engine/loop-group-executor.ts): current inferred
   marker and unresolved-content decisions.
 - [Persistence](../src/graph/engine/engine-persistence.ts): version gate before
