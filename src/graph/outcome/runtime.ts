@@ -313,6 +313,53 @@ export type {
   OutcomeExecutionLookup,
 } from "./dispatch-effects.ts";
 
+// ── The create-right fence a credential re-issue runs under ─────────────────
+
+/**
+ * What one fence claim answered: this process now holds the create right for
+ * the effect, or somebody else does.
+ */
+export type AttemptReissueClaim =
+  | {
+      readonly kind: "claimed";
+      /** The owner to name when the claim is given back. */
+      readonly ownerId: string;
+    }
+  | {
+      readonly kind: "held";
+      /** Host-authored: which claim holds it, never a credential. */
+      readonly reason: string;
+    };
+
+/**
+ * The host's CREATE-RIGHT fence for a lost attempt credential (plan §3.3).
+ *
+ * WHY A RE-ISSUE NEEDS ONE. "The effect row is `pending` and the host answered
+ * `absent`" says nothing about whether another process is between its OWN
+ * re-issue and its create. Without a fence, a second recoverer can replace the
+ * recorded verifier after the first one has re-issued but before it has
+ * delivered, so the worker the first process dispatches holds a credential that
+ * no longer matches the recorded verifier — credential re-binding, the failure
+ * §1 forbids. The create right is the one durable fact that changes at exactly
+ * that boundary, so the re-issue is performed only while this process holds it
+ * and a loser refuses by name instead of overwriting the winner's verifier.
+ *
+ * A HOST THAT CANNOT SUBSTANTIATE IT DOES NOT GET THE RE-ISSUE. Omitting the
+ * capability leaves the re-issue refusing with `credential-reissue-forbidden`:
+ * a check that is only declared and has no mechanism does not count, and the
+ * path must not silently accept (plan §3.3).
+ */
+export interface AttemptCredentialReissueFence {
+  /** Take the create right for one effect, or report it held elsewhere. */
+  claim(effect: OutcomeDispatchEffectKey): AttemptReissueClaim;
+  /**
+   * Give back a claim this runtime took and did NOT hand to the platform. The
+   * caller states the reason as the proof: no create was attempted, so nothing
+   * was created and a later recovery may create exactly once.
+   */
+  abandon(effect: OutcomeDispatchEffectKey, ownerId: string, reason: string): void;
+}
+
 // ── Refusals ────────────────────────────────────────────────────────────────
 
 /**
@@ -852,6 +899,23 @@ export interface OutcomeGraphRuntimeOptions {
    * The production entries check the same condition before opening a ledger.
    */
   readonly dispatch?: OutcomeDispatchAdapter;
+  /**
+   * The host's CREATE-RIGHT fence (plan §3.3) — the mechanism that makes a
+   * credential re-issue single-winner.
+   *
+   * A lost credential is re-issued only while this process holds the create
+   * right for the effect, so a second recoverer (another process, or a second
+   * boot sweep over the same workspace) cannot replace the verifier between
+   * the first process's re-issue and its create — the window in which the
+   * worker it is about to dispatch would otherwise be handed a credential the
+   * store no longer records.
+   *
+   * OMITTED IS NOT NEUTRAL: without it a lost credential is NOT re-issued.
+   * `resume` reports `credential-reissue-forbidden` naming the missing fence,
+   * because "the effect looks pending" is not proof that the old create right
+   * has lapsed and a capability without an enforcing mechanism does not count.
+   */
+  readonly reissueFence?: AttemptCredentialReissueFence;
   /** The installed validator implementations the plan's gates resolve against. */
   readonly validators: ValidatorRegistry;
   /** The root every evidence reference must resolve inside. */
@@ -1006,6 +1070,11 @@ export class OutcomeGraphRuntime {
   private readonly plan: CompiledPlan;
   private readonly ledger: AcceptanceLedger;
   private readonly dispatch: NormalizedOutcomeDispatch | undefined;
+  /**
+   * The host's create-right fence (plan §3.3). Absent means the mechanism is
+   * not installed, and a re-issue refuses rather than running without it.
+   */
+  private readonly reissueFence: AttemptCredentialReissueFence | undefined;
   private readonly validators: ValidatorRegistry;
   private readonly artifactRoot: string;
   private readonly clock: () => number;
@@ -1049,6 +1118,7 @@ export class OutcomeGraphRuntime {
     this.planRevision = options.plan.planRevision;
     this.ledger = options.ledger;
     this.dispatch = normalizeOutcomeDispatch(options.dispatch);
+    this.reissueFence = options.reissueFence;
     this.validators = options.validators;
     this.artifactRoot = options.artifactRoot;
     this.clock = options.clock ?? (() => Date.now());
@@ -2601,6 +2671,10 @@ export class OutcomeGraphRuntime {
           lookup,
           at,
           reason: resolvedCredential.reason,
+          // The verifier recovery OBSERVED for this attempt. The re-issue
+          // replaces exactly this generation and refuses if the recorded one
+          // has already moved, so it can never overwrite a newer verifier.
+          observedDigest: armed.attemptCredentialDigest,
         });
         if ("refusal" in reissuedCredential) {
           refusals.push(reissuedCredential.refusal);
@@ -2833,6 +2907,18 @@ export class OutcomeGraphRuntime {
    *    still carries it is refused `credential-unknown`, exactly as a
    *    superseded attempt's credential is. The previous value is never kept
    *    beside the new one, and no report names either.
+   * 4. THE RE-ISSUE HOLDS THE CREATE RIGHT (`reissueFence`). The fence is the
+   *    store's own claim, taken BEFORE the new generation is minted and kept
+   *    until the create returns, so a second recoverer that reaches the same
+   *    effect while this process is between the re-issue and its create is told
+   *    `held` and refuses instead of replacing the verifier of an attempt about
+   *    to be dispatched. A host that installs no fence gets no re-issue: the
+   *    refusal names the missing mechanism (plan §3.3).
+   * 5. THE WRITE IS CONDITIONAL ON THE OBSERVED GENERATION. The transaction
+   *    re-reads the recorded verifier and replaces it only while it is still
+   *    the one recovery OBSERVED; a verifier that moved in between is reported
+   *    (`credential-reissue-forbidden`) rather than overwritten, so two
+   *    re-issues over one store can never both commit.
    *
    * WHEN THE ANSWER IS `unknown` THIS REFUSES (`credential-reissue-forbidden`)
    * and the effect stays exactly as it is. Re-issuing and re-delivering under an
@@ -2853,6 +2939,11 @@ export class OutcomeGraphRuntime {
     readonly lookup: OutcomeExecutionLookup;
     readonly at: number;
     readonly reason: string;
+    /**
+     * The verifier recovery observed for this attempt. The replacement is
+     * conditional on the recorded one still being this value.
+     */
+    readonly observedDigest: string;
   }): { readonly credential: string } | { readonly refusal: OutcomeRuntimeRefusal } {
     const effect = input.effect;
     const target = input.target;
@@ -2902,8 +2993,100 @@ export class OutcomeGraphRuntime {
         },
       };
     }
-    const replaced = this.replaceAttemptCredential(target.nodeId, target.attemptId, input.at);
-    if ("refusal" in replaced) return replaced;
+    // THE RE-ISSUE TAKES THE CREATE RIGHT BEFORE IT MINTS ANYTHING (plan §3.3).
+    // The claim is the SAME conditional right the host's create takes, so while
+    // this process holds it, a second recoverer is told `held` (or, through the
+    // registry lookup, `unknown`) and cannot replace the verifier this process
+    // is about to deliver. A host that installs no fence gets no re-issue.
+    const key = dispatchEffectKeyOf(this.graphId, target.attemptId);
+    const fence = this.reissueFence;
+    if (fence === undefined) {
+      return {
+        refusal: {
+          code: "credential-reissue-forbidden",
+          path: "$.effectId",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effectId) +
+            " names node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            ", its credential is gone (" +
+            input.reason +
+            "), and re-issuing one needs the host's CREATE-RIGHT fence — this runtime holds " +
+            "none, so the attempt is NOT re-issued and NOT re-delivered: without the fence a " +
+            "second recoverer could replace the verifier of an attempt this process is about " +
+            "to dispatch, and the effect stays unsettled and is reported",
+        },
+      };
+    }
+    let claim: Extract<AttemptReissueClaim, { kind: "claimed" }>;
+    try {
+      const reading = fence.claim(key);
+      if (reading.kind === "held") {
+        return {
+          refusal: {
+            code: "credential-reissue-forbidden",
+            path: "$.effectId",
+            message:
+              "outcome-runtime: dispatch effect " +
+              JSON.stringify(effectId) +
+              " names node " +
+              JSON.stringify(target.nodeId) +
+              " on attempt " +
+              JSON.stringify(target.attemptId) +
+              ", its credential is gone (" +
+              input.reason +
+              "), and the create right for it is held elsewhere (" +
+              reading.reason +
+              ") — the re-issue is refused rather than overwriting a verifier another " +
+              "recoverer may already have committed, so the effect stays unsettled and is " +
+              "reported",
+          },
+        };
+      }
+      claim = reading;
+    } catch (error) {
+      return {
+        refusal: {
+          code: "credential-reissue-forbidden",
+          path: "$.effectId",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effectId) +
+            " names node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            ", its credential is gone (" +
+            input.reason +
+            "), and the host's create-right fence could not be read (" +
+            errorText(error) +
+            ") — nothing was re-issued and the effect stays unsettled",
+        },
+      };
+    }
+    const replaced = this.replaceAttemptCredential(
+      target.nodeId,
+      target.attemptId,
+      input.at,
+      input.observedDigest,
+    );
+    if ("refusal" in replaced) {
+      // The claim was taken and NOTHING was handed to the platform, so giving
+      // it back is a proof-backed release: no execution was created.
+      try {
+        fence.abandon(
+          key,
+          claim.ownerId,
+          "the credential re-issue refused before any create was attempted",
+        );
+      } catch {
+        // The refusal is already the answer; the claim lapses with its lease.
+      }
+      return replaced;
+    }
     return { credential: replaced.credential };
   }
 
@@ -2924,85 +3107,115 @@ export class OutcomeGraphRuntime {
    * that is not in flight, and a body layout that is not this build's current
    * one are all structured refusals — recovery never rewrites a record it could
    * not read, and never advances an older body version.
+   *
+   * THE REPLACEMENT IS CONDITIONAL ON THE OBSERVED GENERATION. The transaction
+   * re-reads the recorded verifier and writes only while it is still the one
+   * recovery observed; a verifier that moved in between is a structured
+   * `credential-reissue-forbidden` refusal and NO write happens. Together with
+   * the create-right fence this is what makes two re-issues over one store a
+   * single-winner operation: the loser reports instead of overwriting the
+   * winner's verifier.
    */
   private replaceAttemptCredential(
     nodeId: string,
     attemptId: string,
     at: number,
+    observedDigest: string,
   ): { readonly credential: string } | { readonly refusal: OutcomeRuntimeRefusal } {
     try {
-      const credential = this.ledger.runInTransaction((tx) => {
-        const record = tx.readGraphState(this.graphId);
-        if (record === undefined) {
-          throw new OutcomeAdvanceRefusedError(
-            "state-ledger-disagreement",
-            "outcome-runtime: the state of graph " +
-              JSON.stringify(this.graphId) +
-              " disappeared between recovery's read and the credential re-issue — nothing " +
-              "was re-issued",
+      return this.ledger.runInTransaction(
+        (tx): { readonly credential: string } | { readonly refusal: OutcomeRuntimeRefusal } => {
+          const record = tx.readGraphState(this.graphId);
+          if (record === undefined) {
+            throw new OutcomeAdvanceRefusedError(
+              "state-ledger-disagreement",
+              "outcome-runtime: the state of graph " +
+                JSON.stringify(this.graphId) +
+                " disappeared between recovery's read and the credential re-issue — nothing " +
+                "was re-issued",
+            );
+          }
+          const state = readOutcomeGraphState(record, this.plan);
+          if (state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY) {
+            throw new OutcomeAdvanceRefusedError(
+              "unsupported-state-version",
+              "outcome-runtime: graph " +
+                JSON.stringify(this.graphId) +
+                " records state body version " +
+                String(state.bodyVersion) +
+                ", which this build does not rewrite — the credential of a recovered attempt is " +
+                "never re-issued into an older layout",
+            );
+          }
+          const position = this.plan.nodes.findIndex((node) => node.id === nodeId);
+          const current = position < 0 ? undefined : state.nodes[position];
+          if (current === undefined || current.attemptId !== attemptId) {
+            throw new OutcomeAdvanceRefusedError(
+              "attempt-mismatch",
+              "outcome-runtime: the credential re-issue was asked for node " +
+                JSON.stringify(nodeId) +
+                " attempt " +
+                JSON.stringify(attemptId) +
+                ", but the state records " +
+                (current === undefined || current.attemptId === undefined
+                  ? "no such attempt"
+                  : "attempt " + JSON.stringify(current.attemptId)) +
+                " — nothing was re-issued",
+            );
+          }
+          if (current.status !== "dispatched" || current.attemptCredentialDigest === undefined) {
+            throw new OutcomeAdvanceRefusedError(
+              "node-not-dispatched",
+              "outcome-runtime: node " +
+                JSON.stringify(nodeId) +
+                " is " +
+                current.status +
+                " (or records no credential digest), so its attempt is not one whose lost " +
+                "credential this build re-issues — nothing was written",
+            );
+          }
+          // THE CONDITIONAL WRITE (R1). The verifier is replaced only while it
+          // is still the generation recovery OBSERVED; a value that moved in
+          // between is reported, never overwritten.
+          if (current.attemptCredentialDigest !== observedDigest) {
+            return {
+              refusal: {
+                code: "credential-reissue-forbidden",
+                path: "$.attemptCredentialDigest",
+                message:
+                  "outcome-runtime: node " +
+                  JSON.stringify(nodeId) +
+                  " attempt " +
+                  JSON.stringify(attemptId) +
+                  " was observed with one recorded credential verifier, but the state now " +
+                  "records a DIFFERENT one — another recoverer re-issued this attempt's " +
+                  "credential first, and this re-issue is refused rather than overwriting a " +
+                  "verifier that may already belong to a dispatched worker",
+              },
+            };
+          }
+          const minted = this.credentialSource(
+            attemptCredentialBinding({
+              graphId: this.graphId,
+              nodeId,
+              attemptId,
+              planRevision: this.planRevision,
+            }),
           );
-        }
-        const state = readOutcomeGraphState(record, this.plan);
-        if (state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY) {
-          throw new OutcomeAdvanceRefusedError(
-            "unsupported-state-version",
-            "outcome-runtime: graph " +
-              JSON.stringify(this.graphId) +
-              " records state body version " +
-              String(state.bodyVersion) +
-              ", which this build does not rewrite — the credential of a recovered attempt is " +
-              "never re-issued into an older layout",
+          const nodes = state.nodes.map((entry, index) =>
+            index === position
+              ? Object.freeze({
+                  ...entry,
+                  attemptCredentialDigest: attemptCredentialDigest(minted),
+                })
+              : entry,
           );
-        }
-        const position = this.plan.nodes.findIndex((node) => node.id === nodeId);
-        const current = position < 0 ? undefined : state.nodes[position];
-        if (current === undefined || current.attemptId !== attemptId) {
-          throw new OutcomeAdvanceRefusedError(
-            "attempt-mismatch",
-            "outcome-runtime: the credential re-issue was asked for node " +
-              JSON.stringify(nodeId) +
-              " attempt " +
-              JSON.stringify(attemptId) +
-              ", but the state records " +
-              (current === undefined || current.attemptId === undefined
-                ? "no such attempt"
-                : "attempt " + JSON.stringify(current.attemptId)) +
-              " — nothing was re-issued",
+          tx.writeGraphState(
+            stateRecordOf(Object.freeze({ ...state, nodes: Object.freeze(nodes) }), at),
           );
-        }
-        if (current.status !== "dispatched" || current.attemptCredentialDigest === undefined) {
-          throw new OutcomeAdvanceRefusedError(
-            "node-not-dispatched",
-            "outcome-runtime: node " +
-              JSON.stringify(nodeId) +
-              " is " +
-              current.status +
-              " (or records no credential digest), so its attempt is not one whose lost " +
-              "credential this build re-issues — nothing was written",
-          );
-        }
-        const minted = this.credentialSource(
-          attemptCredentialBinding({
-            graphId: this.graphId,
-            nodeId,
-            attemptId,
-            planRevision: this.planRevision,
-          }),
-        );
-        const nodes = state.nodes.map((entry, index) =>
-          index === position
-            ? Object.freeze({
-                ...entry,
-                attemptCredentialDigest: attemptCredentialDigest(minted),
-              })
-            : entry,
-        );
-        tx.writeGraphState(
-          stateRecordOf(Object.freeze({ ...state, nodes: Object.freeze(nodes) }), at),
-        );
-        return minted;
-      });
-      return { credential };
+          return { credential: minted };
+        },
+      );
     } catch (error) {
       if (error instanceof OutcomeAdvanceRefusedError) {
         return {

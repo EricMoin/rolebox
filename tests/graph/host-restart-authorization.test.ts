@@ -34,12 +34,19 @@ import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3
 import { auditGraphStore } from "../../src/graph/audit/drain-audit.ts";
 import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
-import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
+import {
+  HostExecutionIndex,
+  hostExecutionNotCreated,
+} from "../../src/graph/host/execution-index.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
 import { dispatchEffectKeyOf } from "../../src/graph/outcome/dispatch-effects.ts";
-import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
+import {
+  OutcomeGraphRuntime,
+  type AttemptCredentialReissueFence,
+  type OutcomeRuntimeRefusal,
+} from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { buildDeclaredOutcomeGraph, persistDeclaredGraph } from "../../src/graph/tools/declare-graph.ts";
@@ -131,6 +138,26 @@ async function effectStatuses(storeRoot: string, graphId: string): Promise<reado
   } finally {
     ledger.close();
   }
+}
+
+/**
+ * The store-backed create-right fence `OutcomeHost` installs, wired by hand so
+ * a bare `OutcomeGraphRuntime` in this file exercises the SAME mechanism: the
+ * claim is the store's own conditional create right, and giving it back is a
+ * proof-backed release (no create was attempted).
+ */
+function storeFence(index: HostExecutionIndex): AttemptCredentialReissueFence {
+  return {
+    claim: (effect) => {
+      const claim = index.claim(effect);
+      return claim.kind === "claimed"
+        ? { kind: "claimed" as const, ownerId: claim.ownerId }
+        : { kind: "held" as const, reason: "another claim owns the create right" };
+    },
+    abandon: (effect, ownerId, reason) => {
+      index.release(effect, ownerId, hostExecutionNotCreated(reason));
+    },
+  };
 }
 
 // ── G14: the three surfaces agree ───────────────────────────────────────────
@@ -497,6 +524,280 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       ]);
     } finally {
       hostTwo.close();
+    }
+  });
+
+  it("holds the create right before minting, so a recovery inside the re-issue window cannot replace the winner's verifier", async () => {
+    const dir = makeTmpDir("reissue-window-");
+    const plan = buildDeclaredOutcomeGraph({
+      declaration: xprocDeclaration(),
+      completionPolicies: XPROC_POLICIES,
+    }).plan;
+    const ledger = await SqliteAcceptanceLedger.create(dir);
+    try {
+      // ── PROCESS ZERO: the effect is committed and the delivery refuses
+      // synchronously, so the create right is released with a proof and the
+      // effect is PENDING with a credential no later process can resolve.
+      const zeroIndex = HostExecutionIndex.open({ root: dir });
+      const zeroVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const zeroDeliveries: string[] = [];
+      const zeroRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: zeroIndex,
+          deliver: (request) => {
+            zeroDeliveries.push(request.attemptId);
+            throw new Error("the platform refused the request before accepting it");
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW,
+        credentialIsolation: zeroVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+      });
+      expect(() => zeroRuntime.start(NOW)).toThrow();
+      expect(zeroDeliveries).toEqual(["work#1"]);
+      expect(await effectStatuses(dir, XPROC_GRAPH_ID)).toEqual([
+        "dispatch:work#1@pending",
+      ]);
+      const digestBefore = await recordedDigest(dir, XPROC_GRAPH_ID);
+      expect(digestBefore).toBeDefined();
+
+      // ── THE TWO RECOVERERS. Both are real runtimes over the SAME store, each
+      // with its own owner and the store-backed create-right fence.
+      const loserIndex = HostExecutionIndex.open({ root: dir });
+      const loserVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const loserDeliveries: string[] = [];
+      const loserRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: loserIndex,
+          deliver: (request) => {
+            loserDeliveries.push(request.attemptId);
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 1,
+        credentialIsolation: loserVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        reissueFence: storeFence(loserIndex),
+      });
+
+      const winnerIndex = HostExecutionIndex.open({ root: dir });
+      const winnerVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const winnerDeliveries: string[] = [];
+      const winnerCredentials: string[] = [];
+      let winnerMints = 0;
+      let loserRefusals: readonly OutcomeRuntimeRefusal[] = [];
+      const winnerRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: winnerIndex,
+          deliver: (request) => {
+            winnerDeliveries.push(request.attemptId);
+            winnerCredentials.push(request.credential);
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 2,
+        credentialIsolation: winnerVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        reissueFence: storeFence(winnerIndex),
+        // THE INTERLEAVING POINT. The winner mints INSIDE its re-issue
+        // transaction, which runs AFTER it has taken the create right; running
+        // the loser's whole recovery here is therefore the exact instant a
+        // second re-issue would have seen `absent` and replaced the verifier the
+        // winner is about to deliver. A mint-before-claim order lets the loser
+        // through, and this test then fails on the assertions below.
+        mintCredential: () => {
+          const resumed = loserRuntime.resume(NOW + 1);
+          if (resumed.kind === "resumed") loserRefusals = resumed.refusals;
+          winnerMints += 1;
+          return "credential:reissue-window/" + String(winnerMints);
+        },
+      });
+
+      const resumed = winnerRuntime.resume(NOW + 2);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+      expect(resumed.refusals).toEqual([]);
+      expect(winnerDeliveries).toEqual(["work#1"]);
+
+      // THE LOSER REFUSED BY NAME, for the right reason: the winner's live claim
+      // is what the host answers `unknown` about, so nothing was re-issued.
+      expect(loserRefusals.map((refusal) => refusal.code)).toEqual([
+        "credential-reissue-forbidden",
+      ]);
+      expect(loserRefusals[0]?.message).toContain("The host answered unknown");
+      expect(loserDeliveries).toEqual([]);
+
+      // THE WINNER'S DISPATCHED CREDENTIAL STILL VERIFIES: the recorded verifier
+      // is the one it delivered, and a submission carrying it is accepted.
+      const digestAfter = await recordedDigest(dir, XPROC_GRAPH_ID);
+      expect(digestAfter).not.toBe(digestBefore);
+      expect(digestAfter).toBe(attemptCredentialDigest(winnerCredentials[0] ?? ""));
+      const accepted = winnerRuntime.submit(
+        { nodeId: "work", outcomeId: "done", credential: winnerCredentials[0] ?? "" },
+        NOW + 3,
+      );
+      expect(accepted.kind).toBe("accepted");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("refuses a re-issue when the host installs no create-right fence", async () => {
+    const dir = makeTmpDir("reissue-unfenced-");
+    const plan = buildDeclaredOutcomeGraph({
+      declaration: xprocDeclaration(),
+      completionPolicies: XPROC_POLICIES,
+    }).plan;
+    const ledger = await SqliteAcceptanceLedger.create(dir);
+    try {
+      // The same lost-credential setup: pending effect, released claim, and a
+      // credential value that died with the process that minted it.
+      const firstIndex = HostExecutionIndex.open({ root: dir });
+      const firstVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const firstRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: firstIndex,
+          deliver: () => {
+            throw new Error("the platform refused the request before accepting it");
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW,
+        credentialIsolation: firstVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+      });
+      expect(() => firstRuntime.start(NOW)).toThrow();
+      const digestBefore = await recordedDigest(dir, XPROC_GRAPH_ID);
+      expect(digestBefore).toBeDefined();
+
+      // A FILE registry answers `absent` (the claim was released by the seam's
+      // proof) and the credential is gone — but NOTHING installs the fence, so
+      // the runtime does not silently re-issue without the mechanism.
+      const secondIndex = HostExecutionIndex.open({ root: dir });
+      const secondVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const secondDeliveries: string[] = [];
+      const unfenced = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: secondIndex,
+          deliver: (request) => {
+            secondDeliveries.push(request.attemptId);
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 1,
+        credentialIsolation: secondVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        // NO `reissueFence` on purpose: the refusal below is the honest answer.
+      });
+      const resumed = unfenced.resume(NOW + 1);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+      expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-reissue-forbidden",
+      ]);
+      expect(resumed.refusals[0]?.message).toContain("CREATE-RIGHT fence");
+      expect(resumed.refusals[0]?.message).toContain("holds none");
+      expect(secondDeliveries).toEqual([]);
+      expect(await effectStatuses(dir, XPROC_GRAPH_ID)).toEqual([
+        "dispatch:work#1@pending",
+      ]);
+      expect(await recordedDigest(dir, XPROC_GRAPH_ID)).toBe(digestBefore);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("refuses a re-issue when the create right is held, even though the lookup answered absent", async () => {
+    const dir = makeTmpDir("reissue-held-");
+    const plan = buildDeclaredOutcomeGraph({
+      declaration: xprocDeclaration(),
+      completionPolicies: XPROC_POLICIES,
+    }).plan;
+    const ledger = await SqliteAcceptanceLedger.create(dir);
+    try {
+      // The effect is committed with a credential this process cannot resolve.
+      const firstIndex = HostExecutionIndex.open({ root: dir });
+      const firstVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const firstRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: firstIndex,
+          deliver: () => {
+            throw new Error("the platform refused the request before accepting it");
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW,
+        credentialIsolation: firstVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+      });
+      expect(() => firstRuntime.start(NOW)).toThrow();
+      const digestBefore = await recordedDigest(dir, XPROC_GRAPH_ID);
+      expect(digestBefore).toBeDefined();
+
+      // ANOTHER HOST TAKES THE CREATE RIGHT and does not hand it over yet — the
+      // state a second recoverer meets in the window between a re-issue and its
+      // create.
+      const holderIndex = HostExecutionIndex.open({ root: dir });
+      const effect = dispatchEffectKeyOf(XPROC_GRAPH_ID, "work#1");
+      expect(holderIndex.claim(effect).kind).toBe("claimed");
+
+      // THE LOSER'S LOOKUP IS STALE: it answers the absent it saw before the
+      // claim was taken. The fence is the REAL store claim, and it refuses.
+      let created = 0;
+      const loserIndex = HostExecutionIndex.open({ root: dir });
+      const loserVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const raced = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: {
+          create: () => {
+            created += 1;
+          },
+          lookup: () => ({ kind: "absent" }) as const,
+        },
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 1,
+        credentialIsolation: loserVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        reissueFence: storeFence(loserIndex),
+      });
+      const resumed = raced.resume(NOW + 1);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+      expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-reissue-forbidden",
+      ]);
+      expect(resumed.refusals[0]?.message).toContain("held elsewhere");
+      expect(created).toBe(0);
+      // The holder's claim is untouched, the verifier did not move, and the
+      // effect is exactly where it was.
+      expect(holderIndex.read(effect)?.state).toBe("pending");
+      expect(await recordedDigest(dir, XPROC_GRAPH_ID)).toBe(digestBefore);
+      expect(await effectStatuses(dir, XPROC_GRAPH_ID)).toEqual([
+        "dispatch:work#1@pending",
+      ]);
+    } finally {
+      ledger.close();
     }
   });
 });

@@ -94,6 +94,7 @@ import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import {
   OutcomeGraphRuntime,
+  type AttemptCredentialReissueFence,
   type HostCompletionAttemptRef,
   type HostCompletionAuthority,
   type OutcomeResumeResult,
@@ -130,6 +131,7 @@ import type {
 import { HostOutcomeDispatch } from "./dispatch-host.ts";
 import {
   HostExecutionIndex,
+  hostExecutionNotCreated,
   type HostExecutionIdentity,
 } from "./execution-index.ts";
 import { HostCredentialVault } from "./credential-vault.ts";
@@ -386,6 +388,19 @@ export class OutcomeHost {
   private readonly completionPolicies: CompletionPolicyRegistry | undefined;
   private readonly vault: HostCredentialVault;
   private readonly executions: HostExecutionIndex;
+  /**
+   * The create-right fence a credential re-issue runs under (plan §3.3).
+   *
+   * ITS MECHANISM IS THE STORE'S OWN CONDITIONAL CLAIM, not a boolean: `claim`
+   * takes the same create right `HostOutcomeDispatch.create` takes (the same
+   * `HostExecutionIndex`, so the later create re-claims it idempotently), and
+   * `abandon` gives back a claim this host took and never handed to the
+   * platform — a proof-backed release, so a later recovery can create once.
+   * While this host is between a re-issue and its create, another process is
+   * told `held` (or `unknown` through the registry) and cannot replace the
+   * verifier of the attempt about to be dispatched.
+   */
+  private readonly reissueFence: AttemptCredentialReissueFence;
   private readonly origins: HostInvocationOrigins;
   /**
    * The ONE store the capabilities share in `durability: "memory"` mode.
@@ -450,6 +465,27 @@ export class OutcomeHost {
       root: options.storeRoot,
       durability,
       ...(shared === undefined ? {} : { store: shared }),
+    });
+    this.reissueFence = Object.freeze({
+      claim: (effect: OutcomeDispatchEffectKey) => {
+        const claim = this.executions.claim(effect);
+        if (claim.kind === "claimed") {
+          return { kind: "claimed" as const, ownerId: claim.ownerId };
+        }
+        const reason =
+          claim.state === "created"
+            ? "a host execution for this effect already exists"
+            : claim.state === "creating"
+              ? "the create request was already handed to the platform and its result is unknown"
+              : "another claim owns the create right for this effect";
+        return {
+          kind: "held" as const,
+          reason: reason + " (claim " + String(claim.generation) + ")",
+        };
+      },
+      abandon: (effect: OutcomeDispatchEffectKey, ownerId: string, reason: string) => {
+        this.executions.release(effect, ownerId, hostExecutionNotCreated(reason));
+      },
     });
     this.origins = HostInvocationOrigins.open({
       root: options.storeRoot,
@@ -917,9 +953,17 @@ export class OutcomeHost {
   }
 
   /**
-   * Report a delivery that failed asynchronously: no execution was created, so
-   * this host's claim is released. A later recovery then asks the host and gets
-   * `absent` instead of treating the effect as started.
+   * Report a delivery that failed asynchronously: whether an execution was
+   * created is UNKNOWN, so this host's claim is KEPT.
+   *
+   * An asynchronous rejection, a callback that never arrives and a timeout
+   * prove nothing about a request the platform may already have received. The
+   * proof-less release is therefore deliberate: the row stays `creating`, the
+   * failure is recorded on it as an `unproven-failure` refusal, and every later
+   * lookup answers `unknown` — a recovery reports the effect as unresolved and
+   * refuses a blind second create. Only a PROVEN not-created (a synchronous
+   * delivery refusal, or the platform's own execution query answering
+   * `absent`) releases the create right.
    */
   reportDeliveryFailure(effect: OutcomeDispatchEffectKey, reason: string): void {
     this.executions.release(effect, this.executions.ownerId);
@@ -928,7 +972,9 @@ export class OutcomeHost {
         JSON.stringify(effect.graphId) +
         " effect " +
         JSON.stringify(effect.effectId) +
-        " — the execution-index record was dropped: " +
+        " — no execution can be PROVEN absent, so the create right is KEPT (the row stays " +
+        "'creating', every lookup answers 'unknown', and the effect is reported as unresolved " +
+        "rather than re-dispatched): " +
         reason,
     );
   }
@@ -1184,6 +1230,11 @@ export class OutcomeHost {
       plan,
       ledger,
       dispatch: this.dispatchAdapter,
+      // THE CREATE-RIGHT FENCE (P2 §3.3): a lost credential is re-issued only
+      // while this host holds the store's own create right for the effect, so
+      // a second recoverer cannot replace the verifier of the attempt this
+      // process is about to dispatch.
+      reissueFence: this.reissueFence,
       validators: this.validators,
       artifactRoot: this.artifactRoot,
       clock: this.clock,
