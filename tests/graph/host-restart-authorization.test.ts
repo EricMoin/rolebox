@@ -45,6 +45,7 @@ import { dispatchEffectKeyOf } from "../../src/graph/outcome/dispatch-effects.ts
 import {
   OutcomeGraphRuntime,
   type AttemptCredentialReissueFence,
+  type OutcomeResumeResult,
   type OutcomeRuntimeRefusal,
 } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
@@ -645,6 +646,188 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       const accepted = winnerRuntime.submit(
         { nodeId: "work", outcomeId: "done", credential: winnerCredentials[0] ?? "" },
         NOW + 3,
+      );
+      expect(accepted.kind).toBe("accepted");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("refuses the SECOND re-issue whose observed verifier moved, keeping the winner's dispatched credential verifiable", async () => {
+    const dir = makeTmpDir("reissue-cas-");
+    const plan = buildDeclaredOutcomeGraph({
+      declaration: xprocDeclaration(),
+      completionPolicies: XPROC_POLICIES,
+    }).plan;
+    const ledger = await SqliteAcceptanceLedger.create(dir);
+    try {
+      // ── PROCESS ZERO: the effect is committed, the delivery refuses
+      // synchronously, and the proof-backed release leaves it PENDING with a
+      // credential no later process can resolve.
+      const zeroIndex = HostExecutionIndex.open({ root: dir });
+      const zeroVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const zeroRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: zeroIndex,
+          deliver: () => {
+            throw new Error("the platform refused the request before accepting it");
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW,
+        credentialIsolation: zeroVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+      });
+      expect(() => zeroRuntime.start(NOW)).toThrow();
+      const digestBefore = await recordedDigest(dir, XPROC_GRAPH_ID);
+      expect(digestBefore).toBeDefined();
+
+      // ── THE WINNER re-issues, commits the new generation and hands it to the
+      // platform, whose synchronous refusal releases the create right again.
+      const winnerIndex = HostExecutionIndex.open({ root: dir });
+      const winnerVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const winnerCredentials: string[] = [];
+      const winnerRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: winnerIndex,
+          deliver: (request) => {
+            winnerCredentials.push(request.credential);
+            throw new Error("the platform refused the request before accepting it");
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 1,
+        credentialIsolation: winnerVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        reissueFence: storeFence(winnerIndex),
+        mintCredential: () => "credential:reissue-cas/winner",
+      });
+
+      // ── THE LOSER reads the persisted verifier and the effect's absence and
+      // only THEN reaches its claim. The winner's whole recovery runs in that
+      // window — the interleaving two real processes produce when one is
+      // scheduled between its read and its claim — and the claim the loser
+      // presents is the REAL store claim, taken after the winner's failed create
+      // released the right. The create right alone therefore cannot refuse it
+      // for the right reason; the conditional write must.
+      const loserIndex = HostExecutionIndex.open({ root: dir });
+      const loserVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const loserDeliveries: string[] = [];
+      let loserMints = 0;
+      // THE WINNER'S RESULT IS KEPT FOR AN ASSERTION OUTSIDE THE HOOK: a
+      // throwing `expect` in here would be caught by the re-issue's own error
+      // handling and reported as "the fence could not be read", hiding the fact
+      // the hook is there to establish.
+      let winnerOutcome: OutcomeResumeResult | undefined;
+      const baseFence = storeFence(loserIndex);
+      const interleavedFence: AttemptCredentialReissueFence = {
+        claim: (effect) => {
+          winnerOutcome = winnerRuntime.resume(NOW + 1);
+          return baseFence.claim(effect);
+        },
+        abandon: (effect, ownerId, reason) => baseFence.abandon(effect, ownerId, reason),
+      };
+      const loserRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: loserIndex,
+          deliver: (request) => {
+            loserDeliveries.push(request.attemptId);
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 2,
+        credentialIsolation: loserVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        reissueFence: interleavedFence,
+        mintCredential: () => {
+          loserMints += 1;
+          return "credential:reissue-cas/loser";
+        },
+      });
+
+      const resumed = loserRuntime.resume(NOW + 2);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+
+      // THE WINNER RAN INSIDE THE LOSER'S WINDOW and committed its generation:
+      // the platform refused its delivery, which the resume reports as an effect
+      // refusal, and its proof-backed release left the effect pending again — so
+      // the claim the hook takes AFTER it is granted, and only the conditional
+      // write can still refuse the loser.
+      expect(winnerOutcome?.kind).toBe("resumed");
+      if (winnerOutcome?.kind === "resumed") {
+        expect(winnerOutcome.refusals.map((refusal) => refusal.code)).toEqual([
+          "dispatch-failed",
+        ]);
+        expect(winnerOutcome.dispatched).toEqual([]);
+      }
+
+      // THE CONDITIONAL WRITE REFUSES THE LOSER: the verifier it observed is no
+      // longer the recorded one, so nothing is overwritten, nothing is minted
+      // and nothing is delivered.
+      expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-reissue-forbidden",
+      ]);
+      expect(resumed.refusals[0]?.message).toContain("records a DIFFERENT one");
+      expect(resumed.dispatched).toEqual([]);
+      expect(loserDeliveries).toEqual([]);
+      expect(loserMints).toBe(0);
+      // THE WINNER'S GENERATION SURVIVES: the recorded verifier is the
+      // credential the winner delivered, and the effect is where the winner's
+      // refused create left it.
+      expect(winnerCredentials).toHaveLength(1);
+      expect(await recordedDigest(dir, XPROC_GRAPH_ID)).toBe(
+        attemptCredentialDigest(winnerCredentials[0] ?? ""),
+      );
+      expect(await effectStatuses(dir, XPROC_GRAPH_ID)).toEqual([
+        "dispatch:work#1@pending",
+      ]);
+
+      // AND THE REFUSAL IS NOT A STRAND: a later recoverer observes the CURRENT
+      // generation, re-issues it, delivers once, and the credential it dispatched
+      // verifies against the recorded one.
+      const thirdIndex = HostExecutionIndex.open({ root: dir });
+      const thirdVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const thirdDeliveries: string[] = [];
+      const thirdCredentials: string[] = [];
+      const thirdRuntime = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: new HostOutcomeDispatch({
+          executions: thirdIndex,
+          deliver: (request) => {
+            thirdDeliveries.push(request.attemptId);
+            thirdCredentials.push(request.credential);
+          },
+        }),
+        validators: createValidatorRegistry([]),
+        artifactRoot: dir,
+        clock: () => NOW + 3,
+        credentialIsolation: thirdVault.capability(),
+        completionPolicies: XPROC_POLICIES,
+        reissueFence: storeFence(thirdIndex),
+        mintCredential: () => "credential:reissue-cas/third",
+      });
+      const third = thirdRuntime.resume(NOW + 3);
+      expect(third.kind).toBe("resumed");
+      if (third.kind !== "resumed") return;
+      expect(third.refusals).toEqual([]);
+      expect(thirdDeliveries).toEqual(["work#1"]);
+      expect(await recordedDigest(dir, XPROC_GRAPH_ID)).toBe(
+        attemptCredentialDigest(thirdCredentials[0] ?? ""),
+      );
+      const accepted = thirdRuntime.submit(
+        { nodeId: "work", outcomeId: "done", credential: thirdCredentials[0] ?? "" },
+        NOW + 4,
       );
       expect(accepted.kind).toBe("accepted");
     } finally {
