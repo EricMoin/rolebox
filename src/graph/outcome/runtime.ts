@@ -901,6 +901,12 @@ export class OutcomeGraphRuntime {
    * reconciles, where no create call ever ran. A store that throws therefore
    * fails the mint, and the transaction that would have recorded the attempt
    * writes nothing.
+   *
+   * BOTH CALLERS MINT INSIDE THEIR TRANSACTION. The start snapshot and the
+   * acceptance advance reach this source from inside the store's single
+   * boundary, and the host store's write joins the open transaction, so an
+   * attempt the state records and the credential record a later submission is
+   * checked against are one commit — a rolled-back start leaves neither.
    */
   private readonly credentialSource: AttemptCredentialSource;
 
@@ -1023,93 +1029,100 @@ export class OutcomeGraphRuntime {
     }
 
     const entryIds = new Set(entries.map((node) => node.id));
-    const nodes: OutcomeNodeState[] = [];
-    const dispatched: OutcomeDispatchRequest[] = [];
-    const effects: PendingEffectRecord[] = [];
-    let attemptSeq = 0;
-    for (const node of this.plan.nodes) {
-      if (!entryIds.has(node.id)) {
-        // No node has settled yet, so every arrival list is empty — which is
-        // exactly the canonical materialization of a state where nothing has
-        // arrived, and what the reader verifies against.
+    // ONE transaction for the starting snapshot, its dispatch intents AND the
+    // credential record every armed attempt is settled with. There is no
+    // acceptance to join yet; what must not come apart is the state that
+    // records the attempt, the effect that says the attempt is to be started,
+    // and the credential the host store must hold for it. The mint is
+    // synchronous and its store write joins this open boundary, so a start
+    // that rolls back leaves no credential row for an attempt that does not
+    // exist. The dispatch seam runs only after the commit, and what it cannot
+    // deliver stays a durable, reconcilable row.
+    const started = this.ledger.runInTransaction((tx) => {
+      const nodes: OutcomeNodeState[] = [];
+      const dispatched: OutcomeDispatchRequest[] = [];
+      const effects: PendingEffectRecord[] = [];
+      let attemptSeq = 0;
+      for (const node of this.plan.nodes) {
+        if (!entryIds.has(node.id)) {
+          // No node has settled yet, so every arrival list is empty — which is
+          // exactly the canonical materialization of a state where nothing has
+          // arrived, and what the reader verifies against.
+          nodes.push(
+            Object.freeze({
+              nodeId: node.id,
+              status: "pending" as const,
+              arrivals: Object.freeze([]),
+            }),
+          );
+          continue;
+        }
+        attemptSeq += 1;
+        const attemptId = node.id + "#" + attemptSeq;
+        // The credential is minted WITH the attempt INSIDE this transaction:
+        // the source adopts it in the host's store, whose write joins the
+        // boundary this snapshot commits in. The binding a later submission is
+        // checked against is therefore the state's — never a credential from
+        // an attempt whose start rolled back.
+        const credential = mintAttemptCredential(
+          this.credentialSource,
+          attemptCredentialBinding({
+            graphId: this.graphId,
+            nodeId: node.id,
+            attemptId,
+            planRevision: this.planRevision,
+          }),
+        );
         nodes.push(
           Object.freeze({
             nodeId: node.id,
-            status: "pending" as const,
+            status: "dispatched" as const,
+            attemptId,
+            attemptSeq,
+            attemptCredentialDigest: attemptCredentialDigest(credential),
+            // The host attribution this attempt is bound to (D9). Absent when the
+            // host declared no identity for this invocation — the absence IS the
+            // record, and no later process back-fills one.
+            ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
+            dispatchedAt: at,
             arrivals: Object.freeze([]),
           }),
         );
-        continue;
+        dispatched.push(
+          this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
+        );
+        // THE INTENT IS PART OF THE SAME SNAPSHOT (D8). The effect names this
+        // attempt under the stable id its host dedupes and looks up by, so a
+        // process that dies between this commit and the create leaves a row a
+        // recovery can reconcile instead of a state that merely looks armed.
+        effects.push(
+          Object.freeze({
+            graphId: this.graphId,
+            effectId: dispatchEffectIdOf(attemptId),
+            attemptId,
+            kind: "dispatch",
+            payload: this.dispatchTargetOf(node.id, attemptId, node.agent, node.prompt),
+            createdAt: at,
+            status: "pending" as const,
+          }),
+        );
       }
-      attemptSeq += 1;
-      const attemptId = node.id + "#" + attemptSeq;
-      // The credential is minted WITH the attempt and persisted on its entry in
-      // the same transaction that records the dispatch: the binding a later
-      // submission is checked against is the state's, not the submission's.
-      const credential = mintAttemptCredential(
-        this.credentialSource,
-        attemptCredentialBinding({
-          graphId: this.graphId,
-          nodeId: node.id,
-          attemptId,
-          planRevision: this.planRevision,
-        }),
-      );
-      nodes.push(
-        Object.freeze({
-          nodeId: node.id,
-          status: "dispatched" as const,
-          attemptId,
-          attemptSeq,
-          attemptCredentialDigest: attemptCredentialDigest(credential),
-          // The host attribution this attempt is bound to (D9). Absent when the
-          // host declared no identity for this invocation — the absence IS the
-          // record, and no later process back-fills one.
-          ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
-          dispatchedAt: at,
-          arrivals: Object.freeze([]),
-        }),
-      );
-      dispatched.push(
-        this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
-      );
-      // THE INTENT IS PART OF THE SAME SNAPSHOT (D8). The effect names this
-      // attempt under the stable id its host dedupes and looks up by, so a
-      // process that dies between this commit and the create leaves a row a
-      // recovery can reconcile instead of a state that merely looks armed.
-      effects.push(
-        Object.freeze({
-          graphId: this.graphId,
-          effectId: dispatchEffectIdOf(attemptId),
-          attemptId,
-          kind: "dispatch",
-          payload: this.dispatchTargetOf(node.id, attemptId, node.agent, node.prompt),
-          createdAt: at,
-          status: "pending" as const,
-        }),
-      );
-    }
-    const state: OutcomeGraphState = Object.freeze({
-      bodyVersion: CURRENT_OUTCOME_STATE_BODY,
-      graphId: this.graphId,
-      planRevision: this.planRevision,
-      phase: "executing" as const,
-      nodes: Object.freeze(nodes),
-      loopTraversals: Object.freeze({}),
-      attemptSeq,
-      loopProgress: Object.freeze(loopProgress),
-    });
-    // ONE transaction for the starting snapshot AND its dispatch intents. There
-    // is no acceptance to join yet; what must not come apart is the state that
-    // records the attempt and the effect that says the attempt is to be
-    // started, so a crash leaves both or neither. The seam runs only after the
-    // commit, and what it cannot deliver stays a durable, reconcilable row.
-    this.ledger.runInTransaction((tx) => {
+      const state: OutcomeGraphState = Object.freeze({
+        bodyVersion: CURRENT_OUTCOME_STATE_BODY,
+        graphId: this.graphId,
+        planRevision: this.planRevision,
+        phase: "executing" as const,
+        nodes: Object.freeze(nodes),
+        loopTraversals: Object.freeze({}),
+        attemptSeq,
+        loopProgress: Object.freeze(loopProgress),
+      });
       tx.writeGraphState(stateRecordOf(state, at));
       for (const effect of effects) tx.writeEffect(effect);
+      return Object.freeze({ state, dispatched: Object.freeze(dispatched) });
     });
-    this.launchDispatches(dispatched);
-    return { kind: "started", state, dispatched: Object.freeze(dispatched) };
+    this.launchDispatches(started.dispatched);
+    return { kind: "started", state: started.state, dispatched: started.dispatched };
   }
 
   /**
