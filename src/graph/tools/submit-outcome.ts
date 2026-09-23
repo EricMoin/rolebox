@@ -190,7 +190,13 @@ export interface GraphSubmitOutcomeResult {
     // run path answers this by name before it reaches this projection; the
     // verdict is spelled here because the ledger's own verdict vocabulary is
     // what this field renders.
-    | "superseded";
+    | "superseded"
+    // The attempt belongs to a run a run-scoped retry SUPERSEDED (P3 item 2):
+    // the closed run accepts nothing, so no receipt, accepted event, accepted
+    // result or state advance was written. The run path answers this as the
+    // named `run-superseded` refusal; the verdict is spelled here for the same
+    // reason as the one above.
+    | "run-superseded";
   /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
   /** Every required gate's outcome, for an accepted or rejected decision. */

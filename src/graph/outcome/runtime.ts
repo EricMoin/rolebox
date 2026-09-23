@@ -604,6 +604,16 @@ export type OutcomeRuntimeRefusalCode =
    */
   | "attempt-superseded"
   /**
+   * The attempt belongs to a run the graph has SUPERSEDED (P3 item 2). A
+   * run-scoped `retry` closed that run and minted a successor, so the closed
+   * run's attempts can never settle afterwards: their results would be new
+   * terminal facts about a run whose receipts are already the record of what it
+   * accepted. Nothing was accepted, and the successor run carries the graph
+   * forward — the closed run's own receipts, accepted events, decisions, state
+   * and effects stay exactly as they were.
+   */
+  | "run-superseded"
+  /**
    * No trusted order to re-execute this run is recorded, so the runtime refuses
    * to mint a successor run on its own. A new run is a trusted decision (§3.2:
    * "终态图重新运行创建新 Run"), and the order is what makes it durable before
@@ -2170,6 +2180,30 @@ export class OutcomeGraphRuntime {
             "written for it — the successor attempt " +
             JSON.stringify(verdict.decision.successorAttemptId ?? "") +
             " carries the node forward",
+        },
+      ]);
+    }
+    // A CLOSED RUN ACCEPTS NOTHING (P3 item 2, the re-execution). The ledger's
+    // own guard refused the batch because the attempt belongs to a run a
+    // run-scoped retry already superseded: accepting it would write a new
+    // terminal fact about a run whose receipts are the record of what it
+    // accepted. Answered by name, exactly like a control stop, and NEVER as a
+    // settlement.
+    if (verdict.kind === "run-superseded") {
+      return refused([
+        {
+          code: "run-superseded",
+          path: "$.attemptId",
+          message:
+            "outcome-runtime: attempt " +
+            JSON.stringify(evaluated.identity.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " belongs to run " +
+            JSON.stringify(verdict.runId) +
+            ", which the graph has SUPERSEDED with a later run, so nothing was accepted: no " +
+            "receipt, no accepted event, no accepted result and no state advance was written " +
+            "for it — re-read the graph to address the run that stands",
         },
       ]);
     }
@@ -4717,9 +4751,9 @@ function controlledInFlightRefusals(
  * DERIVED, NOT RANDOM, so the same (graph, decision time) always names the same
  * run and a test can predict it. Uniqueness is per graph — the run row's key —
  * and the graph id is part of the value so an id in a report is readable. A
- * later work package that re-executes a terminal graph mints the next run's id
- * from its own start time; nothing here assumes one run forever beyond the row
- * key, which that package changes.
+ * RE-EXECUTION uses {@link reexecutionRunIdentityOf} instead, which adds the
+ * run's own sequence so a successor can never collide with the id a first run
+ * derived from the same instant.
  */
 function runIdentityOf(graphId: string, startedAt: number): string {
   return graphId + "@" + String(startedAt);

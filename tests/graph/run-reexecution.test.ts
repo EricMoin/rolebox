@@ -25,8 +25,10 @@
  * THE ASSEMBLY IS THE SHIPPED ONE: a real OutcomeHost over the workspace's one SQLite
  * store, the real toolset, and the `withCancelDelivery` follow-up both entries install.
  *
- * STRENGTH: adapter + real store, one process. No real dsh/Pi SDK runs here, so nothing in
- * this file is real-host evidence.
+ * STRENGTH: adapter + real store, one process. The retry's RESTART half is additionally
+ * driven across REAL OS processes by `tests/graph/retry-restart-cross-process.test.ts`,
+ * which spawns the checked-in worker with `Bun.spawn(process.execPath, …)`. No real dsh/Pi
+ * SDK runs here, so nothing in this file is real-host evidence.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -478,6 +480,134 @@ describe("terminal-graph re-execution — a NEW run", () => {
     }
   });
 
+  it("refuses an acceptance and an effect transition for a SUPERSEDED run at the STORE, naming the run", async () => {
+    const fixture = await openReexecFixture({ cancelling: true });
+    try {
+      // A run closed by a platform-CONFIRMED cancel: its dispatch effect stays
+      // UNSETTLED (a cancel never rewinds one) and the re-execution is allowed,
+      // so the closed run holds an effect a late writer could still try to move.
+      const cancelled = await control(fixture, {
+        graph_id: fixture.graphId,
+        command: "cancel",
+        reason: "stop it",
+      });
+      expect(cancelled.kind).toBe("applied");
+      const ordered = await control(fixture, {
+        graph_id: fixture.graphId,
+        command: "retry",
+        reason: "re-run it",
+      });
+      expect(ordered.kind).toBe("applied");
+      const runs = withStore(fixture, (store) => store.runs.runsOf(fixture.graphId));
+      expect(runs.map((run) => run.runSeq)).toEqual([1, 2]);
+      const firstRunId = runs[0]?.runId ?? "";
+      const secondRunId = runs[1]?.runId ?? "";
+      const firstRevision = runs[0]?.planRevision ?? "";
+      const oldState = withStore(fixture, (store) =>
+        store.readGraphStateOf(fixture.graphId, firstRunId),
+      );
+
+      withStore(fixture, (store) => {
+        // A CLOSED RUN ACCEPTS NOTHING. The attempt's own dispatch effect is
+        // filed under run 1, so the batch write's own guard refuses it — no
+        // receipt, no accepted event, no accepted result — and the verdict NAMES
+        // the run the attempt belongs to.
+        const verdict = store.commitAccepted({
+          receipt: {
+            graphId: fixture.graphId,
+            attemptId: "work#1",
+            submissionId: "submission:superseded-run",
+            planRevision: firstRevision,
+            proposalDigest: "digest:superseded-run",
+            decision: "accepted",
+            committedAt: ORDER_AT,
+          },
+          acceptedEvent: {
+            graphId: fixture.graphId,
+            attemptId: "work#1",
+            submissionId: "submission:superseded-run",
+            planRevision: firstRevision,
+            outcomeId: "done",
+            acceptedAt: ORDER_AT,
+          },
+        });
+        expect(verdict.kind).toBe("run-superseded");
+        if (verdict.kind !== "run-superseded") throw new Error("fixture: expected run-superseded");
+        expect(verdict.runId).toBe(firstRunId);
+        expect(verdict.reason).toContain(firstRunId);
+        expect(
+          store.lookupReceipt({
+            graphId: fixture.graphId,
+            attemptId: "work#1",
+            submissionId: "submission:superseded-run",
+          }),
+        ).toBeUndefined();
+        expect(store.acceptedEvents(fixture.graphId)).toEqual([]);
+        expect(store.readAcceptedResult(fixture.graphId, "work#1")).toBeUndefined();
+
+        // A SUPERSEDED RUN'S EFFECTS ARE IMMUTABLE TOO. The transition is
+        // refused by name (naming both runs), and the row keeps the status it
+        // had — an abandoned execution stays VISIBLE instead of being settled on
+        // the successor's behalf.
+        const transition = store.markEffectDone(fixture.graphId, "dispatch:work#1");
+        expect(transition.kind).toBe("refused");
+        if (transition.kind !== "refused") throw new Error("fixture: expected refused");
+        expect(transition.effect.status).toBe("started");
+        expect(transition.reason).toContain(firstRunId);
+        expect(transition.reason).toContain(secondRunId);
+        expect(
+          store.pendingEffects(fixture.graphId, firstRunId).map((effect) => [
+            effect.effectId,
+            effect.status,
+          ]),
+        ).toEqual([["dispatch:work#1", "started"]]);
+
+        // THE FENCE IS SCOPED, NOT BLANKET: the CURRENT run's attempt still
+        // commits and its own effect still transitions.
+        const successor = store.commitAccepted({
+          receipt: {
+            graphId: fixture.graphId,
+            attemptId: "work#2",
+            submissionId: "submission:current-run",
+            planRevision: firstRevision,
+            proposalDigest: "digest:current-run",
+            decision: "accepted",
+            committedAt: ORDER_AT + 1,
+          },
+          acceptedEvent: {
+            graphId: fixture.graphId,
+            attemptId: "work#2",
+            submissionId: "submission:current-run",
+            planRevision: firstRevision,
+            outcomeId: "done",
+            acceptedAt: ORDER_AT + 1,
+          },
+        });
+        expect(successor.kind).toBe("committed");
+        expect(store.markEffectDone(fixture.graphId, "dispatch:work#2").kind).toBe(
+          "transitioned",
+        );
+      });
+
+      // THE CLOSED RUN IS EXACTLY WHAT IT WAS: its state snapshot, its control
+      // fact, its effect and (no) receipts. Only the CURRENT run moved.
+      expect(
+        withStore(fixture, (store) => store.readGraphStateOf(fixture.graphId, firstRunId)),
+      ).toEqual(oldState);
+      expect(
+        withStore(
+          fixture,
+          (store) => store.runs.readRunControlOf(fixture.graphId, firstRunId)?.command,
+        ),
+      ).toBe("cancel");
+      expect(withStore(fixture, (store) => store.readGraphState(fixture.graphId)?.runId)).toBe(
+        secondRunId,
+      );
+    } finally {
+      fixture.host.close();
+    }
+  });
+
   it("refuses a run-scoped retry while the run is STILL EXECUTING, and writes nothing", async () => {
     const fixture = await openReexecFixture();
     try {
@@ -711,8 +841,12 @@ describe("retry — restart continuity", () => {
     }
     if (!retried) throw new Error("fixture: the retry was not applied");
 
-    // A NEW host process over the same store root: the durable retry is what it
-    // resumes from, and the successor's effect is launched ONCE.
+    // A NEW host OBJECT over the same store root — one process, and (because the
+    // store shares one connection per file in-process) the same connection. The
+    // durable retry is what it resumes from, and the successor's effect is
+    // launched ONCE. The real process boundary is a separate tracked case:
+    // `tests/graph/retry-restart-cross-process.test.ts` spawns actual OS
+    // processes, which is what §4 P3's "重启后继续" is measured with.
     const dispatched: OutcomeDispatchRequest[] = [];
     let reopened: OutcomeHost | undefined;
     const second = OutcomeHost.open({

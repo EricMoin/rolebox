@@ -1516,9 +1516,15 @@ function orderReexecution(
   );
   // THE RUN IS CLOSED BY THE ORDER. Claiming its control fact (first-wins) makes
   // "this run is over; its successor is a new run" a fact every reader already
-  // knows how to read — the status/audit faces report it and the acceptance
-  // guard refuses any late settlement against the superseded run — while a run a
-  // TRUSTED COMMAND ALREADY STOPPED keeps the command that stopped it.
+  // knows how to read — the status/audit faces report it — while a run a
+  // TRUSTED COMMAND ALREADY STOPPED keeps the command that stopped it. Late work
+  // against the superseded run is refused AT THE STORE, not only by the run
+  // path's credential resolution: once the successor is current, an acceptance
+  // batch for one of the closed run's attempts is answered `run-superseded` (the
+  // third guard clause of the batch write joins the attempt to its own dispatch
+  // effect, filed under a run the graph has replaced) and an effect transition
+  // against one of its effects is refused by name — so neither a receipt nor an
+  // effect row of a closed run is ever rewritten.
   runs.claimRunControl(
     Object.freeze({
       graphId,

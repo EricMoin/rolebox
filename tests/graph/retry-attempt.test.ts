@@ -873,3 +873,122 @@ describe("retry — trusted control, never worker input", () => {
     }
   });
 });
+// ── The command's own transaction (plan §4 P3 per-command row 5) ───────────
+
+/**
+ * Run one control command with a TEMP TRIGGER on the store's OWN shared
+ * connection, so the write fails AT THE SQL STATEMENT below the application.
+ *
+ * The store shares one connection per file in this process, so the trigger the
+ * case creates is the one the command's transaction runs against. The trigger is
+ * dropped before the tables are read back, and the return value is whatever the
+ * command threw — the transaction rolls back on a throw, which is exactly what
+ * the assertions below check. (The same shape `control-entry.test.ts` uses for
+ * failure and cancel.)
+ */
+function withInjectedRetryWrite(
+  fixture: RetryFixture,
+  trigger: string,
+  run: () => unknown,
+): unknown {
+  const store = GraphStore.openFile(fixture.storeRoot);
+  try {
+    store.run("CREATE TEMP TRIGGER p3_retry_inject " + trigger);
+    try {
+      run();
+      return undefined;
+    } catch (thrown) {
+      return thrown;
+    } finally {
+      store.run("DROP TRIGGER p3_retry_inject");
+    }
+  } finally {
+    store.close();
+  }
+}
+
+/** How many credential RECORDS (never values) one graph holds. */
+function credentialRows(fixture: RetryFixture): number {
+  const store = GraphStore.openFile(fixture.storeRoot);
+  try {
+    return Number(
+      store.all(
+        "SELECT COUNT(*) AS n FROM host_attempt_credentials WHERE graph_id = ?",
+        fixture.graphId,
+      )[0]?.["n"] ?? 0,
+    );
+  } finally {
+    store.close();
+  }
+}
+
+describe("retry — a command commits whole or not at all", () => {
+  it("rolls the successor attempt, credential and effect back when the successor effect's INSERT fails", async () => {
+    const fixture = await openRetryFixture(SOLO);
+    try {
+      const before = readRows(fixture);
+      const beforeAttemptSeq = readBody(fixture).attemptSeq;
+      expect(before.effects.map((effect) => effect.effectId)).toEqual(["dispatch:work#1"]);
+      expect(before.decisions).toEqual([]);
+      expect(credentialRows(fixture)).toBe(1);
+
+      // THE SUCCESSOR EFFECT IS THE LAST ROW THE RETRY WRITES, so an injected
+      // failure there is the strongest case: decision, successor attempt (state),
+      // credential record and effect must ALL roll back together.
+      const error = withInjectedRetryWrite(
+        fixture,
+        "BEFORE INSERT ON ledger_pending_effects " +
+          "BEGIN SELECT RAISE(ABORT, 'p3-injected-retry-failure'); END",
+        () =>
+          fixture.toolset.graph_control(
+            {
+              graph_id: fixture.graphId,
+              command: "retry",
+              node_id: "work",
+              reason: "injected at the successor effect",
+            },
+            fixture.declarer,
+            "agent.declarer",
+          ),
+      );
+
+      // THE THROW IS THE CONTRACT: the store's own failure reaches the caller
+      // instead of being dressed up as a refusal.
+      expect(error).toBeInstanceOf(Error);
+      const rows = readRows(fixture);
+      expect(rows.decisions).toEqual([]);
+      expect(rows.runControl).toBeUndefined();
+      expect(rows.effects.map((effect) => effect.effectId)).toEqual(["dispatch:work#1"]);
+      expect(rows.events).toEqual([]);
+      expect(rows.receipts).toBe(0);
+      // The successor's credential record did not survive either, so no
+      // credential exists for an attempt the store does not hold.
+      expect(credentialRows(fixture)).toBe(1);
+      const body = readBody(fixture);
+      expect(body.attemptSeq).toBe(beforeAttemptSeq);
+      expect(nodeEntry(body, "work")).toMatchObject({
+        status: "dispatched",
+        attemptId: "work#1",
+        attemptSeq: 1,
+      });
+
+      // AND NOTHING WAS POISONED: the SAME command applied cleanly afterwards,
+      // minting the successor exactly once and handing its effect to the
+      // platform.
+      const retried = await control(
+        fixture,
+        { graph_id: fixture.graphId, command: "retry", node_id: "work", reason: "after the rollback" },
+        fixture.declarer,
+      );
+      expect(retried.kind).toBe("applied");
+      expect(retried.minted?.map((attempt) => attempt.attemptId)).toEqual(["work#2"]);
+      expect(fixture.dispatched.map((request) => request.attemptId)).toEqual(["work#1", "work#2"]);
+      expect(readRows(fixture).decisions.map((decision) => decision.successorAttemptId)).toEqual([
+        "work#2",
+      ]);
+      expect(credentialRows(fixture)).toBe(2);
+    } finally {
+      fixture.host.close();
+    }
+  });
+});

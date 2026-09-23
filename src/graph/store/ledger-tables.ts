@@ -529,6 +529,30 @@ function supersededVerdict(decision: ControlDecisionRecord): CommitResult {
 }
 
 /**
+ * The `run-superseded` verdict for a batch whose attempt belongs to a run the
+ * graph has replaced.
+ *
+ * ONE owner of the wording, exactly like {@link controlledVerdict} and
+ * {@link supersededVerdict}, so the fast path and the guarded write refuse a
+ * batch in the same words.
+ */
+function supersededRunVerdict(
+  graphId: string,
+  attemptId: string,
+  runId: string,
+): CommitResult {
+  return {
+    kind: "run-superseded",
+    runId,
+    reason:
+      `attempt ${attemptId} of graph ${graphId} belongs to run ${runId}, which the graph has ` +
+      "SUPERSEDED with a later run — a closed run's attempts accept nothing, so no receipt, " +
+      "accepted event, accepted result or state advance was written; the successor run carries " +
+      "the graph forward",
+  };
+}
+
+/**
  * The run id a row is filed under when the graph holds NO run identity.
  *
  * The run surface is OPTIONAL on this port (the acceptance core is usable
@@ -697,6 +721,17 @@ export class LedgerTables {
     // EXISTS` of the batch write below.
     const superseded = this.readSupersedingRetry(receipt.graphId, receipt.attemptId);
     if (superseded !== undefined) return supersededVerdict(superseded);
+    // A CLOSED RUN ACCEPTS NOTHING (P3 item 2, the re-execution). An attempt
+    // that belongs to a run the graph has SUPERSEDED can never settle: its
+    // result would be a new terminal fact about a run whose receipts are already
+    // the record of what that run accepted. Same shape as the two checks above —
+    // a run never becomes current again, so a fact read here cannot go stale, and
+    // the authoritative check is the third `WHERE NOT EXISTS` of the batch write
+    // below.
+    const closedRun = this.supersededRunOf(receipt.graphId, receipt.attemptId);
+    if (closedRun !== undefined) {
+      return supersededRunVerdict(receipt.graphId, receipt.attemptId, closedRun);
+    }
 
     const write = (): CommitResult => {
       if (!this.writeBatch(batch)) {
@@ -710,12 +745,16 @@ export class LedgerTables {
         if (raced !== undefined) return controlledVerdict(raced);
         const retried = this.readSupersedingRetry(receipt.graphId, receipt.attemptId);
         if (retried !== undefined) return supersededVerdict(retried);
+        const racedRun = this.supersededRunOf(receipt.graphId, receipt.attemptId);
+        if (racedRun !== undefined) {
+          return supersededRunVerdict(receipt.graphId, receipt.attemptId, racedRun);
+        }
         throw new GraphStoreWriteError(
           "invalid-record",
           "acceptance-ledger: the batch write for graph " +
             JSON.stringify(receipt.graphId) +
-            " was refused by the run-control or supersession guard, but the store holds " +
-            "neither fact for that graph and attempt — the guarded write and the store " +
+            " was refused by the run-control, supersession or closed-run guard, but the store holds " +
+            "none of those facts for that graph and attempt — the guarded write and the store " +
             "disagree, so the batch was rolled back and no verdict is reported",
         );
       }
@@ -731,7 +770,7 @@ export class LedgerTables {
    * Write the receipt, the accepted event, the accepted result and every
    * pending effect — and answer whether the batch actually landed.
    *
-   * THE TWO GUARDS ARE THE FIRST STATEMENT (P3 items 1-2, plan §3.4). The
+   * THE THREE GUARDS ARE THE FIRST STATEMENT (P3 items 1-2, plan §3.4). The
    * receipt INSERT carries its own `WHERE NOT EXISTS (...)` clauses, so they
    * decide against the COMMITTED STORE at the moment of the write rather than
    * against the values the fast path read earlier — the structural twin of the
@@ -747,6 +786,12 @@ export class LedgerTables {
    *   execution the node no longer holds and the successor attempt carries the
    *   node forward. A retry and an acceptance therefore cannot both land for one
    *   attempt, in either order.
+   * - THE ATTEMPT'S RUN IS NO LONGER THE CURRENT ONE (P3 item 2, the
+   *   re-execution): the attempt's own dispatch effect is filed under a run the
+   *   graph has replaced, so the run is CLOSED and its attempts accept nothing.
+   *   The join is on the effect rows this class owns; an attempt that was armed
+   *   always has one, and an attempt with no row anywhere is not attributable to
+   *   a closed run here (see {@link CommitResult}'s `run-superseded`).
    *
    * BEING FIRST IS ALSO WHAT MAKES THE RACE A WAIT. A write statement takes
    * SQLite's RESERVED lock immediately, so a racing control writer WAITS on
@@ -781,6 +826,14 @@ export class LedgerTables {
          AND NOT EXISTS (
            SELECT 1 FROM ${GRAPH_STORE_TABLES.controlDecisions}
            WHERE graph_id = ? AND attempt_id = ? AND command = 'retry'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.pendingEffects}
+           WHERE graph_id = ? AND attempt_id = ?
+             AND run_id <> (
+               SELECT run_id FROM ${GRAPH_STORE_TABLES.runs}
+               WHERE graph_id = ? ORDER BY run_seq DESC LIMIT 1
+             )
          )`,
         receipt.graphId,
         receipt.attemptId,
@@ -793,6 +846,9 @@ export class LedgerTables {
         receipt.graphId,
         receipt.graphId,
         receipt.attemptId,
+        receipt.graphId,
+        receipt.attemptId,
+        receipt.graphId,
       );
       // A conditional INSERT that matched nothing changed no row. A PRIMARY KEY
       // violation is NOT this case: the guard passing means the row was
@@ -1228,6 +1284,28 @@ export class LedgerTables {
         effect: current,
       };
     }
+    // A SUPERSEDED RUN'S EFFECTS ARE IMMUTABLE, exactly like its state (G3,
+    // P3 item 2). The row records work ONE run authorized; a re-executed graph's
+    // successor run never reads it, and a transition would rewrite a closed
+    // run's record of what it launched — the same write {@link writeRunIdOf}
+    // refuses for a state or an effect INSERT. The refusal NAMES the run, so a
+    // late platform confirmation is told why it did not land instead of being
+    // silently dropped, and the row stays visible with the status it had.
+    const currentRunId = this.readCurrentRunId(graphId);
+    if (
+      currentRunId !== undefined &&
+      current.runId !== undefined &&
+      current.runId !== currentRunId
+    ) {
+      return {
+        kind: "refused",
+        reason:
+          `effect ${effectId} of graph ${graphId} belongs to run ${current.runId}, which the graph has ` +
+          `SUPERSEDED with run ${currentRunId} — a closed run's effects are immutable, so nothing was ` +
+          `written and the row stays ${current.status}`,
+        effect: current,
+      };
+    }
     this.db.run(
       `UPDATE ${GRAPH_STORE_TABLES.pendingEffects}
        SET status = ?
@@ -1258,6 +1336,50 @@ export class LedgerTables {
       asRow(row, this.filePath, GRAPH_STORE_TABLES.acceptedEvents),
       this.filePath,
     );
+  }
+
+  /**
+   * The run id of an effect whose run is NO LONGER the graph's current run — the
+   * `run-superseded` classification of a refused batch, or `undefined` when the
+   * attempt's run is current, unknown, or the graph holds no run identity at
+   * all.
+   *
+   * The counterpart of the third guard clause of {@link writeBatch}, read
+   * against the same committed store after that guard refused the batch. It is
+   * deliberately not part of the acceptance preconditions: the guard decides,
+   * this names the fact that decided it.
+   */
+  private supersededRunOf(graphId: string, attemptId: string): string | undefined {
+    const current = this.readCurrentRunId(graphId);
+    if (current === undefined) return undefined;
+    const attemptRun = this.runOfAttempt(graphId, attemptId);
+    if (attemptRun === undefined || attemptRun === current) return undefined;
+    return attemptRun;
+  }
+
+  /**
+   * The run an attempt's own dispatch effect rows are filed under, or
+   * `undefined` when this store holds no such row for it.
+   *
+   * ONE owner of the join (the effects table's SQL lives in this class), and the
+   * reason the acceptance fence can bind a batch to the run it would settle: an
+   * attempt is armed by writing its dispatch effect in the same transaction that
+   * records the attempt, so an attempt that reached a real acceptance always has
+   * one. An attempt with no effect row anywhere is not attributable to a closed
+   * run by this store, and the guard does not invent one.
+   */
+  private runOfAttempt(graphId: string, attemptId: string): string | undefined {
+    const table = GRAPH_STORE_TABLES.pendingEffects;
+    const row = this.db
+      .query(
+        `SELECT run_id FROM ${table}
+         WHERE graph_id = ? AND attempt_id = ?
+         ORDER BY created_at LIMIT 1`,
+      )
+      .get(graphId, attemptId);
+    if (isNoRow(row)) return undefined;
+    const runId = readText(asRow(row, this.filePath, table), "run_id", this.filePath, table);
+    return runId === UNMINTED_RUN_ID ? undefined : runId;
   }
 
   private selectEffect(

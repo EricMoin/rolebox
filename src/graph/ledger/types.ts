@@ -207,8 +207,11 @@ export const GRAPH_STATE_MAX_BYTES = 4_194_304;
  * epoch milliseconds supplied by the CALLER — time is an explicit input, so the
  * store never reads a clock.
  *
- * ONE row per graph: writing a snapshot REPLACES the previous one (the current
- * state is a value, not a log), and the replacement is as atomic as the insert.
+ * ONE row per `(graph, run)`: writing a snapshot REPLACES that run's previous
+ * one (a run's current position is a value, not a log), and the replacement is
+ * as atomic as the insert. A RE-EXECUTION does not replace anything: it mints a
+ * NEW run whose own row is written, so the superseded run's last position stays
+ * readable under its own id (P3 item 2, G3).
  */
 export interface GraphStateRecord {
   readonly graphId: string;
@@ -284,9 +287,11 @@ export interface ControlPrincipalRecord {
  *
  * `runId` is minted once when the run's first state snapshot is committed,
  * inside the SAME transaction, so a run identity without the state it names is
- * unrepresentable. This build keeps the CURRENT run of a graph (one row per
- * graph); re-executing a terminal graph mints a new run and is a later work
- * package's change to this row's key, not a second run table.
+ * unrepresentable. The key is `(graph_id, run_id)` — ONE row per RUN, not per
+ * graph — and `run_seq` orders a graph's runs: the greatest sequence is the
+ * CURRENT run (what {@link RunControlLedger.readRun} answers), while a
+ * re-executed graph's earlier runs stay addressable by their own id with their
+ * own plan revision, state, effects and receipts (P3 item 2, G3).
  */
 export interface RunIdentityRecord {
   readonly graphId: string;
@@ -670,6 +675,10 @@ export interface AcceptanceBatch {
  *   FIRST statement of the batch write, inside the committing transaction and
  *   against the COMMITTED store, so whichever of control and acceptance COMMITS
  *   first is the fact that stands and the loser writes nothing.
+ * - `run-superseded` — the batch's attempt belongs to a run that is NO LONGER
+ *   the graph's current run, so that run was superseded (P3 item 2,
+ *   re-execution): nothing is written. A closed run's attempts accept nothing,
+ *   exactly like a controlled run's.
  */
 export type CommitResult =
   | { readonly kind: "committed"; readonly receipt: ReceiptRecord }
@@ -698,6 +707,31 @@ export type CommitResult =
       readonly kind: "superseded";
       /** The retry decision that superseded this attempt. */
       readonly decision: ControlDecisionRecord;
+      readonly reason: string;
+    }
+  | {
+      /**
+       * The attempt belongs to a run the graph has SUPERSEDED (P3 item 2,
+       * re-execution): nothing was written.
+       *
+       * A run-scoped retry closes the run it replaces and mints a successor, so
+       * the closed run's attempts can never settle afterwards — their results
+       * would be new terminal facts about a run whose receipts are already the
+       * record of what it accepted. The check is part of the FIRST statement of
+       * the batch write (a receipt INSERT conditioned on the attempt's own
+       * dispatch effect being filed under the graph's CURRENT run), so it decides
+       * against the COMMITTED store and a re-execution and a late acceptance can
+       * never both land for one attempt, in either order.
+       *
+       * The attempt is bound to its run by the dispatch effect rows the
+       * acceptance core itself settles: an attempt is armed by writing its effect
+       * in the same transaction that records it, so an attempt that reached a
+       * real acceptance always has one. An attempt with no effect row anywhere is
+       * not attributable to a closed run by this store and is not refused here.
+       */
+      readonly kind: "run-superseded";
+      /** The run the attempt belongs to — no longer the graph's current run. */
+      readonly runId: string;
       readonly reason: string;
     };
 
