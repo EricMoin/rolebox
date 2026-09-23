@@ -81,7 +81,10 @@ import {
   createGraphToolSet,
   createOutcomeGraphTools,
 } from "../graph/tools/index.ts";
-import { OutcomeHost } from "../graph/host/outcome-host.ts";
+import {
+  OutcomeHost,
+  WORKER_GRANTED_GRAPH_TOOLS,
+} from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
@@ -119,10 +122,17 @@ export const PI_SUBAGENT_TOOLS: string[] = [
   "session_read", "session_list", "session_info",
   "context_assemble",
   "signal",
-  // The OUTCOME run path's tool face: a spawned child declares graphs and
-  // settles its own attempt's outcome through graph_submit_outcome. The legacy
+  // THE WORKER HALF OF THE OUTCOME RUN PATH'S TOOL FACE (A21 / plan §3.3).
+  // A spawned child is a WORKER: it settles its own attempt's outcome through
+  // graph_submit_outcome and nothing else of the graph face. Declaring or
+  // mutating a graph definition (graph_declare), reading the authoritative
+  // store (graph_audit / graph_status) belong to the declaring/operating
+  // principal — the session that declared the graph, which on Pi is never a
+  // spawned child. The list is the SAME grant the host's own tool boundary
+  // enforces (src/graph/host/outcome-host.ts), so the face a child is handed
+  // and the face its calls are judged by cannot drift. The legacy
   // construction/execution entries are retired and are NOT granted.
-  "graph_declare", "graph_submit_outcome", "graph_audit", "graph_status",
+  ...WORKER_GRANTED_GRAPH_TOOLS,
   "task_search", "task_budget", "task_graph",
 ];
 

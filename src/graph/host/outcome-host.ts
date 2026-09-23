@@ -70,6 +70,22 @@
  * controller and the actual worker — and a host declares the one it can
  * substantiate.
  *
+ * AND THE FACE A WORKER'S OWN CALLS ARE JUDGED BY IS BOUND TOO (A21 / §3.3).
+ * The worker binding answers "which attempt is this submission for"; the same
+ * fact answers the REVERSE question a plain tool call carries — "is this
+ * session a dispatched worker?" — and {@link OutcomeHost.bindTools} then
+ * refuses every graph tool but the delivery channel
+ * ({@link WORKER_GRANTED_GRAPH_TOOLS}) for that session, BEFORE the tool body
+ * runs. Declaring or mutating a graph definition, reading the authoritative
+ * store and controlling another attempt stay the declaring/operating
+ * principal's capabilities, and the refusal is derived from the host's own
+ * durable execution row — not from a path, a permission bit or an argument the
+ * caller chose. WHAT IT IS NOT: an OS/account/container boundary. A worker on
+ * the same account can still open the store FILE, and the shipped dsh entry
+ * registers its graph face GLOBALLY (dsh has no rolebox-owned per-worker tool
+ * scope), so on that host the boundary is the per-call refusal rather than a
+ * narrowed schema — reported, never claimed as more.
+ *
  * WHO RUNS THE FIRST DISPATCH. A declared graph is persisted by
  * `graph_declare` and dispatched by nobody in the tool layer. The host calls
  * {@link OutcomeHost.startDeclaredGraph} from its declaration seam: that opens
@@ -617,6 +633,21 @@ export class OutcomeHost {
    */
   private readonly workerSessions: HostWorkerSessionHolder;
   private readonly workerCapability: HostWorkerIdentityCapability;
+  /**
+   * The sessions this host bound as the worker of a dispatched attempt, kept for
+   * the process lifetime (A21 / plan §3.3).
+   *
+   * WHY AN INDEX AT ALL. The worker binding answers "what was attempt X
+   * dispatched AS"; the worker-tool boundary asks the REVERSE question — "is
+   * this session a dispatched worker?" — because that is the only subject a
+   * tool call carries. A session enters on the host fact that mints it
+   * ({@link OutcomeHost.confirmExecution}, when the platform names the
+   * execution) and stays: a settled attempt's worker is still a worker, and
+   * nothing legitimate it can do needs the declarer's tools. Sessions this
+   * process did not confirm are still covered — the durable row is read on
+   * demand ({@link OutcomeHost.dispatchedWorkerPrincipalOf}).
+   */
+  private readonly workerPrincipals = new Map<string, OutcomeWorkerPrincipal>();
   private readonly declareInvocationIdentity: boolean;
   /** The platform's child-session derivation, when the host declared one. */
   private readonly workerSessionOf:
@@ -1471,6 +1502,14 @@ export class OutcomeHost {
     return bindOutcomeToolInvocation(tools, {
       holder: this.holder,
       workerSession: this.workerSessions,
+      // THE WORKER BOUNDARY (A21): the face grants a dispatched worker exactly
+      // its delivery channel and refuses the rest before the tool body runs.
+      // Installed unconditionally — a host with no workerSessionOf can never
+      // bind a worker, so the boundary is inert rather than absent.
+      workerBoundary: {
+        granted: WORKER_GRANTED_GRAPH_TOOLS,
+        principalOf: (sessionId: string) => this.workerPrincipalOf(sessionId),
+      },
       ...(getEffectiveAgent === undefined ? {} : { getEffectiveAgent }),
     });
   }
@@ -1487,7 +1526,12 @@ export class OutcomeHost {
     effect: OutcomeDispatchEffectKey,
     execution: HostExecutionIdentity,
   ): boolean {
-    return this.executions.confirm(effect, execution);
+    const confirmed = this.executions.confirm(effect, execution);
+    // The platform just named the execution, so the child session the worker
+    // runs in is the host's own fact from here on: the same derivation the
+    // submission ingress judges a call by, recorded once for the tool boundary.
+    if (confirmed) this.rememberWorkerPrincipal(effect, execution);
+    return confirmed;
   }
 
   /**
@@ -1652,6 +1696,100 @@ export class OutcomeHost {
       ...(execution.taskId === undefined ? {} : { taskId: execution.taskId }),
       workerSessionId,
     });
+  }
+
+  /**
+   * Record one session as the worker of an attempt, from a host fact.
+   *
+   * A platform that cannot name the child session ({@link
+   * OutcomeHostOptions.workerSessionOf} omitted, or this execution unreadable to
+   * it) records nothing: the boundary must never refuse a session the host did
+   * not actually bind, and an unidentifiable worker is a platform gap reported
+   * in the evidence rather than a guessed denial.
+   */
+  private rememberWorkerPrincipal(
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
+  ): void {
+    const workerSessionId = this.workerSessionOf?.(execution);
+    if (workerSessionId === undefined || workerSessionId.length === 0) return;
+    this.workerPrincipals.set(
+      workerSessionId,
+      Object.freeze({
+        graphId: effect.graphId,
+        attemptId: effect.attemptId,
+        executionId: execution.executionId,
+        workerSessionId,
+      }),
+    );
+  }
+
+  /**
+   * What this host bound ONE SESSION as, or `undefined` when it bound nothing.
+   *
+   * Two sources, both host facts: the sessions this process confirmed
+   * (remembered for the process lifetime) and, for a session a PREVIOUS process
+   * dispatched, the durable execution rows of the graphs' still-unsettled
+   * effects. The durable read is the reason a restarted host still refuses a
+   * worker that is still running — not a path check and not a caller-supplied
+   * value, but the same execution row the completion path authenticates
+   * against.
+   */
+  private workerPrincipalOf(sessionId: string): OutcomeWorkerPrincipal | undefined {
+    const remembered = this.workerPrincipals.get(sessionId);
+    if (remembered !== undefined) return remembered;
+    return this.dispatchedWorkerPrincipalOf(sessionId);
+  }
+
+  /**
+   * The durable half of {@link OutcomeHost.workerPrincipalOf}: scan the
+   * still-unsettled dispatch effects of every declared graph and ask which of
+   * their execution rows names this session as its worker.
+   *
+   * READ-ONLY AND FAIL-OPEN. The scan borrows a read-only connection (it never
+   * creates or initializes a store), and a store that cannot be read answers
+   * "no worker bound" rather than denying: the very tool the caller is invoking
+   * reports the unreadable store by name, and a boundary that turned a damaged
+   * store into "everything is a worker" would break the declarer's own
+   * recovery. A settled attempt is covered by the remembered half when THIS
+   * process confirmed it; after a restart, only a still-running attempt can
+   * still be calling tools, and its effect is by definition unsettled.
+   */
+  private dispatchedWorkerPrincipalOf(
+    sessionId: string,
+  ): OutcomeWorkerPrincipal | undefined {
+    const workerSessionOf = this.workerSessionOf;
+    if (workerSessionOf === undefined) return undefined;
+    const loaded = loadGraphStoreSync(this.storeRoot);
+    if (loaded.kind !== "valid") return undefined;
+    const store = loaded.value;
+    try {
+      for (const graphId of store.definitionGraphIds()) {
+        for (const effect of store.pendingEffects(graphId)) {
+          const row = store.readExecution({
+            graphId,
+            effectId: effect.effectId,
+            attemptId: effect.attemptId,
+          });
+          if (row === undefined || row.state !== "created" || row.execution === undefined) {
+            continue;
+          }
+          const workerSessionId = workerSessionOf(row.execution);
+          if (workerSessionId !== sessionId) continue;
+          return Object.freeze({
+            graphId,
+            attemptId: row.attemptId,
+            executionId: row.execution.executionId,
+            workerSessionId,
+          });
+        }
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    } finally {
+      store.close();
+    }
   }
 
   /** The per-graph completion bridge, created on first use. */
@@ -2009,6 +2147,119 @@ export class OutcomeHost {
 
 // ── Tool attribution ────────────────────────────────────────────────────────
 
+/**
+ * The refusal a BOUND DISPATCHED WORKER gets for every graph tool that is not
+ * its delivery channel (plan §3.3 / A21).
+ *
+ * A worker's job — and the whole purpose of the attempt handoff — is to settle
+ * its OWN attempt's outcome. Declaring or mutating a graph definition, reading
+ * the authoritative store and controlling another attempt belong to the
+ * declaring/operating principal, so the face a worker's call is judged by
+ * grants exactly {@link WORKER_GRANTED_GRAPH_TOOLS} and refuses the rest by
+ * name. Stable identifier; wording is not API.
+ */
+export const WORKER_TOOL_FORBIDDEN_CODE = "worker-tool-forbidden" as const;
+
+/**
+ * The ONLY graph-tool names a dispatched worker's face grants.
+ *
+ * DELIBERATELY AN ALLOW-LIST, NOT A DENY-LIST: a tool this build has not
+ * shipped yet (an approval or cancel entry) is refused to a worker without
+ * anyone remembering to add it here. A worker that needs more than the
+ * delivery channel is a principal the run path does not have.
+ */
+export const WORKER_GRANTED_GRAPH_TOOLS: readonly string[] = Object.freeze([
+  "graph_submit_outcome",
+]);
+
+/**
+ * What the host bound one SESSION as: the worker of a dispatched attempt.
+ *
+ * Every field is a host fact — the platform named the execution
+ * ({@link OutcomeHost.confirmExecution}) or the durable execution row carries
+ * it — and the session is derived from that execution by the platform-specific
+ * {@link OutcomeHostOptions.workerSessionOf}. Nothing here comes from the
+ * caller of a tool.
+ */
+export interface OutcomeWorkerPrincipal {
+  readonly graphId: string;
+  readonly attemptId: string;
+  readonly executionId: string;
+  readonly workerSessionId: string;
+}
+
+/**
+ * The worker-principal half of a bound tool face: which names a dispatched
+ * worker may call, and what the host bound one arriving session as.
+ *
+ * This is the boundary §3.3 requires and the one rolebox can enforce without
+ * an OS/account/container boundary: it is a per-call authorization against the
+ * host's own durable execution binding, not a path check, a permission bit or
+ * a boolean capability.
+ */
+export interface OutcomeWorkerToolBoundary {
+  /** The granted tool names; every other name in the face refuses a worker. */
+  readonly granted: readonly string[];
+  /** The attempt one session is the confirmed worker of, or `undefined`. */
+  readonly principalOf: (sessionId: string) => OutcomeWorkerPrincipal | undefined;
+}
+
+/**
+ * The refusal one bound worker's non-granted tool call receives, or
+ * `undefined` when the call may run.
+ *
+ * TOTAL and synchronous: with no boundary installed, with a granted name, with
+ * no session on the call, and with a session the host bound as no worker's, the
+ * answer is "run it" — the boundary only ever refuses a call it can attribute
+ * to a dispatched worker, so a declarer or an unrelated session is unaffected.
+ */
+function workerToolRefusal(
+  toolName: string,
+  boundary: OutcomeWorkerToolBoundary | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  if (boundary === undefined) return undefined;
+  if (boundary.granted.includes(toolName)) return undefined;
+  if (sessionId === undefined || sessionId.length === 0) return undefined;
+  const principal = boundary.principalOf(sessionId);
+  if (principal === undefined) return undefined;
+  return renderWorkerToolRefusal(toolName, boundary.granted, principal);
+}
+
+/** Render one worker-tool refusal as the machine-readable tool result. */
+function renderWorkerToolRefusal(
+  toolName: string,
+  granted: readonly string[],
+  principal: OutcomeWorkerPrincipal,
+): string {
+  return JSON.stringify(
+    {
+      refused: true,
+      code: WORKER_TOOL_FORBIDDEN_CODE,
+      tool: toolName,
+      graph_id: principal.graphId,
+      attempt_id: principal.attemptId,
+      granted_tools: [...granted],
+      message:
+        toolName +
+        " refused [" +
+        WORKER_TOOL_FORBIDDEN_CODE +
+        "]: this call arrives from the session the host bound as the worker of attempt " +
+        JSON.stringify(principal.attemptId) +
+        " of graph " +
+        JSON.stringify(principal.graphId) +
+        ". A dispatched worker's graph face grants exactly " +
+        granted.join(", ") +
+        " — declaring or mutating a graph definition, reading the authoritative store " +
+        "and controlling another attempt are the declaring/operating principal's " +
+        "capabilities, not the worker's. Settle your own attempt's outcome with " +
+        "graph_submit_outcome.",
+    },
+    null,
+    2,
+  );
+}
+
 /** How the host resolves the acting agent for one tool invocation. */
 export interface OutcomeToolAttribution {
   /** The host's invocation holder (D9). */
@@ -2026,6 +2277,15 @@ export interface OutcomeToolAttribution {
   readonly workerSession?: HostWorkerSessionHolder;
   /** Platform acting-agent resolver (`context.agent` wins when populated). */
   readonly getEffectiveAgent?: (sessionID?: string) => string;
+  /**
+   * THE WORKER-PRINCIPAL BOUNDARY (plan §3.3 / A21).
+   *
+   * When installed, a call that arrives from a session this host bound as the
+   * worker of a dispatched attempt is refused unless its tool name is in
+   * `granted`. Omitted → the face grants every name (a host that cannot
+   * substantiate a worker session has no worker principal to judge).
+   */
+  readonly workerBoundary?: OutcomeWorkerToolBoundary;
 }
 
 /**
@@ -2044,7 +2304,7 @@ export function bindOutcomeToolInvocation(
 ): Record<string, CanonicalToolDef> {
   const bound: Record<string, CanonicalToolDef> = {};
   for (const [name, def] of Object.entries(tools)) {
-    bound[name] = withInvocation(def, attribution);
+    bound[name] = withInvocation(name, def, attribution);
   }
   return bound;
 }
@@ -2054,6 +2314,7 @@ type ToolExecute = CanonicalToolDef["execute"];
 type ToolExecuteArgs = Parameters<ToolExecute>[0];
 
 function withInvocation(
+  name: string,
   def: CanonicalToolDef,
   attribution: OutcomeToolAttribution,
 ): CanonicalToolDef {
@@ -2075,6 +2336,17 @@ function withInvocation(
       // is never read across an await on the submission path.
       attribution.workerSession?.set(context?.sessionID);
       try {
+        // THE WORKER BOUNDARY RUNS BEFORE THE TOOL BODY. A bound worker's call
+        // to anything but its delivery channel is answered here, so no parse,
+        // no compile, no store read and no write happens for it — and the
+        // refusal is derived from the host's own binding of the session, never
+        // from an argument the caller chose.
+        const refused = workerToolRefusal(
+          name,
+          attribution.workerBoundary,
+          context?.sessionID,
+        );
+        if (refused !== undefined) return refused;
         return await inner(args as ToolExecuteArgs, context);
       } finally {
         attribution.holder.clear();

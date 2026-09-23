@@ -1541,6 +1541,16 @@ export async function apply(
     );
   }
 
+  // THE GRAPH FACE IS REGISTERED GLOBALLY, AND THAT IS REPORTED, NOT HIDDEN.
+  // dsh's tool registry is global (rolebox's `ctx.tools` mirror exposes
+  // `register`, not a per-agent scope or restriction), so a dispatched worker
+  // on this host is HANDED the same four graph tools as the declaring session.
+  // What rolebox enforces is the call, not the schema: `graphTools` are bound
+  // through `OutcomeHost.bindTools`, which refuses every graph tool but
+  // `graph_submit_outcome` when the call arrives from a session this host
+  // bound as the worker of a dispatched attempt (A21 / plan §3.3), before the
+  // tool body runs. Narrowing the dsh schema itself needs a platform scope
+  // rolebox does not yet consume.
   const tools = {
     ...buildCanonicalTools({
       resolvedRoles,
