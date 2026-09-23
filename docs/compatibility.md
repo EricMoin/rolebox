@@ -29,7 +29,7 @@ On Codex, rolebox resolves its directories under the Codex home (`$CODEX_HOME` w
 | reference_search | ✓ | ✓ | ✓ |
 | load_role_skill | — (native skill tool) | ✓ | ✓ |
 | session_list / session_read / session_search / session_info / session_diff / session_fork | ✓ | ✓ | — (not over MCP) |
-| graph_create / graph_add_node / graph_add_edge / graph_add_loop / graph_run / graph_status / graph_cancel / graph_approve | ✓ | ✓ | — (not over MCP) |
+| graph_declare / graph_submit_outcome / graph_status / graph_audit | ✓ | ✓ | — (not over MCP) |
 | task_search / task_budget / task_graph / task_chronology / task_export (task_retry withheld) | ✓ | ✓ | — (not over MCP) |
 | lsp_* (32 tools) | ✓ | ✓ | — (not over MCP) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |

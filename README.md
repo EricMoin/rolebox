@@ -29,7 +29,7 @@
 
 ## What it is / why you'd want it
 
-A general coding agent is one agent with one prompt. rolebox turns it into *your* configured team: specialist roles you define in YAML, each with its own prompts, model, skills, and permissions, working the same task together. What they learn survives the session — decisions, conventions, and lessons persist in memory — and a graph execution engine actually runs the team: dispatching each role, carrying results and signals between them, enforcing budgets, loop caps, and approval gates.
+A general coding agent is one agent with one prompt. rolebox turns it into *your* configured team: specialist roles you define in YAML, each with its own prompts, model, skills, and permissions, working the same task together. What they learn survives the session — decisions, conventions, and lessons persist in memory — and a graph execution engine actually runs the team: dispatching each role, carrying results and outcomes between them along declared edges, and enforcing declared loop caps.
 
 ---
 
@@ -38,10 +38,10 @@ A general coding agent is one agent with one prompt. rolebox turns it into *your
 - **It remembers your project.** Decisions, conventions, and lessons persist in memory and auto-inject at session start (`<available_memory>`) — you stop re-explaining yourself.
 - **Your team, defined by you.** Every specialist is a YAML role with its own prompt, model, skills, and permissions — install one from the registry or write your own.
 - **Real concurrency with a ceiling.** Parallel multi-agent dispatch with engine-managed concurrency, per-node budgets, and retries — the team scales without runaway spend.
-- **Autonomy you can gate.** Workflows run as an explicit graph with bounded loops, and a node flagged `needs_approval: true` pauses the graph until you approve it.
+- **Autonomy on declared rails.** Workflows run as an explicit graph with bounded loops, and a node advances only when its worker submits one of the outcomes the declaration allows — a free-form report is never interpreted as progress.
 - **Edits that never drift.** 30+ language-server tools (go-to-definition, diagnostics, references, rename) plus content-hash-anchored editing that survives concurrent file changes.
 
-The graph engine is how the team runs: `graph_create` → `graph_add_node` / `graph_add_edge` → `graph_run` builds an explicit workflow, and `graph_status` reads results back. `graph_run` is non-blocking — you end your turn and the engine wakes you with `[GRAPH COMPLETE]`, or `[GRAPH BLOCKED]` at an approval gate. Architecture and the full toolset: [docs/graph-engine-architecture.md](docs/graph-engine-architecture.md).
+The graph engine is how the team runs: `graph_declare` writes a version-3 declaration — each node's agent, prompt and the outcomes it may report, plus the edges that route an accepted outcome — and starts nothing itself. The host dispatches the entry nodes, and a worker settles its node with `graph_submit_outcome`, which commits the node's state and arms the next node; `graph_status` reads the recorded state back and `graph_audit` inventories the persisted store. Architecture and the full toolset: [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
 
 ---
 
@@ -163,7 +163,7 @@ Registry roles often ship placeholder model names; map them once in `role_config
 
 ---
 
-> **Upgrading from 0.x.x?** rolebox 1.x replaced the 0.x execution model. Workflows are now built and run **imperatively on a graph execution engine** — `graph_create` → `graph_add_node` / `graph_add_edge` → `graph_run` — instead of being declared in `role.yaml`. See [docs/graph-engine-architecture.md](docs/graph-engine-architecture.md).
+> **Upgrading from 0.x.x?** rolebox 1.x replaced the 0.x execution model. Workflows are now declared to the **graph outcome protocol** with `graph_declare` instead of being declared in `role.yaml`, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
 
 ---
 
@@ -173,7 +173,7 @@ Registry roles often ship placeholder model names; map them once in `role_config
 |---|---|---|---|---|---|
 | Create a Role | [create-a-role.md](docs/create-a-role.md) | role.yaml Reference | [role-yaml.md](docs/role-yaml.md) | Directory Structure | [directory-structure.md](docs/directory-structure.md) |
 | Functions | [functions.md](docs/functions.md) | Copilot (Turn-End) | [copilot.md](docs/copilot.md) | Skills | [skills.md](docs/skills.md) |
-| References | [references.md](docs/references.md) | Subagents | [subagents.md](docs/subagents.md) | Graph Engine | [graph-engine-architecture.md](docs/graph-engine-architecture.md) |
+| References | [references.md](docs/references.md) | Subagents | [subagents.md](docs/subagents.md) | Graph Engine | [graph-outcome-protocol.md](docs/graph-outcome-protocol.md) |
 | Memory Strategy | [memory-strategy.md](docs/memory-strategy.md) | Model Aliases | [model-aliases.md](docs/model-aliases.md) | CLI | [cli.md](docs/cli.md) |
 | Session Tools | [session-tools-strategy.md](docs/session-tools-strategy.md) | Dispatch Config | [dispatch-config.md](docs/dispatch-config.md) | Custom Hooks | [hooks.md](docs/hooks.md) |
 | Extensions | [extensions.md](docs/extensions.md) | Registry | [registry.md](docs/registry.md) | Error Handling | [error-handling.md](docs/error-handling.md) |
