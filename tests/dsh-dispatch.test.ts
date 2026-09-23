@@ -6,19 +6,17 @@
  * MOCKED dsh subagent service (no real dsh packages, no opencode SDK).
  *
  * Verifies (subtask 8 of the dsh adaptation strategy):
- *   - a single-node graph run through the dsh dispatch path dispatches to the
- *     dsh subagent seam (`SubagentRuntime.start`) with the per-role agent
- *     mapping (node.agent == provider name) and returns the node result
- *     (output materialized → graph_status include_output reads it)
- *   - a throwing `start()` escalates the node per engine semantics
- *     (dispatch failure → timeout + escalate ledger signal → escalate)
- *   - a run that settles with `stopReason: "error"` escalates the node
- *   - cancellation maps to the dsh abort surface (run.dispose) and settles
- *     the task as `cancelled`
+ *   - the OUTCOME run path through the dsh seam: `DshOutcomeDelivery` starts one
+ *     dsh run per attempt and the host settles its observed completion
+ *   - a throwing `start()` fails the round loud (provider-level rejection)
  *   - the immediate-fire termination guard (listen-after-terminate)
  *   - the loop adapter surface (dispatchRound/getRoundResult/cancelRound/
  *     registerTerminatedListener/getTaskStatus) driven through dsh
  *   - the new dsh dispatch code stays free of @opencode-ai imports
+ *
+ * The legacy graph-engine dispatch cases (executeNode, engine node escalation,
+ * nested-graph settlement) were deleted with the runtime they drove; the
+ * surviving graph coverage drives the outcome path instead.
  *
  * @module
  */
@@ -27,9 +25,21 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { GraphToolSet } from "../src/graph/tools/graph-tools.ts";
-import { NodeStatus } from "../src/constants.ts";
-import type { NodeRuntimeState } from "../src/types.engine-v2.ts";
+import { DshOutcomeDelivery } from "../src/platform/adapters/dsh/outcome-dispatch.ts";
+import { OutcomeHost } from "../src/graph/host/outcome-host.ts";
+import type { GraphDeclarationV3 } from "../src/graph/compiler/declaration-v3.ts";
+import {
+  buildDeclaredOutcomeGraph,
+  persistDeclaredGraph,
+} from "../src/graph/tools/declare-graph.ts";
+import { engineStateDir } from "../src/graph/persistence/engine-persistence.ts";
+import { scanPersistedStates } from "../src/graph/tools/persisted-state.ts";
+import { createValidatorRegistry } from "../src/graph/outcome/validators.ts";
+import {
+  completionPolicyRefOf,
+  createCompletionPolicyRegistry,
+  type CompletionPolicyBody,
+} from "../src/graph/policy/completion-policy.ts";
 import { DshDispatchAdapter, DshParentUnresolvedError } from "../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSubagentDispatchRuntime } from "../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSubagentResult } from "../src/platform/adapters/dsh/dispatch.ts";
@@ -201,24 +211,6 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
 
 const outputBlock = (text: string) => [{ type: "text", text }];
 
-/** Parse a graph_status JSON render into a typed record. */
-function statusJson<T>(ts: GraphToolSet, args: Record<string, unknown>): T {
-  return JSON.parse(ts.graph_status(args as never)) as T;
-}
-
-interface NodeSummary {
-  node_id: string;
-  status: string;
-  /** `error` mirrors `NodeRuntimeState.errorReason` in the JSON render. */
-  error?: string;
-  output?: string;
-}
-
-interface GraphJson {
-  phase: string;
-  nodes: NodeSummary[];
-}
-
 // ── Shared setup ────────────────────────────────────────────────────────────
 
 let tmpDir: string;
@@ -246,161 +238,8 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function toolset(): GraphToolSet {
-  return new GraphToolSet({ dispatch, directory: tmpDir });
-}
 
-/**
- * Build a minimal running node fixture for direct `executeNode` calls.
- * `executeNode` reads `node.agent`, `node.prompt`, `node.nodeId`, and
- * `node.budget?.timeout_ms`; the remaining fields satisfy the runtime shape.
- */
-function makeNode(
-  agent: string,
-  opts?: { nodeId?: string; prompt?: string },
-): NodeRuntimeState {
-  return {
-    nodeId: opts?.nodeId ?? "N1",
-    agent,
-    prompt: opts?.prompt ?? "execute this node",
-    needsApproval: false,
-    status: NodeStatus.Running,
-    signalsObserved: {},
-    sessionsSpawned: 0,
-    tokensConsumed: { inputTokens: 0, outputTokens: 0, cost: 0 },
-    upstreamResults: new Map(),
-    joinStrategy: "all",
-    joinSatisfied: false,
-    traversalCount: 0,
-    startedAt: 0,
-    retryCount: 0,
-  };
-}
-
-/** Run a single-node graph to completion and return its status JSON. */
-async function runSingleNode(
-  agent: string,
-  opts?: { id?: string; prompt?: string },
-): Promise<GraphJson> {
-  const ts = toolset();
-  const g = ts.graph_create({ name: "dsh-graph" });
-  ts.graph_add_node({
-    graph_id: g.graph_id,
-    id: opts?.id ?? "N1",
-    agent,
-    prompt: opts?.prompt ?? "execute this node",
-  });
-  await ts.graph_run({ graph_id: g.graph_id });
-  await settle();
-  return statusJson<GraphJson>(ts, { graph_id: g.graph_id, format: "json" });
-}
-
-// ── Graph engine through the dsh dispatch path ──────────────────────────────
-
-describe("graph engine dispatch through the dsh subagent seam", () => {
-  it("dispatches a single node to the registered provider and returns its result", async () => {
-    service.seedProvider("emperor--jinyiwei--backend");
-    service.autoComplete.set("emperor--jinyiwei--backend", {
-      stopReason: "completed",
-      output: outputBlock("dsh worker finished the node"),
-    });
-
-    const ts = toolset();
-    const g = ts.graph_create({ name: "dsh-graph" });
-    ts.graph_add_node({
-      graph_id: g.graph_id,
-      id: "N1",
-      agent: "emperor--jinyiwei--backend",
-      prompt: "execute this node",
-    });
-    await ts.graph_run({ graph_id: g.graph_id });
-    await settle();
-
-    // The dsh subagent seam was hit exactly once, with the per-role mapping
-    // (node.agent === provider name) and the node's prompt as text content.
-    expect(service.started).toHaveLength(1);
-    expect(service.started[0].name).toBe("emperor--jinyiwei--backend");
-    expect(service.started[0].request.prompt).toEqual([
-      { type: "text", text: "execute this node" },
-    ]);
-    expect(service.started[0].request.signal).toBeInstanceOf(AbortSignal);
-
-    // The node completed and its output is readable through graph_status.
-    const graph = statusJson<GraphJson>(ts, { graph_id: g.graph_id, format: "json" });
-    const node = graph.nodes.find((n) => n.node_id === "N1");
-    expect(node?.status).toBe("completed");
-    expect(graph.phase).toBe("complete");
-
-    const withOutput = statusJson<Record<string, unknown>>(ts, {
-      graph_id: g.graph_id,
-      node_id: "N1",
-      format: "json",
-      include_output: true,
-    });
-    expect(String(withOutput.output ?? "")).toContain("dsh worker finished the node");
-  });
-
-  it("does not dispatch when the agent has no registered provider (fails fast)", async () => {
-    // No seedProvider("ghost") — the mapping guard must reject.
-    const graph = await runSingleNode("ghost");
-    // A dispatch failure is contained by the engine: the node is timed out
-    // with an escalate ledger signal, and the graph reaches a terminal phase
-    // (never hangs). No run was ever started on the dsh seam.
-    expect(graph.nodes.find((n) => n.node_id === "N1")?.status).toBe("timeout");
-    expect(graph.phase).toBe("complete");
-    expect(service.started).toHaveLength(0);
-  });
-
-  it("escalates the node when the subagent start throws (dispatch failure)", async () => {
-    service.seedProvider("thrower");
-    service.autoError.set("thrower", "provider refused to spawn");
-    const graph = await runSingleNode("thrower");
-    // Engine semantics for a throwing execute (engine-advance.ts
-    // `_dispatchNode` catch): mark the node `timeout` + record an `escalate`
-    // ledger signal so downstream joins fail fast. The node is terminal and
-    // the graph reaches `complete` (never hangs).
-    const node = graph.nodes.find((n) => n.node_id === "N1");
-    expect(node?.status).toBe("timeout");
-    expect(node?.error).toContain("provider refused to spawn");
-    expect(graph.phase).toBe("complete");
-  });
-
-  it("escalates the node when the run settles with stopReason 'error'", async () => {
-    service.seedProvider("err-run");
-    service.autoComplete.set("err-run", {
-      stopReason: "error",
-      output: outputBlock("child agent exploded"),
-    });
-    const graph = await runSingleNode("err-run");
-    const node = graph.nodes.find((n) => n.node_id === "N1");
-    expect(node?.status).toBe("escalate");
-    expect(node?.error).toContain("child agent exploded");
-  });
-
-  it("maps a run that settles with stopReason 'max-tokens' to an escalated node", async () => {
-    service.seedProvider("long-run");
-    service.autoComplete.set("long-run", { stopReason: "max-tokens", output: [] });
-    const graph = await runSingleNode("long-run");
-    expect(graph.nodes.find((n) => n.node_id === "N1")?.status).toBe("escalate");
-  });
-
-  it("maps cancellation to the dsh abort surface (run.dispose) and settles cancelled", async () => {
-    service.seedProvider("slow");
-    const graph = await runSingleNode("slow");
-    // The run never settles on its own (no autoComplete) — still running.
-    expect(graph.nodes.find((n) => n.node_id === "N1")?.status).toBe("running");
-
-    expect(service.runs.size).toBe(1);
-    const runId = [...service.runs.keys()][0];
-    const cancelled = await dispatch.cancelTask(runId);
-    expect(cancelled).toBe(true);
-    await settle();
-
-    // The dsh run's dispose() (the abort surface) was called.
-    expect(service.runs.get(runId)?.disposeCalls).toBeGreaterThanOrEqual(1);
-    expect(await dispatch.getTaskStatus(runId)).toBe("cancelled");
-  });
-
+describe("dsh dispatch round surface through the subagent seam", () => {
   it("fires an already-terminal task's listener via microtask (immediate-fire guard)", async () => {
     service.seedProvider("fast");
     service.autoComplete.set("fast", {
@@ -423,250 +262,6 @@ describe("graph engine dispatch through the dsh subagent seam", () => {
     expect(fired).toBe(`${workerTaskId}:completed`);
   });
 });
-
-// ── Nested-graph settlement through the dsh dispatch path ───────────────────
-//
-// A dispatched subagent that calls `graph_run` ends its turn immediately
-// (graph_run is non-blocking), so its dsh run resolves `completed` while the
-// nested graph is still executing. The outer node must stay running until the
-// nested graph settles, and a nested-graph failure must propagate (escalate)
-// instead of being reported as a success.
-
-describe("nested graph settlement through the dsh subagent seam", () => {
-  /** Adapter + toolset wired with the (late-bound) nested-graph liveness probe. */
-  function nestedToolset(): { ts: GraphToolSet; adapter: DshDispatchAdapter } {
-    let tsRef: GraphToolSet | undefined;
-    const adapter = new DshDispatchAdapter({
-      subagents: service,
-      directory: tmpDir,
-      parentResolver: () => fakeParent,
-      graphLiveness: {
-        hasExecuting: (sid) => tsRef?.hasExecutingGraphsForSession(sid) ?? false,
-        subscribeTerminal: (cb) =>
-          tsRef?.subscribeGraphTerminal(cb) ?? (() => {}),
-      },
-    });
-    const ts = new GraphToolSet({ dispatch: adapter, directory: tmpDir });
-    tsRef = ts;
-    return { ts, adapter };
-  }
-
-  function nodeStatus(ts: GraphToolSet, graphId: string, nodeId: string): string | undefined {
-    return statusJson<GraphJson>(ts, { graph_id: graphId, format: "json" }).nodes.find(
-      (n) => n.node_id === nodeId,
-    )?.status;
-  }
-
-  /** The dsh run id that is NOT the outer run's (the nested node's run). */
-  function otherRunId(outerRunId: string): string {
-    const id = [...service.runs.keys()].find((r) => r !== outerRunId);
-    if (!id) throw new Error("nested run not started");
-    return id;
-  }
-
-  it("holds the outer node running while the nested graph executes, then escalates it on nested failure", async () => {
-    const { ts } = nestedToolset();
-
-    const inner = ts.graph_create({ name: "inner-graph" });
-    ts.graph_add_node({ graph_id: inner.graph_id, id: "M1", agent: "inner", prompt: "inner" });
-    const outer = ts.graph_create({ name: "outer-graph" });
-    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
-
-    // Both agents yield a controllable run that stays pending.
-    service.seedProvider("outer");
-    service.seedProvider("inner");
-
-    await ts.graph_run({ graph_id: outer.graph_id });
-    await settle();
-    expect(service.runs.size).toBe(1);
-    const outerRunId = [...service.runs.keys()][0];
-
-    // The outer subagent dispatches the nested graph from its own session.
-    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
-    await settle();
-    expect(service.runs.size).toBe(2);
-
-    // The subagent ends its turn `completed` — the nested graph is still
-    // executing, so the outer node must NOT complete.
-    service.completeRun(outerRunId, {
-      stopReason: "completed",
-      output: outputBlock("outer done"),
-    });
-    await settle();
-    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
-
-    // The nested graph fails → the failure propagates to the outer node.
-    service.completeRun(otherRunId(outerRunId), {
-      stopReason: "error",
-      output: outputBlock("inner exploded"),
-    });
-    await settle();
-
-    const json = statusJson<GraphJson>(ts, { graph_id: outer.graph_id, format: "json" });
-    const n1 = json.nodes.find((n) => n.node_id === "N1");
-    expect(n1?.status).toBe("escalate");
-    expect(n1?.error).toContain("nested graph");
-    expect(json.phase).toBe("complete");
-  });
-
-  it("completes the outer node once the nested graph finishes cleanly", async () => {
-    const { ts } = nestedToolset();
-
-    const inner = ts.graph_create({ name: "inner-ok" });
-    ts.graph_add_node({ graph_id: inner.graph_id, id: "M1", agent: "inner", prompt: "inner" });
-    const outer = ts.graph_create({ name: "outer-ok" });
-    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
-
-    service.seedProvider("outer");
-    service.seedProvider("inner");
-
-    await ts.graph_run({ graph_id: outer.graph_id });
-    await settle();
-    const outerRunId = [...service.runs.keys()][0];
-    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
-    await settle();
-
-    service.completeRun(outerRunId, {
-      stopReason: "completed",
-      output: outputBlock("outer done"),
-    });
-    await settle();
-    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
-
-    service.completeRun(otherRunId(outerRunId), {
-      stopReason: "completed",
-      output: outputBlock("inner done"),
-    });
-    await settle();
-
-    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("completed");
-    const withOutput = statusJson<Record<string, unknown>>(ts, {
-      graph_id: outer.graph_id,
-      node_id: "N1",
-      format: "json",
-      include_output: true,
-    });
-    expect(String(withOutput.output ?? "")).toContain("outer done");
-  });
-
-  it("completes a node normally when its agent launches no nested graph (no regression)", async () => {
-    let tsRef: GraphToolSet | undefined;
-    const adapter = new DshDispatchAdapter({
-      subagents: service,
-      directory: tmpDir,
-      parentResolver: () => fakeParent,
-      graphLiveness: {
-        hasExecuting: (sid) => tsRef?.hasExecutingGraphsForSession(sid) ?? false,
-        subscribeTerminal: (cb) =>
-          tsRef?.subscribeGraphTerminal(cb) ?? (() => {}),
-      },
-    });
-    const ts = new GraphToolSet({ dispatch: adapter, directory: tmpDir });
-    tsRef = ts;
-
-    service.seedProvider("plain");
-    service.autoComplete.set("plain", {
-      stopReason: "completed",
-      output: outputBlock("plain done"),
-    });
-
-    const g = ts.graph_create({ name: "plain-graph" });
-    ts.graph_add_node({ graph_id: g.graph_id, id: "N1", agent: "plain", prompt: "plain" });
-    await ts.graph_run({ graph_id: g.graph_id });
-    await settle();
-
-    expect(nodeStatus(ts, g.graph_id, "N1")).toBe("completed");
-  });
-
-  it("resolveSessionChain walks a dispatched child session up to the outermost live session", async () => {
-    const { ts, adapter } = nestedToolset();
-
-    const outer = ts.graph_create({ name: "chain-outer" });
-    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
-    service.seedProvider("outer");
-    service.seedProvider("inner");
-
-    // The user's orchestrator session runs the outer graph.
-    await ts.graph_run({ graph_id: outer.graph_id }, "user-session");
-    await settle();
-    const outerRunId = [...service.runs.keys()][0];
-
-    // The outer subagent (a dispatched child session) runs the inner graph.
-    const inner = ts.graph_create({ name: "chain-inner" });
-    ts.graph_add_node({ graph_id: inner.graph_id, id: "M1", agent: "inner", prompt: "inner" });
-    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
-    await settle();
-
-    // Chain: nested invoker → the real live parent (the orchestrator session).
-    expect(adapter.resolveSessionChain(outerRunId)).toEqual([outerRunId, "user-session"]);
-    // A session with no tracked dispatcher is its own outermost.
-    expect(adapter.resolveSessionChain("user-session")).toEqual(["user-session"]);
-  });
-
-  it("keeps the outer node non-terminal through a nested gate, then escalates it on reject", async () => {
-    const { ts } = nestedToolset();
-
-    const inner = ts.graph_create({ name: "reject-inner" });
-    ts.graph_add_node({
-      graph_id: inner.graph_id,
-      id: "GATE",
-      agent: "inner",
-      prompt: "Approve?",
-      needs_approval: true,
-    });
-    const outer = ts.graph_create({ name: "reject-outer" });
-    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
-
-    service.seedProvider("outer");
-    service.seedProvider("inner");
-
-    // The orchestrator session runs the outer graph; its subagent runs the
-    // nested gate graph from its own (child) session.
-    await ts.graph_run({ graph_id: outer.graph_id }, "user-session");
-    await settle();
-    const outerRunId = [...service.runs.keys()][0];
-    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
-    await settle();
-
-    // The subagent ends its turn → the nested graph still executes, so the
-    // outer node is held running (it must not report a premature success).
-    service.completeRun(outerRunId, {
-      stopReason: "completed",
-      output: outputBlock("outer done"),
-    });
-    await settle();
-    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
-
-    // Drive the nested gate to blocked; the outer node must STAY non-terminal.
-    const entry = (ts as unknown as { getEntry(id: string): { runtime: unknown } })["getEntry"](
-      inner.graph_id,
-    );
-    const runtime = entry.runtime as unknown as {
-      advance: { onNodeSignalEmitted(n: string, t: string, p: unknown): Promise<void> };
-    };
-    await runtime.advance.onNodeSignalEmitted("GATE", "need_approval", "review");
-    await settle();
-    expect(nodeStatus(ts, inner.graph_id, "GATE")).toBe("blocked");
-    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
-
-    // Reject (no loop group) → the gate escalates, which propagates upward.
-    await ts.graph_approve({
-      graph_id: inner.graph_id,
-      node_id: "GATE",
-      action: "reject",
-      reason: "not good",
-    });
-    await settle();
-    expect(nodeStatus(ts, inner.graph_id, "GATE")).toBe("escalate");
-
-    const json = statusJson<GraphJson>(ts, { graph_id: outer.graph_id, format: "json" });
-    const n1 = json.nodes.find((n) => n.node_id === "N1");
-    expect(n1?.status).toBe("escalate");
-    expect(n1?.error).toContain("nested graph");
-    expect(json.phase).toBe("complete");
-  });
-});
-
 // ── Loop mode through the dsh dispatch path ─────────────────────────────────
 
 describe("loop mode dispatch through the dsh subagent seam", () => {
@@ -769,21 +364,13 @@ describe("loop mode dispatch through the dsh subagent seam", () => {
 // ── Provider-level spawn rejection (the delegation path) ────────────────────
 
 describe("provider-level spawn rejection is surfaced, not swallowed", () => {
-  it("errors the graph node and the loop round when the provider's start rejects", async () => {
+  it("errors the loop round when the provider\u0027s start rejects", async () => {
     // The registered provider's start() rejects — a provider-level spawn
     // failure such as the registrar delegating to an unwired host provider
     // (DshSpawnNotWiredError). The fake seam delegates to the provider, so the
     // rejection reaches the adapter exactly as it does in production.
     service.seedProvider("rejecter");
     service.autoError.set("rejecter", "host provider rejected the spawn");
-
-    // Graph path: the engine contains the rejection and escalates the node
-    // (timeout + error reason); the graph still reaches a terminal phase.
-    const graph = await runSingleNode("rejecter");
-    const node = graph.nodes.find((n) => n.node_id === "N1");
-    expect(node?.status).toBe("timeout");
-    expect(node?.error).toContain("host provider rejected the spawn");
-    expect(graph.phase).toBe("complete");
 
     // Loop path: dispatchRound propagates the same rejection to the caller as a
     // round error rather than returning a phantom task id.
@@ -799,6 +386,107 @@ describe("provider-level spawn rejection is surfaced, not swallowed", () => {
     }
     expect(roundErr).toBeInstanceOf(Error);
     expect((roundErr as Error).message).toContain("host provider rejected the spawn");
+  });
+});
+
+// ── Outcome dispatch through the dsh subagent seam ──────────────────────────
+//
+// The legacy graph-engine dispatch cases were deleted with the runtime they
+// drove. A dispatched graph node now travels the OUTCOME run path: the dsh
+// delivery starts one subagent run per attempt, observes its terminal result,
+// and the host settles the attempt through `settleNatural`. This case drives
+// that seam with the real delivery adapter and the real host assembly.
+
+describe("outcome dispatch through the dsh subagent seam", () => {
+  const POLICY_ID = "dsh.outcome.policy";
+  const POLICY_BODY: CompletionPolicyBody = {
+    version: 1,
+    default: "ungranted",
+    rules: [
+      { graphId: "dsh.outcome", nodeId: "work", outcome: "done", decision: "allow" },
+    ],
+  };
+  const AUTHORIZED = createCompletionPolicyRegistry({
+    policies: [
+      {
+        ref: completionPolicyRefOf({ id: POLICY_ID, revision: "1", body: POLICY_BODY }),
+        body: POLICY_BODY,
+      },
+    ],
+  });
+
+  it("delivers the attempt, observes completion, and settles the graph", async () => {
+    const declaration: GraphDeclarationV3 = {
+      version: 3,
+      name: "dsh.outcome",
+      nodes: [
+        {
+          id: "work",
+          agent: "worker-agent",
+          prompt: "Do the work.",
+          outcomes: [{ id: "done" }],
+          completion: { mode: "natural", outcome: "done" },
+        },
+      ],
+      edges: [],
+      completion_policy: { id: POLICY_ID, revision: "1" },
+    };
+    persistDeclaredGraph(
+      buildDeclaredOutcomeGraph({ declaration, completionPolicies: AUTHORIZED }),
+      tmpDir,
+    );
+    service.seedProvider("worker-agent");
+    service.autoComplete.set("worker-agent", {
+      stopReason: "completed",
+      output: outputBlock("work done"),
+    });
+
+    let host: OutcomeHost | undefined;
+    const completions: Array<Promise<void>> = [];
+    const delivery = new DshOutcomeDelivery({
+      subagents: service,
+      parentResolver: () => fakeParent,
+      onStartFailed: () => {},
+      onSettled: (settlement) => {
+        if (settlement.kind !== "completed" || host === undefined) return;
+        const settling = host;
+        completions.push(
+          settling
+            .complete(settlement.request.graphId, settlement.request.attemptId)
+            .then(() => undefined),
+        );
+      },
+    });
+    host = OutcomeHost.open({
+      workspaceDir: tmpDir,
+      storeRoot: engineStateDir(tmpDir),
+      deliver: delivery.deliver,
+      validators: createValidatorRegistry([]),
+      completionPolicies: AUTHORIZED,
+      durability: "memory",
+    });
+    try {
+      delivery.setParentSession("origin-1");
+      const started = await host.startDeclaredGraph("dsh.outcome", {
+        sessionId: "origin-1",
+        agent: "emperor",
+      });
+      expect(started.kind).toBe("started");
+      if (started.kind !== "started") return;
+      expect(started.dispatched.map((request) => request.attemptId)).toEqual(["work#1"]);
+      // The dsh run resolves asynchronously; the host settles on its observation.
+      await settle();
+      await Promise.all(completions);
+
+      const state = scanPersistedStates(tmpDir).loaded.find(
+        (candidate) => candidate.graphId === "dsh.outcome",
+      );
+      expect(state?.phase).toBe("complete");
+      expect(state?.nodes.get("work")?.status).toBe("completed");
+    } finally {
+      delivery.setParentSession(undefined);
+      host.close();
+    }
   });
 });
 
@@ -829,17 +517,6 @@ describe("dsh dispatch parent resolution", () => {
     expect(seenSessions).toEqual(["origin-1"]);
     expect(service.started).toHaveLength(1);
     expect(service.started[0].request.parent).toBe(parent);
-  });
-
-  it("forwards the resolved parent on the graph-node path too", async () => {
-    service.seedProvider("worker-agent");
-    service.autoComplete.set("worker-agent", {
-      stopReason: "completed",
-      output: outputBlock("ok"),
-    });
-    await runSingleNode("worker-agent");
-    expect(service.started).toHaveLength(1);
-    expect(service.started[0].request.parent).toBe(fakeParent);
   });
 
   it("fails loud with DshParentUnresolvedError and never calls start when no parent resolves", async () => {
@@ -891,107 +568,6 @@ describe("dsh dispatch parent resolution", () => {
     expect(service.started).toHaveLength(0);
   });
 
-  // ── Graph-node parent-resolution precedence (executeNode) ────────────────
-  // `executeNode` splits two ids: the graph-scoped budget key (`sessionID`)
-  // and the REAL live parent session (`parentSessionId`). Parent resolution
-  // prefers the latter, falls back to the former, and fails loud otherwise.
-
-  it("executeNode resolves the live parent from parentContext.parentSessionId", async () => {
-    service.seedProvider("worker-agent");
-    const parent = { id: "graph-live-parent", inject: () => undefined };
-    const seenSessions: string[] = [];
-    const adapter = new DshDispatchAdapter({
-      subagents: service,
-      directory: tmpDir,
-      parentResolver: (sid) => {
-        seenSessions.push(sid);
-        return sid === "live-parent-1" ? parent : undefined;
-      },
-    });
-
-    await adapter.executeNode(makeNode("worker-agent"), {
-      sessionID: "graph-123",
-      parentSessionId: "live-parent-1",
-      agent: "emperor",
-      directory: tmpDir,
-    });
-
-    // The resolver received the REAL live parent session (not the graph key)
-    // and its result was forwarded as the SAME reference on the start request.
-    expect(seenSessions).toEqual(["live-parent-1"]);
-    expect(service.started).toHaveLength(1);
-    expect(service.started[0].request.parent).toBeDefined();
-    expect(service.started[0].request.parent).toBe(parent);
-  });
-
-  it("executeNode falls back to sessionID when parentSessionId is absent (no regression)", async () => {
-    service.seedProvider("worker-agent");
-    const parent = { id: "fallback-parent", inject: () => undefined };
-    const seenSessions: string[] = [];
-    const adapter = new DshDispatchAdapter({
-      subagents: service,
-      directory: tmpDir,
-      parentResolver: (sid) => {
-        seenSessions.push(sid);
-        return sid === "graph-scope-session" ? parent : undefined;
-      },
-    });
-
-    const task = await adapter.executeNode(makeNode("worker-agent"), {
-      sessionID: "graph-scope-session",
-      agent: "emperor",
-      directory: tmpDir,
-    });
-
-    // Legacy behavior: with no parentSessionId the graph-scope sessionID is the
-    // parent-resolution key, and both request/task carry it unchanged.
-    expect(seenSessions).toEqual(["graph-scope-session"]);
-    expect(service.started).toHaveLength(1);
-    expect(service.started[0].request.parent).toBe(parent);
-    expect(service.started[0].request.sessionId).toBe("graph-scope-session");
-    expect(task.parentSessionId).toBe("graph-scope-session");
-  });
-
-  it("executeNode throws DshParentUnresolvedError when neither key resolves a parent", async () => {
-    service.seedProvider("orphan");
-    const adapter = new DshDispatchAdapter({
-      subagents: service,
-      directory: tmpDir,
-      // No live parent resolves for any session.
-      parentResolver: () => undefined,
-    });
-
-    let err: unknown;
-    try {
-      // No parentContext at all → both keys fall back to the adapter default.
-      await adapter.executeNode(makeNode("orphan"), undefined);
-    } catch (e) {
-      err = e;
-    }
-
-    expect(err).toBeInstanceOf(DshParentUnresolvedError);
-    // DEFAULT_PARENT_SESSION_ID ("dsh") is the last-resort resolution key.
-    expect((err as DshParentUnresolvedError).sessionId).toBe("dsh");
-    // The spawn never reached the seam — no `parent: undefined` was shipped.
-    expect(service.started).toHaveLength(0);
-  });
-
-  it("executeNode keeps request.sessionId and task.parentSessionId on the graph-scope key", async () => {
-    service.seedProvider("worker-agent");
-    const task = await dispatch.executeNode(makeNode("worker-agent"), {
-      sessionID: "graph-budget-key",
-      parentSessionId: "live-parent-session",
-      agent: "emperor",
-      directory: tmpDir,
-    });
-
-    // Guard: the parent-resolution split must NOT leak the live parent session
-    // into registrar active-role semantics (request.sessionId) or the task
-    // record (task.parentSessionId) — both stay the graph-scope budget key.
-    expect(service.started).toHaveLength(1);
-    expect(service.started[0].request.sessionId).toBe("graph-budget-key");
-    expect(task.parentSessionId).toBe("graph-budget-key");
-  });
 });
 
 // ── dsh 0.1.5-rc.1 SubagentCapabilities contract ────────────────────────────
