@@ -30,11 +30,12 @@
  * name — or overwrite — the execution its claim belongs to.
  *
  * AN ATTEMPT IS NAMED BY ITS CREDENTIAL, NEVER BY ITS NODE. Every attempt is
- * issued a high-entropy nonce at dispatch (`attempt-credential.ts`) and that
- * nonce is persisted on the attempt's own state entry together with its
- * binding. `submit` resolves the attempt FROM the credential before it looks
- * at any execution state: an unknown, tampered, superseded or other node's
- * credential is refused without ever consulting "the node's current attempt".
+ * issued a high-entropy nonce at dispatch (`attempt-credential.ts`); the
+ * attempt's own state entry persists its DIGEST together with the binding, and
+ * `submit` resolves the attempt by HASHING the presented credential and
+ * matching it before it looks at any execution state: an unknown, tampered,
+ * superseded or other node's credential is refused without ever consulting
+ * "the node's current attempt".
  * A late submission that still carries the credential of an attempt a loop
  * round has since superseded therefore cannot be re-bound to the newer attempt
  * — which is exactly the defect this rule exists to remove — and a repeated
@@ -126,18 +127,23 @@
  * from the durable record: its submission key lives in the
  * `natural-completion:<digest>` namespace that the ordinary ingress cannot
  * mint, and the receipt, the accepted event and the decision all carry it. The
- * production dispatch completion bridge that would deliver these facts is still
- * HOST-side work: this build implements and tests the run path it calls.
+ * production bridge that delivers these facts is now shipped too:
+ * `../host/completion-bridge.ts` resolves the attempt's binding and credential
+ * from the host layer and calls `settleNatural` — this module still owns the
+ * settlement and reads no host state of its own.
  *
- * CREDENTIAL ISOLATION IS THE FIRST RUN PRECONDITION (D7). This build persists
- * attempt credentials in an ordinary file that any same-account process can
- * read, so `start`, `resume` and `submit` all refuse with
- * `credential-isolation-unavailable` unless the HOST injected a readable
- * credential-isolation adapter declaring a protected store and per-attempt
- * delivery (`credential-isolation.ts`). It is checked before the plan's
- * completion authorization and before any state is read or written, so an
- * unprotected process mints, persists, hands out and settles NOTHING — the
- * capability is the enablement condition, not a hardening option.
+ * CREDENTIAL ISOLATION IS THE FIRST RUN PRECONDITION (D7). The durable state
+ * records only the credential's DIGEST, so reading the ledger yields nothing a
+ * reader can present — but the credential ITSELF has to be stored and delivered
+ * per attempt, and that is the host's. `start`, `resume` and `submit` all
+ * refuse with `credential-isolation-unavailable` unless the HOST injected a
+ * readable credential-isolation capability declaring a protected store and
+ * per-attempt delivery (`credential-isolation.ts`; version 2 adds the
+ * `{ remember, resolve }` store the shipped host implements in
+ * `../host/credential-vault.ts`). It is checked before the plan's completion
+ * authorization and before any state is read or written, so an unprotected
+ * process mints, persists, hands out and settles NOTHING — the capability is the
+ * enablement condition, not a hardening option.
  *
  * A HOST IDENTITY IS AN ADDITIONAL CONSTRAINT, NEVER A PREREQUISITE (D9). A
  * host may inject a host identity capability naming the invoking session and
@@ -162,16 +168,14 @@
  * A host that answers `unknown` stated no fact and is reported as unsettled
  * work instead, never as a divergence.
  *
- * SCOPE, STATED PLAINLY. C3c delivers `resume` here, the model-facing
- * `graph_submit_outcome` ingress (`src/graph/tools/submit-outcome.ts`), and the
- * startup sweep's route onto this runtime. D8 delivers the unified dispatch
- * EFFECT EXECUTOR described above: the durable intent, the one host adapter
- * (create plus the execution query), the reconciliation of the crash window,
- * and the refusal of a run with no adapter at all. Still DEFERRED: the
- * protocol-aware dispatch COMPLETION BRIDGE (this runtime drives a synchronous
- * host adapter instead), any host IMPLEMENTATION of the adapter, storage format
- * 3 with its `2 -> 3` migrator, and the stage-D/E routing, loop and
- * legacy-retirement work. The legacy v2 run and recovery paths are untouched.
+ * SCOPE, STATED PLAINLY. This module owns the run path (start/resume/submit,
+ * the settlement transaction and the state it commits) and the contracts it
+ * requires from a host. The host capabilities themselves now SHIP in
+ * `src/graph/host/**`: the credential vault, the execution index, the dispatch
+ * adapter, the invocation-identity holder and the completion bridge. Still
+ * DEFERRED: storage format 3 with its `2 -> 3` migrator, the stage-D/E routing
+ * and loop work, and the legacy retirement this repository still owes. The
+ * legacy v2 run and recovery paths are untouched.
  */
 
 import type { CompiledPlan } from "../compiler/plan.ts";
@@ -421,10 +425,11 @@ export type OutcomeRuntimeRefusalCode =
   | "completion-policy-digest-mismatch"
   /**
    * This process was given no readable HOST credential-isolation capability
-   * (D7), so the attempt credentials it persists cannot be held to lie outside
-   * a dispatched worker's reach. The outcome run path REFUSES to start, resume
-   * or settle anything rather than run with credentials this build cannot
-   * protect; nothing is written and no fallback is taken.
+   * (D7), so the credential itself has no store that can hold it and no
+   * channel that can deliver it per attempt. The durable record now carries
+   * only a digest, but a digest cannot be handed to a recovered worker, so the
+   * outcome run path REFUSES to start, resume or settle anything without the
+   * capability; nothing is written and no fallback is taken.
    */
   | "credential-isolation-unavailable"
   /**
@@ -821,14 +826,14 @@ export interface OutcomeGraphRuntimeOptions {
    * The HOST's credential-isolation capability (D7) — the production
    * enablement condition of this run path.
    *
-   * An attempt credential is a bearer nonce this build persists in the
-   * acceptance ledger, which it writes as an ordinary file: any process that
-   * can read that file — including a dispatched worker on the same account —
-   * can read another attempt's credential and be accepted, and no path check
-   * or mount option this build could apply would change that. The boundary
-   * therefore belongs to the host, which declares it here
-   * (`credential-isolation.ts`): a protected credential store and
-   * per-attempt delivery.
+   * An attempt credential is a bearer nonce: whatever holds the value can be
+   * accepted for the attempt it was issued for. This build therefore persists
+   * only its DIGEST, and the credential itself belongs to the host, which
+   * declares and provides it here (`credential-isolation.ts`): a protected
+   * store and per-attempt delivery — version 2 injects the store the runtime
+   * adopts every minted credential into and resolves a recovery's re-delivery
+   * from. Whether that store is readable by a same-account worker is a property
+   * of the host's platform that no value here can attest.
    *
    * OMITTED IS NOT NEUTRAL: every entry — `start`, `resume` and `submit` —
    * refuses with `credential-isolation-unavailable` before it reads or writes
@@ -1761,15 +1766,16 @@ export class OutcomeGraphRuntime {
    * Check that this process holds the HOST credential-isolation capability the
    * run path requires (D7).
    *
-   * THE FACT THIS ENCODES, NOT A CHECK IT PERFORMS. This build persists every
-   * attempt credential in the acceptance ledger and writes that ledger as an
-   * ordinary file, so a process that can read the file can read another
-   * attempt's credential and be accepted; no path comparison, permission or
-   * mount this code could inspect would change what another process can read.
-   * The boundary is therefore the HOST's to provide and to DECLARE, and the
-   * only honest gate available here is the presence of a readable adapter
-   * (`credential-isolation.ts`). Rule and wording live in that module so the
-   * runtime, the tool ingress and the startup sweep report one refusal.
+   * THE FACT THIS ENCODES, NOT A CHECK IT PERFORMS. This build writes only the
+   * credential's DIGEST into the acceptance ledger, so a reader of that file
+   * holds nothing it can present — but the credential ITSELF has to live in a
+   * store the host owns and reach exactly one attempt, and no path comparison,
+   * permission or mount this code could inspect would establish that. The
+   * boundary is therefore the HOST's to provide and to DECLARE, and the only
+   * honest gate available here is the presence of a readable capability
+   * (`credential-isolation.ts`; the shipped store is
+   * `../host/credential-vault.ts`). Rule and wording live in that module so
+   * the runtime, the tool ingress and the startup sweep report one refusal.
    *
    * Refusing HERE — before any state is read or written, in `start`, `resume`
    * and `submit` alike — is what makes "no protected host, no new execution
@@ -2759,8 +2765,9 @@ export class OutcomeGraphRuntime {
       effectId: dispatchEffectIdOf(intent.attemptId),
       kind: "dispatch",
       // CREDENTIAL-FREE payload: the durable effect names the dispatch target
-      // and nothing else, so the credential stays in exactly one durable place
-      // (the attempt's state entry) and is re-bound from there at launch.
+      // and nothing else. Neither the effect nor the state carries the
+      // credential itself — the state records its digest and the HOST's store
+      // holds the value the launch is delivered with.
       payload: this.dispatchPayloadOf(intent),
     }));
     return {

@@ -210,11 +210,11 @@ export interface ResumePersistedOutcomeGraphOptions {
   /**
    * The HOST's credential-isolation capability (D7). The outcome run path this
    * seam continues refuses to start, resume or settle anything without it
-   * (`credential-isolation-unavailable`) — this build persists attempt
-   * credentials in a store it cannot protect from a same-account reader, so
-   * the capability is the production enablement condition and recovery is one
-   * of its entry points. Recovery just forwards it; the rule lives in
-   * `credential-isolation.ts`.
+   * (`credential-isolation-unavailable`): the durable state records only a
+   * DIGEST, so the credential itself has to live in the host's store and be
+   * re-delivered from it — which makes the capability the production enablement
+   * condition and recovery one of its entry points. Recovery just forwards it;
+   * the rule lives in `credential-isolation.ts`.
    */
   readonly credentialIsolation?: CredentialIsolationCapability;
   /**

@@ -27,24 +27,25 @@
  * one — the ENABLEMENT of the run path that uses it is a separate gate, and
  * that one requires a declaring host (`credential-isolation.ts`).
  *
- * WHERE ISSUANCE AND STORAGE LIVE — AN ENABLEMENT CONDITION ON THE HOST, NOT A
- * PROPERTY OF THIS BUILD. Minting happens in the runtime process, and the bound
- * nonce lives in the graph-state row of the acceptance ledger under the
- * configured store root
- * (`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`). This build
- * writes that ledger as an ordinary file, so a same-account process — including
- * a dispatched worker with ordinary file tools — can READ every resident
- * attempt credential, rebind one to another attempt and be accepted. Moving the
- * file to another directory of the same account, or mounting it read-only,
- * stops neither the read nor the rebind, and nothing in this module can detect
- * the difference: the boundary is real only when the HOST provides it. The host
- * therefore DECLARES a protected store and per-attempt delivery through the
- * credential-isolation capability (`credential-isolation.ts`), and the outcome
- * run path refuses with `credential-isolation-unavailable` without a readable
- * adapter — BEFORE it mints, persists, hands out or settles anything. THIS
- * REPOSITORY'S DEFAULT DOES NOT MEET THE REQUIREMENT: it ships no adapter, so
- * the credential's resistance to guessing and to re-aiming is real but
- * conditional on a deployment that injects one.
+ * WHERE ISSUANCE AND STORAGE LIVE. Minting happens in the runtime process. The
+ * nonce itself is ADOPTED BY THE HOST'S STORE the moment it is minted (the
+ * version-2 credential-isolation capability,
+ * `credential-isolation.ts` + `../host/credential-vault.ts`), and the graph
+ * state persists only its DIGEST (`attemptCredentialDigest`, state-body version
+ * 8). A process that reads the acceptance ledger — the read-the-ledger theft
+ * this module's history records — therefore obtains a verifier it cannot
+ * present, which is what closed that defect at the storage layer.
+ *
+ * WHAT IS STILL THE HOST'S. The credential has to be held somewhere and
+ * delivered to exactly one attempt, and the host's store is where: a recovery
+ * resolves the credential from it, and a store that cannot produce one leaves
+ * the attempt reported rather than re-delivered with a fabricated value. The
+ * outcome run path still refuses with `credential-isolation-unavailable`
+ * without a readable capability — BEFORE it mints, persists, hands out or
+ * settles anything — and a same-account process can still read the host's store
+ * FILE unless the platform isolates it; no mode bit or mount option this build
+ * could inspect would change that, so that boundary stays the host's and is
+ * stated in `credential-isolation.ts`.
  *
  * THE CREDENTIAL NAMES NOTHING. The run path resolves the attempt FROM the
  * persisted binding, refuses a credential that names no recorded attempt, and
@@ -82,9 +83,10 @@ export type AttemptPermission = typeof SUBMIT_OUTCOME_PERMISSION;
  *
  * The persisted state entry records the tuple by CONTAINING its parts: the body
  * carries `graphId` and `planRevision`, the entry carries `nodeId`,
- * `attemptId` and the nonce, and the permission is the protocol constant. A
- * submission is checked against the tuple the reader reconstructed from that
- * record — never against a tuple the caller supplied.
+ * `attemptId` and the credential's DIGEST, and the permission is the protocol
+ * constant. A submission is checked against the tuple the reader reconstructed
+ * from that record — never against a tuple the caller supplied — by hashing the
+ * presented credential and comparing it to the recorded verifier.
  */
 export interface AttemptCredentialBinding {
   /** The graph the attempt belongs to. */

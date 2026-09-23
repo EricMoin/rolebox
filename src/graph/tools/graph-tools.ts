@@ -428,9 +428,9 @@ export interface GraphToolSetDeps {
    * submission must not be able to grant itself the capability. Without it
    * `graph_submit_outcome` refuses with `credential-isolation-unavailable`
    * before it opens a ledger (the startup sweep refuses the same way before it
-   * opens one), because this build persists attempt credentials in a store it
-   * cannot keep out of a same-account process's reach. With it, the ingress
-   * opens the ledger at the adapter's declared `credentialStoreRoot`.
+   * opens one): the durable state records only a digest, and only the host can
+   * store the credential itself and deliver it per attempt. With it, the
+   * ingress opens the ledger at the adapter's declared `credentialStoreRoot`.
    */
   credentialIsolation?: CredentialIsolationCapability;
   /**

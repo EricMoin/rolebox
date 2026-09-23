@@ -66,17 +66,19 @@
  * execution identity and replays the persisted decision instead of settling a
  * second time.
  *
- * EVERY ATTEMPT IS ISSUED A CREDENTIAL, AND IT LIVES IN THE STATE ENTRY. The
- * nonce comes from the injected {@link AttemptCredentialSource} (the runtime
- * injects the platform CSPRNG; a test injects a deterministic source) and is
- * written into the attempt's own persisted entry, so the binding tuple —
- * `graphId` and `planRevision` from the body, `nodeId`, `attemptId` and the
- * nonce from the entry — is reconstructed from the STATE, never from a
- * submission. A settled node KEEPS the credential of the attempt that settled
- * it (exactly as it keeps the attempt id), which is what lets a repeated
- * submission resolve to the SAME attempt and replay its receipt. Reducer
- * purity is therefore "pure given its inputs": the minting source is one
- * explicit input, so a given source reproduces a given advance.
+ * EVERY ATTEMPT IS ISSUED A CREDENTIAL, AND THE STATE RECORDS ONLY ITS DIGEST.
+ * The nonce comes from the injected {@link AttemptCredentialSource} (the runtime
+ * injects the platform CSPRNG; a test injects a deterministic source); the
+ * HOST'S STORE adopts it, and the attempt's own persisted entry records
+ * `attemptCredentialDigest` — the verifier a submission is checked against. The
+ * binding tuple — `graphId` and `planRevision` from the body, `nodeId`,
+ * `attemptId` and the digest from the entry — is therefore reconstructed from
+ * the STATE, never from a submission, and no recoverable value is written down.
+ * A settled node KEEPS the digest of the attempt that settled it (exactly as it
+ * keeps the attempt id), which is what lets a repeated submission resolve to the
+ * SAME attempt and replay its receipt. Reducer purity is therefore "pure given
+ * its inputs": the minting source is one explicit input, so a given source
+ * reproduces a given advance.
  *
  * THE JOIN GATE. An accepted non-terminal outcome arms the successors its edge
  * routes to — but only those whose declared JOIN is satisfied. A node's feeders
@@ -114,14 +116,17 @@
  * reset to a clean start — the same "unknown is not fresh" discipline the
  * storage and protocol gates apply.
  *
- * VERSION 2 ADDS THE ATTEMPT CREDENTIAL, AND VERSION 1 STAYS READABLE. A
- * version-1 body records no credential, so this module can still READ it (a
- * completed graph reports cleanly), but an ATTEMPT it records can never be
- * settled: the run path refuses a submission for a credential-less attempt and
- * recovery refuses to launch one, rather than granting an attempt a credential
- * it was never issued. There is deliberately no migrator: an attempt's
- * credential is issued once, at dispatch, and inventing one on read would
- * fabricate the very binding the credential exists to prove.
+ * VERSION 2 ADDS THE ATTEMPT CREDENTIAL, VERSION 8 REPLACES IT WITH ITS DIGEST,
+ * AND THE OLDER LAYOUTS STAY READABLE. A version-1 body records no credential,
+ * so this module can still READ it (a completed graph reports cleanly), but an
+ * ATTEMPT it records can never be settled: the run path refuses a submission for
+ * a credential-less attempt and recovery refuses to launch one, rather than
+ * granting an attempt a credential it was never issued. Versions 2 to 7 record
+ * the credential ITSELF, which this build neither re-persists, nor compares
+ * against a presentation, nor re-delivers — they are readable and never
+ * advanced. There is deliberately no migrator in any direction: an attempt's
+ * credential is issued once, at dispatch, and inventing (or re-deriving) one on
+ * read would fabricate the very binding the credential exists to prove.
  *
  * VERSION 7 ADDS THE OPTIONAL HOST INVOCATION IDENTITY. A `dispatched` or
  * `settled` entry records the host identity its dispatch ran under when the
@@ -473,8 +478,9 @@ export const OUTCOME_STATE_BODY_V1 = 1 as const;
 
 /**
  * The second versioned state-body layout: every `dispatched` and `settled`
- * node entry carries the runtime-issued `attemptCredential` the attempt's
- * worker must present when it submits an outcome.
+ * node entry carries the runtime-issued `attemptCredential` — the credential
+ * ITSELF, which version 8 replaced with its digest (see
+ * {@link OUTCOME_STATE_BODY_V8}).
  *
  * This was the layout this build wrote before version 3 added join arrivals.
  * Version 1 stays readable (a reader is installed for it) but its attempts carry
@@ -3549,7 +3555,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
   return Object.freeze({
     state: Object.freeze({
       // The guard above admitted only the current layout, so the advanced state
-      // is written in it (a new attempt always carries a credential).
+      // is written in it (a new attempt always carries a credential DIGEST).
       bodyVersion: CURRENT_OUTCOME_STATE_BODY,
       graphId: state.graphId,
       planRevision: state.planRevision,

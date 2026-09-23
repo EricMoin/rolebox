@@ -199,7 +199,8 @@ export function createGraphTools(
      * prebuilt `toolset` is provided — that instance carries its own deps.
      * Absent means the ingress refuses to settle anything
      * (`credential-isolation-unavailable`), which is the intended default for
-     * a host that has not provided a protected credential store.
+     * a host that has not provided the store and the per-attempt delivery the
+     * credential itself needs (`src/graph/host/credential-vault.ts`).
      */
     credentialIsolation?: CredentialIsolationCapability;
     /**

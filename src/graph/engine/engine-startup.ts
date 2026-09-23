@@ -376,11 +376,13 @@ export interface RecoverInterruptedGraphsOptions {
   /**
    * Optional HOST credential-isolation capability (D7) for the outcome run
    * path. The sweep is one of that path's entry points, so it consults the
-   * capability BEFORE it opens the ledger: without a readable adapter the
+   * capability BEFORE it opens the ledger: without a readable capability the
    * graph is reported in `outcomeProtocol.refused` with
    * `credential-isolation-unavailable` and NOTHING is opened, launched or
-   * written. With one, the ledger is opened at the adapter's declared
-   * `credentialStoreRoot` instead of the scanned workspace's default.
+   * written — the durable state holds only a digest, and only the host can
+   * store and deliver the credential itself. With one, the ledger is opened at
+   * the adapter's declared `credentialStoreRoot` instead of the scanned
+   * workspace's default.
    */
   outcomeCredentialIsolation?: CredentialIsolationCapability;
 
@@ -666,12 +668,12 @@ export async function recoverInterruptedGraphs(
         });
         continue;
       }
-      // THE HOST CAPABILITY GATE (D7) RUNS BEFORE THE LEDGER IS OPENED. This
-      // build persists attempt credentials in a store it cannot keep out of a
-      // same-account reader's reach, so a sweep with no readable host adapter
-      // must not create, read or resume anything: it reports the refusal and
-      // leaves the persisted record exactly as it found it. With an adapter,
-      // the ledger opens at the root the host declared as protected.
+      // THE HOST CAPABILITY GATE (D7) RUNS BEFORE THE LEDGER IS OPENED. The
+      // durable state holds only the credential's digest, and the credential
+      // itself has to be stored and delivered by the host, so a sweep with no
+      // readable capability must not create, read or resume anything: it reports
+      // the refusal and leaves the persisted record exactly as it found it. With
+      // one, the ledger opens at the root the host declared as protected.
       const unprotected = credentialIsolationRefusal(
         opts.outcomeCredentialIsolation,
       );

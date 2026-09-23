@@ -13,19 +13,26 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   the natural-completion authorization pinned by exact policy revision and
   content digest (`src/graph/compiler/**`, `src/graph/policy/**`);
 - versioned loading: the storage-format capability registry, the
-  execution-protocol registry, and state-body readers for versions 1 to 6, with
+  execution-protocol registry, and state-body readers for versions 1 to 8, with
   an unsupported identity refused before anything hydrates
   (`src/graph/persistence/storage-format.ts`,
   `src/graph/protocol/execution-protocol.ts`,
   `src/graph/outcome/graph-state.ts`);
-- runtime-issued scoped attempt credentials and the submission check that binds
-  a submission to the attempt it was dispatched for
-  (`src/graph/outcome/attempt-credential.ts`);
+- runtime-issued scoped attempt credentials, the DIGEST the durable state
+  records instead of the credential (state-body version 8), and the submission
+  check that binds a submission to the attempt it was dispatched for
+  (`src/graph/outcome/attempt-credential.ts`, `graph-state.ts`);
 - credential isolation as the outcome run path's ENABLEMENT CONDITION: the run
   path refuses to start, resume or settle anything, and the submission ingress
   and the startup sweep refuse before opening a ledger, unless a host-injected
   capability declares a protected credential store and per-attempt delivery
   (`src/graph/outcome/credential-isolation.ts`, D7);
+- the SHIPPED host capability layer (`src/graph/host/**`): the credential vault
+  the runtime adopts every minted credential into and resolves a recovery from,
+  the durable execution index, the dispatch adapter (create at most once per
+  stable effect id plus the execution query), the invocation-identity holder,
+  and the completion bridge that settles an observed completion through
+  `settleNatural`;
 - the submission and acceptance core: proposal shape gate, the closed validator
   registry with the artifact-reference validator, receipt replay, and the atomic
   commit of receipt, accepted event, state and pending effects
@@ -38,7 +45,7 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
 - host invocation identity as an ADDITIONAL constraint on top of the bearer
   credential (D9): a host that declares `{ version, id, current() }` gets the
   identity of the dispatching invocation recorded on the attempt's own state
-  entry (state-body version 7), and a submission that settles that attempt must
+  entry (state-body versions 7 and 8), and a submission that settles that attempt must
   come from the same host attribution — a mismatch, an absent identity or an
   unreadable declaration is refused by name and writes nothing
   (`src/graph/outcome/host-identity.ts`, `graph-state.ts`, `runtime.ts`);
@@ -83,19 +90,23 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
 
-- any host credential-isolation adapter: none ships in this build and this build
-  cannot provide one (it writes the ledger as an ordinary file), so the outcome
-  run path refuses by default until a deployment injects its own (D7);
-- the protocol-aware dispatch completion BRIDGE: the runtime exposes
-  `settleNatural` for a host that observes a dispatched attempt completing, but
-  this build ships no host bridge, and the run path is driven by a synchronous
-  host adapter — so production dispatch still settles no node through it and the
-  bridge itself remains HOST-side work;
-- any HOST implementation of the dispatch adapter or of the identity
-  capability: this build ships the contracts and the reconciliation, and no
-  adapter, so every production entry refuses an outcome graph until a
-  deployment injects a dispatcher (D8), and the identity constraint is simply
-  not enabled until one injects an identity capability (D9);
+- the host layer is SHIPPED AND TESTED (`src/graph/host/**`,
+  `tests/graph/host-capabilities.test.ts`) but NOT YET INJECTED by the dsh or
+  Pi entries: both still declare `allowNewLegacyGraphs` and run their graphs on
+  the legacy v2 path, so no production deployment yet reaches the outcome run
+  path. Switching those entries is the next slice and is deliberately not done
+  here;
+- PER-WORKER FILESYSTEM ISOLATION: the vault keeps the credential in host
+  process memory plus a separate `0600` mirror file, and the ledger carries
+  only a digest — but a same-account process can still read the mirror file
+  unless the platform isolates it (a different OS account, a container or mount
+  namespace, or the vault's `durability: "memory"` mode at the cost of restart
+  re-delivery). No mode bit, path or mount option this build could inspect would
+  change that, so it is stated as a boundary rather than claimed as a guarantee;
+- a SIGNATURE over a submission (or any proof that the presenter is the original
+  worker rather than anything holding the credential); the identity capability
+  narrows this to "the same host attribution", which the host itself must
+  attribute correctly;
 - the remaining validator capabilities: only the registry and the
   artifact-reference validator exist; the schema, command-check and approval
   validators do not;
@@ -1198,44 +1209,52 @@ proceed without one is the RUN PATH's refusal (`credential-missing`), not a
 shape question. The acceptance core neither reads nor needs it: the runtime
 hands it the attempt it resolved.
 
-BODY VERSION 2 ADDS THE FIELD, AND VERSION 1 STAYS READABLE.
-`attemptCredential` is required on a `dispatched`/`settled` node entry of body
-version 2 and forbidden on a `pending` one; version 1 (the previous layout) is
-still installed as a reader because its bodies are well-formed snapshots — but
-an ATTEMPT a version-1 body records carries no credential, so recovery refuses
-to launch it and reports it as refused instead of armed, a submission for it is
-`credential-unknown`, and the reducer refuses to advance a state that cannot
-carry a credential (`unsupported-state-version`). There is no migrator: a
-credential is issued once, at dispatch, and one invented on read would be a
-capability the worker does not hold.
+BODY VERSION 2 ADDS THE FIELD, VERSION 8 REPLACES IT WITH THE DIGEST, AND
+VERSION 1 STAYS READABLE. `attemptCredential` is required on a
+`dispatched`/`settled` node entry of body versions 2 to 7 and forbidden on a
+`pending` one; version 8 requires `attemptCredentialDigest` instead and refuses
+the plaintext field by name. Version 1 is still installed as a reader because
+its bodies are well-formed snapshots — but an ATTEMPT a version-1 body records
+carries no credential, so recovery refuses to launch it and reports it as
+refused instead of armed, a submission for it is `credential-unknown`, and the
+reducer refuses to advance a state that cannot carry a credential
+(`unsupported-state-version`). The same refusal covers versions 2 to 7: they
+record the credential ITSELF, which this build neither re-persists nor compares
+against a presentation. There is no migrator: a credential is issued once, at
+dispatch, and one invented (or re-derived) on read would be a capability the
+worker does not hold.
 
 WHAT A BEARER CREDENTIAL PROVES — STATED HONESTLY. It proves POSSESSION of the
 nonce: guessing it is infeasible, and it cannot be re-aimed at another attempt
 because the binding is checked against the runtime's own state. It does NOT
 prove that the presenter is the original worker: whoever can READ the
-credential — the dispatch channel, or the store it is persisted in — holds the
-same bearer token and is indistinguishable. This build writes the ledger as an
-ordinary file under the configured store root
-(`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`), so a
-same-account process — including a dispatched worker with ordinary file tools —
-can read every resident attempt's credential and be accepted for it. NOTHING IN
-THIS BUILD PREVENTS THAT READ, and the two gestures that are sometimes offered
-as a boundary do not create one: moving the file to another directory of the
-same account changes no access, and a read-only mount stops writes, not reads.
-THIS REPOSITORY'S DEFAULT DOES NOT MEET THE REQUIREMENT; `stateDir` defaults to
-the workspace, so the ledger sits inside the tree a worker can read.
+credential — the dispatch channel, or whichever store holds it — holds the same
+bearer token and is indistinguishable.
 
-BECAUSE THE BOUNDARY CANNOT BE A PROPERTY OF THIS BUILD, IT IS AN ENABLEMENT
-CONDITION (D7). The outcome run path — `start`, `resume`, `submit`, the
-`graph_submit_outcome` ingress and the startup sweep — refuses with
-`credential-isolation-unavailable`, BEFORE reading or writing anything, unless
-the HOST injects a version-1 credential-isolation adapter declaring a protected
+THE PERSISTED RECORD NO LONGER HOLDS ONE. Body version 8 stores only the
+DIGEST, so a same-account reader of the acceptance ledger — including a
+dispatched worker with ordinary file tools — obtains a verifier it cannot
+present: the submission path hashes what a worker presents and compares it to
+the recorded value, which is what closed the read-theft this document used to
+record here. The credential ITSELF lives in the HOST's store (D7), is handed to
+exactly one dispatch channel, and is resolved from that store when a recovery
+re-delivers an attempt. The store's own confidentiality is the platform's:
+a `0600` mirror file is not isolated from the same account, and the shipped host
+says so in `src/graph/host/credential-vault.ts`.
+
+BECAUSE THE STORE AND THE DELIVERY CANNOT BE A PROPERTY OF THIS BUILD, THEY ARE
+AN ENABLEMENT CONDITION (D7). The outcome run path — `start`, `resume`,
+`submit`, the `graph_submit_outcome` ingress and the startup sweep — refuses
+with `credential-isolation-unavailable`, BEFORE reading or writing anything,
+unless the HOST injects a credential-isolation capability declaring a protected
 credential store (`credentialStoreRoot`, where the ledger is then opened) and
-per-attempt delivery. The adapter is an ASSERTION by the host, not a proof:
-this build checks its shape and presence, never the filesystem, because no path
-comparison is evidence about what another process can read. A trusted host
-invocation context (session, agent) can only ADD a constraint — this build
-records none on an attempt and therefore claims none; the core depends on no
+per-attempt delivery — version 1 as the declaration, version 2 adding the
+`{ remember, resolve }` store the shipped vault implements. The capability is an
+ASSERTION by the host, not a proof: this build checks its shape and presence,
+never the filesystem, because no path comparison is evidence about what another
+process can read. A trusted host invocation context (session, agent) can only
+ADD a constraint — this build records none on an attempt and therefore claims
+none; the core depends on no
 host.
 
 ENFORCED BY TESTS. A late credential across a loop round is refused (the
@@ -1625,10 +1644,11 @@ same evaluator version, counter continued — which is also what the two-process
 self-verification probe shows.
 
 DEFERRED by this slice, and not implied by it: effect EXECUTION beyond the
-dispatch seam, the protocol-aware dispatch completion bridge, storage format 3
-with its `2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
-adapters/schema compatibility, the typed-predicate vocabulary, and any
-`src/dispatch/**` change. The evaluator registry is deliberately a closed
+dispatch seam, storage format 3 with its `2 -> 3` migrator, the
+`src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
+typed-predicate vocabulary, and any `src/dispatch/**` change. (The dispatch
+completion bridge, deferred here, now ships as
+`src/graph/host/completion-bridge.ts`.) The evaluator registry is deliberately a closed
 one-implementation set rather than a plugin surface: `revision-token` is the
 comparison this build implements and any other declared identity is refused,
 never silently approximated.
@@ -1869,13 +1889,13 @@ a gate that fails first and passes later still answers rejected (and the
 attempt stays settleable by different content), while one that passes first and
 fails later still answers accepted with the persisted state.
 
-DEFERRED by this slice, and not implied by it: the HOST implementation of the
-dispatch completion bridge that would observe a dispatched attempt completing,
-deliver that fact to `settleNatural` and report the settlement it produced;
-effect EXECUTION beyond the dispatch seam, storage format 3 with its
-`2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
-adapters/schema compatibility, the typed-predicate vocabulary, and any
-`src/dispatch/**` change.
+DEFERRED by this slice, and not implied by it: effect EXECUTION beyond the
+dispatch seam, storage format 3 with its `2 -> 3` migrator, the
+`src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
+typed-predicate vocabulary, and any `src/dispatch/**` change. (The host bridge
+that observes a dispatched attempt completing, delivers that fact to
+`settleNatural` and reports the settlement now ships as
+`src/graph/host/completion-bridge.ts`.)
 
 E0 DELIVERS THE READ-ONLY DRAIN AUDIT — THE PHASE-E ENTRY POINT, AND NOTHING
 ELSE. Stage E is "drain or explicitly migrate legacy executions, then retire
@@ -2036,9 +2056,25 @@ absent, a process that only READ the acceptance ledger — a read-only open of
 the SQLite file, no write and no rebind, the file byte-identical afterwards —
 extracted one attempt's credential and submitted that attempt's outcome with
 it: ACCEPTED. A worker holding only its own credential settled another
-attempt's node. A bearer token cannot tell who read it, so no check inside the
-submission path can fix this: the property lives at the store boundary, and
-this build does not have one (see D2).
+attempt's node.
+
+THE READ-THE-LEDGER HALF IS NOW CLOSED AT THE STORAGE LAYER, WITHOUT A HOST.
+State-body version 8 records `attemptCredentialDigest` — the digest of the
+credential — instead of the credential, and it is the only layout this build
+advances: versions 2 to 7 record the plaintext and are readable only, and a
+version-8 entry carrying the plaintext is refused by name. A submission is
+verified by hashing what the worker presents and comparing it to the recorded
+verifier, so a legitimate submission still settles its attempt after a restart
+while a reader of the store holds nothing it can present.
+`tests/graph/credential-isolation.test.ts` re-proves the defect as closed: the
+read yields a digest, neither worker's credential appears in the bytes of the
+store, and presenting the digest settles nothing.
+
+WHAT REMAINS IS THE STORE AND THE DELIVERY, AND THAT IS THE HOST'S. A digest
+verifies but cannot be handed to a recovered worker: the credential itself has
+to be held somewhere and delivered to exactly one attempt, over exactly one
+channel. That is what the capability declares — and, since the host layer
+below, what it provides.
 
 THE CAPABILITY IS HOST-INJECTED, AND ITS ABSENCE REFUSES THE PATH.
 `src/graph/outcome/credential-isolation.ts` owns the contract:
@@ -2065,21 +2101,55 @@ read (never downgraded to "it runs anyway"):
   credential, and a declared plan that cannot run is refused at the run path by
   name.
 
-WHERE `credentialStoreRoot` POINTS, THE LEDGER IS OPENED. The ingress and the
-sweep open the acceptance ledger at the adapter's declared root instead of the
-workspace default, so the host's protected store is the one actually used. It
-is a ROUTING instruction, never a check: this build does not compare the root
-against the tree, a mount table or permissions, because none of those is
-evidence about another process's read access.
+`credentialStoreRoot` IS WHERE THE LEDGER IS OPENED AND THE HOST'S STORE LIVES.
+The ingress and the sweep open the acceptance ledger at the capability's
+declared root instead of the workspace default, so the host's store root is the
+one actually used; the shipped vault declares the same root and keeps its
+separate mirror file there. It is a ROUTING instruction, never a check: this
+build does not compare the root against the tree, a mount table or permissions,
+because none of those is evidence about another process's read access.
+
+THE VERSION-2 STORE IS WHAT MAKES RECOVERY POSSIBLE. The runtime ADOPTS every
+credential it mints into the capability's `{ remember, resolve }` store before
+the state recording its digest is committed, and a recovery resolves the
+credential from that store to re-create an effect whose execution never
+started. A store that cannot produce one — a memory-only vault after a restart,
+a pruned one — leaves the effect UNSETTLED and reported (`credential-missing`)
+rather than launching it with a fabricated credential. A version-1 adapter (the
+declaration alone) still enables the path, but a recovery then has no store to
+resolve through and reports those effects instead of re-delivering them.
 
 THE GATE IS AN ASSERTION, NOT A PROOF, AND THIS DOCUMENT SAYS SO. This build
-verifies that a READABLE adapter was injected; it cannot verify that the host's
-declaration is true. A host that declares guarantees it does not provide is
-lying to the protocol and is undetectable here — which is exactly why the
-declaration is the gate rather than a comment. No adapter ships in this build:
-`createGraphToolSet`/`createGraphTools` and `recoverInterruptedGraphs` accept
-one and nothing installs a default, so a deployment that has not provided a
-protected host gets the refusal by construction.
+verifies that a READABLE capability was injected; it cannot verify that the
+host's declaration is true. A host that declares guarantees it does not provide
+is lying to the protocol and is undetectable here — which is exactly why the
+declaration is the gate rather than a comment. What this build DOES now enforce
+itself is the storage half: the ledger carries only a digest, so the read-theft
+above is closed whether or not the host is honest. Nothing installs a default:
+`createGraphToolSet`/`createGraphTools` and `recoverInterruptedGraphs` accept a
+capability and no entry injects one yet, so a deployment that has not provided a
+host gets the refusal by construction.
+
+THE SHIPPED HOST LAYER (`src/graph/host/**`). The host half now exists as
+reviewable source rather than as a deployment's private code:
+
+| Module | What it is |
+| --- | --- |
+| `credential-vault.ts` | the version-2 store: process memory as the authority, a separate `0600` mirror file (atomic replace, `0700` directory) for restart re-delivery, and an exact-attempt lookup that cannot re-aim a credential |
+| `execution-index.ts` | the durable record of the executions the host created, keyed by the stable effect id; a memory-only index answers `unknown` rather than `absent` for what an earlier process may have created |
+| `dispatch-host.ts` | `create` at most once per `(graphId, effectId)` plus the lookup; the record is taken before the delivery and dropped when the delivery threw, so a failed create leaves a `pending` row a recovery resolves |
+| `identity.ts` | the version-1 invocation-identity capability over a holder the host moves per invocation |
+| `completion-bridge.ts` | resolves the attempt's binding and credential and calls `settleNatural`; reports a completion it cannot bind or whose credential the store cannot produce, instead of guessing |
+
+THE BOUNDARY THAT REMAINS, STATED PLAINLY. The vault's mirror file is not
+per-worker isolated: a same-account process can read it, exactly as it could
+read the ledger before. The honest strongest forms on a single machine are the
+host process's memory plus a root the workers are not given a path to, or
+`durability: "memory"`, which holds nothing durable and therefore loses
+in-flight credentials on restart (the runtime then reports those effects
+instead of re-delivering them). A different OS account, a container or a mount
+namespace is the platform's to provide, and this build does not pretend to
+check for one.
 
 THE EXPOSURE SURFACE IS CLOSED WHERE THIS BUILD OWNS IT. The credential is a
 field of `OutcomeDispatchRequest` and of nothing else, and the committed REPORT
@@ -2099,16 +2169,22 @@ text it reports.
 ENFORCED BY TESTS. `tests/graph/credential-isolation.test.ts` covers the
 refusal at `start`/`resume`/`submit` and at the ingress and the sweep with
 nothing written and no ledger created; the strict reader against a version
-mismatch, an extra key, a false guarantee and a missing one; the enabled path
-end to end with the ledger opened at the declared root; the read-only theft
-that is still possible (the honest limitation, with the store byte-identical
-across the read); every report channel listed above with a positive control
-proving the probe sees credentials where they DO travel; and the seam-failure
-redaction.
+mismatch, an extra key, a false guarantee, a missing one, a version-2 store
+without its `resolve`, and a store with an extra key; the enabled path end to
+end with the ledger opened at the declared root; the READ-ONLY READ that now
+yields only a digest — the credential's bytes are absent from the store, the
+digest settles nothing, and the vault resolves each credential for its own
+attempt only (the file is still byte-identical across the read); every report
+channel listed above with a positive control proving the probe sees credentials
+where they DO travel; and the seam-failure redaction. The shipped host layer
+itself is covered by `tests/graph/host-capabilities.test.ts`, including a full
+two-node graph settled through the completion bridge and the credential-leak
+scan over the bridge reports, the sweep report, the audit, the state body and
+the ledger bytes.
 
-DEFERRED by this slice, and not implied by it: any host implementation of the
-adapter, a store this build protects itself, per-worker filesystem isolation,
-platform identity and a signature over submissions, and stage-E retirement.
+DEFERRED by this slice, and not implied by it: per-worker filesystem isolation
+(the platform's, as stated above), a signature over submissions, injecting the
+shipped host layer into the dsh and Pi entries, and stage-E retirement.
 
 D8 MAKES FIRST DISPATCH, SUCCESSOR DISPATCH AND RECOVERY ONE PERSISTED EFFECT
 EXECUTOR, AND REFUSES A RUN WITH NO DISPATCHER.
@@ -2191,18 +2267,20 @@ sweep, `tests/graph/submit-outcome-tool.test.ts` through the model-facing
 ingress, and `tests/graph/drain-audit.test.ts` the audit's reading of a started
 row.
 
-DEFERRED by this slice, and not implied by it: any host IMPLEMENTATION of the
-adapter, the protocol-aware dispatch completion bridge, storage format 3 with
-its `2 -> 3` migrator, a cross-process effect executor beyond the adapter
-contract, and stage-E retirement.
+DEFERRED by this slice, and not implied by it: storage format 3 with its
+`2 -> 3` migrator, a cross-process effect executor beyond the adapter contract,
+and stage-E retirement. (The host implementation of the adapter now ships as
+`src/graph/host/dispatch-host.ts` with its execution index, and the completion
+bridge as `src/graph/host/completion-bridge.ts`.)
 
 D9 ADDS THE HOST INVOCATION IDENTITY AS AN ADDITIONAL CONSTRAINT, AND MAKES
 RESTART RECONCILIATION REPORT ITS DISAGREEMENTS.
 
-THE HOLE THIS NARROWS WAS REPRODUCED IN D7, AND IT IS NOT CLOSABLE INSIDE THE
-SUBMISSION PATH. An attempt credential is a bearer nonce: a process that can
-read the ledger can copy another attempt's credential and submit that attempt's
-outcome. D7 answers that with a store boundary the HOST must provide. D9 adds a
+THE HOLE THIS NARROWS WAS REPRODUCED IN D7. An attempt credential is a bearer
+nonce: whoever holds it can submit that attempt's outcome, and a BEARER token
+cannot tell who is asking. The ledger half of that hole is closed by state-body
+version 8 (the record holds only a digest); what no check inside the submission
+path can establish is that the PRESENTER is the original worker. D9 adds a
 second, independent constraint for hosts that can attribute an invocation: the
 host declares WHO is asking, the runtime records that attribution on the attempt
 at dispatch, and a submission that settles the attempt must come from the same
@@ -2216,8 +2294,8 @@ graph:
 
 | Capability | What the host declares | When it is absent | When it is unreadable | Refusal codes |
 | --- | --- | --- | --- | --- |
-| Protected credential store (D7, `credential-isolation.ts`) | every persisted attempt credential, and the state body inside the ledger, lies outside every dispatched worker's read and write scope | the run path refuses enablement — start, resume, submit, the ingress and the sweep all refuse before opening a ledger | same: a value this build cannot read is refused, never downgraded | `credential-isolation-unavailable` |
-| Per-attempt credential delivery (D7, same adapter) | a dispatched attempt receives ONLY its own credential, over its own dispatch channel; no report channel is a delivery channel | same as above | same as above | `credential-isolation-unavailable` |
+| Protected credential store (D7, `credential-isolation.ts`; shipped as `host/credential-vault.ts`) | the credential ITSELF lies outside every dispatched worker's read and write scope, and the credential the ledger persists is only a digest (state-body version 8, enforced by this build) | the run path refuses enablement — start, resume, submit, the ingress and the sweep all refuse before opening a ledger | same: a value this build cannot read is refused, never downgraded | `credential-isolation-unavailable` |
+| Per-attempt credential delivery (D7, same capability) | a dispatched attempt receives ONLY its own credential, over its own dispatch channel; no report channel is a delivery channel | same as above | same as above | `credential-isolation-unavailable`; `credential-missing` when a recovery's store cannot produce the credential |
 | Execution create plus stable-id lookup (D8, `dispatch-effects.ts`) | `create(request, effect)` starts an execution idempotently per `(graphId, effectId)`, and `lookup(effect)` answers `created`, `absent` or `unknown` — `unknown` rather than a guess | no dispatcher at all: the run path, the ingress and the sweep refuse enablement; a bare create-only seam is accepted as the DEGENERATE host and its lookup answers `unknown` | — (a bare function IS the degenerate adapter, by design) | `dispatch-unavailable`; `dispatch-unreconciled` when an unsettled effect cannot be established |
 | Host invocation identity (D9, `host-identity.ts`) | the invoking session and agent the host attributes to the operation being performed now; `undefined` when this invocation has none | NO constraint: nothing is recorded and nothing is checked, which is exactly the behavior every path had before this rule — the core protocol depends on no host | the operation is refused before anything is read or written | `host-identity-unavailable` (unreadable declaration, or a recorded binding judged without a capability), `host-identity-mismatch`, `host-identity-absent` |
 
@@ -2238,11 +2316,12 @@ never the node's current attempt — which yields exactly one asymmetric rule:
   the one outcome this rule must not produce.
 
 THE BINDING IS LAYOUT, NOT AN EXTRA, AND IT SURVIVES A RESTART. The identity is
-recorded on the attempt's own node entry and the state body version becomes 7
-(`OUTCOME_STATE_BODY_V7`). Version 6 and version 5 stay ADVANCEABLE — version 6
-carries every field version 7 requires except the OPTIONAL identity, so
-advancing it invents nothing — while versions 1 to 4 stay readable only
-(`graph-state.ts`). A restart NEVER re-binds a recorded identity to the
+recorded on the attempt's own node entry; it was added in state body version 7
+(`OUTCOME_STATE_BODY_V7`) and version 8 keeps it unchanged. Version 8 is the
+only ADVANCEABLE layout; versions 1 to 7 stay readable only — 7 (and 6 and 5)
+because they persist the credential itself, which this build never
+re-persists, and the older ones because they cannot carry the credentials,
+arrivals, stop or progress baselines this build writes (`graph-state.ts`). A restart NEVER re-binds a recorded identity to the
 invocation that happens to be recovering: `resume` reports the attempt it finds
 and does not ask the host for the current identity at all. The write -> restart
 -> read -> write round trip is enforced by the regression test below.
@@ -2294,10 +2373,10 @@ directions with an idempotent second recovery.
 of the field on a version that does not define it, and the malformed-identity
 refusal.
 
-DEFERRED by this slice, and not implied by it: any host IMPLEMENTATION of the
-identity capability or of the dispatch adapter (this build ships the contracts),
-a signature over a submission, platform-level process isolation, and the
-protocol-aware dispatch completion bridge.
+DEFERRED by this slice, and not implied by it: a signature over a submission and
+platform-level process isolation. (The host identity capability, the dispatch
+adapter and the completion bridge now ship under `src/graph/host/**`; the
+identity holder is `identity.ts`.)
 
 ### Definitions, locations, and comparison owners
 
@@ -2355,7 +2434,8 @@ CompiledPlan[graphId, planRevision]
 Attempt[graphId, attemptId]
   planRevision
   nodeId
-  attemptCredential (runtime-issued nonce, scope-bound to this attempt)
+  attemptCredentialDigest (verifier for the runtime-issued nonce; the value
+    itself lives in the HOST's credential store, never in the record)
 
 Receipt[graphId, attemptId, submissionId]
   planRevision

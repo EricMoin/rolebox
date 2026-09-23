@@ -52,9 +52,9 @@
  * Every field is runtime provenance: the graph and plan revision the node
  * belongs to, the attempt id the STATE minted, and the plan's own agent/prompt.
  * Nothing here comes from a worker. This is also the shape the ledger persists
- * as a dispatch effect's payload — deliberately credential-free, so the
- * credential lives in exactly one durable place (the attempt's state entry) and
- * is re-bound from there at launch.
+ * as a dispatch effect's payload — deliberately credential-free: the durable
+ * state records the credential's DIGEST, the host's store holds the value, and
+ * every launch is delivered with the credential the store resolves.
  */
 export interface OutcomeDispatchTarget {
   readonly graphId: string;

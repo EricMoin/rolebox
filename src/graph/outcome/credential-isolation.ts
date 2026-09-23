@@ -53,9 +53,10 @@
  * check. The adapter's VALUE is therefore the honest enablement switch the
  * deployment owns: no adapter, no new execution path.
  *
- * THE CREDENTIAL STILL TRAVELS OVER EXACTLY ONE CHANNEL. The adapter does not
- * carry, copy or report a credential: the runtime mints it, persists it on the
- * attempt's state entry, and hands it to the dispatch seam inside
+ * THE CREDENTIAL STILL TRAVELS OVER EXACTLY ONE CHANNEL. The capability does
+ * not carry, copy or report a credential: the runtime mints it, ADOPTS it into
+ * the host's store (the version-2 half), writes only its digest into the
+ * attempt's state entry, and hands the value to the dispatch seam inside
  * `OutcomeDispatchRequest` — the one channel the host's delivery guarantee is
  * about. `credentialStoreRoot` is where the host declares its protected store
  * to live, and the callers that OPEN the ledger use it; it is never compared

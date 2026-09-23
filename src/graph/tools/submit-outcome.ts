@@ -250,9 +250,9 @@ export type OutcomeSubmitRefusalReason =
   | "no-state-directory"
   /**
    * This process holds no readable HOST credential-isolation capability (D7):
-   * the attempt credentials this ingress would resolve against live in a store
-   * this build cannot protect from a same-account reader, so the ingress
-   * refuses before it opens a ledger.
+   * the credential a submission is checked against has to be stored and
+   * delivered by the host, so the ingress refuses before it opens a ledger
+   * rather than resolving against a capability it does not have.
    */
   | "credential-isolation-unavailable"
   /**
@@ -466,10 +466,9 @@ export interface SubmitOutcomeDeps {
    * enablement condition of this ingress, exactly as it is of the runtime.
    *
    * WITHOUT it this ingress refuses (`credential-isolation-unavailable`)
-   * BEFORE it opens a ledger: the compiled plan would still be read, but a
-   * submission could not honestly be accepted against credentials this build
-   * cannot keep out of another worker's reach, so nothing is opened and
-   * nothing is written. With it, the ledger is opened at the adapter's
+   * BEFORE it opens a ledger: the compiled plan would still be read, but the
+   * credential itself is the host's to store and deliver, so nothing is opened
+   * and nothing is written. With it, the ledger is opened at the adapter's
    * declared `credentialStoreRoot` instead of the workspace default.
    */
   readonly credentialIsolation?: CredentialIsolationCapability;
