@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState } from "../../src/types.engine-v2.ts";
-import { createEngineState } from "../../src/graph/engine/engine-state.ts";
+import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
+import { OUTCOME_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 import { EnginePersistence } from "../../src/graph/persistence/engine-persistence.ts";
 import {
   scanPersistedStates,
@@ -45,6 +46,9 @@ function declaration(name: string): GraphDeclaration {
 /** Build a runnable state and return it (caller mutates + persists). */
 function buildState(graphId: string, name: string, startedAt: number): EngineState {
   const state = createEngineState(declaration(name), graphId);
+  // The scanner only surfaces records this build BINDS; the outcome protocol is
+  // the one this build registers.
+  state.executionProtocolVersion = OUTCOME_PROTOCOL;
   state.phase = EnginePhase.Executing;
   state.startedAt = startedAt;
   state.updatedAt = startedAt + 50;

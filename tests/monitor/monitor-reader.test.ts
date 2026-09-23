@@ -44,6 +44,10 @@ function writeNDJSONFile(filename: string, lines: unknown[]): string {
 function buildEngineFile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     version: 2,
+    // A record must carry its own execution-protocol identity: the loader
+    // resolves no implicit protocol, so a protocol-1-shaped record without
+    // this key is a malformed discriminator and is skipped.
+    executionProtocolVersion: 2,
     graphId: "demo-graph",
     phase: "executing",
     graphDeclaration: { version: 2, name: "demo", nodes: [], edges: [] },

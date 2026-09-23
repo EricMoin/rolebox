@@ -38,7 +38,6 @@ import {
   EVENT_COALESCE_MS,
   ROLEBOX_MONITOR_ROUTE_PREFIX,
 } from "../../src/platform/adapters/dsh/web-rolebox-monitor-route.ts";
-import { clearLiveGraphToolSet } from "../../src/graph/tools/live-state.ts";
 import type {
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
@@ -636,9 +635,8 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
   });
 
   it("surfaces engine graphs persisted under the workspace .rolebox/state store", async () => {
-    // Force the disk path: the live registry wins over persisted files, so a
-    // toolset registered by another test would mask the fallback under test.
-    clearLiveGraphToolSet();
+    // The persisted workspace store is the ONLY graph source: the deleted
+    // legacy runtime's live in-memory registry is gone.
     const fixture = await createFixture();
     const workspaceDir = mkdtempSync(join(tmpdir(), "dsh-monitor-route-ws-"));
     try {
@@ -649,6 +647,7 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
         join(engineStateDir, "engine-persisted.json"),
         JSON.stringify({
           version: 2,
+          executionProtocolVersion: 2,
           graphId: "persisted-graph",
           // Persisted phase is idle — the RUNNING node below is what promotes
           // the projected phase to `executing` (see projectEngineGraph).
@@ -715,7 +714,6 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
       expect(graph!.phase).toBe("executing");
       expect(graph!.nodeStatusCounts.running).toBe(1);
     } finally {
-      clearLiveGraphToolSet();
       rmSync(workspaceDir, { recursive: true, force: true });
     }
   });

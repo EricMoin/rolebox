@@ -1,16 +1,11 @@
 /**
- * Outcome-protocol handler registration (C3b).
+ * Execution-protocol registration and the outcome-only load contract.
  *
- * The execution-protocol registry now holds a REAL handler for protocol 2, so a
- * declared graph becomes loadable AND runnable in the same slice. This file
- * verifies the three halves of that boundary together: the shipped registry
- * binds protocol 2 through the outcome CAPABILITY (not the number), a declared
- * graph loads through the loader as valid, the legacy entry points still refuse
- * it without dispatching anything, and its compiled plan runs through the
- * outcome run path instead. It also proves a handler registered under 2 that
- * does not declare the outcome capability is refused rather than trusted, and
- * that the legacy RUNTIME's own resume entry (`EngineRuntime.recover()`)
- * refuses the record instead of adopting it under legacy rules.
+ * The legacy signal protocol is deleted: this build registers exactly one
+ * handler (the outcome protocol), a record pinned to version 1 is `unsupported`
+ * and a record with NO protocol key is `corrupt` — there is no backfill and no
+ * implicit protocol. A declared graph loads as valid and runs its compiled plan
+ * through the outcome run path.
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
@@ -25,12 +20,9 @@ import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3
 import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
-  OutcomeProtocolUnavailableError,
 } from "../../src/graph/tools/declare-graph.ts";
 import {
   DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-  LEGACY_EXECUTION_PROTOCOL_REGISTRY,
-  LEGACY_SIGNAL_PROTOCOL,
   OUTCOME_PROTOCOL,
   OUTCOME_PROTOCOL_HANDLER,
   classifyExecutionProtocol,
@@ -45,12 +37,7 @@ import {
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
-import { createEngine } from "../../src/graph/engine/index.ts";
-import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
-import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
-import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -76,29 +63,9 @@ const DECLARATION: GraphDeclarationV3 = {
   edges: [{ from: "plan", to: "ship", outcome: "planned" }],
 };
 
-/** A dispatch seam that records calls and never completes anything. */
-class CountingDispatch implements NodeDispatchPort {
-  calls = 0;
-  executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
-    this.calls += 1;
-    return Promise.resolve({
-      id: "task-" + node.nodeId,
-      sessionId: "sess-" + node.nodeId,
-      parentSessionId: "g",
-      depth: 1,
-      status: "running",
-      agent: node.agent,
-      prompt: node.prompt,
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-      priority: 0,
-    });
-  }
-}
-
 // ── The registered handler ──────────────────────────────────────────────────
 
-describe("execution-protocol registry — the outcome handler (C3b)", () => {
+describe("execution-protocol registry — the outcome handler", () => {
   it("binds protocol 2 through the outcome CAPABILITY, not the number", () => {
     const verdict = classifyExecutionProtocol(
       OUTCOME_PROTOCOL,
@@ -106,32 +73,31 @@ describe("execution-protocol registry — the outcome handler (C3b)", () => {
     );
     expect(verdict.kind).toBe("bound");
     if (verdict.kind !== "bound") return;
-    // The verdict carries the SAME frozen handler the registry holds.
     expect(verdict.handler).toBe(OUTCOME_PROTOCOL_HANDLER);
     expect(isOutcomeProtocolHandler(verdict.handler)).toBe(true);
-    // What the handler OWNS, declared rather than assumed.
     expect(OUTCOME_PROTOCOL_HANDLER.completion).toBe("accepted-outcome-submission");
     expect(OUTCOME_PROTOCOL_HANDLER.submissionIngress).toBe(
       "graph-scoped-outcome-submission",
     );
     expect(OUTCOME_PROTOCOL_HANDLER.legacyCompletion).toBe("unreachable");
-    // Both protocols are shipped; the legacy-only registry still refuses 2.
+    // The shipped registry holds the outcome handler ALONE.
     expect(
       DEFAULT_EXECUTION_PROTOCOL_REGISTRY.handlers.map((handler) => handler.version),
-    ).toEqual([LEGACY_SIGNAL_PROTOCOL, OUTCOME_PROTOCOL]);
-    expect(
-      classifyExecutionProtocol(OUTCOME_PROTOCOL, LEGACY_EXECUTION_PROTOCOL_REGISTRY),
-    ).toEqual({ kind: "unsupported", version: OUTCOME_PROTOCOL });
-    // Frozen membership: an in-place widening cannot make the set move.
+    ).toEqual([OUTCOME_PROTOCOL]);
     expect(Object.isFrozen(DEFAULT_EXECUTION_PROTOCOL_REGISTRY)).toBe(true);
     expect(Object.isFrozen(OUTCOME_PROTOCOL_HANDLER)).toBe(true);
   });
 
+  it("refuses the deleted legacy protocol 1 as an unsupported version", () => {
+    expect(classifyExecutionProtocol(1, DEFAULT_EXECUTION_PROTOCOL_REGISTRY)).toEqual({
+      kind: "unsupported",
+      version: 1,
+    });
+  });
+
   it("refuses a handler registered under 2 that does not declare the outcome capability", async () => {
-    // A bare marker is not an outcome handler, and the runtime says so instead
-    // of running the graph under semantics nobody declared.
     const markerOnly = createExecutionProtocolRegistry({
-      handlers: [{ version: LEGACY_SIGNAL_PROTOCOL }, { version: OUTCOME_PROTOCOL }],
+      handlers: [{ version: 1 }, { version: OUTCOME_PROTOCOL }],
     });
     const verdict = classifyExecutionProtocol(OUTCOME_PROTOCOL, markerOnly);
     expect(verdict.kind).toBe("bound");
@@ -164,17 +130,14 @@ describe("execution-protocol registry — the outcome handler (C3b)", () => {
   });
 });
 
-// ── Load, legacy refusal, and the run path in one graph ─────────────────────
+// ── Load contract: no backfill, no implicit protocol ────────────────────────
 
-describe("a declared graph loads, refuses legacy entry points, and runs its plan", () => {
-  it("does all three against the same persisted declaration", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "outcome-protocol-graph-"));
-    const ledger = await SqliteAcceptanceLedger.create(dir);
+describe("the loader's protocol gate", () => {
+  it("loads a persisted declaration as valid under the outcome protocol", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "outcome-load-"));
     try {
       const graph = buildDeclaredOutcomeGraph({ declaration: DECLARATION });
       expect(persistDeclaredGraph(graph, dir)).toBe(true);
-
-      // 1. LOADS through the loader as valid, naming the outcome protocol.
       const loaded = loadEngineStateForResume(
         readFileSync(engineStatePath(dir, "graph.protocol"), "utf-8"),
         engineStatePath(dir, "graph.protocol"),
@@ -186,31 +149,73 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
         expect(loaded.executionProtocol).toBe(OUTCOME_PROTOCOL);
         expect(loaded.state.compiledPlan?.planRevision).toBe(graph.plan.planRevision);
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
-      // 2. REFUSES every legacy entry point, dispatching nothing.
-      const dispatch = new CountingDispatch();
-      const ts = createGraphToolSet({ dispatch, stateDir: dir });
-      await expect(
-        ts.graph_run({ graph_id: "graph.protocol" }),
-      ).rejects.toThrow(OutcomeProtocolUnavailableError);
-      expect(dispatch.calls).toBe(0);
-      let caught: unknown;
-      try {
-        await ts.graph_run({ graph_id: "graph.protocol" });
-      } catch (error) {
-        caught = error;
-      }
-      if (caught instanceof OutcomeProtocolUnavailableError) {
-        expect(caught.graphId).toBe("graph.protocol");
-        expect(caught.planRevision).toBe(graph.plan.planRevision);
-        expect(caught.message).toMatch(/OUTCOME run path/);
-        expect(caught.message).toMatch(/Nothing was dispatched/);
-      } else {
-        throw new Error("expected OutcomeProtocolUnavailableError, got " + String(caught));
-      }
+  it("reports a record with NO protocol key as corrupt(execution) — no backfill", () => {
+    const raw = JSON.stringify({
+      version: 2,
+      graphId: "no-protocol",
+      phase: "idle",
+      graphDeclaration: { version: 2, name: "no-protocol", nodes: [], edges: [] },
+      nodes: {},
+      loopGroups: {},
+      signalLedger: {},
+      frontier: [],
+      pendingCompletions: [],
+      budget: { sessionsSpawned: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 },
+      startedAt: 1,
+      updatedAt: 1,
+      advancingLock: false,
+    });
+    const loaded = loadEngineStateForResume(
+      raw,
+      "no-protocol",
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
+    );
+    expect(loaded.kind).toBe("corrupt");
+    if (loaded.kind === "corrupt") expect(loaded.dimension).toBe("execution");
+  });
 
-      // 3. RUNS its plan through the outcome run path instead. Each dispatch
-      // hands the worker the attempt credential it must present back.
+  it("reports a record pinned to the deleted protocol 1 as unsupported(execution)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "legacy-record-"));
+    try {
+      const graph = buildDeclaredOutcomeGraph({ declaration: DECLARATION });
+      expect(persistDeclaredGraph(graph, dir)).toBe(true);
+      const path = engineStatePath(dir, "graph.protocol");
+      const parsed = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+      parsed.executionProtocolVersion = 1;
+      const loaded = loadEngineStateForResume(
+        JSON.stringify(parsed),
+        path,
+        DEFAULT_STORAGE_FORMAT_REGISTRY,
+        DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
+      );
+      expect(loaded.kind).toBe("unsupported");
+      if (loaded.kind === "unsupported") {
+        expect(loaded.dimension).toBe("execution");
+        expect(loaded.detail).toBe("1");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── The run path ────────────────────────────────────────────────────────────
+
+describe("a declared graph runs its plan through the outcome run path", () => {
+  it("dispatches the entry node, accepts its outcome and settles the successor", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "outcome-protocol-graph-"));
+    const ledger = await SqliteAcceptanceLedger.create(dir);
+    try {
+      const graph = buildDeclaredOutcomeGraph({ declaration: DECLARATION });
+      expect(persistDeclaredGraph(graph, dir)).toBe(true);
+
+      // Each dispatch hands the worker the attempt credential it must present back.
       const requests: string[] = [];
       const credentials = new Map<string, string>();
       const runtime = new OutcomeGraphRuntime({
@@ -225,7 +230,6 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
         credentialIsolation: testHostCredentialIsolation(dir),
         clock: () => NOW,
       });
-      /** The credential one dispatched attempt was handed, for the submission. */
       const credentialOf = (attemptId: string): string => {
         const found = credentials.get(attemptId);
         if (found === undefined) {
@@ -233,6 +237,7 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
         }
         return found;
       };
+
       const started = runtime.start(NOW);
       expect(started.kind).toBe("started");
       if (started.kind !== "started") return;
@@ -260,45 +265,6 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
       expect(ledger.acceptedEvents("graph.protocol")).toHaveLength(2);
     } finally {
       ledger.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-// ── The legacy runtime's recover() must not adopt a declared state ──────────
-
-describe("EngineRuntime.recover() refuses an outcome-protocol record (C3b)", () => {
-  it("adopts nothing, dispatches nothing and leaves the record byte-identical", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "outcome-recover-"));
-    try {
-      const graph = buildDeclaredOutcomeGraph({ declaration: DECLARATION });
-      expect(persistDeclaredGraph(graph, dir)).toBe(true);
-      const path = engineStatePath(dir, "graph.protocol");
-      const before = readFileSync(path, "utf-8");
-
-      // A LEGACY runtime for the very same graph id and state directory. With
-      // the outcome handler registered, the record now LOADS as valid — so the
-      // adoption gate must be the protocol identity, not the loader.
-      const dispatch = new CountingDispatch();
-      const engine = createEngine(
-        { version: 2, name: "graph.protocol", nodes: [], edges: [] },
-        { graphId: "graph.protocol", stateDir: dir, dispatch },
-      );
-      const report = await engine.recover();
-
-      // The legacy recovery path reports the refusal instead of adopting.
-      expect(report.status).toBe("protocol_refused");
-      if (report.status === "protocol_refused") {
-        expect(report.executionProtocol).toBe(OUTCOME_PROTOCOL);
-      }
-      // Nothing was dispatched and no declared node entered the legacy runtime.
-      expect(dispatch.calls).toBe(0);
-      expect([...engine.status().nodes.keys()]).toEqual([]);
-      // No write happened on this path: the record keeps its protocol, plan
-      // and binding exactly as the declaration wrote them.
-      expect(readFileSync(path, "utf-8")).toBe(before);
-      engine.dispose();
-    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -53,7 +53,6 @@ import type {
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
 import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
-import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
@@ -506,32 +505,6 @@ describe("D8 — a production entry with no dispatch adapter refuses", () => {
     expect(caught).toBeInstanceOf(OutcomeSubmissionRefusedError);
     expect((caught as OutcomeSubmissionRefusedError).reason).toBe("dispatch-unavailable");
     // The refusal happened BEFORE the store was opened.
-    expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
-  });
-
-  it("refuses an outcome graph in the startup sweep and opens no ledger", async () => {
-    const dir = makeTmpDir("effects-noadapter-sweep-");
-    const ts = createGraphToolSet({
-      stateDir: dir,
-      outcomeNow: NOW,
-      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
-    });
-    const declared = ts.graph_declare({ declaration: LINEAR });
-
-    const report = await recoverInterruptedGraphs({
-      directory: dir,
-      manager: idleManager(),
-      stateDir: dir,
-      outcomeNow: NOW,
-      // The credential capability IS installed; only the dispatcher is missing.
-      outcomeCredentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
-    });
-    expect(report.outcomeProtocol?.started).toEqual([]);
-    expect(report.outcomeProtocol?.resumed).toEqual([]);
-    expect(report.outcomeProtocol?.dispatched).toEqual([]);
-    expect(report.outcomeProtocol?.refused).toHaveLength(1);
-    expect(report.outcomeProtocol?.refused[0]).toContain("[dispatch-unavailable]");
-    expect(report.outcomeProtocol?.refused[0]).toContain(declared.graph_id);
     expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
   });
 });

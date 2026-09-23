@@ -23,9 +23,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
-import { buildEngineGraphStateBlock } from "../../src/graph/engine/graph-state-block.ts";
-import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
+import {
+  EnginePersistence,
+  engineStateDir,
+} from "../../src/graph/persistence/engine-persistence.ts";
+import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
+import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { proposalDigest } from "../../src/graph/outcome/proposal.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
@@ -33,19 +36,16 @@ import {
   createValidatorRegistry,
   type ValidationOutcome,
 } from "../../src/graph/outcome/validators.ts";
-import { OutcomeProtocolUnavailableError } from "../../src/graph/tools/declare-graph.ts";
 import {
   OutcomeSubmissionRefusedError,
   type GraphSubmitOutcomeArgs,
   type GraphSubmitOutcomeResult,
 } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
-import { createGraphTools } from "../../src/graph/tools/index.ts";
+import { createOutcomeGraphTools as createGraphTools } from "../../src/graph/tools/index.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
-import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ function makeTmpDir(prefix: string): string {
   return dir;
 }
 
-/** The dispatch surface the sweep touches for legacy graphs; nothing here. */
+/** An idle dispatch-manager surface (kept for the shared fixture shape). */
 function idleManager(): DispatchManager {
   const surface: Partial<DispatchManager> = {
     getTask: () => undefined,
@@ -96,26 +96,6 @@ function idleManager(): DispatchManager {
     getEventState: () => new Map(),
   };
   return surface as DispatchManager;
-}
-
-/** A legacy dispatch port that counts every launch (and never completes). */
-class CountingDispatch implements NodeDispatchPort {
-  calls = 0;
-  executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
-    this.calls += 1;
-    return Promise.resolve({
-      id: "task-" + node.nodeId,
-      sessionId: "sess-" + node.nodeId,
-      parentSessionId: "g",
-      depth: 1,
-      status: "running",
-      agent: node.agent,
-      prompt: node.prompt,
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-      priority: 0,
-    });
-  }
 }
 
 /** A recorder for the outcome run path's dispatch seam. */
@@ -143,19 +123,30 @@ function credentialOf(
   return found.credential;
 }
 
-/** Run the startup sweep against one temp workspace. */
-function sweep(
+/**
+ * Give the store's declared graphs their FIRST EXECUTION (or restart resume)
+ * through the HOST's own entry — the same `OutcomeHost.recoverDeclaredGraphs`
+ * the shipped hosts call at boot. The host is closed afterwards; the credential
+ * vault it minted stays under the same store root the toolset's credential
+ * capability reads.
+ */
+async function sweep(
   dir: string,
   requests: OutcomeDispatchRequest[],
-): ReturnType<typeof recoverInterruptedGraphs> {
-  return recoverInterruptedGraphs({
-    directory: dir,
-    manager: idleManager(),
-    stateDir: dir,
-    outcomeNow: NOW,
-    outcomeDispatch: recorder(requests),
-    outcomeCredentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+): Promise<void> {
+  const host = OutcomeHost.open({
+    workspaceDir: dir,
+    storeRoot: engineStateDir(dir),
+    deliver: (request) => {
+      requests.push(request);
+    },
+    durability: "memory",
   });
+  try {
+    await host.recoverDeclaredGraphs();
+  } finally {
+    host.close();
+  }
 }
 
 /** Read the ledger of a workspace; the caller closes it. */
@@ -197,14 +188,12 @@ describe("graph_submit_outcome — the vertical path", () => {
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
 
-    // FIRST EXECUTION: the sweep starts the graph from the SAVED plan.
+    // FIRST EXECUTION: the host sweep starts the graph from the SAVED plan.
     const startRequests: OutcomeDispatchRequest[] = [];
-    const first = await sweep(dir, startRequests);
-    expect(first.failed).toEqual([]);
-    expect(first.outcomeProtocol?.started).toHaveLength(1);
-    expect(first.outcomeProtocol?.started[0]).toContain(declared.plan_revision);
-    expect(first.outcomeProtocol?.dispatched).toEqual([graphId + ":work#1"]);
+    await sweep(dir, startRequests);
     expect(startRequests.map((request) => request.attemptId)).toEqual(["work#1"]);
+    expect(startRequests[0]?.graphId).toBe(graphId);
+    expect(startRequests[0]?.nodeId).toBe("work");
 
     // The worker reports its outcome through the model-facing ingress, carrying
     // back the credential its dispatch request handed it.
@@ -228,19 +217,10 @@ describe("graph_submit_outcome — the vertical path", () => {
     // The result does not echo the capability back into the transcript.
     expect(JSON.stringify(accepted)).not.toContain(workCredential);
 
-    // The SHARED context block renders legacy engine state only — a declared
-    // (outcome) graph has no legacy runtime — and graph_status refuses it
-    // outright, so neither surface can carry the credential.
-    const liveStates = ts.liveEngineStates();
-    expect(liveStates).toEqual([]);
-    expect(buildEngineGraphStateBlock(liveStates)).not.toContain(workCredential);
-    let statusError: unknown;
-    try {
-      ts.graph_status({ graph_id: graphId });
-    } catch (error) {
-      statusError = error;
-    }
-    expect(statusError).toBeInstanceOf(OutcomeProtocolUnavailableError);
+    // No report surface echoes the capability back: the status JSON for the
+    // declared graph does not carry the credential.
+    const statusJson = ts.graph_status({ graph_id: graphId, scope: "persisted" });
+    expect(statusJson).not.toContain(workCredential);
     expect(accepted.settled_nodes).toEqual(["work"]);
     expect(accepted.phase).toBe("executing");
     expect(accepted.refusals).toEqual([]);
@@ -537,15 +517,23 @@ describe("graph_submit_outcome — the vertical path", () => {
 // ── Addressing: declaration-only graphs, legacy graphs ──────────────────────
 
 describe("graph_submit_outcome — the graphs it serves", () => {
-  it("refuses a legacy v2 graph by name, without opening a ledger", async () => {
+  it("refuses a record pinned to the deleted legacy protocol, without opening a ledger", async () => {
     const dir = makeTmpDir("submit-outcome-legacy-");
     const ts = createGraphToolSet({ stateDir: dir });
-    const legacy = ts.graph_create({ name: "legacy.graph" });
+    // A protocol-1 record — the deleted legacy run path — owns the id. The
+    // loader refuses it as unsupported(execution), so this ingress reports an
+    // unreadable plan and never treats it as a graph it serves.
+    const state = createEngineState(
+      { version: 2, name: "legacy.graph", nodes: [], edges: [] },
+      "legacy.graph",
+    );
+    state.executionProtocolVersion = 1;
+    new EnginePersistence(dir).save(state);
 
     let caught: unknown;
     try {
       await ts.graph_submit_outcome({
-        graph_id: legacy.graph_id,
+        graph_id: "legacy.graph",
         node_id: "A",
         outcome_id: "done",
       });
@@ -555,10 +543,8 @@ describe("graph_submit_outcome — the graphs it serves", () => {
     if (!(caught instanceof OutcomeSubmissionRefusedError)) {
       throw new Error("expected OutcomeSubmissionRefusedError, got " + String(caught));
     }
-    expect(caught.reason).toBe("legacy-graph");
-    expect(caught.graphId).toBe(legacy.graph_id);
-    expect(caught.message).toContain("LEGACY");
-    expect(caught.message).toContain("signal protocol");
+    expect(caught.reason).toBe("unreadable-plan");
+    expect(caught.graphId).toBe("legacy.graph");
     // The refusal happened BEFORE the ledger was opened.
     expect(existsSync(join(engineStateDir(dir), "graph-acceptance-ledger.sqlite"))).toBe(
       false,
@@ -609,7 +595,7 @@ describe("graph_submit_outcome — the graphs it serves", () => {
 
 describe("graph_submit_outcome — registration and completion authority", () => {
   it("registers additively with exactly the minimum model-facing args", () => {
-    const tools = createGraphTools(undefined, { directory: "/tmp" });
+    const tools = createGraphTools(createGraphToolSet({ directory: "/tmp" }));
     expect(Object.keys(tools)).toContain("graph_submit_outcome");
     const def = tools.graph_submit_outcome;
     expect(def).toBeDefined();
@@ -642,7 +628,7 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     const declared = ts.graph_declare({ declaration: LINEAR });
     const startRequests: OutcomeDispatchRequest[] = [];
     await sweep(dir, startRequests);
-    const tools = createGraphTools(undefined, { toolset: ts });
+    const tools = createGraphTools(ts);
     const def = tools.graph_submit_outcome;
     if (def === undefined) throw new Error("graph_submit_outcome is not registered");
     const out = await def.execute(
@@ -667,22 +653,19 @@ describe("graph_submit_outcome — registration and completion authority", () =>
       refusals: [{ code: "credential-missing", path: "$.credential" }],
     });
 
-    const legacy = ts.graph_create({ name: "legacy.registered" });
+    // An id this ingress does not serve renders as a clear tool failure.
     const failed = await def.execute(
-      { graph_id: legacy.graph_id, node_id: "A", outcome_id: "done" },
+      { graph_id: "never.declared", node_id: "A", outcome_id: "done" },
       makeContext(),
     );
     expect(String(failed)).toContain("graph_submit_outcome failed:");
-    expect(String(failed)).toContain("LEGACY");
   });
 
-  it("is the ONLY completion source: every legacy entry point refuses and the legacy port is never called", async () => {
+  it("is the ONLY completion source on the shipped tool face", async () => {
     const dir = makeTmpDir("submit-outcome-authority-");
-    const legacyPort = new CountingDispatch();
     const toolRequests: OutcomeDispatchRequest[] = [];
     const ts = createGraphToolSet({
       stateDir: dir,
-      dispatch: legacyPort,
       outcomeNow: NOW,
       outcomeDispatch: recorder(toolRequests),
       credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
@@ -692,26 +675,15 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     const startRequests: OutcomeDispatchRequest[] = [];
     await sweep(dir, startRequests);
 
-    // Every legacy operation refuses the declared graph before touching a node.
-    const refusals: unknown[] = [];
-    for (const call of [
-      () => ts.graph_run({ graph_id: graphId }),
-      () => ts.graph_run({ graph_id: graphId, dry_run: true }),
-      () => ts.graph_cancel({ graph_id: graphId }),
-      () => ts.graph_add_node({ graph_id: graphId, id: "X", agent: "a", prompt: "p" }),
-      () => ts.graph_approve({ graph_id: graphId, node_id: "work", action: "approve" }),
-    ]) {
-      try {
-        await call();
-        refusals.push(undefined);
-      } catch (error) {
-        refusals.push(error);
-      }
-    }
-    expect(refusals.every((entry) => entry instanceof OutcomeProtocolUnavailableError)).toBe(
-      true,
-    );
-    expect(legacyPort.calls).toBe(0);
+    // The shipped face registers exactly the outcome entries: no legacy
+    // construction/execution key exists that could settle a node.
+    const face = createGraphTools(ts);
+    expect(Object.keys(face).sort()).toEqual([
+      "graph_audit",
+      "graph_declare",
+      "graph_status",
+      "graph_submit_outcome",
+    ]);
 
     // The only settlement on record came from the submission ingress.
     const accepted = await ts.graph_submit_outcome({
@@ -729,6 +701,5 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     } finally {
       ledger.close();
     }
-    expect(legacyPort.calls).toBe(0);
   });
 });

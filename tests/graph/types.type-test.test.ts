@@ -1,54 +1,31 @@
 /**
- * Graph Engine v2 — type-level contract pins (R1 residual / N7 §3.6).
+ * Graph Engine v2 — surviving type-level contract pins.
  *
  * Why this file exists: `bun test` is transpile-only, so a contract that only
  * regresses at the type level (a re-widened optional field, a collapsed
  * discriminated union, a renamed JSON key) would keep every runtime suite
  * green. This file is executed by `bun test` like any other test, but its real
- * authority is the compiler: `bun run typecheck:tests` (`tsc -p
- * tsconfig.tests.json`) fails when a pin below drifts.
+ * authority is the compiler: `bun run typecheck:tests`
+ * (`tsc -p tsconfig.tests.json`) fails when a pin below drifts.
  *
- * Two assertion styles are used:
- *
- * - `expectTypeOf` (bun:test, the vendored expect-type matchers) for the
- *   positive shape: an exact-type pin that fails on any widening or rename.
- * - `@ts-expect-error` for the negative direction ("this must NOT compile"):
- *   tsc reports the directive itself as TS2578 the moment the forbidden shape
- *   becomes legal again, so the pin cannot silently rot.
+ * This is the subset of the former `types.type-test.test.ts` whose subjects
+ * SURVIVE the legacy runtime's deletion. The pins it dropped
+ * (`ApproveReport` / `RejectReport` / `PruneReport`, `CancelScopeReport` and
+ * the tool-layer `GraphApproveResult` / `GraphCancelResult` / `GraphRunResult`
+ * projections) pinned types that were deleted with the legacy construction and
+ * execution tool surface, so there is no contract left to pin.
  *
  * Pinned contracts:
  *   1. `JoinConfig` (C1/R3) — `quorum` exists only on the "quorum" branch, so a
  *      quorum strategy without its required-answer count cannot be declared
  *      (the former `quorum?: number` silently degraded to a count of 1).
- *   2. `ApproveReport` / `RejectReport` / `PruneReport` (C6/B16) — the report
- *      shapes the public approve/reject/prune surface returns, including the
- *      `already_resolved`-only `actualStatus`.
- *   3. `GraphStatusSnapshot` (Y27) — which `graph_status` JSON keys are required
+ *   2. `GraphStatusSnapshot` (Y27) — which `graph_status` JSON keys are required
  *      and which are conditionally spread (must stay optional).
- *   4. The tool-layer report projections (A1/A2/A3) — `GraphCancelResult`
- *      (every `CancelScopeReport` list), `GraphRunResult["retry"]` (every
- *      `RetryReport` field) and the reject-only optional lane fields on
- *      `GraphApproveResult`.
- *
- * The runtime `expect` calls keep each case visible in the test report; they
- * assert the same facts the types encode where a value happens to be available.
  */
 
 import { describe, expect, expectTypeOf, it } from "bun:test";
-import { NodeStatus } from "../../src/constants.ts";
 import type { JoinConfig } from "../../src/types.graph-v2.ts";
-import type {
-  ApproveReport,
-  PruneReport,
-  RejectReport,
-} from "../../src/graph/engine/approval-handler.ts";
-import type {
-  GraphApproveResult,
-  GraphCancelResult,
-  GraphRunResult,
-  GraphStatusSnapshot,
-} from "../../src/graph/tools/graph-tools.ts";
-import type { CancelScopeReport } from "../../src/graph/engine/cancellation.ts";
+import type { GraphStatusSnapshot } from "../../src/graph/tools/graph-tools.ts";
 
 /**
  * Whether `K` may be omitted from `T` — the exact "optional" bit. A required
@@ -102,145 +79,6 @@ describe("type contract: JoinConfig quorum discriminant (C1/R3)", () => {
   });
 });
 
-describe("type contract: approve/reject/prune reports (C6/B16)", () => {
-  it("pins ApproveReport to its applied flag", () => {
-    expectTypeOf<ApproveReport>().toEqualTypeOf<{ applied: boolean }>();
-    const applied: ApproveReport = { applied: true };
-    expect(applied.applied).toBe(true);
-  });
-
-  it("pins the RejectReport discriminated union", () => {
-    expectTypeOf<RejectReport>().toEqualTypeOf<
-      | { kind: "escalate" }
-      | { kind: "revise" }
-      | { kind: "already_resolved"; actualStatus: NodeStatus }
-    >();
-    const resolved: RejectReport = {
-      kind: "already_resolved",
-      actualStatus: NodeStatus.Completed,
-    };
-    expect(resolved.kind).toBe("already_resolved");
-  });
-
-  it("exposes actualStatus only on the already_resolved branch", () => {
-    type AlreadyResolved = Extract<RejectReport, { kind: "already_resolved" }>;
-    expectTypeOf<AlreadyResolved["actualStatus"]>().toEqualTypeOf<NodeStatus>();
-    expectTypeOf<
-      Extract<RejectReport, { kind: "escalate" }>
-    >().toEqualTypeOf<{ kind: "escalate" }>();
-
-    // A consumer that reads actualStatus without narrowing on kind must not
-    // compile — that was the old optional-field hazard (undefined for every
-    // genuine rejection lane).
-    // @ts-expect-error actualStatus exists only on the already_resolved branch
-    type EscalateStatus = Extract<RejectReport, { kind: "escalate" }>["actualStatus"];
-    // @ts-expect-error actualStatus exists only on the already_resolved branch
-    type ReviseStatus = Extract<RejectReport, { kind: "revise" }>["actualStatus"];
-    expect(true).toBe(true);
-  });
-
-  it("pins PruneReport to the applied/cancelled/surviving/skipped split", () => {
-    expectTypeOf<PruneReport>().toEqualTypeOf<{
-      applied: boolean;
-      cancelled: string[];
-      surviving: string[];
-      skipped: string[];
-      reEntered: string[];
-    }>();
-    const prune: PruneReport = {
-      applied: true,
-      cancelled: ["b"],
-      surviving: ["c"],
-      skipped: ["d"],
-      reEntered: ["a"],
-    };
-    expect(prune.cancelled).toEqual(["b"]);
-    // B1: the rejected-upstream re-entry list is part of the report contract,
-    // not an optional extra a caller can forget to read.
-    expect(prune.reEntered).toEqual(["a"]);
-  });
-});
-
-describe("type contract: CancelScopeReport unknown split (B2/E4)", () => {
-  it("pins the five disjoint outcomes, unknown included", () => {
-    expectTypeOf<CancelScopeReport>().toEqualTypeOf<{
-      target: string[];
-      cancelled: string[];
-      skipped: string[];
-      unknown: string[];
-      cancelCalls: string[];
-    }>();
-    const report: CancelScopeReport = {
-      target: ["ghost"],
-      cancelled: [],
-      skipped: [],
-      // An id that names no node is its own outcome, not "skipped".
-      unknown: ["ghost"],
-      cancelCalls: [],
-    };
-    expect(report.unknown).toEqual(["ghost"]);
-    expect(report.skipped).toEqual([]);
-  });
-});
-
-describe("type contract: tool-layer report projections (A1/A2/A3)", () => {
-  it("pins GraphCancelResult to the full CancelScopeReport projection", () => {
-    expectTypeOf<GraphCancelResult>().toEqualTypeOf<{
-      graph_id: string;
-      cancelled: string[];
-      target: string[];
-      skipped: string[];
-      unknown: string[];
-      cancelCalls: string[];
-    }>();
-    const cancel: GraphCancelResult = {
-      graph_id: "g",
-      cancelled: ["a"],
-      target: ["a", "b"],
-      skipped: ["b"],
-      unknown: ["ghost"],
-      cancelCalls: ["task-a"],
-    };
-    expect(cancel.unknown).toEqual(["ghost"]);
-  });
-
-  it("pins the graph_run retry projection to every RetryReport field", () => {
-    expectTypeOf<NonNullable<GraphRunResult["retry"]>>().toEqualTypeOf<{
-      node_id: string;
-      re_dispatched: number;
-      reset: string[];
-      ready: string[];
-      superseded_task_ids: string[];
-    }>();
-  });
-
-  it("keeps the reject lane fields optional on GraphApproveResult", () => {
-    expectTypeOf<IsOptionalKey<GraphApproveResult, "kind">>().toEqualTypeOf<true>();
-    expectTypeOf<IsOptionalKey<GraphApproveResult, "actual_status">>().toEqualTypeOf<true>();
-    expectTypeOf<NonNullable<GraphApproveResult["kind"]>>().toEqualTypeOf<
-      "escalate" | "revise" | "already_resolved"
-    >();
-    const approve: GraphApproveResult = {
-      graph_id: "g",
-      node_id: "P",
-      action: "approve",
-      node_status: NodeStatus.Completed,
-      phase: "complete",
-      applied: true,
-    };
-    // The approve lane carries neither field (A3).
-    expect(approve.kind).toBeUndefined();
-    expect(approve.actual_status).toBeUndefined();
-    const reject: GraphApproveResult = {
-      ...approve,
-      action: "reject",
-      kind: "already_resolved",
-      actual_status: NodeStatus.Completed,
-    };
-    expect(reject.actual_status).toBe(NodeStatus.Completed);
-  });
-});
-
 describe("type contract: GraphStatusSnapshot key requiredness (Y27)", () => {
   it("requires the graph-scoped identity keys", () => {
     expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "graph_id">>().toEqualTypeOf<false>();
@@ -252,12 +90,8 @@ describe("type contract: GraphStatusSnapshot key requiredness (Y27)", () => {
     expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "budget">>().toEqualTypeOf<true>();
     expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "loops">>().toEqualTypeOf<true>();
     expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "metrics">>().toEqualTypeOf<true>();
-    expectTypeOf<
-      IsOptionalKey<GraphStatusSnapshot, "notification_degraded">
-    >().toEqualTypeOf<true>();
-    expectTypeOf<
-      IsOptionalKey<GraphStatusSnapshot, "notification_degraded_statuses">
-    >().toEqualTypeOf<true>();
+    // The legacy notification-degraded keys are gone with the deleted graph
+    // notifier; the snapshot no longer declares them at all.
   });
 
   it("keeps the C-WIRE flag keys optional", () => {

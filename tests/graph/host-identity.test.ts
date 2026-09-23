@@ -46,7 +46,6 @@ import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
-import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
 import {
   LEDGER_FILE_NAME,
   SqliteAcceptanceLedger,
@@ -619,59 +618,8 @@ describe("D9 — an unreadable capability refuses instead of running unconstrain
     expect(caught.message).toContain(HOST_IDENTITY_UNAVAILABLE_CODE);
     // NOTHING was opened: the refusal precedes SqliteAcceptanceLedger.create.
     expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
-
-    const sweep = await recoverInterruptedGraphs({
-      directory: workspace,
-      manager: idleManager(),
-      stateDir: workspace,
-      outcomeNow: NOW,
-      outcomeCredentialIsolation: testHostCredentialIsolation(engineStateDir(workspace)),
-      outcomeDispatch: scriptedHost({}).host,
-      outcomeHostIdentity: { version: 1, id: "host", current: "not-a-function" } as unknown as HostIdentityCapability,
-    });
-    expect(sweep.outcomeProtocol?.refused).toHaveLength(1);
-    expect(sweep.outcomeProtocol?.refused[0]).toContain(HOST_IDENTITY_UNAVAILABLE_CODE);
-    expect(sweep.outcomeProtocol?.started).toEqual([]);
-    expect(sweep.outcomeProtocol?.resumed).toEqual([]);
-    expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
   });
 
-  it("refuses a MISMATCH through the model-facing ingress before any decision", async () => {
-    const workspace = makeTmpDir("host-identity-ingress-mismatch-");
-    const host = testHostIdentity(ALICE);
-    const seam = scriptedHost({});
-    const ts = createGraphToolSet({
-      stateDir: workspace,
-      outcomeNow: NOW,
-      credentialIsolation: testHostCredentialIsolation(engineStateDir(workspace)),
-      outcomeDispatch: seam.host,
-      hostIdentity: host.capability,
-    });
-    const declared = ts.graph_declare({ declaration: LINEAR });
-    // First execution through the sweep, under ALICE.
-    await recoverInterruptedGraphs({
-      directory: workspace,
-      manager: idleManager(),
-      stateDir: workspace,
-      outcomeNow: NOW,
-      outcomeCredentialIsolation: testHostCredentialIsolation(engineStateDir(workspace)),
-      outcomeDispatch: seam.host,
-      outcomeHostIdentity: host.capability,
-    });
-    const credential = credentialOf(seam.creates, "work#1");
-
-    host.set(BOB);
-    const result = await ts.graph_submit_outcome({
-      graph_id: declared.graph_id,
-      node_id: "work",
-      outcome_id: "done",
-      credential,
-    });
-    expect(result.decision).toBeUndefined();
-    expect(result.refusals.map((refusal) => refusal.code)).toEqual([
-      HOST_IDENTITY_MISMATCH_CODE,
-    ]);
-  });
 });
 
 // ── Restart reconciliation reports its disagreements ────────────────────────

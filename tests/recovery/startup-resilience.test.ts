@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,11 +17,9 @@ import { shortHash } from "../../src/utils/state-paths";
 import { LoopStore } from "../../src/loop/loop-store";
 import { FunctionRuntimeStore } from "../../src/function/runtime-store";
 import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
-import { EnginePersistence } from "../../src/graph/persistence/engine-persistence";
+import { loadEngineStateForResume } from "../../src/graph/persistence/engine-persistence";
 import { BudgetTracker } from "../../src/dispatch/budget/budget-tracker";
 import { DEFAULT_CONFIG } from "../../src/dispatch/config";
-import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup";
-import type { DispatchManager } from "../../src/dispatch/core/manager";
 
 // ── Temp-dir hygiene (mirrors startup-check.test.ts) ─────────────────────────
 
@@ -90,16 +89,6 @@ function seedEmpty(sd: string, prefix: string): string {
 /** (c) Truncated JSON — a valid prefix cut mid-object. */
 function seedTruncated(sd: string, prefix: string): string {
   return writeRaw(join(sd, `${namedFile(prefix, sd)}`), `{"version":1,"${prefix}":[{"id":"x","v`);
-}
-
-/**
- * Minimal structural DispatchManager stub. When every `engine-*.json` is
- * corrupt, the sweep never reaches `createEngine` + `recover()`, so this stub
- * is never invoked. Cast to the concrete type because a real manager is far
- * too heavy for a unit test.
- */
-function managerStub(): DispatchManager {
-  return {} as unknown as DispatchManager;
 }
 
 // ── Entry point 1: StartupChecker.checkAll never throws + quarantines ─────────
@@ -175,7 +164,7 @@ describe("StartupChecker.checkAll under seeded failure modes", () => {
 
 describe("store load() under seeded failure modes", () => {
   for (const mode of ["corrupt", "empty", "truncated"] as const) {
-    it(`LoopStore / FunctionRuntimeStore / TaskStateStore / EnginePersistence return null on ${mode} files`, () => {
+    it(`the stores return null and the graph loader stays total on ${mode} files`, () => {
       const dir = tmpDir();
       const sd = ensureStateDir(dir);
       const seed = mode === "corrupt" ? seedCorrupt : mode === "empty" ? seedEmpty : seedTruncated;
@@ -190,9 +179,16 @@ describe("store load() under seeded failure modes", () => {
       expect(() => new TaskStateStore(dir).load()).not.toThrow();
       expect(new TaskStateStore(dir).load()).toBeNull();
 
-      const engine = new EnginePersistence(dir);
-      expect(() => engine.load("x")).not.toThrow();
-      expect(engine.load("x")).toBeNull();
+      // The graph store's read path is the total structured loader (the
+      // deleted legacy runtime's null-shaped wrapper is gone): a corrupt
+      // engine-*.json is a non-valid verdict, never a throw.
+      const enginePath = join(sd, namedFile("engine", sd));
+      const rawEngine = readFileSync(enginePath, "utf-8");
+      let loaded: ReturnType<typeof loadEngineStateForResume> | undefined;
+      expect(() => {
+        loaded = loadEngineStateForResume(rawEngine, enginePath);
+      }).not.toThrow();
+      expect(loaded!.kind).toBe("corrupt");
     });
   }
 
@@ -215,13 +211,12 @@ describe("store load() under seeded failure modes", () => {
     expect(typeof tracker!.getStatus("sess")).toBe("string");
   });
 
-  it("(d) every store's load() returns null when the state directory is missing", () => {
+  it("(d) the surviving stores return null when the state directory is missing", () => {
     const dir = tmpDir(); // no .rolebox/state created
 
     expect(new LoopStore(dir).load()).toBeNull();
     expect(new FunctionRuntimeStore(dir).load()).toBeNull();
     expect(new TaskStateStore(dir).load()).toBeNull();
-    expect(new EnginePersistence(dir).load("x")).toBeNull();
     // BudgetTracker.restore tolerates a missing file and starts fresh.
     expect(() => new BudgetTracker(DEFAULT_CONFIG, dir)).not.toThrow();
   });
@@ -286,50 +281,3 @@ describe("acquireStateLock under seeded failure modes", () => {
   });
 });
 
-// ── Entry point 4: recoverInterruptedGraphs returns a report, never throws ────
-
-describe("recoverInterruptedGraphs under seeded failure modes", () => {
-  for (const mode of ["corrupt", "empty", "truncated"] as const) {
-    it(`returns a report listing ${mode} engine files in failed[], not thrown`, async () => {
-      const dir = tmpDir();
-      const sd = ensureStateDir(dir);
-      const seed = mode === "corrupt" ? seedCorrupt : mode === "empty" ? seedEmpty : seedTruncated;
-      seed(sd, "engine");
-      seed(sd, "engine"); // second file to prove the sweep continues past a bad one
-      writeRaw(join(sd, "engine-alsobad.json"), mode === "empty" ? "" : `bad{{{`);
-
-      let report: Awaited<ReturnType<typeof recoverInterruptedGraphs>> | undefined;
-      await expect(
-        (async () => {
-          report = await recoverInterruptedGraphs({ directory: dir, manager: managerStub() });
-        })(),
-      ).resolves.toBeUndefined();
-
-      expect(report!.scanned).toBeGreaterThanOrEqual(2);
-      expect(report!.recovered).toBe(0);
-      expect(report!.failed.length).toBe(report!.scanned);
-      expect(report!.failed.every((f) => f.startsWith("engine-*.json:"))).toBe(true);
-    });
-  }
-
-  it("(d) returns a clean no-op report when .rolebox/state is missing", async () => {
-    const dir = tmpDir();
-
-    let report: Awaited<ReturnType<typeof recoverInterruptedGraphs>> | undefined;
-    await expect(
-      (async () => {
-        report = await recoverInterruptedGraphs({ directory: dir, manager: managerStub() });
-      })(),
-    ).resolves.toBeUndefined();
-
-    // B3: the no-op report carries the (empty) degraded + migration-required
-    // buckets too.
-    expect(report).toEqual({
-      scanned: 0,
-      recovered: 0,
-      degraded: [],
-      migrationRequired: [],
-      failed: [],
-    });
-  });
-});

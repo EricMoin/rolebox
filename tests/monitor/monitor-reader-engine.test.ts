@@ -30,7 +30,9 @@ function writeEngineFile(filename: string, contents: string): string {
  * Build a valid, hand-authored engine-`2` persistence file object. Mirrors the
  * serialized shape produced by `serializeEngineState` (see
  * `src/graph/persistence/engine-persistence.ts`) so it round-trips through
- * `loadEngineStateFromJson`. `overrides` let tests mutate specific fields.
+ * `loadEngineStateForResume`. The record carries its own
+ * `executionProtocolVersion` — the loader resolves no identity on its behalf.
+ * `overrides` let tests mutate specific fields.
  *
  * `nodeOverrides` supplies per-node overrides keyed by node id (e.g.
  * `{ n1: { dispatchSessionId: "sess-abc" } }`). When omitted, each node
@@ -82,6 +84,7 @@ function buildEngineFile(
   }
   return {
     version: 2,
+    executionProtocolVersion: 2,
     graphId: "demo-graph",
     phase: "executing",
     graphDeclaration: {

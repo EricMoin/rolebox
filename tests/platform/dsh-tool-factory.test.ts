@@ -628,7 +628,7 @@ describe("DshToolFactory reserved run_code guard", () => {
 
   it("grep assertion: no existing rolebox tool name collides with run_code", () => {
     // Grep the tool-registry sources the dsh plugin merges
-    // (src/entries/dsh.ts: buildCanonicalTools ∪ createGraphTools ∪
+    // (src/entries/dsh.ts: buildCanonicalTools ∪ createOutcomeGraphTools ∪
     // createLoopTools) for their declared tool names, and assert none is the
     // reserved `run_code`.
     const registrySources: Array<{ path: string; pattern: RegExp }> = [

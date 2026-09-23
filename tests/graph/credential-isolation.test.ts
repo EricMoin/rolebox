@@ -52,11 +52,7 @@ import {
   engineStateDir,
   engineStatePath,
 } from "../../src/graph/persistence/engine-persistence.ts";
-import { buildEngineGraphStateBlock } from "../../src/graph/engine/graph-state-block.ts";
-import {
-  recoverInterruptedGraphs,
-  type RecoveryStartupReport,
-} from "../../src/graph/engine/engine-startup.ts";
+import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import {
   LEDGER_FILE_NAME,
   SqliteAcceptanceLedger,
@@ -75,9 +71,33 @@ import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.ts";
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
-import { createGraphTools } from "../../src/graph/tools/index.ts";
+import { createOutcomeGraphTools as createGraphTools } from "../../src/graph/tools/index.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
+
+/**
+ * Give a store's declared graphs their FIRST EXECUTION (or restart resume)
+ * through the HOST's own boot entry — the same call the shipped hosts make.
+ */
+async function sweep(
+  dir: string,
+  requests: OutcomeDispatchRequest[],
+  storeRoot: string = engineStateDir(dir),
+): Promise<void> {
+  const host = OutcomeHost.open({
+    workspaceDir: dir,
+    storeRoot,
+    deliver: (request) => {
+      requests.push(request);
+    },
+    durability: "memory",
+  });
+  try {
+    await host.recoverDeclaredGraphs();
+  } finally {
+    host.close();
+  }
+}
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -498,16 +518,8 @@ describe("credential isolation is the outcome run path's enablement condition", 
     const declared = ts.graph_declare({ declaration: LINEAR });
 
     const startRequests: OutcomeDispatchRequest[] = [];
-    const sweep: RecoveryStartupReport = await recoverInterruptedGraphs({
-      directory: workspace,
-      manager: idleManager(),
-      stateDir: workspace,
-      outcomeNow: NOW,
-      outcomeDispatch: recorder(startRequests),
-      outcomeCredentialIsolation: adapter,
-    });
-    expect(sweep.outcomeProtocol?.started).toHaveLength(1);
-    expect(sweep.outcomeProtocol?.refused).toEqual([]);
+    await sweep(workspace, startRequests, protectedRoot);
+    expect(startRequests.map((request) => request.attemptId)).toEqual(["work#1"]);
     expect(existsSync(join(protectedRoot, LEDGER_FILE_NAME))).toBe(true);
     expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
 
@@ -641,16 +653,9 @@ describe("no report channel carries an attempt credential", () => {
     const declared = ts.graph_declare({ declaration: TWO_ENTRIES });
     const graphId = declared.graph_id;
 
-    // FIRST EXECUTION through the sweep, recording what the dispatch seam got.
+    // FIRST EXECUTION through the host sweep, recording what dispatch got.
     const requests: OutcomeDispatchRequest[] = [];
-    const sweep: RecoveryStartupReport = await recoverInterruptedGraphs({
-      directory: workspace,
-      manager: idleManager(),
-      stateDir: workspace,
-      outcomeNow: NOW,
-      outcomeDispatch: recorder(requests),
-      outcomeCredentialIsolation: adapter,
-    });
+    await sweep(workspace, requests, engineStateDir(workspace));
     const alphaCredential = credentialOf(requests, "alpha#1");
     const betaCredential = credentialOf(requests, "beta#2");
     expect(requests).toHaveLength(2);
@@ -693,25 +698,18 @@ describe("no report channel carries an attempt credential", () => {
       ledger.close();
     }
 
-    // 3. graph_status, the shared <graph_state> block and graph_declare.
-    let statusError: unknown;
-    try {
-      ts.graph_status({ graph_id: graphId });
-    } catch (error) {
-      statusError = error;
-    }
-    expect(statusError).toBeInstanceOf(Error);
-    expectNoCredential("graph_status refusal", String(statusError), credentials);
+    // 3. graph_status (persisted view, no runtime to address it in session
+    //    scope) and graph_declare.
     expectNoCredential(
-      "<graph_state> block",
-      buildEngineGraphStateBlock(ts.liveEngineStates()),
+      "graph_status",
+      ts.graph_status({ graph_id: graphId, scope: "persisted" }),
       credentials,
     );
     expectNoCredential("graph_declare result", JSON.stringify(declared), credentials);
 
     // 4. The worker-facing audit TOOL (registered surface) and the audit
     //    function that backs it.
-    const registered = createGraphTools(undefined, { toolset: ts });
+    const registered = createGraphTools(ts);
     const auditTool = registered.graph_audit;
     if (auditTool === undefined) throw new Error("graph_audit is not registered");
     const auditText = String(
@@ -736,8 +734,22 @@ describe("no report channel carries an attempt credential", () => {
       credentials,
     );
 
-    // 5. The startup sweep's report for the SAME store.
-    expectNoCredential("startup sweep report", JSON.stringify(sweep), credentials);
+    // 5. The host sweep's report for the SAME store.
+    const sweepHost = OutcomeHost.open({
+      workspaceDir: workspace,
+      storeRoot: engineStateDir(workspace),
+      deliver: () => undefined,
+      durability: "memory",
+    });
+    try {
+      expectNoCredential(
+        "host sweep report",
+        JSON.stringify(await sweepHost.recoverDeclaredGraphs()),
+        credentials,
+      );
+    } finally {
+      sweepHost.close();
+    }
 
     // 6. Refusal texts: a missing credential and a tampered one are refused
     //    without echoing the value they were given.
@@ -884,20 +896,6 @@ describe("no report channel carries an attempt credential", () => {
     // NOTHING was opened: the refusal precedes SqliteAcceptanceLedger.create.
     expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
 
-    // The startup sweep refuses the same way, and ALSO opens no ledger.
-    const sweep = await recoverInterruptedGraphs({
-      directory: workspace,
-      manager: idleManager(),
-      stateDir: workspace,
-      outcomeNow: NOW,
-    });
-    expect(sweep.outcomeProtocol?.refused).toHaveLength(1);
-    expect(sweep.outcomeProtocol?.refused[0]).toContain(
-      "credential-isolation-unavailable",
-    );
-    expect(sweep.outcomeProtocol?.started).toEqual([]);
-    expect(sweep.outcomeProtocol?.resumed).toEqual([]);
-    expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
     // The declaration is still on disk, unmoved: a refusal is not a deletion.
     expect(readStateRecord(workspace, declared.graph_id).length).toBeGreaterThan(0);
   });

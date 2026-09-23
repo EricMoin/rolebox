@@ -19,9 +19,11 @@
  * not taken, an in-flight branch is refused rather than settled, the stop
  * fabricates no accepted event, and a stop whose state write fails rolls the
  * whole acceptance back with it),
- * the missing-handler refusal, and the legacy v2 run path still working through
- * the file store over an existing record (a NEW durable legacy record is
- * refused by the E gate — see tests/graph/legacy-creation-gate.test.ts).
+ * the missing-handler refusal, and the OUTCOME path working through the file
+ * store over an existing record. The legacy v2 run path and the temporary
+ * `allowNewLegacyGraphs` creation gate are deleted with the legacy runtime, so
+ * an absent protocol identity is a malformed discriminator and never an
+ * implicit protocol 1.
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
@@ -82,12 +84,10 @@ import {
   EnginePersistence,
   engineStatePath,
 } from "../../src/graph/persistence/engine-persistence.ts";
-import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
+import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
-import type { TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -3446,51 +3446,6 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
   });
 });
 
-// ── The legacy v2 path is untouched ─────────────────────────────────────────
-
-/** Dispatch seam that completes every node on the next tick (legacy runs). */
-class CompletingDispatch implements NodeDispatchPort {
-  private subs = new Map<string, TaskTerminatedCallback>();
-  private tasks = new Map<string, DispatchTask>();
-  private seq = 0;
-
-  executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
-    const id = "task-" + node.nodeId + "-" + ++this.seq;
-    const task: DispatchTask = {
-      id,
-      sessionId: "sess-" + id,
-      parentSessionId: "g",
-      depth: 1,
-      status: "running",
-      agent: node.agent,
-      prompt: node.prompt,
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-      priority: 0,
-    };
-    this.tasks.set(id, task);
-    setTimeout(() => {
-      task.status = "completed";
-      this.subs.get(id)?.(id, "completed");
-    }, 0);
-    return Promise.resolve(task);
-  }
-
-  onTaskTerminated(
-    taskId: string,
-    cb: TaskTerminatedCallback,
-  ): TaskTerminatedCallback {
-    this.subs.set(taskId, cb);
-    return cb;
-  }
-
-  getTask(taskId: string): DispatchTask | undefined {
-    return this.tasks.get(taskId);
-  }
-}
-
-const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
-
 // ── A state body this build cannot read blocks the run ──────────────────────
 
 describe("OutcomeGraphRuntime — the state body is gated by its declared version", () => {
@@ -3626,58 +3581,3 @@ describe("OutcomeGraphRuntime — the state body is gated by its declared versio
   });
 });
 
-describe("legacy v2 graphs keep the file store and their run path", () => {
-  it("runs a legacy graph over an existing record through the state directory unchanged", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "legacy-file-store-"));
-    try {
-      // The record already exists, so this run is a resume/rebuild of a legacy
-      // graph — NOT the creation of one. Creating a NEW durable legacy record
-      // through the tool ingress is refused by the E gate
-      // (`tests/graph/legacy-creation-gate.test.ts`); what this case pins is
-      // that the legacy path itself is not retired: it still executes and still
-      // owns the JSON file store.
-      const seeded = createEngineState(
-        {
-          version: 2,
-          name: "legacy-graph",
-          nodes: [{ id: "A", agent: "a", prompt: "pA" }],
-          edges: [],
-        },
-        "legacy-graph",
-      );
-      provision(seeded);
-      seeded.phase = EnginePhase.Executing;
-      const seededNode = seeded.nodes.get("A");
-      if (seededNode === undefined) throw new Error("fixture: node A was not registered");
-      seededNode.status = NodeStatus.Running;
-      seeded.frontier = [];
-      new EnginePersistence(dir).save(seeded);
-      expect(existsSync(engineStatePath(dir, "legacy-graph"))).toBe(true);
-
-      const ts = createGraphToolSet({
-        stateDir: dir,
-        dispatch: new CompletingDispatch(),
-      });
-      const { graph_id } = ts.graph_create({ name: "legacy-graph" });
-      expect(graph_id).toBe("legacy-graph");
-      ts.graph_add_node({
-        graph_id,
-        id: "A",
-        agent: "a",
-        prompt: "pA",
-      });
-      await ts.graph_run({ graph_id });
-      await settle();
-
-      const state = ts["getEntry"](graph_id).runtime.status();
-      expect(state.phase).toBe("complete");
-      expect(state.nodes.get("A")?.status).toBe("completed");
-      // The legacy store is still the JSON file the legacy path owns.
-      expect(existsSync(engineStatePath(dir, graph_id))).toBe(true);
-      // No ledger was created by a legacy run.
-      expect(existsSync(ledgerFilePath(dir))).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
