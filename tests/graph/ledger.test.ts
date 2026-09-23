@@ -31,6 +31,7 @@ import {
   type SubmissionKey,
 } from "../../src/graph/ledger/types.ts";
 import {
+  LEDGER_STORE_TABLES,
   LEDGER_TABLES,
   LedgerClosedError,
   LedgerFormatError,
@@ -277,15 +278,16 @@ async function rejectedError(run: () => Promise<unknown>): Promise<unknown> {
   return undefined;
 }
 
-/** Every table one intact ledger file holds, sorted. */
+/**
+ * Every table one intact store file holds, sorted.
+ *
+ * The ledger's file IS the workspace's converged graph store (P1 item 3), so
+ * the intact set is the store's whole table list — the assertion the refusal
+ * cases make is that a refused open leaves the file's table set EXACTLY as it
+ * was found, whatever that set contains.
+ */
 function ledgerSchema(): string[] {
-  return [
-    LEDGER_TABLES.meta,
-    LEDGER_TABLES.receipts,
-    LEDGER_TABLES.acceptedEvents,
-    LEDGER_TABLES.pendingEffects,
-    LEDGER_TABLES.graphState,
-  ].sort();
+  return Object.values(LEDGER_STORE_TABLES).sort();
 }
 
 // ── Commit outcomes ─────────────────────────────────────────────────────────

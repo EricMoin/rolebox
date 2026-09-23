@@ -27,7 +27,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -37,10 +37,7 @@ import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import {
   buildDeclaredOutcomeGraph,
 } from "../../src/graph/tools/declare-graph.ts";
-import {
-  SqliteAcceptanceLedger,
-  ledgerFilePath,
-} from "../../src/graph/ledger/sqlite-ledger.ts";
+import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import {
   OutcomeGraphRuntime,
   type OutcomeDispatchAdapter,
@@ -56,6 +53,7 @@ import { engineStateDir } from "../../src/graph/persistence/engine-persistence.t
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
+import { hasNoAcceptanceRecords } from "./helpers/acceptance-records.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -515,7 +513,10 @@ describe("D8 — a production entry with no dispatch adapter refuses", () => {
     }
     expect(caught).toBeInstanceOf(OutcomeSubmissionRefusedError);
     expect((caught as OutcomeSubmissionRefusedError).reason).toBe("dispatch-unavailable");
-    // The refusal happened BEFORE the store was opened.
-    expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
+    // The refusal happened BEFORE the acceptance path was used. The store FILE
+    // exists already — the fixture's host capability owns the same database
+    // (P1 item 3) — so the honest check is that no acceptance record was
+    // written for the declared graph.
+    expect(await hasNoAcceptanceRecords(engineStateDir(dir), declared.graph_id)).toBe(true);
   });
 });

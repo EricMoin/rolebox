@@ -1,0 +1,357 @@
+/**
+ * Graph store — the ONE schema of the workspace-scoped authoritative database
+ *
+ * Version: 1.0
+ * Date: 2026-09-23
+ *
+ * THE SCHEMA IS THE UNIFIED SUBSTRATE. Before P1 item 3 the workspace kept
+ * THREE durable authorities — the acceptance ledger
+ * (`graph-acceptance-ledger.sqlite`: receipts, accepted events, pending effects,
+ * run state), the host store (`rolebox-host-store.sqlite`: execution bindings
+ * and credential records) and a whole-file JSON record of each graph's declaring
+ * invocation (`host-invocation-origins.json`). Two of them committed on their
+ * own and each called itself atomic, so no single transaction could make "the
+ * acceptance, its effect and the host's bind to that effect" true together.
+ * This module declares ONE file, ONE schema and ONE format identity for all
+ * three: every table below lives in {@link GRAPH_STORE_FILE}, and
+ * `GraphStore` is the one boundary that writes them.
+ *
+ * WHY THE FILE NAME IS THE LEDGER'S. The file name is durable identity, not
+ * presentation: pointing this build at a different name would make every
+ * committed receipt, accepted event and effect row an `absent` store, which is
+ * exactly the "lost database is not a new graph" failure the plan forbids
+ * (`A19`) and could re-dispatch work an earlier process already created. The
+ * ledger's file already carries the strictest layout gate and the one
+ * transaction boundary the protocol verified, so the converged store keeps that
+ * identity and gains the tables it was missing. The retired host-store file is
+ * NOT read, NOT converted and NOT treated as absent (see
+ * {@link RETIRED_AUTHORITY_FILES} and `format.ts`).
+ *
+ * THE FORMAT VERSION IS THE LEDGER'S, BUMPED. `LEDGER_FORMAT_VERSION` moves to
+ * 2 because the layout genuinely changed: a version-1 file holds five of the ten
+ * tables and none of the host records, and reading it as this build's store
+ * would answer `absent` for every execution binding it never carried. A
+ * version-1 file is therefore refused as an older format this build registers
+ * no migration for (`unsupported`), never widened in place, never downgraded.
+ *
+ * EVERY UNIQUENESS THE PROTOCOL NEEDS IS STRUCTURAL, not a code path:
+ * - one row per `(graph_id, effect_id)` (primary key of the execution table);
+ * - `created` is impossible without a non-empty execution id (the CHECK);
+ * - one credential record per `(graph_id, node_id, attempt_id)` (primary key),
+ *   and a `retained` record cannot exist without a value (the CHECK);
+ * - one accepted event per `(graph_id, attempt_id)` (primary key) — the same
+ *   key carries at most one accepted RESULT;
+ * - one receipt per `(graph_id, attempt_id, submission_id)` (primary key) — the
+ *   submission idempotency key;
+ * - one immutable definition per graph, one current run state per graph, and one
+ *   declaring invocation per graph.
+ *
+ * Dependency leaf: this module imports only the ledger port (for the shared
+ * format identity) and two path/utility helpers; no record model and no driver.
+ */
+
+import { join } from "node:path";
+
+import { LEDGER_FORMAT_VERSION } from "../ledger/types.ts";
+import { workspaceHash } from "../../utils/state-paths.ts";
+
+// ── File and format identity ────────────────────────────────────────────────
+
+/** The one authoritative store file a workspace owns. */
+export const GRAPH_STORE_FILE = "graph-acceptance-ledger.sqlite" as const;
+
+/**
+ * The layout this build writes. It is the ledger's format identity because the
+ * file IS the ledger's file — one number, one gate, one refusal.
+ */
+export const GRAPH_STORE_FORMAT_VERSION = LEDGER_FORMAT_VERSION;
+
+/**
+ * Authority files a PREVIOUS shape kept beside this store.
+ *
+ * They are not read, not converted and not deleted: a non-empty one makes the
+ * workspace's host records `unsupported` rather than `absent`, because
+ * answering `absent` for execution bindings that exist only there is what lets
+ * a recovery create a second execution for one effect (`A04`/`A05`). The
+ * one-time inventory and archive of such records is a later work package's job
+ * (`§P6.4`); until then the honest answer is an explicit block that names the
+ * file.
+ */
+export const RETIRED_AUTHORITY_FILES = Object.freeze([
+  "rolebox-host-store.sqlite",
+  "host-invocation-origins.json",
+] as const);
+
+/**
+ * The store root for one workspace, under the host's OWN data directory.
+ *
+ * The root is deliberately NOT inside the workspace: a dispatched worker runs
+ * with the workspace as its root, so keeping the host's state beside it would
+ * hand every worker the directory (never a defense by itself — see
+ * `credential-vault.ts` — but the one path-shaped part of the boundary this
+ * build can choose). The entry points pass their own data directory in, so this
+ * module stays free of CLI/platform layering.
+ */
+export function graphStoreRoot(dataDir: string, workspaceDir: string): string {
+  return join(dataDir, "host", workspaceHash(workspaceDir));
+}
+
+/** The authoritative store file inside `directory`. */
+export function graphStoreFilePath(directory: string): string {
+  return join(directory, GRAPH_STORE_FILE);
+}
+
+// ── Tables ──────────────────────────────────────────────────────────────────
+
+/**
+ * Every table this format version owns, by role.
+ *
+ * The names are the ones the two converged substrates already used wherever a
+ * test or an operator could have learned them, so the file this build writes is
+ * recognizable to a reader of the previous shape and no durable name moved
+ * silently.
+ */
+export const GRAPH_STORE_TABLES = Object.freeze({
+  /** The ONE format identity of the file. */
+  meta: "ledger_meta",
+  /** Receipts — the submission idempotency key. */
+  receipts: "ledger_receipts",
+  /** The accepted-event stream. */
+  acceptedEvents: "ledger_accepted_events",
+  /** The effect ledger (intent + lifecycle status). */
+  pendingEffects: "ledger_pending_effects",
+  /** The current run-state body of one graph. */
+  graphState: "ledger_graph_state",
+  /** The accepted business result of one settled attempt. */
+  acceptedResults: "graph_accepted_results",
+  /** The immutable graph definition and its compiled-plan snapshot. */
+  definitions: "graph_definitions",
+  /** The host's dispatch-execution bindings (pending/creating/created). */
+  executions: "host_dispatch_executions",
+  /** The host's per-attempt credential RECORDS (never values by default). */
+  credentials: "host_attempt_credentials",
+  /** The declaring invocation of one graph. */
+  origins: "graph_invocation_origins",
+});
+
+/** The ledger's own table names, as the ledger port's reader knows them. */
+export const GRAPH_STORE_LEDGER_TABLES = Object.freeze({
+  meta: GRAPH_STORE_TABLES.meta,
+  receipts: GRAPH_STORE_TABLES.receipts,
+  acceptedEvents: GRAPH_STORE_TABLES.acceptedEvents,
+  pendingEffects: GRAPH_STORE_TABLES.pendingEffects,
+  graphState: GRAPH_STORE_TABLES.graphState,
+});
+
+/**
+ * One DDL statement per table, in creation order.
+ *
+ * `IF NOT EXISTS` is deliberate: two processes may open a brand-new root at
+ * the same moment (a host capability and the acceptance ledger are opened
+ * independently), and the loser of that race must no-op and then VERIFY the file
+ * rather than fail on an already-created table. Creation never happens for a
+ * file that already holds user tables — `format.ts` decides that — so this
+ * clause can never widen an existing store.
+ */
+export const SCHEMA_STATEMENTS: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.meta} (
+     id INTEGER PRIMARY KEY CHECK (id = 1),
+     format_version INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.receipts} (
+     graph_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     submission_id TEXT NOT NULL,
+     plan_revision TEXT NOT NULL,
+     proposal_digest TEXT NOT NULL,
+     decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected')),
+     committed_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id, attempt_id, submission_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.acceptedEvents} (
+     graph_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     submission_id TEXT NOT NULL,
+     plan_revision TEXT NOT NULL,
+     outcome_id TEXT NOT NULL,
+     accepted_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id, attempt_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.pendingEffects} (
+     graph_id TEXT NOT NULL,
+     effect_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     payload TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('pending', 'started', 'done', 'failed')),
+     PRIMARY KEY (graph_id, effect_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.graphState} (
+     graph_id TEXT NOT NULL,
+     plan_revision TEXT NOT NULL,
+     body TEXT NOT NULL,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.acceptedResults} (
+     graph_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     plan_revision TEXT NOT NULL,
+     payload TEXT NOT NULL,
+     accepted_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id, attempt_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.definitions} (
+     graph_id TEXT NOT NULL,
+     declaration_digest TEXT NOT NULL,
+     plan_revision TEXT NOT NULL,
+     declaration TEXT NOT NULL,
+     plan TEXT NOT NULL,
+     recorded_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.executions} (
+     graph_id TEXT NOT NULL,
+     effect_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     state TEXT NOT NULL CHECK (state IN ('pending', 'creating', 'created')),
+     owner_id TEXT NOT NULL,
+     execution_id TEXT,
+     task_id TEXT,
+     claimed_at INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id, effect_id),
+     CHECK ((state = 'created') = (execution_id IS NOT NULL))
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.credentials} (
+     graph_id TEXT NOT NULL,
+     node_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     retention TEXT NOT NULL CHECK (retention IN ('retained', 'not-retained')),
+     credential TEXT,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id, node_id, attempt_id),
+     CHECK ((retention = 'retained') = (credential IS NOT NULL))
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.origins} (
+     graph_id TEXT NOT NULL,
+     session_id TEXT NOT NULL,
+     agent TEXT,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id)
+   )`,
+];
+
+// ── Expected column shapes ──────────────────────────────────────────────────
+
+/**
+ * One column this format version writes, as the shape gate expects it.
+ *
+ * `affinity` is SQLite's storage class rather than the spelled type, so the
+ * gate compares what a column MEANS: `TEXT` and `VARCHAR` name the same
+ * column, `BLOB` where this format writes `TEXT` does not. `primaryKey` is
+ * the column's position in the PRIMARY KEY (0 = not part of it), which is how
+ * the uniqueness the protocol needs is verified as STRUCTURAL rather than
+ * trusted; `notNull` mirrors the declaration.
+ */
+export interface GraphStoreColumn {
+  readonly name: string;
+  readonly affinity: "text" | "integer";
+  readonly primaryKey: number;
+  readonly notNull: boolean;
+}
+
+/**
+ * The exact column shape of every table this format version writes.
+ *
+ * The gate compares a store against THIS, not against table names alone: a
+ * table can be missing, renamed, retyped or keyless, and the first statement
+ * against it would then fail with a raw driver error instead of the typed
+ * refusal a foreign store gets. Columns are matched by NAME — every query
+ * addresses columns by name, so order is not identity — and the list is
+ * exhaustive, because this format writes exactly these columns and an extra one
+ * is a reshape too. The `id` of the meta table is an `INTEGER PRIMARY KEY`,
+ * the rowid alias SQLite reports as nullable; the gate records the declaration,
+ * not the intent.
+ */
+export const GRAPH_STORE_COLUMNS: Readonly<
+  Record<keyof typeof GRAPH_STORE_TABLES, readonly GraphStoreColumn[]>
+> = Object.freeze({
+  meta: [
+    { name: "id", affinity: "integer", primaryKey: 1, notNull: false },
+    { name: "format_version", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  receipts: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "submission_id", affinity: "text", primaryKey: 3, notNull: true },
+    { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "proposal_digest", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "decision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "committed_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  acceptedEvents: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "submission_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "outcome_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "accepted_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  pendingEffects: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "effect_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "kind", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "payload", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "created_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "status", affinity: "text", primaryKey: 0, notNull: true },
+  ],
+  graphState: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "body", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  acceptedResults: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "payload", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "accepted_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  definitions: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "declaration_digest", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "declaration", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "plan", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "recorded_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  executions: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "effect_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "state", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "owner_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "execution_id", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "task_id", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "claimed_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  credentials: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "node_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 3, notNull: true },
+    { name: "retention", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "credential", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  origins: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "session_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "agent", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+});

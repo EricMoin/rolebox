@@ -56,7 +56,7 @@ import {
 } from "../../src/graph/policy/completion-policy.ts";
 import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
-import { HOST_STORE_FILE } from "../../src/graph/host/host-store.ts";
+import { GRAPH_STORE_FILE } from "../../src/graph/store/schema.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import {
   createHostInvocationHolder,
@@ -263,7 +263,9 @@ describe("host credential vault — the credential lives here and nowhere else",
   it("refuses a store file it cannot read instead of opening as empty", () => {
     const dir = makeTmpDir("host-vault-corrupt-");
     try {
-      writeFileSync(join(dir, HOST_STORE_FILE), "{ not json", "utf8");
+      // The vault's records live in the workspace's ONE graph store now, so the
+      // file a damaged store must be refused at is that store's file.
+      writeFileSync(join(dir, GRAPH_STORE_FILE), "{ not json", "utf8");
       expect(() => HostCredentialVault.open({ root: dir })).toThrow();
     } finally {
       rmSync(dir, { recursive: true, force: true });

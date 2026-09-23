@@ -1,7 +1,7 @@
 /**
- * Graph Execution Engine v2 — the host's durable record of a graph's declaring invocation
+ * Graph Execution Engine v2 — a graph's declaring invocation, as a store TABLE
  *
- * Version: 1.0
+ * Version: 2.0
  * Date: 2026-09-23
  *
  * WHY THIS RECORD EXISTS. Every window that can arm a dispatch — the declaring
@@ -15,47 +15,60 @@
  * names the invocation during the declaring call therefore loses it exactly
  * when the second node is armed.
  *
- * So the declaring invocation becomes a HOST FACT, kept per graph:
+ * So the declaring invocation becomes a HOST FACT, kept per graph — in the
+ * workspace's ONE graph store (`src/graph/store/`), table
+ * `graph_invocation_origins`, in the SAME database as the run state and the
+ * execution bindings it belongs to.
  *
- * - in this process, {@link HostInvocationOrigins} answers the origin for every
- *   dispatch the graph's runtime makes, whatever window arms it;
- * - with `durability: "file"` (the default) the same record is written to a
- *   separate file under the host-owned root (atomic replace, 0600, directory
- *   0700), so a process that starts after a restart can still name the origin
- *   instead of leaving a declared graph's pending effect un-attributable.
+ * WHAT THIS MODULE NO LONGER IS. It used to be a WHOLE-FILE authority: a
+ * `host-invocation-origins.json` rewritten in full on every change, beside the
+ * acceptance ledger and committing independently of it. P1 item 3 names that
+ * file as the bypass authority to eliminate, and it is gone: there is no file
+ * to rewrite, no in-process snapshot to lose a concurrent writer's rows, and no
+ * second format to gate. The record is a row now, so it is written, read and
+ * committed with everything else the graph owns.
  *
  * WHAT IT CONTAINS, AND WHAT IT DOES NOT. A graph id and the
  * `{ sessionId, agent }` attribution the declaring call carried — no
- * credential, no prompt, no outcome. It is the same invocation identity the
- * runtime may record on an attempt when the host declares D9, and it is a host
- * record for the same reason the vault is: the module is the one place the
- * attribution is kept, and nothing in a report or a ledger row carries it
- * forward on its own.
+ * credential, no prompt, no outcome. Recording a graph again with the SAME
+ * attribution changes nothing, and a DIFFERENT attribution REPLACES it: a
+ * re-declaration from a new session is the newer invocation, and a later
+ * dispatch must be attributed to the session that is actually running the
+ * graph.
  *
- * A FILE THIS BUILD CANNOT READ IS REFUSED, NOT IGNORED. Reading an unreadable
- * record as "no origins" would make every declared graph look like one no
- * invocation ever named, and the sweep would report a dispatch failure whose
- * real cause is an unreadable host file. The refusal names the file instead.
+ * AN UNREADABLE STORE IS REFUSED, NOT IGNORED. The store's own format gate runs
+ * at `open`, so a file this build cannot read throws instead of answering "no
+ * origins" — reading an unreadable record as empty would make every declared
+ * graph look like one no invocation ever named, and the sweep would report a
+ * dispatch failure whose real cause is an unreadable store.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { GraphStore } from "../store/graph-store.ts";
 
 // ── Options and format ──────────────────────────────────────────────────────
 
 /** How long the origin record outlives the process that wrote it. */
 export type HostInvocationOriginsDurability =
-  /** A separate 0600 file under `root` (the default): restart-resolvable. */
+  /** The workspace's durable store (the default): restart-resolvable. */
   | "file"
   /** This process only: a restarted host knows no graph's origin. */
   | "memory";
 
 /** Inputs to {@link HostInvocationOrigins.open}. */
 export interface HostInvocationOriginsOptions {
-  /** The host-owned directory the record file lives in (created 0700). */
+  /** The host-owned directory the store lives in (created 0700). */
   readonly root: string;
   /** Defaults to `"file"` (see {@link HostInvocationOriginsDurability}). */
   readonly durability?: HostInvocationOriginsDurability;
+  /**
+   * An ALREADY OPEN workspace store to share.
+   *
+   * Omitted (the default), this record opens its own connection to `root` — or
+   * a private in-memory store for `durability: "memory"`. A host that
+   * assembles several capabilities passes ONE store so all of them address one
+   * database and one transaction boundary even in memory mode.
+   */
+  readonly store?: GraphStore;
 }
 
 /** One graph's declaring invocation, as the declaring call saw it. */
@@ -66,38 +79,31 @@ export interface HostInvocationOrigin {
   readonly agent?: string;
 }
 
-/** The record file's name inside {@link HostInvocationOriginsOptions.root}. */
-export const HOST_INVOCATION_ORIGINS_FILE = "host-invocation-origins.json" as const;
-
-/** The record's own format version, refused rather than read approximately. */
-export const HOST_INVOCATION_ORIGINS_VERSION = 1 as const;
-
 // ── The record ──────────────────────────────────────────────────────────────
 
 /**
  * The host's record of which invocation declared each graph.
  *
- * One entry per graph id: recording a graph again with the SAME attribution
- * changes nothing, and a DIFFERENT attribution REPLACES it — a re-declaration
- * from a new session is the newer invocation, and a later dispatch must be
- * attributed to the session that is actually running the graph.
+ * One row per graph id in the workspace's store. Every method delegates to the
+ * store, so the record joins whatever transaction the caller has open and the
+ * value a restart reads is the row the store committed.
  */
 export class HostInvocationOrigins {
-  private readonly root: string;
-  private readonly durability: HostInvocationOriginsDurability;
-  private readonly origins = new Map<string, HostInvocationOrigin>();
-  private readonly recordPath: string;
+  private readonly graphStore: GraphStore;
 
-  private constructor(options: HostInvocationOriginsOptions) {
-    this.root = options.root;
-    this.durability = options.durability ?? "file";
-    this.recordPath = join(this.root, HOST_INVOCATION_ORIGINS_FILE);
-    if (this.durability === "file") this.load();
+  private constructor(graphStore: GraphStore) {
+    this.graphStore = graphStore;
   }
 
-  /** Open one record over `root`, reading the durable file when present. */
+  /** Open one record over `root`, reading the durable store when present. */
   static open(options: HostInvocationOriginsOptions): HostInvocationOrigins {
-    return new HostInvocationOrigins(options);
+    const durability = options.durability ?? "file";
+    const graphStore =
+      options.store ??
+      (durability === "memory"
+        ? GraphStore.openMemory()
+        : GraphStore.openFile(options.root));
+    return new HostInvocationOrigins(graphStore);
   }
 
   /**
@@ -110,109 +116,27 @@ export class HostInvocationOrigins {
   record(graphId: string, origin: HostInvocationOrigin): boolean {
     assertGraphId(graphId);
     assertOrigin(origin);
-    const stored = this.origins.get(graphId);
-    if (stored !== undefined && sameOrigin(stored, origin)) return false;
-    this.origins.set(graphId, Object.freeze(origin));
-    if (this.durability === "file") this.persist();
-    return true;
+    return this.graphStore.recordInvocationOrigin(graphId, origin, Date.now());
   }
 
   /** The invocation that declared this graph, or `undefined` when none is known. */
   get(graphId: string): HostInvocationOrigin | undefined {
-    return this.origins.get(graphId);
+    return this.graphStore.readInvocationOrigin(graphId);
   }
 
   /** Every graph id this record holds an origin for, sorted. */
   graphIds(): readonly string[] {
-    return Object.freeze([...this.origins.keys()].sort());
+    return this.graphStore.invocationOriginGraphIds();
   }
 
   /** How many origins this record holds. A count, never a listing. */
   get size(): number {
-    return this.origins.size;
+    return this.graphIds().length;
   }
 
-  // ── Internals ─────────────────────────────────────────────────────────────
-
-  /** Read the record file, refusing a shape this build cannot read. */
-  private load(): void {
-    if (!existsSync(this.recordPath)) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(this.recordPath, "utf8"));
-    } catch (error) {
-      throw new Error(
-        "host-invocation-origins: the record file " +
-          JSON.stringify(this.recordPath) +
-          " is not readable JSON (" +
-          (error instanceof Error ? error.message : String(error)) +
-          ") — refusing to open it as if it were empty, because every declared graph would " +
-          "then look like one no invocation ever named and its dispatches would be " +
-          "attributed to nobody",
-      );
-    }
-    if (!isRecord(parsed) || parsed.version !== HOST_INVOCATION_ORIGINS_VERSION) {
-      throw new Error(
-        "host-invocation-origins: the record file " +
-          JSON.stringify(this.recordPath) +
-          " does not declare format version " +
-          HOST_INVOCATION_ORIGINS_VERSION +
-          " — refusing to read it approximately",
-      );
-    }
-    if (!Array.isArray(parsed.origins)) {
-      throw new Error(
-        "host-invocation-origins: the record file " +
-          JSON.stringify(this.recordPath) +
-          " carries no origins list",
-      );
-    }
-    for (const entry of parsed.origins) {
-      if (
-        !isRecord(entry) ||
-        typeof entry.graphId !== "string" ||
-        entry.graphId.length === 0 ||
-        typeof entry.sessionId !== "string" ||
-        entry.sessionId.length === 0 ||
-        (entry.agent !== undefined &&
-          (typeof entry.agent !== "string" || entry.agent.length === 0))
-      ) {
-        throw new Error(
-          "host-invocation-origins: the record file " +
-            JSON.stringify(this.recordPath) +
-            " carries an entry this build cannot read — refusing the whole file rather " +
-            "than dropping one graph's declaring invocation",
-        );
-      }
-      this.origins.set(
-        entry.graphId,
-        Object.freeze(
-          entry.agent === undefined
-            ? { sessionId: entry.sessionId }
-            : { sessionId: entry.sessionId, agent: entry.agent },
-        ),
-      );
-    }
-  }
-
-  /** Write the record atomically (temp file, then rename) with mode 0600. */
-  private persist(): void {
-    mkdirSync(this.root, { recursive: true, mode: 0o700 });
-    const origins = [...this.origins.entries()]
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([graphId, origin]) => ({
-        graphId,
-        sessionId: origin.sessionId,
-        ...(origin.agent === undefined ? {} : { agent: origin.agent }),
-      }));
-    const text = JSON.stringify(
-      { version: HOST_INVOCATION_ORIGINS_VERSION, origins },
-      null,
-      2,
-    );
-    const temporary = this.recordPath + "." + process.pid + ".tmp";
-    writeFileSync(temporary, text, { encoding: "utf8", mode: 0o600 });
-    renameSync(temporary, this.recordPath);
+  /** Close the store connection. Idempotent. */
+  close(): void {
+    this.graphStore.close();
   }
 }
 
@@ -241,14 +165,4 @@ function assertOrigin(origin: HostInvocationOrigin): void {
       "host-invocation-origins: an origin's agent must be a non-empty string when present",
     );
   }
-}
-
-/** Whether two origins name the same invocation. */
-function sameOrigin(left: HostInvocationOrigin, right: HostInvocationOrigin): boolean {
-  return left.sessionId === right.sessionId && left.agent === right.agent;
-}
-
-/** Whether a value is a plain, non-array record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

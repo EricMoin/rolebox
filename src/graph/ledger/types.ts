@@ -58,8 +58,19 @@
  * is versioned independently of the records it holds: a store may only open a
  * file whose version row says EXACTLY this value, and an unknown, newer or
  * older version is refused rather than recreated or downgraded.
+ *
+ * VERSION 2 IS THE CONVERGED STORE (P1 item 3). The ledger's file became the
+ * workspace's ONE authoritative store — the graph definition, the run state,
+ * the accepted results, the host's execution bindings, the credential records
+ * and the declaring-invocation record now live in the SAME database — so the
+ * layout genuinely changed. A version-1 file holds five of the ten tables and
+ * none of the host records; reading it as this build's store would answer
+ * "no execution binding" for every effect it never carried, which is what lets
+ * a recovery create a second execution for one effect. This build registers NO
+ * migration, so a version-1 file is refused by name (`older-format`), never
+ * widened in place and never downgraded.
  */
-export const LEDGER_FORMAT_VERSION = 1;
+export const LEDGER_FORMAT_VERSION = 2;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 

@@ -38,7 +38,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -46,10 +46,7 @@ import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
-import {
-  LEDGER_FILE_NAME,
-  SqliteAcceptanceLedger,
-} from "../../src/graph/ledger/sqlite-ledger.ts";
+import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
 import {
   HOST_IDENTITY_ABSENT_CODE,
@@ -78,6 +75,7 @@ import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.t
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
+import { hasNoAcceptanceRecords } from "./helpers/acceptance-records.ts";
 import { testHostIdentity } from "./helpers/host-identity.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -622,8 +620,12 @@ describe("D9 — an unreadable capability refuses instead of running unconstrain
     }
     expect(caught.reason).toBe("host-identity-unavailable");
     expect(caught.message).toContain(HOST_IDENTITY_UNAVAILABLE_CODE);
-    // NOTHING was opened: the refusal precedes SqliteAcceptanceLedger.create.
-    expect(existsSync(join(engineStateDir(workspace), LEDGER_FILE_NAME))).toBe(false);
+    // NOTHING was accepted: the refusal precedes the acceptance write. The
+    // store FILE exists already (the fixture's host capability owns the same
+    // database — P1 item 3), so the check is that no acceptance record landed.
+    expect(
+      await hasNoAcceptanceRecords(engineStateDir(workspace), declared.graph_id),
+    ).toBe(true);
   });
 
 });

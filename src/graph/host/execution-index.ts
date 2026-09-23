@@ -8,8 +8,17 @@
  * gives the runtime two answers it cannot derive on its own: create this
  * effect's execution (idempotently per `(graphId, effectId)`) and say whether an
  * execution for that stable id ALREADY EXISTS. This module owns both for a real
- * host, over the host's authoritative SQLite store
- * ({@link HostStore}, `host-store.ts`).
+ * host, over the workspace's ONE authoritative store
+ * ({@link GraphStore}, `src/graph/store/`) — the SAME database that holds the
+ * acceptance ledger, so the effect intent and the host's bind to it are rows in
+ * one file and one transaction can write both.
+ *
+ * THIS MODULE IS A FACADE OVER THE STORE'S `host_dispatch_executions` TABLE:
+ * the lease, the owner identity and the three-answer lookup policy live here,
+ * while the row's shape, its primary key and its conditional transitions live in
+ * the store. Every write delegates, so an application service that opens
+ * `GraphStore.transaction` can claim, confirm or release in the SAME
+ * transaction as the acceptance that authorized the effect.
  *
  * THE THREE STATES, AND WHY TWO WERE NOT ENOUGH. A create is not a single
  * event: the host first takes the right to create, then hands the request to a
@@ -51,7 +60,8 @@ import type {
   OutcomeDispatchEffectKey,
   OutcomeExecutionLookup,
 } from "../outcome/dispatch-effects.ts";
-import { HostStore } from "./host-store.ts";
+import { GraphStore } from "../store/graph-store.ts";
+import { GRAPH_STORE_TABLES } from "../store/schema.ts";
 
 // ── Options and record shapes ───────────────────────────────────────────────
 
@@ -128,6 +138,15 @@ export interface HostExecutionIndexOptions {
    */
   readonly ownerId?: string;
   /**
+   * An ALREADY OPEN workspace store to share.
+   *
+   * Omitted (the default), this registry opens its own connection to
+   * `root` — or a private in-memory store for `durability: "memory"`. A host
+   * that assembles several capabilities passes ONE store so all of them address
+   * one database and one transaction boundary even in memory mode.
+   */
+  readonly store?: GraphStore;
+  /**
    * How long a `pending` claim stays its owner's before another instance may
    * take it over. A claim that never handed anything to the platform can be
    * abandoned safely, so the lease is what keeps a dead process from blocking a
@@ -149,7 +168,7 @@ export const HOST_EXECUTION_CLAIM_LEASE_MS = 60_000;
  * (`dispatch:<attemptId>`, scoped by graph).
  */
 export class HostExecutionIndex {
-  private readonly store: HostStore;
+  private readonly store: GraphStore;
   private readonly durability: HostExecutionIndexDurability;
   private readonly leaseMs: number;
   private readonly now: () => number;
@@ -157,7 +176,7 @@ export class HostExecutionIndex {
   readonly ownerId: string;
 
   private constructor(
-    store: HostStore,
+    store: GraphStore,
     durability: HostExecutionIndexDurability,
     options: HostExecutionIndexOptions,
   ) {
@@ -172,7 +191,8 @@ export class HostExecutionIndex {
   static open(options: HostExecutionIndexOptions): HostExecutionIndex {
     const durability = options.durability ?? "file";
     const store =
-      durability === "memory" ? HostStore.openMemory() : HostStore.openFile(options.root);
+      options.store ??
+      (durability === "memory" ? GraphStore.openMemory() : GraphStore.openFile(options.root));
     return new HostExecutionIndex(store, durability, options);
   }
 
@@ -180,61 +200,22 @@ export class HostExecutionIndex {
    * Take the right to create this effect's execution, or be told it is held.
    *
    * ONE transaction, THREE outcomes: the effect is new (`claimed`), this
-   * instance already holds it (`claimed`, idempotent), or another claim/execution
-   * owns it (`held`). A `pending` claim whose lease expired is taken over
-   * INSIDE the transaction with a conditional update, so two instances racing
-   * for the same stale claim cannot both win.
+   * instance already holds it (`claimed`, idempotent), or another
+   * claim/execution owns it (`held`). The insert, the read and the conditional
+   * takeover all run inside the STORE's transaction — which is the caller's
+   * when one is open, so a service can claim in the same boundary that commits
+   * the effect.
    */
   claim(effect: OutcomeDispatchEffectKey): HostExecutionClaim {
-    const now = this.now();
-    return this.store.transaction(() => {
-      // The insert is FIRST and IGNORES a conflict, so the transaction takes
-      // the write lock before it reads: a racing instance's insert either wins
-      // (this one reads the winner's row and is told "held") or waits on the
-      // lock. Inserting after a read would let a deferred transaction see a
-      // stale snapshot and fail on promotion instead of answering.
-      this.store.run(
-        `INSERT OR IGNORE INTO ${EXECUTIONS} (graph_id, effect_id, attempt_id, state, owner_id, execution_id, task_id, claimed_at, updated_at)
-         VALUES (?, ?, ?, 'pending', ?, NULL, NULL, ?, ?)`,
-        effect.graphId,
-        effect.effectId,
-        effect.attemptId,
-        this.ownerId,
-        now,
-        now,
-      );
-      const row = this.read(effect);
-      if (row === undefined) {
-        throw new Error(
-          "host-execution-index: the registry row for effect " +
-            JSON.stringify(effect.effectId) +
-            " could not be written or read back — refusing to report a claim this store " +
-            "does not hold",
-        );
-      }
-      if (row.state !== "pending") return heldClaim(row);
-      if (row.ownerId === this.ownerId) {
-        return Object.freeze({ kind: "claimed" as const, ownerId: this.ownerId });
-      }
-      if (row.claimedAt + this.leaseMs > now) return heldClaim(row);
-      this.store.run(
-        `UPDATE ${EXECUTIONS} SET owner_id = ?, claimed_at = ?, updated_at = ?
-         WHERE graph_id = ? AND effect_id = ? AND state = 'pending' AND owner_id = ?`,
-        this.ownerId,
-        now,
-        now,
-        effect.graphId,
-        effect.effectId,
-        row.ownerId,
-      );
-      if (this.store.changes() === 1) {
-        return Object.freeze({ kind: "claimed" as const, ownerId: this.ownerId });
-      }
-      const after = this.read(effect);
-      return after === undefined
-        ? Object.freeze({ kind: "claimed" as const, ownerId: this.ownerId })
-        : heldClaim(after);
-    });
+    const outcome = this.store.claimExecution(
+      effect,
+      this.ownerId,
+      this.now(),
+      this.leaseMs,
+    );
+    return outcome.kind === "claimed"
+      ? Object.freeze({ kind: "claimed" as const, ownerId: outcome.ownerId })
+      : heldClaim(outcome.row);
   }
 
   /**
@@ -246,45 +227,20 @@ export class HostExecutionIndex {
    * safely retryable.
    */
   markCreating(effect: OutcomeDispatchEffectKey, ownerId: string): boolean {
-    this.store.run(
-      `UPDATE ${EXECUTIONS} SET state = 'creating', updated_at = ?
-       WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND state = 'pending'`,
-      this.now(),
-      effect.graphId,
-      effect.effectId,
-      ownerId,
-    );
-    return this.store.changes() === 1;
+    return this.store.markExecutionCreating(effect, ownerId, this.now());
   }
 
   /**
    * Record the host execution the platform CONFIRMED.
    *
    * The execution id is required and non-empty: `created` is the one state
-   * `lookup` reports as a fact, so it may only be written with the fact. A row
-   * that is not in `creating` is not touched (the confirmation belongs to the
-   * process whose request was in flight).
+   * `lookup` reports as a fact, so it may only be written with the fact — the
+   * store's own CHECK makes the alternative unrepresentable. A row that is not
+   * in `creating` is not touched (the confirmation belongs to the process
+   * whose request was in flight).
    */
   confirm(effect: OutcomeDispatchEffectKey, execution: HostExecutionIdentity): boolean {
-    if (typeof execution.executionId !== "string" || execution.executionId.length === 0) {
-      throw new Error(
-        "host-execution-index: refusing to record effect " +
-          JSON.stringify(effect.effectId) +
-          " as created without a non-empty host execution id — 'created' is the host's " +
-          "confirmed fact, and a state that claims one without naming the execution " +
-          "cannot be reconciled against the platform",
-      );
-    }
-    this.store.run(
-      `UPDATE ${EXECUTIONS} SET state = 'created', execution_id = ?, task_id = ?, updated_at = ?
-       WHERE graph_id = ? AND effect_id = ? AND state = 'creating'`,
-      execution.executionId,
-      execution.taskId ?? null,
-      this.now(),
-      effect.graphId,
-      effect.effectId,
-    );
-    return this.store.changes() === 1;
+    return this.store.confirmExecution(effect, execution, this.now());
   }
 
   /**
@@ -293,14 +249,7 @@ export class HostExecutionIndex {
    * row is never released — that execution exists.
    */
   release(effect: OutcomeDispatchEffectKey, ownerId: string): boolean {
-    this.store.run(
-      `DELETE FROM ${EXECUTIONS}
-       WHERE graph_id = ? AND effect_id = ? AND owner_id = ? AND state IN ('pending', 'creating')`,
-      effect.graphId,
-      effect.effectId,
-      ownerId,
-    );
-    return this.store.changes() === 1;
+    return this.store.releaseExecution(effect, ownerId);
   }
 
   /**
@@ -368,54 +317,7 @@ export class HostExecutionIndex {
 
   /** One effect's row, or `undefined`. */
   read(effect: OutcomeDispatchEffectKey): HostDispatchExecution | undefined {
-    const row = this.store.get(
-      `SELECT graph_id, effect_id, attempt_id, state, owner_id, execution_id, task_id, claimed_at, updated_at
-       FROM ${EXECUTIONS} WHERE graph_id = ? AND effect_id = ?`,
-      effect.graphId,
-      effect.effectId,
-    );
-    if (row === undefined) return undefined;
-    const graphId = row["graph_id"];
-    const effectId = row["effect_id"];
-    const attemptId = row["attempt_id"];
-    const state = row["state"];
-    const ownerId = row["owner_id"];
-    const claimedAt = row["claimed_at"];
-    const updatedAt = row["updated_at"];
-    if (
-      typeof graphId !== "string" ||
-      typeof effectId !== "string" ||
-      typeof attemptId !== "string" ||
-      typeof ownerId !== "string" ||
-      typeof claimedAt !== "number" ||
-      typeof updatedAt !== "number" ||
-      !isExecutionState(state)
-    ) {
-      throw new Error(
-        "host-execution-index: the registry row for effect " +
-          JSON.stringify(effect.effectId) +
-          " is not a shape this build writes — refusing to read it approximately",
-      );
-    }
-    const executionId = row["execution_id"];
-    const taskId = row["task_id"];
-    const execution =
-      typeof executionId === "string" && executionId.length > 0
-        ? Object.freeze({
-            executionId,
-            ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
-          })
-        : undefined;
-    return Object.freeze({
-      graphId,
-      effectId,
-      attemptId,
-      state,
-      ownerId,
-      ...(execution === undefined ? {} : { execution }),
-      claimedAt,
-      updatedAt,
-    });
+    return this.store.readExecution(effect);
   }
 
   /** Whether this effect has a row at all (any state). */
@@ -425,7 +327,9 @@ export class HostExecutionIndex {
 
   /** How many effects this host has rows for. A count, never a listing. */
   get size(): number {
-    const row = this.store.get(`SELECT COUNT(*) AS total FROM ${EXECUTIONS}`);
+    const row = this.store.get(
+      `SELECT COUNT(*) AS total FROM ${GRAPH_STORE_TABLES.executions}`,
+    );
     const total = row?.["total"];
     return typeof total === "number" ? total : 0;
   }
@@ -438,11 +342,16 @@ export class HostExecutionIndex {
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
-/** The table this registry owns, exported for tests that fabricate a store. */
-export const HOST_EXECUTION_TABLE = "host_dispatch_executions" as const;
+/**
+ * The table this registry writes, as the STORE names it.
+ *
+ * Exported because a reader of the host layer may want the durable name; the
+ * registry itself addresses it through the store's table map, so the name has
+ * one definition.
+ */
+export const HOST_EXECUTION_TABLE = GRAPH_STORE_TABLES.executions;
 
-const EXECUTIONS = HOST_EXECUTION_TABLE;
-
+/** The explicit refusal the create-once rule needs, as this layer words it. */
 function heldClaim(row: HostDispatchExecution): HostExecutionClaim {
   return Object.freeze({
     kind: "held" as const,
@@ -450,8 +359,4 @@ function heldClaim(row: HostDispatchExecution): HostExecutionClaim {
     ownerId: row.ownerId,
     ...(row.execution === undefined ? {} : { execution: row.execution }),
   });
-}
-
-function isExecutionState(value: unknown): value is HostExecutionState {
-  return value === "pending" || value === "creating" || value === "created";
 }

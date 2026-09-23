@@ -1,23 +1,28 @@
 /**
  * Graph Execution Engine v2 — the host capability layer
  *
- * Version: 1.0
+ * Version: 2.0
  * Date: 2026-09-23
  *
  * The SHIPPED host-side implementations of the four capabilities the outcome
- * run path requires (`docs/graph-outcome-protocol.md`, the D7/D8/D9 sections):
+ * run path requires (`docs/graph-outcome-protocol.md`, the D7/D8/D9 sections).
+ * Every durable fact below lives in the WORKSPACE'S ONE GRAPH STORE
+ * (`src/graph/store/`): the same SQLite file as the acceptance ledger, with one
+ * schema, one format gate and one transaction boundary (P1 item 3).
  *
- * - `host-store.ts` — the host's authoritative SQLite store (execution rows
- *   and attempt-credential rows), with the format gate, the uniqueness and the
- *   transactions the two record-keeping modules below rely on;
+ * - `host-store.ts` — the RETIRED host-store path: a compatibility alias for
+ *   the workspace's store root, and nothing else. The second database it used to
+ *   own is gone; the next P1 step deletes this module and its two entry imports.
  * - `credential-vault.ts` — the store and per-attempt delivery half of the
  *   credential-isolation capability (version 3), whose default keeps NO
- *   credential value on disk and whose capability states that honestly;
+ *   credential value on disk and whose capability states that honestly. Its
+ *   durable RECORDS are the store's `host_attempt_credentials` table.
  * - `execution-index.ts` — the host's record of the executions it created
  *   (`pending` / `creating` / `created`, with a real host execution id only in
  *   the last), so a restart can answer `created` / `absent` / `unknown` about
  *   a dispatch effect instead of guessing, and two host processes cannot both
- *   claim one effect;
+ *   claim one effect. Its rows are the store's `host_dispatch_executions`
+ *   table.
  * - `dispatch-host.ts` — the `OutcomeDispatchHost` implementation: create at
  *   most once per stable effect id, look up the host's fact;
  * - `identity.ts` — the invocation-identity capability (version 1) a host
@@ -25,7 +30,9 @@
  * - `invocation-origins.ts` — the host's record of which invocation DECLARED
  *   each graph, so every window that arms a dispatch (a first execution, a
  *   worker's submission, an observed completion, a boot sweep) starts the
- *   worker under the same parent instead of the window's ambient attribution;
+ *   worker under the same parent instead of the window's ambient attribution.
+ *   Its rows are the store's `graph_invocation_origins` table — the
+ *   whole-file JSON authority is gone.
  * - `completion-bridge.ts` — the bridge from an observed completion to
  *   `settleNatural`, which is the only settlement channel a completion uses.
  *
@@ -34,14 +41,28 @@
  * host and is driven directly by the tests.
  */
 
+export { hostStoreRoot } from "./host-store.ts";
 export {
-  HostStore,
-  HostStoreFormatError,
-  hostStoreRoot,
-  HOST_STORE_FILE,
-  HOST_STORE_FORMAT_VERSION,
-  HOST_STORE_TABLES,
-} from "./host-store.ts";
+  GRAPH_STORE_FILE,
+  GRAPH_STORE_FORMAT_VERSION,
+  GRAPH_STORE_TABLES,
+  graphStoreFilePath,
+  graphStoreRoot,
+} from "../store/schema.ts";
+export {
+  GraphStore,
+  type GraphStoreTx,
+} from "../store/graph-store.ts";
+export {
+  GraphStoreClosedError,
+  GraphStoreFormatError,
+  GraphStoreWriteError,
+} from "../store/errors.ts";
+export {
+  loadGraphStore,
+  loadGraphStoreSync,
+  type GraphStoreLoadResult,
+} from "../store/load.ts";
 export {
   HOST_CREDENTIAL_TABLE,
   HostCredentialVault,
@@ -68,8 +89,6 @@ export {
   type HostOutcomeDispatchOptions,
 } from "./dispatch-host.ts";
 export {
-  HOST_INVOCATION_ORIGINS_FILE,
-  HOST_INVOCATION_ORIGINS_VERSION,
   HostInvocationOrigins,
   type HostInvocationOrigin,
   type HostInvocationOriginsDurability,

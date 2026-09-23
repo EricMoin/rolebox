@@ -32,7 +32,8 @@ import {
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
 import type { HostDispatchInvocation } from "../../src/graph/host/dispatch-host.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
-import { HOST_INVOCATION_ORIGINS_FILE } from "../../src/graph/host/invocation-origins.ts";
+import { GraphStore } from "../../src/graph/store/graph-store.ts";
+import { graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import {
   AUTHORIZED,
@@ -276,7 +277,16 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
       const started = await host.startDeclaredGraph(PLAIN_GRAPH_ID);
       expect(started.kind).toBe("started");
       expect(invocations).toEqual([undefined]);
-      expect(existsSync(join(storeRoot, HOST_INVOCATION_ORIGINS_FILE))).toBe(false);
+      // NOTHING was recorded as the graph's declaring invocation. The store
+      // FILE exists either way — the acceptance ledger is durable regardless of
+      // the host's capability durability — so the honest check reads the
+      // record itself.
+      const store = GraphStore.openFile(storeRoot);
+      try {
+        expect(store.readInvocationOrigin(PLAIN_GRAPH_ID)).toBeUndefined();
+      } finally {
+        store.close();
+      }
     } finally {
       host.close();
     }
@@ -319,8 +329,9 @@ describe("OutcomeHost — the declaring invocation travels with every dispatch",
     } finally {
       firstHost.close();
     }
-    // The declaring invocation outlived the process that named it.
-    expect(existsSync(join(storeRoot, HOST_INVOCATION_ORIGINS_FILE))).toBe(true);
+    // The declaring invocation outlived the process that named it: it is a row
+    // of the workspace's one graph store, beside the run state it belongs to.
+    expect(existsSync(graphStoreFilePath(storeRoot))).toBe(true);
 
     // THE RESTARTED PROCESS: the sweep reads the graph's origin back from the
     // host's own record and re-arms the pending effect under it.

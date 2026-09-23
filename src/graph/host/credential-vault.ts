@@ -67,7 +67,8 @@ import type {
   DurableCredentialStore,
 } from "../outcome/credential-isolation.ts";
 import { CREDENTIAL_ISOLATION_VERSION_V3 } from "../outcome/credential-isolation.ts";
-import { HostStore, HOST_STORE_FILE } from "./host-store.ts";
+import { GraphStore } from "../store/graph-store.ts";
+import { GRAPH_STORE_TABLES } from "../store/schema.ts";
 
 // ── Options and identity ────────────────────────────────────────────────────
 
@@ -84,9 +85,6 @@ export type HostCredentialDurability =
    * restart cannot report which attempts had a credential.
    */
   | "memory";
-
-/** Re-exported so a host names the file through this module's contract. */
-export { HOST_STORE_FILE };
 
 /** Inputs to {@link HostCredentialVault.open}. */
 export interface HostCredentialVaultOptions {
@@ -118,10 +116,23 @@ export interface HostCredentialVaultOptions {
    * refused: it would declare a durable store that does not exist.
    */
   readonly durableCredentialStore?: DurableCredentialStore;
+  /**
+   * An ALREADY OPEN workspace store to share.
+   *
+   * Omitted (the default), the vault opens its own connection to `root` — or a
+   * private in-memory store for `durability: "memory"`. A host that assembles
+   * several capabilities passes ONE store so all of them address one database
+   * and one transaction boundary even in memory mode.
+   */
+  readonly store?: GraphStore;
 }
 
-/** The store's credential table, exported for tests that fabricate a store. */
-export const HOST_CREDENTIAL_TABLE = "host_attempt_credentials" as const;
+/**
+ * The credential table this vault writes, as the STORE names it. Exported
+ * because a reader of the host layer may want the durable name; the vault
+ * addresses it through the store, so the name has one definition.
+ */
+export const HOST_CREDENTIAL_TABLE = GRAPH_STORE_TABLES.credentials;
 
 // ── The vault ───────────────────────────────────────────────────────────────
 
@@ -137,7 +148,7 @@ export class HostCredentialVault {
   private readonly retainValues: boolean;
   private readonly mintSource: AttemptCredentialSource;
   private readonly entries = new Map<string, string>();
-  private readonly hostStore: HostStore;
+  private readonly graphStore: GraphStore;
 
   private constructor(options: HostCredentialVaultOptions) {
     this.root = options.root;
@@ -157,8 +168,11 @@ export class HostCredentialVault {
     this.mintSource =
       options.mint ??
       ((binding: AttemptCredentialBinding): string => this.randomCredential(binding));
-    this.hostStore =
-      this.durability === "memory" ? HostStore.openMemory() : HostStore.openFile(this.root);
+    this.graphStore =
+      options.store ??
+      (this.durability === "memory"
+        ? GraphStore.openMemory()
+        : GraphStore.openFile(this.root));
     if (this.retainValues) this.loadRetained();
   }
 
@@ -211,17 +225,8 @@ export class HostCredentialVault {
       );
     }
     this.entries.set(entryKey(identity), credential);
-    this.hostStore.run(
-      `INSERT INTO ${HOST_CREDENTIAL_TABLE}
-         (graph_id, node_id, attempt_id, retention, credential, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (graph_id, node_id, attempt_id) DO UPDATE SET
-         retention = excluded.retention,
-         credential = excluded.credential,
-         updated_at = excluded.updated_at`,
-      identity.graphId,
-      identity.nodeId,
-      identity.attemptId,
+    this.graphStore.rememberCredential(
+      identity,
       this.retainValues ? "retained" : "not-retained",
       this.retainValues ? credential : null,
       Date.now(),
@@ -253,17 +258,7 @@ export class HostCredentialVault {
   durableRecord(
     identity: CredentialStoreIdentity,
   ): "retained" | "not-retained" | undefined {
-    const row = this.hostStore.get(
-      `SELECT retention FROM ${HOST_CREDENTIAL_TABLE}
-       WHERE graph_id = ? AND node_id = ? AND attempt_id = ?`,
-      identity.graphId,
-      identity.nodeId,
-      identity.attemptId,
-    );
-    const retention = row?.["retention"];
-    return retention === "retained" || retention === "not-retained"
-      ? retention
-      : undefined;
+    return this.graphStore.readCredentialRetention(identity);
   }
 
   /**
@@ -273,12 +268,7 @@ export class HostCredentialVault {
    */
   forget(identity: CredentialStoreIdentity): void {
     this.entries.delete(entryKey(identity));
-    this.hostStore.run(
-      `DELETE FROM ${HOST_CREDENTIAL_TABLE} WHERE graph_id = ? AND node_id = ? AND attempt_id = ?`,
-      identity.graphId,
-      identity.nodeId,
-      identity.attemptId,
-    );
+    this.graphStore.forgetCredential(identity);
   }
 
   /**
@@ -340,7 +330,7 @@ export class HostCredentialVault {
 
   /** Close the store connection. Idempotent. */
   close(): void {
-    this.hostStore.close();
+    this.graphStore.close();
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -357,33 +347,21 @@ export class HostCredentialVault {
    * see.
    */
   private loadRetained(): void {
-    const rows = this.hostStore.all(
-      `SELECT graph_id, node_id, attempt_id, credential FROM ${HOST_CREDENTIAL_TABLE}
-       WHERE retention = 'retained'`,
-    );
-    for (const row of rows) {
-      const graphId = row["graph_id"];
-      const nodeId = row["node_id"];
-      const attemptId = row["attempt_id"];
-      const credential = row["credential"];
-      if (
-        typeof graphId !== "string" ||
-        typeof nodeId !== "string" ||
-        typeof attemptId !== "string" ||
-        !isAttemptCredential(credential)
-      ) {
+    const retained = this.graphStore.retainedCredentials();
+    for (const entry of retained) {
+      if (!isAttemptCredential(entry.credential)) {
         throw new Error(
           "host-credential-vault: the store holds a retained entry this build cannot read " +
             "(graph " +
-            JSON.stringify(graphId) +
+            JSON.stringify(entry.identity.graphId) +
             ", node " +
-            JSON.stringify(nodeId) +
+            JSON.stringify(entry.identity.nodeId) +
             ", attempt " +
-            JSON.stringify(attemptId) +
+            JSON.stringify(entry.identity.attemptId) +
             ") — refusing the whole store rather than dropping one attempt's credential",
         );
       }
-      this.entries.set(entryKey({ graphId, nodeId, attemptId }), credential);
+      this.entries.set(entryKey(entry.identity), entry.credential);
     }
   }
 }

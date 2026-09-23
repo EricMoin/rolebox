@@ -100,6 +100,7 @@ import {
 } from "./execution-index.ts";
 import { HostCredentialVault } from "./credential-vault.ts";
 import { HostInvocationOrigins } from "./invocation-origins.ts";
+import { GraphStore } from "../store/graph-store.ts";
 import {
   HostDispatchCompletionBridge,
   type HostCompletionReport,
@@ -232,6 +233,17 @@ export class OutcomeHost {
   private readonly vault: HostCredentialVault;
   private readonly executions: HostExecutionIndex;
   private readonly origins: HostInvocationOrigins;
+  /**
+   * The ONE store the capabilities share in `durability: "memory"` mode.
+   *
+   * A memory-mode host keeps three records — credentials, execution bindings
+   * and declaring invocations — and they belong to ONE database with ONE
+   * transaction boundary, so the host opens a single private store and hands it
+   * to all three. In file mode each capability opens its own connection to the
+   * SAME file (the pattern the ledger already uses), so the workspace still has
+   * exactly one durable store.
+   */
+  private readonly sharedStore: GraphStore | undefined;
   private readonly holder: HostInvocationHolder;
   private readonly declareInvocationIdentity: boolean;
   private readonly dispatchAdapter: HostOutcomeDispatch;
@@ -252,15 +264,26 @@ export class OutcomeHost {
     this.validators = options.validators ?? createValidatorRegistry([]);
     this.completionPolicies = options.completionPolicies;
     const durability = options.durability ?? "file";
+    const shared = durability === "memory" ? GraphStore.openMemory() : undefined;
+    this.sharedStore = shared;
     this.vault = HostCredentialVault.open({
       root: options.storeRoot,
       durability,
+      ...(shared === undefined ? {} : { store: shared }),
       ...(options.durableCredentialStore === undefined
         ? {}
         : { durableCredentialStore: options.durableCredentialStore }),
     });
-    this.executions = HostExecutionIndex.open({ root: options.storeRoot, durability });
-    this.origins = HostInvocationOrigins.open({ root: options.storeRoot, durability });
+    this.executions = HostExecutionIndex.open({
+      root: options.storeRoot,
+      durability,
+      ...(shared === undefined ? {} : { store: shared }),
+    });
+    this.origins = HostInvocationOrigins.open({
+      root: options.storeRoot,
+      durability,
+      ...(shared === undefined ? {} : { store: shared }),
+    });
     this.holder = createHostInvocationHolder();
     this.declareInvocationIdentity = options.declareInvocationIdentity ?? true;
     this.dispatchAdapter = new HostOutcomeDispatch({
@@ -555,6 +578,15 @@ export class OutcomeHost {
     }
     this.runtimes.clear();
     this.bridges.clear();
+    // The memory-mode capabilities share ONE private store; releasing it here
+    // is what keeps the host's process-only records from outliving the host.
+    // In file mode the capabilities own their own connections, exactly as the
+    // per-graph ledgers above do, and closing them is not this call's job.
+    try {
+      this.sharedStore?.close();
+    } catch {
+      // Closing an already-closed store is not a host failure.
+    }
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
