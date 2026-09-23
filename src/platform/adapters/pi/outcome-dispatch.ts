@@ -325,9 +325,13 @@ export class PiOutcomeDelivery {
    * channel: it is keyed by task id, it fires once, and it fires IMMEDIATELY
    * (via microtask) for a task that is already terminal — so re-subscribing
    * after a restart both re-establishes the live notification and delivers the
-   * end that already happened. The callback carries no outcome: it only tells
-   * the host to look again, and the settlement it triggers runs through the one
-   * completion bridge.
+   * end that already happened. THE ANNOUNCEMENT IS NOT AN OUTCOME and this port
+   * does not pretend it is: it tells the host to look again, and the host
+   * VERIFIES the end against {@link PiOutcomeDelivery.observeExecution} — the
+   * manager's own task record the announcement was written to — so only a
+   * `completed` read is settled, through the one completion bridge. An
+   * `error`/`cancelled`/`timeout` announcement is reported as an unsettled
+   * attempt, exactly as the sweep's own `failed` branch reports it.
    *
    * A task the manager cannot name is NOT watchable — the manager's listener
    * registration is silently a no-op for an unknown id — so that answers

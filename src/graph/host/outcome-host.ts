@@ -318,9 +318,12 @@ export interface OutcomeHostOptions {
    * arrived in `awaitingCompletion`; this port is how the host turns that
    * inventory into a LIVE observation again. The entry installs the platform's
    * own notification channel (Pi: `dispatchManager.onTaskTerminated`); the
-   * callback fires when the platform says the execution ended, and the host
-   * settles the attempt through the SAME completion bridge an announced
-   * in-process completion uses — never a second listener mechanism.
+   * callback fires when the platform says the execution ended, and the host then
+   * VERIFIES that end against {@link OutcomeHostOptions.observeExecution} —
+   * settling only a `completed` read, through the SAME completion bridge an
+   * announced in-process completion uses. Never a second listener mechanism, and
+   * never a settlement on the announcement alone: a platform announces ends that
+   * are not completions (failed, cancelled, timed out) too.
    *
    * A platform that cannot subscribe after the process that held the run exited
    * answers `"unsupported"` (dsh), and the host reports those executions as
@@ -377,8 +380,12 @@ export type HostExecutionObservationPort = (
  * instead of pretending it is covered.
  *
  * IT IS NOT A SECOND LISTENER MECHANISM: the callback carries no outcome, no
- * payload and no credential — it only says "look again", and the settlement
- * runs through the one completion bridge the delivery path already feeds.
+ * payload and no credential — it only says "look again". THE LOOK IS REAL: the
+ * host re-reads the execution through {@link HostExecutionObservationPort} and
+ * settles only when that read reports `completed`, so an announced end that is
+ * not a completion is REPORTED as an unsettled attempt rather than fabricated
+ * into one, and the settlement that does run goes through the one completion
+ * bridge the delivery path already feeds.
  */
 export type HostCompletionWatchVerdict = "watching" | "unsupported";
 
@@ -1432,6 +1439,16 @@ export class OutcomeHost {
   /**
    * Settle the attempt whose execution the platform announced as ended.
    *
+   * AN ANNOUNCEMENT IS NOT AN OUTCOME. The callback says the platform's
+   * execution is over; it does not say the execution reached the outcome its
+   * plan authorized — a failed, cancelled or timed-out run ends too. The host
+   * therefore VERIFIES the announcement against its own four-way observation of
+   * that execution and settles only a `completed` read. Every other end is
+   * reported here as an unsettled attempt (and again on the next recovery
+   * window), exactly as the sweep's own branches report it; settling the
+   * announcement itself would fabricate the §3.4 outcome a crashed run never
+   * produced.
+   *
    * THE ONE COMPLETION PATH. This is the bridge an in-process announcement
    * already feeds, so the settlement is authenticated, idempotent and
    * credential-free exactly like every other observed completion; a second
@@ -1442,6 +1459,27 @@ export class OutcomeHost {
     options: OutcomeHostWatchOptions,
   ): Promise<void> {
     try {
+      const execution: HostExecutionIdentity = Object.freeze({
+        executionId: entry.executionId,
+        ...(entry.taskId === undefined ? {} : { taskId: entry.taskId }),
+      });
+      const observation = this.observeExecutionOf(execution);
+      if (observation.kind !== "completed") {
+        logWarn(
+          "outcome-host: the platform announced execution " +
+            JSON.stringify(entry.executionId) +
+            " of graph " +
+            JSON.stringify(entry.graphId) +
+            " attempt " +
+            JSON.stringify(entry.attemptId) +
+            " ended, but the host's own read of that execution does not report a " +
+            "completion [completion-unsettled] (" +
+            describeUnconfirmedAnnouncement(observation) +
+            ") — the attempt stays unsettled and is reported rather than settled on the " +
+            "announcement alone",
+        );
+        return;
+      }
       const report = await this.complete(entry.graphId, entry.attemptId);
       if (report.kind === "settled") {
         options.onSettled?.(entry.graphId, entry.attemptId);
@@ -2388,6 +2426,43 @@ function describeUnwatched(
     "the platform cannot say whether this execution has ended (" +
     observation.reason +
     "), so no observation is established and the attempt stays unsettled"
+  );
+}
+
+/**
+ * Why an ANNOUNCED end was not settled (F4 / W5), in the platform's own words
+ * when it has any.
+ *
+ * An announcement says the platform's execution is over; it does not say the
+ * execution reached the outcome its plan authorized. Each answer of the host's
+ * four-way read that is NOT a completion therefore has its own wording: a
+ * failed end says how it ended, a read that has not caught up says it still
+ * reports the execution running, and an unanswerable read carries its reason.
+ * Every one of them leaves the attempt unsettled and reported — never settled
+ * on the announcement alone.
+ */
+function describeUnconfirmedAnnouncement(
+  observation: HostExecutionObservation,
+): string {
+  if (observation.kind === "failed") {
+    return (
+      "the platform reports that execution ENDED without reaching its authorized outcome (" +
+      observation.reason +
+      "), so it is not a completion"
+    );
+  }
+  if (observation.kind === "running") {
+    return "the platform's own read still reports that execution running";
+  }
+  if (observation.kind === "completed") {
+    // Unreachable from the watch path (only a non-completion reaches here),
+    // kept total so the wording never falls through to the unknown branch.
+    return "the platform's own read reports that execution complete";
+  }
+  return (
+    "the platform cannot say whether that execution reached its authorized outcome (" +
+    observation.reason +
+    ")"
   );
 }
 

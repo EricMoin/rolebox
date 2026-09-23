@@ -515,9 +515,9 @@ describe("F4 — the awaiting inventory is consumed", () => {
     // to watch, and the durable failure decision belongs to the control path.
     expect(sweep.awaitingCompletion).toEqual([]);
 
-    // Even when the entry is handed to the watch path directly, a failed end is
-    // reported as unwatchable — not established as a watch whose callback would
-    // settle it.
+    // THE RE-QUERY BRANCH, with no watch established for the entry (the
+    // platform cannot name the execution here). The case where the WATCH IS
+    // established is pinned separately below.
     state.present = false;
     const watching = await host.retainAwaitingCompletions([
       {
@@ -533,6 +533,69 @@ describe("F4 — the awaiting inventory is consumed", () => {
     expect(watching.unwatched.map((entry) => entry.reason)).toEqual([
       expect.stringContaining("nothing left to watch"),
     ]);
+  });
+
+  it("never settles an announced end the platform does not report as a completion", async () => {
+    const { host, deliveries, state, storeRoot } = await awaitingFixture(
+      "host-observation-announced-failed-",
+    );
+    const sweep = await host.recoverDeclaredGraphs();
+    const watching = await host.retainAwaitingCompletions(sweep.awaitingCompletion);
+    // THE WATCH IS ESTABLISHED — this is the path the re-query case above does
+    // not reach, and the one an announcement can arrive on.
+    expect(watching.watched).toEqual([
+      GRAPH_ID + ":" + ATTEMPT_ID + ":" + PLATFORM_EXECUTION_ID,
+    ]);
+    expect(watching.unwatched).toEqual([]);
+    expect(state.ended).toBeDefined();
+
+    // The platform announces the end, and its OWN read reports an end that is
+    // NOT the authorized outcome (a timeout/error/cancel). An announcement is
+    // not evidence of a completion, so nothing is settled — the settlement core
+    // is never entered on a fabricated outcome.
+    state.observation = Object.freeze({
+      kind: "failed" as const,
+      reason: "the worker run ended with status timeout",
+    });
+    state.ended?.();
+    await settle();
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+
+    // AND IT IS REPORTED, never silently dropped: the next recovery window
+    // reads the same failed end and names the attempt `completion-unsettled`.
+    const again = await host.recoverDeclaredGraphs();
+    expect(again.completed).toEqual([]);
+    expect(again.awaitingCompletion).toEqual([]);
+    expect(
+      again.effectRefusals.some((refusal) => refusal.code === "completion-unsettled"),
+    ).toBe(true);
+    expect(deliveries).toEqual([]);
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+  });
+
+  it("does not settle an announcement the platform's own read still reports as running", async () => {
+    const { host, deliveries, state, storeRoot } = await awaitingFixture(
+      "host-observation-announced-race-",
+    );
+    const sweep = await host.recoverDeclaredGraphs();
+    const watching = await host.retainAwaitingCompletions(sweep.awaitingCompletion);
+    expect(watching.watched).toHaveLength(1);
+
+    // The announcement races ahead of the platform's own record: the read still
+    // says running, and "the platform said it is over" is not a completion.
+    state.ended?.();
+    await settle();
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+
+    // The next window still names it as AWAITED — nothing was rounded into an
+    // end — and nothing is created again.
+    const again = await host.recoverDeclaredGraphs();
+    expect(again.completed).toEqual([]);
+    expect(again.awaitingCompletion.map((entry) => entry.executionId)).toEqual([
+      PLATFORM_EXECUTION_ID,
+    ]);
+    expect(deliveries).toEqual([]);
+    expect(await acceptedEvents(storeRoot)).toBe(0);
   });
 });
 

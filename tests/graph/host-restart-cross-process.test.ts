@@ -578,6 +578,75 @@ describe("host restart — a real process boundary recovers the completion bindi
     expect(again.record?.events).toBe(1);
   });
 
+  it("W5: an announced end the platform itself reports as NOT a completion never settles the attempt", async () => {
+    const fixture = makeFixture("restart-xproc-w5-");
+
+    // ── PROCESS ONE: dispatch and never confirm, then EXIT.
+    const dispatched = await runWorker("dispatch-unconfirmed-w5", [
+      ...workerArgs(fixture, {
+        mode: "dispatch",
+        execution: PLATFORM_EXECUTION_ID,
+        "marker-dir": fixture.markerDir,
+        confirm: "no",
+      }),
+    ]);
+    expect(dispatched.pid).not.toBe(process.pid);
+    expect(dispatched.delivered).toEqual(["work#1"]);
+    await waitForMarker(
+      join(fixture.markerDir, "dispatched-work#1.marker"),
+      "the dispatching process's marker",
+    );
+
+    // ── PROCESS TWO: a FRESH process whose platform read reports the execution
+    // RUNNING — so the sweep names it and the host re-subscribes — and whose
+    // announcement is an end that is NOT the authorized outcome
+    // (`--announce failed`, which also moves the platform's own read, exactly
+    // as a manager that wrote the terminal state does). The announcement is
+    // verified against that read, so the attempt must stay exactly where the
+    // dead process left it: never settled on the announcement alone.
+    const failed = await runWorker("recover-w5-failed", [
+      ...workerArgs(fixture, {
+        mode: "recover",
+        observe: "running",
+        query: "created",
+        execution: PLATFORM_EXECUTION_ID,
+        watch: "on",
+        announce: "failed",
+      }),
+    ]);
+    expect(failed.pid).not.toBe(dispatched.pid);
+    expect(failed.watching?.watched).toEqual([
+      XPROC_GRAPH_ID + ":work#1:" + PLATFORM_EXECUTION_ID,
+    ]);
+    expect(failed.completed).toEqual([]);
+    expect(failed.record?.status).toBe("dispatched");
+    expect(failed.record?.outcomeId).toBeNull();
+    expect(failed.record?.events).toBe(0);
+    expect(failed.record?.pendingEffects).toEqual(["dispatch:work#1@started"]);
+    expect(failed.delivered).toEqual([]);
+
+    // ── PROCESS THREE: another FRESH process whose read reports the SAME failed
+    // end. It is REPORTED as an unsettled completion (the observable block, not
+    // a silent strand) and still nothing is settled or re-created.
+    const reported = await runWorker("recover-w5-reported", [
+      ...workerArgs(fixture, {
+        mode: "recover",
+        observe: "failed",
+        query: "created",
+        execution: PLATFORM_EXECUTION_ID,
+      }),
+    ]);
+    expect(reported.pid).not.toBe(failed.pid);
+    expect(reported.completed).toEqual([]);
+    expect(reported.effectRefusals).toContain(
+      XPROC_GRAPH_ID + ":completion-unsettled",
+    );
+    expect(reported.awaitingCompletion).toEqual([]);
+    expect(reported.record?.status).toBe("dispatched");
+    expect(reported.record?.events).toBe(0);
+    expect(reported.delivered).toEqual([]);
+  });
+
   it("W3: a port that cannot prove non-existence leaves the create right held across real processes", async () => {
     const fixture = makeFixture("restart-xproc-w3-");
 

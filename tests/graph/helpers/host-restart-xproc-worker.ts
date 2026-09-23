@@ -38,6 +38,10 @@ import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../../src/graph/compiler/declaration-v3.ts";
 import { OutcomeHost } from "../../../src/graph/host/outcome-host.ts";
+import type {
+  HostExecutionObservation,
+  HostExecutionObservationPort,
+} from "../../../src/graph/host/outcome-host.ts";
 import { HostExecutionIndex } from "../../../src/graph/host/execution-index.ts";
 import { SqliteAcceptanceLedger } from "../../../src/graph/ledger/sqlite-ledger.ts";
 import { dispatchEffectKeyOf } from "../../../src/graph/outcome/dispatch-effects.ts";
@@ -210,6 +214,14 @@ interface ModeOutcome {
   readonly [key: string]: unknown;
 }
 
+/** The end that is NOT a completion, in the platform's own words. */
+function failedObservation(): HostExecutionObservation {
+  return Object.freeze({
+    kind: "failed" as const,
+    reason: 'the platform reports the execution ended with status "error"',
+  });
+}
+
 /**
  * `--mode dispatch`: give the graph its FIRST execution, confirm the platform's
  * real execution id, and leave. Nothing about this process survives except the
@@ -277,13 +289,30 @@ async function modeDispatch(): Promise<ModeOutcome> {
  * `terminal` for the confirmed execution; `--observe running` installs it and
  * answers `running` (the execution has not finished yet — the sweep must report
  * it as AWAITED, naming the platform's execution id, and must not settle it);
- * `--observe none` installs none, which is the shipped adapter's position today.
+ * `--observe failed` answers that the execution ENDED without reaching its
+ * authorized outcome (the sweep must report it `completion-unsettled` and
+ * settle nothing); `--observe none` installs none, which is the shipped
+ * adapter's position today.
+ *
+ * `--announce completed|failed` decides what the platform's watch channel
+ * announces when `--watch on`: a real manager announces only after it wrote
+ * the terminal state, so the announcement MOVES the platform's read — to the
+ * authorized outcome (the default) or to an end that is not one. The host
+ * settles only a `completed` read, so `--announce failed` must leave the
+ * attempt exactly where it was.
  */
 async function modeRecover(): Promise<ModeOutcome> {
   const storeRoot = required("root");
   const workspaceDir = required("workspace");
   const graphId = required("graph");
   const observe = required("observe");
+  // WHAT THE PLATFORM ANNOUNCES WHEN IT ENDS. A real manager announces an end
+  // only AFTER it wrote the terminal state, so the announcement MOVES the
+  // platform's read before the callback fires: `completed` (the default) reports
+  // the authorized outcome, `failed` reports an end that is not one. An
+  // announcement the host's own read cannot confirm must never settle — the
+  // in-process race case is pinned in host-observation-ports.test.ts.
+  const announce = arg("announce") ?? "completed";
   // `--query created` installs the PLATFORM EXECUTION QUERY PORT (P2 item 5):
   // it answers `created`, naming `--execution`, and only after its `prime`
   // phase ran — which is what proves the host primed the port before the
@@ -299,6 +328,18 @@ async function modeRecover(): Promise<ModeOutcome> {
   const watchEnded: Array<() => void> = [];
   let primed = false;
   const delivered: string[] = [];
+  // THE PLATFORM'S LIVE READ. `--observe terminal` always reports the authorized
+  // outcome; `--observe running` reports running until the announcement below
+  // moves it, which is exactly what a real end does.
+  let observed: HostExecutionObservation = Object.freeze({ kind: "running" as const });
+  const observePort: HostExecutionObservationPort | undefined =
+    observe === "terminal"
+      ? () => Object.freeze({ kind: "completed" as const })
+      : observe === "running"
+        ? () => observed
+        : observe === "failed"
+          ? failedObservation
+          : undefined;
   const host = OutcomeHost.open({
     workspaceDir,
     storeRoot,
@@ -307,11 +348,7 @@ async function modeRecover(): Promise<ModeOutcome> {
     },
     declareInvocationIdentity: false,
     completionPolicies: XPROC_POLICIES,
-    ...(observe === "terminal"
-      ? { observeExecution: () => Object.freeze({ kind: "completed" as const }) }
-      : observe === "running"
-        ? { observeExecution: () => Object.freeze({ kind: "running" as const }) }
-        : {}),
+    ...(observePort === undefined ? {} : { observeExecution: observePort }),
     ...(queryMode === undefined
       ? {}
       : {
@@ -339,7 +376,13 @@ async function modeRecover(): Promise<ModeOutcome> {
             _entry: unknown,
             onEnded: () => void,
           ) => {
-            watchEnded.push(onEnded);
+            watchEnded.push(() => {
+              observed =
+                announce === "failed"
+                  ? failedObservation()
+                  : Object.freeze({ kind: "completed" as const });
+              onEnded();
+            });
             return "watching" as const;
           },
         }
