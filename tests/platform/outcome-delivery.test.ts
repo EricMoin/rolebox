@@ -451,8 +451,11 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
     try {
       const started = await host.startDeclaredGraph(GRAPH_ID, INVOCATION);
       expect(started.kind).toBe("started");
+      // THE CREATE CARRIES THE STABLE IDEMPOTENCY KEY (P2 item 5): the task's
+      // description IS `dispatchIdempotencyKeyOf` for the effect, which is the
+      // exact string the execution query matches on after a restart.
       expect(launches.map((input) => input.description)).toEqual([
-        GRAPH_ID + ":work#work#1",
+        GRAPH_ID + "/dispatch:work#1",
       ]);
       await flush();
 
@@ -461,8 +464,8 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
       terminate("task-1", "completed");
       await settleCompletions();
       expect(launches.map((input) => input.description)).toEqual([
-        GRAPH_ID + ":work#work#1",
-        GRAPH_ID + ":ship#ship#2",
+        GRAPH_ID + "/dispatch:work#1",
+        GRAPH_ID + "/dispatch:ship#2",
       ]);
       // The successor's parent is the DECLARING invocation the host recorded,
       // even though this delivery happened with no declaring call in effect.

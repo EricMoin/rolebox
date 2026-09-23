@@ -1022,7 +1022,7 @@ describe("restart recovery — a completion is applied or reported, never fabric
       declareInvocationIdentity: false,
       // The platform says the execution finished — and the plan still does not
       // authorize a natural completion for this node.
-      observeExecution: () => Object.freeze({ kind: "terminal" as const }),
+      observeExecution: () => Object.freeze({ kind: "completed" as const }),
     });
     try {
       const sweep = await hostTwo.recoverDeclaredGraphs();

@@ -870,6 +870,17 @@ export default async function (pi: any): Promise<void> {
       // credential alone.
       workerSessionOf: (execution) =>
         dispatchManager.getTask(execution.executionId)?.sessionId,
+      // THE PLATFORM PORTS (P2 part 2 / F3). The dispatch adapter's own question
+      // — "does an execution already exist for this stable effect id, and which
+      // one?" — is answered from the manager's own task records by the stable
+      // key the create carried as the task description; the boot sweep's
+      // terminal read is the task's status (with a completion separated from an
+      // end that is not one), and its re-subscribe is
+      // `onTaskTerminated`, which fires immediately for a task that is already
+      // terminal.
+      query: outcomeDelivery.executionQuery,
+      observeExecution: outcomeDelivery.observeExecution,
+      watchCompletion: outcomeDelivery.watchCompletion,
     });
 
     // Boot recovery for DECLARED graphs: a graph interrupted by the previous
@@ -916,6 +927,31 @@ export default async function (pi: any): Promise<void> {
                 divergence.local +
                 "->" +
                 divergence.host,
+            ),
+          });
+        }
+        // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every
+        // confirmed execution the sweep is still waiting on is handed back to
+        // the platform adapter: Pi re-subscribes through
+        // `dispatchManager.onTaskTerminated` — which fires immediately for a
+        // task that is already terminal, so an end that happened while nobody
+        // was listening is applied through the SAME completion bridge — and any
+        // execution the manager cannot name is reported as unwatched rather
+        // than silently awaited.
+        const watching = await outcomeHost.retainAwaitingCompletions(
+          outcomeRecovery.awaitingCompletion,
+        );
+        if (
+          watching.watched.length > 0 ||
+          watching.settled.length > 0 ||
+          watching.unwatched.length > 0
+        ) {
+          log.info("Declared outcome graph observation re-established", {
+            watched: watching.watched,
+            settled: watching.settled,
+            unwatched: watching.unwatched.map(
+              (entry) =>
+                entry.graphId + ":" + entry.attemptId + ":" + entry.executionId,
             ),
           });
         }

@@ -638,10 +638,12 @@ describe("host dispatch adapter — create at most once, look up the host's fact
           deliveries.push(delivered);
         },
         // A port that can only say "no answer" until the test flips it.
-        query: () =>
-          platformSaysAbsent
-            ? { kind: "absent" }
-            : { kind: "unknown", reason: "the control plane is unreachable" },
+        query: {
+          lookup: () =>
+            platformSaysAbsent
+              ? { kind: "absent" as const }
+              : { kind: "unknown" as const, reason: "the control plane is unreachable" },
+        },
       });
 
       host.create(request, effect);
@@ -766,10 +768,12 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         deliver: (request) => {
           deliveries.push(request.attemptId);
         },
-        query: () =>
-          platformSaysAbsent
-            ? { kind: "absent" }
-            : { kind: "unknown", reason: "no answer from the platform" },
+        query: {
+          lookup: () =>
+            platformSaysAbsent
+              ? { kind: "absent" as const }
+              : { kind: "unknown" as const, reason: "no answer from the platform" },
+        },
         completions: {
           bind: (binding) => {
             bindings.push(binding.attemptId);

@@ -112,7 +112,10 @@ import {
 import { OutcomeHost } from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
-import { DshOutcomeDelivery } from "../platform/adapters/dsh/outcome-dispatch.ts";
+import {
+  DshOutcomeDelivery,
+  type DshOutcomeSubagentRuntime,
+} from "../platform/adapters/dsh/outcome-dispatch.ts";
 import { createValidatorRegistry } from "../graph/outcome/validators.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
@@ -230,8 +233,16 @@ export interface DshPluginContext {
    * into the catalog (via {@link DshAgentRegistrar}) and dispatches graph
    * nodes / loop rounds through `ctx.subagents.start` (via
    * {@link DshDispatchAdapter}).
+   *
+   * `listChildren` is OPTIONAL ON THIS MIRROR because it is one consumer's
+   * optional capability, not part of the dispatch contract: the outcome run
+   * path's execution query correlates a dispatch effect with the subagent run
+   * it created through the run's durable label, and a dsh build (or a test
+   * double) without the listing is answered `unknown` rather than failing to
+   * load. The base profile's `SubagentRuntime` provides it
+   * (`docs/dsh-plugin-contract.md` §4.3).
    */
-  subagents: DshSubagentDispatchRuntime;
+  subagents: DshOutcomeSubagentRuntime;
   /**
    * The dsh system-prompt registry service (`@deepseek-ai/dsh-system-prompt`,
    * structural subset — see {@link DshSystemPromptRegistry}). Present only in
@@ -1236,6 +1247,19 @@ export async function apply(
     // execution: for a local dsh run the run id IS the published child session
     // id, so the worker of an attempt is the session `onStarted` reported.
     workerSessionOf: (execution) => execution.executionId,
+    // THE PLATFORM PORTS (P2 part 2 / F3). The dispatch adapter's own question
+    // — "does an execution already exist for this stable effect id, and which
+    // one?" — is answered from the dsh child listing by the run's durable label,
+    // and the boot sweep's terminal read and re-subscribe are installed too.
+    // dsh's answers are what the platform can substantiate: the query can NAME
+    // an execution and can never prove one absent, the terminal read is
+    // `unknown` (no durable outcome exists on the surface rolebox consumes),
+    // and the watch is `unsupported` (a run's result promise belongs to the
+    // process that started it). Each of those is REPORTED by the host, never
+    // rounded into a launch, a settlement or a silent strand.
+    query: outcomeDelivery.executionQuery,
+    observeExecution: outcomeDelivery.observeExecution,
+    watchCompletion: outcomeDelivery.watchCompletion,
   });
   // The outcome toolset: the four entries that operate on a DECLARED graph.
   // No manager / dispatch seam is injected, so it can never build a legacy
@@ -1308,36 +1332,61 @@ export async function apply(
   // Best-effort: a failure is logged, never gates boot.
   void outcomeHost
     .recoverDeclaredGraphs()
-    .then((report) => {
+    .then(async (report) => {
       if (
-        report.started.length === 0 &&
-        report.resumed.length === 0 &&
-        report.refused.length === 0 &&
-        report.effectRefusals.length === 0 &&
-        report.divergences.length === 0
+        report.started.length > 0 ||
+        report.resumed.length > 0 ||
+        report.refused.length > 0 ||
+        report.effectRefusals.length > 0 ||
+        report.divergences.length > 0
       ) {
-        return;
+        log.warn("dsh outcome graph recovery", {
+          started: report.started,
+          resumed: report.resumed,
+          refused: report.refused,
+          // Per-effect facts a visited graph still owes: an effect the resume
+          // would not launch, and a row the host's fact contradicted.
+          effectRefusals: report.effectRefusals.map(
+            (refusal) => refusal.graphId + ":" + refusal.code,
+          ),
+          divergences: report.divergences.map(
+            (divergence) =>
+              divergence.graphId +
+              ":" +
+              divergence.effectId +
+              ":" +
+              divergence.local +
+              "->" +
+              divergence.host,
+          ),
+        });
       }
-      log.warn("dsh outcome graph recovery", {
-        started: report.started,
-        resumed: report.resumed,
-        refused: report.refused,
-        // Per-effect facts a visited graph still owes: an effect the resume
-        // would not launch, and a row the host's fact contradicted.
-        effectRefusals: report.effectRefusals.map(
-          (refusal) => refusal.graphId + ":" + refusal.code,
-        ),
-        divergences: report.divergences.map(
-          (divergence) =>
-            divergence.graphId +
-            ":" +
-            divergence.effectId +
-            ":" +
-            divergence.local +
-            "->" +
-            divergence.host,
-        ),
-      });
+      // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every
+      // confirmed execution the sweep is still waiting on is handed back to the
+      // platform adapter, which re-subscribes where dsh supports it and reports
+      // the ones it cannot keep observing. On dsh the watch is `unsupported`
+      // (a run's result promise belongs to the process that started it), so the
+      // report names each execution nobody is listening to — the observable
+      // block, never a silent strand — and the next boot sweep re-asks.
+      const watching = await outcomeHost?.retainAwaitingCompletions(
+        report.awaitingCompletion,
+        { onSettled: () => notifyRoleboxChanged("graph") },
+      );
+      if (
+        watching !== undefined &&
+        (watching.watched.length > 0 ||
+          watching.settled.length > 0 ||
+          watching.unwatched.length > 0)
+      ) {
+        log.warn("dsh outcome graph observation", {
+          watched: watching.watched,
+          settled: watching.settled,
+          unwatched: watching.unwatched.map(
+            (entry) =>
+              entry.graphId + ":" + entry.attemptId + ":" + entry.executionId,
+          ),
+        });
+      }
     })
     .catch((err: unknown) => {
       log.warn("dsh outcome graph recovery failed", {

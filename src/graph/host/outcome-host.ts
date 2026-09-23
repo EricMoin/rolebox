@@ -28,12 +28,22 @@
  *   applied idempotently instead of waiting for a callback that will never come.
  *   An execution the platform reports STILL RUNNING is not settled and not
  *   forgotten either: the sweep names it (with the platform's own execution id)
- *   in `awaitingCompletion`, which is the inventory a host adapter re-subscribes
- *   to or keeps re-querying after the process that held the subscription exited;
+ *   in `awaitingCompletion`, the inventory {@link
+ *   OutcomeHost.retainAwaitingCompletions} CONSUMES after the sweep —
+ *   re-subscribing through the entry's platform watch port where the platform
+ *   supports it, re-querying on the same recovery window where it does not, and
+ *   reporting every execution it could not keep observing;
+ * - THE PLATFORM QUERY PORT (P2 item 5, F2) — the create's outcome may be
+ *   unknown, but the platform can be asked about the SAME stable effect id and
+ *   can name the execution it created. The host joins that answer with its own
+ *   registry, binds the name when this process still owns the claim, keeps it as
+ *   a re-derivable reading otherwise, and never turns "I cannot see" into
+ *   `absent` — a false `absent` is what would license a second execution;
  * - the host's COMPLETION AUTHORITY (P2 item 7) — the confirmed execution the
- *   host's durable record carries is what authenticates a completion the
- *   worker's bearer value can no longer vouch for, and the run path refuses a
- *   fact it cannot corroborate.
+ *   host's durable record carries (or the execution the platform named for the
+ *   same stable effect id) is what authenticates a completion the worker's
+ *   bearer value can no longer vouch for, and the run path refuses a fact it
+ *   cannot corroborate.
  *
  * AND THE CACHED RUN PATH IS VALIDATED BEFORE IT IS USED (G14). A graph's
  * runtime is opened once and kept, so the durable definition row is re-read on
@@ -96,6 +106,7 @@ import {
 } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
+import type { PendingEffectRecord } from "../ledger/types.ts";
 import {
   OutcomeGraphRuntime,
   type AttemptCredentialReissueFence,
@@ -123,7 +134,12 @@ import type {
   HostDispatchDelivery,
   HostDispatchInvocation,
 } from "./dispatch-host.ts";
-import type { OutcomeDispatchEffectKey } from "../outcome/dispatch-effects.ts";
+import type {
+  OutcomeDispatchEffectKey,
+  OutcomeExecutionIdentity,
+  OutcomeExecutionProbe,
+  OutcomeExecutionQuery,
+} from "../outcome/dispatch-effects.ts";
 import {
   dispatchEffectIdOf,
   dispatchEffectKeyOf,
@@ -240,34 +256,85 @@ export interface OutcomeHostOptions {
    * execution/child-session binding and RE-SUBSCRIBES OR READS THE TERMINAL
    * STATE. Re-subscribing is the platform's callback (already wired); this port
    * is the read: asked about an execution the host confirmed, the platform
-   * answers whether that execution has already reached its end.
+   * answers whether that execution has already reached its end — and, when it
+   * has, whether it reached the outcome its plan authorized.
    *
    * WHY IT MATTERS. An execution that finished while no process was listening
    * will never announce itself again. Without this port the attempt would wait
    * forever for a callback that is not coming — the silent strand the plan
-   * forbids — so the boot sweep asks, and a `terminal` answer settles the
+   * forbids — so the boot sweep asks, and a `completed` answer settles the
    * attempt idempotently through the same acceptance core an announced
    * completion uses.
    *
-   * OMITTED IS HONEST, NOT SILENT: a host that cannot ask the platform (neither
-   * shipped adapter implements this yet — see §8.1 of the execution plan)
-   * reports every in-flight attempt it could not observe as an explicit
-   * per-effect refusal. It never reports the graph resumed-and-fine while an
-   * execution's fate is unknown.
+   * A FAILED END IS NOT A COMPLETION (plan §3.4). An execution the platform
+   * reports over WITHOUT reaching its authorized outcome (`failed`) is NEVER
+   * settled on this channel: the durable failure write is P3's command, and
+   * inventing a successful outcome for a run that crashed is exactly the
+   * fabrication the plan forbids. The attempt is reported unsettled instead.
+   *
+   * INSTALLED BY BOTH SHIPPED ENTRIES (F3). dsh cannot read a run's outcome
+   * after the process that held it exited (its child listing encodes no durable
+   * outcome), so the dsh port answers `unknown` with that reason; Pi reads the
+   * dispatch manager's own task record. A host that installs no port at all
+   * still gets the honest `unknown` and a per-effect refusal — never
+   * "resumed-and-fine" while an execution's fate is unknown.
    */
   readonly observeExecution?: HostExecutionObservationPort;
+  /**
+   * THE PLATFORM'S OWN ANSWER ABOUT ONE DISPATCH EFFECT (P2 item 5).
+   *
+   * The question the runtime's crash-window reconciliation asks: whether an
+   * execution exists for a stable effect id whose create outcome was never
+   * confirmed — and, when one does, WHICH execution (F2). The port is reached
+   * through {@link OutcomeHost.dispatch}, joined with the host's own registry,
+   * and its `prime` phase is awaited by this host's asynchronous entry points
+   * before the synchronous run path asks.
+   *
+   * A platform that cannot answer says `unknown` and the effect stays BLOCKED:
+   * only a PROOF of non-existence may release a stranded create right, and
+   * neither shipped platform can prove it.
+   */
+  readonly query?: OutcomeExecutionQuery;
+  /**
+   * WHERE THE HOST RE-SUBSCRIBES TO AN EXECUTION IT IS STILL WAITING ON (F4).
+   *
+   * The boot sweep names every confirmed execution whose completion has not
+   * arrived in `awaitingCompletion`; this port is how the host turns that
+   * inventory into a LIVE observation again. The entry installs the platform's
+   * own notification channel (Pi: `dispatchManager.onTaskTerminated`); the
+   * callback fires when the platform says the execution ended, and the host
+   * settles the attempt through the SAME completion bridge an announced
+   * in-process completion uses — never a second listener mechanism.
+   *
+   * A platform that cannot subscribe after the process that held the run exited
+   * answers `"unsupported"` (dsh), and the host reports those executions as
+   * unwatched rather than pretending they are covered.
+   */
+  readonly watchCompletion?: HostCompletionWatchPort;
 }
 
 /**
  * What the platform can say about one CONFIRMED execution.
  *
- * A CLOSED three-way answer, because "finished" and "not finished" are the only
- * facts a completion needs and "I cannot tell" must never be rounded into
- * either: `unknown` keeps the attempt in flight and is REPORTED, exactly as an
- * unanswerable execution query keeps a dispatch effect unsettled.
+ * A CLOSED four-way answer. "Still running" and "cannot tell" must never be
+ * rounded into an end, and — the distinction that keeps a crash from being
+ * settled as a success — the two ways an execution can END are separate:
+ *
+ * - `completed` — the execution reached the outcome its plan authorized. A
+ *   COMPLETION fact, settled through the acceptance core;
+ * - `failed` — it ended WITHOUT reaching that outcome (failed, cancelled,
+ *   timed out, aborted), with the platform's own reason. It is reported as an
+ *   unsettled attempt and is NEVER settled as a completion: P3 owns the durable
+ *   failure write, and fabricating a successful outcome would be exactly the
+ *   §3.4 violation the plan forbids;
+ * - `running` — still in flight;
+ * - `unknown` — the platform cannot tell. Keeps the attempt in flight and is
+ *   REPORTED, exactly as an unanswerable execution query keeps a dispatch effect
+ *   unsettled.
  */
 export type HostExecutionObservation =
-  | { readonly kind: "terminal" }
+  | { readonly kind: "completed" }
+  | { readonly kind: "failed"; readonly reason: string }
   | { readonly kind: "running" }
   | { readonly kind: "unknown"; readonly reason: string };
 
@@ -279,6 +346,75 @@ export type HostExecutionObservation =
 export type HostExecutionObservationPort = (
   execution: HostExecutionIdentity,
 ) => HostExecutionObservation;
+
+/**
+ * The platform's own notification channel for one execution the host is still
+ * waiting on (F4).
+ *
+ * `watch` asks the platform to announce the end of ONE execution the sweep
+ * named in `awaitingCompletion`; `onEnded` is invoked at most once, when the
+ * platform says it is over (a platform that already knows it ended must deliver
+ * that immediately). `"watching"` means the announcement is established — the
+ * host then settles the attempt through the SAME completion bridge an in-process
+ * announcement uses. `"unsupported"` means this platform cannot re-establish
+ * the observation for that execution, and the host REPORTS it as unwatched
+ * instead of pretending it is covered.
+ *
+ * IT IS NOT A SECOND LISTENER MECHANISM: the callback carries no outcome, no
+ * payload and no credential — it only says "look again", and the settlement
+ * runs through the one completion bridge the delivery path already feeds.
+ */
+export type HostCompletionWatchVerdict = "watching" | "unsupported";
+
+/** How the host re-subscribes to one awaited execution (F4). */
+export type HostCompletionWatchPort = (
+  entry: OutcomeHostAwaitingCompletion,
+  onEnded: () => void,
+) => HostCompletionWatchVerdict;
+
+/**
+ * One confirmed execution the host could NOT re-establish a watch on (F4).
+ *
+ * Reported, never silent: the execution is still in flight (or its fate is
+ * unknown), no platform announcement is established for it in this process, and
+ * the next recovery window is the only thing that will look at it again.
+ */
+export interface OutcomeHostUnwatchedExecution {
+  readonly graphId: string;
+  readonly attemptId: string;
+  /** The platform's own id for the execution, as the sweep reported it. */
+  readonly executionId: string;
+  readonly reason: string;
+}
+
+/**
+ * What re-establishing observation over the sweep's `awaitingCompletion`
+ * inventory did (F4).
+ *
+ * `watched` is the platform's announcement ESTABLISHED for a named execution
+ * (the settlement it triggers is idempotent and goes through the one completion
+ * bridge); `settled` is an execution this call itself resolved from a
+ * `completed` read; `unwatched` is every execution this process cannot keep
+ * observing, with the reason.
+ */
+export interface OutcomeHostWatchReport {
+  /** `graph:attempt:executionId` for each execution the platform now watches. */
+  readonly watched: readonly string[];
+  /** `graph:attempt:report` for each execution settled from a terminal read. */
+  readonly settled: readonly string[];
+  readonly unwatched: readonly OutcomeHostUnwatchedExecution[];
+}
+
+/** Inputs to {@link OutcomeHost.retainAwaitingCompletions}. */
+export interface OutcomeHostWatchOptions {
+  /**
+   * Called after a settlement this call performed — or the watch it
+   * established — actually finished, so the entry can refresh its own views
+   * (the web console, a log line). Optional: the settlement itself does not
+   * depend on it.
+   */
+  readonly onSettled?: (graphId: string, attemptId: string) => void;
+}
 
 /** One host invocation's attribution, as the declaring tool call saw it. */
 export interface OutcomeHostInvocation {
@@ -315,7 +451,11 @@ export interface OutcomeHostAwaitingCompletion {
   readonly graphId: string;
   readonly nodeId: string;
   readonly attemptId: string;
-  /** The platform's own id for the execution the host confirmed. */
+  /**
+   * The platform's own id for the execution: the host's confirmed record when
+   * it has one, and otherwise the execution the PLATFORM's query named for the
+   * same stable effect id (F2 — the create whose confirmation never arrived).
+   */
   readonly executionId: string;
   /** The platform's task id, when it names the execution and the task apart. */
   readonly taskId?: string;
@@ -371,7 +511,7 @@ export interface OutcomeHostRecoveryReport {
    */
   readonly completed: readonly string[];
   /**
-   * EVERY CONFIRMED HOST EXECUTION THIS SWEEP IS STILL WAITING ON (P2 item 6).
+   * EVERY HOST EXECUTION THIS SWEEP IS STILL WAITING ON (P2 item 6).
    *
    * A graph is resumed as soon as its own state is continued, but an attempt
    * whose platform execution has NOT finished cannot be settled from a terminal
@@ -381,6 +521,13 @@ export interface OutcomeHostRecoveryReport {
    * subscription is gone. This is the inventory such a host re-subscribes to,
    * or keeps re-querying, named by the platform's own execution id: item 6's
    * "rebuild the binding AND the listening" does not stop at the binding.
+   *
+   * THE EXECUTION MAY BE ONE THE LOCAL ROW NEVER CONFIRMED (F2). An attempt
+   * whose create confirmation was lost is named here by the execution the
+   * PLATFORM's query answered for the same stable effect id — the same
+   * execution, found rather than created a second time. The durable row stays
+   * exactly as the fence left it (`creating`), and the platform's name is what
+   * the host observes and authenticates a completion against.
    *
    * IT IS NOT A CLAIM THAT A SUBSCRIPTION HAPPENED. The sweep asked and the
    * platform answered `running` (or could not answer), so the attempt stays in
@@ -478,6 +625,10 @@ export class OutcomeHost {
   private readonly dispatchAdapter: HostOutcomeDispatch;
   /** The platform port the boot sweep observes a confirmed execution through. */
   private readonly observeExecution: HostExecutionObservationPort | undefined;
+  /** The platform's dispatch-effect query port, for the run path's own asks. */
+  private readonly query: OutcomeExecutionQuery | undefined;
+  /** Where a restarted host re-subscribes to an execution it still awaits (F4). */
+  private readonly watchCompletion: HostCompletionWatchPort | undefined;
   /**
    * What substantiates a host completion fact this host holds no bearer for
    * (P2 item 7): the host's OWN confirmed execution record. Bound methods, so
@@ -546,6 +697,8 @@ export class OutcomeHost {
     this.workerSessions = createHostWorkerSessionHolder();
     this.workerSessionOf = options.workerSessionOf;
     this.observeExecution = options.observeExecution;
+    this.query = options.query;
+    this.watchCompletion = options.watchCompletion;
     // The authority is the host's own durable record, read through the SAME
     // accessor the worker binding uses: one source of truth for "which
     // execution did this attempt get", never a second copy.
@@ -565,8 +718,14 @@ export class OutcomeHost {
       invocation: () => this.holder.current(),
       // The graph's own declaring invocation, not the ambient one: this is what
       // lets a successor armed out of band (and a boot sweep) name the same
-      // parent as the entry attempt.
+      // parent as the entry attempt. The SAME value is what the platform query
+      // port is asked with, so the child it correlates is the one this graph
+      // dispatched under this parent.
       dispatchInvocation: (graphId) => this.originOf(graphId),
+      // THE PLATFORM'S OWN ANSWER, PLUMBED TO THE DISPATCH ADAPTER (F3): the
+      // host's option is the one seam the entries install, and the adapter is
+      // where the run path's crash-window questions are actually asked.
+      ...(options.query === undefined ? {} : { query: options.query }),
       completions: {
         bind: (binding) => {
           this.bridgeFor(binding.graphId).bind(binding);
@@ -751,8 +910,18 @@ export class OutcomeHost {
     invocation: OutcomeHostInvocation = {},
   ): Promise<OutcomeResumeResult> {
     this.assertOpen();
-    const { runtime } = await this.runtimeFor(graphId);
+    const { runtime, ledger } = await this.runtimeFor(graphId);
     this.rememberOrigin(graphId, invocation);
+    // THE PLATFORM'S READINGS ARE PRIMED BEFORE THE SYNCHRONOUS WINDOW (P2
+    // item 5 / F3). `resume` reconciles every unsettled effect and asks the
+    // dispatch adapter — synchronously — whether an execution already exists for
+    // it; a platform whose correlation read is asynchronous would have no answer
+    // to give inside that window. Awaiting the port's `prime` here (with the
+    // graph's own recorded origin, the parent the creates were made under) is
+    // what makes the question answerable when it is asked. A platform without
+    // `prime` needs nothing; a failed prime leaves every reading unset, which
+    // answers `unknown` and blocks — never guesses.
+    await this.primePlatformReadings(graphId, ledger, invocation);
     this.setInvocation(invocation);
     try {
       // The run advanced inside the acceptance transaction, which wrote the run
@@ -761,6 +930,54 @@ export class OutcomeHost {
     } finally {
       this.holder.clear();
     }
+  }
+
+  /**
+   * Ask the platform port to refresh its readings for this graph's UNSETTLED
+   * dispatch effects, before the synchronous run path asks about them.
+   *
+   * THE PROBES COME FROM THE LEDGER, NOT FROM A CALLER. Every effect the
+   * ledger still holds unsettled (`pending` or `started` — exactly the set
+   * `resume` reconciles) is a question the run path is about to ask, and each
+   * is named by the stable key its create carried plus the invocation that
+   * create was handed. A graph with nothing unsettled asks nothing, and a
+   * ledger that cannot be read primes nothing: the run path's own reconcile
+   * reports that failure in its own words.
+   */
+  private async primePlatformReadings(
+    graphId: string,
+    ledger: SqliteAcceptanceLedger,
+    invocation: OutcomeHostInvocation,
+  ): Promise<void> {
+    if (this.query?.prime === undefined) return;
+    let effects: readonly PendingEffectRecord[];
+    try {
+      effects = ledger.pendingEffects(graphId);
+    } catch {
+      // The unreadable ledger is the run path's own report to make; priming
+      // simply has nothing to ask about.
+      return;
+    }
+    const origin =
+      invocation.sessionId === undefined || invocation.sessionId.length === 0
+        ? undefined
+        : Object.freeze({
+            sessionId: invocation.sessionId,
+            ...(invocation.agent === undefined || invocation.agent.length === 0
+              ? {}
+              : { agent: invocation.agent }),
+          });
+    const probes: OutcomeExecutionProbe[] = [];
+    for (const effect of effects) {
+      if (effect.kind !== "dispatch") continue;
+      probes.push(
+        Object.freeze({
+          effect: dispatchEffectKeyOf(graphId, effect.attemptId),
+          ...(origin === undefined ? {} : { invocation: origin }),
+        }),
+      );
+    }
+    await this.dispatchAdapter.primePlatformReadings(probes);
   }
 
   /**
@@ -817,12 +1034,14 @@ export class OutcomeHost {
         // A resume re-establishes the binding for every attempt still in
         // flight, so a completion the platform announces LATER settles. An
         // execution that finished while no process was listening will never
-        // announce itself again, so for each in-flight attempt the host
-        // CONFIRMED it asks the platform whether it is already over, and a
-        // `terminal` answer is settled idempotently through the same
+        // announce itself again, so for each in-flight attempt the host can
+        // name (its own confirmed record, or the platform's answer for the same
+        // stable effect id — F2) it asks whether the execution is already over,
+        // and a `completed` answer is settled idempotently through the same
         // acceptance core an announced completion uses. An unanswerable
         // question is REPORTED: never resumed-and-fine, never waited on
-        // forever.
+        // forever, and an execution that ENDED without its outcome is reported,
+        // not fabricated into one.
         for (const node of result.armed) {
           const attemptId = node.attemptId;
           let execution: HostExecutionIdentity | undefined;
@@ -848,12 +1067,43 @@ export class OutcomeHost {
             continue;
           }
           if (execution === undefined) {
-            // No CONFIRMED execution: the resume above already reported the
-            // effect (unsettled, credential-missing, divergence …), and an
-            // attempt nobody confirmed cannot be completed from a host fact.
+            // NO EXECUTION ANYBODY CAN NAME. `executionBindingOf` already asked
+            // the platform's query port for the same stable effect id (F2), so
+            // this is the case where the row never got the confirmation AND the
+            // platform did not name one either: the resume above already
+            // reported the effect (unsettled, credential-missing, divergence …),
+            // and an attempt no fact names cannot be observed, settled, or
+            // guessed about. The attempt stays in flight and is reported.
             continue;
           }
           const observation = this.observeExecutionOf(execution);
+          if (observation.kind === "failed") {
+            // THE EXECUTION ENDED WITHOUT REACHING ITS OUTCOME (plan §3.4): a
+            // failed/cancelled/timed-out run is NOT a completion, and settling
+            // one as the plan's pinned outcome would fabricate a result the run
+            // never produced. The durable failure write is P3's command, so the
+            // attempt is reported unsettled instead — never silently stranded,
+            // and never settled on a fabricated success.
+            effectRefusals.push(
+              Object.freeze({
+                graphId,
+                code: "completion-unsettled" as const,
+                path: "$.executionId",
+                message:
+                  "outcome-host: the platform reports host execution " +
+                  JSON.stringify(execution.executionId) +
+                  " of node " +
+                  JSON.stringify(node.nodeId) +
+                  " attempt " +
+                  JSON.stringify(attemptId) +
+                  " ENDED without reaching its authorized outcome (" +
+                  observation.reason +
+                  ") — it is NOT settled as a completion, and the durable failure " +
+                  "decision belongs to the control path",
+              }),
+            );
+            continue;
+          }
           if (observation.kind === "running") {
             // STILL RUNNING, SO STILL LISTENED FOR (P2 item 6). The durable
             // binding above survives the restart, but nothing subscribes to the
@@ -1027,6 +1277,189 @@ export class OutcomeHost {
   }
 
   /**
+   * RE-ESTABLISH OBSERVATION FOR EVERY EXECUTION THE SWEEP IS STILL WAITING ON
+   * (F4, P2 item 6).
+   *
+   * The sweep names each confirmed execution whose completion has not arrived in
+   * {@link OutcomeHostRecoveryReport.awaitingCompletion}; this call is what
+   * CONSUMES that inventory, and it is deliberately the entry's call rather than
+   * something the sweep does to itself: a host adapter that re-subscribes owns
+   * the platform channel, and the report says what it managed to establish.
+   *
+   * PER ENTRY, IN ORDER:
+   *
+   * 1. RE-SUBSCRIBE where the platform supports it — {@link
+   *    OutcomeHostOptions.watchCompletion} asks the platform to announce the end
+   *    of exactly this execution, and the callback settles the attempt through
+   *    the SAME completion bridge an in-process announcement uses (one
+   *    acceptance core, one listener mechanism, idempotent by the ledger).
+   * 2. OTHERWISE RE-QUERY ON THE SAME RECOVERY WINDOW: the platform is asked
+   *    once more whether the execution has ended, and a `completed` read is
+   *    settled here and now, through the same bridge.
+   * 3. ANYTHING ELSE IS REPORTED UNWATCHED, with the reason. An execution nobody
+   *    can observe after this call is named in the report — the observable block
+   *    the plan requires — never quietly forgotten, and the next boot sweep is
+   *    the next time anything looks at it.
+   *
+   * A platform that reports the execution `failed` is reported, not settled:
+   * see {@link HostExecutionObservation}.
+   */
+  async retainAwaitingCompletions(
+    awaiting: readonly OutcomeHostAwaitingCompletion[],
+    options: OutcomeHostWatchOptions = {},
+  ): Promise<OutcomeHostWatchReport> {
+    this.assertOpen();
+    const watched: string[] = [];
+    const settled: string[] = [];
+    const unwatched: OutcomeHostUnwatchedExecution[] = [];
+    for (const entry of awaiting) {
+      if (this.watchFor(entry, options)) {
+        watched.push(entry.graphId + ":" + entry.attemptId + ":" + entry.executionId);
+        continue;
+      }
+      const execution: HostExecutionIdentity = Object.freeze({
+        executionId: entry.executionId,
+        ...(entry.taskId === undefined ? {} : { taskId: entry.taskId }),
+      });
+      const observation = this.observeExecutionOf(execution);
+      if (observation.kind === "completed") {
+        const settlement = await this.complete(entry.graphId, entry.attemptId);
+        settled.push(
+          entry.graphId + ":" + entry.attemptId + ":" + settlement.kind,
+        );
+        if (settlement.kind === "settled") {
+          options.onSettled?.(entry.graphId, entry.attemptId);
+        }
+        continue;
+      }
+      unwatched.push(
+        Object.freeze({
+          graphId: entry.graphId,
+          attemptId: entry.attemptId,
+          executionId: entry.executionId,
+          reason: describeUnwatched(entry, observation),
+        }),
+      );
+    }
+    if (unwatched.length > 0) {
+      logWarn(
+        "outcome-host: awaiting-completion re-subscribe — " +
+          String(watched.length) +
+          " watched, " +
+          String(settled.length) +
+          " settled from a terminal read, " +
+          String(unwatched.length) +
+          " WITHOUT an established observation ([" +
+          unwatched
+            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.reason)
+            .join(", ") +
+          "]) — these executions stay named in the sweep's awaiting inventory and the next " +
+          "recovery window is the next time anything looks at them",
+      );
+    }
+    return Object.freeze({
+      watched: Object.freeze(watched),
+      settled: Object.freeze(settled),
+      unwatched: Object.freeze(unwatched),
+    });
+  }
+
+  /**
+   * Ask the platform to announce the end of one awaited execution, or say it
+   * cannot.
+   *
+   * A port that THROWS has not established anything: the failure is reported as
+   * unwatched by the caller (the caller's own observation read then supplies the
+   * reason), and no settlement is faked.
+   */
+  private watchFor(
+    entry: OutcomeHostAwaitingCompletion,
+    options: OutcomeHostWatchOptions,
+  ): boolean {
+    const watch = this.watchCompletion;
+    if (watch === undefined) return false;
+    try {
+      return (
+        watch(entry, () => {
+          void this.settleWatchedCompletion(entry, options);
+        }) === "watching"
+      );
+    } catch (error) {
+      logWarn(
+        "outcome-host: the platform completion-watch port threw for execution " +
+          JSON.stringify(entry.executionId) +
+          " of graph " +
+          JSON.stringify(entry.graphId) +
+          " — the execution is reported as unwatched rather than treated as covered (" +
+          describeWatchFailure(error) +
+          ")",
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Settle the attempt whose execution the platform announced as ended.
+   *
+   * THE ONE COMPLETION PATH. This is the bridge an in-process announcement
+   * already feeds, so the settlement is authenticated, idempotent and
+   * credential-free exactly like every other observed completion; a second
+   * announcement replays the receipt. A refusal is reported, never swallowed.
+   */
+  private async settleWatchedCompletion(
+    entry: OutcomeHostAwaitingCompletion,
+    options: OutcomeHostWatchOptions,
+  ): Promise<void> {
+    try {
+      const report = await this.complete(entry.graphId, entry.attemptId);
+      if (report.kind === "settled") {
+        options.onSettled?.(entry.graphId, entry.attemptId);
+      }
+      logWarn(
+        "outcome-host: the platform announced execution " +
+          JSON.stringify(entry.executionId) +
+          " of graph " +
+          JSON.stringify(entry.graphId) +
+          " attempt " +
+          JSON.stringify(entry.attemptId) +
+          " ended; the settlement report is " +
+          report.kind +
+          (report.kind === "settled" ? " (" + report.settlement.kind + ")" : ""),
+      );
+    } catch (error) {
+      logWarn(
+        "outcome-host: the platform announced execution " +
+          JSON.stringify(entry.executionId) +
+          " of graph " +
+          JSON.stringify(entry.graphId) +
+          " attempt " +
+          JSON.stringify(entry.attemptId) +
+          " ended, but the settlement threw (" +
+          describeWatchFailure(error) +
+          ") — the attempt stays unsettled and is reported",
+      );
+    }
+  }
+
+  /**
+   * The execution the PLATFORM names for one attempt, or `undefined`.
+   *
+   * Asked through the host's own dispatch adapter, which joins the local
+   * registry with the platform port and caches the platform's answer (F2). This
+   * is what lets an attempt whose durable row never got the confirmation be
+   * observed, named in `awaitingCompletion` and authenticated for a completion
+   * — the SAME execution the platform created, never a second one.
+   */
+  private platformNamedExecutionOf(
+    graphId: string,
+    attemptId: string,
+  ): HostExecutionIdentity | undefined {
+    const key = dispatchEffectKeyOf(graphId, attemptId);
+    const answer = this.dispatchAdapter.lookup(key);
+    return answer.kind === "created" ? answer.execution : undefined;
+  }
+
+  /**
    * Bind a tool face to this host's invocation attribution: every call puts the
    * host's attribution of THAT invocation in effect for the call's duration and
    * clears it after (D9).
@@ -1155,25 +1588,40 @@ export class OutcomeHost {
   }
 
   /**
-   * The host's CONFIRMED execution for one attempt, from its durable record.
+   * The CONFIRMED execution of one attempt: the host's durable record, or the
+   * execution the PLATFORM names for the same stable effect id (F2).
    *
-   * A row is a host execution only when the platform confirmed it — state
-   * `created` carries the platform's real id, and the store's own CHECK makes
-   * "created without an id" unrepresentable. `pending`/`creating` rows are
-   * deliberately NOT an execution: whether one exists is unknown, and a
-   * completion settled against a guess is exactly what this rule prevents.
+   * A row is a host execution when the platform confirmed it — state `created`
+   * carries the platform's real id, and the store's own CHECK makes "created
+   * without an id" unrepresentable. A `pending`/`creating` row is NOT that
+   * record: this host never saw the confirmation. It is not proof that no
+   * execution exists, though, and reading it as such is exactly the W4 strand —
+   * so the platform's own query port is asked the same stable question, and its
+   * answer (a READING, cached per process, never a rewrite of the fenced row) is
+   * the attempt's execution. A completion settled against a guess is still
+   * impossible: the only two sources are the fenced durable row and the
+   * platform's own named answer, and the completion envelope must name the SAME
+   * execution.
    */
   private executionBindingOf(attempt: {
     readonly graphId: string;
     readonly attemptId: string;
   }): HostExecutionIdentity | undefined {
-    const row = this.executions.read(
-      dispatchEffectKeyOf(attempt.graphId, attempt.attemptId),
-    );
-    if (row === undefined) return undefined;
-    if (row.attemptId !== attempt.attemptId) return undefined;
-    if (row.state !== "created" || row.execution === undefined) return undefined;
-    return row.execution;
+    const key = dispatchEffectKeyOf(attempt.graphId, attempt.attemptId);
+    const row = this.executions.read(key);
+    if (row !== undefined && row.attemptId === attempt.attemptId) {
+      if (row.state === "created" && row.execution !== undefined) return row.execution;
+    }
+    // THE PLATFORM'S OWN NAME, WHEN THE ROW NEVER GOT THE CONFIRMATION (F2).
+    // The durable row is the host's record of what IT created, and a row that is
+    // still `creating` because the confirmation was lost does not stop the
+    // platform from having created the execution. Asking the platform's query
+    // port — the SAME stable question, the same answer any process gets — is
+    // what lets the W4 window's attempt be observed, named and authenticated
+    // instead of stranded. It is a READING of the platform's fact, never a
+    // rewrite of the fenced row, and it is what the sweep and the worker binding
+    // both read.
+    return this.platformNamedExecutionOf(attempt.graphId, attempt.attemptId);
   }
 
   /**
@@ -1634,4 +2082,50 @@ function withInvocation(
       }
     },
   };
+}
+
+/**
+ * Why one awaited execution could not be watched (F4), in the platform's own
+ * words when it has any: a running execution has nothing more to say, a failed
+ * one says how it ended, and an unanswerable one carries its reason.
+ */
+function describeUnwatched(
+  entry: OutcomeHostAwaitingCompletion,
+  observation: HostExecutionObservation,
+): string {
+  if (observation.kind === "failed") {
+    return (
+      "the platform reports this execution ENDED without reaching its authorized outcome (" +
+      observation.reason +
+      "), so there is nothing left to watch and the durable failure decision belongs to the " +
+      "control path"
+    );
+  }
+  if (observation.kind === "running") {
+    return (
+      "the platform reports this execution still running and offers no watch to re-establish " +
+      "for it in this process, so it stays in the sweep's awaiting inventory"
+    );
+  }
+  if (observation.kind === "completed") {
+    // Unreachable through retainAwaitingCompletions (a completed read settles),
+    // kept total so the wording never falls through to the unknown branch.
+    return "the platform reports this execution COMPLETE";
+  }
+  return (
+    "the platform cannot say whether this execution has ended (" +
+    observation.reason +
+    "), so no observation is established and the attempt stays unsettled"
+  );
+}
+
+/**
+ * One caught value from the watch channel, described without quoting a platform
+ * message wholesale: the watch port is handed an execution id and no
+ * credential, and its failure is a diagnostic — not a channel for arbitrary
+ * host text.
+ */
+function describeWatchFailure(error: unknown): string {
+  if (error instanceof Error) return error.name;
+  return typeof error;
 }

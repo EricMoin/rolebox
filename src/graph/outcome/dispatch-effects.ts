@@ -53,19 +53,39 @@
  * carried: {@link OutcomeDispatchEffectKey.graphId} plus
  * {@link OutcomeDispatchEffectKey.effectId} (`"dispatch:" + attemptId`), or the
  * one-string spelling {@link dispatchIdempotencyKeyOf} when the platform needs
- * a single token (a task label, a query argument). A platform that cannot
- * correlate that key with certainty — no listing, no per-task lookup, a control
- * plane it does not own — MUST answer `unknown`, and the effect stays blocked.
- * `absent` is a proof, not a guess.
+ * a single token. That is why BOTH shipped adapters now carry the one-string
+ * spelling ON THE CREATE CALL itself — a dsh subagent run's durable `label`,
+ * a Pi dispatch task's `description` — so the key a platform stored is the
+ * exact string the query is asked for it. The probe also carries the
+ * {@link OutcomeExecutionProbe.invocation} the create was handed, because
+ * correlating a child with its effect needs the parent whose children are
+ * listed. A platform that cannot correlate that key with certainty — no
+ * listing, no per-task lookup, a control plane it does not own — MUST answer
+ * `unknown`, and the effect stays blocked. `absent` is a proof, not a guess:
+ * neither shipped platform can prove that an execution it cannot find never
+ * existed (dsh's child listing is live-preferred without session persistence,
+ * and Pi's task registry is a recovered, TTL-cleaned cache), so BOTH answer
+ * `unknown` rather than `absent`.
  *
- * THIS BUILD IMPLEMENTS THE LOCAL HALF. `HostOutcomeDispatch` accepts a port
- * and joins its answer with the host's own registry, and it uses an `absent`
- * answer to release a stranded claim. Neither shipped platform adapter supplies
- * one yet: dsh has `ctx.subagents.listChildren` and Pi has
- * `dispatchManager.getTask`, but nothing maps a stable effect id onto them, so
- * the shipped hosts answer `unknown` for a `creating` row and block. That
- * platform half is an open P2 gap named in
- * `docs/graph-v3-execution-plan.md` §8.1.
+ * A `created` ANSWER MUST BE ABLE TO SAY WHICH EXECUTION (F2). A platform that
+ * reports an execution exists names it ({@link OutcomeExecutionLookup.created}
+ * carries the platform's own execution id), so a process that never saw the
+ * create confirmation binds the SAME execution locally instead of creating a
+ * second one — the "host created it, local never got the confirmation" window.
+ * A `created` that names no execution is still a fact about EXISTENCE, but it
+ * is not a licence to re-create: a caller that needs the identity treats the
+ * missing name as "not named" and blocks.
+ *
+ * PRIMING AN ASYNCHRONOUS PLATFORM. The run path asks SYNCHRONOUSLY — the
+ * dispatch create, the crash-window reconciliation and the host's own lookup
+ * are all synchronous — while a platform's correlation call may not be (dsh's
+ * `ctx.subagents.listChildren` returns a promise). The port therefore has two
+ * phases: {@link OutcomeExecutionQuery.prime} is awaited by the host's own
+ * asynchronous entry points (the declaration seam and the boot sweep) BEFORE
+ * the synchronous window opens, and {@link OutcomeExecutionQuery.lookup} then
+ * answers from the readings that window produced. A question with no primed
+ * reading is `unknown` — never a guess, and never a synchronous call into an
+ * asynchronous control plane.
  *
  * Dependency leaf except for the request type: this module imports nothing at
  * runtime, so the runtime, the recovery seam and any adapter may depend on it
@@ -145,6 +165,24 @@ export interface OutcomeDispatchEffectKey {
 }
 
 /**
+ * The PLATFORM'S OWN NAME for one started execution.
+ *
+ * A dsh subagent run's id (which the dsh type contract makes equal to the
+ * published child session id), a Pi dispatch task's id — the token a recovery
+ * can ask the platform about, re-subscribe to, or observe. Declared here
+ * STRUCTURALLY rather than imported from the host registry: this module is the
+ * outcome-side contract and stays a dependency leaf, and the host's own
+ * `HostExecutionIdentity` has exactly this shape, so either value satisfies
+ * the other without a conversion.
+ */
+export interface OutcomeExecutionIdentity {
+  /** The platform's own id for the started execution. */
+  readonly executionId: string;
+  /** The platform's task id, when it names the execution and the task apart. */
+  readonly taskId?: string;
+}
+
+/**
  * What asking the host whether an execution exists answered.
  *
  * `created` and `absent` are FACTS the host stands behind; `unknown` is the
@@ -152,11 +190,82 @@ export interface OutcomeDispatchEffectKey {
  * does not own, a lookup that is not implemented). The three answers are what
  * lets a recovery say "already started", "definitely not started" or
  * "unresolved" instead of guessing between the last two.
+ *
+ * A `created` ANSWER NAMES THE EXECUTION WHENEVER THE ANSWERER CAN (F2). The
+ * name is what lets a process that never saw the create confirmation find the
+ * SAME execution the platform created instead of creating a second one; every
+ * producer in this build that can name it does (the host adapter enriches its
+ * own registry's answer, and both shipped platform ports answer with the
+ * platform's id). The field is optional only because the host registry's own
+ * inner answer is older than the named one; a caller that NEEDS the identity
+ * treats its absence as "not named" and blocks rather than guessing.
  */
 export type OutcomeExecutionLookup =
-  | { readonly kind: "created" }
+  | {
+      readonly kind: "created";
+      /** The platform's own name for the execution, when the answerer has it. */
+      readonly execution?: OutcomeExecutionIdentity;
+    }
   | { readonly kind: "absent" }
   | { readonly kind: "unknown"; readonly reason: string };
+
+/**
+ * The platform invocation a create was handed, as the host attributes it.
+ *
+ * A SESSION, and optionally the agent acting in it. The outcome adapters hand
+ * the same value to the delivery seam, so the invocation a platform stored with
+ * the create is the one the probe carries back to it. Structural twin of the
+ * host's `HostDispatchInvocation` (see the module header on the dependency
+ * direction).
+ */
+export interface OutcomeDispatchInvocation {
+  readonly sessionId?: string;
+  readonly agent?: string;
+}
+
+/**
+ * What a platform is asked about, and everything it needs to correlate the
+ * question with the create call it is being asked about.
+ *
+ * `effect` is the stable key the create carried (see
+ * {@link dispatchIdempotencyKeyOf} for its one-string spelling); `invocation`
+ * is the parent invocation the create was handed, present only when the host
+ * has one recorded — a platform that needs the parent to find the child (dsh
+ * lists a parent's children) answers `unknown` for a question that names none,
+ * rather than searching a control plane it cannot scope.
+ */
+export interface OutcomeExecutionProbe {
+  readonly effect: OutcomeDispatchEffectKey;
+  readonly invocation?: OutcomeDispatchInvocation;
+}
+
+/**
+ * The PLATFORM'S own answer about one dispatch effect (P2 item 5).
+ *
+ * TWO PHASES, because the run path is synchronous and a platform's correlation
+ * call may not be (see the module header):
+ *
+ * - {@link OutcomeExecutionQuery.prime} refreshes the readings for the probes
+ *   the next synchronous window will ask about. The host awaits it from its own
+ *   asynchronous entry points — the declaration seam and the boot sweep — so a
+ *   platform that lists, scans or reads asynchronously has its answer ready
+ *   before the run path asks. Optional: a platform whose reads are synchronous
+ *   does not need it.
+ * - {@link OutcomeExecutionQuery.lookup} answers for one probe from the
+ *   readings this process holds. It is the run path's only question, so it must
+ *   be synchronous and total: a probe with no primed reading, an unreadable
+ *   control plane and an ambiguous correlation all answer `unknown`.
+ *
+ * `absent` is a PROOF and only a proof releases the create right: a platform
+ * that cannot establish that an execution it cannot find never existed answers
+ * `unknown`, and the effect stays blocked.
+ */
+export interface OutcomeExecutionQuery {
+  /** The synchronous answer the run path reads. */
+  lookup(probe: OutcomeExecutionProbe): OutcomeExecutionLookup;
+  /** Refresh the readings for these probes; awaited before the sync window. */
+  prime?(probes: readonly OutcomeExecutionProbe[]): Promise<void>;
+}
 
 /**
  * The host adapter that executes dispatch effects.
@@ -174,19 +283,6 @@ export interface OutcomeDispatchHost {
 
 /** Every shape the runtime accepts as a dispatcher: a seam or a host. */
 export type OutcomeDispatchAdapter = OutcomeDispatchSeam | OutcomeDispatchHost;
-
-/**
- * The PLATFORM'S answer about the execution of one stable effect identity
- * (P2 item 5): the port a host needs to turn "the create outcome is unknown"
- * into a FACT it can act on.
- *
- * It answers for the same stable key the create call carried — see the module
- * header for the full contract. `absent` is a proof; a platform that cannot
- * correlate the key answers `unknown` and the effect stays blocked.
- */
-export type OutcomeExecutionQuery = (
-  effect: OutcomeDispatchEffectKey,
-) => OutcomeExecutionLookup;
 
 /**
  * One adapter, seen through one interface: a create call that always receives

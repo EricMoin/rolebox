@@ -57,12 +57,22 @@
  * IDEMPOTENCY AND CORRELATION (P2 item 5). The create call carries the stable
  * effect identity — `(graphId, effectId)` with `effectId = "dispatch:" + attemptId` —
  * which is the key a platform must dedupe and correlate on; a platform that
- * needs one string uses `dispatchIdempotencyKeyOf`. The QUERY PORT is the other
- * half: a host that installs one can have a stranded `creating` effect PROVEN
- * absent and released, and one that does not answers `unknown` and BLOCKS. The
- * shipped dsh/Pi adapters do not implement the port yet (see
- * `dispatch-effects.ts` and §8.1 of the execution plan), so this build
- * implements the local half only.
+ * needs one string uses `dispatchIdempotencyKeyOf`, and BOTH shipped adapters
+ * carry exactly that string on the create call (the dsh run's durable label, the
+ * Pi task's description). The QUERY PORT is the other half: a host that installs
+ * one can have a stranded `creating` effect PROVEN absent and released, or its
+ * execution NAMED and adopted, and one that does not answers `unknown` and
+ * BLOCKS. Both shipped adapters implement the port and both answer `unknown`
+ * rather than `absent` when they cannot prove non-existence.
+ *
+ * THE PLATFORM'S NAME IS BOUND, NOT JUST REPORTED (F2). A `created` answer that
+ * names the execution is recorded on this process's `creating` claim through
+ * the SAME conditional write a late confirmation uses (so a foreign claim is
+ * never rewritten), and the name stays readable through
+ * {@link HostOutcomeDispatch.namedExecutionOf} either way. A process that never
+ * saw the create confirmation therefore finds the SAME execution the platform
+ * created and never creates a second one — and a platform that cannot prove
+ * absence leaves the effect BLOCKED rather than re-created.
  *
  * WHERE THE CREDENTIAL GOES. The request this adapter receives is the ONLY
  * carrier of the attempt credential (`OutcomeDispatchRequest`), and it is handed
@@ -87,8 +97,11 @@ import { logWarn } from "../log-warn.ts";
 import type {
   OutcomeDispatchEffectKey,
   OutcomeDispatchHost,
+  OutcomeDispatchInvocation,
   OutcomeDispatchRequest,
+  OutcomeExecutionIdentity,
   OutcomeExecutionLookup,
+  OutcomeExecutionProbe,
   OutcomeExecutionQuery,
 } from "../outcome/dispatch-effects.ts";
 import { dispatchIdempotencyKeyOf } from "../outcome/dispatch-effects.ts";
@@ -97,6 +110,7 @@ import {
   HostExecutionIndex,
   hostExecutionNotCreated,
   type HostExecutionClaim,
+  type HostExecutionConfirmation,
   type HostExecutionIdentity,
   type HostExecutionNotCreated,
 } from "./execution-index.ts";
@@ -141,10 +155,7 @@ export type HostDispatchDelivery = (
  * it recorded for the GRAPH, so the declaring call, a worker's accepted
  * submission, an observed completion and a boot sweep all name the same parent.
  */
-export interface HostDispatchInvocation {
-  readonly sessionId?: string;
-  readonly agent?: string;
-}
+export type HostDispatchInvocation = OutcomeDispatchInvocation;
 
 /** The attempt identity one delivery is bound to, for the completion bridge. */
 export interface HostAttemptBinding {
@@ -183,12 +194,22 @@ export interface HostOutcomeDispatchOptions {
   /**
    * The PLATFORM'S own answer about whether an execution exists for one stable
    * effect id (P2 item 5). Optional: a host that cannot ask the platform
-   * answers `unknown` for a `creating` effect and blocks, which is the honest
-   * behaviour and the one the shipped entries have today.
+   * answers `unknown` for a `creating` effect and blocks.
    *
    * With a port installed, an `absent` answer is a PROOF: it can release a
    * stranded claim so the attempt is created exactly once, and it joins the
-   * host's own answer so a lookup never turns "I cannot see" into `absent`.
+   * host's own answer so a lookup never turns "I cannot see" into `absent`. A
+   * `created` answer NAMES the execution (F2): the adapter BINDS that name
+   * locally when this process still holds the claim, and answers with it either
+   * way, so a process that never saw the confirmation finds the SAME execution
+   * instead of creating a second one.
+   *
+   * The port is asked with {@link OutcomeExecutionProbe}: the stable effect key
+   * plus the invocation the create carried (read from
+   * {@link HostOutcomeDispatchOptions.dispatchInvocation}, the graph's own
+   * recorded origin). A platform whose correlation read is asynchronous is
+   * primed through {@link HostOutcomeDispatch.primePlatformReadings} before the
+   * synchronous run path asks.
    */
   readonly query?: OutcomeExecutionQuery;
   /** Optional completion-binding sink, for a host that settles completions. */
@@ -223,6 +244,23 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   private readonly dispatchInvocation:
     | ((graphId: string) => HostDispatchInvocation | undefined)
     | undefined;
+  /**
+   * THE PLATFORM'S OWN NAMES, as this process has read them (F2).
+   *
+   * A per-process reading of the platform's answer for effects whose create
+   * confirmation this host never recorded — the W4 window. It is NOT a second
+   * authority and NOT a durable record: the platform re-answers the same stable
+   * question in any process, and the durable execution row (fenced) remains the
+   * host's record of what it created. It exists so the boot sweep, the worker
+   * binding and the completion authority can name the execution of an attempt
+   * whose row is still `creating`.
+   */
+  private readonly platformExecutions = new Map<string, HostExecutionIdentity>();
+  /**
+   * Effects whose failed local binding has already been reported, so a lookup
+   * repeated by the sweep and by submissions logs the refusal once.
+   */
+  private readonly unboundReports = new Set<string>();
 
   constructor(options: HostOutcomeDispatchOptions) {
     this.executions = options.executions;
@@ -359,7 +397,8 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   }
 
   /**
-   * Whether an execution for this effect exists, as the host can tell.
+   * Whether an execution for this effect exists, as the host can tell — AND
+   * WHICH ONE, when either answerer can name it (F2).
    *
    * THE JOIN OF TWO ANSWERERS, and it is deliberately conservative: the host's
    * own durable registry answers for every create it performed, and the platform
@@ -368,9 +407,71 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
    * not confirming `created`) is the answer; `absent` requires BOTH to say that
    * no execution exists. A port that cannot answer therefore never degrades into
    * "absent" — which is what would license a second create.
+   *
+   * A NAMED `created` IS BOUND LOCALLY WHEN THIS PROCESS STILL OWNS THE CLAIM
+   * (F2). The one window where that is possible is the confirmation that never
+   * arrived while the claim stayed this process's: the platform's answer is the
+   * fact the lost callback would have carried, so recording it is the same write
+   * `confirmStarted` performs, and it is the SAME conditional write (the store
+   * refuses it for any other claim). A claim this process does NOT hold is never
+   * rewritten — the platform's name is cached for the attempt and reported, and
+   * the durable row is left exactly as the fence left it. Either way the SAME
+   * execution is returned, so the recovery never creates a second one.
    */
   lookup(effect: OutcomeDispatchEffectKey): OutcomeExecutionLookup {
-    return joinExecutionLookups(this.executions.lookup(effect), this.platformLookup(effect));
+    const local = this.namedLocalLookup(effect);
+    const platform = this.platformLookup(effect);
+    const joined = joinExecutionLookups(local, platform);
+    if (joined.kind === "created" && joined.execution !== undefined) {
+      this.rememberExecution(effect, joined.execution);
+      if (local.kind !== "created") {
+        this.bindPlatformExecution(effect, joined.execution);
+      }
+    }
+    return joined;
+  }
+
+  /**
+   * The execution the platform named for this effect, as this process last read
+   * it — or `undefined` when no answer has named one.
+   *
+   * A READING, NOT A SECOND AUTHORITY: it is the platform's own answer to the
+   * stable question, re-derivable by asking again in any process, and it exists
+   * so the host's completion path and boot sweep can name the execution of an
+   * attempt whose durable row never got the confirmation (the W4 window). The
+   * durable row stays the authority for what this host created; this is what the
+   * PLATFORM says it created.
+   */
+  namedExecutionOf(effect: OutcomeDispatchEffectKey): HostExecutionIdentity | undefined {
+    return this.platformExecutions.get(effectKeyOf(effect));
+  }
+
+  /**
+   * Refresh the platform's readings for these probes (the port's `prime`).
+   *
+   * The host awaits this from its own ASYNCHRONOUS entry points — the
+   * declaration seam and the boot sweep — so a platform whose correlation read
+   * is asynchronous (dsh lists a parent's children) has its answers ready before
+   * the run path's synchronous window opens. A port without `prime`, and a
+   * `prime` that fails, both leave every reading unset: the synchronous lookup
+   * then answers `unknown` and the effect stays blocked, never guessed. A
+   * failure is reported, never propagated into the caller's own result.
+   */
+  async primePlatformReadings(probes: readonly OutcomeExecutionProbe[]): Promise<void> {
+    const prime = this.query?.prime;
+    if (prime === undefined || probes.length === 0) return;
+    try {
+      await prime.call(this.query, probes);
+    } catch (error) {
+      logWarn(
+        "host-dispatch: priming the platform execution readings for " +
+          String(probes.length) +
+          " effect(s) failed — every reading stays unset, so the next lookup answers " +
+          "'unknown' and the affected effects stay blocked rather than being guessed at (" +
+          describeError(error) +
+          ")",
+      );
+    }
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -418,6 +519,12 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   /**
    * The platform's own answer, or `undefined` when no port is installed.
    *
+   * THE PROBE CARRIES THE INVOCATION THE CREATE WAS HANDED. A platform that
+   * correlates a child with its effect needs the parent (dsh lists a parent's
+   * children), and the host already holds that fact per graph — the same
+   * recorded origin every dispatch window uses — so the question is asked in the
+   * scope the create was made in, never against a control plane at large.
+   *
    * A port that THROWS has not answered: the failure is reported as `unknown`
    * (never as `absent`, and never as a proof), with a message that says the port
    * itself failed rather than quoting host text — the request carries an attempt
@@ -429,8 +536,13 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   ): OutcomeExecutionLookup | undefined {
     const query = this.query;
     if (query === undefined) return undefined;
+    const invocation = this.dispatchInvocation?.(effect.graphId);
+    const probe: OutcomeExecutionProbe = Object.freeze({
+      effect,
+      ...(invocation === undefined ? {} : { invocation }),
+    });
     try {
-      return query(effect);
+      return query.lookup(probe);
     } catch {
       logWarn(
         "host-dispatch: the platform execution query for effect " +
@@ -448,6 +560,105 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
       });
     }
   }
+
+  /**
+   * The host's OWN answer, with the execution the row records named on it (F2).
+   *
+   * {@link HostExecutionIndex.lookup} answers the three facts but not the name,
+   * and the name is exactly what a recovery needs to find the SAME execution.
+   * The row is read here — a read of the host's own durable fact, not a second
+   * write — and only a `created` row may name one: the store's own CHECK makes
+   * "created without an execution id" unrepresentable, and a row that somehow
+   * contradicted that is reported `unknown` rather than named.
+   */
+  private namedLocalLookup(effect: OutcomeDispatchEffectKey): OutcomeExecutionLookup {
+    const answer = this.executions.lookup(effect);
+    if (answer.kind !== "created") return answer;
+    const row = this.executions.read(effect);
+    if (row === undefined || row.state !== "created" || row.execution === undefined) {
+      return Object.freeze({
+        kind: "unknown" as const,
+        reason:
+          "the host registry records effect " +
+          JSON.stringify(effect.effectId) +
+          " as created but cannot name the execution it records, so the fact cannot be " +
+          "reconciled against the platform",
+      });
+    }
+    return Object.freeze({ kind: "created" as const, execution: row.execution });
+  }
+
+  /** Remember the platform's own name for one effect's execution. */
+  private rememberExecution(
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
+  ): void {
+    this.platformExecutions.set(effectKeyOf(effect), execution);
+  }
+
+  /**
+   * Try to record the platform's named execution on the LOCAL row.
+   *
+   * This is a WRITE, so it is the same conditional write `confirmStarted`
+   * performs: the row must be THIS process's `creating` claim. An attempt whose
+   * confirmation never arrived while the claim stayed ours is therefore bound
+   * exactly as a late callback would have bound it; a foreign or superseded
+   * claim is refused by the store and NOT rewritten, and the refusal is reported
+   * once per effect. Either way the platform's name stays readable through
+   * {@link namedExecutionOf}, so the attempt is never re-created.
+   */
+  private bindPlatformExecution(
+    effect: OutcomeDispatchEffectKey,
+    execution: HostExecutionIdentity,
+  ): void {
+    const key = effectKeyOf(effect);
+    // AT MOST ONE ATTEMPT PER EFFECT PER PROCESS. A refused conditional write
+    // records a durable refusal on the row, and that record exists to diagnose a
+    // STALE CONFIRMATION — not to be raised again by every lookup the sweep and
+    // the completion path perform for an effect this process does not own.
+    if (this.unboundReports.has(key)) return;
+    let verdict: HostExecutionConfirmation;
+    try {
+      verdict = this.executions.confirmExecution(effect, execution);
+    } catch (error) {
+      logWarn(
+        "host-dispatch: the platform names execution " +
+          JSON.stringify(execution.executionId) +
+          " for effect " +
+          JSON.stringify(effect.effectId) +
+          " of graph " +
+          JSON.stringify(effect.graphId) +
+          ", but binding it locally failed (" +
+          describeError(error) +
+          ") — the platform's name is kept for the recovery and no second execution is created",
+      );
+      return;
+    }
+    if (verdict.kind === "confirmed" || verdict.kind === "replayed") return;
+    this.unboundReports.add(key);
+    logWarn(
+      "host-dispatch: the platform names execution " +
+        JSON.stringify(execution.executionId) +
+        " for effect " +
+        JSON.stringify(effect.effectId) +
+        " of graph " +
+        JSON.stringify(effect.graphId) +
+        ", but this process does not hold the claim that recorded the create (" +
+        verdict.kind +
+        ") — the durable row is NOT rewritten, the platform's name is kept for the " +
+        "recovery, and no second execution is created",
+    );
+  }
+}
+
+/** One effect's map key, spelled the same way the registry spells it. */
+function effectKeyOf(effect: OutcomeDispatchEffectKey): string {
+  return effect.graphId + "\u0000" + effect.effectId;
+}
+
+/** One caught value, described without quoting host text wholesale. */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.name + ": " + error.message : typeof error;
 }
 
 /**
@@ -455,11 +666,20 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
  * create the other one knows about.
  *
  * - `created` from EITHER side is a fact and wins;
- * - `absent` from the PLATFORM wins over a local `unknown`/`absent`: the port's own
- *   contract makes that answer a proof, and it is what lets a stranded
- *   `creating` claim be adopted (or a memory-blind registry be told the truth);
- * - a platform that cannot tell keeps `unknown` — with the LOCAL reason when the
- *   local side is the one that could not tell (`another host process holds the
+ * - when BOTH say `created`, the answer that NAMES the execution wins (F2): the
+ *   caller needs the platform's own id to find the SAME execution, and a local
+ *   answer that names it is preferred because it is this host's own durable row;
+ * - `absent` from EITHER side is a PROOF and wins over the other side's
+ *   `unknown`. The host's durable registry proves it by construction — every
+ *   handover first writes the create-right row, so "no row" (or a released,
+ *   expired or own pending claim) means nothing was ever handed to the platform.
+ *   The platform proves it by its own contract (see `dispatch-effects.ts`), and
+ *   a local `unknown` is overruled by it — which is what lets a stranded
+ *   `creating` claim be released. A platform that merely cannot SEE an
+ *   execution proves nothing: its `unknown` never overrules a local `absent`,
+ *   because that would block a create the host has already proven safe;
+ * - with both sides unable to tell, the `unknown` is kept — with the LOCAL
+ *   reason when the local side could not tell (`another host process holds the
  *   create right` is more specific than "the port could not answer");
  * - with no port at all the local answer is the answer, exactly as before.
  */
@@ -467,11 +687,15 @@ function joinExecutionLookups(
   local: OutcomeExecutionLookup,
   platform: OutcomeExecutionLookup | undefined,
 ): OutcomeExecutionLookup {
-  if (local.kind === "created") return local;
   if (platform === undefined) return local;
+  if (local.kind === "created" && platform.kind === "created") {
+    return local.execution !== undefined ? local : platform;
+  }
+  if (local.kind === "created") return local;
   if (platform.kind === "created") return platform;
+  if (local.kind === "absent") return local;
   if (platform.kind === "absent") return platform;
-  return local.kind === "unknown" ? local : platform;
+  return local;
 }
 
 /** One held claim, described for the refusal without quoting a row wholesale. */

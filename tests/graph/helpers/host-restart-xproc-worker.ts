@@ -221,6 +221,10 @@ async function modeDispatch(): Promise<ModeOutcome> {
   const graphId = required("graph");
   const executionId = required("execution");
   const markerDir = required("marker-dir");
+  // `--confirm no` drives the W4 window: the platform created the execution and
+  // THIS process never recorded the confirmation, so the row stays `creating`
+  // and the next process must find the SAME execution through the platform.
+  const confirm = arg("confirm") !== "no";
   const delivered: string[] = [];
   const host = OutcomeHost.open({
     workspaceDir,
@@ -240,11 +244,12 @@ async function modeDispatch(): Promise<ModeOutcome> {
       throw new Error("the fixture graph was not started: " + started.kind);
     }
     const attemptId = "work#1";
-    const confirmed = host.confirmExecution(
-      dispatchEffectKeyOf(graphId, attemptId),
-      { executionId },
-    );
-    if (!confirmed) throw new Error("the platform execution was not confirmed");
+    const confirmed = confirm
+      ? host.confirmExecution(dispatchEffectKeyOf(graphId, attemptId), { executionId })
+      : false;
+    if (confirm && !confirmed) {
+      throw new Error("the platform execution was not confirmed");
+    }
     // THE VALUE IS NOT RETAINED, and this process is the only one that ever had
     // it. The recovery process cannot resolve it, which is the whole point.
     const retained =
@@ -279,6 +284,20 @@ async function modeRecover(): Promise<ModeOutcome> {
   const workspaceDir = required("workspace");
   const graphId = required("graph");
   const observe = required("observe");
+  // `--query created` installs the PLATFORM EXECUTION QUERY PORT (P2 item 5):
+  // it answers `created`, naming `--execution`, and only after its `prime`
+  // phase ran — which is what proves the host primed the port before the
+  // synchronous run path asked. `--query unknown` installs a port that cannot
+  // prove non-existence (the W3 shape: the effect stays blocked).
+  const queryMode = arg("query");
+  const executionId = arg("execution");
+  if (queryMode === "created" && (executionId === undefined || executionId.length === 0)) {
+    throw new Error(
+      "host-restart-xproc-worker: --query created needs --execution (the platform's own id)",
+    );
+  }
+  const watchEnded: Array<() => void> = [];
+  let primed = false;
   const delivered: string[] = [];
   const host = OutcomeHost.open({
     workspaceDir,
@@ -289,15 +308,56 @@ async function modeRecover(): Promise<ModeOutcome> {
     declareInvocationIdentity: false,
     completionPolicies: XPROC_POLICIES,
     ...(observe === "terminal"
-      ? { observeExecution: () => Object.freeze({ kind: "terminal" as const }) }
+      ? { observeExecution: () => Object.freeze({ kind: "completed" as const }) }
       : observe === "running"
         ? { observeExecution: () => Object.freeze({ kind: "running" as const }) }
         : {}),
+    ...(queryMode === undefined
+      ? {}
+      : {
+          query: {
+            lookup: () => {
+              if (queryMode === "created" && primed) {
+                return Object.freeze({
+                  kind: "created" as const,
+                  execution: Object.freeze({ executionId: executionId ?? "" }),
+                });
+              }
+              return Object.freeze({
+                kind: "unknown" as const,
+                reason: "the platform cannot prove this execution never existed",
+              });
+            },
+            prime: async () => {
+              primed = true;
+            },
+          },
+        }),
+    ...(arg("watch") === "on"
+      ? {
+          watchCompletion: (
+            _entry: unknown,
+            onEnded: () => void,
+          ) => {
+            watchEnded.push(onEnded);
+            return "watching" as const;
+          },
+        }
+      : {}),
   });
   try {
     const report = await host.recoverDeclaredGraphs();
+    // F4: THE AWAITING INVENTORY IS CONSUMED. Every execution the sweep named
+    // is handed back to the platform adapter for re-subscription; with
+    // `--watch on` the scripted platform announces the end immediately, which
+    // the host settles through the SAME completion bridge.
+    const watching = await host.retainAwaitingCompletions(report.awaitingCompletion);
+    for (const ended of watchEnded.splice(0)) ended();
+    // Give the announced settlement its turn before the record is read.
+    await new Promise((resolve) => setTimeout(resolve, 10));
     return {
       delivered,
+      primed,
       started: report.started,
       resumed: report.resumed,
       refused: report.refused,
@@ -307,9 +367,10 @@ async function modeRecover(): Promise<ModeOutcome> {
         (refusal) => refusal.graphId + ":" + refusal.code,
       ),
       storeBlocked: report.storeBlocked ?? null,
-      // THE LISTENING INVENTORY (P2 item 6): every confirmed execution the
-      // sweep is still waiting on, named by the platform's own id — what a host
-      // adapter re-subscribes to after the dispatching process exited.
+      // THE LISTENING INVENTORY (P2 item 6): every confirmed (or platform-named)
+      // execution the sweep is still waiting on, named by the platform's own id —
+      // what a host adapter re-subscribes to after the dispatching process
+      // exited.
       awaitingCompletion: report.awaitingCompletion.map((entry) => ({
         graphId: entry.graphId,
         nodeId: entry.nodeId,
@@ -317,6 +378,13 @@ async function modeRecover(): Promise<ModeOutcome> {
         executionId: entry.executionId,
         status: entry.status,
       })),
+      watching: {
+        watched: watching.watched,
+        settled: watching.settled,
+        unwatched: watching.unwatched.map(
+          (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.executionId,
+        ),
+      },
       record: await readRecord(storeRoot, graphId),
       executionRow: readExecutionRow(storeRoot, graphId, "work#1"),
     };

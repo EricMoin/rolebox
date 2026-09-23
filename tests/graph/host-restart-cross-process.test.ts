@@ -91,6 +91,14 @@ interface WorkerReport {
     readonly executionId: string;
     readonly status: string;
   }[];
+  /** Whether the platform query port's asynchronous prime phase ran. */
+  readonly primed?: boolean;
+  /** What consuming the awaiting inventory established (F4). */
+  readonly watching?: {
+    readonly watched: readonly string[];
+    readonly settled: readonly string[];
+    readonly unwatched: readonly string[];
+  };
   readonly storeBlocked?: string | null;
   readonly kind?: string;
   readonly nodeId?: string | null;
@@ -486,5 +494,128 @@ describe("host restart — a real process boundary recovers the completion bindi
     ]);
     expect(later.completed).toEqual([XPROC_GRAPH_ID + ":work#1:accepted"]);
     expect(later.record?.events).toBe(1);
+  });
+
+  it("W4: adopts the execution the platform names for a create whose confirmation never arrived, and settles it once", async () => {
+    const fixture = makeFixture("restart-xproc-w4-");
+
+    // ── PROCESS ONE: dispatch and NEVER confirm (the confirmation was lost),
+    // then EXIT. The host's row is left `creating` with no execution id.
+    const dispatched = await runWorker("dispatch-unconfirmed", [
+      ...workerArgs(fixture, {
+        mode: "dispatch",
+        execution: PLATFORM_EXECUTION_ID,
+        "marker-dir": fixture.markerDir,
+        confirm: "no",
+      }),
+    ]);
+    expect(dispatched.pid).not.toBe(process.pid);
+    expect(dispatched.delivered).toEqual(["work#1"]);
+    expect(dispatched.executionRow?.state).toBe("creating");
+    expect(dispatched.executionRow?.executionId).toBeNull();
+    await waitForMarker(
+      join(fixture.markerDir, "dispatched-work#1.marker"),
+      "the dispatching process's marker",
+    );
+
+    // ── PROCESS TWO: a FRESH process whose platform port can name the
+    // execution, and which re-subscribes to it. The port answers only after
+    // its prime phase ran, so this also proves the host primed it BEFORE the
+    // synchronous resume asked.
+    const recovered = await runWorker("recover-w4-watch", [
+      ...workerArgs(fixture, {
+        mode: "recover",
+        observe: "running",
+        query: "created",
+        execution: PLATFORM_EXECUTION_ID,
+        watch: "on",
+      }),
+    ]);
+    expect(recovered.pid).not.toBe(dispatched.pid);
+    expect(recovered.primed).toBe(true);
+    // NO SECOND EXECUTION: the platform named the SAME one, and the recovery
+    // delivered nothing.
+    expect(recovered.delivered).toEqual([]);
+    expect(recovered.awaitingCompletion).toEqual([
+      {
+        graphId: XPROC_GRAPH_ID,
+        nodeId: "work",
+        attemptId: "work#1",
+        executionId: PLATFORM_EXECUTION_ID,
+        status: "running",
+      },
+    ]);
+    // THE AWAITING INVENTORY WAS CONSUMED: the platform's own channel was
+    // established for the named execution, and the announced end settled the
+    // attempt through the same acceptance core.
+    expect(recovered.watching?.watched).toEqual([
+      XPROC_GRAPH_ID + ":work#1:" + PLATFORM_EXECUTION_ID,
+    ]);
+    expect(recovered.watching?.unwatched).toEqual([]);
+    expect(recovered.record?.status).toBe("settled");
+    expect(recovered.record?.outcomeId).toBe("done");
+    expect(recovered.record?.events).toBe(1);
+    expect(recovered.record?.pendingEffects).toEqual([]);
+    // THE DURABLE ROW IS NOT REWRITTEN: the fenced `creating` claim belonged to
+    // the process that died, and the platform's name is the reading that
+    // authenticated the completion — not a second local creation.
+    expect(recovered.executionRow?.state).toBe("creating");
+    expect(recovered.executionRow?.executionId).toBeNull();
+
+    // ── PROCESS THREE: the same store again. One accepted event, nothing
+    // re-created, nothing re-settled.
+    const again = await runWorker("recover-w4-again", [
+      ...workerArgs(fixture, {
+        mode: "recover",
+        observe: "terminal",
+        query: "created",
+        execution: PLATFORM_EXECUTION_ID,
+      }),
+    ]);
+    expect(again.pid).not.toBe(recovered.pid);
+    expect(again.delivered).toEqual([]);
+    expect(again.completed).toEqual([]);
+    expect(again.record?.events).toBe(1);
+  });
+
+  it("W3: a port that cannot prove non-existence leaves the create right held across real processes", async () => {
+    const fixture = makeFixture("restart-xproc-w3-");
+
+    const dispatched = await runWorker("dispatch-unconfirmed-w3", [
+      ...workerArgs(fixture, {
+        mode: "dispatch",
+        execution: PLATFORM_EXECUTION_ID,
+        "marker-dir": fixture.markerDir,
+        confirm: "no",
+      }),
+    ]);
+    expect(dispatched.executionRow?.state).toBe("creating");
+    await waitForMarker(
+      join(fixture.markerDir, "dispatched-work#1.marker"),
+      "the dispatching process's marker",
+    );
+
+    // The platform's port is installed and answers UNKNOWN: the effect may
+    // exist, so nothing may be released and nothing may be re-created.
+    const blocked = await runWorker("recover-w3-unknown", [
+      ...workerArgs(fixture, {
+        mode: "recover",
+        observe: "none",
+        query: "unknown",
+      }),
+    ]);
+    expect(blocked.delivered).toEqual([]);
+    expect(blocked.completed).toEqual([]);
+    expect(blocked.primed).toBe(true);
+    expect(blocked.record?.events).toBe(0);
+    expect(blocked.record?.status).toBe("dispatched");
+    // The row is EXACTLY where the dead process left it, and the lost
+    // credential is reported rather than re-issued.
+    expect(blocked.executionRow?.state).toBe("creating");
+    expect(blocked.executionRow?.executionId).toBeNull();
+    expect(blocked.effectRefusals).toEqual([
+      XPROC_GRAPH_ID + ":credential-reissue-forbidden",
+    ]);
+    expect(blocked.awaitingCompletion).toEqual([]);
   });
 });
