@@ -283,11 +283,14 @@ export interface ControlDecisionRecord {
  * The RUN-level control fact: the FIRST trusted command recorded for a run.
  *
  * It is written with the decision that produced it, in ONE transaction, and it
- * is never replaced — a later command (a second node's failure, a cancel issued
- * after a failure) is still recorded per attempt, but the run keeps the command
- * that stopped it first. That is the deterministic rule a repeated or racing
- * command is resolved by, and it is what a status/recovery reader asks instead
- * of re-deriving a stop from whichever decision happens to be read last.
+ * is never replaced — a later command for a DIFFERENT attempt (a second node's
+ * failure; a cancel issued after a failure, which records its intent on every
+ * in-flight attempt that carries no decision yet) is still recorded per
+ * attempt, while an attempt that ALREADY carries a command is never
+ * re-labelled and the run keeps the command that stopped it first. That is the
+ * deterministic rule a repeated or racing command is resolved by, and it is
+ * what a status/recovery reader asks instead of re-deriving a stop from
+ * whichever decision happens to be read last.
  */
 export interface RunControlRecord {
   readonly graphId: string;

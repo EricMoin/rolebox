@@ -2871,9 +2871,13 @@ export function bindOutcomeToolInvocation(
  * - it wraps exactly the `graph_control` tool of the record it is given and returns every other
  *   tool untouched;
  * - it runs the tool body FIRST, so the intent is durable before the host is asked anything;
- * - it then reads the graph id from the call's own arguments and ASKS the host to deliver that
- *   graph's cancel intents ({@link OutcomeHost.deliverCancelIntents}), awaiting it so the caller
- *   observes the delivered state rather than a race with it;
+ * - it then reads the graph id from the body's own APPLIED answer and ASKS the host to deliver
+ *   that graph's cancel intents ({@link OutcomeHost.deliverCancelIntents}), awaiting it so the
+ *   caller observes the delivered state rather than a race with it. ONLY an applied control
+ *   result delivers: a REFUSED command (an unauthorized caller, an unknown graph, an attempt
+ *   that already settled) wrote no intent, so asking the platform on its behalf would put an
+ *   effect on the control plane that the caller is not authorized to cause — the refusal is a
+ *   value in the tool result, and the answer's own `kind` is what the delivery is gated on;
  * - it NEVER changes the tool's result. The control answer already names every unconfirmed
  *   execution; what this adds is the platform half — reported to the host's log and to the next
  *   boot sweep, and recorded in the durable cancel effects.
@@ -2895,7 +2899,13 @@ export function withCancelDelivery(
       ...control,
       async execute(args, context) {
         const result = await inner(args, context);
-        const graphId = controlGraphIdOf(args);
+        // ONLY AN APPLIED COMMAND DELIVERS. The answer's own `kind` is the service's
+        // verdict: a refusal (no attribution, a caller that is not the declarer, an
+        // unknown graph, an attempt that already settled) recorded nothing, and a
+        // thrown store failure reached no platform either — neither has an intent to
+        // hand over, and delivering on one would let an unauthorized caller make the
+        // host ask a platform to stop a graph it does not own.
+        const graphId = appliedControlGraphIdOf(result);
         if (graphId !== undefined) {
           try {
             reportCancelDelivery(await host.deliverCancelIntents(graphId));
@@ -2916,10 +2926,26 @@ export function withCancelDelivery(
   };
 }
 
-/** The graph id a `graph_control` call names, or `undefined` when it names none. */
-function controlGraphIdOf(args: unknown): string | undefined {
-  if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
-  const graphId = (args as Record<string, unknown>)["graph_id"];
+/**
+ * The graph id of an APPLIED `graph_control` answer, or `undefined` for anything else.
+ *
+ * The tool body renders the control service's result as JSON; `kind: "applied"` is the
+ * service's own verdict that the command wrote a durable fact, so it is the only answer a
+ * platform delivery may follow. A refused answer (or an error string a thrown store failure
+ * produced) names no applied command and is answered `undefined`: nothing is delivered.
+ */
+function appliedControlGraphIdOf(result: unknown): string | undefined {
+  if (typeof result !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const answer = parsed as Record<string, unknown>;
+  if (answer["kind"] !== "applied") return undefined;
+  const graphId = answer["graphId"];
   return typeof graphId === "string" && graphId.length > 0 ? graphId : undefined;
 }
 

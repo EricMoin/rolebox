@@ -14,12 +14,14 @@
  * `OutcomeHost.bindTools` both entries call. Every assertion about a refusal
  * also reads the AUTHORITATIVE record back with a fresh connection.
  *
- * STRENGTH: adapter + real store, one process. No real dsh/Pi SDK runs in this
+ * STRENGTH: adapter + real store, process-level, and CROSS-PROCESS for the
+ * inverse race and for the failure/timeout restart (real `Bun.spawnSync` OS
+ * processes with their own store connections). No real dsh/Pi SDK runs in this
  * environment, so nothing here is real-host evidence.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +35,7 @@ import {
   type ValidatorRegistry,
 } from "../../src/graph/outcome/validators.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
+import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -42,6 +45,10 @@ import type {
   CanonicalToolContext,
   CanonicalToolDef,
 } from "../../src/platform/types.ts";
+import {
+  CONTROL_REPORT_MARKER,
+  XPROC_CONTROL_GRAPH_ID,
+} from "./helpers/control-xproc-worker.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -51,6 +58,25 @@ const EMPTY_VALIDATORS = createValidatorRegistry([]);
 const XPROC_WORKER = fileURLToPath(
   new URL("./helpers/graph-store-xproc-worker.ts", import.meta.url),
 );
+
+/** The checked-in HOST-level worker the failure/timeout restart cases spawn. */
+const CONTROL_XPROC_WORKER = fileURLToPath(
+  new URL("./helpers/control-xproc-worker.ts", import.meta.url),
+);
+
+/** One child process's deadline; a worker that overruns is killed by the harness. */
+const CONTROL_CHILD_DEADLINE_MS = 30_000;
+
+/**
+ * THE HARNESS BUDGET MUST EXCEED THIS FILE'S OWN CHILD DEADLINE (the same rule
+ * `cancel-delivery.test.ts` and `graph-store-cross-process.test.ts` carry). Bun's
+ * default is 5000ms per test, so a child that was merely SLOW — spawn latency
+ * under load, a `busy_timeout` wait on the shared store file — would have the
+ * CASE killed and its own diagnosis never written. The budget below lets the
+ * child deadline fire first, so what this file reports is always the control
+ * behavior, never a harness timeout.
+ */
+setDefaultTimeout(CONTROL_CHILD_DEADLINE_MS + 15_000);
 
 /** The one fixed instant the inverse-race worker stamps its decision with. */
 const RACE_AT = 1_700_000_000_000;
@@ -294,7 +320,12 @@ interface ControlAnswer {
     readonly decidedAt: number;
     readonly decidedBy?: { readonly sessionId: string; readonly agentId?: string };
   };
-  readonly skipped?: readonly { readonly nodeId: string; readonly attemptId: string }[];
+  readonly skipped?: readonly {
+    readonly nodeId: string;
+    readonly attemptId: string;
+    readonly code?: string;
+    readonly message?: string;
+  }[];
   readonly unsettledEffects?: readonly { readonly effectId: string; readonly status: string }[];
   readonly unconfirmedExecutions?: readonly {
     readonly nodeId?: string;
@@ -405,6 +436,31 @@ function credentialOf(fixture: ControlFixture, nodeId: string): string {
   const request = fixture.dispatched.find((candidate) => candidate.nodeId === nodeId);
   if (request === undefined) throw new Error("fixture: no dispatch for node " + nodeId);
   return request.credential;
+}
+
+/**
+ * Settle `work` through the SHIPPED submission ingress, which arms its successor.
+ *
+ * The control cases that must show a PRE-EXISTING accepted event untouched use
+ * this: the rollback assertions are only meaningful when there was something the
+ * command could have clobbered.
+ */
+async function settleWork(fixture: ControlFixture): Promise<void> {
+  const raw = String(
+    await fixture.tools.graph_submit_outcome.execute(
+      {
+        graph_id: fixture.graphId,
+        node_id: "work",
+        outcome_id: "done",
+        credential: credentialOf(fixture, "work"),
+      },
+      fixture.contextOf(childSessionOf("work#1"), "agent.work"),
+    ),
+  );
+  const answer = JSON.parse(raw) as { readonly decision?: string };
+  if (answer.decision !== "accepted") {
+    throw new Error("fixture: work did not settle (" + answer.decision + ")");
+  }
 }
 
 /** The decision one attempt carries, or a fixture error. */
@@ -758,6 +814,79 @@ describe("graph_control — idempotency and races", () => {
     }
   });
 
+  it("cancels the OTHER in-flight attempts after a failure, without re-labelling the failed one", async () => {
+    for (const command of ["failure", "timeout"] as const) {
+      // The failure stops the run but leaves its attempt DISPATCHED (by design),
+      // and both creates are unconfirmed: the run still owes two external tasks.
+      const fixture = await openControlFixture(FAN_OUT, { confirm: false });
+      try {
+        const stopped = await control(
+          fixture,
+          {
+            graph_id: fixture.graphId,
+            command,
+            node_id: "alpha",
+            reason: "alpha's execution ended first",
+          },
+          declarerOf(fixture),
+        );
+        expect(stopped.kind).toBe("applied");
+        expect(stopped.decided?.map((entry) => entry.attemptId)).toEqual(["alpha#1"]);
+        // Both unconfirmed external tasks are named by the stop itself.
+        expect(
+          stopped.unconfirmedExecutions?.map((entry) => entry.attemptId).sort(),
+        ).toEqual(["alpha#1", "beta#2"]);
+
+        const cancelled = await control(
+          fixture,
+          { graph_id: fixture.graphId, command: "cancel", reason: "stop the rest" },
+          declarerOf(fixture),
+        );
+        // A LATER RUN-WIDE CANCEL IS NOT BLOCKED BY THE FAILED ATTEMPT. It
+        // records its intent on every attempt that carries no fact yet, and the
+        // attempt that already has one is a SKIPPED target — never re-labelled,
+        // never a refusal of the whole command.
+        expect(cancelled.kind).toBe("applied");
+        expect(cancelled.command).toBe("cancel");
+        expect(cancelled.decided?.map((entry) => entry.attemptId)).toEqual(["beta#2"]);
+        expect(cancelled.decided?.[0]?.decision.command).toBe("cancel");
+        expect(cancelled.skipped).toHaveLength(1);
+        expect(cancelled.skipped?.[0]).toMatchObject({
+          nodeId: "alpha",
+          attemptId: "alpha#1",
+          code: "control-already-decided",
+        });
+        // The run keeps the FIRST stop — the command that actually stopped it.
+        expect(cancelled.runControl?.command).toBe(command);
+        expect(cancelled.runControl?.reason).toBe("alpha's execution ended first");
+        // The external tasks of BOTH attempts are still visible after the cancel.
+        expect(
+          cancelled.unconfirmedExecutions?.map((entry) => entry.attemptId).sort(),
+        ).toEqual(["alpha#1", "beta#2"]);
+
+        const rows = readControlRows(fixture);
+        expect(rows.control?.command).toBe(command);
+        expect(
+          rows.decisions.map((entry) => entry.attemptId + ":" + entry.command).sort(),
+        ).toEqual(["alpha#1:" + command, "beta#2:cancel"]);
+        // NO BUSINESS SUCCESS: control is not an outcome, so the failure and the
+        // cancel together wrote no accepted event and no receipt.
+        expect(rows.events).toEqual([]);
+        expect(rows.receipts).toBe(0);
+        expect(nodeEntry(readState(fixture), "alpha")).toMatchObject({
+          status: "dispatched",
+          attemptId: "alpha#1",
+        });
+        expect(nodeEntry(readState(fixture), "beta")).toMatchObject({
+          status: "dispatched",
+          attemptId: "beta#2",
+        });
+      } finally {
+        fixture.host.close();
+      }
+    }
+  });
+
   it("is refused once the attempt settled through the acceptance core", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
@@ -856,6 +985,186 @@ describe("graph_control — idempotency and races", () => {
       expect(pending.refusals?.[0]?.code).toBe("attempt-absent");
 
       expect(readControlRows(fixture).decisions).toEqual([]);
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── The command's own transaction (plan §5 P3 acceptance row 5) ─────────────
+
+/**
+ * Run one control command with a TEMP TRIGGER on the store's OWN shared
+ * connection, so the write fails AT THE SQL STATEMENT below the application.
+ *
+ * The store shares one connection per file in this process, so the trigger the
+ * case creates is the one the tool's transaction runs against. The trigger is
+ * dropped before the tables are read back, and the return value is whatever the
+ * command threw — the transaction rolls back on a throw, which is exactly what
+ * the assertions below check.
+ */
+function withInjectedControlWrite(
+  fixture: ControlFixture,
+  trigger: string,
+  run: () => unknown,
+): unknown {
+  const store = GraphStore.openFile(fixture.storeRoot);
+  try {
+    store.run("CREATE TEMP TRIGGER p3_control_inject " + trigger);
+    try {
+      run();
+      return undefined;
+    } catch (thrown) {
+      return thrown;
+    } finally {
+      store.run("DROP TRIGGER p3_control_inject");
+    }
+  } finally {
+    store.close();
+  }
+}
+
+describe("graph_control — a command commits whole or not at all", () => {
+  it("rolls a failure back whole when the decision INSERT fails, leaving the accepted predecessor untouched", async () => {
+    const fixture = await openControlFixture(CHAIN);
+    try {
+      await settleWork(fixture);
+      const before = readControlRows(fixture);
+      expect(before.events.map((event) => event.outcomeId)).toEqual(["done"]);
+      expect(before.receipts).toBe(1);
+
+      const error = withInjectedControlWrite(
+        fixture,
+        "BEFORE INSERT ON " +
+          GRAPH_STORE_TABLES.controlDecisions +
+          " BEGIN SELECT RAISE(ABORT, 'p3-injected-control-failure'); END",
+        () =>
+          fixture.toolset.graph_control(
+            {
+              graph_id: fixture.graphId,
+              command: "failure",
+              node_id: "review",
+              reason: "injected at the decision INSERT",
+            },
+            declarerOf(fixture),
+            "agent.declarer",
+          ),
+      );
+
+      // THE THROW IS THE CONTRACT: the store's own failure reaches the caller
+      // instead of being dressed up as a refusal.
+      expect(error).toBeInstanceOf(Error);
+      const rows = readControlRows(fixture);
+      expect(rows.decisions).toEqual([]);
+      expect(rows.control).toBeUndefined();
+      // UNTOUCHED: the accepted event, the receipt and the effects are exactly
+      // what the acceptance and the dispatch committed before the command.
+      expect(rows.events.map((event) => event.outcomeId)).toEqual(["done"]);
+      expect(rows.receipts).toBe(1);
+      expect(rows.effects).toEqual(before.effects);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("rolls a failure back whole when the RUN control UPDATE fails", async () => {
+    const fixture = await openControlFixture(CHAIN);
+    try {
+      await settleWork(fixture);
+      const before = readControlRows(fixture);
+
+      const error = withInjectedControlWrite(
+        fixture,
+        "BEFORE UPDATE OF control_command ON " +
+          GRAPH_STORE_TABLES.runs +
+          " BEGIN SELECT RAISE(ABORT, 'p3-injected-control-failure'); END",
+        () =>
+          fixture.toolset.graph_control(
+            {
+              graph_id: fixture.graphId,
+              command: "failure",
+              node_id: "review",
+              reason: "injected at the run control UPDATE",
+            },
+            declarerOf(fixture),
+            "agent.declarer",
+          ),
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      const rows = readControlRows(fixture);
+      expect(rows.decisions).toEqual([]);
+      expect(rows.control).toBeUndefined();
+      expect(rows.events.map((event) => event.outcomeId)).toEqual(["done"]);
+      expect(rows.receipts).toBe(1);
+      expect(rows.effects).toEqual(before.effects);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("rolls a PARTIAL cancel back whole: the second decision's failure undoes the first", async () => {
+    const fixture = await openControlFixture(FAN_OUT);
+    try {
+      const before = readControlRows(fixture);
+      const error = withInjectedControlWrite(
+        fixture,
+        "BEFORE INSERT ON " +
+          GRAPH_STORE_TABLES.controlDecisions +
+          " WHEN NEW.attempt_id = 'beta#2' " +
+          "BEGIN SELECT RAISE(ABORT, 'p3-injected-control-failure'); END",
+        () =>
+          fixture.toolset.graph_control(
+            {
+              graph_id: fixture.graphId,
+              command: "cancel",
+              reason: "injected on the second target",
+            },
+            declarerOf(fixture),
+            "agent.declarer",
+          ),
+      );
+
+      // ALPHA'S DECISION HAD LANDED when beta's INSERT failed; the rollback took
+      // it with it, so a partially applied cancel is unrepresentable.
+      expect(error).toBeInstanceOf(Error);
+      const rows = readControlRows(fixture);
+      expect(rows.decisions).toEqual([]);
+      expect(rows.control).toBeUndefined();
+      expect(rows.events).toEqual([]);
+      expect(rows.receipts).toBe(0);
+      expect(rows.effects).toEqual(before.effects);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("rolls a RUN-WIDE cancel back whole when the RUN control UPDATE fails", async () => {
+    const fixture = await openControlFixture(FAN_OUT);
+    try {
+      const error = withInjectedControlWrite(
+        fixture,
+        "BEFORE UPDATE OF control_command ON " +
+          GRAPH_STORE_TABLES.runs +
+          " BEGIN SELECT RAISE(ABORT, 'p3-injected-control-failure'); END",
+        () =>
+          fixture.toolset.graph_control(
+            {
+              graph_id: fixture.graphId,
+              command: "cancel",
+              reason: "injected at the run control UPDATE",
+            },
+            declarerOf(fixture),
+            "agent.declarer",
+          ),
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      const rows = readControlRows(fixture);
+      expect(rows.decisions).toEqual([]);
+      expect(rows.control).toBeUndefined();
+      expect(rows.events).toEqual([]);
+      expect(rows.effects.map((effect) => effect.status)).toEqual(["started", "started"]);
     } finally {
       fixture.host.close();
     }
@@ -1099,6 +1408,167 @@ describe("graph_control — an unconfirmed external task stays visible", () => {
       fixture.host.close();
     }
   });
+});
+
+// ── The failure/timeout restart across a REAL process boundary ──────────────
+
+/** What the real child process reported after applying one control command. */
+interface ControlRestartReport {
+  readonly pid: number;
+  readonly graphId: string;
+  readonly command: string;
+  readonly answer: {
+    readonly kind?: string;
+    readonly runControl?: { readonly command?: string };
+  };
+  readonly effects: readonly string[];
+  readonly executions: readonly string[];
+  readonly events: number;
+  readonly receipts: number;
+}
+
+/**
+ * Apply ONE control command through a REAL second OS process, SYNCHRONOUSLY.
+ *
+ * The child (tests/graph/helpers/control-xproc-worker.ts) declares and starts
+ * the graph through the SHIPPED assembly, never confirms the create, applies
+ * the trusted command, reads the durable rows with a fresh connection, writes
+ * the reading to its marker and EXITS. This helper starts it, refuses a child
+ * that did not exit cleanly, and answers what the child left behind — the
+ * process boundary is real, not two connections in one process.
+ */
+function recordControlFromAnotherProcess(options: {
+  readonly dir: string;
+  readonly storeRoot: string;
+  readonly graphId: string;
+  readonly command: "failure" | "timeout";
+}): ControlRestartReport {
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      CONTROL_XPROC_WORKER,
+      "--dir",
+      options.dir,
+      "--store",
+      options.storeRoot,
+      "--graph",
+      options.graphId,
+      "--command",
+      options.command,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const stderr = new TextDecoder().decode(result.stderr);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      "fixture: the control-recording process exited " +
+        String(result.exitCode) +
+        " instead of applying the command (stderr: " +
+        stderr.trim() +
+        ")",
+    );
+  }
+  return JSON.parse(
+    readFileSync(join(options.dir, CONTROL_REPORT_MARKER), "utf8"),
+  ) as ControlRestartReport;
+}
+
+describe("graph_control — a failure/timeout survives the recording PROCESS", () => {
+  for (const command of ["failure", "timeout"] as const) {
+    it("reports the " + command + " after a real relaunch, keeps the unconfirmed execution visible and settles nothing", async () => {
+      const dir = makeTmpDir("control-xproc-restart-");
+      const storeRoot = join(dir, "host-store");
+      mkdirSync(storeRoot, { recursive: true });
+      const graphId = XPROC_CONTROL_GRAPH_ID;
+
+      // THE CHILD IS A REAL OS PROCESS, and the marker proves it: its pid is
+      // not this process's, and its own fresh-connection reading is what it
+      // leaves behind.
+      const child = recordControlFromAnotherProcess({ dir, storeRoot, graphId, command });
+      expect(child.pid).not.toBe(process.pid);
+      expect(child.graphId).toBe(graphId);
+      expect(child.command).toBe(command);
+      expect(child.answer.kind).toBe("applied");
+      expect(child.answer.runControl?.command).toBe(command);
+      // The create was handed to the platform and NEVER confirmed, so the
+      // execution row is `creating` — an external task that may exist.
+      expect(child.executions).toEqual(["work#1=creating"]);
+      expect(child.events).toBe(0);
+      expect(child.receipts).toBe(0);
+
+      // THE RELAUNCH: a FRESH host over the same store root runs the PRODUCTION
+      // boot sweep, which is the only path a restart takes.
+      const dispatches: OutcomeDispatchRequest[] = [];
+      const relaunched = OutcomeHost.open({
+        workspaceDir: dir,
+        storeRoot,
+        deliver: (request) => {
+          dispatches.push(request);
+        },
+        validators: EMPTY_VALIDATORS,
+        declareInvocationIdentity: false,
+        workerSessionOf: (execution) => execution.executionId,
+      });
+      try {
+        const report = await relaunched.recoverDeclaredGraphs();
+        // THE STOP IS REPORTED: the fact outlives the process that decided it.
+        expect(report.controlled).toEqual([graphId + ":" + command]);
+        // THE UNCONFIRMED EXECUTION STAYS VISIBLE.
+        expect(report.unconfirmedExecutions).toHaveLength(1);
+        expect(report.unconfirmedExecutions[0]).toMatchObject({
+          graphId,
+          nodeId: "work",
+          attemptId: "work#1",
+          state: "creating",
+        });
+        // NOTHING IS DISPATCHED by the relaunch, and the effect the stop left
+        // pending is refused by name instead of being re-created.
+        expect(dispatches).toEqual([]);
+        expect(report.effectRefusals.map((refusal) => refusal.code)).toContain("control-stopped");
+
+        // NO SETTLEMENT IS POSSIBLE AFTER THE RESTART. The shipped ingress
+        // refuses the stopped run by name whatever credential a late worker
+        // presents, so the successor can never be armed.
+        const relaunchedToolset = createGraphToolSet({
+          stateDir: dir,
+          credentialIsolation: relaunched.credentialIsolation,
+          hostIdentity: relaunched.workerIdentity,
+          outcomeDispatch: relaunched.dispatch,
+          outcomeValidators: EMPTY_VALIDATORS,
+          outcomeArtifactRoot: dir,
+        });
+        const tools = relaunched.bindTools(createOutcomeGraphTools(relaunchedToolset));
+        const refused = JSON.parse(
+          String(
+            await tools.graph_submit_outcome.execute(
+              {
+                graph_id: graphId,
+                node_id: "work",
+                outcome_id: "done",
+                credential: "credential.after-restart",
+              },
+              makeContext(childSessionOf("work#1"), "agent.work", dir),
+            ),
+          ),
+        ) as { readonly refusals?: readonly { readonly code: string }[] };
+        expect(refused.refusals?.[0]?.code).toBe("control-stopped");
+        expect(dispatches).toEqual([]);
+
+        const store = GraphStore.openFile(storeRoot);
+        try {
+          expect(store.runs.readRunControl(graphId)?.command).toBe(command);
+          expect(
+            store.runs.controlDecisions(graphId).map((decision) => decision.attemptId + ":" + decision.command),
+          ).toEqual(["work#1:" + command]);
+          expect(store.acceptedEvents(graphId)).toEqual([]);
+        } finally {
+          store.close();
+        }
+      } finally {
+        relaunched.close();
+      }
+    });
+  }
 });
 
 /** Call the SHIPPED `graph_control` tool and parse its JSON answer. */

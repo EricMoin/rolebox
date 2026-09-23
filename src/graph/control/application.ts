@@ -36,7 +36,9 @@
  *   from being mis-started: a successor is armed only from an accepted event
  *   plus the feeder's current attempt, and a control decision is neither.
  * - CANCEL: the run is stopped (the same run fact) and every attempt still in
- *   flight is named by its own cancel decision — the durable cancel INTENT.
+ *   flight is named by its own cancel decision — the durable cancel INTENT. An
+ *   attempt that ALREADY carries another control command keeps that fact and is
+ *   reported as SKIPPED; every other in-flight attempt still gets the intent.
  *   The external executions themselves are NOT cancelled HERE: this module
  *   writes control records and nothing else. The intent is handed to the
  *   platform by the host's cancel delivery (`src/graph/outcome/cancel.ts`,
@@ -70,9 +72,16 @@
  * 2. ONE RUN, ONE STOPPING COMMAND — THE FIRST ONE. The run's control fact is
  *    claimed by a conditional update on the unclaimed row, so a second command
  *    never replaces the command that stopped the run first. Later commands are
- *    still recorded PER ATTEMPT (a sibling's failure, a cancel issued after a
- *    failure) because they are facts worth keeping — but the run keeps its
- *    first stop, and the answer always reports the fact that actually stands.
+ *    still recorded PER ATTEMPT for every in-flight attempt that carries none:
+ *    a sibling's failure, and a cancel issued after a failure, record their own
+ *    decision on each attempt still owed one, because those are facts worth
+ *    keeping. An attempt that ALREADY carries a different command is never
+ *    re-labelled — a node-scoped command naming it is refused
+ *    `control-already-decided`, while a RUN-WIDE command (a cancel) reports it
+ *    as a SKIPPED target and carries on with the rest of the run, so one failed
+ *    attempt can never block the cancellation of every other in-flight
+ *    execution. The run keeps its first stop, and the answer reports the fact
+ *    that actually stands.
  * 3. AGAINST ACCEPTANCE, IN BOTH DIRECTIONS. This service reads the attempt's
  *    accepted events and writes its decision in ONE store transaction, so an
  *    attempt that settled is refused (`attempt-already-settled`). The inverse
@@ -238,7 +247,11 @@ export type GraphControlResult =
        * it — never this call's candidate.
        */
       readonly runControl: RunControlRecord;
-      /** In-flight attempts this call did not decide, because they had settled. */
+      /**
+       * In-flight attempts this call did not decide, because they had already
+       * settled through the acceptance core, or — for a run-wide command — because
+       * they already carry another control command and are never re-labelled.
+       */
       readonly skipped: readonly GraphControlSkippedAttempt[];
       /** Every effect of the run still pending or started. */
       readonly unsettledEffects: readonly PendingEffectRecord[];
@@ -646,6 +659,37 @@ export function applyGraphControl(
         );
       }
       if (written.kind === "conflict") {
+        // A RUN-WIDE COMMAND SKIPS A TARGET THAT ALREADY CARRIES ANOTHER
+        // CONTROL FACT instead of refusing the whole command. The store wrote
+        // NOTHING for this attempt (the conditional INSERT did not land and the
+        // conflict verdict returns the existing row), so the other in-flight
+        // attempts still get their cancel decision, the run keeps its first
+        // stop, and "one attempt, one control fact" is preserved. Refusing here
+        // instead would let one already-failed attempt block the cancellation of
+        // every other execution the run still owes (the fan-out case).
+        if (RUN_WIDE_COMMANDS.has(request.command)) {
+          skipped.push(
+            Object.freeze({
+              nodeId: target.nodeId,
+              attemptId: target.attemptId,
+              code: "control-already-decided" as const,
+              message:
+                "node " +
+                target.nodeId +
+                " attempt " +
+                target.attemptId +
+                " already carries the control command " +
+                JSON.stringify(written.existing.command) +
+                " (" +
+                written.existing.reason +
+                "), so " +
+                JSON.stringify(request.command) +
+                " is not recorded over it — the attempt keeps its own fact and is " +
+                "reported as skipped while the command applies to the rest of the run",
+            }),
+          );
+          continue;
+        }
         return refuse(
           graphId,
           "control-already-decided",
@@ -672,10 +716,13 @@ export function applyGraphControl(
           replayed: written.kind === "replayed",
         }),
       );
-      // A COMMAND IS ATOMIC: every decision it records commits with the run
-      // fact, or none of them does. A refusal below rolls the whole transaction
-      // back, including the decisions already inserted for other attempts, so a
-      // partially applied cancel is unrepresentable.
+      // A COMMAND IS ATOMIC: every decision it ACTUALLY RECORDS commits with the
+      // run fact, or none of them does. A `settled` refusal below rolls the whole
+      // transaction back, including the decisions already inserted for other
+      // attempts, so a partially applied cancel is unrepresentable. A `conflict`
+      // on a run-wide command is not a refusal (see above): the attempt keeps its
+      // own fact and is reported as skipped, and the decisions taken for the
+      // remaining attempts still commit together.
     }
 
     if (runControl === undefined) {

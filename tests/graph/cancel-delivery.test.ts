@@ -137,6 +137,22 @@ const SOLO: GraphDeclarationV3 = {
 };
 
 /**
+ * Two ENTRY nodes: one start leaves TWO attempts in flight at once.
+ *
+ * The failure-then-cancel case needs both: the first attempt carries the
+ * failure, and the second is the one a later cancel must still reach.
+ */
+const TWO_ENTRIES: GraphDeclarationV3 = {
+  version: 3,
+  name: "cancel.two-entries",
+  nodes: [
+    { id: "alpha", agent: "agent.alpha", prompt: "Do alpha.", outcomes: [{ id: "done" }] },
+    { id: "beta", agent: "agent.beta", prompt: "Do beta.", outcomes: [{ id: "done" }] },
+  ],
+  edges: [],
+};
+
+/**
  * The same chain, with `work`'s accepted outcome behind a DECLARED GATE.
  *
  * The gate is what opens the inverse-race window: acceptance gates run OUTSIDE
@@ -963,6 +979,73 @@ describe("graph_control cancel — deterministic races", () => {
     }
   });
 
+  it("still delivers the cancel for the OTHER in-flight attempt after a failure already stopped the run", async () => {
+    // TWO ENTRY ATTEMPTS, NEITHER CONFIRMED and neither settled. A `failure` on
+    // alpha stops the run but leaves alpha's attempt DISPATCHED (by design), so a
+    // later run-wide cancel must not be refused by the fact alpha already carries:
+    // beta's external execution is the one the plan's cancel clause still owes.
+    const fixture = await openCancelFixture(TWO_ENTRIES, { confirm: false });
+    try {
+      fixture.platform.answer = {
+        kind: "confirmed",
+        reason: "the fake platform confirmed the abort",
+      };
+
+      const failed = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "failure",
+          node_id: "alpha",
+          reason: "alpha's execution ended",
+        },
+        "session.declarer",
+      );
+      expect(failed["kind"]).toBe("applied");
+      // A failure is NOT a cancel: nothing is handed to the platform.
+      expect(fixture.platform.asked).toEqual([]);
+
+      const cancelled = await control(
+        fixture,
+        { graph_id: fixture.graphId, command: "cancel", reason: "stop the rest" },
+        "session.declarer",
+      );
+      expect(cancelled["kind"]).toBe("applied");
+      // The intent is recorded for the attempt that carries NO fact yet...
+      expect(
+        (cancelled["decided"] as readonly { readonly attemptId: string }[]).map(
+          (entry) => entry.attemptId,
+        ),
+      ).toEqual(["beta#2"]);
+      // ...and the failed one is a SKIPPED target, not an error.
+      expect(
+        (cancelled["skipped"] as readonly { readonly attemptId: string; readonly code?: string }[])[0],
+      ).toMatchObject({ attemptId: "alpha#1", code: "control-already-decided" });
+      expect((cancelled["runControl"] as { readonly command?: string }).command).toBe("failure");
+
+      // THE PLATFORM ASK GOES TO BETA — the execution the stop still owes. Alpha
+      // is never re-labelled and is never asked about.
+      expect(fixture.platform.asked).toHaveLength(1);
+      expect(fixture.platform.asked[0]?.effect.attemptId).toBe("beta#2");
+      expect(fixture.platform.atAsk).toEqual([
+        { attemptId: "beta#2", effect: "started", runCommand: "failure" },
+      ]);
+
+      const rows = readRows(fixture);
+      expect(rows.control?.command).toBe("failure");
+      expect(
+        rows.decisions.map((decision) => decision.attemptId + ":" + decision.command).sort(),
+      ).toEqual(["alpha#1:failure", "beta#2:cancel"]);
+      expect(cancelRowOf(rows, "beta#2")).toEqual({ effectId: "cancel:beta#2", status: "done" });
+      expect(cancelRowOf(rows, "alpha#1")).toBeUndefined();
+      // No business success was written by either command.
+      expect(rows.events).toEqual([]);
+      expect(rows.receipts).toBe(0);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
   it("refuses an in-flight submission when a cancel commits in ANOTHER PROCESS while its gate runs, and arms no successor", async () => {
     // The gate needs the fixture's store root, and the fixture needs the gate to
     // build its host: the holder is filled as soon as the fixture exists, and the
@@ -1305,6 +1388,48 @@ describe("graph_control cancel — the window before delivery, and the worker bo
       expect(rows.decisions).toEqual([]);
       expect(rows.control).toBeUndefined();
       expect(rows.cancelEffects).toEqual([]);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("asks the platform nothing when an unauthorized caller's control command is refused", async () => {
+    const fixture = await openCancelFixture(CHAIN);
+    try {
+      fixture.platform.answer = {
+        kind: "requested",
+        reason: "the fake platform took the request and cannot confirm it",
+      };
+      const applied = await control(
+        fixture,
+        { graph_id: fixture.graphId, command: "cancel", reason: "the operator stopped it" },
+        "session.declarer",
+      );
+      expect(applied["kind"]).toBe("applied");
+      expect(fixture.platform.asked).toHaveLength(1);
+
+      // A NON-DECLARER IS REFUSED BY THE SERVICE...
+      const refused = await control(
+        fixture,
+        { graph_id: fixture.graphId, command: "cancel", reason: "not mine to stop" },
+        "session.intruder",
+      );
+      expect(refused["kind"]).toBe("refused");
+      expect(
+        (refused["refusals"] as readonly { readonly code: string }[])[0]?.code,
+      ).toBe("control-not-authorized");
+
+      // ...AND THE PLATFORM IS NOT ASKED ON ITS BEHALF. Only an APPLIED control
+      // answer carries an intent to deliver; a refusal must not let a caller who
+      // does not own the graph make the host ask the platform to stop it.
+      expect(fixture.platform.asked).toHaveLength(1);
+      const rows = readRows(fixture);
+      expect(rows.control?.reason).toBe("the operator stopped it");
+      expect(rows.decisions).toHaveLength(1);
+      expect(rows.cancelEffects).toEqual([
+        { effectId: "cancel:work#1", status: "started" },
+      ]);
+      expect(rows.events).toEqual([]);
     } finally {
       fixture.host.close();
     }
