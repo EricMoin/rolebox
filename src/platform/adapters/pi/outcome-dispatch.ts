@@ -18,7 +18,14 @@
  * - a launch that rejects before any task exists is reported with the stable
  *   effect key through `onStartFailed`, so the host drops the execution-index
  *   record — the same "the execution did not start" fact a synchronous throw
- *   records.
+ *   records;
+ * - the invocation the task is launched under arrives WITH the delivery (the
+ *   host's third argument: the graph's declaring invocation, recorded by the
+ *   host and re-supplied on every window that arms a dispatch). The adapter
+ *   keeps no session state of its own, so a successor armed by an out-of-band
+ *   completion is launched under the same parent as the entry attempt, and a
+ *   delivery whose host knows no invocation is refused by name instead of
+ *   being attributed to whatever call happens to be running.
  *
  * The task carries NO notification-suppression marker: the deleted legacy
  * graph engine turned off the dispatch manager's parent notification because
@@ -33,6 +40,7 @@ import type {
 } from "../../../graph/outcome/dispatch-effects.ts";
 import type { DispatchInput, DispatchTask } from "../../../dispatch/types.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
+import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 
@@ -85,11 +93,13 @@ const NON_COMPLETION_STATUSES: ReadonlySet<string> = new Set<string>([
   "timeout",
 ]);
 
-/** The Pi delivery seam, one per host process. */
+/**
+ * The Pi delivery seam, one per host process, and STATELESS about invocations:
+ * the session a task is launched under arrives with each delivery as the host's
+ * own attribution of the graph's declaring invocation.
+ */
 export class PiOutcomeDelivery {
   private readonly log;
-  private parentSessionId: string | undefined;
-  private parentAgent: string | undefined;
   /** request per launched task id, so a terminal callback can name the attempt. */
   private readonly attempts = new Map<string, OutcomeDispatchRequest>();
 
@@ -97,21 +107,12 @@ export class PiOutcomeDelivery {
     this.log = createSubLogger(opts.loggerName ?? "pi-outcome-dispatch");
   }
 
-  /**
-   * Name the invocation a graph's attempts belong to. Set by the host before it
-   * resumes (or first-executes) a declared graph and cleared after; the
-   * dispatch happens inside that window.
-   */
-  setInvocation(sessionId: string | undefined, agent: string | undefined): void {
-    this.parentSessionId = sessionId;
-    this.parentAgent = agent;
-  }
-
   deliver = (
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
+    invocation?: HostDispatchInvocation,
   ): void => {
-    const parentSessionId = this.parentSessionId;
+    const parentSessionId = invocation?.sessionId;
     if (parentSessionId === undefined || parentSessionId.length === 0) {
       throw new Error(
         "Pi outcome dispatch: no invoking session is in effect for graph " +
@@ -129,7 +130,7 @@ export class PiOutcomeDelivery {
       },
       {
         sessionID: parentSessionId,
-        agent: this.parentAgent ?? "",
+        agent: invocation?.agent ?? "",
         directory: this.opts.directory,
       },
     );

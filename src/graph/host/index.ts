@@ -17,6 +17,10 @@
  *   most once per stable effect id, look up the host's fact;
  * - `identity.ts` — the invocation-identity capability (version 1) a host
  *   injects so an attempt is settled only by the invocation that dispatched it;
+ * - `invocation-origins.ts` — the host's record of which invocation DECLARED
+ *   each graph, so every window that arms a dispatch (a first execution, a
+ *   worker's submission, an observed completion, a boot sweep) starts the
+ *   worker under the same parent instead of the window's ambient attribution;
  * - `completion-bridge.ts` — the bridge from an observed completion to
  *   `settleNatural`, which is the only settlement channel a completion uses.
  *
@@ -44,8 +48,17 @@ export {
   type HostAttemptBinding,
   type HostCompletionBindingSink,
   type HostDispatchDelivery,
+  type HostDispatchInvocation,
   type HostOutcomeDispatchOptions,
 } from "./dispatch-host.ts";
+export {
+  HOST_INVOCATION_ORIGINS_FILE,
+  HOST_INVOCATION_ORIGINS_VERSION,
+  HostInvocationOrigins,
+  type HostInvocationOrigin,
+  type HostInvocationOriginsDurability,
+  type HostInvocationOriginsOptions,
+} from "./invocation-origins.ts";
 export {
   createHostInvocationHolder,
   hostIdentityCapability,

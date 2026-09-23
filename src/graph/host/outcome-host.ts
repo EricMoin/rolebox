@@ -36,6 +36,17 @@
  * closes. {@link OutcomeHost.recoverDeclaredGraphs} is the same operation over
  * every protocol-2 record in the store, for a host's boot path.
  *
+ * EVERY DISPATCH WINDOW NAMES THE GRAPH'S DECLARING INVOCATION. A platform can
+ * only start a worker under the invocation that owns it, and only ONE of the
+ * windows that arm a dispatch is the declaring call: a successor is armed by an
+ * acceptance (a worker's submission or an observed completion) and a boot sweep
+ * re-arms what a dead process left pending, both with no tool call in effect.
+ * The host therefore keeps the declaring invocation PER GRAPH — in memory and,
+ * with `durability: "file"`, in its own store root
+ * (`invocation-origins.ts`) — and hands it to the delivery seam on every
+ * create, so the entry attempt and every successor run under the same parent
+ * instead of the window's ambient attribution.
+ *
  * WHAT THIS MODULE DELIBERATELY DOES NOT DO. It never builds a legacy engine,
  * never imports one, and never registers a legacy tool: a declared graph has no
  * legacy runtime instance. Its delivery seam is injected by the host
@@ -72,11 +83,17 @@ import {
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type {
   HostDispatchDelivery,
+  HostDispatchInvocation,
 } from "./dispatch-host.ts";
 import type { OutcomeDispatchEffectKey } from "../outcome/dispatch-effects.ts";
+import type {
+  OutcomeEffectDivergence,
+  OutcomeRuntimeRefusal,
+} from "../outcome/runtime.ts";
 import { HostOutcomeDispatch } from "./dispatch-host.ts";
 import { HostExecutionIndex } from "./execution-index.ts";
 import { HostCredentialVault } from "./credential-vault.ts";
+import { HostInvocationOrigins } from "./invocation-origins.ts";
 import {
   HostDispatchCompletionBridge,
   type HostCompletionReport,
@@ -141,7 +158,16 @@ export interface OutcomeHostInvocation {
   readonly agent?: string;
 }
 
-/** What a boot sweep over the declared graphs did. */
+/**
+ * What a boot sweep over the declared graphs did.
+ *
+ * A STARTED OR RESUMED GRAPH STILL CARRIES ITS PER-EFFECT DIAGNOSTICS. A
+ * graph's own `resume` reports every effect it could not launch and every
+ * effect whose persisted row contradicted the host's fact; the sweep is the
+ * caller that owns those effects, so it AGGREGATES them instead of reporting
+ * only that the graph was visited. `refused` stays what it always was — the
+ * graphs the sweep could not open or run AT ALL.
+ */
 export interface OutcomeHostRecoveryReport {
   /** `graph:revision` for each graph this sweep gave a FIRST EXECUTION. */
   readonly started: readonly string[];
@@ -149,6 +175,24 @@ export interface OutcomeHostRecoveryReport {
   readonly resumed: readonly string[];
   /** `graph:reason` for each protocol-2 record this sweep could not open. */
   readonly refused: readonly string[];
+  /**
+   * Every per-effect refusal the graphs' own resumes reported, each tagged with
+   * the graph it came from: an effect the runtime would not launch (an
+   * unreadable payload, a credential the host cannot produce, a create the
+   * platform refused) stays `pending` and is named here rather than dropped.
+   */
+  readonly effectRefusals: readonly (OutcomeRuntimeRefusal & {
+    readonly graphId: string;
+  })[];
+  /**
+   * Every restart DIVERGENCE the graphs' own resumes reported, each tagged with
+   * its graph: the persisted local effect status and the host's fact about the
+   * same stable id disagree, and the resolution says what the resume did about
+   * it — never a blind re-dispatch and never a silent drop.
+   */
+  readonly divergences: readonly (OutcomeEffectDivergence & {
+    readonly graphId: string;
+  })[];
 }
 
 // ── The host ────────────────────────────────────────────────────────────────
@@ -170,6 +214,7 @@ export class OutcomeHost {
   private readonly completionPolicies: CompletionPolicyRegistry | undefined;
   private readonly vault: HostCredentialVault;
   private readonly executions: HostExecutionIndex;
+  private readonly origins: HostInvocationOrigins;
   private readonly holder: HostInvocationHolder;
   private readonly declareInvocationIdentity: boolean;
   private readonly dispatchAdapter: HostOutcomeDispatch;
@@ -192,12 +237,17 @@ export class OutcomeHost {
     const durability = options.durability ?? "file";
     this.vault = HostCredentialVault.open({ root: options.storeRoot, durability });
     this.executions = HostExecutionIndex.open({ root: options.storeRoot, durability });
+    this.origins = HostInvocationOrigins.open({ root: options.storeRoot, durability });
     this.holder = createHostInvocationHolder();
     this.declareInvocationIdentity = options.declareInvocationIdentity ?? true;
     this.dispatchAdapter = new HostOutcomeDispatch({
       executions: this.executions,
       deliver: options.deliver,
       invocation: () => this.holder.current(),
+      // The graph's own declaring invocation, not the ambient one: this is what
+      // lets a successor armed out of band (and a boot sweep) name the same
+      // parent as the entry attempt.
+      dispatchInvocation: (graphId) => this.originOf(graphId),
       completions: {
         bind: (binding) => {
           this.bridgeFor(binding.graphId).bind(binding);
@@ -250,9 +300,13 @@ export class OutcomeHost {
    * completion is observed later, out of band, when no invocation is in effect;
    * the runtime still compares the host's current identity with the one it
    * recorded when the attempt was armed. So the host re-enters the identity the
-   * delivery captured on the binding for exactly this call and restores the
-   * ambient attribution afterwards. An attempt that recorded NO identity is
-   * settled with none — nothing fabricates an attribution for it — and an
+   * delivery captured on the binding — or, for a host that declared no identity,
+   * the graph's own declaring invocation — for exactly this call and restores
+   * the ambient attribution afterwards. That window is also what arms the
+   * attempt's SUCCESSOR, so the dispatch it triggers names the same parent the
+   * entry attempt ran under, whatever the ambient attribution is at the moment
+   * the platform reports the completion. An attempt that recorded NO identity
+   * is settled with none — nothing fabricates an attribution for it — and an
    * attempt this host never dispatched stays unbound and is reported by the
    * bridge.
    */
@@ -262,7 +316,7 @@ export class OutcomeHost {
   ): Promise<HostCompletionReport> {
     const bridge = this.bridgeFor(graphId);
     const binding = bridge.bindingFor({ graphId, attemptId });
-    const dispatchIdentity = binding?.dispatchIdentity;
+    const dispatchIdentity = binding?.dispatchIdentity ?? this.originIdentityOf(graphId);
     const previous = this.holder.current();
     if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
     try {
@@ -292,7 +346,14 @@ export class OutcomeHost {
    * state is STARTED from the saved plan, a graph with one is continued, and
    * nothing is ever started twice for the same plan revision. The invocation is
    * put in effect for the synchronous dispatch window, so an attempt this call
-   * arms records the declaring invocation's identity (D9).
+   * arms records the declaring invocation's identity (D9) — and it is RECORDED
+   * for the graph, so the successors this run arms later are dispatched under
+   * the same invocation instead of the ambient one.
+   *
+   * A call that names no session (the sweep finding no recorded origin) records
+   * nothing and arms attempts under no invocation: a dispatch the platform then
+   * refuses is reported as the effect refusal it is, never attributed to a
+   * guess.
    */
   async startDeclaredGraph(
     graphId: string,
@@ -300,6 +361,7 @@ export class OutcomeHost {
   ): Promise<OutcomeResumeResult> {
     this.assertOpen();
     const { runtime } = await this.runtimeFor(graphId);
+    this.rememberOrigin(graphId, invocation);
     this.setInvocation(invocation);
     try {
       const result = runtime.resume(this.clock());
@@ -326,9 +388,17 @@ export class OutcomeHost {
     const started: string[] = [];
     const resumed: string[] = [];
     const refused: string[] = [];
+    const effectRefusals: (OutcomeRuntimeRefusal & { graphId: string })[] = [];
+    const divergences: (OutcomeEffectDivergence & { graphId: string })[] = [];
     for (const graphId of this.declaredGraphIds()) {
       try {
-        const result = await this.startDeclaredGraph(graphId);
+        // The invocation this graph was declared under, when this host knows it
+        // (in memory, or from its own record after a restart): a resumed graph
+        // re-arms its pending effects, and the platform can only start them
+        // under a parent. No recorded origin dispatches under none, and the
+        // refusal that follows is reported — not guessed away.
+        const origin = this.origins.get(graphId);
+        const result = await this.startDeclaredGraph(graphId, origin ?? {});
         if (result.kind === "refused") {
           refused.push(
             graphId + ": " + result.refusals.map((r) => r.code).join(","),
@@ -340,11 +410,27 @@ export class OutcomeHost {
         } else {
           resumed.push(graphId + ":" + result.state.phase);
         }
+        // A VISITED GRAPH STILL OWES ITS PER-EFFECT FACTS. Every effect the
+        // resume would not launch and every row that contradicted the host is
+        // carried into the report (and the log below), so "resumed" never hides
+        // work that is still pending.
+        for (const refusal of result.refusals) {
+          effectRefusals.push(Object.freeze({ graphId, ...refusal }));
+        }
+        for (const divergence of result.divergences) {
+          divergences.push(Object.freeze({ graphId, ...divergence }));
+        }
       } catch (err) {
         refused.push(graphId + ": " + errorText(err));
       }
     }
-    if (started.length > 0 || resumed.length > 0 || refused.length > 0) {
+    if (
+      started.length > 0 ||
+      resumed.length > 0 ||
+      refused.length > 0 ||
+      effectRefusals.length > 0 ||
+      divergences.length > 0
+    ) {
       logWarn(
         "outcome-host: declared-graph sweep — started=[" +
           started.join(", ") +
@@ -352,6 +438,23 @@ export class OutcomeHost {
           resumed.join(", ") +
           "] refused=[" +
           refused.join(", ") +
+          "] effect-refusals=[" +
+          effectRefusals
+            .map((refusal) => refusal.graphId + ":" + refusal.code)
+            .join(", ") +
+          "] divergences=[" +
+          divergences
+            .map(
+              (divergence) =>
+                divergence.graphId +
+                ":" +
+                divergence.effectId +
+                ":" +
+                divergence.local +
+                "->" +
+                divergence.host,
+            )
+            .join(", ") +
           "]",
       );
     }
@@ -359,6 +462,8 @@ export class OutcomeHost {
       started: Object.freeze(started),
       resumed: Object.freeze(resumed),
       refused: Object.freeze(refused),
+      effectRefusals: Object.freeze(effectRefusals),
+      divergences: Object.freeze(divergences),
     });
   }
 
@@ -416,6 +521,45 @@ export class OutcomeHost {
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
+
+  /**
+   * Record the declaring invocation a graph's dispatches belong to.
+   *
+   * A call that names no session records nothing: "no origin" is a fact about
+   * this host's knowledge, and a placeholder would turn it into a false
+   * attribution. A later call that DOES name a session replaces the record —
+   * the newer invocation is the one actually running the graph.
+   */
+  private rememberOrigin(
+    graphId: string,
+    invocation: OutcomeHostInvocation,
+  ): void {
+    const sessionId = invocation.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) return;
+    this.origins.record(
+      graphId,
+      invocation.agent === undefined || invocation.agent.length === 0
+        ? { sessionId }
+        : { sessionId, agent: invocation.agent },
+    );
+  }
+
+  /** The platform invocation this graph's dispatches run under, if known. */
+  private originOf(graphId: string): HostDispatchInvocation | undefined {
+    const origin = this.origins.get(graphId);
+    if (origin === undefined) return undefined;
+    return Object.freeze({
+      sessionId: origin.sessionId,
+      ...(origin.agent === undefined ? {} : { agent: origin.agent }),
+    });
+  }
+
+  /** The same origin as the D9 identity shape, or `undefined` when unreadable. */
+  private originIdentityOf(graphId: string) {
+    const origin = this.origins.get(graphId);
+    if (origin === undefined) return undefined;
+    return hostInvocationIdentity(origin.sessionId, origin.agent);
+  }
 
   /** The per-graph completion bridge, created on first use. */
   private bridgeFor(graphId: string): HostDispatchCompletionBridge {

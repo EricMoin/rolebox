@@ -843,24 +843,42 @@ export default async function (pi: any): Promise<void> {
       graphRecoveryValue !== "off" &&
       graphRecoveryValue !== "0" &&
       graphRecoveryValue !== "false";
-    const recoveredEmperorSessionId = (
-      pi as {
-        ctx?: { sessionManager?: { getSessionId?: () => string } };
-      }
-    )?.ctx?.sessionManager?.getSessionId?.();
-    const graphRecoveryStateDir = process.cwd();
+    // The sweep names each graph's RECORDED declaring invocation (the host's
+    // own per-graph fact, in memory and on disk). The boot session is
+    // deliberately NOT substituted for it: a graph declared by another
+    // invocation would then be attributed to whichever session happens to be
+    // current, and a dispatch it arms would run under a parent it never had.
+    // A graph with no recorded origin re-arms nothing and says so in the
+    // report's per-effect refusals.
     if (graphRecoveryEnabled) {
       try {
         const outcomeRecovery = await outcomeHost.recoverDeclaredGraphs();
         if (
           outcomeRecovery.started.length > 0 ||
           outcomeRecovery.resumed.length > 0 ||
-          outcomeRecovery.refused.length > 0
+          outcomeRecovery.refused.length > 0 ||
+          outcomeRecovery.effectRefusals.length > 0 ||
+          outcomeRecovery.divergences.length > 0
         ) {
           log.info("Declared outcome graphs recovered", {
             started: outcomeRecovery.started,
             resumed: outcomeRecovery.resumed,
             refused: outcomeRecovery.refused,
+            // Per-effect facts a visited graph still owes: an effect the resume
+            // would not launch, and a row the host's fact contradicted.
+            effectRefusals: outcomeRecovery.effectRefusals.map(
+              (refusal) => refusal.graphId + ":" + refusal.code,
+            ),
+            divergences: outcomeRecovery.divergences.map(
+              (divergence) =>
+                divergence.graphId +
+                ":" +
+                divergence.effectId +
+                ":" +
+                divergence.local +
+                "->" +
+                divergence.host,
+            ),
           });
         }
       } catch (err) {
@@ -1037,31 +1055,45 @@ export default async function (pi: any): Promise<void> {
       outcomeValidators: createValidatorRegistry([]),
       outcomeArtifactRoot: process.cwd(),
       onGraphDeclared: (graphId, invokingSessionId, agent) => {
-        outcomeDelivery.setInvocation(invokingSessionId, agent ?? activeAgent.get() ?? "");
+        // The declaring invocation is handed to the HOST, which records it per
+        // graph and re-supplies it on every dispatch window — the entry attempt
+        // here, and every successor a later acceptance arms (a worker's
+        // submission, an observed completion, the boot sweep). The delivery seam
+        // is stateless about invocations, so no window's end can lose the
+        // attribution. The acting-agent fallback the entry already applied is
+        // recorded with it, so a restored origin carries the same attribution.
         void outcomeHost
-          .startDeclaredGraph(graphId, { sessionId: invokingSessionId, agent })
+          .startDeclaredGraph(graphId, {
+            sessionId: invokingSessionId,
+            agent: agent ?? activeAgent.get() ?? "",
+          })
           .then((result) => {
             if (result.kind === "refused") {
               log.warn("Pi outcome graph start refused", {
                 graphId,
                 refusals: result.refusals.map((r) => r.code).join(","),
               });
-            } else {
-              log.info("Pi outcome graph started", {
-                graphId,
-                kind: result.kind,
-                dispatched: result.dispatched.length,
-              });
+              return;
             }
+            log.info("Pi outcome graph started", {
+              graphId,
+              kind: result.kind,
+              dispatched: result.dispatched.length,
+              // The effects this window could NOT launch (and the rows a host
+              // fact contradicted) are named, never folded into "started".
+              ...(result.refusals.length === 0
+                ? {}
+                : { refusals: result.refusals.map((r) => r.code).join(",") }),
+              ...(result.divergences.length === 0
+                ? {}
+                : { divergences: result.divergences.length }),
+            });
           })
           .catch((err: unknown) => {
             log.warn("Pi outcome graph start failed", {
               graphId,
               error: formatError(err),
             });
-          })
-          .finally(() => {
-            outcomeDelivery.setInvocation(undefined, undefined);
           });
       },
     });

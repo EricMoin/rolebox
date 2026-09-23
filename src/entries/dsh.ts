@@ -1214,11 +1214,12 @@ export async function apply(
     outcomeValidators: createValidatorRegistry([]),
     outcomeArtifactRoot: process.cwd(),
     onGraphDeclared: (graphId, invokingSessionId, agent) => {
-      // The attempt's dispatch happens inside `startDeclaredGraph`'s
-      // synchronous resume window, so the delivery seam is told which session
-      // those attempts belong to first; the invocation identity is attributed
-      // by the host's own holder for that window (D9).
-      outcomeDelivery.setParentSession(invokingSessionId);
+      // The declaring invocation is handed to the HOST, which records it for the
+      // graph and re-supplies it on every dispatch window — the entry attempt
+      // here, and every successor a later acceptance arms (a worker's
+      // submission, an observed completion, the boot sweep). The delivery seam
+      // is stateless: nothing names a session "for the duration of" a call, so
+      // there is no window whose end can lose it.
       void outcomeHost
         ?.startDeclaredGraph(graphId, { sessionId: invokingSessionId, agent })
         .then((result) => {
@@ -1228,22 +1229,27 @@ export async function apply(
               graphId,
               refusals: result.refusals.map((r) => r.code).join(","),
             });
-          } else {
-            log.info("dsh outcome graph started", {
-              graphId,
-              kind: result.kind,
-              dispatched: result.dispatched.length,
-            });
+            return;
           }
+          log.info("dsh outcome graph started", {
+            graphId,
+            kind: result.kind,
+            dispatched: result.dispatched.length,
+            // The effects this window could NOT launch (and the rows a host
+            // fact contradicted) are named, never folded into "started".
+            ...(result.refusals.length === 0
+              ? {}
+              : { refusals: result.refusals.map((r) => r.code).join(",") }),
+            ...(result.divergences.length === 0
+              ? {}
+              : { divergences: result.divergences.length }),
+          });
         })
         .catch((err: unknown) => {
           log.warn("dsh outcome graph start failed", {
             graphId,
             error: err instanceof Error ? err.message : String(err),
           });
-        })
-        .finally(() => {
-          outcomeDelivery.setParentSession(undefined);
         });
     },
   });
@@ -1257,13 +1263,47 @@ export async function apply(
   // Boot recovery for declared graphs: a graph interrupted by the previous
   // process is continued from its persisted state, and one that was declared
   // but never started gets its first execution — through the same runtime entry
-  // the declaration seam uses. Best-effort: a failure is logged, never gates
-  // boot.
-  void outcomeHost.recoverDeclaredGraphs().catch((err: unknown) => {
-    log.warn("dsh outcome graph recovery failed", {
-      error: err instanceof Error ? err.message : String(err),
+  // the declaration seam uses. The sweep names each graph's recorded declaring
+  // invocation, so a pending effect re-arms under the parent it belongs to.
+  // Best-effort: a failure is logged, never gates boot.
+  void outcomeHost
+    .recoverDeclaredGraphs()
+    .then((report) => {
+      if (
+        report.started.length === 0 &&
+        report.resumed.length === 0 &&
+        report.refused.length === 0 &&
+        report.effectRefusals.length === 0 &&
+        report.divergences.length === 0
+      ) {
+        return;
+      }
+      log.warn("dsh outcome graph recovery", {
+        started: report.started,
+        resumed: report.resumed,
+        refused: report.refused,
+        // Per-effect facts a visited graph still owes: an effect the resume
+        // would not launch, and a row the host's fact contradicted.
+        effectRefusals: report.effectRefusals.map(
+          (refusal) => refusal.graphId + ":" + refusal.code,
+        ),
+        divergences: report.divergences.map(
+          (divergence) =>
+            divergence.graphId +
+            ":" +
+            divergence.effectId +
+            ":" +
+            divergence.local +
+            "->" +
+            divergence.host,
+        ),
+      });
+    })
+    .catch((err: unknown) => {
+      log.warn("dsh outcome graph recovery failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
-  });
 
   // ── Event-driven console updates ─────────────────────────────────────────
   // Two producers feed the web console's change channel. None of them polls:

@@ -404,6 +404,7 @@ describe("outcome dispatch through the dsh subagent seam", () => {
     default: "ungranted",
     rules: [
       { graphId: "dsh.outcome", nodeId: "work", outcome: "done", decision: "allow" },
+      { graphId: "dsh.outcome", nodeId: "ship", outcome: "shipped", decision: "allow" },
     ],
   };
   const AUTHORIZED = createCompletionPolicyRegistry({
@@ -415,7 +416,11 @@ describe("outcome dispatch through the dsh subagent seam", () => {
     ],
   });
 
-  it("delivers the attempt, observes completion, and settles the graph", async () => {
+  it("delivers both attempts of a TWO-NODE graph and settles it to complete", async () => {
+    // A successor is armed by an acceptance the platform reports LATER, with no
+    // declaring call in effect. The dsh delivery is handed the graph's declaring
+    // invocation by the host on every window, so the second node's run is
+    // composed under the same live parent instead of failing the settlement.
     const declaration: GraphDeclarationV3 = {
       version: 3,
       name: "dsh.outcome",
@@ -427,8 +432,15 @@ describe("outcome dispatch through the dsh subagent seam", () => {
           outcomes: [{ id: "done" }],
           completion: { mode: "natural", outcome: "done" },
         },
+        {
+          id: "ship",
+          agent: "shipper-agent",
+          prompt: "Ship it.",
+          outcomes: [{ id: "shipped" }],
+          completion: { mode: "natural", outcome: "shipped" },
+        },
       ],
-      edges: [],
+      edges: [{ from: "work", to: "ship", outcome: "done" }],
       completion_policy: { id: POLICY_ID, revision: "1" },
     };
     persistDeclaredGraph(
@@ -436,9 +448,14 @@ describe("outcome dispatch through the dsh subagent seam", () => {
       tmpDir,
     );
     service.seedProvider("worker-agent");
+    service.seedProvider("shipper-agent");
     service.autoComplete.set("worker-agent", {
       stopReason: "completed",
       output: outputBlock("work done"),
+    });
+    service.autoComplete.set("shipper-agent", {
+      stopReason: "completed",
+      output: outputBlock("shipped"),
     });
 
     let host: OutcomeHost | undefined;
@@ -466,7 +483,6 @@ describe("outcome dispatch through the dsh subagent seam", () => {
       durability: "memory",
     });
     try {
-      delivery.setParentSession("origin-1");
       const started = await host.startDeclaredGraph("dsh.outcome", {
         sessionId: "origin-1",
         agent: "emperor",
@@ -474,17 +490,31 @@ describe("outcome dispatch through the dsh subagent seam", () => {
       expect(started.kind).toBe("started");
       if (started.kind !== "started") return;
       expect(started.dispatched.map((request) => request.attemptId)).toEqual(["work#1"]);
-      // The dsh run resolves asynchronously; the host settles on its observation.
+      // The dsh runs resolve asynchronously; the host settles on each
+      // observation, and the first settlement arms (and dispatches) the second.
       await settle();
-      await Promise.all(completions);
+      await Promise.all(completions.splice(0));
+      await settle();
+      await Promise.all(completions.splice(0));
+
+      expect(service.started.map((entry) => entry.name)).toEqual([
+        "worker-agent",
+        "shipper-agent",
+      ]);
+      // Both runs were composed under the declaring session the host recorded —
+      // the successor's window has no declaring call of its own.
+      expect(service.started.map((entry) => entry.request.sessionId)).toEqual([
+        "origin-1",
+        "origin-1",
+      ]);
 
       const state = scanPersistedStates(tmpDir).loaded.find(
         (candidate) => candidate.graphId === "dsh.outcome",
       );
       expect(state?.phase).toBe("complete");
       expect(state?.nodes.get("work")?.status).toBe("completed");
+      expect(state?.nodes.get("ship")?.status).toBe("completed");
     } finally {
-      delivery.setParentSession(undefined);
       host.close();
     }
   });

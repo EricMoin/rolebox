@@ -14,6 +14,13 @@
  *   seam the legacy graph dispatch used, with the same parent-resolution
  *   contract (dsh REQUIRES a live parent `Agent` and dereferences it while
  *   composing the child, so an unresolvable parent fails LOUD before the start);
+ * - the invocation the run belongs to arrives WITH the delivery (the host's
+ *   third argument: the graph's declaring invocation, recorded by the host and
+ *   re-supplied on every window that arms a dispatch). The adapter keeps no
+ *   session state of its own, so a successor armed by an out-of-band completion
+ *   is composed under the same parent as the entry attempt, and a delivery
+ *   whose host knows no invocation is refused by name instead of being
+ *   attributed to whatever call happens to be running;
  * - the worker's prompt is the plan's own prompt plus the attempt handoff
  *   (`src/graph/host/delivery.ts`), which is the ONE channel the bearer
  *   credential travels over;
@@ -42,6 +49,7 @@ import type {
 } from "./dispatch.ts";
 import { DshParentUnresolvedError } from "./dispatch.ts";
 import type { DshSubagentStartRequest } from "./agent-registrar.ts";
+import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
@@ -79,38 +87,29 @@ export interface DshOutcomeDeliveryOptions {
 }
 
 /**
- * The dsh delivery seam. One instance per host process; `setParentSession`
- * names the session a resume's dispatches belong to (the graph's declaring
- * invocation) before the host enters the synchronous dispatch window.
+ * The dsh delivery seam. One instance per host process, and STATELESS about
+ * invocations: the session a run is composed under arrives with each delivery
+ * as the host's own attribution of the graph's declaring invocation.
  */
 export class DshOutcomeDelivery {
   private readonly log;
-  private parentSessionId: string | undefined;
 
   constructor(private readonly opts: DshOutcomeDeliveryOptions) {
     this.log = createSubLogger(opts.loggerName ?? "dsh-outcome-dispatch");
   }
 
   /**
-   * Name the session whose subagents this graph's attempts run under. Set by
-   * the host immediately before it resumes (or first-executes) a declared
-   * graph and cleared after; the dispatch happens inside that window.
-   */
-  setParentSession(sessionId: string | undefined): void {
-    this.parentSessionId = sessionId;
-  }
-
-  /**
    * The host dispatch adapter's `deliver`: start ONE dsh subagent run.
    *
    * Synchronous prefix, asynchronous tail. Everything that can refuse the
-   * start without starting anything (no provider, no parent session, no
+   * start without starting anything (no provider, no invoking session, no
    * resolvable live parent) throws HERE, so the host adapter un-records the
    * effect and the ledger row stays `pending` for the next recovery.
    */
   deliver = (
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
+    invocation?: HostDispatchInvocation,
   ): void => {
     const agent = request.agent;
     if (this.opts.subagents.getProvider) {
@@ -126,7 +125,7 @@ export class DshOutcomeDelivery {
         );
       }
     }
-    const parentSessionId = this.parentSessionId;
+    const parentSessionId = invocation?.sessionId;
     if (parentSessionId === undefined || parentSessionId.length === 0) {
       throw new Error(
         "dsh outcome dispatch: no invoking session is in effect for graph " +

@@ -20,6 +20,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
@@ -29,6 +30,9 @@ import {
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
+import type { HostDispatchInvocation } from "../../src/graph/host/dispatch-host.ts";
+import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
+import { HOST_INVOCATION_ORIGINS_FILE } from "../../src/graph/host/invocation-origins.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import {
   AUTHORIZED,
@@ -193,3 +197,210 @@ describe("the invocation-identity decision", () => {
     }
   });
 });
+
+// ── Every dispatch window names the graph's declaring invocation ────────────
+//
+// THE DEFECT THIS FILE PINS SHUT (second half). A successor is armed by an
+// acceptance, and the acceptance that ends the FIRST node is observed out of
+// band. The host therefore records the declaring invocation PER GRAPH and hands
+// it to the delivery on every create — the entry attempt, a successor armed by a
+// completion, and a restart sweep — instead of relying on a window's ambient
+// attribution, which is exactly what the real platform adapters need to compose
+// the worker under its parent.
+
+describe("OutcomeHost — the declaring invocation travels with every dispatch", () => {
+  it("names the same invocation for the entry attempt and the out-of-band successor", async () => {
+    const dir = makeTmpDir("outcome-host-origin-");
+    const storeRoot = join(dir, "host-store");
+    const graph = buildDeclaredOutcomeGraph({
+      declaration: naturalDeclaration(),
+      completionPolicies: AUTHORIZED,
+    });
+    persistDeclaredGraph(graph, dir);
+    const deliveries: OutcomeDispatchRequest[] = [];
+    const invocations: Array<HostDispatchInvocation | undefined> = [];
+    const host = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      durability: "memory",
+      validators: EMPTY_VALIDATORS,
+      completionPolicies: AUTHORIZED,
+      deliver: (request, _effect, invocation) => {
+        deliveries.push(request);
+        invocations.push(invocation);
+      },
+    });
+    try {
+      await host.startDeclaredGraph(GRAPH_ID, {
+        sessionId: "session-1",
+        agent: "agent.orchestrator",
+      });
+      expect(invocations).toEqual([
+        { sessionId: "session-1", agent: "agent.orchestrator" },
+      ]);
+
+      // The completion arrives with NO invocation in effect: the entry
+      // attempt's successor must still be dispatched under the declaring one.
+      host.clearInvocation();
+      const settled = await host.complete(GRAPH_ID, "work#1");
+      expect(settled.kind).toBe("settled");
+      expect(deliveries.map((request) => request.attemptId)).toEqual(["work#1", "ship#2"]);
+      expect(invocations).toEqual([
+        { sessionId: "session-1", agent: "agent.orchestrator" },
+        { sessionId: "session-1", agent: "agent.orchestrator" },
+      ]);
+    } finally {
+      host.close();
+    }
+  });
+
+  it("hands NO invocation when the declaring call named none", async () => {
+    const dir = makeTmpDir("outcome-host-no-origin-");
+    const storeRoot = join(dir, "host-store");
+    const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
+    persistDeclaredGraph(graph, dir);
+    const invocations: Array<HostDispatchInvocation | undefined> = [];
+    const host = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      durability: "memory",
+      validators: EMPTY_VALIDATORS,
+      deliver: (_request, _effect, invocation) => {
+        invocations.push(invocation);
+      },
+    });
+    try {
+      // No session named: nothing is recorded, and the delivery is handed
+      // nothing. A platform then refuses the dispatch by name; the host never
+      // fabricates a parent for it.
+      const started = await host.startDeclaredGraph(PLAIN_GRAPH_ID);
+      expect(started.kind).toBe("started");
+      expect(invocations).toEqual([undefined]);
+      expect(existsSync(join(storeRoot, HOST_INVOCATION_ORIGINS_FILE))).toBe(false);
+    } finally {
+      host.close();
+    }
+  });
+
+  it("re-arms a pending effect after a restart under the recorded origin", async () => {
+    const dir = makeTmpDir("outcome-host-restart-origin-");
+    const storeRoot = join(dir, "host-store");
+    const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
+    persistDeclaredGraph(graph, dir);
+
+    // THE FIRST PROCESS: the platform cannot start the worker (no live parent),
+    // so the delivery throws. The state and its dispatch effect are already
+    // committed, the effect stays pending, and the execution index drops the
+    // record it took — the crash window the contract exists for.
+    const firstHost = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      durability: "file",
+      validators: EMPTY_VALIDATORS,
+      deliver: () => {
+        throw new Error("the platform has no live parent for this graph");
+      },
+    });
+    try {
+      let failure: unknown;
+      try {
+        await firstHost.startDeclaredGraph(PLAIN_GRAPH_ID, {
+          sessionId: "session-1",
+          agent: "agent.orchestrator",
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(String(failure)).toContain("no live parent");
+    } finally {
+      firstHost.close();
+    }
+    // The declaring invocation outlived the process that named it.
+    expect(existsSync(join(storeRoot, HOST_INVOCATION_ORIGINS_FILE))).toBe(true);
+
+    // THE RESTARTED PROCESS: the sweep reads the graph's origin back from the
+    // host's own record and re-arms the pending effect under it.
+    const invocations: Array<HostDispatchInvocation | undefined> = [];
+    const secondHost = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      durability: "file",
+      validators: EMPTY_VALIDATORS,
+      deliver: (_request, _effect, invocation) => {
+        invocations.push(invocation);
+      },
+    });
+    try {
+      const report = await secondHost.recoverDeclaredGraphs();
+      expect(report.started).toEqual([]);
+      expect(report.resumed).toEqual([PLAIN_GRAPH_ID + ":executing"]);
+      expect(report.refused).toEqual([]);
+      expect(report.effectRefusals).toEqual([]);
+      expect(invocations).toEqual([
+        { sessionId: "session-1", agent: "agent.orchestrator" },
+      ]);
+    } finally {
+      secondHost.close();
+    }
+  });
+
+  it("reports the per-effect refusal of a graph whose dispatch the platform refused", async () => {
+    const dir = makeTmpDir("outcome-host-effect-refusal-");
+    const storeRoot = join(dir, "host-store");
+    const graph = buildDeclaredOutcomeGraph({ declaration: plainDeclaration() });
+    persistDeclaredGraph(graph, dir);
+
+    // The graph is left with a committed state and a pending effect by a
+    // process whose platform refused the dispatch, and NO invocation was ever
+    // recorded for it.
+    const firstHost = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      durability: "file",
+      validators: EMPTY_VALIDATORS,
+      deliver: () => {
+        throw new Error("nothing can be started here");
+      },
+    });
+    try {
+      let failure: unknown;
+      try {
+        await firstHost.startDeclaredGraph(PLAIN_GRAPH_ID);
+      } catch (error) {
+        failure = error;
+      }
+      expect(String(failure)).toContain("nothing can be started here");
+    } finally {
+      firstHost.close();
+    }
+
+    // The sweep visits the graph and the graph's own resume refuses the effect.
+    // The fact is AGGREGATED into the report instead of being reported as a
+    // bare resumed with the work silently still pending.
+    const secondHost = OutcomeHost.open({
+      workspaceDir: dir,
+      storeRoot,
+      durability: "file",
+      validators: EMPTY_VALIDATORS,
+      deliver: () => {
+        throw new Error("nothing can be started here either");
+      },
+    });
+    try {
+      const report = await secondHost.recoverDeclaredGraphs();
+      expect(report.resumed).toEqual([PLAIN_GRAPH_ID + ":executing"]);
+      expect(report.refused).toEqual([]);
+      expect(report.effectRefusals.map((refusal) => refusal.graphId)).toEqual([
+        PLAIN_GRAPH_ID,
+      ]);
+      expect(report.effectRefusals.map((refusal) => refusal.code)).toEqual([
+        "dispatch-failed",
+      ]);
+      expect(report.effectRefusals[0]?.message).toContain("dispatch:work#1");
+      expect(report.divergences).toEqual([]);
+    } finally {
+      secondHost.close();
+    }
+  });
+});
+

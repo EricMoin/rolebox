@@ -33,6 +33,16 @@
  * `execution-index.ts`: the host prefers a reported attempt over a second
  * execution, because running one attempt twice is the failure the contract
  * exists to prevent.
+ *
+ * THE INVOCATION TRAVELS WITH THE DELIVERY. A platform starts a worker under a
+ * parent invocation (dsh composes the subagent under a live parent session, Pi
+ * launches the task under one), and the window that arms a dispatch is not
+ * always the declaring call: a successor is armed by an acceptance observed
+ * later, out of band. The adapter therefore hands the delivery the host's
+ * attribution of the graph's declaring invocation
+ * ({@link HostOutcomeDispatchOptions.dispatchInvocation}) as a third argument,
+ * so every window names the same parent. A host that knows no origin hands
+ * none, and the platform reports the absence instead of guessing one.
  */
 
 import type {
@@ -61,7 +71,24 @@ import { HostExecutionIndex } from "./execution-index.ts";
 export type HostDispatchDelivery = (
   request: OutcomeDispatchRequest,
   effect: OutcomeDispatchEffectKey,
+  invocation?: HostDispatchInvocation,
 ) => void;
+
+/**
+ * The platform invocation a graph's attempt is dispatched under, as the host
+ * attributes it.
+ *
+ * A SESSION, and optionally the agent acting in it. Both components are
+ * optional in the type because they carry different weights: the platform needs
+ * the session to compose the worker under its parent, while the agent is the
+ * attribution a host may additionally declare (D9). The host passes the value
+ * it recorded for the GRAPH, so the declaring call, a worker's accepted
+ * submission, an observed completion and a boot sweep all name the same parent.
+ */
+export interface HostDispatchInvocation {
+  readonly sessionId?: string;
+  readonly agent?: string;
+}
 
 /** The attempt identity one delivery is bound to, for the completion bridge. */
 export interface HostAttemptBinding {
@@ -105,6 +132,18 @@ export interface HostOutcomeDispatchOptions {
    * invocation identity passes none and every binding carries none.
    */
   readonly invocation?: () => HostInvocationIdentity | undefined;
+  /**
+   * The invocation the platform dispatches this GRAPH's attempts under, read
+   * once per created execution and handed to {@link HostDispatchDelivery}. It is
+   * a per-graph fact (the declaring invocation), not "whoever is acting now":
+   * the successor armed by a completion must be started under the same parent as
+   * the entry attempt, and the completion is observed when no tool call is in
+   * effect. Optional: a host that keeps no such record passes none, and the
+   * platform reports the unnamed dispatch instead of inventing a parent.
+   */
+  readonly dispatchInvocation?: (
+    graphId: string,
+  ) => HostDispatchInvocation | undefined;
 }
 
 // ── The adapter ─────────────────────────────────────────────────────────────
@@ -115,12 +154,16 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   private readonly deliver: HostDispatchDelivery;
   private readonly completions: HostCompletionBindingSink | undefined;
   private readonly invocation: (() => HostInvocationIdentity | undefined) | undefined;
+  private readonly dispatchInvocation:
+    | ((graphId: string) => HostDispatchInvocation | undefined)
+    | undefined;
 
   constructor(options: HostOutcomeDispatchOptions) {
     this.executions = options.executions;
     this.deliver = options.deliver;
     this.completions = options.completions;
     this.invocation = options.invocation;
+    this.dispatchInvocation = options.dispatchInvocation;
   }
 
   /**
@@ -147,8 +190,13 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     }
     if (this.executions.has(effect)) return;
     this.executions.record(effect);
+    // The platform invocation is read HERE, inside the runtime's dispatch
+    // window, and from the GRAPH's recorded origin rather than from the ambient
+    // attribution: a successor settled out of band must run under the invocation
+    // that declared the graph, not under whoever happens to be acting.
+    const dispatchInvocation = this.dispatchInvocation?.(request.graphId);
     try {
-      this.deliver(request, effect);
+      this.deliver(request, effect, dispatchInvocation);
     } catch (error) {
       this.executions.unrecord(effect);
       throw error;
