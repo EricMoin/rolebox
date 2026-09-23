@@ -403,10 +403,13 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
    * THE JOIN OF TWO ANSWERERS, and it is deliberately conservative: the host's
    * own durable registry answers for every create it performed, and the platform
    * query port (when installed) answers for what the platform holds. `created`
-   * from either side is a fact; `unknown` from either side (with the other side
-   * not confirming `created`) is the answer; `absent` requires BOTH to say that
-   * no execution exists. A port that cannot answer therefore never degrades into
-   * "absent" — which is what would license a second create.
+   * from either side is a fact; `absent` from EITHER side is a PROOF and wins
+   * over the other side's `unknown` (a port that cannot SEE an execution proves
+   * nothing, and its `unknown` never overrules a local proof of absence — which
+   * is what lets a stranded `creating` claim be released); only when neither side
+   * can prove absence is the answer `unknown`. A port that cannot answer
+   * therefore never degrades into "absent" — which is what would license a
+   * second create.
    *
    * A NAMED `created` IS BOUND LOCALLY WHEN THIS PROCESS STILL OWNS THE CLAIM
    * (F2). The one window where that is possible is the confirmation that never

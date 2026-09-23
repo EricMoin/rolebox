@@ -36,7 +36,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,10 +50,6 @@ import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts"
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
-import {
-  buildDeclaredOutcomeGraph,
-  persistDeclaredGraph,
-} from "../../src/graph/tools/declare-graph.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { createOutcomeGraphTools } from "../../src/graph/tools/index.ts";
 import type {
@@ -143,8 +139,18 @@ interface FaceFixture {
 async function openFaceFixture(declaration: GraphDeclarationV3): Promise<FaceFixture> {
   const dir = makeTmpDir("worker-face-");
   const storeRoot = join(dir, "host-store");
-  persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration }), storeRoot);
+  // The store root exists before the host opens it (the host's vault
+  // writes under it). The DECLARATION itself is authored through the
+  // SHIPPED `graph_declare`, exactly as a real declarer's session does
+  // it, so the declarer-side cases below exercise a graph THIS PROCESS
+  // declared rather than one a helper dropped on disk behind the face.
+  mkdirSync(storeRoot, { recursive: true });
   const face = bindFaceOver(dir, storeRoot);
+  const declarer = face.contextOf("session-declarer", "agent.declarer");
+  const declared = String(await face.tools.graph_declare.execute({ declaration }, declarer));
+  if (declared.includes("graph_declare failed:")) {
+    throw new Error("fixture: graph_declare refused the declaration: " + declared);
+  }
   const started = await face.host.startDeclaredGraph(declaration.name, {
     sessionId: "session-declarer",
     agent: "agent.declarer",
@@ -594,12 +600,22 @@ describe("the boundary refuses only a bound worker", () => {
     try {
       const declarer = fixture.contextOf("session-declarer", "agent.declarer");
 
-      // The DECLARER keeps the status query and the inventory.
-      const status = String(
-        await fixture.tools.graph_status.execute({ graph_id: FAN_OUT.name }, declarer),
-      );
-      expect(status).not.toContain(WORKER_TOOL_FORBIDDEN_CODE);
-      expect(status).toContain(FAN_OUT.name);
+      // The DECLARER keeps the status query and the inventory: the graph
+      // this session declared resolves to its REAL position, PARSED — not
+      // an error string that merely happens to carry the graph's name.
+      const status = JSON.parse(
+        String(
+          await fixture.tools.graph_status.execute(
+            { graph_id: FAN_OUT.name, format: "json" },
+            declarer,
+          ),
+        ),
+      ) as { graph_id?: string; nodes?: Array<{ node_id?: string; status?: string }> };
+      expect(status.graph_id).toBe(FAN_OUT.name);
+      expect(status.nodes?.map((node) => node.node_id).sort()).toEqual(["alpha", "beta"]);
+      // The position is LIVE, not the declaration snapshot: both entry
+      // attempts are running (a snapshot would read `pending`).
+      expect(status.nodes?.map((node) => node.status)).toEqual(["running", "running"]);
 
       const audit = JSON.parse(String(await fixture.tools.graph_audit.execute({}, declarer))) as {
         verdict?: string;
@@ -608,22 +624,30 @@ describe("the boundary refuses only a bound worker", () => {
 
       // ... and can still declare a NEW graph: the boundary is about the
       // worker principal, not about the tool.
-      const declared = String(
-        await fixture.tools.graph_declare.execute({ declaration: OTHER }, declarer),
-      );
-      expect(declared).not.toContain(WORKER_TOOL_FORBIDDEN_CODE);
+      const declared = JSON.parse(
+        String(await fixture.tools.graph_declare.execute({ declaration: OTHER }, declarer)),
+      ) as { graph_id?: string };
+      expect(declared.graph_id).toBe(OTHER.name);
       expect(readStoredDefinition(fixture.storeRoot, OTHER.name).kind).toBe("ok");
 
       // An UNRELATED session was never bound by this host, so this boundary
       // does not touch it. (Its SUBMISSIONS are the submission ingress's
       // business — tests/graph/submit-ingress-credentials.test.ts — not this
-      // face's.)
+      // face's.) Its status read is a REAL body answer too, parsed.
       const unrelated = fixture.contextOf("unrelated-session", "unrelated-agent");
-      const unrelatedStatus = String(
-        await fixture.tools.graph_status.execute({ graph_id: FAN_OUT.name }, unrelated),
-      );
-      expect(unrelatedStatus).not.toContain(WORKER_TOOL_FORBIDDEN_CODE);
-      expect(unrelatedStatus).toContain(FAN_OUT.name);
+      const unrelatedStatus = JSON.parse(
+        String(
+          await fixture.tools.graph_status.execute(
+            { graph_id: FAN_OUT.name, format: "json" },
+            unrelated,
+          ),
+        ),
+      ) as { graph_id?: string; nodes?: Array<{ node_id?: string }> };
+      expect(unrelatedStatus.graph_id).toBe(FAN_OUT.name);
+      expect(unrelatedStatus.nodes?.map((node) => node.node_id).sort()).toEqual([
+        "alpha",
+        "beta",
+      ]);
     } finally {
       fixture.host.close();
     }
