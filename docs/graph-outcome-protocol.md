@@ -1,6 +1,52 @@
 # Graph outcome protocol — target architecture
 
-Status: design decision; implementation pending.
+Status: PARTIALLY IMPLEMENTED. This document specifies the target architecture
+and records, section by section, what this build already does and what it does
+not. The current boundary is stated under "Implementation status" below; a
+section describing proposed modules or fields is not a claim that they exist.
+
+## Implementation status
+
+IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
+
+- compilation and plan pinning, including the closed progress-policy grammar and
+  the natural-completion authorization pinned by exact policy revision and
+  content digest (`src/graph/compiler/**`, `src/graph/policy/**`);
+- versioned loading: the storage-format capability registry, the
+  execution-protocol registry, and state-body readers for versions 1 to 6, with
+  an unsupported identity refused before anything hydrates
+  (`src/graph/persistence/storage-format.ts`,
+  `src/graph/protocol/execution-protocol.ts`,
+  `src/graph/outcome/graph-state.ts`);
+- runtime-issued scoped attempt credentials and the submission check that binds
+  a submission to the attempt it was dispatched for
+  (`src/graph/outcome/attempt-credential.ts`);
+- the submission and acceptance core: proposal shape gate, the closed validator
+  registry with the artifact-reference validator, receipt replay, and the atomic
+  commit of receipt, accepted event, state and pending effects
+  (`src/graph/outcome/proposal.ts`, `acceptance.ts`, `validators.ts`);
+- the durable STOP: hard-limit exhaustion and the declared progress-stalled
+  policy end the run inside the same transaction that accepts the outcome
+  (`src/graph/outcome/progress.ts`, `graph-state.ts`);
+- natural-completion AUTHORIZATION as a run precondition: a plan that pins a
+  policy revision this host did not install never starts, resumes or settles
+  (`src/graph/policy/completion-policy.ts`, `src/graph/outcome/runtime.ts`);
+- the read-only drain audit (`src/graph/audit/drain-audit.ts`).
+
+NOT YET ENABLED OR NOT IMPLEMENTED:
+
+- the protocol-aware dispatch completion bridge: the outcome runtime is driven by
+  a synchronous scripted seam, so production dispatch settles no node through it
+  and the natural-completion SETTLEMENT path is not executed;
+- effect execution beyond that seam — in particular any cross-process effect
+  execution or reconciliation;
+- the remaining validator capabilities: only the registry and the
+  artifact-reference validator exist; the schema, command-check and approval
+  validators do not;
+- storage format 3 and its `2 -> 3` migrator — `ENGINE_PERSISTENCE_VERSION` is
+  still the literal `2` — and the `src/graph/persistence/load.ts` module move;
+- stage-E retirement: the legacy signal path and the legacy v2 run and recovery
+  paths are untouched and still run.
 
 ## Objective and scope
 
