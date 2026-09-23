@@ -154,7 +154,8 @@ export interface RetryConfig {
  * branch, so a quorum strategy cannot be declared without its required-answer
  * count. The former optional `quorum?: number` made `{ strategy: "quorum" }`
  * type-check and then silently degrade to a count of 1 at runtime; the
- * declaration side (validator-v2 rule 9) now rejects a missing count instead.
+ * declaration side (the deleted v2 validator's rule 9, and now the v3 parser)
+ * rejects a missing count instead.
  */
 export type JoinConfig =
   | {
@@ -170,7 +171,8 @@ export type JoinConfig =
       strategy: "quorum";
       /**
        * Number of required answers (N in `quorum:N`). Must be a positive
-       * integer no greater than the node's in-degree (validator-v2 rule 9).
+       * integer; the v3 declaration parser enforces that (the deleted v2
+       * validator additionally bounded it by the node's in-degree).
        */
       quorum: number;
     };
@@ -184,12 +186,11 @@ export type JoinConfig =
  * state), and re-exported here so the graph declaration and the loop
  * subsystem share one union instead of two drift-prone copies (B28).
  *
- * The engine's loop rounds re-dispatch members within the SAME engine state
- * (propagateRevise increments `traversalCount` on the shared node, see
- * `src/graph/engine/loop-group-executor.ts`), so rounds are inherently
- * inherit-flavored. `fresh` per-round session isolation is NOT wired in the
- * engine — requesting it returns a documented-unsupported error, never a
- * silent no-op.
+ * The outcome run path's loop rounds re-dispatch members within the SAME graph
+ * state (the reducer increments `traversalCount` on the shared node), so rounds
+ * are inherently inherit-flavored. `fresh` per-round session isolation is NOT
+ * wired in the engine — requesting it returns a documented-unsupported error,
+ * never a silent no-op.
  */
 import type { LoopMode } from "./loop/types.ts";
 export type { LoopMode };
@@ -199,8 +200,8 @@ export type { LoopMode };
  *
  * The graph remains fundamentally a DAG; cycles are contained within
  * explicitly declared loop groups. Each loop group has a hard max-traversal
- * cap; early exit is driven by the `answer`-signal convergence path in
- * `src/graph/engine/loop-group-executor.ts`.
+ * cap; early exit is driven by the `answer`-signal convergence path the outcome
+ * reducer implements (the deleted legacy `loop-group-executor.ts` owned it).
  */
 export interface LoopGroupDecl {
   /** Unique identifier for this loop group */

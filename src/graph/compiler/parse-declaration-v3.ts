@@ -618,7 +618,7 @@ function readJoin(
  * - `timeout_ms` is a NON-NEGATIVE number — 0 is the documented per-node
  *   "disable the staleness watchdog" opt-out, while a negative one would
  *   silently disable the watchdog for a node that is not opting out
- *   (validator-v2.ts rule 10);
+ *   (the deleted v2 validator's rule 10);
  * - `max_retries` is a NON-NEGATIVE SAFE INTEGER — a retry count is an integer
  *   threshold at runtime, so a fractional or negative one is meaningless;
  * - the three ceilings are non-negative numbers.

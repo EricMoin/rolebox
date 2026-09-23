@@ -13,12 +13,11 @@
  * the state snapshot, the receipt, the accepted event and the pending effects
  * commit together or not at all.
  *
- * THE LEGACY ENGINE IS NOT INVOLVED. This runtime never builds a v2 engine,
- * never imports `src/graph/engine/**` or `src/dispatch/**`, and never lets a
- * severity-ranked signal decide a node's completion: for a graph bound to the
+ * THE LEGACY ENGINE IS GONE. This runtime never builds a v2 engine, never
+ * imports `src/graph/engine/**` (deleted) or `src/dispatch/**`, and never lets
+ * a severity-ranked signal decide a node's completion: for a graph bound to the
  * outcome protocol the SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE, which
- * is exactly what the registered outcome handler declares. The legacy v2 run
- * path and its file persistence are untouched.
+ * is exactly what the registered outcome handler declares.
  *
  * EXECUTION IDENTITY IS DERIVED HERE, NEVER SUPPLIED. The graph id is the
  * compiled plan's own `graphId`; the attempt id is resolved from the ATTEMPT
@@ -93,9 +92,9 @@
  * `graph-stopped` rather than settled into a run that has ended.
  *
  * THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE. A graph bound to this
- * protocol has no legacy runtime instance anywhere: it is not an entry of the
- * toolset's legacy registry, every legacy tool entry point refuses it, and this
- * module never imports `src/graph/engine/**` or `src/dispatch/**`. No
+ * protocol has no legacy runtime instance anywhere: the legacy registry and
+ * every legacy tool entry point were deleted with the runtime, and this module
+ * never imports `src/graph/engine/**` (deleted) or `src/dispatch/**`. No
  * severity-ranked signal and no synthesized answer can settle one of its nodes;
  * only an accepted outcome committed through this runtime can (see
  * `src/graph/tools/submit-outcome.ts`, which is the model-facing ingress into

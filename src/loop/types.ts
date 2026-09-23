@@ -8,10 +8,9 @@ import type { Result } from "../utils/result.ts";
  *
  * This is the single definition of the union (B28): the graph declaration's
  * `LoopGroupDecl.mode` (`src/types.graph-v2.ts`) re-exports it rather than
- * keeping a second copy. For graph loop groups the engine's rounds re-dispatch
- * members within the SAME engine state (propagateRevise increments
- * `traversalCount` on the shared node, see
- * `src/graph/engine/loop-group-executor.ts`), so rounds are inherently
+ * keeping a second copy. For graph loop groups the outcome run path's rounds
+ * re-dispatch members within the SAME graph state (the reducer increments
+ * `traversalCount` on the shared node), so rounds are inherently
  * inherit-flavored and `fresh` per-round session isolation is NOT wired — the
  * graph tool path returns a documented-unsupported error for it, never a
  * silent no-op.

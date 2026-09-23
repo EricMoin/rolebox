@@ -198,11 +198,10 @@ export function scheduleSidecarGC(d: TaskLifecycleDeps, taskId: string): void {
 /**
  * Notify parent about task completion.
  *
- * Graph-scope suppression: tasks dispatched by the graph engine (marker
- * `task.graphScoped`) are skipped entirely — graph-node completion is reported
- * EXCLUSIVELY by the graph notifier (`createGraphNotifier` /
- * `createGraphTerminalNotifier` in `src/graph/engine/graph-notify.ts`), which
- * references the node id rather than the internal `bg_*` dispatch task id.
+ * Graph-scope suppression: tasks dispatched by the deleted legacy graph engine
+ * (marker `task.graphScoped`) are skipped entirely — the deleted legacy graph
+ * notifier reported node completion itself, by node id rather than by the
+ * internal `bg_*` dispatch task id. No shipped host sets the marker today.
  * Emitting both would give the emperor two reminders with two id namespaces.
  * Real-session tasks notify exactly as before.
  */

@@ -185,13 +185,13 @@ export interface EngineState {
    * declaration version.
    *
    * OPTIONAL-ADDITIVE — absent in files written before this field existed, and
-   * for states that never bound one. Absence is deliberately NOT
-   * self-describing: the format-2 decoder is the one component allowed to
-   * infer `LEGACY_SIGNAL_PROTOCOL` for it, because format 2 IS the
-   * legacy layout. A future storage format that lacks the field is corrupt,
-   * never guessed as legacy. When present, the loader classifies the value
-   * against the execution-protocol registry and refuses an unregistered one
-   * instead of running it under legacy rules.
+   * for states that never bound one. Absence is NOT self-describing and is
+   * never resolved: the loader reports `corrupt(execution)`, because the
+   * deleted legacy runtime's decoder backfill (format 2 ⇒ protocol 1) was
+   * removed with it and no decoder infers a protocol any more. When present,
+   * the loader classifies the value against the execution-protocol registry
+   * and refuses an unregistered one — the deleted protocol 1 included —
+   * instead of running it under substituted rules.
    */
   executionProtocolVersion?: number;
 
@@ -290,10 +290,9 @@ export interface PlanBinding {
  * `"all"` / `"any"` stay strings; `quorum:N` becomes `{ quorum: N }` so the
  * required count travels with the strategy. The declared union forces
  * `quorum` to exist on the quorum branch, so a bare `"quorum"` string is not
- * representable at either boundary. `readQuorum` in
- * `src/graph/engine/join-evaluator.ts` is the single reader of the count; the
- * approval cancellation gate (`approval-handler.ts` `shouldCancel`) and
- * `evaluateJoin` both go through it.
+ * representable at either boundary. `readQuorum` in `src/graph/join-strategy.ts`
+ * is the single reader of the count; the outcome-protocol reducer goes through
+ * it (its legacy callers were deleted with the legacy runtime).
  */
 export type ResolvedJoinStrategy = "all" | "any" | { quorum: number };
 
@@ -331,11 +330,9 @@ export interface NodeRuntimeState {
   result?: MaterializedResultRef;
   /**
    * Stashed text snapshot of the node's materialized result sidecar, read
-   * ONCE at completion time by `AdvanceEngine._captureNodeResult`
-   * (`src/graph/engine/engine-advance.ts`, subtask 2). Backs the EdgePayload
-   * `result` fallback in `_edgeResultText` so downstream data flow never
-   * performs a synchronous disk read while the advancement critical section
-   * holds the lock.
+   * ONCE at completion time by the deleted legacy advancement engine's
+   * `_captureNodeResult`. Backs the EdgePayload `result` fallback so data flow
+   * never performs a synchronous disk read while the advancement lock is held.
    *
    * OPTIONAL-ADDITIVE — absent until a completed node's sidecar was stashed
    * (or when the node has no materialized result); the I/O-failure → ''
@@ -475,7 +472,7 @@ export interface EdgePayload {
    * genuine output), this falls back to the source node's materialized result
    * sidecar text (M3) — the real output the worker produced, when it was
    * materialized (`totalChars > 0` and no `fetchError`); otherwise `""`.
-   * See `AdvanceEngine._buildEdgePayload` (`src/graph/engine/engine-advance.ts`).
+   * Written by the deleted legacy advancement engine's `_buildEdgePayload`.
    */
   result: string;
   /** List of artifact file paths produced by the source node */

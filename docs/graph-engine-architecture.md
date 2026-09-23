@@ -1,12 +1,21 @@
-# Graph Execution Engine v2 — Architecture Map
+# Graph Execution Engine v2 — Architecture Map (ARCHIVED)
+
+> **ARCHIVED HISTORY — the runtime this document maps no longer exists.**
+> The legacy signal runtime was deleted on 2026-09-23: every module under
+> `src/graph/engine/*`, `parser-v2.ts`, `validator-v2.ts`, `serialize.ts`, the
+> legacy graph barrel/templates and the legacy construction/execution tools are
+> gone. This file is kept only as a historical record of that design; do not
+> follow its file paths, and do not treat any "current" claim in it as true of
+> today's tree. The shipped architecture is
+> [docs/graph-outcome-protocol.md](graph-outcome-protocol.md).
 
 Canonical architecture map of the v2 graph execution engine in
-`src/graph/engine/*`. All file:line anchors were verified against the current
-source at the time of writing; where a range in the task brief differed from
-the actual file after reading, the verified line numbers are used and the
-correction is noted inline. Anchors were re-verified against the post-fix tree
-on 2026-08-24 (review D6: the prior "re-verified on 2026-07-29" claim had
-drifted on ~60% of anchors).
+`src/graph/engine/*` (deleted 2026-09-23). All file:line anchors were verified
+against the source as it existed at the time of writing; where a range in the
+task brief differed from the actual file after reading, the verified line
+numbers are used and the correction is noted inline. Anchors were re-verified
+against the post-fix tree on 2026-08-24 (review D6: the prior "re-verified on
+2026-07-29" claim had drifted on ~60% of anchors).
 
 - Engine version: **2.0** (barrel banner, `src/graph/engine/index.ts`)
 - Design reference (intended, not present on disk — see CONFIRMED-GAPS **a**):

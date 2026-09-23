@@ -30,7 +30,7 @@ export const DISPATCH_RECOVERY_MARKER = "[RECOVERY: PENDING TASKS DROPPED]";
 export const DISPATCH_PROGRESS_MILESTONE_MARKER = "[PROGRESS MILESTONE]";
 /**
  * Marker for graph-node-completion reminders injected into the emperor session
- * by the graph notifier (`src/graph/engine/graph-notify.ts`). Like every other
+ * by the deleted legacy graph notifier. Like every other
  * parent-targeted reminder, it is part of {@link DISPATCH_NOTIFICATION_MARKERS}
  * so the re-entering chat.message hook recognizes it as a non-user turn and does
  * NOT reset the auto-continue counter.
@@ -38,7 +38,7 @@ export const DISPATCH_PROGRESS_MILESTONE_MARKER = "[PROGRESS MILESTONE]";
 export const GRAPH_COMPLETION_MARKER = "[GRAPH NODE COMPLETED]";
 /**
  * Marker for graph-terminal reminders (GRAPH COMPLETE) injected into the emperor
- * session by the graph terminal notifier (`src/graph/engine/graph-notify.ts`).
+ * session by the deleted legacy graph terminal notifier.
  * Like every other parent-targeted reminder, it is part of
  * {@link DISPATCH_NOTIFICATION_MARKERS} so the re-entering chat.message hook
  * recognizes it as a non-user turn.
@@ -46,14 +46,14 @@ export const GRAPH_COMPLETION_MARKER = "[GRAPH NODE COMPLETED]";
 export const GRAPH_COMPLETE_MARKER = "[GRAPH COMPLETE]";
 /**
  * Marker for graph-terminal reminders (GRAPH BLOCKED) injected into the emperor
- * session by the graph terminal notifier (`src/graph/engine/graph-notify.ts`).
+ * session by the deleted legacy graph terminal notifier.
  * Distinct from GRAPH_COMPLETE_MARKER so a graph that is blocked-then-resumed-then-completed
  * produces two distinct terminal reminders with different markers.
  */
 export const GRAPH_BLOCKED_MARKER = "[GRAPH BLOCKED]";
 /**
  * Marker for graph-node-stall reminders injected into the emperor session by
- * the graph stall notifier (`src/graph/engine/graph-notify.ts`). Like every
+ * the deleted legacy graph stall notifier. Like every
  * other parent-targeted reminder, it is part of
  * {@link DISPATCH_NOTIFICATION_MARKERS} so the re-entering chat.message hook
  * recognizes it as a non-user turn and does NOT reset the auto-continue

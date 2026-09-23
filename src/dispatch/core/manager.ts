@@ -345,11 +345,11 @@ export class DispatchManager {
   /**
    * Notify the parent session about a task's completion.
    *
-   * Graph-scope suppression: graph-scoped tasks (dispatched by the graph
-   * engine via `executeNode`/`graphParentContext`) return immediately without
-   * sending — graph-node completion is reported EXCLUSIVELY by the graph
-   * notifier (`createGraphNotifier`/`createGraphTerminalNotifier` in
-   * `src/graph/engine/graph-notify.ts`). This guards the direct callers
+   * Graph-scope suppression: graph-scoped tasks (dispatched by the deleted
+   * legacy graph engine via `executeNode`/`graphParentContext`) return
+   * immediately without sending — the deleted legacy graph notifier reported
+   * node completion itself, and no shipped host sets the marker today. This
+   * guards the direct callers
    * (approveTask/rejectTask) and the `sendNotification` callback path used by
    * recovery-orchestrator and the completion-orchestrator outbox sweeper.
    * Real-session tasks notify exactly as before.

@@ -35,13 +35,14 @@
  * nothing here executes, dispatches or reconciles one.
  *
  * SCOPE: the durable substrate of the OUTCOME protocol. The legacy v2 run path
- * keeps its file persistence untouched and imports none of this module.
+ * and its file persistence were deleted with the legacy runtime and import none
+ * of this module.
  * `ledger_graph_state` carries the outcome runtime's state (C3b), and
  * `writeGraphState` joins a caller's ACCEPTANCE transaction: the state snapshot
  * commits with the receipt, the accepted event and the pending effects instead
  * of landing beside them in a second write that a crash could separate. Nothing
- * under `src/graph/engine`, `src/graph/tools` or `src/dispatch` imports this
- * module; the run path that does is `src/graph/outcome/runtime.ts`.
+ * under `src/graph/tools` or `src/dispatch` imports this module; the run path
+ * that does is `src/graph/outcome/runtime.ts`.
  */
 
 import { closeSync, existsSync, mkdirSync, openSync, readSync } from "node:fs";

@@ -109,16 +109,17 @@ export interface DispatchTask {
    */
   terminatingSignal?: { type: string; payload: unknown };
   /**
-   * Graph-scope marker: set when this task was dispatched by the graph engine
-   * (via `executeNode`/`graphParentContext` in `src/graph/engine/dispatch-bridge.ts`).
+   * Graph-scope marker: set when this task was dispatched by the (deleted)
+   * legacy graph engine via `executeNode`/`graphParentContext`.
    *
    * While set, the dispatch layer suppresses its parent notifications
-   * (`[BACKGROUND TASK COMPLETED]` / `[ALL BACKGROUND TASKS COMPLETE]`):
-   * graph-node completion is reported EXCLUSIVELY by the graph notifier
-   * (`createGraphNotifier`/`createGraphTerminalNotifier` in
-   * `src/graph/engine/graph-notify.ts`), which references the node id rather
-   * than the internal `bg_*` dispatch task id. Absent/undefined for every
-   * real-session dispatch, whose notifications behave exactly as before.
+   * (`[BACKGROUND TASK COMPLETED]` / `[ALL BACKGROUND TASKS COMPLETE]`): the
+   * deleted legacy graph notifier reported node completion itself, by node id
+   * rather than by the internal `bg_*` dispatch task id. No shipped host sets
+   * the marker today — the outcome run path deliberately leaves it unset so the
+   * normal completion notice stays the orchestrator's visibility — and it
+   * remains only so a task persisted by the legacy runtime keeps its
+   * suppression semantics. Absent/undefined for every real-session dispatch.
    */
   graphScoped?: boolean;
 }
@@ -144,11 +145,11 @@ export interface DispatchInput {
   /** When true, the dispatched session is created without parentID — it does NOT inherit the parent session's conversation history. Used by the loop system to ensure each round starts fresh. */
   noParentInherit?: boolean;
   /**
-   * Graph-scope marker: set by the graph engine's `executeNode`
-   * (`src/graph/engine/dispatch-bridge.ts`) for every node dispatch. Carried
-   * onto the resulting {@link DispatchTask} so the notification choke points
-   * can suppress parent reminders for graph-scoped tasks (the graph notifier
-   * reports node completion instead). Absent for real-session dispatches.
+   * Graph-scope marker: set by the deleted legacy graph engine's `executeNode`
+   * for every node dispatch. Carried onto the resulting {@link DispatchTask} so
+   * the notification choke points can suppress parent reminders for
+   * graph-scoped tasks. No shipped host sets it today; absent for real-session
+   * dispatches.
    */
   graphScoped?: boolean;
   /** Priority: lower number = higher priority. Default 0 (normal).

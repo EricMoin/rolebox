@@ -121,12 +121,11 @@ const _signalCategoryCoverage = {} satisfies Record<
 /**
  * Union of the signal types that terminate a node's run.
  *
- * Exported for the engine's node-completion seam (`NodeCompletionEvent` in
- * `src/graph/engine/engine-advance.ts`), which carries one of these for a
- * signal-driven transition plus its own synthetic `"timeout"` marker — so the
- * engine-side field is `TerminatingSignalType | "timeout"`, not this union
- * alone. The engine adds the timeout literal because a timeout is not a
- * signal.
+ * Exported for the deleted legacy engine's node-completion seam
+ * (`NodeCompletionEvent`), which carried one of these for a signal-driven
+ * transition plus its own synthetic `"timeout"` marker — so that field was
+ * `TerminatingSignalType | "timeout"`, not this union alone. A timeout was a
+ * separate literal because a timeout is not a signal.
  */
 export type TerminatingSignalType = (typeof TERMINATING_SIGNAL_TYPES)[number];
 

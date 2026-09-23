@@ -61,10 +61,10 @@
  * NO EFFECT RUNS HERE. This module records effects; executing them belongs to
  * the effect executor a later slice delivers, and the outcome run path
  * (`src/graph/outcome/runtime.ts`) is the only consumer that reads them back
- * today. Nothing under `src/graph/engine`, `src/graph/tools` or
- * `src/dispatch` imports this module: the outcome protocol has its OWN run
- * path, and the legacy engine keeps deciding completions from severity-ranked
- * signals exactly as before.
+ * today. Nothing under `src/graph/tools` or `src/dispatch` imports this
+ * module: the outcome protocol has its OWN run path, and the legacy engine that
+ * decided completions from severity-ranked signals was deleted with its
+ * runtime.
  */
 
 import {

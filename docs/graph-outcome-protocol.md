@@ -53,7 +53,7 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   persisted local status and the host's fact about the same stable id contradict
   each other is named in `divergences` with what recovery did about it — never a
   blind re-dispatch and never a silent drop (`runtime.ts`, `recovery.ts`,
-  `engine/engine-startup.ts`);
+  `src/graph/host/outcome-host.ts`);
 - the durable STOP: hard-limit exhaustion and the declared progress-stalled
   policy end the run inside the same transaction that accepts the outcome
   (`src/graph/outcome/progress.ts`, `graph-state.ts`);
@@ -112,12 +112,17 @@ NOT YET ENABLED OR NOT IMPLEMENTED:
   validators do not;
 - storage format 3 and its `2 -> 3` migrator — `ENGINE_PERSISTENCE_VERSION` is
   still the literal `2` — and the `src/graph/persistence/load.ts` module move;
-- stage-E retirement, draining and migration: stage E is NOT complete. The
-  legacy signal path, the legacy v2 run path and the legacy recovery path are
-  untouched and still run for every record that already exists; what E0 closes
-  is the creation SOURCE, so the protocol-1 population cannot grow while it is
-  being drained (see the E0 sections below). Nothing is deleted and no existing
-  record is resolved, converted or retired.
+- stage-E retirement: COMPLETE as of 2026-09-23. The legacy signal runtime
+  (`src/graph/engine/**`), `parser-v2.ts`, `validator-v2.ts` (with
+  `serialize.ts`, the legacy graph barrel and templates), the legacy
+  construction/execution tools, the protocol-1 load/backfill branches and the
+  `allowNewLegacyGraphs` creation gate are DELETED; the outcome protocol is the
+  only registered execution protocol. There is no drain, no conversion and no
+  temporary admission: a record pinned to protocol 1 is refused as
+  `unsupported(execution)` by the total loader and is never run. The stage
+  narratives below (C1-E0) are HISTORICAL: statements that the legacy runtime,
+  its tool entries, its registry or a protocol-1 handler still exist describe
+  the tree before the deletion.
 
 ## Objective and scope
 
@@ -357,7 +362,7 @@ belong to: `migration-required` is returned only after the registered
 migration's `validateSource` accepts the body, so an intact source is a missing
 capability while a source that violates its own format is `corrupt(storage)`,
 and the two never collapse. The detailed loader still lives in
-`src/graph/engine/engine-persistence.ts` (`loadEngineStateForResume`), which
+`src/graph/persistence/engine-persistence.ts` (`loadEngineStateForResume`), which
 also assembles and exports the default registry next to the format-2 decoder:
 the decoder needs v2 hydration, so it cannot live in the dependency-leaf
 `storage-format.ts`, and the startup sweep imports the registry from
@@ -1303,15 +1308,15 @@ per candidate, before anything is applied, and its refusal rolls back the whole
 acceptance.
 
 THE STRATEGY IS RESOLVED, NOT REIMPLEMENTED. `resolveJoinStrategy` and
-`readQuorum` moved to the dependency-leaf module `src/graph/join-strategy.ts`
-and are re-exported unchanged from `src/graph/engine/join-evaluator.ts`, so the
-legacy signal engine and the outcome reducer read one `join` declaration
-through ONE resolver instead of two that could drift. What the reducer does NOT
-reuse is the evaluator itself: `evaluateJoin` is defined over
+`readQuorum` live in the dependency-leaf module `src/graph/join-strategy.ts`,
+so every reader resolves one `join` declaration through ONE resolver instead of
+copies that could drift. The legacy signal engine that also read them — and its
+`join-evaluator.ts` — was deleted with the legacy runtime. What the reducer
+does NOT reuse is the legacy evaluator itself: `evaluateJoin` was defined over
 `EngineState`/`NodeRuntimeState` and per-source `EdgePayload` signals, and
-importing its module would drag `src/graph/engine/engine-persistence.ts` (file
-I/O) into the outcome run path, which is deliberately free of
-`src/graph/engine/**`. The outcome rule is therefore the equivalent
+importing its module would have dragged file persistence into the outcome run
+path, which is deliberately free of it. The outcome rule is therefore the
+equivalent
 satisfaction predicate over arrivals: `all` requires every distinct feeder,
 `any` at least one, `quorum:N` at least N. The ONE semantic difference is
 stated where it lives: the legacy evaluator counts severity-ranked signals and
@@ -2554,16 +2559,15 @@ versioned or rewritten rather than constraining the new protocol to old defects.
 ## Existing implementation references
 
 - [Node declarations](../src/types.graph-v2.ts): role-independent configuration.
-- [Condition resolver](../src/graph/engine/condition-resolver.ts):
-  `signal_observed` tests a defined ledger value, not payload content.
 - [Natural-completion settlement](../src/graph/outcome/natural-completion.ts):
   the closed completion-fact envelope and the `natural-completion:` provenance
   namespace the run path persists.
-- [Loop execution](../src/graph/engine/loop-group-executor.ts): current inferred
-  marker and unresolved-content decisions.
-- [Persistence](../src/graph/engine/engine-persistence.ts): version gate before
-  hydration; graph declarations and loop runtime state are already persisted.
-- [Recovery](../src/graph/engine/engine-recovery.ts): current dispatch-ID fencing.
-- [Termination](../src/graph/engine/engine-termination.ts): graph notification
-  dedupe, distinct from node submission acceptance.
+- [Persistence](../src/graph/persistence/engine-persistence.ts): version gate
+  before hydration; graph declarations and loop runtime state are persisted.
+- [Recovery](../src/graph/host/outcome-host.ts): the declared-graph sweep and its
+  restart report.
 - [Signal tool](../src/signal/signal-tool.ts): shared function/session/observe use.
+- The legacy `src/graph/engine/**` references this list used to carry
+  (condition resolver, loop executor, recovery, termination) were deleted with
+  the legacy runtime; [docs/graph-engine-architecture.md](graph-engine-architecture.md)
+  is archived history.

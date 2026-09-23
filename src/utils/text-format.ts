@@ -33,7 +33,7 @@
  *   `max` (up to `max + 1` UTF-16 code units).
  * - `src/cli/commands/memory/memory-helpers.ts` `truncate` — a UTF-16
  *   code-unit budget whose callers `.padEnd()` afterwards.
- * - `src/graph/engine/approval-payload.ts` `truncateSummary` — a fixed
+ * - the deleted `src/graph/engine/approval-payload.ts` `truncateSummary` — a fixed
  *   `slice(0, 200)` with no ellipsis on a structured (non-display) payload.
  *
  * Hardening contract: display paths must never throw and must never render

@@ -278,8 +278,8 @@ function toGraphEvent(record: RawGraphEventLine): RoleboxEvent | null {
         graphId: record.graphId,
         nodeId: record.nodeId,
         agent: record.agent ?? "",
-        // `node_dispatched` lines always carry status "running" (see
-        // src/graph/engine/graph-events.ts GraphEventRecorder.nodeDispatched).
+        // `node_dispatched` lines always carry status "running" (the deleted
+        // legacy recorder's GraphEventRecorder.nodeDispatched wrote them).
         status: record.status ?? "running",
         ts,
       };

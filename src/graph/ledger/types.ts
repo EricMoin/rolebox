@@ -35,10 +35,10 @@
  * outcome-protocol graph, so `writeGraphState` joins the acceptance batch
  * instead of landing beside it (C3b).
  *
- * THE GRAPH STATE IS THE ONLY ENGINE STATE THIS PORT CARRIES. A LEGACY v2 graph
- * keeps its file persistence exactly as before; nothing here reads or writes a
- * legacy snapshot, and this ledger remains a substrate the legacy run path does
- * not import.
+ * THE GRAPH STATE IS THE ONLY ENGINE STATE THIS PORT CARRIES. The legacy v2
+ * run path and its file persistence were deleted with the legacy runtime;
+ * nothing here reads or writes a legacy snapshot, and no module imports this
+ * ledger for one.
  *
  * Timestamps are EPOCH MILLISECONDS supplied by the CALLER. Time is an explicit
  * input to the protocol (docs § "State, storage, and effects"), so the store

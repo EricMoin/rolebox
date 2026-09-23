@@ -5,15 +5,15 @@
  * Date: 2026-09-22
  *
  * ONE strongly-connected-component implementation for every cycle rule in the
- * tree. The v2 validator's cycle containment and the v3 compiler plan's
- * cycle-containment rule both call this module, so "a cycle" can never mean two
- * different things depending on which side of the pipeline is asking.
+ * tree. The deleted v2 validator's cycle containment and the v3 compiler plan's
+ * cycle-containment rule both called this module, so "a cycle" could never mean
+ * two different things depending on which side of the pipeline was asking.
  *
- * Why it is a dependency leaf: the v2 validator (`validator-v2.ts`) and the v3
- * compiled plan (`compiler/plan.ts`) must not depend on each other — a plan
- * module that imported the v2 validator would pull the parser and the condition
- * vocabulary into the plan's dependency set — so the shared algorithm lives
- * below both.
+ * Why it is a dependency leaf: the v2 validator (`validator-v2.ts`, deleted) and
+ * the v3 compiled plan (`compiler/plan.ts`) must not depend on each other — a
+ * plan module that imported the v2 validator would pull the parser and the
+ * condition vocabulary into the plan's dependency set — so the shared algorithm
+ * lives below both.
  *
  * The algorithm is the v2 validator's own Tarjan SCC, moved here unchanged:
  * nodes are derived from the edge endpoints in first-seen order, a self-loop is

@@ -7,17 +7,16 @@
  * The ONE resolver of a declared {@link JoinConfig} into the runtime
  * {@link ResolvedJoinStrategy} shape, and the ONE reader of a resolved quorum
  * count. It is a DEPENDENCY LEAF — it imports the constants vocabulary and
- * types only — because TWO runtimes resolve the same declaration vocabulary:
- * the legacy signal engine (`src/graph/engine/join-evaluator.ts`, which
- * re-exports these functions so its own importers are unchanged) and the
- * outcome-protocol reducer (`src/graph/outcome/graph-state.ts`), whose module
- * is deliberately free of `src/graph/engine/**` (that module pulls in file
- * persistence through `markDirty`).
+ * types only — because the two runtimes that once resolved the same declaration
+ * vocabulary have collapsed into ONE: the legacy signal engine
+ * (`src/graph/engine/join-evaluator.ts`) was deleted with its runtime, and the
+ * outcome-protocol reducer (`src/graph/outcome/graph-state.ts`) is the only
+ * reader left — deliberately free of file persistence.
  *
- * Keeping the resolution here means the two paths cannot drift into two
- * readings of one `join` declaration — the legacy evaluator's own doc comment
- * called this resolver "THE single source of truth for the join-strategy shape",
- * and it still is: only its location moved.
+ * Keeping the resolution here means there is a single reading of one `join`
+ * declaration — the deleted legacy evaluator's own doc comment called this
+ * resolver "THE single source of truth for the join-strategy shape", and it
+ * still is: only its location moved.
  */
 
 import { JoinStrategy } from "../constants.ts";

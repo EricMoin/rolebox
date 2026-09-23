@@ -8,7 +8,7 @@
 // failure arm carries a reason rather than a distinct payload, and Result can
 // express it WITHOUT INFORMATION LOSS. In-repo shapes that fail that rule are
 // deliberately NOT converted:
-//   - GraphValidationResult (src/graph/validator-v2.ts) — a validation REPORT
+//   - GraphValidationResult (deleted with src/graph/validator-v2.ts) — a REPORT
 //     with two independent diagnostic channels (errors AND warnings); warnings
 //     are meaningful even when valid, so a Result<void, string[]> would drop
 //     them. Not expressible.
