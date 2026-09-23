@@ -348,7 +348,7 @@ export interface StartupHealth {
  * - `fnstate-`      → function runtime store
  * - `dispatch-`     → TaskStore (task-store.ts:258, `dispatch-{dirHash}.json`)
  * - `metrics-`      → metrics persister
- * - `engine-`       → per-graph engine state (engine-persistence.ts:480)
+ * - `engine-`       → per-graph engine state (src/graph/persistence/engine-persistence.ts, `engineStatePath`)
  * - `budget-`       → budget tracker (budget-tracker.ts:281)
  * - `activerole-`   → dsh active-role sidecar (active-role-store.ts:105)
  */

@@ -730,12 +730,11 @@ describe("dsh 0.1.5-rc.1 continuable-creation contract (prepareContinuable)", ()
 // ── Terminating-signal parity on the dsh settlement path ────────────────────
 //
 // The completion evaluator records the sub-agent's terminating signal on the
-// task (`task.terminatingSignal`, completion-evaluator.ts) so the engine's
-// `mapDispatchStatusToSignal` (engine-recovery.ts) can preserve a real
-// `revise_needed` / `escalate` instead of hardcoding `answer`. The dsh
-// adapter settles its own tasks, so it must make the same assignment —
-// otherwise every completed dsh node falls through to the inferred-answer
-// branch and logs "no terminatingSignal recorded for completed task".
+// task (`task.terminatingSignal`, completion-evaluator.ts). The dsh adapter
+// settles its own tasks, so it must make the same assignment or it would
+// diverge from the in-process / opencode / pi paths. The field's only reader
+// was the deleted legacy engine's `mapDispatchStatusToSignal`; the parity is
+// kept (and pinned here) with no surviving consumer.
 
 describe("terminating-signal parity on dsh completion settlement", () => {
   // `sessionSignalLedger` is a process-wide singleton; reset it around every

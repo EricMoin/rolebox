@@ -171,10 +171,11 @@
  * the settlement transaction and the state it commits) and the contracts it
  * requires from a host. The host capabilities themselves now SHIP in
  * `src/graph/host/**`: the credential vault, the execution index, the dispatch
- * adapter, the invocation-identity holder and the completion bridge. Still
- * DEFERRED: storage format 3 with its `2 -> 3` migrator, the stage-D/E routing
- * and loop work, and the legacy retirement this repository still owes. The
- * legacy v2 run and recovery paths are untouched.
+ * adapter, the invocation-identity holder and the completion bridge. The
+ * legacy signal runtime was deleted on 2026-09-23, so this is the only graph
+ * run path: there is no legacy v2 run or recovery path left to fall back to.
+ * Still DEFERRED: storage format 3 with its `2 -> 3` migrator and the
+ * remaining routing and loop work.
  */
 
 import type { CompiledPlan } from "../compiler/plan.ts";

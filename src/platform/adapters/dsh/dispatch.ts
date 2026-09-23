@@ -200,7 +200,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-/** Dispatch statuses that end a task (mirrors engine-recovery.ts). */
+/** Dispatch statuses that end a task. */
 const TERMINAL_STATUSES = new Set<string>([
   "completed",
   "error",
@@ -319,13 +319,11 @@ export class DshDispatchAdapter implements IDispatchAdapter {
       // rolebox extension: carry the CONTEXT session onto the spawn so the
       // registered provider (DshAgentRegistrar.buildProvider) can apply the
       // per-session ACTIVE role at spawn time. On the loop path this is the
-      // origin dsh session id (matches the web dock's key); on the graph path
-      // it remains the graph id (the engine's budget scope — see
-      // dispatch-bridge.ts:graphParentContext), so registrar active-role
-      // resolution stays keyed on the value engine-recovery expects. The live
-      // parent `Agent` (dsh requires one) is resolved separately from
-      // `liveParentSessionId` above — the graph's REAL parent session — so
-      // graph dispatch no longer hands the budget key to `parentResolver`.
+      // origin dsh session id (matches the web dock's key). The live parent
+      // `Agent` (dsh requires one) is resolved separately from
+      // `liveParentSessionId` above, so the context session key and the parent
+      // Agent never have to be the same value. Graph dispatch does not run
+      // through this adapter (the host layer dispatches it).
       sessionId: parentSessionId,
     };
     const run = await this.opts.subagents.start(agent, request);
@@ -450,11 +448,13 @@ export class DshDispatchAdapter implements IDispatchAdapter {
    * Record the run's terminating signal on the task before it settles, with
    * parity to the completion evaluator (`completion-evaluator.ts` sets
    * `task.terminatingSignal` on the in-process / opencode / pi paths). The dsh
-   * adapter settles its own tasks, so without this the engine's
-   * `mapDispatchStatusToSignal` (`engine-recovery.ts`) finds the field unset
-   * and the ledger empty for EVERY completed dsh node — logging
-   * "no terminatingSignal recorded for completed task" and inferring the
-   * `answer` it could have read directly.
+   * adapter settles its own tasks, so it makes the same assignment instead of
+   * diverging from the other paths.
+   *
+   * The field's only reader was the deleted legacy engine's
+   * `mapDispatchStatusToSignal`; it is kept as the dispatch-level record of the
+   * task's terminating signal (and as the parity `tests/dsh-dispatch.test.ts`
+   * pins), with no surviving consumer.
    *
    * Infallible by construction: settlement is fire-and-forget and must never
    * reject (see {@link wireRunSettlement}), so a throwing ledger falls back to
@@ -635,8 +635,9 @@ export class DshDispatchAdapter implements IDispatchAdapter {
     entry.listeners.delete(callback);
   }
 
-  // `getSessionUsage` is intentionally omitted — dsh has no budget accounting;
-  // the engine's captureNodeUsage (engine-recovery.ts) guards on absence.
+  // `getSessionUsage` is intentionally omitted — dsh has no budget accounting.
+  // (The legacy engine's captureNodeUsage was the only consumer that guarded on
+  // its absence; that runtime is deleted.)
 
   // ── IDispatchAdapter (loop coordinator) ───────────────────────────────────
 

@@ -60,9 +60,10 @@ export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
   // this branch; the widening below covers inputs the compiler cannot see
   // (hand-written JS callers, pre-normalization persisted state), where a
   // missing count still degrades to the documented default of 1. The
-  // DECLARATION side may not lean on that default: validator-v2 rule 9
-  // rejects `{ strategy: "quorum" }` without a count and parser-v2 refuses to
-  // build one.
+  // DECLARATION side may not lean on that default: the v3 declaration parser
+  // refuses a "quorum" strategy with no positive-integer count
+  // (`readJoin` in parse-declaration-v3.ts), so no accepted declaration
+  // reaches this default.
   //
   // Defensive clamp: a non-positive quorum would make `evaluateJoin` treat the
   // join as satisfied with ZERO upstream answers (a DAG-order violation).
@@ -77,11 +78,11 @@ export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
  * The required answer count of a resolved join strategy, or `undefined` for
  * the strategies that carry no count (`"all"` / `"any"`).
  *
- * Single reader for the quorum branch (C1): `evaluateJoin` and the approval
- * cancellation gate (`approval-handler.ts` `shouldCancel`) both read the count
- * through this function, so the two consumers cannot interpret the same
- * `{ quorum: N }` value differently. The outcome-protocol reducer reads it
- * here too.
+ * Single reader for the quorum branch (C1). The deleted legacy evaluator and
+ * approval cancellation gate read the count through this function too; today
+ * the outcome-protocol reducer (`src/graph/outcome/graph-state.ts`) is the
+ * surviving reader, so a `{ quorum: N }` value still has exactly one
+ * interpreter.
  */
 export function readQuorum(strategy: ResolvedJoinStrategy): number | undefined {
   return typeof strategy === "object" ? strategy.quorum : undefined;

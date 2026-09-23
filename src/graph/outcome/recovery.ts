@@ -35,10 +35,10 @@
  * seam rather than a second store owner.
  *
  * Dependency note: this module may import the engine's persisted-state TYPE and
- * the loader's record types, but it imports no legacy runtime, so a declared
- * graph can never be recovered through the legacy path from here. The legacy
- * recovery guard is untouched: `EngineRuntime.recover()` still refuses any
- * protocol but the legacy one.
+ * the loader's record types, but it imports no legacy runtime: there is none
+ * left. The legacy signal runtime was deleted on 2026-09-23, and the loader
+ * refuses a record pinned to any protocol but the outcome protocol before
+ * recovery is reached, so no legacy recovery path exists to guard against.
  */
 
 import type { EngineState } from "../../types.engine-v2.ts";

@@ -258,8 +258,9 @@ export interface LoopGroupDeclarationV3 {
  * the storage format, the execution protocol or a contract revision, and it is
  * never compared with those identities
  * (docs/graph-outcome-protocol.md § "Definitions, locations, and comparison
- * owners"). The legacy v2 declaration keeps `version: 2` and the legacy
- * parser/validator/engine path.
+ * owners"). The v2 authoring grammar and the parser/validator/engine path that
+ * read it were deleted with the legacy runtime on 2026-09-23; this build reads
+ * grammar 3 only.
  */
 export interface GraphDeclarationV3 {
   /** Authoring grammar version — always 3 for this type. */

@@ -32,12 +32,13 @@
  *   sessions without owning the Map unwrapping.
  *
  * All functions are total (never throw): every filesystem and parse failure
- * path is contained. Directory semantics match `engine-persistence.ts` —
- * `stateDir` is the workspace directory, and the state files live under
- * `.rolebox/state/` (see `engineStatePath`, engine-persistence.ts:281).
+ * path is contained. Directory semantics match
+ * `src/graph/persistence/engine-persistence.ts` — `stateDir` is the workspace
+ * directory, and the state files live under `.rolebox/state/` (see
+ * `engineStatePath`).
  *
  * Design reference: `.rolebox/design/engine-state-machine.md` §4 (persistence
- * model); scan pattern mirrored from `engine-startup.ts:129-167`.
+ * model); the scan pattern is the one the deleted `engine-startup.ts` used.
  */
 
 import { readdirSync, readFileSync } from "node:fs";

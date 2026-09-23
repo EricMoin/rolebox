@@ -353,7 +353,7 @@ function readRootVersion(value: unknown, log: IssueLog): 3 | undefined {
     log.issues.push(
       issue(
         "unsupported-version",
-        `$.version is ${value}; this front-end reads authoring grammar 3 only (a version-2 document keeps the legacy parser)`,
+        `$.version is ${value}; this front-end reads authoring grammar 3 only (the v2 authoring grammar and its parser were deleted with the legacy runtime)`,
         "$.version",
       ),
     );
