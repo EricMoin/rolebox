@@ -122,7 +122,7 @@ import {
 } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
-import type { PendingEffectRecord } from "../ledger/types.ts";
+import type { ControlDecisionRecord, PendingEffectRecord } from "../ledger/types.ts";
 import {
   OutcomeGraphRuntime,
   type AttemptCredentialReissueFence,
@@ -157,6 +157,17 @@ import type {
   OutcomeExecutionProbe,
   OutcomeExecutionQuery,
 } from "../outcome/dispatch-effects.ts";
+import {
+  cancelEffectIdOf,
+  confirmCancelIntent,
+  markCancelRequested,
+  recordCancelIntent,
+  type OutcomeCancelIntentInput,
+  type OutcomeCancelRequestStep,
+  type OutcomeExecutionCancelAnswer,
+  type OutcomeExecutionCancelProbe,
+  type OutcomeExecutionCancellation,
+} from "../outcome/cancel.ts";
 import {
   dispatchEffectIdOf,
   dispatchEffectKeyOf,
@@ -331,6 +342,21 @@ export interface OutcomeHostOptions {
    * unwatched rather than pretending they are covered.
    */
   readonly watchCompletion?: HostCompletionWatchPort;
+  /**
+   * THE PLATFORM'S CANCEL SURFACE (P3 cancel).
+   *
+   * A trusted cancel command is persisted by the control application service as a
+   * `ControlDecision` per in-flight attempt — the durable INTENT — and this port is how the host
+   * then hands each of those intents to the platform. It is separate from
+   * {@link OutcomeHostOptions.query} on purpose: a platform may be able to ANSWER whether an
+   * execution exists and still be unable to STOP it, and the two facts must not be conflated.
+   *
+   * A HOST WITH NO PORT STILL RECORDS THE INTENT and reports every attempt `unsupported`: nothing
+   * is handed to a platform it does not have, and no cancel is ever reported as confirmed. An
+   * unconfirmed cancel stays a `started` effect row — visible, unsettled, re-delivered by the next
+   * window — exactly as the plan requires ("未确认的外部任务必须仍可见").
+   */
+  readonly cancelExecution?: OutcomeExecutionCancellation;
 }
 
 /**
@@ -512,6 +538,48 @@ export interface OutcomeHostUnconfirmedExecution {
 }
 
 /**
+ * ONE ATTEMPT'S CANCEL DELIVERY (P3 cancel).
+ *
+ * THE TWO FACTS, KEPT APART. `requested` means the host handed the cancel to the platform and the
+ * platform has NOT confirmed it: the execution stays visible and unsettled, and a later window asks
+ * again. `confirmed` means the platform SUBSTANTIATED the cancellation — and it is the only state
+ * that may be read as a cancellation. `unsupported` means the platform offers no cancel surface for
+ * that execution, and `blocked` means the host could not even record the intent. Neither of the
+ * last two is a cancellation, and neither hides the execution.
+ */
+export interface OutcomeCancelDeliveryEntry {
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  /** The durable cancel effect this delivery recorded beside the intent. */
+  readonly effectId: string;
+  readonly state: "confirmed" | "requested" | "unsupported" | "blocked";
+  /** The platform's own execution id, when the host could name one. */
+  readonly executionId?: string;
+  /** The platform's task id, when it names the task apart from the execution. */
+  readonly taskId?: string;
+  /** What happened, in the platform's or the store's own words. Never a credential. */
+  readonly reason: string;
+}
+
+/** What delivering one graph's cancel intents did. */
+export interface OutcomeCancelDeliveryReport {
+  readonly graphId: string;
+  /** The current run identity, when the store holds one. */
+  readonly runId?: string;
+  /** One entry per attempt the run's cancel decisions name, in decision order. */
+  readonly entries: readonly OutcomeCancelDeliveryEntry[];
+  /** Set when NOTHING could be delivered because the graph's run path is unreadable. */
+  readonly blocked?: string;
+}
+
+/** Inputs to {@link OutcomeHost.deliverCancelIntents}. */
+export interface OutcomeCancelDeliveryOptions {
+  /** Epoch milliseconds the intent is recorded at; defaults to this host's clock. */
+  readonly at?: number;
+}
+
+/**
  * What a boot sweep over the declared graphs did.
  *
  * A STARTED OR RESUMED GRAPH STILL CARRIES ITS PER-EFFECT DIAGNOSTICS. A
@@ -597,6 +665,24 @@ export interface OutcomeHostRecoveryReport {
    */
   readonly unconfirmedExecutions: readonly OutcomeHostUnconfirmedExecution[];
   /**
+   * WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3 cancel), one entry per
+   * attempt a run's trusted cancel intents name.
+   *
+   * The REPLAY half of the cancel capability: a process that died between the
+   * durable decision and the platform call leaves a `pending` cancel effect
+   * (the intent is visible), and this sweep is what hands it over — and a
+   * `started` effect the platform has not confirmed is asked AGAIN, because a
+   * cancel is idempotent and an unanswered request must not be presented as
+   * done. Every entry states which of the two facts it established.
+   */
+  readonly cancellations: readonly OutcomeCancelDeliveryEntry[];
+  /**
+   * `graph:reason` for each graph whose cancel intents could NOT be delivered
+   * at all — an unreadable run path, a store that refused the intent write. The
+   * intent and every unconfirmed execution stay visible; nothing was confirmed.
+   */
+  readonly cancelBlocked: readonly string[];
+  /**
    * Set when the workspace's store could not be read AT ALL, so the sweep had no
    * inventory to visit. A store the format gate refuses must not read as "no
    * graphs exist" — that is the same disagreement between the boot sweep, the
@@ -622,6 +708,24 @@ interface RunningGraphRuntime {
   readonly declarationDigest: string;
   /** The plan revision the same row named. */
   readonly planRevision: string;
+}
+
+/**
+ * ONE ATTEMPT'S CANCEL, AS {@link OutcomeHost.deliverCancelIntents} PREPARED IT (P3 cancel).
+ *
+ * Exactly one of `entry` (the attempt is not asked of any platform: no port installed, a blocked
+ * intent write, …) and `port` (the attempt is ready to be asked) is present; `step` carries what
+ * the durable cancel effect already said, which is what keeps a repeated delivery deterministic.
+ */
+interface PreparedCancelDelivery {
+  readonly decision: ControlDecisionRecord;
+  readonly execution: HostExecutionIdentity | undefined;
+  /** The final entry, when this attempt needs no platform ask. */
+  readonly entry?: OutcomeCancelDeliveryEntry;
+  /** What the durable cancel effect said, when this attempt IS asked. */
+  readonly step?: OutcomeCancelRequestStep;
+  /** The port that will ask; present exactly when `entry` is absent. */
+  readonly port?: OutcomeExecutionCancellation;
 }
 
 // ── The host ────────────────────────────────────────────────────────────────
@@ -702,6 +806,8 @@ export class OutcomeHost {
   private readonly query: OutcomeExecutionQuery | undefined;
   /** Where a restarted host re-subscribes to an execution it still awaits (F4). */
   private readonly watchCompletion: HostCompletionWatchPort | undefined;
+  /** The platform's cancel surface, when this host has one (P3 cancel). */
+  private readonly cancelExecution: OutcomeExecutionCancellation | undefined;
   /**
    * What substantiates a host completion fact this host holds no bearer for
    * (P2 item 7): the host's OWN confirmed execution record. Bound methods, so
@@ -772,6 +878,7 @@ export class OutcomeHost {
     this.observeExecution = options.observeExecution;
     this.query = options.query;
     this.watchCompletion = options.watchCompletion;
+    this.cancelExecution = options.cancelExecution;
     // The authority is the host's own durable record, read through the SAME
     // accessor the worker binding uses: one source of truth for "which
     // execution did this attempt get", never a second copy.
@@ -1073,6 +1180,8 @@ export class OutcomeHost {
     const awaiting: OutcomeHostAwaitingCompletion[] = [];
     const controlled: string[] = [];
     const unconfirmed: OutcomeHostUnconfirmedExecution[] = [];
+    const cancellations: OutcomeCancelDeliveryEntry[] = [];
+    const cancelBlocked: string[] = [];
     const inventory = this.declaredGraphInventory();
     for (const graphId of inventory.graphIds) {
       try {
@@ -1136,6 +1245,16 @@ export class OutcomeHost {
                 state: row.state,
               }),
             );
+          }
+          // HAND THE CANCEL INTENTS OVER (P3 cancel). The stop is durable before any platform
+          // call, and this is the window that replays what a dead process left `pending` — and
+          // re-asks what it left `started` and unconfirmed. IT DISPATCHES NOTHING: the run is
+          // controlled, the resume above armed nothing, and this call writes cancel effects and
+          // asks the platform about the executions they name.
+          const deliveries = await this.deliverCancelIntents(graphId);
+          for (const entry of deliveries.entries) cancellations.push(entry);
+          if (deliveries.blocked !== undefined) {
+            cancelBlocked.push(graphId + ":" + deliveries.blocked);
           }
         }
         // ── RE-READ THE HOST'S TERMINAL STATE (P2 item 6) ───────────────────
@@ -1331,7 +1450,9 @@ export class OutcomeHost {
       divergences.length > 0 ||
       completed.length > 0 ||
       awaiting.length > 0 ||
-      controlled.length > 0
+      controlled.length > 0 ||
+      cancellations.length > 0 ||
+      cancelBlocked.length > 0
     ) {
       logWarn(
         "outcome-host: declared-graph sweep — started=[" +
@@ -1365,6 +1486,12 @@ export class OutcomeHost {
             .join(", ") +
           "] controlled=[" +
           controlled.join(", ") +
+          "] cancellations=[" +
+          cancellations
+            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
+            .join(", ") +
+          "] cancel-blocked=[" +
+          cancelBlocked.join(", ") +
           "] unconfirmed=[" +
           unconfirmed
             .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
@@ -1389,6 +1516,11 @@ export class OutcomeHost {
       // neither re-starts a cancelled graph nor presents it as quiet.
       controlled: Object.freeze(controlled),
       unconfirmedExecutions: Object.freeze(unconfirmed),
+      // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3 cancel): confirmed /
+      // requested / unsupported / blocked, per attempt. Nothing here is a
+      // cancellation unless the platform substantiated it.
+      cancellations: Object.freeze(cancellations),
+      cancelBlocked: Object.freeze(cancelBlocked),
       // A store the format gate refuses is a BLOCK, never an empty sweep: the
       // audit and the status surface already refuse it, and the boot sweep must
       // not answer "nothing to do" for the same workspace. A store that simply
@@ -1482,6 +1614,268 @@ export class OutcomeHost {
       watched: Object.freeze(watched),
       settled: Object.freeze(settled),
       unwatched: Object.freeze(unwatched),
+    });
+  }
+
+  /**
+   * DELIVER THIS RUN'S TRUSTED CANCEL INTENTS TO THE PLATFORM (P3 cancel).
+   *
+   * THE REPLAY HALF OF A CANCELLATION. The trusted cancel command is already durable when this runs:
+   * the control application service committed one `"cancel"` decision per in-flight attempt plus the
+   * run's control fact, and the intent therefore outlives the process that decided it. This method
+   * turns those intents into cancel EFFECTS and asks the platform to stop the executions they name,
+   * in this order — and the order is the contract:
+   *
+   * 1. RECORD THE INTENT as a `pending` cancel effect, in its own committed transaction, BEFORE the
+   *    platform is asked anything. A process that dies between the decision and the platform call
+   *    resumes with that row visible, and the next window (a live control command, the boot sweep, a
+   *    later call) hands it over.
+   * 2. MOVE IT TO `started` — the request transition, and the durable-state probe: an already
+   *    `started` row is a request the platform has not confirmed and is asked AGAIN (a cancel is
+   *    idempotent on both shipped platforms); a `done` row is a CONFIRMED cancellation and the
+   *    platform is not asked again; a terminal row this build never writes is reported by name and
+   *    is NOT read as a confirmation.
+   * 3. ASK THE PLATFORM, when this host has a cancel port at all. A port that throws, and a host
+   *    with no port, substantiate nothing.
+   * 4. RECORD `done` ONLY when the platform answered `confirmed`. Every other answer leaves the row
+   *    `started` (or `pending`), so the execution stays in the resume set and stays VISIBLE.
+   *
+   * WHAT THIS METHOD NEVER DOES. It never writes an accepted event, a receipt or an accepted result:
+   * a cancellation is CONTROL (§3.4), not an outcome, and the attempts it names are not settled by
+   * it. It never rewinds an effect. It never reports an unconfirmed cancel as cancelled — the
+   * entry's `state` is `confirmed` only where the platform substantiated it.
+   *
+   * TOTAL: an unreadable run path answers a report with `blocked` instead of throwing, and one
+   * attempt's failure never stops another's delivery.
+   */
+  async deliverCancelIntents(
+    graphId: string,
+    options: OutcomeCancelDeliveryOptions = {},
+  ): Promise<OutcomeCancelDeliveryReport> {
+    this.assertOpen();
+    const at = options.at ?? this.clock();
+    let ledger: SqliteAcceptanceLedger;
+    try {
+      ledger = (await this.runtimeFor(graphId)).ledger;
+    } catch (error) {
+      return Object.freeze({
+        graphId,
+        entries: Object.freeze([]),
+        blocked: errorText(error),
+      });
+    }
+    let runId: string | undefined;
+    let decisions: readonly ControlDecisionRecord[];
+    try {
+      runId = ledger.runs.readRun(graphId)?.runId;
+      decisions = ledger.runs
+        .controlDecisions(graphId)
+        .filter((decision) => decision.command === "cancel");
+    } catch (error) {
+      return Object.freeze({
+        graphId,
+        entries: Object.freeze([]),
+        blocked: errorText(error),
+      });
+    }
+    const targets = decisions.filter(
+      (decision) => runId === undefined || decision.runId === runId,
+    );
+    if (targets.length === 0) {
+      return Object.freeze({
+        graphId,
+        ...(runId === undefined ? {} : { runId }),
+        entries: Object.freeze([]),
+      });
+    }
+    const port = this.cancelExecution;
+    const prepared: PreparedCancelDelivery[] = [];
+    for (const decision of targets) {
+      const execution = this.executionBindingOf({
+        graphId,
+        attemptId: decision.attemptId,
+      });
+      // NO PORT, NO EFFECT ROW. A host that cannot hand the cancel to any platform records
+      // nothing on the effect ledger: there is no delivery to resume, the trusted INTENT is
+      // already durable as the control decision, and the execution stays visible through its
+      // dispatch effect. The report says so per attempt.
+      if (port === undefined) {
+        prepared.push(
+          Object.freeze({
+            decision,
+            execution,
+            entry: cancelDeliveryEntry(
+              graphId,
+              decision,
+              execution,
+              "unsupported",
+              "this host installs no platform cancel port " +
+                "(OutcomeHostOptions.cancelExecution), so the cancel intent was NOT handed to " +
+                "any platform and NO cancel effect was recorded: the execution stays visible " +
+                "and is not reported as cancelled",
+            ),
+          }),
+        );
+        continue;
+      }
+      const intent: OutcomeCancelIntentInput = Object.freeze({
+        graphId,
+        nodeId: decision.nodeId,
+        attemptId: decision.attemptId,
+        reason: decision.reason,
+        requestedAt: at,
+        ...(execution === undefined ? {} : { execution }),
+      });
+      try {
+        // STEP 1 — the durable intent, committed before any platform call.
+        ledger.runInTransaction((tx) => {
+          recordCancelIntent(tx, intent);
+        });
+      } catch (error) {
+        prepared.push(
+          Object.freeze({
+            decision,
+            execution,
+            entry: cancelDeliveryEntry(
+              graphId,
+              decision,
+              execution,
+              "blocked",
+              "the durable cancel intent could NOT be recorded, so nothing was handed to the " +
+                "platform for this attempt and no cancellation was substantiated (" +
+                errorText(error) +
+                ")",
+            ),
+          }),
+        );
+        continue;
+      }
+      let step: OutcomeCancelRequestStep;
+      try {
+        // STEP 2 — the request transition, and the durable-state probe.
+        step = ledger.runInTransaction((tx) =>
+          markCancelRequested(tx, graphId, decision.attemptId),
+        );
+      } catch (error) {
+        prepared.push(
+          Object.freeze({
+            decision,
+            execution,
+            entry: cancelDeliveryEntry(
+              graphId,
+              decision,
+              execution,
+              "blocked",
+              "the cancel intent could not be moved to its request step, so the platform was " +
+                "not asked and nothing was substantiated (" +
+                errorText(error) +
+                ")",
+            ),
+          }),
+        );
+        continue;
+      }
+      prepared.push(Object.freeze({ decision, execution, step, port }));
+    }
+    // STEPS 3/4 — ask the platform for every attempt whose cancel is not already confirmed, and
+    // record ONLY a substantiated confirmation. The asks overlap; the entries keep decision order.
+    const entries = await Promise.all(
+      prepared.map(async (item): Promise<OutcomeCancelDeliveryEntry> => {
+        if (item.entry !== undefined) return item.entry;
+        const ask = item.port;
+        if (ask === undefined) {
+          // Unreachable by construction (every prepared item without an entry carries its port),
+          // kept total so a missing port can never fall through to a confirmation.
+          return cancelDeliveryEntry(
+            graphId,
+            item.decision,
+            item.execution,
+            "unsupported",
+            "no platform cancel port is installed for this attempt, so nothing was handed over",
+          );
+        }
+        if (item.step?.kind === "already-confirmed") {
+          return cancelDeliveryEntry(
+            graphId,
+            item.decision,
+            item.execution,
+            "confirmed",
+            "the durable cancel effect is done: a previous delivery recorded the platform's " +
+              "confirmation for this attempt, so the platform was not asked again and the fact " +
+              "was not rewound",
+          );
+        }
+        const foreign =
+          item.step?.kind === "unexpected-terminal"
+            ? " (the durable cancel effect is terminal '" +
+              item.step.status +
+              "', a state this build never writes for a cancel — it is NOT read as a confirmation)"
+            : "";
+        const invocation = this.originOf(graphId);
+        const probe: OutcomeExecutionCancelProbe = Object.freeze({
+          effect: dispatchEffectKeyOf(graphId, item.decision.attemptId),
+          nodeId: item.decision.nodeId,
+          reason: item.decision.reason,
+          ...(invocation === undefined ? {} : { invocation }),
+          ...(item.execution === undefined ? {} : { execution: item.execution }),
+        });
+        let answer: OutcomeExecutionCancelAnswer;
+        try {
+          answer = await ask.cancel(probe);
+        } catch (error) {
+          answer = Object.freeze({
+            kind: "unsupported" as const,
+            reason:
+              "the platform cancel port threw, so nothing was substantiated and the execution " +
+              "stays visible (" +
+              errorText(error) +
+              ")",
+          });
+        }
+        if (answer.kind !== "confirmed") {
+          return cancelDeliveryEntry(
+            graphId,
+            item.decision,
+            item.execution,
+            answer.kind,
+            (answer.kind === "requested"
+              ? "the platform was handed the cancel and has NOT confirmed it: "
+              : "the platform offers no cancellation surface for this execution: ") +
+              answer.reason +
+              foreign +
+              (answer.kind === "requested"
+                ? "; the execution stays visible and unsettled"
+                : ""),
+          );
+        }
+        let durability = "";
+        try {
+          const verdict = ledger.runInTransaction((tx) =>
+            confirmCancelIntent(tx, graphId, item.decision.attemptId),
+          );
+          if (verdict.kind === "refused" || verdict.kind === "missing") {
+            durability =
+              " (the durable cancel effect answered '" + verdict.kind + "' to the confirmation)";
+          }
+        } catch (error) {
+          durability =
+            " (recording the confirmation on the cancel effect failed: " +
+            errorText(error) +
+            ")";
+        }
+        return cancelDeliveryEntry(
+          graphId,
+          item.decision,
+          item.execution,
+          "confirmed",
+          "the platform substantiated the cancellation: " + answer.reason + durability,
+        );
+      }),
+    );
+    return Object.freeze({
+      graphId,
+      ...(runId === undefined ? {} : { runId }),
+      entries: Object.freeze(entries),
     });
   }
 
@@ -2466,6 +2860,89 @@ export function bindOutcomeToolInvocation(
   return bound;
 }
 
+/**
+ * HAND A GRAPH'S CANCEL INTENTS TO THE PLATFORM AFTER A `graph_control` CALL (P3 cancel).
+ *
+ * THE LIVE TRIGGER. A trusted cancel command becomes durable inside the tool body (the control
+ * application service writes the decisions and the run's control fact); this wrapper is what makes
+ * the PLATFORM effects follow in the same call, without the tool face or the control service
+ * knowing anything about a platform:
+ *
+ * - it wraps exactly the `graph_control` tool of the record it is given and returns every other
+ *   tool untouched;
+ * - it runs the tool body FIRST, so the intent is durable before the host is asked anything;
+ * - it then reads the graph id from the call's own arguments and ASKS the host to deliver that
+ *   graph's cancel intents ({@link OutcomeHost.deliverCancelIntents}), awaiting it so the caller
+ *   observes the delivered state rather than a race with it;
+ * - it NEVER changes the tool's result. The control answer already names every unconfirmed
+ *   execution; what this adds is the platform half — reported to the host's log and to the next
+ *   boot sweep, and recorded in the durable cancel effects.
+ *
+ * APPLY IT INSIDE {@link OutcomeHost.bindTools}, AS THE SHIPPED ENTRIES DO: the invocation binding
+ * installs the worker boundary, so a DISPATCHED WORKER's call is refused before the tool body runs
+ * and can therefore never reach this wrapper's delivery at all.
+ */
+export function withCancelDelivery(
+  tools: Record<string, CanonicalToolDef>,
+  host: OutcomeHost,
+): Record<string, CanonicalToolDef> {
+  const control = tools["graph_control"];
+  if (control === undefined) return tools;
+  const inner = control.execute;
+  return {
+    ...tools,
+    graph_control: {
+      ...control,
+      async execute(args, context) {
+        const result = await inner(args, context);
+        const graphId = controlGraphIdOf(args);
+        if (graphId !== undefined) {
+          try {
+            reportCancelDelivery(await host.deliverCancelIntents(graphId));
+          } catch (error) {
+            logWarn(
+              "outcome-host: delivering the cancel intents of graph " +
+                JSON.stringify(graphId) +
+                " threw (" +
+                describeWatchFailure(error) +
+                ") — the durable cancel intent and every unconfirmed execution stay visible, " +
+                "and the next boot sweep is the next window that delivers them",
+            );
+          }
+        }
+        return result;
+      },
+    },
+  };
+}
+
+/** The graph id a `graph_control` call names, or `undefined` when it names none. */
+function controlGraphIdOf(args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+  const graphId = (args as Record<string, unknown>)["graph_id"];
+  return typeof graphId === "string" && graphId.length > 0 ? graphId : undefined;
+}
+
+/**
+ * Report what one cancel delivery established, per attempt.
+ *
+ * `confirmed` is the platform's own substantiation; every other state leaves the execution
+ * visible and unsettled, which is what the log line says rather than rounding it into "cancelled".
+ */
+function reportCancelDelivery(report: OutcomeCancelDeliveryReport): void {
+  if (report.entries.length === 0 && report.blocked === undefined) return;
+  logWarn(
+    "outcome-host: cancel delivery for graph " +
+      JSON.stringify(report.graphId) +
+      " — " +
+      (report.blocked === undefined ? "" : "BLOCKED (" + report.blocked + "); ") +
+      report.entries.map((entry) => entry.attemptId + ":" + entry.state).join(", ") +
+      " — 'confirmed' is the platform's own substantiation; every other state leaves the " +
+      "execution visible and unsettled, and no unconfirmed cancel is reported as cancelled",
+  );
+}
+
+
 /** The erased argument type one canonical tool's execute receives. */
 type ToolExecute = CanonicalToolDef["execute"];
 type ToolExecuteArgs = Parameters<ToolExecute>[0];
@@ -2511,6 +2988,31 @@ function withInvocation(
       }
     },
   };
+}
+
+/**
+ * One cancel delivery entry, shaped so no field is ever invented (P3 cancel).
+ *
+ * The execution id is the platform's own, present exactly when the host could name one; the reason
+ * never quotes a credential (no cancel probe carries one).
+ */
+function cancelDeliveryEntry(
+  graphId: string,
+  decision: ControlDecisionRecord,
+  execution: HostExecutionIdentity | undefined,
+  state: OutcomeCancelDeliveryEntry["state"],
+  reason: string,
+): OutcomeCancelDeliveryEntry {
+  return Object.freeze({
+    graphId,
+    nodeId: decision.nodeId,
+    attemptId: decision.attemptId,
+    effectId: cancelEffectIdOf(decision.attemptId),
+    state,
+    ...(execution === undefined ? {} : { executionId: execution.executionId }),
+    ...(execution?.taskId === undefined ? {} : { taskId: execution.taskId }),
+    reason,
+  });
 }
 
 /**

@@ -59,6 +59,28 @@
  *   which answers `unsupported`: a run's `result` promise belongs to the
  *   process that started it, so a restarted process cannot re-establish the
  *   announcement.
+ *
+ * THE CANCEL PORT (P3). {@link DshOutcomeDelivery.cancelExecution} is what a
+ * trusted cancel command reaches the platform through, and it is deliberately
+ * conservative about what it calls CONFIRMED:
+ *
+ * - a run THIS process started is cancelled through the dsh surface the contract
+ *   documents — `SubagentRun.dispose()`, the run's abort surface — plus the
+ *   caller-owned AbortSignal the start request was composed with. The
+ *   CONFIRMATION is not the call: it is the run's own `result` promise
+ *   resolving with `stopReason === "aborted"`, awaited for a bounded time. A run
+ *   that has not reported its end when that bound expires answers `requested`
+ *   — handed over, NOT confirmed;
+ * - a run this process did NOT start has no handle here. dsh's
+ *   `SubagentRuntime.interrupt(targetSessionId, authority)` is the only
+ *   addressable surface (contract §4.3, `:295`), and it RETURNS VOID: nothing
+ *   about it substantiates the run ending. When the runtime exposes it, it is
+ *   issued for the confirmed execution id (which the dsh contract makes equal to
+ *   the child session id) and the answer is `requested`; when it is absent, the
+ *   answer is `unsupported`. THE `authority` ARGUMENT IS NOT DEFINED BY ANY
+ *   DOCUMENT IN THIS REPOSITORY and `@deepseek-ai/dsh-subagent` is not
+ *   installed, so rolebox passes none and claims nothing beyond "the interrupt
+ *   was issued".
  */
 
 import type {
@@ -70,11 +92,16 @@ import type {
 } from "../../../graph/outcome/dispatch-effects.ts";
 import { dispatchIdempotencyKeyOf } from "../../../graph/outcome/dispatch-effects.ts";
 import type {
+  OutcomeExecutionCancelAnswer,
+  OutcomeExecutionCancelProbe,
+  OutcomeExecutionCancellation,
+} from "../../../graph/outcome/cancel.ts";
+import type {
   DshSubagentDispatchRuntime,
   DshSubagentResult,
 } from "./dispatch.ts";
 import { DshParentUnresolvedError } from "./dispatch.ts";
-import type { DshSubagentStartRequest } from "./agent-registrar.ts";
+import type { DshSubagentRun, DshSubagentStartRequest } from "./agent-registrar.ts";
 import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
 import type { HostExecutionIdentity } from "../../../graph/host/execution-index.ts";
 import type {
@@ -121,6 +148,21 @@ export interface DshSubagentCatalogLike {
     parentSessionId: string,
     signal?: AbortSignal,
   ): Promise<readonly DshSubagentChildRow[]>;
+  /**
+   * Interrupt one CHILD SESSION — the addressable cancellation surface of the
+   * dsh subagent runtime (contract §4.3:
+   * `interrupt(targetSessionId, authority): void`).
+   *
+   * OPTIONAL, like the listing above, because it belongs to the cancel port's
+   * needs alone. THE RETURN TYPE IS THE POINT: `void`. An interrupt says "the
+   * request was issued" and nothing about the run ending, so a caller can never
+   * read a confirmation out of it. The `authority` parameter is not defined by
+   * any document in this repository (the contract extract names the parameter and
+   * no shape for it) and the SDK is not installed, so rolebox passes none; a
+   * runtime that validates it fails the call, which the port reports as
+   * `unsupported` rather than as a cancellation.
+   */
+  interrupt?(targetSessionId: string, authority: unknown): void;
 }
 
 /** The dsh subagent surface the outcome dispatch adapter consumes. */
@@ -166,8 +208,47 @@ export interface DshOutcomeDeliveryOptions {
     effect: OutcomeDispatchEffectKey,
     execution: HostExecutionIdentity,
   ) => void;
+  /**
+   * How long a cancellation may wait for the platform's OWN confirmation — the
+   * run's `result` promise reporting `stopReason === "aborted"` — before the
+   * port answers `requested` instead. Defaults to
+   * {@link DEFAULT_CANCEL_CONFIRM_TIMEOUT_MS}. The bound exists because "the
+   * dispose call returned" is not "the run ended": a run that outlives the bound
+   * stays VISIBLE and unsettled, and the next host window asks again.
+   */
+  readonly cancelConfirmTimeoutMs?: number;
   /** Optional logger name override. */
   readonly loggerName?: string;
+}
+
+/**
+ * The default confirmation bound for a cancellation (P3): two seconds is long
+ * enough for an in-process abort to settle a run and short enough that a
+ * control command never appears to hang on a platform that cannot confirm.
+ */
+const DEFAULT_CANCEL_CONFIRM_TIMEOUT_MS = 2_000;
+
+/** What one dsh run's own result promise reported — the abort confirmation. */
+interface DshRunObservation {
+  /** The run's stop reason, when its result promise resolved. */
+  readonly stopReason?: DshSubagentResult["stopReason"];
+  /** Why the result promise rejected, when it did. */
+  readonly failure?: string;
+}
+
+/**
+ * ONE RUN THIS PROCESS STARTED, kept for the cancel port (P3).
+ *
+ * A dsh run is addressable only through the handle `start()` returned, so a
+ * cancellation is possible exactly while this process holds that handle. The
+ * observation is the SAME result promise the delivery already awaits: its
+ * `stopReason` is the platform's confirmation that the run ended, and nothing
+ * else in this adapter's reach says so.
+ */
+interface DshLiveRun {
+  readonly controller: AbortController;
+  readonly run: DshSubagentRun;
+  readonly observed: Promise<DshRunObservation>;
 }
 
 /**
@@ -192,6 +273,15 @@ export class DshOutcomeDelivery {
    * asynchronous control plane from a synchronous question.
    */
   private readonly childListings = new Map<string, readonly DshSubagentChildRow[]>();
+  /**
+   * THE RUNS THIS PROCESS STARTED, keyed by the platform's own execution id
+   * (P3 cancel). A dsh run is addressable only through the handle its `start()`
+   * returned, so this map is exactly the set of executions a cancellation can
+   * reach from here; a run started by a PREVIOUS process is not in it, and the
+   * port says so instead of pretending otherwise. An entry is removed the moment
+   * the run's result promise settles.
+   */
+  private readonly liveRuns = new Map<string, DshLiveRun>();
 
   constructor(private readonly opts: DshOutcomeDeliveryOptions) {
     this.log = createSubLogger(opts.loggerName ?? "dsh-outcome-dispatch");
@@ -340,6 +430,162 @@ export class DshOutcomeDelivery {
   readonly watchCompletion: HostCompletionWatchPort = () => "unsupported";
 
   /**
+   * THE PLATFORM CANCEL PORT (P3).
+   *
+   * TWO PATHS, AND NEITHER OF THEM CLAIMS MORE THAN DSH SUBSTANTIATES:
+   *
+   * 1. THIS PROCESS STARTED THE EXECUTION. `run.dispose()` is the abort surface
+   *    the contract documents, and the start request's own `AbortSignal` is the
+   *    caller-owned cancellation it was composed with; both are applied. The
+   *    CONFIRMATION is the run's `result` promise resolving with
+   *    `stopReason === "aborted"`, awaited for
+   *    {@link DshOutcomeDeliveryOptions.cancelConfirmTimeoutMs}. Confirmed only
+   *    when the platform actually reported that end; otherwise `requested` —
+   *    the dispose was issued and nothing substantiated the run ending.
+   * 2. ANOTHER PROCESS STARTED IT. No handle exists here. dsh's addressable
+   *    surface is `SubagentRuntime.interrupt(targetSessionId, authority)`,
+   *    which returns `void` (contract §4.3), so it can only ever answer
+   *    `requested` — and only when the runtime exposes it at all. The target is
+   *    the execution id the HOST recorded, which the dsh contract makes equal to
+   *    the published child session id; the `authority` argument is passed as
+   *    none because no document in this repository defines its shape.
+   *
+   * A probe that names no execution is `unsupported`: there is nothing to
+   * address. So is a runtime whose `interrupt` throws — the failure is reported
+   * without quoting the run's own text.
+   */
+  readonly cancelExecution: OutcomeExecutionCancellation = Object.freeze({
+    cancel: async (probe: OutcomeExecutionCancelProbe): Promise<OutcomeExecutionCancelAnswer> => {
+      const executionId = probe.execution?.executionId;
+      if (executionId === undefined || executionId.length === 0) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "the host holds no confirmed dsh execution for attempt " +
+            JSON.stringify(probe.effect.attemptId) +
+            " (a create whose confirmation never arrived names no run, and a dsh run is " +
+            "addressable only by the id its start() returned), so there is nothing to cancel — " +
+            "the execution stays visible and is NOT reported as cancelled",
+        });
+      }
+      const live = this.liveRuns.get(executionId);
+      if (live !== undefined) {
+        let disposed = true;
+        try {
+          live.controller.abort(
+            "cancelled by a trusted graph control command",
+          );
+        } catch (error) {
+          disposed = false;
+          this.log.warn("dsh outcome cancel: aborting the start signal failed", {
+            executionId,
+            error: errorText(error),
+          });
+        }
+        try {
+          await live.run.dispose();
+        } catch (error) {
+          disposed = false;
+          this.log.warn("dsh outcome cancel: disposing the run failed", {
+            executionId,
+            error: errorText(error),
+          });
+        }
+        const aborted = await this.awaitRunAbort(live.observed);
+        if (aborted) {
+          return Object.freeze({
+            kind: "confirmed" as const,
+            reason:
+              "the dsh subagent run " +
+              JSON.stringify(executionId) +
+              " reported stopReason 'aborted' after its run handle was disposed, which is the " +
+              "platform's own confirmation that the execution ended",
+          });
+        }
+        return Object.freeze({
+          kind: "requested" as const,
+          reason:
+            (disposed
+              ? "the dsh run handle of execution "
+              : "cancelling dsh execution ") +
+            JSON.stringify(executionId) +
+            (disposed ? " was aborted and disposed" : " failed") +
+            ", but the run's result promise has not reported its end within " +
+            String(this.cancelConfirmTimeoutMs()) +
+            " ms — the request was issued and dsh CONFIRMED NOTHING, so the execution stays " +
+            "visible and unsettled",
+        });
+      }
+      const interrupt = this.opts.subagents.interrupt;
+      if (interrupt === undefined) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "execution " +
+            JSON.stringify(executionId) +
+            " was not started by this process (no live run handle) and this dsh build exposes " +
+            "no SubagentRuntime.interrupt, so the run cannot be addressed for cancellation — it " +
+            "stays visible and is NOT reported as cancelled",
+        });
+      }
+      try {
+        // The second argument is the contract's `authority`, whose shape no
+        // document in this repository defines: `undefined` is passed as "none",
+        // and a runtime that validates it fails the call into the branch below.
+        interrupt.call(this.opts.subagents, executionId, undefined);
+      } catch (error) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "the dsh interrupt() call for child session " +
+            JSON.stringify(executionId) +
+            " threw, so the cancellation was NOT issued (" +
+            errorText(error) +
+            ") — the execution stays visible",
+        });
+      }
+      return Object.freeze({
+        kind: "requested" as const,
+        reason:
+          "the dsh interrupt() was issued for child session " +
+          JSON.stringify(executionId) +
+          " (the execution the host recorded), but SubagentRuntime.interrupt returns void and " +
+          "this process holds no run handle to observe, so the platform substantiated nothing — " +
+          "the execution stays visible and unsettled until a later window confirms it",
+      });
+    },
+  });
+
+  /** The configured confirmation bound, in milliseconds. */
+  private cancelConfirmTimeoutMs(): number {
+    const configured = this.opts.cancelConfirmTimeoutMs;
+    return configured === undefined || configured < 0
+      ? DEFAULT_CANCEL_CONFIRM_TIMEOUT_MS
+      : configured;
+  }
+
+  /**
+   * Wait, for a bounded time, for the run's own result promise to report an
+   * ABORT. `true` means the platform confirmed the run ended aborted; the
+   * bound expiring is `false` — a request, never a confirmation.
+   */
+  private async awaitRunAbort(observed: Promise<DshRunObservation>): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([
+        observed,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), this.cancelConfirmTimeoutMs());
+        }),
+      ]);
+      if (outcome === undefined) return false;
+      return outcome.stopReason === "aborted";
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
    * The host dispatch adapter's `deliver`: start ONE dsh subagent run.
    *
    * Synchronous prefix, asynchronous tail. Everything that can refuse the
@@ -406,28 +652,32 @@ export class DshOutcomeDelivery {
         // created. Reported before the result is observed: a completion that
         // arrives immediately still finds a `created` row.
         this.opts.onStarted?.(request, effect, { executionId: run.id });
-        void Promise.resolve(run.result).then(
-          (result: DshSubagentResult) => {
-            this.opts.onSettled(
-              result.stopReason === "completed"
-                ? { kind: "completed", request }
-                : {
-                    kind: "failed",
-                    request,
-                    reason:
-                      "the dsh subagent run ended with stopReason " +
-                      JSON.stringify(result.stopReason),
-                  },
-            );
-          },
-          (err: unknown) => {
-            this.opts.onSettled({
-              kind: "failed",
-              request,
-              reason: "the subagent run result rejected: " + errorText(err),
-            });
-          },
+        // THE RUN IS ADDRESSABLE HERE FROM NOW ON (P3 cancel). The observation
+        // is the SAME result promise the delivery reports from, so the abort
+        // confirmation the cancel port reads and the completion/failure report
+        // below can never disagree: one platform fact, read once.
+        const observed: Promise<DshRunObservation> = Promise.resolve(run.result).then(
+          (result: DshSubagentResult) =>
+            Object.freeze({ stopReason: result.stopReason }),
+          (err: unknown) => Object.freeze({ failure: errorText(err) }),
         );
+        this.liveRuns.set(run.id, { controller, run, observed });
+        void observed.then((outcome) => {
+          this.liveRuns.delete(run.id);
+          this.opts.onSettled(
+            outcome.stopReason === "completed"
+              ? { kind: "completed", request }
+              : {
+                  kind: "failed",
+                  request,
+                  reason:
+                    outcome.failure === undefined
+                      ? "the dsh subagent run ended with stopReason " +
+                        JSON.stringify(outcome.stopReason)
+                      : "the subagent run result rejected: " + outcome.failure,
+                },
+          );
+        });
       },
       (err: unknown) => {
         this.log.warn("dsh outcome dispatch: subagent start rejected", {

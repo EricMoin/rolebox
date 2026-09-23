@@ -109,7 +109,7 @@ import {
   createGraphToolSet,
   createOutcomeGraphTools,
 } from "../graph/tools/index.ts";
-import { OutcomeHost } from "../graph/host/outcome-host.ts";
+import { OutcomeHost, withCancelDelivery } from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import {
@@ -1260,6 +1260,13 @@ export async function apply(
     query: outcomeDelivery.executionQuery,
     observeExecution: outcomeDelivery.observeExecution,
     watchCompletion: outcomeDelivery.watchCompletion,
+    // THE PLATFORM CANCEL PORT (P3). A trusted cancel command's durable intents
+    // are handed to dsh through this: a run THIS process started is aborted
+    // through its run handle and confirmed by its own `result` promise
+    // (`stopReason === "aborted"`); a run it did not start is answered
+    // `unsupported` or `requested` — never "cancelled" — because dsh's
+    // `interrupt()` returns void and substantiates nothing.
+    cancelExecution: outcomeDelivery.cancelExecution,
   });
   // The outcome toolset: the four entries that operate on a DECLARED graph.
   // No manager / dispatch seam is injected, so it can never build a legacy
@@ -1318,10 +1325,18 @@ export async function apply(
     },
   });
   const graphTools = outcomeHost.bindTools(
-    createOutcomeGraphTools(outcomeToolset, {
-      getEffectiveAgent: (sessionID?: string) =>
-        sessionID ? activeRole.get(sessionID) ?? "" : "",
-    }),
+    // THE CANCEL DELIVERY IS WIRED TO THE CONTROL ENTRY (P3). After a
+    // `graph_control` call returns — the trusted command is durable by then —
+    // the host hands the graph's cancel intents to the platform port above. The
+    // wrapper runs INSIDE `bindTools`, so the worker boundary refuses a
+    // dispatched worker's call before the tool body and before this delivery.
+    withCancelDelivery(
+      createOutcomeGraphTools(outcomeToolset, {
+        getEffectiveAgent: (sessionID?: string) =>
+          sessionID ? activeRole.get(sessionID) ?? "" : "",
+      }),
+      outcomeHost,
+    ),
     (sessionID?: string) => (sessionID ? activeRole.get(sessionID) ?? "" : ""),
   );
   // Boot recovery for declared graphs: a graph interrupted by the previous
@@ -1338,7 +1353,9 @@ export async function apply(
         report.resumed.length > 0 ||
         report.refused.length > 0 ||
         report.effectRefusals.length > 0 ||
-        report.divergences.length > 0
+        report.divergences.length > 0 ||
+        report.cancellations.length > 0 ||
+        report.cancelBlocked.length > 0
       ) {
         log.warn("dsh outcome graph recovery", {
           started: report.started,
@@ -1359,6 +1376,15 @@ export async function apply(
               "->" +
               divergence.host,
           ),
+          // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
+          // requested / unsupported / blocked, per attempt. Only `confirmed`
+          // is the platform's own substantiation; everything else leaves the
+          // execution visible and unsettled, which is why the report names it.
+          cancellations: report.cancellations.map(
+            (entry) =>
+              entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+          ),
+          cancelBlocked: report.cancelBlocked,
         });
       }
       // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every

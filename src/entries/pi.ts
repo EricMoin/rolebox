@@ -84,6 +84,7 @@ import {
 import {
   OutcomeHost,
   WORKER_GRANTED_GRAPH_TOOLS,
+  withCancelDelivery,
 } from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
@@ -890,6 +891,12 @@ export default async function (pi: any): Promise<void> {
       // terminal.
       query: outcomeDelivery.executionQuery,
       observeExecution: outcomeDelivery.observeExecution,
+      // THE PLATFORM CANCEL PORT (P3): a trusted cancel command's durable
+      // intents are handed to the Pi dispatch manager through it. Only the
+      // manager's OWN task record reading `cancelled` is a confirmation; a
+      // reported transition without that record is a request, and every other
+      // answer leaves the execution visible.
+      cancelExecution: outcomeDelivery.cancelExecution,
       watchCompletion: outcomeDelivery.watchCompletion,
     });
 
@@ -917,7 +924,9 @@ export default async function (pi: any): Promise<void> {
           outcomeRecovery.resumed.length > 0 ||
           outcomeRecovery.refused.length > 0 ||
           outcomeRecovery.effectRefusals.length > 0 ||
-          outcomeRecovery.divergences.length > 0
+          outcomeRecovery.divergences.length > 0 ||
+          outcomeRecovery.cancellations.length > 0 ||
+          outcomeRecovery.cancelBlocked.length > 0
         ) {
           log.info("Declared outcome graphs recovered", {
             started: outcomeRecovery.started,
@@ -938,6 +947,15 @@ export default async function (pi: any): Promise<void> {
                 "->" +
                 divergence.host,
             ),
+            // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
+            // requested / unsupported / blocked, per attempt. Only `confirmed`
+            // is the platform's own substantiation; everything else leaves the
+            // execution visible and unsettled.
+            cancellations: outcomeRecovery.cancellations.map(
+              (entry) =>
+                entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+            ),
+            cancelBlocked: outcomeRecovery.cancelBlocked,
           });
         }
         // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every
@@ -1186,9 +1204,17 @@ export default async function (pi: any): Promise<void> {
       },
     });
     const outcomeGraphTools = outcomeHost.bindTools(
-      createOutcomeGraphTools(outcomeToolset, {
-        getEffectiveAgent: () => activeAgent.get() ?? "",
-      }),
+      // THE CANCEL DELIVERY IS WIRED TO THE CONTROL ENTRY (P3). After a
+      // `graph_control` call returns — the trusted command is durable by then —
+      // the host hands the graph's cancel intents to the platform port above.
+      // The wrapper runs INSIDE `bindTools`, so the worker boundary refuses a
+      // dispatched child's call before the tool body and before this delivery.
+      withCancelDelivery(
+        createOutcomeGraphTools(outcomeToolset, {
+          getEffectiveAgent: () => activeAgent.get() ?? "",
+        }),
+        outcomeHost,
+      ),
       () => activeAgent.get() ?? "",
     );
 

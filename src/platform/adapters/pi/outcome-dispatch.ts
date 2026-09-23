@@ -50,6 +50,23 @@
  *   `DispatchManager.onTaskTerminated`, which fires immediately for a task that
  *   is already terminal, so a restarted process both re-establishes the
  *   announcement and receives the end it missed.
+ *
+ * THE CANCEL PORT (P3). {@link PiOutcomeDelivery.cancelExecution} asks the
+ * dispatch manager to cancel one task and then reads the manager's OWN task
+ * record back:
+ *
+ * - `cancelled` in that record is the CONFIRMATION — the platform's durable-ish
+ *   task state, whichever call produced it;
+ * - `cancelTask` returning `true` without a record that says `cancelled` (the
+ *   manager cleaned the record up, or exposes no read) is `requested`: the
+ *   transition was reported and nothing visible substantiates it;
+ * - a task that is already terminal with another status, a manager that holds no
+ *   record, and a manager with no `cancelTask` at all are `unsupported` — the
+ *   execution was NOT cancelled and stays visible.
+ *
+ * The order matters: the READ decides, never the boolean. An unsubstantiated
+ * "true" is exactly the kind of claim the plan forbids a host from reporting as
+ * a cancellation.
  */
 
 import type {
@@ -60,6 +77,11 @@ import type {
   OutcomeExecutionQuery,
 } from "../../../graph/outcome/dispatch-effects.ts";
 import { dispatchIdempotencyKeyOf } from "../../../graph/outcome/dispatch-effects.ts";
+import type {
+  OutcomeExecutionCancelAnswer,
+  OutcomeExecutionCancelProbe,
+  OutcomeExecutionCancellation,
+} from "../../../graph/outcome/cancel.ts";
 import type { DispatchInput, DispatchTask } from "../../../dispatch/types.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
 import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
@@ -133,6 +155,14 @@ export interface PiOutcomeDispatchPort {
    * key is what makes the query work in BOTH processes.
    */
   getAllTasks?(): DispatchTask[];
+  /**
+   * Cancel one dispatch task (`DispatchManager.cancelTask`). Optional on this
+   * port: a manager that cannot cancel answers `unsupported` rather than
+   * pretending. The boolean means "the manager transitioned the task to
+   * `cancelled`", and it is NOT by itself the port's confirmation — the task
+   * record read back ({@link PiOutcomeDispatchPort.getTask}) is.
+   */
+  cancelTask?(taskId: string): Promise<boolean>;
 }
 
 export interface PiOutcomeDeliveryOptions {
@@ -352,6 +382,124 @@ export class PiOutcomeDelivery {
     this.opts.manager.onTaskTerminated(taskId, () => onEnded());
     return "watching";
   };
+
+  /**
+   * THE PLATFORM CANCEL PORT (P3).
+   *
+   * ONE CALL AND ONE READ, IN THAT ORDER: `DispatchManager.cancelTask` asks the
+   * platform to end the task, and the manager's OWN task record decides what the
+   * port may report. `cancelled` in that record is a CONFIRMATION — the same
+   * state the completion observer reads, so the cancel and the end can never be
+   * reported as different things. Everything else is unconfirmed:
+   *
+   * - the transition reported but no record visible -> `requested`;
+   * - the task already terminal with another status -> `unsupported` (it was NOT
+   *   cancelled; it ended, and the completion path reports that end);
+   * - no record, no `cancelTask`, or a throwing manager -> `unsupported`.
+   *
+   * A probe that names no execution is `unsupported`: a Pi task is addressable
+   * only by the id the launch returned.
+   */
+  readonly cancelExecution: OutcomeExecutionCancellation = Object.freeze({
+    cancel: async (probe: OutcomeExecutionCancelProbe): Promise<OutcomeExecutionCancelAnswer> => {
+      const executionId = probe.execution?.executionId;
+      const taskId = probe.execution?.taskId ?? executionId;
+      if (executionId === undefined || executionId.length === 0 || taskId === undefined) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "the host holds no confirmed Pi dispatch task for attempt " +
+            JSON.stringify(probe.effect.attemptId) +
+            " (a launch whose confirmation never arrived names no task, and a Pi task is " +
+            "addressable only by the id its launch returned), so there is nothing to cancel — " +
+            "the execution stays visible and is NOT reported as cancelled",
+        });
+      }
+      const cancelTask = this.opts.manager.cancelTask;
+      if (cancelTask === undefined) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "this Pi dispatch port exposes no cancelTask, so dispatch task " +
+            JSON.stringify(taskId) +
+            " could not be cancelled — the execution stays visible and is NOT reported as " +
+            "cancelled",
+        });
+      }
+      let transitioned: boolean;
+      try {
+        transitioned = await cancelTask.call(this.opts.manager, taskId);
+      } catch (error) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "the Pi dispatch manager's cancelTask threw for dispatch task " +
+            JSON.stringify(taskId) +
+            ", so the cancellation was NOT substantiated (" +
+            errorText(error) +
+            ") — the execution stays visible",
+        });
+      }
+      const status = this.dispatchTaskStatusOf(taskId);
+      if (status === "cancelled") {
+        return Object.freeze({
+          kind: "confirmed" as const,
+          reason:
+            "the Pi dispatch manager's own task record reports dispatch task " +
+            JSON.stringify(taskId) +
+            " cancelled" +
+            (transitioned ? " after cancelTask transitioned it" : " (it already was)") +
+            ", which is the platform's own state for the execution the host recorded",
+        });
+      }
+      if (transitioned) {
+        return Object.freeze({
+          kind: "requested" as const,
+          reason:
+            "the Pi dispatch manager reported dispatch task " +
+            JSON.stringify(taskId) +
+            " cancelled, but its own task record does not substantiate that state (" +
+            (status === undefined ? "no record is readable" : "status " + JSON.stringify(status)) +
+            "), so the cancellation is a REQUEST and not a confirmed fact — the execution stays " +
+            "visible and unsettled",
+        });
+      }
+      if (status !== undefined && TERMINAL_STATUSES.has(status)) {
+        return Object.freeze({
+          kind: "unsupported" as const,
+          reason:
+            "dispatch task " +
+            JSON.stringify(taskId) +
+            " is already terminal with status " +
+            JSON.stringify(status) +
+            ", so it was NOT cancelled by this request — whether the execution reached its " +
+            "authorized outcome is decided by the platform's own end, never by a cancellation",
+        });
+      }
+      return Object.freeze({
+        kind: "unsupported" as const,
+        reason:
+          "the Pi dispatch manager did not cancel dispatch task " +
+          JSON.stringify(taskId) +
+          (status === undefined
+            ? " and holds no readable record of it (it may have been cleaned up after its TTL, " +
+              "or lost by a failed recovery)"
+            : " (its record still reports status " + JSON.stringify(status) + ")") +
+          ", so the cancellation was NOT substantiated — the execution stays visible",
+      });
+    },
+  });
+
+  /** The manager's own status for one task, or `undefined` when it cannot say. */
+  private dispatchTaskStatusOf(taskId: string): string | undefined {
+    const getTask = this.opts.manager.getTask;
+    if (getTask === undefined) return undefined;
+    try {
+      return getTask.call(this.opts.manager, taskId)?.status;
+    } catch {
+      return undefined;
+    }
+  }
 
   deliver = (
     request: OutcomeDispatchRequest,
