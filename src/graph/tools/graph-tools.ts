@@ -69,6 +69,11 @@ import { engineStateDir } from "../persistence/engine-persistence.ts";
 import { readCredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
 import { createSubLogger } from "../../logger.ts";
 import { errorText } from "../../utils/error-text.ts";
+import type { GraphControlResult } from "../control/application.ts";
+import {
+  runGraphControlEntry,
+  type GraphControlEntryArgs,
+} from "./control-entry.ts";
 import {
   EnginePhase,
   NodeStatus,
@@ -677,6 +682,36 @@ export class GraphToolSet {
       },
     );
   }
+  // ── graph_control ──────────────────────────────────────────────────────────
+
+  /**
+   * THE ONE EXPLICIT CONTROL ENTRY (P3 item 1): apply one trusted lifecycle
+   * command to a declared graph's run.
+   *
+   * The command types are explicit (never inferred from a payload or a worker
+   * field), the store is the workspace's ONE store, and the PRINCIPAL is the
+   * session the platform attributed to THIS call — the second parameter, exactly
+   * like the submission ingress — never a value on `args`. The permission rule,
+   * the idempotency rules and every refusal belong to the control application
+   * service; this method only resolves the store directory the rest of this
+   * toolset already resolves and hands the command over.
+   */
+  graph_control(
+    args: GraphControlEntryArgs,
+    invokingSessionId?: string,
+    agent?: string,
+  ): GraphControlResult {
+    return runGraphControlEntry(
+      {
+        storeDirectory: this.storeDirectory(),
+        ...(this.deps.outcomeNow === undefined ? {} : { now: this.deps.outcomeNow }),
+      },
+      args,
+      invokingSessionId,
+      agent,
+    );
+  }
+
   // ── graph_status ───────────────────────────────────────────────────────────
 
   graph_status(args: GraphStatusArgs): string {

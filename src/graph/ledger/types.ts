@@ -69,8 +69,15 @@
  * a recovery create a second execution for one effect. This build registers NO
  * migration, so a version-1 file is refused by name (`older-format`), never
  * widened in place and never downgraded.
+ *
+ * VERSION 3 ADDS THE RUN IDENTITY AND THE TRUSTED CONTROL RECORDS (P3 item 1).
+ * A version-2 file holds neither `graph_runs` nor `graph_control_decisions`,
+ * so it could not answer "which run is this, and was it stopped by a trusted
+ * command?" — reading it as this build's store would report every controlled
+ * run as merely executing. Same rule, same answer: refused by name, never
+ * widened, never migrated (plan §3.6).
  */
-export const LEDGER_FORMAT_VERSION = 2;
+export const LEDGER_FORMAT_VERSION = 3;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 
@@ -186,6 +193,217 @@ export interface GraphStateRecord {
   readonly body: unknown;
   /** Epoch milliseconds, supplied by the caller. */
   readonly updatedAt: number;
+}
+
+// ── Run identity and trusted control (P3 item 1) ────────────────────────────
+
+/**
+ * The lifecycle/control commands this format can RECORD.
+ *
+ * The durable vocabulary is closed and spelled here (a SQL CHECK cannot import
+ * a TypeScript union), and it is the same five commands the domain's
+ * `ControlCommand` names (`src/graph/domain/model.ts`). None of them is a
+ * business outcome: a failure, a cancellation, a timeout, a retry and a budget
+ * stop are decided by the trusted control path, never derived from a submitted
+ * payload (plan §3.4).
+ *
+ * A command being SPELLABLE is not a promise that this build applies it: the
+ * control application refuses a command whose own semantics have not been
+ * implemented yet, by name, instead of recording an intent nothing will honour.
+ */
+export type ControlCommandName =
+  | "failure"
+  | "cancel"
+  | "timeout"
+  | "retry"
+  | "budget-stop";
+
+/** The control commands this format records, in canonical order. */
+export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freeze([
+  "failure",
+  "cancel",
+  "timeout",
+  "retry",
+  "budget-stop",
+]);
+
+/**
+ * The trusted invocation that decided, as the host attributed it.
+ *
+ * `sessionId` is what the permission rule compares (the declaring principal's
+ * session); `agentId` is recorded when the host attributes one. Both are
+ * non-secret attribution, never a credential.
+ */
+export interface ControlPrincipalRecord {
+  readonly sessionId: string;
+  readonly agentId?: string;
+}
+
+/**
+ * One run's IDENTITY: the execution of one logical graph the run path began.
+ *
+ * `runId` is minted once when the run's first state snapshot is committed,
+ * inside the SAME transaction, so a run identity without the state it names is
+ * unrepresentable. This build keeps the CURRENT run of a graph (one row per
+ * graph); re-executing a terminal graph mints a new run and is a later work
+ * package's change to this row's key, not a second run table.
+ */
+export interface RunIdentityRecord {
+  readonly graphId: string;
+  readonly runId: string;
+  /** Epoch milliseconds the run's first snapshot was committed at. */
+  readonly startedAt: number;
+}
+
+/**
+ * One durable TRUSTED CONTROL DECISION for one attempt (P3 item 1).
+ *
+ * Owns: which {@link ControlCommandName} a trusted principal applied to one
+ * attempt of one run, why, when, and who decided. An ATTEMPT carries at most
+ * one control decision — the primary key is the attempt — exactly as it
+ * carries at most one accepted event: two competing terminal facts for one
+ * execution are unrepresentable rather than merely refused.
+ * Writers: the control application service and ONLY it. A worker's submission
+ * cannot reach this record: control is never derived from a submitted payload.
+ */
+export interface ControlDecisionRecord {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly command: ControlCommandName;
+  readonly reason: string;
+  /** Epoch milliseconds, supplied by the caller. */
+  readonly decidedAt: number;
+  /** The trusted invocation that decided, when the host attributes one. */
+  readonly decidedBy?: ControlPrincipalRecord;
+}
+
+/**
+ * The RUN-level control fact: the FIRST trusted command recorded for a run.
+ *
+ * It is written with the decision that produced it, in ONE transaction, and it
+ * is never replaced — a later command (a second node's failure, a cancel issued
+ * after a failure) is still recorded per attempt, but the run keeps the command
+ * that stopped it first. That is the deterministic rule a repeated or racing
+ * command is resolved by, and it is what a status/recovery reader asks instead
+ * of re-deriving a stop from whichever decision happens to be read last.
+ */
+export interface RunControlRecord {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly command: ControlCommandName;
+  readonly reason: string;
+  /** Epoch milliseconds the stopping command was decided at. */
+  readonly decidedAt: number;
+  readonly decidedBy?: ControlPrincipalRecord;
+}
+
+/** One control write: the decision, plus the run state to set when unclaimed. */
+export interface RunControlWrite {
+  readonly decision: ControlDecisionRecord;
+  /**
+   * The run's control to SET when the run has none. The write is conditional on
+   * the run still being unclaimed, so a racing second command never replaces
+   * the first — it is told which command already stopped the run instead.
+   */
+  readonly runControl: RunControlRecord;
+}
+
+/**
+ * The verdict of one control-decision write.
+ *
+ * - `recorded` — the attempt carried no control decision: the decision row and
+ *   (when the run was unclaimed) the run's control fact were written.
+ * - `replayed` — the SAME command is already recorded for this attempt:
+ *   nothing was written and the PERSISTED decision is returned.
+ * - `conflict` — this attempt already carries a DIFFERENT command: nothing was
+ *   written and the existing decision is returned. One attempt, one control
+ *   fact.
+ * - `settled` — the attempt has an ACCEPTED EVENT: nothing was written, because
+ *   a settled attempt is never re-labelled by a control command. This check is
+ *   part of the INSERT itself (a conditional `INSERT ... WHERE NOT EXISTS`), so
+ *   it decides against the committed store rather than against a value read
+ *   earlier in the transaction: whichever of an acceptance and a control
+ *   decision commits FIRST is the fact that stands, at any concurrency.
+ */
+export type RunControlWriteResult =
+  | {
+      readonly kind: "recorded";
+      readonly decision: ControlDecisionRecord;
+      readonly runControl: RunControlRecord;
+    }
+  | {
+      readonly kind: "replayed";
+      readonly decision: ControlDecisionRecord;
+      readonly runControl: RunControlRecord | undefined;
+    }
+  | {
+      readonly kind: "conflict";
+      readonly existing: ControlDecisionRecord;
+      readonly runControl: RunControlRecord | undefined;
+    }
+  | {
+      readonly kind: "settled";
+      /** The attempt that had already settled when the write was attempted. */
+      readonly attemptId: string;
+      readonly runControl: RunControlRecord | undefined;
+    };
+
+/**
+ * The RUN-IDENTITY and TRUSTED-CONTROL surface of a substrate.
+ *
+ * It is OPTIONAL on the transaction surface (`runs` below) for one reason:
+ * the ledger port is implemented by substrates that predate control (a test
+ * double, a read-only reader), and a substrate that cannot hold a control
+ * record cannot have one — the run path reports no control stop for it rather
+ * than inventing one, and the control entry refuses by name with no store to
+ * write. A substrate that DOES implement it owns the uniqueness rules above.
+ */
+export interface RunControlLedger {
+  /** The current run identity of one graph, or `undefined`. */
+  readRun(graphId: string): RunIdentityRecord | undefined;
+  /** Record a run identity, or return the one already recorded (idempotent). */
+  mintRun(record: RunIdentityRecord): RunIdentityRecord;
+  /** The run-level control fact of one graph's current run, or `undefined`. */
+  readRunControl(graphId: string): RunControlRecord | undefined;
+  /** The control decision one attempt carries, or `undefined`. */
+  readControlDecision(
+    graphId: string,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+  ): ControlDecisionRecord | undefined;
+  /** Every control decision of one graph, in decision order. */
+  controlDecisions(graphId: string): readonly ControlDecisionRecord[];
+  /** Record one decision and, when the run is unclaimed, its control fact. */
+  writeControlDecision(write: RunControlWrite): RunControlWriteResult;
+  /**
+   * Take the store's WRITE LOCK for one graph's control path, inside the
+   * caller's transaction, WITHOUT recording anything.
+   *
+   * WHY A LOCK IS AN OPERATION. A control command reads the graph definition,
+   * the run, the state and the accepted events before it writes, and SQLite
+   * refuses a shared-to-reserved lock PROMOTION immediately (`database is
+   * locked`) when another connection already holds the write lock — it does not
+   * wait on `busy_timeout`. Making the transaction's FIRST statement a write
+   * turns that failure into a WAIT, so two commands racing for one attempt
+   * serialize and the loser reads the winner's committed row and answers
+   * `conflict`/`settled` rather than dying on a driver error. The statement
+   * changes no value, so a surrounding transaction that rolls back leaves no
+   * trace of it. A substrate without the control surface needs no lock.
+   */
+  lockControlWrite(graphId: string): void;
+  /**
+   * Claim one run's control fact with no attempt decision beside it.
+   *
+   * The run-wide case a cancel reaches when NOTHING is in flight: the run fact
+   * IS the whole decision (a graph with every entry dispatch refused has no
+   * attempt to name and still must be stoppable). Conditional on the run being
+   * unclaimed, exactly like {@link RunControlLedger.writeControlDecision}, and
+   * it answers with the fact that stands — this call's claim, or the first one.
+   */
+  claimRunControl(control: RunControlRecord): RunControlRecord | undefined;
 }
 
 // ── Commit surface ──────────────────────────────────────────────────────────
@@ -315,6 +533,17 @@ export interface AcceptanceLedgerTx {
   markEffectStarted(graphId: string, effectId: string): EffectTransition;
   markEffectDone(graphId: string, effectId: string): EffectTransition;
   markEffectFailed(graphId: string, effectId: string): EffectTransition;
+  /**
+   * The run identity and trusted-control records of this substrate, or
+   * `undefined` when it holds none.
+   *
+   * OPTIONAL, AND ABSENT IS NOT NEUTRAL. A substrate without this surface
+   * cannot hold a control decision, so the run path reads NO control stop from
+   * it (there is nothing to read) — while the control ENTRY refuses by name,
+   * because a command it cannot record must not look applied. The shipped
+   * store implements it; a focused test double need not.
+   */
+  readonly runs?: RunControlLedger;
 }
 
 /**

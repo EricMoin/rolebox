@@ -93,6 +93,10 @@ import { join } from "node:path";
 
 import { hostExecutionNotCreated } from "../../../src/graph/host/execution-index.ts";
 import {
+  CONTROL_COMMAND_NAMES,
+  type ControlCommandName,
+} from "../../../src/graph/ledger/types.ts";
+import {
   GraphStore,
   GraphStoreWriteError,
   type ExecutionBindingRecord,
@@ -117,6 +121,21 @@ function required(name: string): string {
     throw new Error(`graph-store-xproc-worker: --${name} is required`);
   }
   return value;
+}
+
+/**
+ * The value of `--name` as one of the durable control commands, refused
+ * otherwise: the fixture never invents a command the store's CHECK would reject.
+ */
+function controlCommandArg(name: string): ControlCommandName {
+  const value = required(name);
+  const found = CONTROL_COMMAND_NAMES.find((command) => command === value);
+  if (found === undefined) {
+    throw new Error(
+      `graph-store-xproc-worker: --${name} must be one of ${CONTROL_COMMAND_NAMES.join(", ")}, got ${JSON.stringify(value)}`,
+    );
+  }
+  return found;
 }
 
 /** The value of `--name` as a safe integer, refused otherwise. */
@@ -494,6 +513,111 @@ function receipt(store: GraphStore): void {
 }
 
 /**
+ * Race a CONTROL DECISION against an acceptance — or against another control
+ * command — from a REAL separate process (P3 item 1).
+ *
+ * WHY THIS MODE EXISTS. "A repeated command, a command that races an acceptance
+ * and a command that races another control command each have a DETERMINISTIC
+ * outcome" is a claim about the STORE's conditional writes, and two
+ * `GraphStore` objects inside one process share one connection — exactly the
+ * single-process evidence the plan refuses to count. Each worker here is its own
+ * OS process with its own SQLite connection to the same file, and every round
+ * starts from a marker barrier (`ready-<id>-<round>.marker` then
+ * `go-<round>.marker`, the same protocol `claim-race` uses).
+ *
+ * WHAT IT DOES. With `--accept on` it commits ONE acceptance batch (receipt +
+ * accepted event) for the attempt, exactly as the acceptance core does. Without
+ * it, it applies ONE control decision for the attempt with its own
+ * `--command`, `--reason` and `--at`. Both write through the SAME store
+ * methods the shipped paths use, and both print the verdict they observed, so
+ * the parent can assert the outcome per round rather than assume it.
+ *
+ * PRIVACY: store roots under the OS temp dir, minted ids and epoch
+ * milliseconds only. No credential value is read or printed.
+ */
+async function controlRace(store: GraphStore): Promise<void> {
+  const id = required("id");
+  const graphId = required("graph");
+  const runId = required("run");
+  const nodeId = required("node");
+  const attemptId = required("attempt");
+  const reason = required("reason");
+  const at = numberArg("at");
+  const markerDir = required("marker-dir");
+  const round = numberArg("round");
+  const deadlineMs = Number(arg("deadline-ms") ?? "30000");
+  const sessionId = arg("session") ?? "session.declarer";
+  const accept = arg("accept") === "on";
+
+  // The run identity the decision belongs to. Both racers mint it; the store
+  // answers the FIRST one to every later mint, so the two processes agree.
+  store.runs.mintRun({ graphId, runId, startedAt: at });
+
+  writeFileSync(join(markerDir, `ready-${id}-${round}.marker`), "1");
+  await waitForMarker(
+    join(markerDir, `go-${round}.marker`),
+    deadlineMs,
+    `go-${round}.marker`,
+  );
+
+  if (accept) {
+    const committed = store.commitAccepted({
+      receipt: {
+        graphId,
+        attemptId,
+        submissionId: `submission:${id}:${round}`,
+        planRevision: required("plan-revision"),
+        proposalDigest: `digest-${id}-${round}`,
+        decision: "accepted",
+        committedAt: at,
+      },
+      acceptedEvent: {
+        graphId,
+        attemptId,
+        submissionId: `submission:${id}:${round}`,
+        planRevision: required("plan-revision"),
+        outcomeId: required("outcome"),
+        acceptedAt: at,
+      },
+    });
+    emit({ ok: true, mode: "control-race", id, round, role: "acceptance", verdict: committed.kind });
+    return;
+  }
+
+  const command = controlCommandArg("command");
+  const verdict = store.runs.writeControlDecision({
+    decision: {
+      graphId,
+      runId,
+      nodeId,
+      attemptId,
+      command,
+      reason,
+      decidedAt: at,
+      decidedBy: { sessionId },
+    },
+    runControl: {
+      graphId,
+      runId,
+      command,
+      reason,
+      decidedAt: at,
+      decidedBy: { sessionId },
+    },
+  });
+  emit({
+    ok: true,
+    mode: "control-race",
+    id,
+    round,
+    role: "control",
+    command,
+    verdict: verdict.kind,
+    attemptId,
+  });
+}
+
+/**
  * Hold the store's WRITE LOCK for `--hold-ms` and say so from INSIDE the
  * transaction.
  *
@@ -542,6 +666,7 @@ const MODES = [
   "claim-race",
   "confirm-shape",
   "confirm-stale",
+  "control-race",
   "hold-write-lock",
   "read-execution",
   "receipt",
@@ -573,6 +698,9 @@ async function main(): Promise<void> {
         return;
       case "confirm-stale":
         confirmStale(store);
+        return;
+      case "control-race":
+        await controlRace(store);
         return;
       case "hold-write-lock":
         holdWriteLock(store);

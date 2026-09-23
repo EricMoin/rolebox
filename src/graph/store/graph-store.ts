@@ -73,10 +73,18 @@ import type {
   AcceptanceLedgerTx,
   AcceptedEventRecord,
   CommitResult,
+  ControlCommandName,
+  ControlDecisionRecord,
+  ControlPrincipalRecord,
   EffectTransition,
   GraphStateRecord,
   PendingEffectRecord,
   ReceiptRecord,
+  RunControlLedger,
+  RunControlRecord,
+  RunControlWrite,
+  RunControlWriteResult,
+  RunIdentityRecord,
   SubmissionKey,
 } from "../ledger/types.ts";
 import {
@@ -267,6 +275,7 @@ export class GraphStore {
   private readonly db: DatabaseDriver;
   private readonly filePath: string;
   private readonly ledger: LedgerTables;
+  private readonly runsView: RunControlLedger;
   private readonly txView: GraphStoreTx;
   private closed = false;
 
@@ -282,6 +291,30 @@ export class GraphStore {
     this.ledger = new LedgerTables(connection.db, filePath, (work) =>
       this.joinOrBegin(work),
     );
+    // THE RUN/CONTROL SURFACE IS ONE OBJECT, bound to this store. It is built
+    // before the transaction view because that view hands the SAME object out
+    // (see `runs` below), so a caller inside a transaction and a caller holding
+    // the store address one interface and one boundary.
+    this.runsView = Object.freeze({
+      readRun: (graphId: string): RunIdentityRecord | undefined => this.readRun(graphId),
+      mintRun: (record: RunIdentityRecord): RunIdentityRecord => this.mintRun(record),
+      readRunControl: (graphId: string): RunControlRecord | undefined =>
+        this.readRunControl(graphId),
+      readControlDecision: (
+        graphId: string,
+        runId: string,
+        nodeId: string,
+        attemptId: string,
+      ): ControlDecisionRecord | undefined =>
+        this.readControlDecision(graphId, runId, nodeId, attemptId),
+      controlDecisions: (graphId: string): readonly ControlDecisionRecord[] =>
+        this.controlDecisions(graphId),
+      writeControlDecision: (write: RunControlWrite): RunControlWriteResult =>
+        this.writeControlDecision(write),
+      claimRunControl: (control: RunControlRecord): RunControlRecord | undefined =>
+        this.claimRunControl(control),
+      lockControlWrite: (graphId: string): void => this.lockControlWrite(graphId),
+    });
     this.txView = Object.freeze({
       commitAccepted: (batch: GraphAcceptanceBatch): CommitResult =>
         this.commitAccepted(batch),
@@ -373,6 +406,7 @@ export class GraphStore {
       invocationOriginGraphIds: (): readonly string[] =>
         this.invocationOriginGraphIds(),
       definitionGraphIds: (): readonly string[] => this.definitionGraphIds(),
+      runs: this.runsView,
     });
   }
 
@@ -1548,6 +1582,334 @@ export class GraphStore {
     return Object.freeze(ids.sort());
   }
 
+  // ── Run identity and trusted control (P3 item 1) ───────────────────────────
+
+  /**
+   * The run identity and control surface, as the ledger port exposes it.
+   *
+   * The SAME object the transaction surface hands out, so a caller inside a
+   * transaction and a caller holding the store write through one interface and
+   * one boundary.
+   */
+  get runs(): RunControlLedger {
+    this.assertOpen("runs");
+    return this.runsView;
+  }
+
+  /**
+   * Record one run identity, or return the one already recorded.
+   *
+   * IDEMPOTENT BY CONSTRUCTION: `ON CONFLICT DO NOTHING` then a read, so two
+   * processes that raced the same graph's first execution agree on ONE run id —
+   * the first writer's — instead of each minting its own. The caller mints the
+   * candidate id; the store decides which one is the run's.
+   */
+  mintRun(record: RunIdentityRecord): RunIdentityRecord {
+    this.assertOpen("mintRun");
+    assertRunShape(record);
+    return this.joinOrBegin(() => {
+      this.db.run(
+        `INSERT INTO ${GRAPH_STORE_TABLES.runs} (graph_id, run_id, started_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (graph_id) DO NOTHING`,
+        record.graphId,
+        record.runId,
+        record.startedAt,
+      );
+      const stored = this.readRun(record.graphId);
+      if (stored === undefined) {
+        throw new GraphStoreWriteError(
+          "invalid-record",
+          "graph-store: run identity of graph " +
+            JSON.stringify(record.graphId) +
+            " disappeared between the mint and the read — the run was not recorded",
+        );
+      }
+      return stored;
+    });
+  }
+
+  /** The current run identity of one graph, or `undefined`. */
+  readRun(graphId: string): RunIdentityRecord | undefined {
+    this.assertOpen("readRun");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, started_at FROM ${GRAPH_STORE_TABLES.runs} WHERE graph_id = ?`,
+      )
+      .get(graphId);
+    if (row === undefined || row === null) return undefined;
+    const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.runs);
+    return Object.freeze({
+      graphId: readStoreText(entry, "graph_id", this.filePath, GRAPH_STORE_TABLES.runs),
+      runId: readStoreText(entry, "run_id", this.filePath, GRAPH_STORE_TABLES.runs),
+      startedAt: readStoreEpoch(entry, "started_at", this.filePath, GRAPH_STORE_TABLES.runs),
+    });
+  }
+
+  /** The run-level control fact of one graph's current run, or `undefined`. */
+  readRunControl(graphId: string): RunControlRecord | undefined {
+    this.assertOpen("readRunControl");
+    const run = this.readRun(graphId);
+    if (run === undefined) return undefined;
+    const row = this.db
+      .query(
+        `SELECT control_command, control_reason, control_decided_at,
+                control_decided_by_session, control_decided_by_agent
+         FROM ${GRAPH_STORE_TABLES.runs} WHERE graph_id = ? AND control_command IS NOT NULL`,
+      )
+      .get(graphId);
+    if (row === undefined || row === null) return undefined;
+    const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.runs);
+    return Object.freeze({
+      graphId: run.graphId,
+      runId: run.runId,
+      command: readControlCommand(
+        entry,
+        "control_command",
+        this.filePath,
+        GRAPH_STORE_TABLES.runs,
+      ),
+      reason: readStoreText(entry, "control_reason", this.filePath, GRAPH_STORE_TABLES.runs),
+      decidedAt: readStoreEpoch(
+        entry,
+        "control_decided_at",
+        this.filePath,
+        GRAPH_STORE_TABLES.runs,
+      ),
+      ...readDecidedBy(entry, "control_decided_by_session", "control_decided_by_agent", this.filePath, GRAPH_STORE_TABLES.runs),
+    });
+  }
+
+  /** The control decision one attempt carries, or `undefined`. */
+  readControlDecision(
+    graphId: string,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+  ): ControlDecisionRecord | undefined {
+    this.assertOpen("readControlDecision");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                decided_by_session, decided_by_agent
+         FROM ${GRAPH_STORE_TABLES.controlDecisions}
+         WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?`,
+      )
+      .get(graphId, runId, nodeId, attemptId);
+    if (row === undefined || row === null) return undefined;
+    return readControlDecisionRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.controlDecisions),
+      this.filePath,
+    );
+  }
+
+  /** Every control decision of one graph, in decision order. */
+  controlDecisions(graphId: string): readonly ControlDecisionRecord[] {
+    this.assertOpen("controlDecisions");
+    const rows = this.db
+      .query(
+        `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                decided_by_session, decided_by_agent
+         FROM ${GRAPH_STORE_TABLES.controlDecisions}
+         WHERE graph_id = ? ORDER BY decided_at, rowid`,
+      )
+      .all(graphId);
+    const decisions: ControlDecisionRecord[] = [];
+    for (const row of rows) {
+      decisions.push(
+        readControlDecisionRow(
+          asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.controlDecisions),
+          this.filePath,
+        ),
+      );
+    }
+    return Object.freeze(decisions);
+  }
+
+  /**
+   * Record one control decision, and the run's control fact when it is
+   * unclaimed — in ONE boundary (`joinOrBegin`), so the decision and the run
+   * fact a reader combines them from commit together.
+   *
+   * THREE CONDITIONAL RULES, all structural:
+   * - THE ATTEMPT: a row already exists under the decision's key. The SAME
+   *   command is a REPLAY (the persisted decision is returned, nothing is
+   *   written); a DIFFERENT command is a CONFLICT and nothing is written. An
+   *   attempt therefore never carries two control facts.
+   * - THE ACCEPTANCE: the INSERT carries its own `WHERE NOT EXISTS (accepted
+   *   event for this attempt)`, so an attempt that settled through the
+   *   acceptance core is reported `settled` and NOTHING is written — decided
+   *   against the committed store at the moment of the write, not against a
+   *   value read earlier in the transaction. That is what makes a control
+   *   command race an acceptance deterministically: whichever COMMITS first is
+   *   the fact that stands, and the loser writes nothing.
+   * - THE RUN: the control fact is claimed by `WHERE control_command IS NULL`.
+   *   A second command — an identical repeat after an unrelated decision, or a
+   *   different command for another attempt — never replaces the first; the
+   *   caller is handed the run fact that actually stands. The claim runs ONLY
+   *   after the decision itself landed, so a refused command never stops a run.
+   */
+  writeControlDecision(write: RunControlWrite): RunControlWriteResult {
+    this.assertOpen("writeControlDecision");
+    assertControlWriteShape(write);
+    return this.joinOrBegin(() => {
+      const key = write.decision;
+      // THE DECISIVE WRITE IS THE FIRST STATEMENT, and both halves of its rule
+      // are inside it: the row lands only when no accepted event exists for this
+      // attempt AT THIS MOMENT, and `OR IGNORE` keeps the attempt's primary key
+      // as the other half. Being FIRST also matters for concurrency: a write
+      // statement takes SQLite's RESERVED lock immediately, so a racing writer
+      // WAITS on `busy_timeout` instead of failing a shared-to-reserved lock
+      // PROMOTION after a read — the "database is locked" failure a
+      // read-then-write shape produces cross-process (reproduced by
+      // `tests/graph/graph-store-cross-process.test.ts`). A row that does not
+      // land is CLASSIFIED from the committed store by the re-read below.
+      this.db.run(
+        `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.controlDecisions}
+           (graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+            decided_by_session, decided_by_agent)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.acceptedEvents}
+           WHERE graph_id = ? AND attempt_id = ?
+         )`,
+        key.graphId,
+        key.runId,
+        key.nodeId,
+        key.attemptId,
+        key.command,
+        key.reason,
+        key.decidedAt,
+        key.decidedBy?.sessionId ?? null,
+        key.decidedBy?.agentId ?? null,
+        key.graphId,
+        key.attemptId,
+      );
+      if (this.changes() === 0) {
+        // NOTHING LANDED: either this attempt already carries a decision under
+        // the same key, or it SETTLED through the acceptance core. Both are
+        // facts of the COMMITTED store, read back here rather than assumed.
+        const raced = this.readControlDecision(
+          key.graphId,
+          key.runId,
+          key.nodeId,
+          key.attemptId,
+        );
+        return Object.freeze(
+          raced === undefined
+            ? {
+                kind: "settled" as const,
+                attemptId: key.attemptId,
+                runControl: this.readRunControl(key.graphId),
+              }
+            : raced.command === key.command
+              ? {
+                  kind: "replayed" as const,
+                  decision: raced,
+                  runControl: this.readRunControl(key.graphId),
+                }
+              : {
+                  kind: "conflict" as const,
+                  existing: raced,
+                  runControl: this.readRunControl(key.graphId),
+                },
+        );
+      }
+      const claimed = write.runControl;
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.runs}
+         SET control_command = ?, control_reason = ?, control_decided_at = ?,
+             control_decided_by_session = ?, control_decided_by_agent = ?
+         WHERE graph_id = ? AND run_id = ? AND control_command IS NULL`,
+        claimed.command,
+        claimed.reason,
+        claimed.decidedAt,
+        claimed.decidedBy?.sessionId ?? null,
+        claimed.decidedBy?.agentId ?? null,
+        claimed.graphId,
+        claimed.runId,
+      );
+      // THE STORED FACT IS THE ANSWER, not the value this call proposed: a
+      // racing command may have claimed the run between the read and the
+      // update, and reporting this call's candidate would name a command that
+      // is not the one that stands. A run row that is not there at all is an
+      // inconsistency, not a fact to invent.
+      const stored = this.readRunControl(key.graphId);
+      if (stored === undefined) {
+        throw new GraphStoreWriteError(
+          "invalid-record",
+          "graph-store: control decision for graph " +
+            JSON.stringify(key.graphId) +
+            " was recorded, but the store holds no run control fact for it — the run " +
+            "identity is missing and the decision was rolled back",
+        );
+      }
+      return Object.freeze({
+        kind: "recorded" as const,
+        decision: key,
+        runControl: stored,
+      });
+    });
+  }
+
+  /**
+   * Take the store's WRITE LOCK for one graph's control path, and record
+   * nothing.
+   *
+   * A control command reads before it writes, and SQLite refuses a
+   * shared-to-reserved lock PROMOTION immediately when another connection holds
+   * the write lock (it does not wait on `busy_timeout`) — the
+   * `database is locked` failure two racing commands produced cross-process
+   * before this method existed. The UPDATE below is the transaction's FIRST
+   * write, so RESERVED is taken before any read; it writes the value that is
+   * already there, so a transaction that rolls back leaves no trace, and a
+   * missing run row (the graph has no run yet) still takes the lock: the
+   * statement is a write whether or not it matches a row.
+   */
+  lockControlWrite(graphId: string): void {
+    this.assertOpen("lockControlWrite");
+    requireStoreIdentifier(graphId, "control.graphId");
+    this.joinOrBegin(() => {
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.runs}
+         SET started_at = started_at
+         WHERE graph_id = ?`,
+        graphId,
+      );
+    });
+  }
+
+  /**
+   * Claim one run's control fact when the run is unclaimed, and answer with the
+   * fact that stands.
+   *
+   * The conditional UPDATE is the whole rule: a second command never replaces
+   * the first, and a caller always learns which command actually stopped the
+   * run. `undefined` means the run row is not there at all — a caller mints a
+   * run identity before it controls one, so that is an inconsistency to report,
+   * not a claim to record.
+   */
+  claimRunControl(control: RunControlRecord): RunControlRecord | undefined {
+    this.assertOpen("claimRunControl");
+    assertRunControlShape(control);
+    return this.joinOrBegin(() => {
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.runs}
+         SET control_command = ?, control_reason = ?, control_decided_at = ?,
+             control_decided_by_session = ?, control_decided_by_agent = ?
+         WHERE graph_id = ? AND run_id = ? AND control_command IS NULL`,
+        control.command,
+        control.reason,
+        control.decidedAt,
+        control.decidedBy?.sessionId ?? null,
+        control.decidedBy?.agentId ?? null,
+        control.graphId,
+        control.runId,
+      );
+      return this.readRunControl(control.graphId);
+    });
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /** Refuse any use of a closed store with a clear, typed error. */
@@ -1648,6 +2010,167 @@ function readStoreJson(
 }
 
 // ── Shape checks ────────────────────────────────────────────────────────────
+
+/** Read one control-command column as the closed vocabulary this format writes. */
+function readControlCommand(
+  row: Record<string, unknown>,
+  column: string,
+  path: string,
+  table: string,
+): ControlCommandName {
+  const value = row[column];
+  if (
+    value === "failure" ||
+    value === "cancel" ||
+    value === "timeout" ||
+    value === "retry" ||
+    value === "budget-stop"
+  ) {
+    return value;
+  }
+  throw new GraphStoreFormatError(
+    "malformed-row",
+    path,
+    `graph-store: a ${table} row of ${path} carries a control command of ${describeValue(value)}, which is not one this format records — refusing to read it approximately`,
+    value,
+    GRAPH_STORE_FORMAT_VERSION,
+  );
+}
+
+/**
+ * Read the principal columns of a control row.
+ *
+ * The session is the identity the permission rule compared; the agent is
+ * recorded only when the host attributed one, and an agent without a session is
+ * unrepresentable (the DDL says so) and therefore refused here as malformed.
+ */
+function readDecidedBy(
+  row: Record<string, unknown>,
+  sessionColumn: string,
+  agentColumn: string,
+  path: string,
+  table: string,
+): { readonly decidedBy?: ControlPrincipalRecord } {
+  const session = row[sessionColumn];
+  const agent = row[agentColumn];
+  if (session === null || session === undefined) {
+    if (agent !== null && agent !== undefined) {
+      throw new GraphStoreFormatError(
+        "malformed-row",
+        path,
+        `graph-store: a ${table} row of ${path} records an agent with no deciding session — refusing to read it approximately`,
+        agent,
+        GRAPH_STORE_FORMAT_VERSION,
+      );
+    }
+    return {};
+  }
+  if (typeof session !== "string" || session.length === 0) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} carries ${sessionColumn} as ${describeValue(session)}, not a non-empty session — refusing to read it approximately`,
+      session,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  if (typeof agent === "string" && agent.length > 0) {
+    return { decidedBy: Object.freeze({ sessionId: session, agentId: agent }) };
+  }
+  return { decidedBy: Object.freeze({ sessionId: session }) };
+}
+
+/** Read one control-decision row. */
+function readControlDecisionRow(
+  row: Record<string, unknown>,
+  path: string,
+): ControlDecisionRecord {
+  const table = GRAPH_STORE_TABLES.controlDecisions;
+  return Object.freeze({
+    graphId: readStoreText(row, "graph_id", path, table),
+    runId: readStoreText(row, "run_id", path, table),
+    nodeId: readStoreText(row, "node_id", path, table),
+    attemptId: readStoreText(row, "attempt_id", path, table),
+    command: readControlCommand(row, "command", path, table),
+    reason: readStoreText(row, "reason", path, table),
+    decidedAt: readStoreEpoch(row, "decided_at", path, table),
+    ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
+  });
+}
+
+/** Refuse a run CONTROL fact that violates the record model before it is stored. */
+function assertRunControlShape(control: RunControlRecord): void {
+  requireStoreIdentifier(control.graphId, "runControl.graphId");
+  requireStoreIdentifier(control.runId, "runControl.runId");
+  requireStoreIdentifier(control.reason, "runControl.reason");
+  requireStoreEpoch(control.decidedAt, "runControl.decidedAt");
+  assertPrincipalShape(control.decidedBy, "runControl.decidedBy");
+}
+
+/** Refuse a run row that violates the record model before it is stored. */
+function assertRunShape(record: RunIdentityRecord): void {
+  requireStoreIdentifier(record.graphId, "run.graphId");
+  requireStoreIdentifier(record.runId, "run.runId");
+  requireStoreEpoch(record.startedAt, "run.startedAt");
+}
+
+/** Refuse a control write that violates the record model before it is stored. */
+function assertControlWriteShape(write: RunControlWrite): void {
+  const decision = write.decision;
+  const control = write.runControl;
+  if (decision.graphId !== control.graphId || decision.runId !== control.runId) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: the control decision names run " +
+        JSON.stringify(decision.graphId + "/" + decision.runId) +
+        " while the run control fact names " +
+        JSON.stringify(control.graphId + "/" + control.runId) +
+        " — the write was not made",
+    );
+  }
+  if (decision.command !== control.command) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: the control decision records " +
+        JSON.stringify(decision.command) +
+        " while the run control fact records " +
+        JSON.stringify(control.command) +
+        " — one write cannot record two commands, so nothing was written",
+    );
+  }
+  requireStoreIdentifier(decision.graphId, "control.graphId");
+  requireStoreIdentifier(decision.runId, "control.runId");
+  requireStoreIdentifier(decision.nodeId, "control.nodeId");
+  requireStoreIdentifier(decision.attemptId, "control.attemptId");
+  requireStoreIdentifier(decision.reason, "control.reason");
+  requireStoreEpoch(decision.decidedAt, "control.decidedAt");
+  requireStoreIdentifier(control.reason, "control.reason");
+  requireStoreEpoch(control.decidedAt, "control.decidedAt");
+  assertPrincipalShape(decision.decidedBy, "control.decidedBy");
+  assertPrincipalShape(control.decidedBy, "control.decidedBy");
+}
+
+/** Refuse a principal that is not a session with an optional non-empty agent. */
+function assertPrincipalShape(
+  principal: ControlPrincipalRecord | undefined,
+  field: string,
+): void {
+  if (principal === undefined) return;
+  requireStoreIdentifier(principal.sessionId, field + ".sessionId");
+  if (
+    principal.agentId !== undefined &&
+    (typeof principal.agentId !== "string" || principal.agentId.length === 0)
+  ) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: " +
+        field +
+        ".agentId is " +
+        describeValue(principal.agentId) +
+        ", not a non-empty agent — the record was not written",
+    );
+  }
+}
 
 /** Refuse a definition row that violates the record model before it is stored. */
 function assertDefinitionShape(record: GraphDefinitionRecord): void {

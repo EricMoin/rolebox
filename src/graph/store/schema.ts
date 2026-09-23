@@ -27,12 +27,16 @@
  * NOT read, NOT converted and NOT treated as absent (see
  * {@link RETIRED_AUTHORITY_FILES} and `format.ts`).
  *
- * THE FORMAT VERSION IS THE LEDGER'S, BUMPED. `LEDGER_FORMAT_VERSION` moves to
- * 2 because the layout genuinely changed: a version-1 file holds five of the ten
+ * THE FORMAT VERSION IS THE LEDGER'S, BUMPED. `LEDGER_FORMAT_VERSION` moved to
+ * 2 when the converged layout arrived: a version-1 file holds five of the ten
  * tables and none of the host records, and reading it as this build's store
- * would answer `absent` for every execution binding it never carried. A
- * version-1 file is therefore refused as an older format this build registers
- * no migration for (`unsupported`), never widened in place, never downgraded.
+ * would answer `absent` for every execution binding it never carried. It moves
+ * to 3 with the RUN IDENTITY and the TRUSTED CONTROL records (P3 item 1): a
+ * version-2 file holds neither, so it could not answer "which run is this, and
+ * was it stopped by a trusted command?" — reading it as this build's store
+ * would report every controlled run as merely executing. Both older versions
+ * are refused as an older format this build registers no migration for
+ * (`unsupported`), never widened in place, never downgraded.
  *
  * EVERY UNIQUENESS THE PROTOCOL NEEDS IS STRUCTURAL, not a code path:
  * - one row per `(graph_id, effect_id)` (primary key of the execution table);
@@ -49,8 +53,13 @@
  *   key carries at most one accepted RESULT;
  * - one receipt per `(graph_id, attempt_id, submission_id)` (primary key) — the
  *   submission idempotency key;
- * - one immutable definition per graph, one current run state per graph, and one
- *   declaring invocation per graph.
+ * - one TRUSTED CONTROL DECISION per `(graph_id, run_id, node_id, attempt_id)`
+ *   (primary key) — an attempt carries at most one control fact, exactly as it
+ *   carries at most one accepted event — and ONE run-level control fact per
+ *   graph, claimed by a conditional update so a racing second command cannot
+ *   replace the command that stopped the run first;
+ * - one immutable definition per graph, one current run state per graph, one run
+ *   identity per graph, and one declaring invocation per graph.
  *
  * Dependency leaf: this module imports only the ledger port (for the shared
  * format identity) and two path/utility helpers; no record model and no driver.
@@ -153,6 +162,10 @@ export const GRAPH_STORE_TABLES = Object.freeze({
   credentials: "host_attempt_credentials",
   /** The declaring invocation of one graph. */
   origins: "graph_invocation_origins",
+  /** The CURRENT run identity of one graph (P3 item 1). */
+  runs: "graph_runs",
+  /** The trusted control decisions and the run's control fact (P3 item 1). */
+  controlDecisions: "graph_control_decisions",
 });
 
 /** The ledger's own table names, as the ledger port's reader knows them. */
@@ -271,6 +284,46 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      agent TEXT,
      updated_at INTEGER NOT NULL,
      PRIMARY KEY (graph_id)
+   )`,
+  // THE RUN IDENTITY (P3 item 1). One row per graph — the current run — written
+  // INSIDE the transaction that commits the run's first state snapshot, so a run
+  // identity without the state it names is unrepresentable. It also carries the
+  // run's CONTROL FACT: the first trusted command recorded for the run, claimed
+  // by a conditional update (`WHERE control_command IS NULL`) so a racing second
+  // command is told which command stopped the run instead of replacing it. The
+  // CHECK group makes a half-written control fact (a command with no reason, no
+  // time or no principal) unrepresentable.
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.runs} (
+     graph_id TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     started_at INTEGER NOT NULL,
+     control_command TEXT CHECK (control_command IS NULL OR control_command IN ('failure', 'cancel', 'timeout', 'retry', 'budget-stop')),
+     control_reason TEXT,
+     control_decided_at INTEGER,
+     control_decided_by_session TEXT,
+     control_decided_by_agent TEXT,
+     PRIMARY KEY (graph_id),
+     CHECK ((control_command IS NULL) = (control_reason IS NULL)),
+     CHECK ((control_command IS NULL) = (control_decided_at IS NULL)),
+     CHECK ((control_command IS NULL) = (control_decided_by_session IS NULL)),
+     CHECK (control_decided_by_agent IS NULL OR control_decided_by_session IS NOT NULL)
+   )`,
+  // THE TRUSTED CONTROL DECISIONS (P3 item 1). One row per attempt: the primary
+  // key is the attempt, so an attempt can never carry two competing control
+  // facts. `decided_by_session` is the principal the permission rule compared;
+  // the agent is recorded when the host attributed one.
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.controlDecisions} (
+     graph_id TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     node_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     command TEXT NOT NULL CHECK (command IN ('failure', 'cancel', 'timeout', 'retry', 'budget-stop')),
+     reason TEXT NOT NULL,
+     decided_at INTEGER NOT NULL,
+     decided_by_session TEXT,
+     decided_by_agent TEXT,
+     PRIMARY KEY (graph_id, run_id, node_id, attempt_id),
+     CHECK (decided_by_agent IS NULL OR decided_by_session IS NOT NULL)
    )`,
 ];
 
@@ -392,5 +445,26 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "session_id", affinity: "text", primaryKey: 0, notNull: true },
     { name: "agent", affinity: "text", primaryKey: 0, notNull: false },
     { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  runs: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "run_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "started_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "control_command", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "control_reason", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "control_decided_at", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "control_decided_by_session", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "control_decided_by_agent", affinity: "text", primaryKey: 0, notNull: false },
+  ],
+  controlDecisions: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "run_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "node_id", affinity: "text", primaryKey: 3, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 4, notNull: true },
+    { name: "command", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "reason", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "decided_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "decided_by_session", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "decided_by_agent", affinity: "text", primaryKey: 0, notNull: false },
   ],
 });

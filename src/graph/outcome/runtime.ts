@@ -195,8 +195,12 @@
  * adapter, the invocation-identity holder and the completion bridge. The
  * legacy signal runtime was deleted on 2026-09-23, so this is the only graph
  * run path: there is no legacy v2 run or recovery path left to fall back to.
- * Still DEFERRED: storage format 3 with its `2 -> 3` migrator and the
- * remaining routing and loop work.
+ * THE STORE FORMAT IS 3 (P3 item 1): the run identity and the trusted control
+ * records live in the SAME store as the state this runtime commits, and every
+ * entry point below refuses a run a control command stopped (`control-stopped`)
+ * before it reads or writes anything. There is deliberately NO migrator: an
+ * older file is refused by name, never widened (§3.6).
+ * Still DEFERRED: the remaining routing and loop work.
  */
 
 import type { CompiledPlan } from "../compiler/plan.ts";
@@ -206,6 +210,7 @@ import type {
   GraphStateRecord,
   PendingEffectRecord,
   ReceiptRecord,
+  RunControlRecord,
 } from "../ledger/types.ts";
 import {
   DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
@@ -574,7 +579,19 @@ export type OutcomeRuntimeRefusalCode =
    * re-delivering under an unknown create outcome is forbidden — a blind retry
    * could run the attempt twice — so the effect stays unsettled and is reported.
    */
-  | "credential-reissue-forbidden";
+  | "credential-reissue-forbidden"
+  /**
+   * A TRUSTED CONTROL COMMAND stopped this run (P3 item 1): a failure, a
+   * timeout or a cancellation is recorded on the run, so the run takes no
+   * further step — it dispatches nothing, arms nothing and settles nothing.
+   * The command, its reason and the principal that decided it are the durable
+   * record this refusal reports; the attempt entries the stop left in flight
+   * are reported, never settled and never dropped. It is deliberately NOT a
+   * successful outcome: a stopped run can never be advanced by a submission,
+   * and the same code is what a late worker submission and a late completion
+   * fact both meet.
+   */
+  | "control-stopped";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -865,6 +882,22 @@ export type OutcomeResumeResult =
        * have stopped.
        */
       readonly stop?: OutcomeStop;
+      /**
+       * Present exactly when the run this call found is STOPPED BY A TRUSTED
+       * CONTROL COMMAND (P3 item 1): the failure, timeout or cancellation
+       * recorded on the run, with its reason, its decision time and the
+       * principal that decided it.
+       *
+       * A controlled run behaves exactly like a body-stopped one — nothing is
+       * launched, nothing is armed, nothing is settled, and a second resume
+       * reports the same fact — but the reason is a TRUSTED LIFECYCLE COMMAND,
+       * not a declared limit, so it is carried as its own field instead of
+       * being rounded into {@link OutcomeStop} (plan §3.4: control is not an
+       * outcome). The attempts the stop left in flight are named in `refusals`
+       * and their effects stay in `unsettledEffects`: an external execution
+       * this process cannot confirm is REPORTED, never hidden.
+       */
+      readonly control?: RunControlRecord;
     }
   | {
       readonly kind: "refused";
@@ -1193,6 +1226,15 @@ export class OutcomeGraphRuntime {
       return refused([unsupportedCompletion]);
     }
 
+    // A TRUSTED CONTROL COMMAND OUTRANKS STARTING (P3 item 1). A run that was
+    // cancelled, failed or timed out is never begun again — not by a re-declare
+    // whose id resolves to a stopped run, and not by a recovery window that
+    // found the run row without a snapshot. The check runs before anything is
+    // read as this plan's state and before anything is written, so the stop is
+    // preserved exactly as it was recorded.
+    const control = this.runControl();
+    if (control !== undefined) return refused([this.controlStopRefusal(control)]);
+
     let existing: OutcomeGraphState | undefined;
     try {
       existing = this.state();
@@ -1233,6 +1275,12 @@ export class OutcomeGraphRuntime {
     }
 
     const entryIds = new Set(entries.map((node) => node.id));
+    // THE RUN IDENTITY the whole run is addressed by (P3 item 1). It is minted
+    // HERE, inside the transaction that commits the first snapshot, so a run id
+    // without the state it names is unrepresentable; `mintRun` keeps the
+    // identity an earlier writer recorded, so two processes that raced this
+    // graph's first execution agree on ONE run instead of each minting its own.
+    const runId = runIdentityOf(this.graphId, at);
     // ONE transaction for the starting snapshot, its dispatch intents AND the
     // credential record every armed attempt is settled with. There is no
     // acceptance to join yet; what must not come apart is the state that
@@ -1322,6 +1370,10 @@ export class OutcomeGraphRuntime {
         loopProgress: Object.freeze(loopProgress),
       });
       tx.writeGraphState(stateRecordOf(state, at));
+      // The run identity commits WITH the snapshot it names. A substrate with no
+      // run/control surface holds no runs, and therefore no control records
+      // either — nothing minted here, and the control entry refuses by name.
+      tx.runs?.mintRun({ graphId: this.graphId, runId, startedAt: at });
       for (const effect of effects) tx.writeEffect(effect);
       return Object.freeze({ state, dispatched: Object.freeze(dispatched) });
     });
@@ -1438,6 +1490,14 @@ export class OutcomeGraphRuntime {
     if (unsupportedCompletion !== undefined) {
       return refused([unsupportedCompletion]);
     }
+    // A TRUSTED CONTROL COMMAND ENDS THE RUN (P3 item 1): a failure, a timeout
+    // or a cancellation is a durable fact about the run, and no submission —
+    // the worker's or the host's — advances a run it stopped. The check runs
+    // BEFORE the state is read and before anything is written, so a late
+    // settlement cannot resurrect an attempt control already ended, and the
+    // refusal names the command, its reason and who decided it.
+    const control = this.runControl();
+    if (control !== undefined) return refused([this.controlStopRefusal(control)]);
 
     let record: GraphStateRecord | undefined;
     try {
@@ -2088,6 +2148,36 @@ export class OutcomeGraphRuntime {
       return refused([this.stateRefusal(error)]);
     }
 
+    // A RUN A TRUSTED CONTROL COMMAND STOPPED IS REPORTED, NOT CONTINUED (P3
+    // item 1). It is the same rule as the declared stop below, one level up:
+    // a cancelled, failed or timed-out run launches nothing, arms nothing and
+    // reconciles nothing, so a second resume (and every boot sweep after it)
+    // reports the SAME control fact and clears nothing. The attempts the stop
+    // left in flight are NOT armed — no submission can settle them — and they
+    // are named in `refusals`, with their effects still in `unsettledEffects`:
+    // an external execution whose fate this process cannot confirm stays
+    // VISIBLE instead of being hidden to make the stop look converged.
+    const control = this.runControl();
+    if (control !== undefined) {
+      const stopped = this.unsettledEffectReading();
+      if ("code" in stopped) return refused([stopped]);
+      return {
+        kind: "resumed",
+        state,
+        dispatched: Object.freeze([]),
+        reconciled: Object.freeze([]),
+        divergences: Object.freeze([]),
+        armed: Object.freeze([]),
+        unsettledEffects: stopped,
+        refusals: Object.freeze([
+          ...controlledInFlightRefusals(state, control),
+          ...(state.stop === undefined ? [] : stoppedInFlightRefusals(state)),
+        ]),
+        ...(state.stop === undefined ? {} : { stop: state.stop }),
+        control,
+      };
+    }
+
     // A STOPPED RUN IS REPORTED, NOT CONTINUED. Nothing is launched — not even a
     // `pending` effect the crash window left behind — and nothing is offered as
     // armed, because no submission can settle anything once the run has stopped.
@@ -2156,6 +2246,62 @@ export class OutcomeGraphRuntime {
     const record = this.ledger.readGraphState(this.graphId);
     if (record === undefined) return undefined;
     return readOutcomeGraphState(record, this.plan);
+  }
+
+  /**
+   * The TRUSTED CONTROL FACT of this graph's run, or `undefined` (P3 item 1).
+   *
+   * READ THROUGH THE PORT THIS RUNTIME ALREADY HOLDS. The control record lives
+   * in the SAME store as the run state — one file, one schema, one transaction
+   * boundary — so the run path can ask about it without a second authority, a
+   * second connection or a second capability to keep in sync with the store it
+   * commits through.
+   *
+   * A SUBSTRATE WITHOUT THE SURFACE REPORTS NO CONTROL, and that is correct
+   * rather than lenient: a ledger that cannot hold a control decision cannot
+   * have one, so there is no stop to report. The control ENTRY is the other
+   * half of that rule — it refuses by name when it has no surface to record a
+   * command in, because a command nobody can record must never look applied.
+   *
+   * A READ THAT THROWS IS NOT SWALLOWED as "no control": the closed store and
+   * the malformed row throw, and the callers let the error answer rather than
+   * run a graph whose stop could not be read.
+   */
+  private runControl(): RunControlRecord | undefined {
+    const runs = this.ledger.runs;
+    if (runs === undefined) return undefined;
+    return runs.readRunControl(this.graphId);
+  }
+
+  /**
+   * The structured refusal every step of a CONTROLLED run answers with.
+   *
+   * ONE code, `control-stopped`, for every command: the caller's repair is the
+   * same in all three cases (the run is over; a new run is a new identity), and
+   * the command, the reason and the deciding principal are carried in the
+   * message so the refusal says WHICH trusted command ended it. The code is
+   * never a business outcome and never a settlement.
+   */
+  private controlStopRefusal(control: RunControlRecord): OutcomeRuntimeRefusal {
+    return {
+      code: "control-stopped",
+      path: "$.graphId",
+      message:
+        "outcome-runtime: graph " +
+        JSON.stringify(this.graphId) +
+        " was STOPPED by the trusted control command " +
+        JSON.stringify(control.command) +
+        " (reason: " +
+        control.reason +
+        ", decided at " +
+        String(control.decidedAt) +
+        (control.decidedBy === undefined
+          ? ""
+          : ", decided by session " + JSON.stringify(control.decidedBy.sessionId)) +
+        ") — a controlled run dispatches nothing, arms nothing and settles nothing, so " +
+        "this operation is refused and no state is written; the attempts the stop left in " +
+        "flight stay exactly as they are and are reported",
+    };
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -3949,6 +4095,61 @@ function stoppedInFlightRefusals(
     );
   });
   return Object.freeze(refusals);
+}
+
+/**
+ * What a CONTROL-STOPPED run reports for the nodes still recorded in flight.
+ *
+ * The mirror of {@link stoppedInFlightRefusals} for the trusted-control case:
+ * every in-flight attempt is a refusal with the `control-stopped` code and the
+ * command, reason and decision time that stopped the run — never an "armed"
+ * entry (no submission can settle it) and never a silent drop (the attempt is
+ * still recorded, and an external execution nobody confirmed must stay
+ * visible). Credential-free by construction, like every other report here.
+ */
+function controlledInFlightRefusals(
+  state: OutcomeGraphState,
+  control: RunControlRecord,
+): readonly OutcomeRuntimeRefusal[] {
+  const refusals: OutcomeRuntimeRefusal[] = [];
+  state.nodes.forEach((node, index) => {
+    if (node.status !== "dispatched") return;
+    refusals.push(
+      Object.freeze({
+        code: "control-stopped" as const,
+        path: "$.nodes[" + index + "].status",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(node.nodeId) +
+          " is still recorded in flight" +
+          (node.attemptId === undefined ? "" : " on attempt " + JSON.stringify(node.attemptId)) +
+          ", but graph " +
+          JSON.stringify(state.graphId) +
+          " was STOPPED by the trusted control command " +
+          JSON.stringify(control.command) +
+          " (" +
+          control.reason +
+          ") — a controlled run dispatches nothing and no submission can settle this " +
+          "attempt, so it is reported as refused rather than armed, and its execution (if " +
+          "the host created one) is neither confirmed nor hidden by this report",
+      }),
+    );
+  });
+  return Object.freeze(refusals);
+}
+
+/**
+ * The run identity minted for one graph's execution.
+ *
+ * DERIVED, NOT RANDOM, so the same (graph, decision time) always names the same
+ * run and a test can predict it. Uniqueness is per graph — the run row's key —
+ * and the graph id is part of the value so an id in a report is readable. A
+ * later work package that re-executes a terminal graph mints the next run's id
+ * from its own start time; nothing here assumes one run forever beyond the row
+ * key, which that package changes.
+ */
+function runIdentityOf(graphId: string, startedAt: number): string {
+  return graphId + "@" + String(startedAt);
 }
 
 /** The state's progress for one node, when that node is currently in flight. */

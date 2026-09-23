@@ -47,6 +47,10 @@ const OUTCOME_GRAPH_KEYS = [
   "graph_submit_outcome",
   "graph_audit",
   "graph_status",
+  // THE ONE EXPLICIT CONTROL ENTRY (P3 item 1). It is part of the shipped face
+  // and NOT part of what a dispatched worker is granted: the host's own worker
+  // boundary refuses it before its body runs (see worker-tool-face.test.ts).
+  "graph_control",
 ];
 
 /** The legacy execution entries that no longer exist. */
@@ -83,7 +87,7 @@ function makeContext(): CanonicalToolContext {
 // ── createOutcomeGraphTools: schema shape ───────────────────────────────────
 
 describe("createOutcomeGraphTools", () => {
-  it("returns exactly the four outcome-path tools", () => {
+  it("returns exactly the outcome-path tools, control included", () => {
     const tools = createOutcomeGraphTools(createGraphToolSet({ directory: "/tmp" }));
     expect(Object.keys(tools).sort()).toEqual([...OUTCOME_GRAPH_KEYS].sort());
   });
@@ -110,6 +114,33 @@ describe("createOutcomeGraphTools", () => {
   it("graph_status no longer exposes the legacy pending-approvals view", () => {
     const { graph_status } = createOutcomeGraphTools(createGraphToolSet({ directory: "/tmp" }));
     expect(graph_status.args.pending_approvals).toBeUndefined();
+  });
+
+  it("graph_control exposes the explicit command vocabulary and no principal argument", () => {
+    const { graph_control } = createOutcomeGraphTools(createGraphToolSet({ directory: "/tmp" }));
+    // THE COMMANDS ARE EXPLICIT: a closed enum, never inferred from worker data.
+    const command = graph_control.args.command as z.ZodType<unknown>;
+    expect(command.safeParse("failure").success).toBe(true);
+    expect(command.safeParse("cancel").success).toBe(true);
+    expect(command.safeParse("timeout").success).toBe(true);
+    expect(command.safeParse("retry").success).toBe(true);
+    expect(command.safeParse("budget-stop").success).toBe(true);
+    expect(command.safeParse("stop").success).toBe(false);
+    expect(command.safeParse("failed").success).toBe(false);
+    // The minimum a trusted caller states: which graph, which command, why, and
+    // optionally which node/attempt.
+    expect(Object.keys(graph_control.args).sort()).toEqual([
+      "attempt_id",
+      "command",
+      "graph_id",
+      "node_id",
+      "reason",
+    ]);
+    // NO PRINCIPAL ARGUMENT EXISTS: the caller is the session the platform
+    // attributed to the call, never a field it can set.
+    expect(graph_control.args.session_id).toBeUndefined();
+    expect(graph_control.args.principal).toBeUndefined();
+    expect(graph_control.args.decided_by).toBeUndefined();
   });
 
   it("graph_declare exposes the declaration ingress args", () => {

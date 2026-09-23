@@ -678,6 +678,7 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     const face = createGraphTools(ts);
     expect(Object.keys(face).sort()).toEqual([
       "graph_audit",
+      "graph_control",
       "graph_declare",
       "graph_status",
       "graph_submit_outcome",

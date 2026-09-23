@@ -65,6 +65,7 @@ import {
   type GraphStateRecord,
   type PendingEffectRecord,
   type ReceiptRecord,
+  type RunControlLedger,
   type SubmissionKey,
 } from "./types.ts";
 
@@ -174,10 +175,22 @@ export type LedgerReadOpenResult =
 export class SqliteAcceptanceLedger implements AcceptanceLedger {
   readonly ledgerFormatVersion: number = LEDGER_FORMAT_VERSION;
 
+  /**
+   * The RUN IDENTITY and TRUSTED CONTROL surface (P3 item 1).
+   *
+   * A pure delegation to the store, exactly like every other method here: the
+   * run path reads the run's control fact through the port it already holds, so
+   * a controlled run is refused by the SAME code that settles an outcome, and
+   * the control service writes through the SAME connection and boundary.
+   * Nothing about the rules lives here.
+   */
+  readonly runs: RunControlLedger;
+
   private readonly store: GraphStore;
 
   private constructor(store: GraphStore) {
     this.store = store;
+    this.runs = store.runs;
   }
 
   /**

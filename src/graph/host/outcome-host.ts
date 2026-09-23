@@ -150,6 +150,7 @@ import type {
   HostDispatchDelivery,
   HostDispatchInvocation,
 } from "./dispatch-host.ts";
+import type { HostDispatchExecution } from "./execution-index.ts";
 import type {
   OutcomeDispatchEffectKey,
   OutcomeExecutionIdentity,
@@ -493,6 +494,24 @@ export interface OutcomeHostAwaitingCompletion {
 }
 
 /**
+ * ONE EXECUTION OF A CONTROLLED RUN THE HOST HAS NOT CONFIRMED (P3 item 1).
+ *
+ * `creating` is the case that matters: the create request was handed to the
+ * platform and the result is unknown, so an external task may exist although no
+ * execution id was ever bound. It is REPORTED, never hidden and never rounded
+ * into "nothing is running": the plan forbids declaring convergence by dropping
+ * the effects a stop left behind.
+ */
+export interface OutcomeHostUnconfirmedExecution {
+  readonly graphId: string;
+  /** The node the effect names, read from the effect's own target record. */
+  readonly nodeId?: string;
+  readonly attemptId: string;
+  readonly effectId: string;
+  readonly state: "pending" | "creating";
+}
+
+/**
  * What a boot sweep over the declared graphs did.
  *
  * A STARTED OR RESUMED GRAPH STILL CARRIES ITS PER-EFFECT DIAGNOSTICS. A
@@ -561,6 +580,22 @@ export interface OutcomeHostRecoveryReport {
    * execution id to subscribe to, and the refusal names it.
    */
   readonly awaitingCompletion: readonly OutcomeHostAwaitingCompletion[];
+  /**
+   * `graph:command` for each graph a TRUSTED CONTROL COMMAND stopped (P3 item
+   * 1), read from the run's durable control fact through the resume that visited
+   * it. A controlled graph is still reported in `resumed` — it has a persisted
+   * position — and this list is what says WHY it will not move: a restart never
+   * clears a control stop, and a sweep that reported only "resumed" would let a
+   * cancelled graph read as merely quiet.
+   */
+  readonly controlled: readonly string[];
+  /**
+   * EVERY EXECUTION OF A CONTROLLED GRAPH THE HOST HAS NOT CONFIRMED (P3 item 1):
+   * the `pending` and `creating` rows behind the effects a control stop left
+   * unsettled. A `creating` row may name a task the platform really started, so
+   * hiding it would be exactly the false convergence the plan forbids.
+   */
+  readonly unconfirmedExecutions: readonly OutcomeHostUnconfirmedExecution[];
   /**
    * Set when the workspace's store could not be read AT ALL, so the sweep had no
    * inventory to visit. A store the format gate refuses must not read as "no
@@ -1036,6 +1071,8 @@ export class OutcomeHost {
     const divergences: (OutcomeEffectDivergence & { graphId: string })[] = [];
     const completed: string[] = [];
     const awaiting: OutcomeHostAwaitingCompletion[] = [];
+    const controlled: string[] = [];
+    const unconfirmed: OutcomeHostUnconfirmedExecution[] = [];
     const inventory = this.declaredGraphInventory();
     for (const graphId of inventory.graphIds) {
       try {
@@ -1066,6 +1103,40 @@ export class OutcomeHost {
         }
         for (const divergence of result.divergences) {
           divergences.push(Object.freeze({ graphId, ...divergence }));
+        }
+        // ── A RUN A TRUSTED CONTROL COMMAND STOPPED (P3 item 1) ─────────────
+        //
+        // The resume reported the run's durable control fact and dispatched
+        // nothing, so this sweep does not re-dispatch, does not settle and does
+        // not clear the stop. What it DOES do is name the stop and every
+        // execution the stop left unconfirmed: the effects are still `pending`
+        // or `started` in the ledger, and an execution row that is not
+        // `created` may name a task the platform really started — so it stays
+        // visible instead of being dropped to make the graph look converged.
+        if (result.kind === "resumed" && result.control !== undefined) {
+          controlled.push(graphId + ":" + result.control.command);
+          for (const effect of result.unsettledEffects) {
+            if (effect.kind !== "dispatch") continue;
+            let row: HostDispatchExecution | undefined;
+            try {
+              row = this.executions.read(
+                dispatchEffectKeyOf(graphId, effect.attemptId),
+              );
+            } catch {
+              row = undefined;
+            }
+            if (row === undefined || row.state === "created") continue;
+            const nodeId = effectNodeIdOf(effect);
+            unconfirmed.push(
+              Object.freeze({
+                graphId,
+                ...(nodeId === undefined ? {} : { nodeId }),
+                attemptId: effect.attemptId,
+                effectId: effect.effectId,
+                state: row.state,
+              }),
+            );
+          }
         }
         // ── RE-READ THE HOST'S TERMINAL STATE (P2 item 6) ───────────────────
         //
@@ -1259,7 +1330,8 @@ export class OutcomeHost {
       effectRefusals.length > 0 ||
       divergences.length > 0 ||
       completed.length > 0 ||
-      awaiting.length > 0
+      awaiting.length > 0 ||
+      controlled.length > 0
     ) {
       logWarn(
         "outcome-host: declared-graph sweep — started=[" +
@@ -1291,6 +1363,12 @@ export class OutcomeHost {
           awaiting
             .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status)
             .join(", ") +
+          "] controlled=[" +
+          controlled.join(", ") +
+          "] unconfirmed=[" +
+          unconfirmed
+            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
+            .join(", ") +
           "]",
       );
     }
@@ -1306,6 +1384,11 @@ export class OutcomeHost {
       // or re-query instead of waiting for an announcement a restarted process
       // can no longer receive.
       awaitingCompletion: Object.freeze(awaiting),
+      // WHAT A TRUSTED CONTROL COMMAND STOPPED (P3 item 1), and the external
+      // work that stop leaves unconfirmed: both are reported, so a restart
+      // neither re-starts a cancelled graph nor presents it as quiet.
+      controlled: Object.freeze(controlled),
+      unconfirmedExecutions: Object.freeze(unconfirmed),
       // A store the format gate refuses is a BLOCK, never an empty sweep: the
       // audit and the status surface already refuse it, and the boot sweep must
       // not answer "nothing to do" for the same workspace. A store that simply
@@ -2428,6 +2511,25 @@ function withInvocation(
       }
     },
   };
+}
+
+/**
+ * The node one unsettled DISPATCH effect names, read from the effect's own
+ * target record (P3 item 1).
+ *
+ * A DEFENSIVE READ of a record this build wrote, not a decoder: the sweep only
+ * needs the node a controlled run's unconfirmed execution belongs to, and a
+ * payload that is not a record or names no node simply contributes no node id —
+ * the attempt and the effect still name the external work, so nothing is hidden
+ * by the absence. The node is never inferred from an attempt id.
+ */
+function effectNodeIdOf(effect: PendingEffectRecord): string | undefined {
+  const payload = effect.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return undefined;
+  }
+  const nodeId = (payload as Record<string, unknown>)["nodeId"];
+  return typeof nodeId === "string" && nodeId.length > 0 ? nodeId : undefined;
 }
 
 /**

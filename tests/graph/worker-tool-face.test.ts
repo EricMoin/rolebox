@@ -321,14 +321,17 @@ async function expectWorkerRefusal(
 // ── The face ────────────────────────────────────────────────────────────────
 
 describe("the shipped graph face — what a bound worker is granted", () => {
-  it("keeps the four declarer entries and grants a dispatched worker exactly the delivery channel", async () => {
+  it("keeps the declarer entries and grants a dispatched worker exactly the delivery channel", async () => {
     const fixture = await openFaceFixture(FAN_OUT);
     try {
-      // THE GRANT IS AN ALLOW-LIST OF ONE, and the four shipped entries are
-      // still bound (the declaring session's face is unchanged).
+      // THE GRANT IS AN ALLOW-LIST OF ONE, and every shipped entry — including
+      // the trusted control entry (P3 item 1) — is still bound, so the declaring
+      // session's face is unchanged and a worker is refused control by the SAME
+      // boundary that refuses the other declarer entries.
       expect([...WORKER_GRANTED_GRAPH_TOOLS]).toEqual(["graph_submit_outcome"]);
       expect(Object.keys(fixture.tools).sort()).toEqual([
         "graph_audit",
+        "graph_control",
         "graph_declare",
         "graph_status",
         "graph_submit_outcome",
@@ -418,6 +421,57 @@ describe("a dispatched worker cannot reach the declarer/store face", () => {
       expect(statusRaw).not.toContain("node_id");
 
       expect(await readGraph(fixture)).toEqual(before);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("REFUSES graph_control before the body runs, so a worker cannot stop or fail a run", async () => {
+    const fixture = await openFaceFixture(FAN_OUT);
+    try {
+      const before = await readGraph(fixture);
+
+      // (a) A cancel the worker has no business issuing: the boundary answers
+      // before the control service is reached, so the answer is the worker
+      // refusal and NOT a control-application refusal.
+      const cancelRaw = await expectWorkerRefusal(
+        fixture,
+        "graph_control",
+        { graph_id: FAN_OUT.name, command: "cancel", reason: "a worker must not stop this" },
+        childSessionOf("alpha#1"),
+        "agent.alpha",
+        { graphId: FAN_OUT.name, attemptId: "alpha#1" },
+      );
+      expect(cancelRaw).not.toContain("control-not-authorized");
+      expect(cancelRaw).not.toContain(fixture.storeRoot);
+
+      // (b) A failure aimed at the caller's OWN attempt: still refused, because
+      // a control decision is never derived from the worker that would benefit.
+      await expectWorkerRefusal(
+        fixture,
+        "graph_control",
+        {
+          graph_id: FAN_OUT.name,
+          command: "failure",
+          node_id: "alpha",
+          attempt_id: "alpha#1",
+          reason: "a worker must not fail its own attempt",
+        },
+        childSessionOf("alpha#1"),
+        "agent.alpha",
+        { graphId: FAN_OUT.name, attemptId: "alpha#1" },
+      );
+
+      // The authoritative record is untouched: no control decision, no run
+      // control fact, the same state row and no accepted event.
+      expect(await readGraph(fixture)).toEqual(before);
+      const ledger = await SqliteAcceptanceLedger.create(fixture.storeRoot);
+      try {
+        expect(ledger.runs.controlDecisions(FAN_OUT.name)).toEqual([]);
+        expect(ledger.runs.readRunControl(FAN_OUT.name)).toBeUndefined();
+      } finally {
+        ledger.close();
+      }
     } finally {
       fixture.host.close();
     }

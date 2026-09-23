@@ -76,8 +76,92 @@ export function createOutcomeGraphTools(
     graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
     graph_audit: createGraphAuditTool(toolset),
     graph_status: createGraphStatusTool(toolset),
+    graph_control: createGraphControlTool(toolset, opts.getEffectiveAgent),
   };
 }
+/**
+ * graph_control — THE ONE EXPLICIT CONTROL ENTRY (P3 item 1).
+ *
+ * A trusted lifecycle command (failure / cancel / timeout, plus the two
+ * vocabulary members whose own work packages have not landed) applied to one
+ * declared graph's run. The command is an explicit enum argument, never
+ * inferred from a payload or a worker field (§3.4), and the PRINCIPAL is the
+ * session the platform attributed to this call — the same call context the
+ * submission ingress uses — never an argument. Permission, idempotency and
+ * every refusal belong to the control application service
+ * (`src/graph/control/application.ts`); this wrapper only adapts types and
+ * error text.
+ */
+function createGraphControlTool(
+  toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
+): CanonicalToolDef {
+  return defineTool({
+    description:
+      "Apply one TRUSTED lifecycle control command to a declared graph's run: " +
+      "'failure' (the host reports one node's in-flight execution ended without " +
+      "reaching its authorized outcome), 'timeout' (it exceeded its time), or " +
+      "'cancel' (stop the run and record the cancel intent for every attempt still in " +
+      "flight). A control command is NOT an outcome: it never writes an accepted result, " +
+      "it never starts a successor, and a worker's submission can never issue one. The " +
+      "command is durable: the decision is recorded on the attempt and the first command " +
+      "recorded for the run is the one that stopped it, so a repeated command replays and " +
+      "a competing command is refused rather than applied. Only the session that DECLARED " +
+      "the graph may control it; a dispatched worker is refused before this body runs. " +
+      "The answer names every still-unsettled effect and every execution the host has not " +
+      "confirmed, so a stopped graph never hides an external task. 'retry' and " +
+      "'budget-stop' are part of the declared vocabulary but their semantics are not " +
+      "implemented in this build and are refused by name.",
+    args: {
+      graph_id: z.string().min(1).describe("The declared graph whose run is controlled."),
+      command: z
+        .enum(["failure", "cancel", "timeout", "retry", "budget-stop"])
+        .describe(
+          "The control command. 'failure', 'timeout' and 'cancel' are applied and " +
+            "recorded durably; 'retry' and 'budget-stop' are refused by name until their " +
+            "own semantics exist. No command is ever inferred from worker data.",
+        ),
+      node_id: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "The node the command names: REQUIRED for 'failure'/'timeout' (they name one " +
+            "attempt) and refused for 'cancel' (which applies to the whole run).",
+        ),
+      attempt_id: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "The in-flight attempt the command names. Optional: the run's current attempt " +
+            "for the node is used when omitted, and a value that is not the current " +
+            "attempt is refused rather than re-attached.",
+        ),
+      reason: z
+        .string()
+        .min(1)
+        .describe(
+          "Why the command is applied. Stored verbatim on the durable decision and " +
+            "reported by every later refusal, so it is the human-readable half of the fact.",
+        ),
+    },
+    async execute(args, context) {
+      try {
+        return json(
+          toolset.graph_control(
+            args,
+            context?.sessionID,
+            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
+          ),
+        );
+      } catch (err) {
+        return `graph_control failed: ${errorText(err)}`;
+      }
+    },
+  });
+}
+
 /** graph_declare — author a v3 (outcome-protocol) graph and persist its plan. */
 function createGraphDeclareTool(
   toolset: GraphToolSet,

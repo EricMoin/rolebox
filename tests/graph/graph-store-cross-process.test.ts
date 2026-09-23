@@ -83,7 +83,10 @@ import { fileURLToPath } from "node:url";
 
 import { GraphStore, GRAPH_STORE_TABLES } from "../../src/graph/store/index.ts";
 import { hostExecutionNotCreated } from "../../src/graph/host/execution-index.ts";
-import type { ReceiptRecord } from "../../src/graph/ledger/types.ts";
+import type {
+  ControlCommandName,
+  ReceiptRecord,
+} from "../../src/graph/ledger/types.ts";
 
 /** The checked-in worker every case spawns as a REAL separate process. */
 const WORKER = fileURLToPath(
@@ -958,6 +961,200 @@ describe("GraphStore — cross-process receipt replay", () => {
     expect(fx.store.readAcceptedResult(GRAPH, attemptId)?.payload).toEqual({ tag: "first" });
     expect(fx.store.readGraphState(GRAPH)?.updatedAt).toBe(NOW);
     expect(fx.store.readGraphState(GRAPH)?.body).toEqual({ tag: "first" });
+  });
+});
+
+// ── Trusted control across processes (P3 item 1) ─────────────────────────────
+
+/** One control-race worker's report. */
+interface ControlRaceReport extends WorkerReport {
+  readonly id: string;
+  readonly round: number;
+  readonly role: "control" | "acceptance";
+  readonly command?: ControlCommandName;
+  readonly attemptId?: string;
+  readonly verdict: string;
+}
+
+interface ControlRaceWorker {
+  readonly id: string;
+  readonly child: Child;
+  readonly ready: { readonly path: string; readonly what: string };
+}
+
+/** Args every control-race worker needs, plus the mode-specific ones. */
+function controlRaceArgs(
+  fx: XprocFixture,
+  options: {
+    readonly id: string;
+    readonly round: number;
+    readonly attemptId: string;
+    readonly command?: string;
+    readonly accept?: boolean;
+    readonly node?: string;
+    readonly run?: string;
+    readonly planRevision?: string;
+    readonly outcome?: string;
+  },
+): string[] {
+  const node = options.attemptId.split("#")[0] ?? options.attemptId;
+  return workerArgs(fx, {
+    mode: "control-race",
+    id: options.id,
+    graph: GRAPH,
+    run: options.run ?? CONTROL_RUN,
+    node: options.node ?? node,
+    attempt: options.attemptId,
+    reason: "race reason " + options.id,
+    at: String(NOW),
+    round: String(options.round),
+    "marker-dir": fx.markerDir,
+    "deadline-ms": String(CHILD_DEADLINE_MS),
+    ...(options.command === undefined ? {} : { command: options.command }),
+    ...(options.accept === true
+      ? {
+          accept: "on",
+          "plan-revision": options.planRevision ?? "plan.xproc",
+          outcome: options.outcome ?? "done",
+        }
+      : {}),
+  });
+}
+
+/** Spawn one racer and describe the barrier marker it will write. */
+function spawnControlRacer(
+  fx: XprocFixture,
+  options: Parameters<typeof controlRaceArgs>[1],
+): ControlRaceWorker {
+  const child = spawnWorker(options.id, controlRaceArgs(fx, options));
+  return {
+    id: options.id,
+    child,
+    ready: {
+      path: join(fx.markerDir, `ready-${options.id}-${options.round}.marker`),
+      what: `ready-${options.id}-${options.round}`,
+    },
+  };
+}
+
+/**
+ * Run one gated round: every racer signals ready, the parent releases the
+ * barrier, and each racer's own verdict is returned. The barrier is what makes
+ * the race a race rather than a schedule.
+ */
+async function raceControlRound(
+  fx: XprocFixture,
+  round: number,
+  racers: readonly ControlRaceWorker[],
+): Promise<ControlRaceReport[]> {
+  await waitForMarkers(racers.map((racer) => racer.ready));
+  writeFileSync(join(fx.markerDir, `go-${round}.marker`), "1");
+  const reports = await Promise.all(
+    racers.map(async (racer) => (await racer.child.done) as unknown as ControlRaceReport),
+  );
+  // Every report comes from a REAL separate process, and no two racers share one.
+  const pids = reports.map((report) => report.pid);
+  expect(pids).not.toContain(process.pid);
+  expect(new Set(pids).size).toBe(pids.length);
+  return reports;
+}
+
+const CONTROL_RUN = GRAPH + "@1";
+
+describe("trusted control across two real processes", () => {
+  it("lets exactly ONE competing command win an attempt, and the FIRST win the run", async () => {
+    const fx = makeFixture("graph-xproc-control-");
+    const rounds = 4;
+    const winners: (ControlCommandName | undefined)[] = [];
+    for (let round = 0; round < rounds; round++) {
+      const attemptId = `work#${round + 1}`;
+      const racers = [
+        spawnControlRacer(fx, {
+          id: `failure-${round}`,
+          round,
+          attemptId,
+          command: "failure",
+        }),
+        spawnControlRacer(fx, {
+          id: `timeout-${round}`,
+          round,
+          attemptId,
+          command: "timeout",
+        }),
+      ];
+      const reports = await raceControlRound(fx, round, racers);
+      // ONE ATTEMPT, ONE CONTROL FACT: exactly one command recorded it and the
+      // other was told which command stands.
+      expect(reports.map((report) => report.verdict).sort()).toEqual([
+        "conflict",
+        "recorded",
+      ]);
+      const winner = reports.find((report) => report.verdict === "recorded");
+      expect(winner?.command).toBeDefined();
+      winners.push(winner?.command);
+    }
+
+    // The parent's OWN connection: one decision per attempt...
+    expect(fx.store.runs.controlDecisions(GRAPH)).toHaveLength(rounds);
+    expect(
+      fx.store.runs.controlDecisions(GRAPH).map((decision) => decision.attemptId).sort(),
+    ).toEqual(["work#1", "work#2", "work#3", "work#4"]);
+    // ...and the RUN keeps the command that stopped it FIRST, whatever the later
+    // processes proposed.
+    expect(fx.store.runs.readRunControl(GRAPH)?.command).toBe(winners[0]);
+  });
+
+  it("never records a control decision over an acceptance that committed first", async () => {
+    const fx = makeFixture("graph-xproc-control-accept-");
+    const rounds = 4;
+    const verdicts: string[] = [];
+    for (let round = 0; round < rounds; round++) {
+      const attemptId = `review#${round + 1}`;
+      const racers = [
+        spawnControlRacer(fx, {
+          id: `accept-${round}`,
+          round,
+          attemptId,
+          accept: true,
+        }),
+        spawnControlRacer(fx, {
+          id: `control-${round}`,
+          round,
+          attemptId,
+          command: "failure",
+        }),
+      ];
+      const reports = await raceControlRound(fx, round, racers);
+      const acceptance = reports.find((report) => report.role === "acceptance");
+      const control = reports.find((report) => report.role === "control");
+      expect(acceptance?.verdict).toBe("committed");
+      verdicts.push(control?.verdict ?? "");
+
+      const decision = fx.store.runs.readControlDecision(
+        GRAPH,
+        CONTROL_RUN,
+        attemptId.split("#")[0] ?? attemptId,
+        attemptId,
+      );
+      const settled = fx.store
+        .acceptedEvents(GRAPH)
+        .some((event) => event.attemptId === attemptId);
+      // THE DETERMINISTIC RULE, read back from the store rather than assumed: a
+      // control decision exists EXACTLY when the control write won the race; a
+      // `settled` verdict means the acceptance committed first and the control
+      // write landed NOTHING.
+      expect(settled).toBe(true);
+      if (control?.verdict === "settled") {
+        expect(decision).toBeUndefined();
+      } else {
+        expect(control?.verdict).toBe("recorded");
+        expect(decision?.command).toBe("failure");
+      }
+    }
+    // Every round answered one of the two deterministic outcomes.
+    for (const verdict of verdicts) {
+      expect(["recorded", "settled"]).toContain(verdict);
+    }
   });
 });
 
