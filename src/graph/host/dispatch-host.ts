@@ -41,6 +41,7 @@ import type {
   OutcomeDispatchRequest,
   OutcomeExecutionLookup,
 } from "../outcome/dispatch-effects.ts";
+import type { HostInvocationIdentity } from "../outcome/host-identity.ts";
 import { HostExecutionIndex } from "./execution-index.ts";
 
 // ── The seam and the completion sink ────────────────────────────────────────
@@ -67,6 +68,18 @@ export interface HostAttemptBinding {
   readonly graphId: string;
   readonly nodeId: string;
   readonly attemptId: string;
+  /**
+   * The HOST INVOCATION the attempt was dispatched under (D9), captured from
+   * the host's attribution at the moment the delivery was created — the same
+   * identity the runtime recorded on the attempt.
+   *
+   * It is carried on the binding so a completion observed LATER, when no
+   * invocation is in effect any more, can be settled in the attribution of the
+   * invocation that dispatched the attempt instead of being refused
+   * `host-identity-absent`. Absent means the attempt recorded no identity
+   * (the host declared none for that invocation), and nothing fabricates one.
+   */
+  readonly dispatchIdentity?: HostInvocationIdentity;
 }
 
 /**
@@ -86,6 +99,12 @@ export interface HostOutcomeDispatchOptions {
   readonly deliver: HostDispatchDelivery;
   /** Optional completion-binding sink, for a host that settles completions. */
   readonly completions?: HostCompletionBindingSink;
+  /**
+   * The host's invocation attribution at delivery time, read once per created
+   * execution and recorded on the binding. Optional: a host that declares no
+   * invocation identity passes none and every binding carries none.
+   */
+  readonly invocation?: () => HostInvocationIdentity | undefined;
 }
 
 // ── The adapter ─────────────────────────────────────────────────────────────
@@ -95,11 +114,13 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   private readonly executions: HostExecutionIndex;
   private readonly deliver: HostDispatchDelivery;
   private readonly completions: HostCompletionBindingSink | undefined;
+  private readonly invocation: (() => HostInvocationIdentity | undefined) | undefined;
 
   constructor(options: HostOutcomeDispatchOptions) {
     this.executions = options.executions;
     this.deliver = options.deliver;
     this.completions = options.completions;
+    this.invocation = options.invocation;
   }
 
   /**
@@ -132,10 +153,15 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
       this.executions.unrecord(effect);
       throw error;
     }
+    // The identity is read HERE, synchronously inside the runtime's dispatch
+    // window: it is the host's own attribution of the invocation that armed
+    // this attempt, and the runtime recorded the same value on the state entry.
+    const dispatchIdentity = this.invocation?.();
     this.completions?.bind({
       graphId: effect.graphId,
       nodeId: request.nodeId,
       attemptId: request.attemptId,
+      ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     });
   }
 

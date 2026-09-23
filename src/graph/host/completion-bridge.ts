@@ -223,6 +223,20 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
   }
 
   /**
+   * The binding one attempt was dispatched under, or `undefined` when this
+   * host dispatched no execution for it.
+   *
+   * Exposed so the HOST (not this bridge) can re-enter the invocation
+   * attribution the attempt was armed under before it settles: the holder is
+   * the host's, and the settlement must run under the same attribution the
+   * runtime recorded at dispatch, even when the completion is observed later
+   * with no invocation in effect.
+   */
+  bindingFor(attempt: HostCompletionAttempt): HostAttemptBinding | undefined {
+    return this.bindings.get(bindingKey(attempt.graphId, attempt.attemptId));
+  }
+
+  /**
    * Settle the attempt the host observed finishing.
    *
    * The envelope is exactly `{ nodeId, attemptId, credential }` — the closed

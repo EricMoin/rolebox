@@ -14,9 +14,19 @@
  *   once per stable effect id, and answer `created` / `absent` / `unknown`
  *   about an effect a restart finds in the ledger;
  * - the invocation-identity holder (D9) — the host's own attribution of "which
- *   invocation is running now", moved per tool call and per first execution;
+ *   invocation is running now", moved per tool call and per first execution,
+ *   captured on each attempt's binding and re-entered for the duration of that
+ *   attempt's completion settlement (see {@link OutcomeHost.complete});
  * - the completion bridge — an attempt the platform reports finished is settled
  *   through the runtime's `settleNatural`, never through a second ingress.
+ *
+ * WHETHER THE HOST DECLARES D9 IS A DECISION, NOT A DEFAULT. The identity
+ * capability is an assertion the host must be able to substantiate: the
+ * submission that settles an attempt has to be attributed to the same
+ * invocation that armed it. {@link OutcomeHostOptions.declareInvocationIdentity}
+ * is that decision, and the shipped entries choose NOT to declare it because a
+ * dispatched worker is a separate agent session whose own tool calls are
+ * attributed to the worker, never to the declaring invocation.
  *
  * WHO RUNS THE FIRST DISPATCH. A declared graph is persisted by
  * `graph_declare` and dispatched by nobody in the tool layer. The host calls
@@ -107,6 +117,21 @@ export interface OutcomeHostOptions {
   readonly clock?: () => number;
   /** Vault/index durability. Defaults to `"file"` (restart-recoverable). */
   readonly durability?: OutcomeHostDurability;
+  /**
+   * Whether this host DECLARES the invocation-identity capability (D9) to the
+   * run path. Defaults to `true`.
+   *
+   * DECLARE IT ONLY WHEN THE HOST CAN SUBSTANTIATE IT. The capability's
+   * contract is that a submission settling an attempt is attributed to the
+   * SAME invocation the dispatch armed it under. A host whose dispatched
+   * workers submit from their OWN invocations (the shipped dsh and Pi entries:
+   * a worker is a separate agent session, not the declaring one) cannot
+   * substantiate that, and declaring it would refuse exactly the submissions
+   * the delivery handoff asks the worker to make. Such a host passes `false`:
+   * every other guarantee is unchanged — the bearer credential still binds a
+   * submission to its attempt — and no identity is recorded on an attempt.
+   */
+  readonly declareInvocationIdentity?: boolean;
 }
 
 /** One host invocation's attribution, as the declaring tool call saw it. */
@@ -145,6 +170,7 @@ export class OutcomeHost {
   private readonly vault: HostCredentialVault;
   private readonly executions: HostExecutionIndex;
   private readonly holder: HostInvocationHolder;
+  private readonly declareInvocationIdentity: boolean;
   private readonly dispatchAdapter: HostOutcomeDispatch;
   /** One bridge per graph — a settlement needs the graph's own saved plan. */
   private readonly bridges = new Map<string, HostDispatchCompletionBridge>();
@@ -166,9 +192,11 @@ export class OutcomeHost {
     this.vault = HostCredentialVault.open({ root: options.storeRoot, durability });
     this.executions = HostExecutionIndex.open({ root: options.storeRoot, durability });
     this.holder = createHostInvocationHolder();
+    this.declareInvocationIdentity = options.declareInvocationIdentity ?? true;
     this.dispatchAdapter = new HostOutcomeDispatch({
       executions: this.executions,
       deliver: options.deliver,
+      invocation: () => this.holder.current(),
       completions: {
         bind: (binding) => {
           this.bridgeFor(binding.graphId).bind(binding);
@@ -216,9 +244,35 @@ export class OutcomeHost {
   /**
    * Settle the attempt the host observed finishing, through the graph's own
    * saved plan. The report is the bridge's — see `completion-bridge.ts`.
+   *
+   * THE SETTLEMENT RUNS UNDER THE ATTEMPT'S OWN DISPATCH ATTRIBUTION. A
+   * completion is observed later, out of band, when no invocation is in effect;
+   * the runtime still compares the host's current identity with the one it
+   * recorded when the attempt was armed. So the host re-enters the identity the
+   * delivery captured on the binding for exactly this call and restores the
+   * ambient attribution afterwards. An attempt that recorded NO identity is
+   * settled with none — nothing fabricates an attribution for it — and an
+   * attempt this host never dispatched stays unbound and is reported by the
+   * bridge.
    */
-  complete(graphId: string, attemptId: string): Promise<HostCompletionReport> {
-    return this.bridgeFor(graphId).complete({ graphId, attemptId });
+  async complete(
+    graphId: string,
+    attemptId: string,
+  ): Promise<HostCompletionReport> {
+    const bridge = this.bridgeFor(graphId);
+    const binding = bridge.bindingFor({ graphId, attemptId });
+    const dispatchIdentity = binding?.dispatchIdentity;
+    const previous = this.holder.current();
+    if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
+    try {
+      return await bridge.complete({ graphId, attemptId });
+    } finally {
+      if (previous === undefined) {
+        this.holder.clear();
+      } else {
+        this.holder.set(previous);
+      }
+    }
   }
 
   /**
@@ -436,7 +490,9 @@ export class OutcomeHost {
       artifactRoot: this.artifactRoot,
       clock: this.clock,
       credentialIsolation: this.credentialIsolation,
-      hostIdentity: this.hostIdentity,
+      ...(this.declareInvocationIdentity
+        ? { hostIdentity: this.hostIdentity }
+        : {}),
       ...(this.completionPolicies === undefined
         ? {}
         : { completionPolicies: this.completionPolicies }),

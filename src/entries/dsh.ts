@@ -1186,11 +1186,20 @@ export async function apply(
     },
   });
   const outcomeStoreRoot = join(process.cwd(), ".rolebox", "state", "host");
+  // D9 IS NOT DECLARED BY THIS HOST, and that is the honest decision: the dsh
+  // platform attributes a dispatched worker's own tool call to the WORKER's
+  // session and agent (tool-factory.ts builds the context from the executing
+  // agent), never to the declaring invocation that armed the attempt. Declaring
+  // the identity capability would therefore refuse the very submission the
+  // delivery handoff asks the worker to make (host-identity-mismatch). The
+  // bearer credential still binds every submission to its attempt; nothing else
+  // is weakened, and no identity is recorded on an attempt.
   outcomeHost = OutcomeHost.open({
     workspaceDir: process.cwd(),
     storeRoot: outcomeStoreRoot,
     deliver: outcomeDelivery.deliver,
     validators: createValidatorRegistry([]),
+    declareInvocationIdentity: false,
   });
   // The outcome toolset: the four entries that operate on a DECLARED graph.
   // No manager / dispatch seam is injected, so it can never build a legacy
@@ -1199,7 +1208,8 @@ export async function apply(
     directory: process.cwd(),
     stateDir: process.cwd(),
     credentialIsolation: outcomeHost.credentialIsolation,
-    hostIdentity: outcomeHost.hostIdentity,
+    // No hostIdentity: see the OutcomeHost.open decision above — this host does
+    // not declare a capability it cannot substantiate.
     outcomeDispatch: outcomeHost.dispatch,
     outcomeValidators: createValidatorRegistry([]),
     outcomeArtifactRoot: process.cwd(),

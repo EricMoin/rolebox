@@ -863,11 +863,20 @@ export default async function (pi: any): Promise<void> {
           });
       },
     });
+    // D9 IS NOT DECLARED BY THIS HOST, and that is the honest decision: the
+    // platform attributes a dispatched worker's own tool call to the WORKER's
+    // session and agent (the dispatch task is a separate invocation), never to
+    // the declaring invocation that armed the attempt. Declaring the identity
+    // capability would therefore refuse the very submission the delivery
+    // handoff asks the worker to make (host-identity-mismatch). The bearer
+    // credential still binds every submission to its attempt; nothing else is
+    // weakened, and no identity is recorded on an attempt.
     outcomeHost = OutcomeHost.open({
       workspaceDir: process.cwd(),
       storeRoot: join(process.cwd(), ".rolebox", "state", "host"),
       deliver: outcomeDelivery.deliver,
       validators: createValidatorRegistry([]),
+      declareInvocationIdentity: false,
     });
 
     // Boot recovery for DECLARED graphs: a graph interrupted by the previous
@@ -1076,7 +1085,8 @@ export default async function (pi: any): Promise<void> {
       directory: process.cwd(),
       stateDir: process.cwd(),
       credentialIsolation: outcomeHost.credentialIsolation,
-      hostIdentity: outcomeHost.hostIdentity,
+      // No hostIdentity: see the OutcomeHost.open decision above — this host
+      // does not declare a capability it cannot substantiate.
       outcomeDispatch: outcomeHost.dispatch,
       outcomeValidators: createValidatorRegistry([]),
       outcomeArtifactRoot: process.cwd(),
