@@ -21,6 +21,7 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
 import { HostInvocationOrigins } from "../../src/graph/host/invocation-origins.ts";
+import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";
 import { graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import { makeTmpDir } from "./helpers/host-graph-fixture.ts";
 
@@ -78,7 +79,18 @@ describe("HostInvocationOrigins", () => {
     const root = makeTmpDir("invocation-origins-corrupt-");
     mkdirSync(root, { recursive: true });
     writeFileSync(graphStoreFilePath(root), "{ not json", "utf8");
-    expect(() => HostInvocationOrigins.open({ root, durability: "file" })).toThrow();
+    // O2 (§8.2): pin the refusal's own CLASS and problem. A bare toThrow()
+    // cannot tell a store refusal from an unrelated crash, and this file is not
+    // SQLite, so the gate must refuse it as foreign — never as "no origins".
+    const refusal = (() => {
+      try {
+        HostInvocationOrigins.open({ root, durability: "file" });
+      } catch (error) {
+        return error instanceof GraphStoreFormatError ? error.problem : undefined;
+      }
+      return undefined;
+    })();
+    expect(refusal).toBe("foreign-store");
 
     // A ZERO-BYTE authoritative file is a damaged store, never a fresh one.
     const emptyRoot = makeTmpDir("invocation-origins-empty-");
