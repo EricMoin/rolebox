@@ -64,6 +64,12 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   event, so a repeated delivery replays the first receipt and a worker's claimed
   submission can never wear the natural label
   (`src/graph/outcome/natural-completion.ts`, `runtime.ts`);
+- the REPLAY ANSWER is the persisted receipt's decision, on BOTH channels: a
+  repeated delivery or submission of the same content re-evaluates the declared
+  gates for the record but cannot overturn a persisted rejection into an
+  acceptance (or the reverse), and it reports the state the settlement left
+  behind — never an advance the transaction did not write
+  (`src/graph/outcome/runtime.ts`);
 - the COMBINATION of that settlement with the run semantics already in the
   reducer: one `loopTraversals` counter and one hard-cap stop, natural
   completions as durable join ARRIVALS armed exactly once, the progress refusal
@@ -1754,6 +1760,15 @@ REPLAYS the first receipt — one settlement, one accepted event — while a
 delivery for an attempt already settled by a different logical submission is
 reported `not-committed` with the ledger's `settled` verdict.
 
+THE REPLAY ANSWER IS THE PERSISTED DECISION. A repeated delivery is re-validated
+outside the commit like any submission, but nothing that second evaluation
+answers can change what the receipt already decided: a first delivery rejected
+by a gate stays rejected on every repeat — its content-addressed key can never
+be re-decided, and the attempt stays open only for a submission with different
+content — and a first delivery accepted stays accepted even if a later
+evaluation fails or cannot answer. The answer's state is the state the
+settlement left behind, never an advance the transaction did not write.
+
 THE COMBINATION WITH LOOPS, JOINS, STOPS AND RESTART IS ONE STATE AND ONE
 TRANSACTION, and it has its own regression suite
 (`tests/graph/natural-completion-combination.test.ts`) rather than being
@@ -1841,7 +1856,11 @@ has its own cases: the one loop counter and its cap stop (with the stop and a
 still-in-flight attempt read back after a restart), a natural arrival arming a
 join exactly once (and a re-armed feeder's earlier arrival no longer counting),
 the progress refusal that leaves the unchanged streak untouched, and the
-field-by-field write -> restart -> read -> write-again invariant.
+field-by-field write -> restart -> read -> write-again invariant. The replay
+answer's persisted-decision rule has cases in both directions on both channels:
+a gate that fails first and passes later still answers rejected (and the
+attempt stays settleable by different content), while one that passes first and
+fails later still answers accepted with the persisted state.
 
 DEFERRED by this slice, and not implied by it: the HOST implementation of the
 dispatch completion bridge that would observe a dispatched attempt completing,

@@ -1010,6 +1010,73 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
     );
   });
 
+  it("answers a repeated submission with the persisted rejection when the gate passes later", async () => {
+    // Two runtimes over ONE ledger: the gate's answer changes between two
+    // submissions of the SAME content, which is the only way to reach a replay
+    // whose re-evaluation disagrees with the receipt the ledger already holds.
+    const dir = mkdtempSync(join(tmpdir(), "outcome-runtime-replay-decision-"));
+    const ledger = await SqliteAcceptanceLedger.create(dir);
+    try {
+      const declared = buildDeclaredOutcomeGraph({
+        declaration: GATED,
+        supportedValidators: [{ validator: GATE_ID, version: GATE_VERSION }],
+      });
+      const requests: OutcomeDispatchRequest[] = [];
+      const build = (validators: ValidatorRegistry): OutcomeGraphRuntime =>
+        new OutcomeGraphRuntime({
+          plan: declared.plan,
+          ledger,
+          dispatch: (request) => {
+            requests.push(request);
+          },
+          validators,
+          artifactRoot: dir,
+          credentialIsolation: testHostCredentialIsolation(dir),
+          clock: () => NOW,
+          mintCredential: TEST_CREDENTIAL_SOURCE,
+        });
+      const proposal = () => ({
+        nodeId: "work",
+        outcomeId: "done",
+        credential: credentialOf(requests, "work#1"),
+      });
+
+      const failing = build(gatedRegistry({ kind: "fail", reason: "not yet" }));
+      expect(failing.start(NOW).kind).toBe("started");
+      const first = failing.submit(proposal(), NOW + 1);
+      expect(first.kind).toBe("rejected");
+      if (first.kind !== "rejected") return;
+      const stateAfterRejection = JSON.stringify(
+        ledger.readGraphState(declared.graphId),
+      );
+
+      // The gate passes now, but the submission key was already decided: the
+      // SAME persisted rejection is the answer, not a fresh acceptance.
+      const passing = build(gatedRegistry({ kind: "pass" }));
+      const second = passing.submit(proposal(), NOW + 2);
+      expect(second.kind).toBe("rejected");
+      if (second.kind !== "rejected") return;
+      expect(second.decision.kind).toBe("rejected");
+      expect(second.receipt).toEqual(first.receipt);
+      expect(second.receipt.decision).toBe("rejected");
+      expect(JSON.stringify(ledger.readGraphState(declared.graphId))).toBe(
+        stateAfterRejection,
+      );
+      expect(ledger.acceptedEvents(declared.graphId)).toHaveLength(0);
+
+      // A DIFFERENT submission — the worker repaired the input, so its content
+      // address is new — settles the attempt the rejection left open.
+      const repaired = passing.submit({ ...proposal(), data: { attempt: 2 } }, NOW + 3);
+      expect(repaired.kind).toBe("accepted");
+      if (repaired.kind === "accepted") {
+        expect(nodeOf(repaired.state, "work").status).toBe("settled");
+      }
+    } finally {
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rolls the acceptance back when the state and the ledger disagree", async () => {
     await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);

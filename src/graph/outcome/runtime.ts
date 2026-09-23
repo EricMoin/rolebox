@@ -495,7 +495,11 @@ export type OutcomeSubmissionResult =
   /**
    * An accepted outcome advanced the graph. `replayed` distinguishes the FIRST
    * settlement from a repeated submission of the same content: a replay returns
-   * the persisted receipt, dispatches nothing and changes no state.
+   * the persisted receipt, dispatches nothing and changes no state. The
+   * PERSISTED receipt's decision governs the answer: on a replay `decision.kind`
+   * is the terminal kind the ledger recorded — never this call's re-evaluation,
+   * whose `requirements` cannot overturn it — so a repeated submission answers
+   * with the SAME persisted decision the receipt holds.
    */
   | {
       readonly kind: "accepted";
@@ -564,7 +568,13 @@ export type OutcomeNaturalSettlementResult =
       readonly kind: "refused";
       readonly refusals: readonly OutcomeRuntimeRefusal[];
     }
-  /** The natural completion settled the attempt through the shared transaction. */
+  /**
+   * The natural completion settled the attempt through the shared transaction.
+   * Like a submission's replay, a repeated delivery answers with the PERSISTED
+   * receipt's decision: the completion fact's gates are re-evaluated for the
+   * record, but they can neither overturn a persisted rejection into an
+   * acceptance nor a persisted acceptance into a rejection.
+   */
   | {
       readonly kind: "accepted";
       readonly completion: NaturalCompletionSettlement;
@@ -1242,10 +1252,24 @@ export class OutcomeGraphRuntime {
         refusals: result.refusals.map(toRuntimeRefusal),
       };
     }
-    const { decision, verdict } = result;
+    const { decision: evaluated, verdict } = result;
     if (verdict.kind === "conflict" || verdict.kind === "settled") {
-      return { kind: "not-committed", decision, verdict };
+      return { kind: "not-committed", decision: evaluated, verdict };
     }
+    // A REPLAY ANSWERS WITH THE PERSISTED DECISION, NEVER THIS CALL'S
+    // EVALUATION. Validation runs outside the transaction, so a repeated
+    // submission's gates are evaluated again; but a replay writes nothing, and
+    // the receipt is the durable decision. Reporting the fresh evaluation would
+    // claim a settlement the ledger does not hold — an acceptance for a
+    // persisted rejection (no accepted event, no state advance, and the
+    // content-addressed submission key can never be re-decided) or a rejection
+    // for a settlement that did happen. The receipt's decision therefore
+    // selects the result variant and `decision.kind`; `requirements` stays this
+    // delivery's re-evaluation evidence, which nothing persisted.
+    const decision: AcceptanceDecision =
+      verdict.kind === "replayed" && verdict.receipt.decision !== evaluated.kind
+        ? Object.freeze({ ...evaluated, kind: verdict.receipt.decision })
+        : evaluated;
     if (decision.kind === "rejected") {
       return { kind: "rejected", decision, receipt: verdict.receipt };
     }
@@ -1255,16 +1279,18 @@ export class OutcomeGraphRuntime {
       committed && planned !== undefined
         ? planned.dispatches.map((intent) => this.requestOf(intent))
         : [];
-    // After a commit the PERSISTED state is authoritative. A read failure here
-    // must not turn a committed acceptance into a thrown error, so the advance
-    // the join computed is the fallback.
-    let persisted = planned === undefined ? state : planned.state;
-    if (committed) {
-      try {
-        persisted = this.state() ?? persisted;
-      } catch {
-        // Keep the state the transaction just wrote.
-      }
+    // The PERSISTED state is what this answer carries. After a commit that is
+    // the state the transaction just wrote, re-read below (a read failure must
+    // not turn a committed acceptance into a thrown error, so the advance the
+    // join computed is the fallback); after a replay it is the state the
+    // settlement actually left behind — NEVER the advance the join computed,
+    // which the transaction did not write.
+    let persisted = committed && planned !== undefined ? planned.state : state;
+    try {
+      persisted = this.state() ?? persisted;
+    } catch {
+      // Keep the state the transaction wrote (a commit) or the state this call
+      // read (a replay).
     }
     this.launchDispatches(dispatched);
     // The comparisons THIS call made. A replay re-runs none (the join is skipped

@@ -946,6 +946,172 @@ describe("OutcomeGraphRuntime.settleNatural — one attempt, one authorized outc
   });
 });
 
+// ── Replay answers ──────────────────────────────────────────────────────────
+
+/**
+ * One gated natural graph on its own ledger, with the runtime rebuilt per
+ * validator registry. Rebuilding is how a case changes a gate's answer between
+ * two deliveries of the SAME content — the only way to reach a replay whose
+ * re-evaluation disagrees with the receipt the ledger already holds.
+ */
+async function withGatedLedger<T>(
+  prefix: string,
+  fn: (setup: {
+    readonly declared: ReturnType<typeof buildDeclaredOutcomeGraph>;
+    readonly ledger: SqliteAcceptanceLedger;
+    readonly requests: OutcomeDispatchRequest[];
+    build(validators: ValidatorRegistry): OutcomeGraphRuntime;
+  }) => Promise<T> | T,
+): Promise<T> {
+  const dir = makeTmpDir(prefix);
+  const ledger = await SqliteAcceptanceLedger.create(dir);
+  try {
+    const declared = buildDeclaredOutcomeGraph({
+      declaration: gatedNaturalDeclaration(),
+      supportedValidators: [{ validator: GATE_ID, version: GATE_VERSION }],
+      completionPolicies: ALL_AUTHORIZED,
+    });
+    const requests: OutcomeDispatchRequest[] = [];
+    const build = (validators: ValidatorRegistry): OutcomeGraphRuntime =>
+      new OutcomeGraphRuntime({
+        plan: declared.plan,
+        ledger,
+        dispatch: (request) => {
+          requests.push(request);
+        },
+        validators,
+        artifactRoot: dir,
+        credentialIsolation: testHostCredentialIsolation(dir),
+        clock: () => NOW,
+        mintCredential: TEST_CREDENTIAL_SOURCE,
+        completionPolicies: ALL_AUTHORIZED,
+      });
+    return await fn({ declared, ledger, requests, build });
+  } finally {
+    ledger.close();
+  }
+}
+
+/**
+ * The acceptance core promises that a repeated identical submission answers
+ * with the SAME PERSISTED decision. A completion fact is re-validated outside
+ * the transaction like any submission, so its gates get a second answer — and
+ * that answer must never overturn the receipt: a persisted rejection cannot
+ * become an acceptance (no event, no advance, and the content-addressed key can
+ * never be re-decided) and a persisted acceptance cannot become a rejection.
+ */
+describe("settleNatural — a replay answers with the persisted decision", () => {
+  it("keeps answering the persisted rejection when the gate passes only later", async () => {
+    await withGatedLedger(
+      "natural-replay-rejected-",
+      async ({ declared, ledger, requests, build }) => {
+        const delivery = () => ({
+          nodeId: "work",
+          attemptId: "work#1",
+          credential: credentialOf(requests, "work#1"),
+        });
+        const failing = build(gatedRegistry({ kind: "fail", reason: "not yet" }));
+        expect(failing.start(NOW).kind).toBe("started");
+        const first = failing.settleNatural(delivery(), NOW + 1);
+        expect(first.kind).toBe("rejected");
+        if (first.kind !== "rejected") return;
+        const stateAfterRejection = JSON.stringify(
+          ledger.readGraphState(declared.graphId),
+        );
+        expect(ledger.acceptedEvents(declared.graphId)).toHaveLength(0);
+
+        // The gate passes now, but the receipt already decided this
+        // content-addressed key: the persisted rejection governs every repeat.
+        const passing = build(gatedRegistry({ kind: "pass" }));
+        const second = passing.settleNatural(delivery(), NOW + 2);
+        expect(second.kind).toBe("rejected");
+        if (second.kind !== "rejected") return;
+        expect(second.decision.kind).toBe("rejected");
+        expect(second.receipt).toEqual(first.receipt);
+        expect(second.receipt.decision).toBe("rejected");
+        // The gate DID answer pass this time; the requirements are this
+        // delivery's re-evaluation evidence, and the receipt is the answer.
+        expect(second.decision.requirements).toMatchObject([
+          {
+            requirement: { id: GATE_ID, version: GATE_VERSION },
+            outcome: { kind: "pass" },
+          },
+        ]);
+
+        const third = passing.settleNatural(delivery(), NOW + 3);
+        expect(third.kind).toBe("rejected");
+        expect(JSON.stringify(ledger.readGraphState(declared.graphId))).toBe(
+          stateAfterRejection,
+        );
+        expect(ledger.acceptedEvents(declared.graphId)).toHaveLength(0);
+        const state = passing.state();
+        expect(state === undefined ? undefined : nodeOf(state, "work").status).toBe(
+          "dispatched",
+        );
+
+        // A DIFFERENT logical submission (the worker's own claim) has its own
+        // key, so the persisted rejection never wedges the attempt.
+        expect(
+          passing.submit(
+            { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+            NOW + 4,
+          ).kind,
+        ).toBe("accepted");
+      },
+    );
+  });
+
+  it("keeps answering the persisted acceptance when the gate fails only later", async () => {
+    await withGatedLedger(
+      "natural-replay-accepted-",
+      async ({ declared, ledger, requests, build }) => {
+        const delivery = () => ({
+          nodeId: "work",
+          attemptId: "work#1",
+          credential: credentialOf(requests, "work#1"),
+        });
+        const passing = build(gatedRegistry({ kind: "pass" }));
+        expect(passing.start(NOW).kind).toBe("started");
+        const first = passing.settleNatural(delivery(), NOW + 1);
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+        const stateAfterSettlement = JSON.stringify(
+          ledger.readGraphState(declared.graphId),
+        );
+        const eventsAfterSettlement = ledger.acceptedEvents(declared.graphId).length;
+
+        const failing = build(gatedRegistry({ kind: "fail", reason: "flaked" }));
+        const replay = failing.settleNatural(delivery(), NOW + 2);
+        // The settlement HAPPENED; a later failing evaluation does not undo it.
+        expect(replay.kind).toBe("accepted");
+        if (replay.kind !== "accepted") return;
+        expect(replay.replayed).toBe(true);
+        expect(replay.decision.kind).toBe("accepted");
+        expect(replay.receipt).toEqual(first.receipt);
+        expect(replay.receipt.decision).toBe("accepted");
+        expect(replay.dispatched).toEqual([]);
+        // The state is the persisted one — never an advance the replay's join
+        // computed and the transaction did not write.
+        const persisted = failing.state();
+        if (persisted === undefined) {
+          throw new Error("fixture: the settlement wrote no state");
+        }
+        expect(replay.state).toEqual(persisted);
+        expect(nodeOf(replay.state, "work")).toMatchObject({
+          status: "settled",
+          outcomeId: "done",
+        });
+        expect(JSON.stringify(ledger.readGraphState(declared.graphId))).toBe(
+          stateAfterSettlement,
+        );
+        expect(ledger.acceptedEvents(declared.graphId)).toHaveLength(
+          eventsAfterSettlement,
+        );
+      },
+    );
+  });
+});
+
 // ── No data channel ─────────────────────────────────────────────────────────
 
 describe("settleNatural — the completion envelope carries no result channel", () => {
