@@ -31,8 +31,18 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   the runtime adopts every minted credential into and resolves a recovery from,
   the durable execution index, the dispatch adapter (create at most once per
   stable effect id plus the execution query), the invocation-identity holder,
+  the per-graph record of the DECLARING invocation (`invocation-origins.ts`),
   and the completion bridge that settles an observed completion through
   `settleNatural`;
+- every dispatch window names the graph's declaring invocation: the host records
+  it per graph (in memory, and in a `0600` record under its own store root when
+  durability is `"file"`) and hands it to the platform delivery on EVERY create —
+  the declaring call's first execution, a successor armed by a worker's accepted
+  submission, a successor armed by an out-of-band completion, and the boot sweep.
+  The platform delivery adapters keep no session state of their own, so no
+  window's end can lose the attribution a later successor needs; a graph whose
+  declaring invocation was never named dispatches under none and the platform's
+  refusal is reported per effect instead of being guessed away;
 - the submission and acceptance core: proposal shape gate, the closed validator
   registry with the artifact-reference validator, receipt replay, and the atomic
   commit of receipt, accepted event, state and pending effects
@@ -52,8 +62,12 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
 - restart reconciliation that REPORTS its disagreements (D9): every effect whose
   persisted local status and the host's fact about the same stable id contradict
   each other is named in `divergences` with what recovery did about it — never a
-  blind re-dispatch and never a silent drop (`runtime.ts`, `recovery.ts`,
-  `src/graph/host/outcome-host.ts`);
+  blind re-dispatch and never a silent drop (`runtime.ts`, `recovery.ts`). The
+  host's declared-graph sweep carries that reporting through instead of
+  flattening it: a graph it visits is reported with EVERY per-effect refusal its
+  own resume produced (`effectRefusals`, each tagged with its graph) and every
+  divergence (`divergences`), so "resumed" never hides an effect that is still
+  pending (`src/graph/host/outcome-host.ts`);
 - the durable STOP: hard-limit exhaustion and the declared progress-stalled
   policy end the run inside the same transaction that accepts the outcome
   (`src/graph/outcome/progress.ts`, `graph-state.ts`);
@@ -90,7 +104,10 @@ IMPLEMENTED AND COVERED BY TESTS (the protocol-2 outcome path):
   `src/entries/pi.ts` assemble the outcome tool face (`graph_declare`,
   `graph_submit_outcome`, `graph_audit`, `graph_status`) over
   `src/graph/host/outcome-host.ts`, each through its own platform delivery
-  adapter. The legacy construction/execution entries, the legacy runtime and the
+  adapter. Each entry hands the declaring invocation to the HOST (which records
+  and re-supplies it) rather than naming it around one call window, so a
+  multi-node graph dispatches its successors on both hosts. The legacy
+  construction/execution entries, the legacy runtime and the
   `allowNewLegacyGraphs` creation gate no longer exist anywhere in the tree.
 
 NOT YET ENABLED OR NOT IMPLEMENTED:
@@ -2145,13 +2162,21 @@ reviewable source rather than as a deployment's private code:
 | --- | --- |
 | `credential-vault.ts` | the version-2 store: process memory as the authority, a separate `0600` mirror file (atomic replace, `0700` directory) for restart re-delivery, and an exact-attempt lookup that cannot re-aim a credential |
 | `execution-index.ts` | the durable record of the executions the host created, keyed by the stable effect id; a memory-only index answers `unknown` rather than `absent` for what an earlier process may have created |
-| `dispatch-host.ts` | `create` at most once per `(graphId, effectId)` plus the lookup; the record is taken before the delivery and dropped when the delivery threw, so a failed create leaves a `pending` row a recovery resolves |
+| `dispatch-host.ts` | `create` at most once per `(graphId, effectId)` plus the lookup; the record is taken before the delivery and dropped when the delivery threw, so a failed create leaves a `pending` row a recovery resolves; the delivery is handed the graph's declaring invocation as a third argument on every create |
 | `identity.ts` | the version-1 invocation-identity capability over a holder the host moves per invocation |
+| `invocation-origins.ts` | the host's per-graph record of the DECLARING invocation (atomic `0600` file under the host root, `0700` directory, refused rather than read approximately), so a successor armed out of band and a restart sweep start the worker under the same parent the entry attempt ran under |
 | `completion-bridge.ts` | resolves the attempt's binding and credential and calls `settleNatural`; reports a completion it cannot bind or whose credential the store cannot produce, instead of guessing |
 
 THE BOUNDARY THAT REMAINS, STATED PLAINLY. The vault's mirror file is not
 per-worker isolated: a same-account process can read it, exactly as it could
-read the ledger before. The honest strongest forms on a single machine are the
+read the ledger before. The same boundary applies to the invocation-origins
+record: it holds a graph id and the `{ sessionId, agent }` attribution of the
+declaring call — no credential, no prompt — and a same-account process can read
+it; what it buys is that a successor dispatched out of band, or after a restart,
+is attributed to the invocation that actually declared the graph instead of to
+whichever call happens to be current. A graph whose origin this process can
+neither remember nor read is dispatched under NO invocation, and the platform's
+refusal is reported per effect. The honest strongest forms on a single machine are the
 host process's memory plus a root the workers are not given a path to, or
 `durability: "memory"`, which holds nothing durable and therefore loses
 in-flight credentials on restart (the runtime then reports those effects
