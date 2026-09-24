@@ -179,6 +179,21 @@ export type CompiledCompletionPolicy =
  * one is legal in this slice — contracts become mandatory for outcome nodes in
  * a later slice, once the load boundary can refuse a missing binding.
  */
+/**
+ * One compiled DOWNSTREAM INPUT: the exact upstream node and outcome whose
+ * accepted result this node consumes (§3.5).
+ *
+ * Both endpoints are declared and the producer is UPSTREAM of the consumer — the
+ * compiler refuses anything it cannot pin — so a consumer never has to guess
+ * which accepted result it was supposed to receive.
+ */
+export interface CompiledInputRef {
+  /** The upstream node whose accepted result this node consumes. */
+  readonly from: string;
+  /** The outcome of `from` whose accepted result is consumed. */
+  readonly outcome: string;
+}
+
 export interface CompiledNode {
   /** Unique identifier within the graph. */
   readonly id: string;
@@ -196,6 +211,12 @@ export interface CompiledNode {
   readonly join?: JoinConfig;
   /** Per-node resource budget (the runtime's own `NodeBudgetSpec` vocabulary). */
   readonly budget?: NodeBudgetSpec;
+  /**
+   * The accepted results this node consumes, in declaration order (empty/absent
+   * means it consumes none). Fixed at compile time; resolved at dispatch from
+   * what the acceptance RECORDED, never from the reference's path.
+   */
+  readonly inputs?: readonly CompiledInputRef[];
 }
 
 /**

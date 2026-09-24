@@ -151,6 +151,22 @@ export interface CompletionPolicyRequestV3 {
  * and `budget` reuse the runtime's own `JoinConfig` /
  * `NodeBudgetSpec` vocabulary rather than restating it.
  */
+/**
+ * One DOWNSTREAM INPUT a node consumes (§3.5): a fixed reference to the accepted
+ * result of an outcome an UPSTREAM node produced.
+ *
+ * It names a node and an outcome, never a value, a path or a global slot. Which
+ * revision of that outcome this node receives is decided when the upstream
+ * acceptance commits — so a consumer resolves the revision the acceptance
+ * NAMED, not whatever the reference's path holds by the time it reads (§P4.5).
+ */
+export interface InputDeclarationV3 {
+  /** The upstream node whose accepted result this node consumes. */
+  from: string;
+  /** The outcome of `from` whose accepted result is consumed. */
+  outcome: string;
+}
+
 export interface NodeDeclarationV3 {
   /** Unique identifier within the graph. */
   id: string;
@@ -168,6 +184,14 @@ export interface NodeDeclarationV3 {
   join?: JoinConfig;
   /** Per-node resource budget (the runtime's own vocabulary). */
   budget?: NodeBudgetSpec;
+  /**
+   * The accepted results this node consumes, in declaration order.
+   *
+   * COMPILE-TIME FIXED: the compiler resolves each reference against the
+   * declared nodes and outcomes and refuses anything it cannot pin, so a node
+   * never reads "the latest result of some type" at run time.
+   */
+  inputs?: InputDeclarationV3[];
 }
 
 // ── Edges ───────────────────────────────────────────────────────────────────
@@ -361,6 +385,21 @@ export function isGraphDeclarationV3(
 function isNodeDeclarationV3(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (!isNonEmptyString(value.id)) return false;
+  // Shape level only, like every other optional field: a non-array can never be
+  // an input list, while a record with wrong members is the compiler's own
+  // diagnostic at its own path.
+  if (
+    value.inputs !== undefined &&
+    (!Array.isArray(value.inputs) ||
+      !value.inputs.every(
+        (entry) =>
+          isRecord(entry) &&
+          isNonEmptyString(entry.from) &&
+          isNonEmptyString(entry.outcome),
+      ))
+  ) {
+    return false;
+  }
   if (typeof value.agent !== "string") return false;
   if (typeof value.prompt !== "string") return false;
   if (!Array.isArray(value.outcomes)) return false;

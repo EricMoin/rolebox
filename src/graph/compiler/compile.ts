@@ -123,6 +123,7 @@ import {
   type CompiledCompletionAuthorization,
   type CompiledCompletionPolicy,
   type CompiledEdge,
+  type CompiledInputRef,
   type CompiledLoopGroup,
   type CompiledNode,
   type CompiledOutcome,
@@ -150,6 +151,11 @@ export type CompileErrorCode =
   | CompiledTopologyIssueCode
   | "malformed-declaration"
   | "duplicate-outcome-id"
+  | "unknown-input-node"
+  | "unknown-input-outcome"
+  | "self-referential-input"
+  | "duplicate-input"
+  | "input-not-upstream"
   | "missing-edge-outcome"
   | "natural-completion-unknown-outcome"
   | "duplicate-natural-completion"
@@ -457,6 +463,7 @@ function compileDeclaration(
       compileNode(
         node,
         declaration.name,
+        declaredOutcomes,
         options,
         log,
         snapshots,
@@ -467,6 +474,24 @@ function compileDeclaration(
     );
   }
   const compiledEdges = compileEdges(edges, nodesById, declaredOutcomes, log);
+  // EVERY DECLARED INPUT MUST COME FROM AN UPSTREAM NODE (§3.5). A reference to a
+  // node that no declared edge path can reach is not an input, it is a guess
+  // about what the consumer was supposed to receive — and it is refused HERE,
+  // where the plan is built, rather than resolved into something arbitrary at
+  // dispatch time.
+  for (const node of nodes) {
+    for (const input of node.inputs ?? []) {
+      if (!upstreamOf(compiledEdges, node.id).has(input.from)) {
+        log.errors.push(
+          issue(
+            "input-not-upstream",
+            `node ${JSON.stringify(node.id)} consumes the accepted result of ${JSON.stringify(input.from)}, but no declared edge path leads from that node to this one — a consumer's input is an UPSTREAM result`,
+            nodePath(node.id) + ".inputs",
+          ),
+        );
+      }
+    }
+  }
   const loopGroups = compileLoopGroups(
     declaration,
     nodesById,
@@ -588,6 +613,7 @@ function indexNodes(
 function compileNode(
   node: NodeDeclarationV3,
   graphId: string,
+  declaredOutcomes: ReadonlyMap<string, ReadonlySet<string>>,
   options: CompileOptions | undefined,
   log: IssueLog,
   snapshots: Map<string, ContractContentSnapshot>,
@@ -597,6 +623,13 @@ function compileNode(
 ): CompiledNode {
   const base = nodePath(node.id);
   const outcomes = compileOutcomes(node, graphId, options, log, unresolved);
+  const inputs = readInputs(
+    node.inputs,
+    base,
+    node.id,
+    declaredOutcomes,
+    log,
+  );
 
   if (node.outcomes.length === 0) {
     log.errors.push(
@@ -678,7 +711,135 @@ function compileNode(
     ...(contractRef === undefined ? {} : { contractRef }),
     ...(join === null ? {} : { join }),
     ...(budget === null ? {} : { budget }),
+    ...(inputs === undefined ? {} : { inputs }),
   };
+}
+
+/** Every node a declared edge path can reach `start` FROM (its ancestors). */
+function upstreamOf(
+  edges: readonly CompiledEdge[],
+  start: string,
+): ReadonlySet<string> {
+  const reverse = new Map<string, string[]>();
+  for (const edge of edges) {
+    const list = reverse.get(edge.to);
+    if (list === undefined) reverse.set(edge.to, [edge.from]);
+    else list.push(edge.from);
+  }
+  const seen = new Set<string>();
+  const stack = [...(reverse.get(start) ?? [])];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined || seen.has(current)) continue;
+    seen.add(current);
+    for (const parent of reverse.get(current) ?? []) {
+      if (!seen.has(parent)) stack.push(parent);
+    }
+  }
+  return seen;
+}
+
+/**
+ * Read a node's declared DOWNSTREAM INPUTS and resolve each against the declared
+ * graph (§3.5).
+ *
+ * Fixed at compile time, and refused here rather than guessed at run time: a
+ * reference to a node the graph does not declare, to an outcome that node does
+ * not declare, to the node itself, or a repeated reference, is an error — the
+ * plan is not produced at all. A node never reads "the latest result of some
+ * type", which is exactly the global-slot shape the plan forbids.
+ *
+ * UPSTREAM-NESS is checked separately, in `compileGraph`, because it needs the
+ * compiled edges.
+ */
+function readInputs(
+  raw: unknown,
+  base: string,
+  nodeId: string,
+  declaredOutcomes: ReadonlyMap<string, ReadonlySet<string>>,
+  log: IssueLog,
+): readonly CompiledInputRef[] | undefined {
+  if (raw === undefined) return undefined;
+  const path = `${base}.inputs`;
+  if (!Array.isArray(raw)) {
+    log.errors.push(
+      issue(
+        "malformed-declaration",
+        `inputs at ${path} is not an array of { from, outcome }`,
+        path,
+      ),
+    );
+    return undefined;
+  }
+  const refs: CompiledInputRef[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < raw.length; index++) {
+    const entryPath = `${path}[${index}]`;
+    const entry: unknown = raw[index];
+    if (!isRecord(entry)) {
+      log.errors.push(
+        issue("malformed-declaration", `input at ${entryPath} is not an object`, entryPath),
+      );
+      continue;
+    }
+    const from = entry.from;
+    const outcome = entry.outcome;
+    if (!isNonEmptyString(from) || !isNonEmptyString(outcome)) {
+      log.errors.push(
+        issue(
+          "malformed-declaration",
+          `input at ${entryPath} is not { from, outcome } with non-empty strings`,
+          entryPath,
+        ),
+      );
+      continue;
+    }
+    if (from === nodeId) {
+      log.errors.push(
+        issue(
+          "self-referential-input",
+          `node ${JSON.stringify(nodeId)} declares an input from itself at ${entryPath} — a node consumes the accepted result of an UPSTREAM node, never its own`,
+          entryPath,
+        ),
+      );
+      continue;
+    }
+    const producer = declaredOutcomes.get(from);
+    if (producer === undefined) {
+      log.errors.push(
+        issue(
+          "unknown-input-node",
+          `input at ${entryPath} names node ${JSON.stringify(from)}, which this graph does not declare`,
+          entryPath,
+        ),
+      );
+      continue;
+    }
+    if (!producer.has(outcome)) {
+      log.errors.push(
+        issue(
+          "unknown-input-outcome",
+          `input at ${entryPath} names outcome ${JSON.stringify(outcome)}, which node ${JSON.stringify(from)} does not declare`,
+          entryPath,
+        ),
+      );
+      continue;
+    }
+    const key = from + "\u0000" + outcome;
+    if (seen.has(key)) {
+      log.errors.push(
+        issue(
+          "duplicate-input",
+          `input at ${entryPath} repeats ${JSON.stringify(from)}/${JSON.stringify(outcome)} — one accepted result is consumed once`,
+          entryPath,
+        ),
+      );
+      continue;
+    }
+    seen.add(key);
+    refs.push(Object.freeze({ from, outcome }));
+  }
+  return refs.length === 0 ? undefined : Object.freeze(refs);
 }
 
 /**
