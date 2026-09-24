@@ -377,7 +377,16 @@ export type GraphControlRefusalCode =
    * a value that is not a finite non-negative number). The limit is neither
    * enforced nor defaulted away, so the retry is refused.
    */
-  | "budget-limit-unauthorized";
+  | "budget-limit-unauthorized"
+  /**
+   * The node DECLARES downstream inputs and the attempt a retry would supersede
+   * was armed before this build bound an input view to the attempt — so there is
+   * no binding to carry onto the successor, and minting one by resolving the
+   * producing nodes again is exactly the re-derivation a retry must not perform
+   * (D6). Nothing is written; the repair is a re-execution, which arms an
+   * attempt that carries the binding.
+   */
+  | "input-binding-absent";
 
 /** One structured control refusal. */
 export interface GraphControlRefusal {
@@ -1949,6 +1958,43 @@ function applyRetryCommand(ctx: RetryCommandContext): GraphControlResult {
   // released here: its external execution may still be running, so it keeps its
   // share of the node's budget until it settles or a platform report reconciles
   // it.
+  // THE SUCCESSOR IS ARMED WITH THE BINDING THE SUPERSEDED ATTEMPT HAD (D6).
+  //
+  // A retry runs the SAME node for the SAME round, so it must receive the same
+  // accepted upstream revisions — and they are CARRIED from the attempt's own
+  // state entry, never resolved again here. Re-deriving them would bind the
+  // successor to whatever the producing nodes hold NOW, and a producing node
+  // that moved to a newer attempt (a loop round, another retry, a re-execution)
+  // would then hand this consumer a different round's result.
+  //
+  // A node that DECLARES inputs and has no bound view (an attempt armed before
+  // this build wrote one down) is refused by name: there is nothing to carry,
+  // and minting an attempt that would start with a hole where its input should
+  // be is worse than refusing. The check runs BEFORE any write, so a refused
+  // retry leaves the decision, the state, the effect and the budget untouched.
+  const supersededEntry = state.nodes.find((entry) => entry.nodeId === node.nodeId);
+  const carriedInputs = supersededEntry?.inputs ?? Object.freeze([]);
+  if (
+    supersededEntry?.inputs === undefined &&
+    (planNode.inputs?.length ?? 0) > 0
+  ) {
+    return refuse(
+      graphId,
+      "input-binding-absent",
+      "$.node_id",
+      "graph-control refused [input-binding-absent]: node " +
+        JSON.stringify(node.nodeId) +
+        " DECLARES " +
+        String(planNode.inputs?.length ?? 0) +
+        " downstream input(s), and attempt " +
+        JSON.stringify(supersededAttemptId) +
+        " records no bound input view — it was armed before this build bound one, so " +
+        "there is nothing to carry onto the successor and nothing was written. A " +
+        "successor whose binding this command resolved from the producing nodes would " +
+        "hand the worker a different round's result, which a retry must never do; " +
+        "re-execute the graph as a new run to arm an attempt that carries the binding",
+    );
+  }
   const limitsReading = nodeBudgetLimitsOf(planNode.budget);
   if (limitsReading.kind === "refused") {
     return refuse(
@@ -2013,6 +2059,9 @@ function applyRetryCommand(ctx: RetryCommandContext): GraphControlResult {
     attemptId: successorAttemptId,
     agent: planNode.agent,
     prompt: planNode.prompt,
+    // The SAME view the state entry records below: the dispatch target and the
+    // armed attempt can never describe two different bindings.
+    inputs: carriedInputs,
   });
   // THE DECISIVE WRITE IS FIRST (the same rule the stopping commands follow):
   // the decision lands only when no accepted event exists for the superseded
@@ -2106,6 +2155,10 @@ function applyRetryCommand(ctx: RetryCommandContext): GraphControlResult {
           // The arrival record is not this command's to change: it is the
           // canonical list of settled feeders, and a retry settles nothing.
           arrivals: entry.arrivals ?? Object.freeze([]),
+          // The binding carried from the attempt this retry supersedes (D6), so
+          // the successor is delivered exactly what its predecessor was armed
+          // with.
+          inputs: carriedInputs,
         }),
   );
   const nextState: OutcomeGraphState = Object.freeze({

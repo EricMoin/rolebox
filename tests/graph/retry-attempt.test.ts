@@ -992,3 +992,94 @@ describe("retry — a command commits whole or not at all", () => {
     }
   });
 });
+
+// ── The carried binding (D6) ────────────────────────────────────────────────
+
+/**
+ * `work -> review`, where REVIEW consumes work's accepted result: the retry
+ * below supersedes a consumer that was ALREADY armed with a binding.
+ */
+const BOUND_CHAIN: GraphDeclarationV3 = {
+  version: 3,
+  name: "retry.bound-chain",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "review",
+      agent: "agent.review",
+      prompt: "Review the work.",
+      outcomes: [{ id: "approve" }],
+      inputs: [{ from: "work", outcome: "done" }],
+    },
+  ],
+  edges: [{ from: "work", to: "review", outcome: "done" }],
+};
+
+describe("retry — a superseded consumer's binding is CARRIED, never re-derived (D6)", () => {
+  it("arms the successor attempt with the SAME bound inputs, in its state entry and in the delivered request", async () => {
+    const fixture = await openRetryFixture(BOUND_CHAIN);
+    try {
+      expect(await settle(fixture, "work", "work#1", "done")).toBe("accepted");
+
+      const armedBody = readBody(fixture);
+      const armedReview = nodeEntry(armedBody, "review");
+      expect(armedReview["attemptId"]).toBe("review#2");
+      const bound = armedReview["inputs"];
+      if (!Array.isArray(bound) || bound.length !== 1) {
+        throw new Error("fixture: the consumer was not armed with a binding");
+      }
+      const boundEntry = bound[0] as Record<string, unknown>;
+      // The binding names the producing ATTEMPT, not the node.
+      expect(boundEntry["from"]).toBe("work");
+      expect(boundEntry["attemptId"]).toBe("work#1");
+      expect(boundEntry["payload"]).toEqual({ kind: "absent" });
+
+      const answer = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "retry",
+          node_id: "review",
+          reason: "the review attempt produced nothing",
+        },
+        fixture.declarer,
+      );
+      expect(answer.kind).toBe("applied");
+      expect(answer.minted?.map((attempt) => attempt.attemptId)).toEqual(["review#3"]);
+
+      // THE SUCCESSOR'S STATE ENTRY CARRIES THE SAME ENTRIES — the successor was
+      // not re-resolved against the producing nodes.
+      const successorBody = readBody(fixture);
+      const successorReview = nodeEntry(successorBody, "review");
+      expect(successorReview["attemptId"]).toBe("review#3");
+      expect(successorReview["inputs"]).toEqual(bound);
+
+      // AND SO DOES THE REQUEST THE PLATFORM WAS HANDED for the new attempt.
+      const delivered = fixture.dispatched.find(
+        (request) => request.attemptId === "review#3",
+      );
+      expect(delivered).toBeDefined();
+      expect(delivered?.inputs).toEqual(bound);
+
+      // THE PERSISTED DISPATCH TARGET carries it too, so a process that reads
+      // the effect back sees one binding, not a second opinion.
+      const store = GraphStore.openFile(fixture.storeRoot);
+      try {
+        const effect = store
+          .pendingEffects(fixture.graphId)
+          .find((row) => row.effectId === "dispatch:review#3");
+        expect(effect).toBeDefined();
+        const payload = effect?.payload;
+        expect(
+          typeof payload === "object" && payload !== null
+            ? (payload as Record<string, unknown>)["inputs"]
+            : undefined,
+        ).toEqual(bound);
+      } finally {
+        store.close();
+      }
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
