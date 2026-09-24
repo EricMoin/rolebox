@@ -19,7 +19,8 @@ export async function executeGraphWorkerCommand(options: {
       workspaceReadsOnly: true, scratchDirectory: scratch, inputPaths: options.inputPaths });
     return await new Promise((resolve, reject) => {
       const child = spawn(wrapped.executable, wrapped.args, { cwd: options.workspace, detached: true,
-        env: { PATH: process.env.PATH, LANG: "C.UTF-8", TMPDIR: scratch }, stdio: ["ignore", "pipe", "pipe"] });
+        env: { PATH: process.env.PATH, LANG: "C.UTF-8", TMPDIR: scratch, xcrun_db: join(scratch, "xcrun_db"),
+          ...(process.env.DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.DEVELOPER_DIR } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
       const buffers: Buffer[] = [];
       let bytes = 0;
       let terminated = false;
