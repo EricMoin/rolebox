@@ -96,7 +96,7 @@ function result(overrides: Partial<AcceptedResultRecord> = {}): AcceptedResultRe
     graphId: GRAPH,
     attemptId: ATTEMPT,
     planRevision: "rev-1",
-    payload: { delivered: true, files: ["out/report.md"] },
+    payload: { kind: "value", value: { delivered: true, files: ["out/report.md"] } },
     acceptedAt: NOW,
     ...overrides,
   };
@@ -232,8 +232,8 @@ describe("GraphStore — ONE workspace database", () => {
         })?.decision).toBe("accepted");
         expect(reopened.acceptedEvents(GRAPH).length).toBe(1);
         expect(reopened.readAcceptedResult(GRAPH, ATTEMPT)?.payload).toEqual({
-          delivered: true,
-          files: ["out/report.md"],
+          kind: "value",
+          value: { delivered: true, files: ["out/report.md"] },
         });
         expect(reopened.readGraphState(GRAPH)?.planRevision).toBe("rev-1");
         expect(reopened.readDefinition(GRAPH)?.declarationDigest).toBe("decl-digest-a");
@@ -549,8 +549,8 @@ describe("GraphStore — the invariants P0 pinned", () => {
         );
         expect(settled.kind).toBe("settled");
         expect(store.readAcceptedResult(GRAPH, ATTEMPT)?.payload).toEqual({
-          delivered: true,
-          files: ["out/report.md"],
+          kind: "value",
+          value: { delivered: true, files: ["out/report.md"] },
         });
       } finally {
         store.close();
@@ -563,10 +563,12 @@ describe("GraphStore — the invariants P0 pinned", () => {
       const store = GraphStore.openFile(dir);
       try {
         store.commitAccepted(batch({ acceptedResult: result() }));
-        store.writeAcceptedResult(result({ payload: { delivered: false } }));
+        store.writeAcceptedResult(
+          result({ payload: { kind: "value", value: { delivered: false } } }),
+        );
         expect(store.readAcceptedResult(GRAPH, ATTEMPT)?.payload).toEqual({
-          delivered: true,
-          files: ["out/report.md"],
+          kind: "value",
+          value: { delivered: true, files: ["out/report.md"] },
         });
       } finally {
         store.close();
@@ -835,6 +837,113 @@ describe("GraphStore — the format gate (P1 item 6)", () => {
       expect(error).toBeInstanceOf(GraphStoreFormatError);
       if (error instanceof GraphStoreFormatError) {
         expect(error.problem).toBe("older-format");
+      }
+    });
+  });
+
+  it("answers unsupported for a version-6 predecessor store, never corrupt", async () => {
+    // THE PREDECESSOR IS A WELL-FORMED MEMBER OF A FORMAT THAT EXISTED. Version 6
+    // stored the accepted payload as the BARE value the submission carried and
+    // its accepted-results row had no `artifacts` column, so its rows cannot be
+    // read as this build's accepted data. The verdict must name the VERSION —
+    // never "corrupt", never migrated, never deleted, never re-executed.
+    await withTempDir(async (dir) => {
+      const store = GraphStore.openFile(dir);
+      store.close();
+      await tamper(graphStoreFilePath(dir), (db) => {
+        db.run(
+          "ALTER TABLE " +
+            GRAPH_STORE_TABLES.acceptedResults +
+            " DROP COLUMN artifacts",
+        );
+        db.run(
+          "UPDATE " + GRAPH_STORE_TABLES.meta + " SET format_version = 6 WHERE id = 1",
+        );
+      });
+
+      const verdict = loadGraphStoreSync(dir);
+      expect(verdict.kind).toBe("unsupported");
+      if (verdict.kind === "unsupported") expect(verdict.dimension).toBe("storage");
+
+      const error = (() => {
+        try {
+          GraphStore.openFile(dir);
+        } catch (caught) {
+          return caught;
+        }
+      })();
+      expect(error).toBeInstanceOf(GraphStoreFormatError);
+      if (error instanceof GraphStoreFormatError) {
+        expect(error.problem).toBe("older-format");
+        expect(error.found).toBe(6);
+        expect(error.supported).toBe(LEDGER_FORMAT_VERSION);
+      }
+
+      // THE FILE IS LEFT EXACTLY AS IT WAS FOUND: still present, still stamped
+      // 6, still without the column its build never wrote.
+      expect(statSync(graphStoreFilePath(dir)).size).toBeGreaterThan(0);
+      await tamper(graphStoreFilePath(dir), (db) => {
+        expect(
+          db
+            .query(
+              "SELECT format_version FROM " +
+                GRAPH_STORE_TABLES.meta +
+                " WHERE id = 1",
+            )
+            .get(),
+        ).toEqual({ format_version: 6 });
+        const names: string[] = [];
+        for (const column of db
+          .query("PRAGMA table_info(" + GRAPH_STORE_TABLES.acceptedResults + ")")
+          .all()) {
+          if (typeof column === "object" && column !== null && "name" in column) {
+            const name = (column as { readonly name?: unknown }).name;
+            if (typeof name === "string") names.push(name);
+          }
+        }
+        expect(names).not.toContain("artifacts");
+      });
+    });
+
+    // THE REAL-WORLD PREDECESSOR TOO: a store this branch's HEAD wrote carries
+    // the `artifacts` column but the SAME bare-payload rows. The VERSION is the
+    // identity that must answer — the layout alone cannot tell the two apart.
+    await withTempDir(async (dir) => {
+      const store = GraphStore.openFile(dir);
+      store.close();
+      await tamper(graphStoreFilePath(dir), (db) => {
+        db.run(
+          "UPDATE " + GRAPH_STORE_TABLES.meta + " SET format_version = 6 WHERE id = 1",
+        );
+      });
+      expect(loadGraphStoreSync(dir).kind).toBe("unsupported");
+    });
+
+    // CONTRAST: the SAME dropped column with the CURRENT version stamped is a
+    // reshaped store, and the layout check answers `corrupt` (incomplete-store).
+    // The difference between the two verdicts is exactly the VERSION IDENTITY.
+    await withTempDir(async (dir) => {
+      const store = GraphStore.openFile(dir);
+      store.close();
+      await tamper(graphStoreFilePath(dir), (db) => {
+        db.run(
+          "ALTER TABLE " +
+            GRAPH_STORE_TABLES.acceptedResults +
+            " DROP COLUMN artifacts",
+        );
+      });
+      const verdict = loadGraphStoreSync(dir);
+      expect(verdict.kind).toBe("corrupt");
+      const error = (() => {
+        try {
+          GraphStore.openFile(dir);
+        } catch (caught) {
+          return caught;
+        }
+      })();
+      expect(error).toBeInstanceOf(GraphStoreFormatError);
+      if (error instanceof GraphStoreFormatError) {
+        expect(error.problem).toBe("incomplete-store");
       }
     });
   });

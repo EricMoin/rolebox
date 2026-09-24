@@ -958,7 +958,10 @@ describe("GraphStore — cross-process receipt replay", () => {
     expect(fx.store.pendingEffects(GRAPH)[0]?.createdAt).toBe(NOW);
     expect(fx.store.pendingEffects(GRAPH)[0]?.payload).toEqual({ tag: "first" });
     expect(fx.store.readAcceptedResult(GRAPH, attemptId)?.acceptedAt).toBe(NOW);
-    expect(fx.store.readAcceptedResult(GRAPH, attemptId)?.payload).toEqual({ tag: "first" });
+    expect(fx.store.readAcceptedResult(GRAPH, attemptId)?.payload).toEqual({
+      kind: "value",
+      value: { tag: "first" },
+    });
     expect(fx.store.readGraphState(GRAPH)?.updatedAt).toBe(NOW);
     expect(fx.store.readGraphState(GRAPH)?.body).toEqual({ tag: "first" });
   });

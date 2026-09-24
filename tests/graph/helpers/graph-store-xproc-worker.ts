@@ -499,7 +499,7 @@ function receipt(store: GraphStore): void {
       graphId,
       attemptId,
       planRevision,
-      payload: { tag },
+      payload: { kind: "value", value: { tag } },
       acceptedAt: resultAt,
     },
   };

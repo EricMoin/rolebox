@@ -44,7 +44,7 @@ function accept(store: GraphStore, root: string, bytes: Buffer): void {
     graphId: GRAPH,
     attemptId: ATTEMPT,
     planRevision: "rev-1",
-    payload: { summary: "accepted" },
+    payload: { kind: "value", value: { summary: "accepted" } },
     artifacts: [
       {
         ref: REF,
@@ -88,7 +88,8 @@ describe("the accepted revision is what downstream resolves", () => {
         if (after.kind !== "read") return;
         expect(Buffer.compare(after.bytes, A)).toBe(0);
         expect(reopened.readAcceptedResult(GRAPH, ATTEMPT)?.payload).toEqual({
-          summary: "accepted",
+          kind: "value",
+          value: { summary: "accepted" },
         });
       } finally {
         reopened.close();
