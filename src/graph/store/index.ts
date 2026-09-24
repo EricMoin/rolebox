@@ -55,6 +55,7 @@ export {
   type GraphStoreTx,
 } from "./graph-store.ts";
 export {
+  ACCEPTED_DATA_MAX_BYTES,
   type AcceptedResultRecord,
   type CredentialRecordIdentity,
   type CredentialRetention,

@@ -51,7 +51,13 @@ import {
   type SubmissionKey,
 } from "../ledger/types.ts";
 import { GraphStoreWriteError } from "./errors.ts";
-import { encodeJsonBody, encodePayload, encodeStateBody } from "./json.ts";
+import {
+  encodeAcceptedData,
+  encodeJsonBody,
+  encodePayload,
+  encodeStateBody,
+} from "./json.ts";
+import type { AcceptedData, JsonValue } from "../domain/model.ts";
 import { malformedRow } from "./format.ts";
 import { GRAPH_STORE_TABLES } from "./schema.ts";
 import type { AcceptedResultRecord, GraphAcceptanceBatch } from "./records.ts";
@@ -191,6 +197,67 @@ function readPayload(row: Record<string, unknown>, path: string): unknown {
   return readJsonBody(row, "payload", path, GRAPH_STORE_TABLES.pendingEffects);
 }
 
+/**
+ * Read the accepted-results `payload` column as the explicit `AcceptedData`
+ * envelope this format writes.
+ *
+ * THE ENVELOPE IS PART OF THE FORMAT, so a body that is not one of its two
+ * members is a MALFORMED ROW rather than a value to guess at. A row written by
+ * the previous format stores the bare payload; re-reading its `null` as
+ * `{kind:"value", value:null}` would report an accepted value for a submission
+ * that accepted none, which is exactly the distinction the envelope exists to
+ * carry. The shape is checked EXACTLY — an unknown key is a reshape like any
+ * other — and the value is a JSON value by construction, because it is what
+ * `JSON.parse` produced.
+ */
+function readAcceptedData(
+  row: Record<string, unknown>,
+  path: string,
+  table: string,
+): AcceptedData {
+  const body = readJsonBody(row, "payload", path, table);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw malformedRow(
+      path,
+      table,
+      `payload is ${describeValue(body)}, not the accepted-data envelope this format writes ({"kind":"absent"} or {"kind":"value","value":…})`,
+    );
+  }
+  const record = body as Record<string, unknown>;
+  const kind = record["kind"];
+  if (kind === "absent" && hasExactKeys(record, ["kind"])) {
+    return Object.freeze({ kind: "absent" as const });
+  }
+  if (kind === "value" && hasExactKeys(record, ["kind", "value"])) {
+    return Object.freeze({
+      kind: "value" as const,
+      value: record["value"] as JsonValue,
+    });
+  }
+  throw malformedRow(
+    path,
+    table,
+    "payload carries keys [" +
+      Object.keys(record)
+        .map((key) => JSON.stringify(key))
+        .join(", ") +
+      "] with kind " +
+      describeValue(kind) +
+      ", not the accepted-data envelope this format writes ({\"kind\":\"absent\"} or {\"kind\":\"value\",\"value\":…})",
+  );
+}
+
+/** Whether a record carries exactly the named keys — no more, no fewer. */
+function hasExactKeys(
+  record: Record<string, unknown>,
+  names: readonly string[],
+): boolean {
+  const keys = Object.keys(record);
+  return (
+    keys.length === names.length && keys.every((key) => names.includes(key))
+  );
+}
+
 function toReceipt(
   row: Record<string, unknown>,
   path: string,
@@ -267,7 +334,7 @@ function toAcceptedResult(
     graphId: readText(row, "graph_id", path, table),
     attemptId: readText(row, "attempt_id", path, table),
     planRevision: readText(row, "plan_revision", path, table),
-    payload: readJsonBody(row, "payload", path, table),
+    payload: readAcceptedData(row, path, table),
     ...(row["artifacts"] === null || row["artifacts"] === undefined
       ? {}
       : {
@@ -1344,11 +1411,7 @@ export class LedgerTables {
         record.graphId,
         record.attemptId,
         record.planRevision,
-        encodeJsonBody(
-          record.payload,
-          `the accepted result of attempt ${record.attemptId}`,
-          "unrepresentable-record",
-        ),
+        encodeAcceptedData(record.payload, record.attemptId),
         record.artifacts === undefined
           ? null
           : encodeJsonBody(

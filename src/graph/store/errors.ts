@@ -118,6 +118,12 @@ export type GraphStoreWriteProblem =
   | "invalid-record"
   /** A store record's JSON cannot be represented — nothing was committed. */
   | "unrepresentable-record"
+  /**
+   * An accepted result's data is larger than `ACCEPTED_DATA_MAX_BYTES` —
+   * refused BEFORE a row is written, so the acceptance transaction as a whole
+   * rolls back rather than storing a truncated accepted value.
+   */
+  | "oversized-accepted-data"
   /** The store rejected a row (a uniqueness violation, a broken file). */
   | "write-rejected"
   /** A nested `runInTransaction` — the boundary is one transaction. */

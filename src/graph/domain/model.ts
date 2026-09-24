@@ -188,6 +188,37 @@ export interface AcceptedArtifact {
   readonly size: number;
 }
 
+/**
+ * One value that round-trips through JSON without loss.
+ *
+ * It is declared HERE, once: this module is a dependency leaf and must not
+ * import the host SDK's identically-named helper type (that package is a
+ * transitive devDependency of the host adapters), so this is the project's own
+ * single spelling of "a value JSON can carry" — the alternative is a second,
+ * drifting one.
+ */
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+/**
+ * Whether an accepted result carried DATA, and what it carried.
+ *
+ * PRESENCE IS EXPLICIT (v7 of the store format). A submission that supplied no
+ * `data` at all is `absent`; a submission that supplied JSON `null`, `{}` or
+ * `""` is a `value`. The two are different accepted results, and a reader must
+ * be able to tell them apart — the pre-v7 row stored the bare payload, so
+ * "absent" and "null" were byte-identical and no reader could recover which one
+ * had been accepted.
+ */
+export type AcceptedData =
+  | { readonly kind: "absent" }
+  | { readonly kind: "value"; readonly value: JsonValue };
+
 export interface AcceptedResult {
   /** The graph the settled attempt belongs to. */
   readonly graphId: string;
@@ -196,10 +227,12 @@ export interface AcceptedResult {
   /** The plan revision this result was accepted under. */
   readonly planRevision: string;
   /**
-   * The accepted data or an immutable artifact reference. Never a control hint,
-   * never truncated into a smaller accepted value.
+   * The accepted data, with its presence made explicit ({@link AcceptedData}).
+   * Never a control hint, never truncated into a smaller accepted value: a
+   * payload beyond the store's accepted-data ceiling is REFUSED by name rather
+   * than shortened.
    */
-  readonly payload: unknown;
+  readonly payload: AcceptedData;
   /**
    * The artifact revisions this acceptance RETAINED, in evidence-reference
    * order (P4 item 5 / A17).

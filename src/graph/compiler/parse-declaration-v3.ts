@@ -52,6 +52,7 @@ import {
   type CompletionPolicyV3,
   type EdgeDeclarationV3,
   type GraphDeclarationV3,
+  type InputDeclarationV3,
   type LoopGroupDeclarationV3,
   type NodeDeclarationV3,
   type OutcomeDataV3,
@@ -200,7 +201,9 @@ const NODE_KEYS = [
   "contractRef",
   "join",
   "budget",
+  "inputs",
 ] as const;
+const INPUT_KEYS = ["from", "outcome"] as const;
 const OUTCOME_KEYS = ["id", "data", "acceptance"] as const;
 const OUTCOME_DATA_KEYS = ["schema", "version"] as const;
 const ACCEPTANCE_KEYS = ["validator", "version"] as const;
@@ -389,12 +392,22 @@ function readNode(
   const contractRef = readContractRef(record.contractRef, `${path}.contractRef`, log);
   const join = readJoin(record.join, `${path}.join`, log);
   const budget = readBudget(record.budget, `${path}.budget`, log);
+  const inputs =
+    record.inputs === undefined
+      ? undefined
+      : readList(
+          record.inputs,
+          `${path}.inputs`,
+          log,
+          (entry, entryPath) => readInput(entry, entryPath, log),
+        );
 
   if (
     id === undefined ||
     agent === undefined ||
     prompt === undefined ||
-    outcomes === undefined
+    outcomes === undefined ||
+    (record.inputs !== undefined && inputs === undefined)
   ) {
     return undefined;
   }
@@ -408,7 +421,34 @@ function readNode(
     ...(contractRef === undefined ? {} : { contractRef }),
     ...(join === undefined ? {} : { join }),
     ...(budget === undefined ? {} : { budget }),
+    ...(inputs === undefined ? {} : { inputs }),
   };
+}
+
+/**
+ * Read one declared DOWNSTREAM INPUT: exactly `{ from, outcome }`, both
+ * non-empty strings.
+ *
+ * The grammar is closed here like everywhere else — an extra key inside an entry
+ * is `unknown-key`, so a document cannot smuggle a third member (a path, a
+ * version, a "latest" flag) past the front-end and have it silently dropped.
+ * Whether the reference can actually be PINNED is the compiler's question, not
+ * this one: this reader owns the shape, and an EMPTY list is a legal
+ * declaration of a node that consumes nothing.
+ */
+function readInput(
+  value: unknown,
+  path: string,
+  log: IssueLog,
+): InputDeclarationV3 | undefined {
+  const record = readRecord(value, path, log);
+  if (record === undefined) return undefined;
+  rejectUnknownKeys(record, INPUT_KEYS, path, log);
+
+  const from = readNonEmptyString(record.from, `${path}.from`, log);
+  const outcome = readNonEmptyString(record.outcome, `${path}.outcome`, log);
+  if (from === undefined || outcome === undefined) return undefined;
+  return { from, outcome };
 }
 
 /** Read one outcome declaration. */

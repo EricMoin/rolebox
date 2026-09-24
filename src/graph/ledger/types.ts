@@ -113,8 +113,20 @@ import type {
  * dispatch a previous process armed, and the next parallel dispatch would be
  * authorized past a ceiling that was already spent. Same rule, same answer:
  * refused by name, never widened, never migrated (plan §3.6).
+ *
+ * VERSION 7 MAKES THE ACCEPTED DATA'S PRESENCE EXPLICIT (P4 item 5 / D1). A
+ * version-6 file stores the accepted payload as the BARE value the submission
+ * carried, so a submission that supplied no `data` at all and one that supplied
+ * JSON `null` are byte-identical rows (`null`) — no reader can recover which
+ * of the two was accepted, and a downstream consumer is handed the same bytes
+ * for both. Version 7 stores the explicit envelope (`{"kind":"absent"}` /
+ * `{"kind":"value","value":…}`) and refuses a body that is not one of those two
+ * members. Reading a version-6 row as this build's accepted data would report
+ * an accepted `null` where the earlier build recorded an absence, which is
+ * exactly the distinction this version exists to preserve. Same rule, same
+ * answer: refused by name, never widened, never migrated (plan §3.6).
  */
-export const LEDGER_FORMAT_VERSION = 6;
+export const LEDGER_FORMAT_VERSION = 7;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 

@@ -67,7 +67,12 @@
  * runtime.
  */
 
-import type { GraphAcceptanceBatch } from "../store/records.ts";
+import {
+  ACCEPTED_DATA_MAX_BYTES,
+  type GraphAcceptanceBatch,
+} from "../store/records.ts";
+import { acceptedDataBytes } from "../store/json.ts";
+import type { AcceptedData, JsonValue } from "../domain/model.ts";
 import {
   readPlanExecutability,
   type CompiledNode,
@@ -193,6 +198,12 @@ export type SubmissionRefusalCode =
   | "undeclared-outcome"
   | "unrepresentable-proposal"
   | "validator-not-registered"
+  /**
+   * The data an ACCEPTED decision would retain is larger than the store's
+   * accepted-data ceiling. Refused before anything is written — an accepted
+   * value is never truncated into a smaller one.
+   */
+  | "oversized-accepted-data"
   | "stale-validation";
 
 /**
@@ -303,7 +314,13 @@ export type SubmissionValidation =
        * Present only for an ACCEPTED decision.
        */
       readonly retained?: {
-        readonly payload: unknown;
+        /**
+         * The accepted data, with its PRESENCE made explicit
+         * ({@link AcceptedData}): `absent` for a submission that carried no
+         * `data` at all, `value` for one that carried `null`, `{}`, `""` or
+         * anything else. The store persists exactly this envelope.
+         */
+        readonly payload: AcceptedData;
         readonly artifacts: readonly ArtifactEvidence[];
       };
     }
@@ -679,22 +696,66 @@ export function validateSubmission(
   const evidence = requirements.flatMap((entry) =>
     entry.outcome.kind === "pass" ? (entry.outcome.evidence ?? []) : [],
   );
+  if (!accepted) {
+    return {
+      kind: "validated",
+      decision,
+      binding: bindingOf(identity, planRevision, digest),
+    };
+  }
+
+  // WHAT AN ACCEPTANCE WOULD RETAIN IS CAPTURED HERE, at validation time, and
+  // its SIZE is judged before the commit is ever attempted: a payload beyond
+  // the store's accepted-data ceiling is a STRUCTURED REFUSAL that writes
+  // nothing at all, rather than an encoder exception thrown inside the
+  // committing transaction. The store's own encoder stays the second gate.
+  const payload = acceptedDataOf(normalized.data);
+  const payloadBytes = acceptedDataBytes(payload);
+  if (
+    payloadBytes !== undefined &&
+    payloadBytes > ACCEPTED_DATA_MAX_BYTES
+  ) {
+    return {
+      kind: "refused",
+      refusals: [
+        {
+          code: "oversized-accepted-data",
+          path: "$.data",
+          message:
+            `the accepted data of this submission is ${payloadBytes} bytes, beyond the ${ACCEPTED_DATA_MAX_BYTES}-byte ceiling this store keeps — ` +
+            "refused by name, and nothing was written: an accepted value is never truncated into a smaller, dishonest one",
+        },
+      ],
+    };
+  }
   return {
     kind: "validated",
     decision,
     binding: bindingOf(identity, planRevision, digest),
-    ...(accepted
-      ? {
-          retained: Object.freeze({
-            // A submission that carried no data is stored as `null`: an absent
-            // payload is a VALUE here, not an unrepresentable one, and the
-            // store's JSON gate refuses `undefined`.
-            payload: normalized.data ?? null,
-            artifacts: Object.freeze(evidence),
-          }),
-        }
-      : {}),
+    retained: Object.freeze({
+      payload,
+      artifacts: Object.freeze(evidence),
+    }),
   };
+}
+
+/**
+ * The explicit presence envelope for one submission's data (D1).
+ *
+ * `undefined` is the ONLY spelling of ABSENT: the proposal gate drops an absent
+ * `data` key, so nothing else can mean "carried no data". Every other value —
+ * `null`, `{}`, `""`, `0`, `false` — is data the submission carried, and
+ * collapsing the two into one stored byte sequence is what made an absent
+ * payload indistinguishable from an accepted `null`.
+ *
+ * The `JsonValue` assertion is discharged by the digest taken above:
+ * `proposalDigest` REFUSED this proposal already unless every reachable value
+ * is losslessly JSON (no `undefined`, function, symbol, BigInt, non-finite
+ * number, cycle or non-plain container), so no non-JSON value can reach here.
+ */
+function acceptedDataOf(data: unknown): AcceptedData {
+  if (data === undefined) return Object.freeze({ kind: "absent" as const });
+  return Object.freeze({ kind: "value" as const, value: data as JsonValue });
 }
 
 // ── Steps 5-6: the atomic commit ────────────────────────────────────────────

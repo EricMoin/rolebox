@@ -47,6 +47,25 @@ export type StoreEffectKey = {
 // ── Accepted results ────────────────────────────────────────────────────────
 
 /**
+ * The largest accepted-data body this store keeps, in UTF-8 bytes.
+ *
+ * It bounds the ENCODED `AcceptedData` envelope — the exact text the
+ * `payload` column holds — because that is what a reader decodes and what a
+ * downstream consumer is handed. An over-limit payload is REFUSED by name with
+ * its actual size and this ceiling, never truncated into a smaller, dishonest
+ * accepted value: the acceptance path turns it into a structured refusal before
+ * anything is written, and the store's own encoder is the second line of
+ * defence.
+ *
+ * DELIBERATELY BELOW `CONTRACT_DIGEST_MAX_BYTES` (1 MiB). The proposal digest
+ * refuses a canonical body beyond its own bound, so a ceiling at or above that
+ * bound would let the digest's truncation guard answer for a payload this rule
+ * is supposed to name — the accepted-data rule must own its own range and say
+ * what would actually be stored and delivered.
+ */
+export const ACCEPTED_DATA_MAX_BYTES = 262_144;
+
+/**
  * The accepted business result of one settled attempt, as a durable row.
  *
  * It IS the domain's {@link AcceptedResult} plus the acceptance time, so a
