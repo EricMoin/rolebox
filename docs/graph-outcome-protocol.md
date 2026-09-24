@@ -102,11 +102,37 @@ A destroyed in-process dsh worker cannot survive destruction of its host process
 
 The current OS sandbox adapter supports **macOS Seatbelt**. Pi runs the entire graph child under the sandbox. dsh restricts workers to outcome submission and a command tool that runs each command in a separate sandbox with a minimal environment. A host execution guard also blocks special transports such as `run_code`, and graph children use native tool presentation.
 
+dsh selects each graph application, store, artifact root, and worker command directory from the invoking session's absolute `header.cwd`. Applications are shared only within the same canonical workspace; the host process's launch directory is not a fallback. Loaded and newly created sessions restore their own workspace's graphs. Native worker presentation is installed during child creation, before the first prompt assembly, including on hosts configured for Code Mode.
+
+Worker commands may read the active developer toolchain selected by `xcode-select` (including Xcode's adjacent frameworks). Writes remain confined to the workspace and command scratch directory. `xcrun` stores its cache in that scratch directory so system tools such as `/usr/bin/git` can resolve their executables without writing to the host user's cache.
+
 Workers cannot read or modify the host state root, another worker's retained handoff, or sibling session records in protected directories. Their own declared input materialization is readable and immutable. Workspace work files remain writable. Permissions are enforced on subprocesses and verified against symlink and hardlink access, not inferred from directory modes.
 
 Other operating systems currently have no installed sandbox adapter and graph worker execution fails closed. dsh requires the host's execution-guard and scoped-presentation APIs. Host session persistence must remain outside the writable workspace or in its protected `.dsh` / `.rolebox` directories; exposing a separate transcript directory as ordinary workspace files is outside this supported isolation configuration.
 
 ## Query and verification
+
+### Parent notifications
+
+Pi and dsh wake the declaring session when a run completes or stops, or when a
+durable approval, input, or dispatch blocker needs attention. Intermediate Pi
+worker completions do not send separate dispatch notifications. Messages identify
+the graph and run and direct the parent to `graph_status` for the committed result;
+they contain no worker credentials or business payloads. A completed graph may
+still have external effects awaiting confirmation, which remain visible in status.
+
+Notification intents use the existing effect ledger and commit with the graph
+state. Delivery runs after commit, with a renewable lease for competing hosts,
+bounded exponential backoff, and persisted acknowledgement. Unsent effects are
+recovered on restart; resolved attention reminders are discarded before retry.
+Pi only delivers into the matching active session, so switching sessions cannot
+redirect another graph's notification. An unavailable target leaves delivery pending.
+
+Delivery is at least once: if the host accepts a message and the process exits
+before recording acknowledgement, recovery can repeat it. Each message carries a
+stable notification ID. Completed delivery is deduplicated per run/event; a new run
+gets its own notification. Notification failure never changes graph success or
+failure, and does not prevent retrying a terminal run.
 
 `graph_status` reads native run/attempt facts. Use `scope: "all"`, `format: "json"`, and `include_history: true` for full history, or `run_id` for a selected run. `graph_audit` includes the same `GraphView` alongside storage and recovery blockers. CLI/TUI/web map that read model to presentation only; no UI projection participates in recovery. An unreadable store is an error, never an empty successful inventory.
 
