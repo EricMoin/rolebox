@@ -64,6 +64,7 @@ import {
   readStoredDefinition,
 } from "../persistence/declared-record.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
+import type { CommitResult } from "../ledger/types.ts";
 import type {
   AcceptanceDecision,
   RequirementEvaluation,
@@ -153,11 +154,20 @@ export interface SubmitOutcomeDiagnostic {
 /**
  * What `graph_submit_outcome` reports to the model.
  *
- * `refusals` is NON-EMPTY exactly when nothing was written: the proposal was
- * refused before any decision, so the caller can repair one field and submit
- * again. `decision` is present for an accepted OR rejected submission, and a
- * rejected decision carries `requirements` — every gate's own answer — so the
- * caller learns which requirement failed without re-deriving anything.
+ * TWO DIFFERENT FACTS, NEVER CONFLATED: what this call EVALUATED, and what the
+ * LEDGER committed.
+ *
+ * `refusals` is NON-EMPTY exactly when nothing was written. That covers a
+ * proposal refused before any decision AND a NOT-COMMITTED verdict, which
+ * `verdict` names in the ledger's own vocabulary (`conflict`, `settled` or
+ * `controlled`): in both cases the caller can repair one field and submit
+ * again, or learn that the record already in the store stands unchanged.
+ *
+ * `decision` is present EXACTLY when a decision was COMMITTED — an accepted or
+ * rejected submission. `requirements` carries the gates' own answers: the
+ * committed decision's gates for an accepted or rejected submission, and this
+ * call's re-evaluation for a not-committed verdict, which the ledger did not
+ * commit and which is therefore evidence only, never a settlement.
  */
 export interface GraphSubmitOutcomeResult {
   readonly graph_id: string;
@@ -169,7 +179,11 @@ export interface GraphSubmitOutcomeResult {
   readonly attempt_id?: string;
   /** The submission id the runtime derived from the proposal digest. */
   readonly submission_id?: string;
-  /** Present when a decision was taken; absent on a refusal. */
+  /**
+   * Present EXACTLY when a decision was COMMITTED: an accepted or rejected
+   * submission. Absent on a refusal and on a not-committed verdict, where
+   * nothing was written and `refusals` says so.
+   */
   readonly decision?: "accepted" | "rejected";
   /**
    * The ledger's verdict. `replayed` means this exact submission was already
@@ -205,7 +219,11 @@ export interface GraphSubmitOutcomeResult {
     | "approval-blocked";
   /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
-  /** Every required gate's outcome, for an accepted or rejected decision. */
+  /**
+   * The gates' own outcomes: the committed decision's gates for an accepted or
+   * rejected submission, and this call's re-evaluation for a not-committed
+   * verdict, which the ledger did not commit.
+   */
   readonly requirements?: readonly SubmitRequirementOutcome[];
   /** Structured repair diagnostics; non-empty exactly when nothing was written. */
   readonly refusals: readonly SubmitOutcomeDiagnostic[];
@@ -847,23 +865,27 @@ function renderResult(
   };
   const requirements = requirementOutcomes(decision.requirements);
   if (result.kind === "not-committed") {
-    // A not-committed verdict is a `conflict`, a `settled` or a `controlled`
-    // (the runtime narrows it), and each carries the ledger's own reason
-    // verbatim.
-    const reason =
-      result.verdict.kind === "conflict" ||
-      result.verdict.kind === "settled" ||
-      result.verdict.kind === "controlled"
-        ? result.verdict.reason
-        : undefined;
+    // A NOT-COMMITTED VERDICT WROTE NOTHING, SO THE REPORT SAYS SO. The ledger
+    // narrowed this result to a `conflict`, a `settled` or a `controlled`:
+    // nothing was written for this submission — no receipt, no accepted event,
+    // no accepted result, no input binding and no dispatch effect — and the
+    // record already in the store stands unchanged.
+    //
+    // `decision` is deliberately ABSENT. It is this call's EVALUATION, not a
+    // committed decision, and rendering it beside an empty `refusals` made a
+    // submission refused as already settled read as a newly accepted one —
+    // contradicting this shape's own contract that `refusals` is non-empty
+    // exactly when nothing was written. The evaluation stays visible through
+    // `requirements`, which nothing persisted.
+    const verdict = result.verdict.kind;
+    const reason = notCommittedReason(result.verdict);
     return {
       ...base,
       ...identity,
-      decision: decision.kind,
-      verdict: result.verdict.kind,
+      verdict,
       ...(reason === undefined ? {} : { verdict_reason: reason }),
       requirements,
-      refusals: [],
+      refusals: [notCommittedRefusal(verdict, decision, reason)],
     };
   }
   if (result.kind === "rejected") {
@@ -937,6 +959,63 @@ function settledNodesOf(state: OutcomeGraphState): readonly string[] {
   return Object.freeze(
     state.nodes.filter((node) => node.status === "settled").map((node) => node.nodeId),
   );
+}
+
+/** The ledger's own reason for a NOT-COMMITTED verdict, when it carries one. */
+function notCommittedReason(verdict: CommitResult): string | undefined {
+  switch (verdict.kind) {
+    case "conflict":
+    case "settled":
+    case "controlled":
+      return verdict.reason;
+    default:
+      return undefined;
+  }
+}
+
+/** The refusal code a NOT-COMMITTED verdict renders as, in the ledger's vocabulary. */
+function notCommittedCode(verdict: CommitResult["kind"]): string {
+  switch (verdict) {
+    case "conflict":
+      return "submission-conflict";
+    case "settled":
+      return "submission-settled";
+    case "controlled":
+      return "submission-controlled";
+    default:
+      return "submission-not-committed";
+  }
+}
+
+/**
+ * The structured refusal one NOT-COMMITTED verdict renders as.
+ *
+ * `refusals` is non-empty exactly when nothing was written, and a not-committed
+ * verdict wrote nothing. The code names the ledger's own answer so a caller can
+ * branch on it exactly like any other refusal, and the message states what
+ * happened to THIS call's evaluation — it was not committed, and nothing about
+ * the record in the store moved.
+ */
+function notCommittedRefusal(
+  verdict: CommitResult["kind"],
+  decision: AcceptanceDecision,
+  reason: string | undefined,
+): SubmitOutcomeDiagnostic {
+  return {
+    code: notCommittedCode(verdict),
+    message:
+      "graph_submit_outcome: the submission for node " +
+      JSON.stringify(decision.nodeId) +
+      " and outcome " +
+      JSON.stringify(decision.outcomeId) +
+      " was NOT committed (ledger verdict " +
+      JSON.stringify(verdict) +
+      "). The ledger's own reason: " +
+      (reason ?? "no reason was recorded") +
+      ". This call's re-evaluation answered " +
+      decision.kind +
+      ", and the ledger did not commit that decision — nothing was written for it: no receipt, no accepted event, no accepted result, no input binding and no dispatch effect, so the record already in the store stands unchanged",
+  };
 }
 
 /** Map a runtime refusal onto a tool diagnostic verbatim. */

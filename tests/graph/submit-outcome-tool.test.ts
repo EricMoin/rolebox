@@ -27,7 +27,12 @@ import { engineStateDir } from "../../src/graph/persistence/engine-persistence.t
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { proposalDigest } from "../../src/graph/outcome/proposal.ts";
+import {
+  readOutcomeGraphState,
+  type OutcomeGraphState,
+} from "../../src/graph/outcome/graph-state.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
+import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
 import {
   createValidatorRegistry,
   type ValidationOutcome,
@@ -54,6 +59,27 @@ const LINEAR: GraphDeclarationV3 = {
   nodes: [
     { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
     { id: "ship", agent: "agent.ship", prompt: "Ship it.", outcomes: [{ id: "delivered" }] },
+  ],
+  edges: [{ from: "work", to: "ship", outcome: "done" }],
+};
+
+/**
+ * The same shape, but the consumer DECLARES work's accepted result as its
+ * input, so a submission that settles work also records an input binding —
+ * "nothing was written" is observable on the binding as well as on the events.
+ */
+const CHAIN: GraphDeclarationV3 = {
+  version: 3,
+  name: "tool.chain",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "ship",
+      agent: "agent.ship",
+      prompt: "Ship it.",
+      outcomes: [{ id: "delivered" }],
+      inputs: [{ from: "work", outcome: "done" }],
+    },
   ],
   edges: [{ from: "work", to: "ship", outcome: "done" }],
 };
@@ -148,6 +174,60 @@ async function sweep(
 /** Read the ledger of a workspace; the caller closes it. */
 function openLedger(dir: string): Promise<SqliteAcceptanceLedger> {
   return SqliteAcceptanceLedger.create(engineStateDir(dir));
+}
+
+/**
+ * The graph's PERSISTED outcome state, decoded by the runtime's own reader.
+ *
+ * A raw \`GraphStateRecord\` is the store's row; the node entries a consumer's
+ * binding lives in are in its decoded body, so the test reads it the same way
+ * the run path does rather than trusting a shallow field.
+ */
+function persistedState(
+  storeRoot: string,
+  ledger: SqliteAcceptanceLedger,
+  graphId: string,
+): OutcomeGraphState {
+  const reading = readStoredDefinition(storeRoot, graphId);
+  if (reading.kind !== "ok") {
+    throw new Error("fixture: graph " + graphId + " has no readable stored definition");
+  }
+  const record = ledger.readGraphState(graphId);
+  if (record === undefined) {
+    throw new Error("fixture: graph " + graphId + " has written no state snapshot");
+  }
+  return readOutcomeGraphState(record, reading.declared.plan);
+}
+
+/** One node's entry in a persisted state, failing when the state has none. */
+function nodeOf(state: OutcomeGraphState, nodeId: string) {
+  const found = state.nodes.find((node) => node.nodeId === nodeId);
+  if (found === undefined) {
+    throw new Error("fixture: no persisted state entry for node " + nodeId);
+  }
+  return found;
+}
+
+/** Everything a NOT-COMMITTED verdict must leave exactly as it was. */
+interface DurableFacts {
+  readonly events: readonly string[];
+  readonly effects: readonly string[];
+  readonly consumerInputs: readonly unknown[] | undefined;
+}
+
+/** Read the durable facts one submission could have moved. */
+function durableFacts(
+  storeRoot: string,
+  ledger: SqliteAcceptanceLedger,
+  graphId: string,
+): DurableFacts {
+  return {
+    events: ledger.acceptedEvents(graphId).map((event) => event.attemptId),
+    effects: ledger
+      .pendingEffects(graphId)
+      .map((effect) => effect.effectId + "@" + effect.status),
+    consumerInputs: nodeOf(persistedState(storeRoot, ledger, graphId), "ship").inputs,
+  };
 }
 
 /** A minimal canonical tool context, mirroring the registration test helper. */
@@ -507,6 +587,93 @@ describe("graph_submit_outcome — the vertical path", () => {
     } finally {
       afterAcceptance.close();
     }
+  });
+});
+
+// ── The report agrees with the durable state ────────────────────────────────
+
+describe("graph_submit_outcome — a not-committed verdict wrote nothing and says so", () => {
+  it("answers a replay with the persisted confirmation and reports a distinct terminal submission as refused", async () => {
+    const dir = makeTmpDir("submit-outcome-settled-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
+      credentialIsolation: testHostCredentialIsolation(engineStateDir(dir)),
+    });
+    const declared = ts.graph_declare({ declaration: CHAIN });
+    const graphId = declared.graph_id;
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
+    const workCredential = credentialOf(startRequests, "work#1");
+
+    // The first submission settles work#1 and arms ship#2 with a binding.
+    const first = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+      credential: workCredential,
+      data: { round: 1 },
+    });
+    expect(first.decision).toBe("accepted");
+    expect(first.verdict).toBe("committed");
+
+    const storeRoot = engineStateDir(dir);
+    const ledgerBefore = await openLedger(dir);
+    let factsBefore: DurableFacts;
+    try {
+      factsBefore = durableFacts(storeRoot, ledgerBefore, graphId);
+    } finally {
+      ledgerBefore.close();
+    }
+    // The consumer binding really exists, so "no binding was written" below is
+    // not a vacuous claim about a graph that binds nothing.
+    expect(factsBefore.consumerInputs?.length).toBe(1);
+
+    // THE IDENTICAL REPLAY: the PERSISTED confirmation is returned and nothing
+    // is added — same submission id, no refusal, no event.
+    const replay = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+      credential: workCredential,
+      data: { round: 1 },
+    });
+    expect(replay.decision).toBe("accepted");
+    expect(replay.verdict).toBe("replayed");
+    expect(replay.submission_id).toBe(first.submission_id);
+    expect(replay.refusals).toEqual([]);
+
+    // A DISTINCT TERMINAL SUBMISSION for the same settled attempt: the ledger
+    // commits nothing, and the report must not read as a newly accepted
+    // submission. The decision field is absent because no decision was
+    // committed, and the refusals list is non-empty because nothing was
+    // written.
+    const distinct = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+      credential: workCredential,
+      data: { round: 2 },
+    });
+    expect(distinct.verdict).toBe("settled");
+    expect(distinct.attempt_id).toBe("work#1");
+    expect(distinct.decision).toBeUndefined();
+    expect(distinct.refusals.length).toBeGreaterThan(0);
+    expect(distinct.refusals[0]?.code).toBe("submission-settled");
+    expect(distinct.verdict_reason).toBeDefined();
+
+    // NOTHING MOVED: no event, no effect, no rebinding of the consumer.
+    const ledgerAfter = await openLedger(dir);
+    try {
+      expect(durableFacts(storeRoot, ledgerAfter, graphId)).toEqual(factsBefore);
+    } finally {
+      ledgerAfter.close();
+    }
+    // Neither the replay nor the refusal launched anything: the only successor
+    // dispatch is the one the FIRST acceptance armed.
+    expect(toolRequests.map((request) => request.attemptId)).toEqual(["ship#2"]);
   });
 });
 
