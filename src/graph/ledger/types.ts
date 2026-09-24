@@ -1258,6 +1258,19 @@ export type EffectTransition =
  * state write that lands with the reducer joins the same transaction through
  * this surface.
  */
+/**
+ * One artifact revision an acceptance RETAINED, as a consumer sees it.
+ *
+ * Declared here, in the ledger port's own leaf, so a substrate can answer what
+ * it retained without the port importing the store's record types.
+ */
+export interface RetainedArtifactRef {
+  readonly ref: string;
+  readonly artifactId: string;
+  readonly digest: string;
+  readonly size: number;
+}
+
 export interface AcceptanceLedgerTx {
   /** Commit one batch atomically; see {@link CommitResult}. */
   commitAccepted(batch: AcceptanceBatch): CommitResult;
@@ -1288,6 +1301,19 @@ export interface AcceptanceLedgerTx {
   lookupReceipt(key: SubmissionKey): ReceiptRecord | undefined;
   /** Every accepted event of one graph, in accepted order. */
   acceptedEvents(graphId: string): readonly AcceptedEventRecord[];
+  /**
+   * The artifact revisions an acceptance RETAINED for one attempt, or
+   * `undefined` when it retained none (or the substrate keeps no accepted
+   * results at all).
+   *
+   * OPTIONAL: a substrate without accepted-result storage simply answers
+   * nothing, and a consumer that needs a revision REFUSES rather than falling
+   * back to the mutable path the reference names (P4 item 5 / A17).
+   */
+  retainedArtifacts?(
+    graphId: string,
+    attemptId: string,
+  ): readonly RetainedArtifactRef[] | undefined;
   /**
    * The UNSETTLED effects of ONE RUN — rows still `pending` or `started`.
    * Terminal effects are never listed; that stream IS the resume set.

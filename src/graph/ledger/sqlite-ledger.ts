@@ -235,6 +235,16 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
   }
 
   /**
+   * The artifact revisions one acceptance retained — a pure delegation, like
+   * every other read here. It answers the LEDGER PORT's shape rather than the
+   * store's record, so a consumer that only knows the port can still ask what a
+   * settled attempt retained (P4 item 5 / A17).
+   */
+  retainedArtifacts(graphId: string, attemptId: string) {
+    return this.store.readAcceptedResult(graphId, attemptId)?.artifacts;
+  }
+
+  /**
    * The bytes of one artifact revision an accepted result retained (P4 item 5 /
    * A17) — a pure delegation to the store, which resolves the recorded identity
    * and never the mutable path.

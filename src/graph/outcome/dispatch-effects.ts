@@ -93,6 +93,7 @@
  */
 
 import type { PendingEffectRecord } from "../ledger/types.ts";
+import type { ResolvedInput } from "./inputs.ts";
 
 // ── The dispatch request ────────────────────────────────────────────────────
 
@@ -113,6 +114,16 @@ export interface OutcomeDispatchTarget {
   readonly attemptId: string;
   readonly agent: string;
   readonly prompt: string;
+  /**
+   * The accepted upstream revisions this node consumes, resolved from what the
+   * acceptances RECORDED (§3.5, P4 item 5 / A17).
+   *
+   * Absent means the node declares no inputs. It NEVER means "resolve the path
+   * later": a declared input that cannot be resolved is a BLOCKED dispatch, and
+   * the runtime refuses to arm one rather than starting a node with a hole where
+   * its input should be.
+   */
+  readonly inputs?: readonly ResolvedInput[];
 }
 
 /**
