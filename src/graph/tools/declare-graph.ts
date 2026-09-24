@@ -59,7 +59,10 @@ import {
   resolveDeclaredValidatorCapabilities,
   type DeclaredCapabilityIssue,
 } from "../compiler/capability-set.ts";
-import type { ValidatorRegistry } from "../outcome/validators.ts";
+import type {
+  AcceptanceCapabilitySet,
+  ValidatorRegistry,
+} from "../outcome/validators.ts";
 
 import {
   parseGraphDeclarationV3,
@@ -296,10 +299,17 @@ function refuseDraftPlan(
     ...unresolved.map((entry) => {
       const version =
         entry.version === undefined ? "any version" : `version ${entry.version}`;
-      return (
+      const head =
         `  - nodes.${entry.nodeId}: outcome "${entry.outcomeId}" requires validator ` +
-        `"${entry.validator}" (${version}), which no declared capability resolves to an exact installed version`
-      );
+        `"${entry.validator}" (${version})`;
+      // A22: an unresolved entry now has TWO possible owners. `reason` names a
+      // missing CONCRETE capability (the outcome's declared schema is not
+      // installed, or no trusted policy authorizes this exact mapping), while
+      // its absence is the identity-level problem the caller fixes with
+      // supported_validators. Rendering them apart keeps the guidance honest.
+      return entry.reason === undefined
+        ? `${head}, which no declared capability resolves to an exact installed version`
+        : `${head}, but ${entry.reason}`;
     }),
     ...unauthorizedCompletions.map((entry) => {
       const requested =
@@ -312,10 +322,13 @@ function refuseDraftPlan(
       );
     }),
   ];
+  const concrete = unresolved.some((entry) => entry.reason !== undefined);
   const guidance = [
     unresolved.length === 0
       ? undefined
-      : "Supply supported_validators covering each requirement at its exact version (or remove the requirement)",
+      : concrete
+        ? "have the HOST install the schema an outcome's data contract names, or authorize a trusted command for the exact (graph, node, outcome) mapping each command-exit requirement pins — a declaration resolves capabilities, it can never install one"
+        : "Supply supported_validators covering each requirement at its exact version (or remove the requirement)",
     unauthorizedCompletions.length === 0
       ? undefined
       : "have the HOST install the exact completion-policy revision each mapping requests (a declaration may REQUEST a policy; it can never authorize one)",
@@ -390,6 +403,20 @@ export interface BuildDeclaredOutcomeGraphInput {
    * argument can never substitute for host authorization.
    */
   readonly installedValidators?: ValidatorRegistry;
+  /**
+   * THE CONCRETE half of the host's acceptance capability (A22): the schemas the
+   * schema primitive registered and the exact command mappings a trusted policy
+   * authorized. It comes from the SAME assembly that built
+   * {@link installedValidators}, so the two cannot disagree about what this host
+   * can substantiate.
+   *
+   * OMITTED, only validator IDENTITIES are resolved — the pre-A22 behaviour,
+   * kept for the direct-embedding contract. The shipped compile entry always
+   * supplies it, so a declaration whose data contract names an uninstalled
+   * schema, or whose command-exit requirement has no authorized mapping, is a
+   * non-executable DRAFT and is refused before anything is dispatched.
+   */
+  readonly installedAcceptanceCapabilities?: AcceptanceCapabilitySet;
   /**
    * The caller's NARROWING assertion over {@link installedValidators}: each
    * entry must be substantiated by an installed registration, and the effective
@@ -484,6 +511,9 @@ export function buildDeclaredOutcomeGraph(
     ...(input.completionPolicies === undefined
       ? {}
       : { completionPolicies: input.completionPolicies }),
+    ...(input.installedAcceptanceCapabilities === undefined
+      ? {}
+      : { acceptanceCapabilities: input.installedAcceptanceCapabilities }),
   });
   if (!compiled.ok) throw refuseCompileErrors(compiled.errors);
   if (compiled.kind === "draft") {

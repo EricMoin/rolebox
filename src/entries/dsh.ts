@@ -1351,6 +1351,13 @@ export async function apply(
     // caller's supported_validators can only narrow what this process can
     // actually resolve and enforce at acceptance.
     outcomeValidators: shippedValidators,
+    // THE CONCRETE capability from the SAME assembly (A22): the schemas the
+    // schema primitive registered and the command mappings a trusted policy
+    // authorized. Compilation resolves a requirement's concrete identity
+    // against it, so a plan whose gates this host could never satisfy is a
+    // non-executable draft refused at declaration — not an "executable" plan
+    // that every submission fails.
+    outcomeAcceptanceCapabilities: capabilities.capabilities,
     // The HOST's completion-policy capability, never a tool argument: the same
     // registry the run path corroborates against (D6).
     completionPolicies: capabilities.completionPolicies,

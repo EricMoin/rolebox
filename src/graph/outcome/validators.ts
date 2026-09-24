@@ -237,6 +237,66 @@ export function createValidatorRegistry(
   });
 }
 
+// ── The concrete acceptance capability set (A22) ────────────────────────────
+
+/** One installed schema implementation's exact identity, as a data contract names it. */
+export interface SchemaCapabilityIdentity {
+  readonly schema: string;
+  readonly version: number;
+}
+
+/** One host-authorized command check's exact mapping identity. */
+export interface CommandMappingCapabilityIdentity {
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly outcome: string;
+}
+
+/**
+ * THE ONE HOST CAPABILITY DESCRIPTION compile and run both resolve against.
+ *
+ * `validators` is the installed registry's key list; `schemas` and
+ * `commandMappings` are the CONCRETE identities those installed validators can
+ * substantiate, derived from the very values their implementations close over.
+ * A compilation resolves a requirement's concrete identity here, so a plan can
+ * neither pin `schema@1` for a schema this host did not install nor require a
+ * command check for a mapping no trusted policy authorizes.
+ *
+ * There is deliberately NO second, hand-written compile-time capability list: a
+ * set that could drift from the installed registrations would let a plan be
+ * compiled against capabilities the run path cannot resolve.
+ */
+export interface AcceptanceCapabilitySet {
+  readonly validators: readonly ValidatorKey[];
+  readonly schemas: readonly SchemaCapabilityIdentity[];
+  readonly commandMappings: readonly CommandMappingCapabilityIdentity[];
+}
+
+/** Whether the host installed this EXACT schema identity (matching is identity, never ordering). */
+export function substantiatesSchema(
+  set: AcceptanceCapabilitySet,
+  contract: { readonly schema: string; readonly version?: number },
+): boolean {
+  if (!isPositiveSafeInteger(contract.version)) return false;
+  return set.schemas.some(
+    (identity) =>
+      identity.schema === contract.schema && identity.version === contract.version,
+  );
+}
+
+/** Whether a trusted policy authorizes a check for this EXACT graph/node/outcome mapping. */
+export function substantiatesCommandMapping(
+  set: AcceptanceCapabilitySet,
+  mapping: CommandMappingCapabilityIdentity,
+): boolean {
+  return set.commandMappings.some(
+    (identity) =>
+      identity.graphId === mapping.graphId &&
+      identity.nodeId === mapping.nodeId &&
+      identity.outcome === mapping.outcome,
+  );
+}
+
 // ── Built-in: artifact-reference validation ─────────────────────────────────
 
 /** The shipped artifact-reference validator's name. */

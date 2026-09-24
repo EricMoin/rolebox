@@ -61,6 +61,7 @@ import type { CredentialIsolationCapability } from "../outcome/credential-isolat
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import {
   createValidatorRegistry,
+  type AcceptanceCapabilitySet,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
 
@@ -267,6 +268,14 @@ export interface GraphToolSetDeps {
    * host and this toolset.
    */
   outcomeValidators?: ValidatorRegistry;
+  /**
+   * The concrete acceptance capability the SAME assembly produced (A22). The
+   * compile step resolves a requirement's schema identity and command mapping
+   * against it, so a plan whose gates this host could never satisfy is a
+   * non-executable draft refused at declaration rather than `executable` and
+   * refused at every submission.
+   */
+  outcomeAcceptanceCapabilities?: AcceptanceCapabilitySet;
   /**
    * Root every outcome evidence reference must resolve inside. Defaults to
    * `directory` (the same working directory graph dispatches use).
@@ -585,6 +594,12 @@ export class GraphToolSet {
       // what this process can check.
       installedValidators:
         this.deps.outcomeValidators ?? EMPTY_OUTCOME_VALIDATORS,
+      ...(this.deps.outcomeAcceptanceCapabilities === undefined
+        ? {}
+        : {
+            installedAcceptanceCapabilities:
+              this.deps.outcomeAcceptanceCapabilities,
+          }),
       ...(args.supported_validators === undefined
         ? {}
         : { supportedValidators: args.supported_validators }),

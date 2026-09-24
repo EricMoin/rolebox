@@ -97,6 +97,15 @@ import {
   type NodeDeclarationV3,
 } from "./declaration-v3.ts";
 import {
+  substantiatesCommandMapping,
+  substantiatesSchema,
+  type AcceptanceCapabilitySet,
+} from "../outcome/validators.ts";
+import {
+  COMMAND_EXIT_VALIDATOR_ID,
+  SCHEMA_VALIDATOR_ID,
+} from "../policy/acceptance-primitives.ts";
+import {
   decideCompletion,
   describeCompletionPolicy,
   resolveCompletionPolicy,
@@ -217,6 +226,28 @@ export interface CompileOptions {
    * carrying what is unresolved. It is never silently treated as executable.
    */
   readonly supportedValidators?: readonly SupportedValidatorV3[];
+  /**
+   * THE CONCRETE half of the host's acceptance capabilities (A22): the schemas
+   * this host actually installed and the command mappings a trusted policy
+   * actually authorizes.
+   *
+   * An installed validator IDENTITY is not an installed capability. Resolving
+   * only `{ id, version }` let a plan compile `executable` while the schema its
+   * outcome declared was not installed, or while no trusted command policy
+   * authorized a check for its `(graph, node, outcome)` — the gate then answered
+   * a fail-closed `indeterminate` at acceptance, so the plan could never settle
+   * and the operator learned it submission by submission instead of at
+   * declaration.
+   *
+   * This is the SAME description the run path holds (built once by
+   * `assembleHostCapabilities`), not a second compile-time list that could
+   * drift from it.
+   *
+   * OMITTED: no concrete capability is resolved, and the compile behaves exactly
+   * as before (identity resolution only). The shipped tool path always supplies
+   * one.
+   */
+  readonly acceptanceCapabilities?: AcceptanceCapabilitySet;
   /**
    * The HOST-INSTALLED completion-policy capability: the exact policy revisions
    * this process may authorize natural completion against (D6).
@@ -423,7 +454,16 @@ function compileDeclaration(
   const nodes: CompiledNode[] = [];
   for (const node of nodesById.values()) {
     nodes.push(
-      compileNode(node, options, log, snapshots, identities, unresolved, completion),
+      compileNode(
+        node,
+        declaration.name,
+        options,
+        log,
+        snapshots,
+        identities,
+        unresolved,
+        completion,
+      ),
     );
   }
   const compiledEdges = compileEdges(edges, nodesById, declaredOutcomes, log);
@@ -547,6 +587,7 @@ function indexNodes(
 /** Compile one node, reporting every defect at its own path. */
 function compileNode(
   node: NodeDeclarationV3,
+  graphId: string,
   options: CompileOptions | undefined,
   log: IssueLog,
   snapshots: Map<string, ContractContentSnapshot>,
@@ -555,7 +596,7 @@ function compileNode(
   policyContext: CompletionPolicyContext,
 ): CompiledNode {
   const base = nodePath(node.id);
-  const outcomes = compileOutcomes(node, options, log, unresolved);
+  const outcomes = compileOutcomes(node, graphId, options, log, unresolved);
 
   if (node.outcomes.length === 0) {
     log.errors.push(
@@ -647,6 +688,7 @@ function compileNode(
  */
 function compileOutcomes(
   node: NodeDeclarationV3,
+  graphId: string,
   options: CompileOptions | undefined,
   log: IssueLog,
   unresolved: CompiledUnresolvedRequirement[],
@@ -703,8 +745,10 @@ function compileOutcomes(
       acceptance: readAcceptance(
         raw.acceptance,
         path,
+        graphId,
         node.id,
         id,
+        data ?? undefined,
         options,
         log,
         unresolved,
@@ -726,6 +770,71 @@ function readOutcomeData(raw: unknown): CompiledOutcomeData | null {
 }
 
 /**
+ * WHY A PINNED VALIDATOR IDENTITY CAN STILL BE UNEXECUTABLE (A22).
+ *
+ * An installed identity is not an installed CAPABILITY. The schema primitive
+ * resolves the plan's declared data contract against the schemas this host
+ * actually registered, and the command primitive resolves the exact
+ * `(graph, node, outcome)` mapping against the commands a trusted policy
+ * authorized. Both answer a fail-closed `indeterminate` at acceptance, which is
+ * correct but arrives TOO LATE: before this check a plan whose gates could never
+ * pass still compiled `executable` and was refused submission by submission.
+ *
+ * Resolving the concrete identity here, from the SAME host capability
+ * description the run path resolves against, turns that into a non-executable
+ * draft — and a draft is refused at declaration, before dispatch.
+ */
+function missingConcreteCapability(
+  where: {
+    readonly validator: string;
+    readonly graphId: string;
+    readonly nodeId: string;
+    readonly outcomeId: string;
+    readonly data: CompiledOutcomeData | undefined;
+  },
+  capabilities: AcceptanceCapabilitySet | undefined,
+): string | undefined {
+  if (capabilities === undefined) return undefined;
+  if (where.validator === SCHEMA_VALIDATOR_ID) {
+    if (where.data === undefined) {
+      return "the outcome declares no data contract, so a schema requirement has nothing to check — an undeclared contract is not a passing one";
+    }
+    if (!substantiatesSchema(capabilities, where.data)) {
+      return (
+        "schema " +
+        JSON.stringify(where.data.schema) +
+        (where.data.version === undefined
+          ? " is declared without an exact version"
+          : "@" + String(where.data.version)) +
+        " is not installed in this host"
+      );
+    }
+    return undefined;
+  }
+  if (where.validator === COMMAND_EXIT_VALIDATOR_ID) {
+    if (
+      !substantiatesCommandMapping(capabilities, {
+        graphId: where.graphId,
+        nodeId: where.nodeId,
+        outcome: where.outcomeId,
+      })
+    ) {
+      return (
+        "no trusted command policy authorizes a check for (" +
+        where.graphId +
+        ", " +
+        where.nodeId +
+        ", " +
+        where.outcomeId +
+        ")"
+      );
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
  * Read an outcome's acceptance requirements, preserving their declared order
  * (they are an ordered gate sequence), and RESOLVE each one against the
  * installed capability set.
@@ -739,8 +848,10 @@ function readOutcomeData(raw: unknown): CompiledOutcomeData | null {
 function readAcceptance(
   raw: unknown,
   outcomePath: string,
+  graphId: string,
   nodeId: string,
   outcomeId: string,
+  data: CompiledOutcomeData | undefined,
   options: CompileOptions | undefined,
   log: IssueLog,
   unresolved: CompiledUnresolvedRequirement[],
@@ -786,7 +897,7 @@ function readAcceptance(
     }
     const resolution = resolveValidatorCapability(requirement, supported);
     switch (resolution.kind) {
-      case "resolved":
+      case "resolved": {
         // The EXACT resolved version is written back, whether the declaration
         // named it or the installed capability supplied it: the plan records
         // what was checked, and a bare requirement never means "any version".
@@ -794,7 +905,32 @@ function readAcceptance(
           validator: requirement.validator,
           version: resolution.version,
         });
+        // A22 — AN INSTALLED IDENTITY IS NOT AN INSTALLED CAPABILITY. Resolve
+        // the CONCRETE capability against the SAME host description the run
+        // path resolves against, and record an unresolved entry when it is
+        // absent: that entry is what makes the whole compilation a DRAFT, and a
+        // draft is refused at declaration, before anything can be dispatched.
+        const missing = missingConcreteCapability(
+          {
+            validator: requirement.validator,
+            graphId,
+            nodeId,
+            outcomeId,
+            data,
+          },
+          options?.acceptanceCapabilities,
+        );
+        if (missing !== undefined) {
+          unresolved.push({
+            nodeId,
+            outcomeId,
+            validator: requirement.validator,
+            version: resolution.version,
+            reason: missing,
+          });
+        }
         break;
+      }
       case "unpinned":
         log.errors.push(
           issue(

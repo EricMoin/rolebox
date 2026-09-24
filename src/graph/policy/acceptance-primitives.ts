@@ -64,6 +64,7 @@ import {
   createArtifactReferenceValidator,
   createValidatorRegistry,
   readArtifact,
+  type AcceptanceCapabilitySet,
   type ArtifactEvidence,
   type ValidationOutcome,
   type ValidatorImplementation,
@@ -1169,6 +1170,18 @@ export interface HostCapabilityAssembly {
   readonly commandPolicyIssues: readonly CommandPolicyIssue[];
   /** How many trusted commands were installed. */
   readonly commandBindings: number;
+  /**
+   * THE CONCRETE capabilities this assembly installed (A22): the schemas the
+   * schema primitive registered, and the exact command mappings a trusted policy
+   * authorized.
+   *
+   * Derived from the SAME values the validator implementations close over, in
+   * this one function — so the set a plan is compiled against cannot drift from
+   * the set acceptance resolves against. Compilation uses it to refuse a plan
+   * whose gates this host could never satisfy, instead of letting it compile
+   * `executable` and fail at every submission.
+   */
+  readonly capabilities: AcceptanceCapabilitySet;
   /** The validators this assembly installed, in registry order. */
   readonly validatorIds: readonly string[];
 }
@@ -1186,12 +1199,40 @@ export function assembleHostCapabilities(
 ): HostCapabilityAssembly {
   const loaded = loadGraphCompletionPolicies(options.env);
   const commandPolicy = readTrustedCommandPolicy(options.env[TRUSTED_COMMAND_POLICY_ENV]);
+  // THE VALUES BOTH SIDES ARE BUILT FROM, computed once. The validator
+  // implementations close over exactly these, and the concrete capability set
+  // below is derived from exactly these, so compile and run cannot disagree
+  // about what this host can substantiate (A22).
+  const schemas = REPOSITORY_SCHEMAS;
+  const commands = commandPolicy.bindings;
+  const validators = createShippedAcceptanceValidators({
+    artifactRoot: options.artifactRoot,
+    approvals: approvalEvidenceFromStoreRoot(options.storeRoot),
+    schemas,
+    commands,
+  });
   return Object.freeze({
-    validators: createShippedAcceptanceValidators({
-      artifactRoot: options.artifactRoot,
-      approvals: approvalEvidenceFromStoreRoot(options.storeRoot),
-      commands: commandPolicy.bindings,
-    }),
+    validators,
+    capabilities: Object.freeze({
+      validators: validators.keys,
+      schemas: Object.freeze(
+        schemas.map((registration) =>
+          Object.freeze({
+            schema: registration.schema,
+            version: registration.version,
+          }),
+        ),
+      ),
+      commandMappings: Object.freeze(
+        commands.map((binding) =>
+          Object.freeze({
+            graphId: binding.graphId,
+            nodeId: binding.nodeId,
+            outcome: binding.outcome,
+          }),
+        ),
+      ),
+    }) as AcceptanceCapabilitySet,
     completionPolicies: loaded.registry,
     authorizedCompletionPolicies: loaded.authorized,
     completionPolicyIssues: Object.freeze(
@@ -1199,7 +1240,10 @@ export function assembleHostCapabilities(
     ),
     commandPolicyIssues: commandPolicy.issues,
     commandBindings: commandPolicy.bindings.length,
-    validatorIds: SHIPPED_VALIDATOR_IDS,
+    // DERIVED FROM THE REGISTRY, never a parallel hand-written list: the log's
+    // "installed validators" claim now comes from the same keys acceptance
+    // resolves against, so a fifth registration cannot make it lie (G5).
+    validatorIds: Object.freeze(validators.keys.map((key) => key.id)),
   });
 }
 

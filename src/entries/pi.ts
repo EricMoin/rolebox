@@ -1249,6 +1249,8 @@ export default async function (pi: any): Promise<void> {
       // caller's supported_validators can only narrow what this process can
       // actually resolve and enforce at acceptance.
       outcomeValidators: shippedValidators,
+      // THE CONCRETE capability from the SAME assembly (A22) — see dsh.ts.
+      outcomeAcceptanceCapabilities: hostCapabilities.capabilities,
       // The HOST's completion-policy capability, never a tool argument: the
       // same registry the run path corroborates against (D6).
       completionPolicies: hostCapabilities.completionPolicies,

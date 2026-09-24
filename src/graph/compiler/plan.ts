@@ -301,6 +301,13 @@ export interface CompiledUnresolvedRequirement {
   readonly validator: string;
   /** The exact version the declaration named, when it named one. */
   readonly version?: number;
+  /**
+   * Why the requirement did not resolve, when the reason is NOT a missing
+   * validator identity but a missing CONCRETE capability: the declared data
+   * contract's schema is not installed, or no trusted command policy authorizes
+   * a check for this graph/node/outcome (A22). Diagnostic text; not a contract.
+   */
+  readonly reason?: string;
 }
 
 /**
