@@ -41,6 +41,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
 import type { NormalizedOutcomeProposal } from "./proposal.ts";
+import { artifactIdOf, putArtifact } from "../store/artifacts.ts";
 
 // ── Validator identity ──────────────────────────────────────────────────────
 
@@ -80,7 +81,19 @@ export function validatorKeysEqual(a: ValidatorKey, b: ValidatorKey): boolean {
  * from "the evidence could not be judged".
  */
 export type ValidationOutcome =
-  | { readonly kind: "pass" }
+  | {
+      readonly kind: "pass";
+      /**
+       * The artifacts this gate READ and digested, in evidence-reference order.
+       *
+       * This is the ONLY channel by which a validation's own reading reaches the
+       * acceptance transaction, and it deliberately carries the identity the
+       * bytes HASH to rather than a path: the acceptance retains those bytes
+       * under that identity, so what a downstream consumer receives is what the
+       * gate judged — not whatever the path holds by then (P4 item 5 / A17).
+       */
+      readonly evidence?: readonly ArtifactEvidence[];
+    }
   | { readonly kind: "fail"; readonly reason: string }
   | { readonly kind: "indeterminate"; readonly reason: string };
 
@@ -307,8 +320,13 @@ export const ARTIFACT_REFERENCE_VALIDATOR_VERSION = 1;
 
 /** What one evidence reference resolved to: the artifact as it was READ. */
 export interface ArtifactEvidence {
-  /** The reference exactly as the proposal declared it. */
+  /**
+   * The reference exactly as the proposal declared it. PROVENANCE: it is
+   * recorded for an operator and is NEVER resolved again by a consumer.
+   */
   readonly ref: string;
+  /** The content identity `sha256:<hex>` — what an accepted result names. */
+  readonly artifactId: string;
   /** SHA-256 hex of the bytes read from the artifact. */
   readonly digest: string;
   /** The byte length of those bytes. */
@@ -317,18 +335,41 @@ export interface ArtifactEvidence {
 
 /** The outcome of reading one evidence reference. */
 export type ArtifactRead =
-  | { readonly kind: "read"; readonly evidence: ArtifactEvidence }
+  | {
+      readonly kind: "read";
+      readonly evidence: ArtifactEvidence;
+      /**
+       * THE EXACT BYTES the digest above was taken over.
+       *
+       * They are returned rather than re-read by the caller on purpose: a second
+       * read is a different byte range, and retaining THOSE bytes under THIS
+       * digest would retain something the gate never judged — the very
+       * "validated A, stored B" hole this path exists to close.
+       */
+      readonly bytes: Buffer;
+    }
   | { readonly kind: "problem"; readonly reason: string };
 
 /** Options for {@link createArtifactReferenceValidator}. */
 export interface ArtifactReferenceValidatorOptions {
   /**
-   * Called once per artifact, in evidence-reference order, with the bytes that
-   * were actually read. This is where a digest/size record goes; without a
-   * recorder the validator still reads and digests every artifact, and a
-   * failure still names the artifact it concerns.
+   * Called once per artifact, in evidence-reference order, with the identity of
+   * the bytes that were actually read. This is where a digest/size record goes;
+   * without a recorder the validator still reads and digests every artifact, and
+   * a failure still names the artifact it concerns.
    */
   readonly onArtifact?: (evidence: ArtifactEvidence) => void;
+  /**
+   * The immutable artifact store to RETAIN the bytes in, when this host has one.
+   *
+   * RETAINING IS NOT OPTIONAL FOR THE PROPERTY THIS GATE IS FOR. Reading and
+   * digesting proves "at validation time this reference named these bytes"; only
+   * holding the bytes under their own digest lets a later consumer receive them
+   * after the path has changed. A host that configures no store still validates
+   * (a test, or an embedder with no durable root), and its acceptance simply
+   * carries no retained revision — which is a refusal, never a re-read.
+   */
+  readonly artifactStoreRoot?: string;
 }
 
 /**
@@ -350,6 +391,7 @@ export function createArtifactReferenceValidator(
   options: ArtifactReferenceValidatorOptions = {},
 ): ValidatorImplementation {
   const onArtifact = options.onArtifact;
+  const storeRoot = options.artifactStoreRoot;
   return (request: ValidatorRequest): ValidationOutcome => {
     const refs = request.proposal.evidenceRefs;
     if (refs.length === 0) {
@@ -360,13 +402,40 @@ export function createArtifactReferenceValidator(
       };
     }
     const problems: string[] = [];
+    const evidence: ArtifactEvidence[] = [];
     for (const ref of refs) {
       const read = readArtifact(request.artifactRoot, ref);
       if (read.kind === "problem") {
         problems.push(read.reason);
         continue;
       }
-      if (onArtifact !== undefined) onArtifact(read.evidence);
+      let retained = read.evidence;
+      if (storeRoot !== undefined) {
+        // RETAIN THE EXACT BYTES THIS GATE READ, BEFORE any acceptance
+        // transaction opens: a file write inside the transaction would break the
+        // one atomic boundary §3.1 requires, and the object must exist before
+        // the reference to it is committed. `read.bytes` IS the byte range the
+        // digest was taken over — never a second read of the path.
+        try {
+          const deposit = putArtifact(storeRoot, read.bytes);
+          retained = Object.freeze({
+            ...read.evidence,
+            artifactId: deposit.artifactId,
+            digest: deposit.digest,
+            size: deposit.size,
+          });
+        } catch (error) {
+          problems.push(
+            "artifact " +
+              JSON.stringify(ref) +
+              " could not be retained: " +
+              describeValue(error),
+          );
+          continue;
+        }
+      }
+      evidence.push(retained);
+      if (onArtifact !== undefined) onArtifact(retained);
     }
     if (problems.length > 0) {
       return {
@@ -376,7 +445,7 @@ export function createArtifactReferenceValidator(
           problems.join("; "),
       };
     }
-    return { kind: "pass" };
+    return { kind: "pass", evidence: Object.freeze(evidence) };
   };
 }
 
@@ -453,13 +522,16 @@ export function readArtifact(root: string, ref: string): ArtifactRead {
       reason: `evidence reference ${JSON.stringify(ref)} cannot be read (${errorText(error)})`,
     };
   }
+  const digest = createHash("sha256").update(bytes).digest("hex");
   return {
     kind: "read",
     evidence: {
       ref,
-      digest: createHash("sha256").update(bytes).digest("hex"),
+      artifactId: artifactIdOf(digest),
+      digest,
       size: bytes.length,
     },
+    bytes,
   };
 }
 

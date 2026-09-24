@@ -1068,6 +1068,13 @@ export interface ShippedAcceptanceValidatorOptions {
   readonly schemas?: readonly SchemaRegistration[];
   /** Commands this host authorizes. Default: none. */
   readonly commands?: readonly TrustedCommandBinding[];
+  /**
+   * The immutable artifact store the artifact primitive RETAINS validated bytes
+   * in (P4 item 5 / A17). Without it the gate still reads and digests, and an
+   * accepted result simply carries no retained revision — a refusal downstream,
+   * never a re-read of the mutable path.
+   */
+  readonly artifactStoreRoot?: string;
 }
 
 /**
@@ -1104,7 +1111,11 @@ export function createShippedAcceptanceValidators(
     {
       id: ARTIFACT_VALIDATOR_ID,
       version: ARTIFACT_VALIDATOR_VERSION,
-      implementation: createArtifactReferenceValidator(),
+      implementation: createArtifactReferenceValidator({
+        ...(options.artifactStoreRoot === undefined
+          ? {}
+          : { artifactStoreRoot: options.artifactStoreRoot }),
+      }),
       description:
         "reads every declared evidence reference inside the artifact root and digests the bytes actually read",
     },
@@ -1210,6 +1221,9 @@ export function assembleHostCapabilities(
     approvals: approvalEvidenceFromStoreRoot(options.storeRoot),
     schemas,
     commands,
+    // The retained-artifact store lives under the graph store root, beside the
+    // rows that name which revision was accepted.
+    artifactStoreRoot: options.storeRoot,
   });
   return Object.freeze({
     validators,
