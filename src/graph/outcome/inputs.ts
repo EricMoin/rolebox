@@ -26,7 +26,13 @@
  * - the accepted result must have RETAINED the artifact the consumer needs. The
  *   mutable path a reference once named is never read here: by dispatch time it
  *   may hold a different revision, and delivering that is the whole defect this
- *   chain exists to make impossible.
+ *   chain exists to make impossible;
+ * - an artifact is addressed by (PRODUCER, reference), never by a bare
+ *   reference. Two producers may each retain `report.txt` with different bytes,
+ *   so "the first entry that retained this ref" would make what a consumer
+ *   receives depend on list order. A producer with no entry, a producer that
+ *   retained nothing for the reference, and one address that names more than one
+ *   content identity are each a NAMED refusal instead.
  *
  * A blocked input is a BLOCKED DISPATCH, reported by name — never a node started
  * with a hole where its input should be.
@@ -158,26 +164,90 @@ export function assembleDownstreamInput(
 }
 
 /**
- * Read one resolved input's retained artifact BYTES.
+ * The address of one retained artifact: WHICH producer, and the reference it
+ * declared.
+ *
+ * Both halves are required, and a bare reference is deliberately not
+ * expressible: a reference alone does not identify a revision once two
+ * producers can retain the same one.
+ */
+export interface ResolvedArtifactAddress {
+  /** The node that produced the accepted result this artifact belongs to. */
+  readonly from: string;
+  /** The reference that producer's acceptance retained, exactly as declared. */
+  readonly ref: string;
+}
+
+/**
+ * Read one resolved input's retained artifact BYTES, addressed by
+ * (producer, reference).
  *
  * Kept beside the assembly so a consumer has exactly one way to reach the bytes:
  * the identity the acceptance recorded, never the reference's path. A missing or
  * tampered object is the store's own named problem, returned unchanged.
+ *
+ * TOTAL: the two ways an address can fail to name exactly one revision — no
+ * producer entry or no retained artifact for the reference, and the SAME address
+ * retained under two content identities — are named problems rather than a
+ * first-match answer, because a first match would let list order decide which
+ * revision a consumer receives.
  */
 export function readResolvedArtifact(
   entries: readonly ResolvedInput[],
-  ref: string,
+  address: ResolvedArtifactAddress,
   readById: (artifactId: string) => ArtifactObjectRead,
 ): ArtifactObjectRead {
+  let producerFound = false;
+  let retained = false;
+  let identity: string | undefined;
+  let conflictingIdentity: string | undefined;
   for (const entry of entries) {
-    const retained = entry.artifacts.find((artifact) => artifact.ref === ref);
-    if (retained !== undefined) return readById(retained.artifactId);
+    if (entry.from !== address.from) continue;
+    producerFound = true;
+    for (const artifact of entry.artifacts) {
+      if (artifact.ref !== address.ref) continue;
+      retained = true;
+      if (identity === undefined) {
+        identity = artifact.artifactId;
+      } else if (identity !== artifact.artifactId) {
+        conflictingIdentity = artifact.artifactId;
+      }
+    }
   }
-  return {
-    kind: "problem",
-    reason:
-      "no resolved input retained an artifact for reference " +
-      JSON.stringify(ref) +
-      " — a reference the acceptance did not retain is REFUSED, never resolved from the path",
-  };
+  if (!producerFound) {
+    return {
+      kind: "problem",
+      reason:
+        "no resolved input names producer " +
+        JSON.stringify(address.from) +
+        " — an artifact is addressed by (producer, reference), so a producer with no entry is refused rather than searched for the reference alone",
+    };
+  }
+  if (!retained || identity === undefined) {
+    return {
+      kind: "problem",
+      reason:
+        "producer " +
+        JSON.stringify(address.from) +
+        " retained no artifact for reference " +
+        JSON.stringify(address.ref) +
+        " — a reference the acceptance did not retain is REFUSED, never resolved from the path",
+    };
+  }
+  if (conflictingIdentity !== undefined) {
+    return {
+      kind: "problem",
+      reason:
+        "producer " +
+        JSON.stringify(address.from) +
+        " retained reference " +
+        JSON.stringify(address.ref) +
+        " under more than one content identity (" +
+        identity +
+        " and " +
+        conflictingIdentity +
+        ") — which revision a consumer would receive would depend on list order, so the ambiguous address is REFUSED rather than resolved by position",
+    };
+  }
+  return readById(identity);
 }
