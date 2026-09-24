@@ -11,7 +11,13 @@
  * - `manager.launch(input, parentContext)` starts one background task for the
  *   plan's agent, with the plan's own prompt plus the attempt handoff
  *   (`src/graph/host/delivery.ts`) — the one channel the bearer credential
- *   travels over;
+ *   travels over — and, when the attempt consumes upstream results, the INPUT
+ *   VIEW the host materialized (D7): the producing node, its accepted outcome,
+ *   the producing attempt, the accepted data and the paths of the real files the
+ *   worker reads. The view arrives WITH the delivery, materialized by the host
+ *   adapter before this seam is called, so this adapter never reads a store, a
+ *   credential or a policy to build a prompt and a refused view never reaches
+ *   it at all (the host raises before launching anything);
  * - the task's terminal transition is observed through
  *   `manager.onTaskTerminated`: `completed` is a natural completion, every
  *   other status is REPORTED as a failed attempt (no completion to fabricate);
@@ -85,6 +91,7 @@ import type {
 import type { DispatchInput, DispatchTask } from "../../../dispatch/types.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
 import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
+import type { DeliveredInputView } from "../../../graph/host/input-view.ts";
 import type { HostExecutionIdentity } from "../../../graph/host/execution-index.ts";
 import type {
   HostCompletionWatchPort,
@@ -505,6 +512,7 @@ export class PiOutcomeDelivery {
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
     invocation?: HostDispatchInvocation,
+    inputView?: DeliveredInputView,
   ): void => {
     const parentSessionId = invocation?.sessionId;
     if (parentSessionId === undefined || parentSessionId.length === 0) {
@@ -517,7 +525,10 @@ export class PiOutcomeDelivery {
     const launched = this.opts.manager.launch(
       {
         subagent: request.agent,
-        prompt: buildAttemptDeliveryPrompt(request),
+        // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff
+        // and the input view the host materialized beside it. The view's file
+        // paths are the worker's own copies, verified before this call.
+        prompt: buildAttemptDeliveryPrompt(request, inputView),
         run_in_background: true,
         // THE STABLE IDEMPOTENCY KEY IS THE TASK DESCRIPTION (P2 item 5). The
         // manager persists a task's description with its record and recovers it

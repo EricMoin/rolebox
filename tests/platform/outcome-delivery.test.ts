@@ -17,6 +17,10 @@
  *     way, before any start request is composed;
  *   - a started run's prompt carries the plan prompt plus the attempt handoff
  *     (identity + credential) and never a second copy;
+ *   - the INPUT VIEW a dispatch was armed with (D7) reaches the worker through
+ *     the SAME prompt: the producing node, its outcome, the producing attempt,
+ *     the accepted data with its presence intact, and the paths of the files the
+ *     host materialized — which the "worker" here opens and reads;
  *   - a terminal observation becomes `completed` only for the platform's own
  *     completion status; every other status is REPORTED as failed and settles
  *     nothing;
@@ -24,6 +28,11 @@
  *   - a TWO-NODE graph driven through the real Pi delivery and the real host
  *     layer reaches `complete`, with the successor launched under the invoking
  *     session the delivery was handed.
+ *
+ * STRENGTH: adapter-level. Both delivery seams are the real ones and the input
+ * view is the one the host module materializes, but neither platform SDK runs
+ * here — a runtime double starts the task or the run — so nothing in this file
+ * is real-host evidence.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -40,6 +49,12 @@ import type {
   OutcomeDispatchEffectKey,
   OutcomeDispatchRequest,
 } from "../../src/graph/outcome/dispatch-effects.ts";
+import {
+  materializeInputView,
+  type DeliveredInputView,
+} from "../../src/graph/host/input-view.ts";
+import type { ResolvedInput } from "../../src/graph/outcome/inputs.ts";
+import { artifactObjectPath, digestOf, putArtifact } from "../../src/graph/store/artifacts.ts";
 import type { DispatchInput, DispatchTask } from "../../src/dispatch/types.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import {
@@ -386,6 +401,178 @@ describe("PiOutcomeDelivery", () => {
     await flush();
     terminate("task-1", "error");
     expect(settled).toEqual(["failed"]);
+  });
+});
+
+// ── The input view the worker is handed (D7) ────────────────────────────────
+//
+// WHAT THIS PROVES THAT A UNIT TEST CANNOT. The host materializes a real view
+// (`src/graph/host/input-view.ts`); these cases hand that exact view to each
+// PLATFORM ADAPTER and read the prompt the platform was actually asked to start
+// — then open the file the prompt names. A field on a request is not delivery;
+// a file the worker can read at the path its prompt carries is.
+
+const VIEW_REF = "evidence/report.json";
+const VIEW_BYTES = Buffer.from('{"report":"A"}', "utf-8");
+
+interface MaterializedFixture {
+  readonly view: DeliveredInputView;
+  readonly artifactId: string;
+  readonly contentStore: string;
+}
+
+/**
+ * One real view over one real content store: the retained revision deposited,
+ * then materialized for a consumer attempt exactly as the host adapter does.
+ */
+function materializedView(
+  dir: string,
+  options: { readonly attemptId: string; readonly payload: ResolvedInput["payload"] },
+): MaterializedFixture {
+  const contentStore = join(dir, "host-store");
+  const deposit = putArtifact(contentStore, VIEW_BYTES);
+  if (deposit.kind !== "deposited") throw new Error("fixture: " + deposit.reason);
+  const materialized = materializeInputView({
+    contentStoreRoot: contentStore,
+    deliveryRoot: join(contentStore, "input-deliveries"),
+    graphId: "graph.delivery",
+    attemptId: options.attemptId,
+    inputs: [
+      {
+        from: "work",
+        outcome: "done",
+        attemptId: "work#1",
+        payload: options.payload,
+        artifacts: [
+          {
+            ref: VIEW_REF,
+            artifactId: deposit.artifactId,
+            digest: deposit.digest,
+            size: deposit.size,
+          },
+        ],
+      },
+    ],
+  });
+  if (materialized.kind !== "ready") {
+    throw new Error(
+      "fixture: the view was refused: " +
+        materialized.refusals.map((refusal) => refusal.code).join(","),
+    );
+  }
+  return { view: materialized.view, artifactId: deposit.artifactId, contentStore };
+}
+
+/** The delivered path one rendered prompt names for {@link VIEW_REF}. */
+function deliveredPathIn(prompt: string): string {
+  const marker = VIEW_REF + " -> ";
+  const at = prompt.indexOf(marker);
+  if (at === -1) {
+    throw new Error("the prompt names no delivered file for " + VIEW_REF);
+  }
+  const rest = prompt.slice(at + marker.length);
+  const end = rest.indexOf(" ");
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/**
+ * The request of the node that CONSUMES the view: the attempt id is the
+ * consumer's, which is what the host materialized the directory for.
+ */
+function reviewRequest(attemptId: string): OutcomeDispatchRequest {
+  return { ...request(), nodeId: "review", attemptId };
+}
+
+describe("the input view reaches the worker each adapter starts (D7)", () => {
+  it("Pi: the launched task's prompt names the delivered file, and it reads back", async () => {
+    const dir = makeTmpDir("pi-input-view-");
+    const fixture = materializedView(dir, {
+      attemptId: "review#2",
+      payload: { kind: "value", value: { report: "A" } },
+    });
+    const { port, launches } = makePiPort();
+    const delivery = new PiOutcomeDelivery({
+      manager: port,
+      directory: dir,
+      onSettled: () => {},
+      onStartFailed: () => {},
+    });
+
+    delivery.deliver(reviewRequest("review#2"), effect(), INVOCATION, fixture.view);
+    await flush();
+
+    const prompt = launches[0]?.prompt ?? "";
+    // THE HANDOFF STILL TRAVELS.
+    expect(prompt).toContain("Do the work.");
+    expect(prompt).toContain(CREDENTIAL);
+    // THE INPUT: the producer, its outcome, the producing attempt and the
+    // accepted data, with its presence intact.
+    expect(prompt).toContain('from "work", outcome "done", attempt "work#1"');
+    expect(prompt).toContain('accepted data: {"report":"A"}');
+    // AND THE FILE THE WORKER OPENS.
+    const path = deliveredPathIn(prompt);
+    expect(path.startsWith(fixture.view.directory)).toBe(true);
+    expect(readFileSync(path).equals(VIEW_BYTES)).toBe(true);
+    expect(digestOf(readFileSync(path))).toBe(
+      fixture.view.entries[0]?.artifacts[0]?.digest ?? "",
+    );
+    // THE WORKER IS POINTED AT ITS OWN COPY, NEVER AT THE STORE OBJECT.
+    expect(prompt).not.toContain(artifactObjectPath(fixture.contentStore, fixture.artifactId));
+    expect(prompt).not.toContain(join(fixture.contentStore, "artifacts"));
+  });
+
+  it("dsh: the composed run's prompt names the delivered file, and it reads back", async () => {
+    const dir = makeTmpDir("dsh-input-view-");
+    const fixture = materializedView(dir, {
+      attemptId: "review#2",
+      payload: { kind: "value", value: null },
+    });
+    const { runtime, starts } = makeDshRuntime();
+    const delivery = new DshOutcomeDelivery({
+      subagents: runtime,
+      parentResolver: () => ({ id: "parent" }),
+      onSettled: () => {},
+      onStartFailed: () => {},
+    });
+
+    delivery.deliver(reviewRequest("review#2"), effect(), INVOCATION, fixture.view);
+    await flush();
+
+    expect(starts).toHaveLength(1);
+    const prompt = starts[0]?.request.prompt.map((block) => block.text).join("\n") ?? "";
+    expect(prompt).toContain(CREDENTIAL);
+    expect(prompt).toContain('from "work", outcome "done", attempt "work#1"');
+    // AN ACCEPTED `null` IS NOT AN ABSENT PAYLOAD (D1).
+    expect(prompt).toContain("accepted data: null");
+    expect(prompt).not.toContain("carried no data at all");
+    const path = deliveredPathIn(prompt);
+    expect(readFileSync(path).equals(VIEW_BYTES)).toBe(true);
+    expect(prompt).not.toContain(artifactObjectPath(fixture.contentStore, fixture.artifactId));
+  });
+
+  it("renders an ABSENT payload as absent, never as an empty value (D1)", async () => {
+    const dir = makeTmpDir("pi-input-absent-");
+    const fixture = materializedView(dir, {
+      attemptId: "review#3",
+      payload: { kind: "absent" },
+    });
+    const { port, launches } = makePiPort();
+    const delivery = new PiOutcomeDelivery({
+      manager: port,
+      directory: dir,
+      onSettled: () => {},
+      onStartFailed: () => {},
+    });
+
+    delivery.deliver(reviewRequest("review#3"), effect(), INVOCATION, fixture.view);
+    await flush();
+
+    const prompt = launches[0]?.prompt ?? "";
+    expect(prompt).toContain(
+      "accepted data: none (the producing submission carried no data at all)",
+    );
+    // The file is still delivered: an absent payload is not an absent input.
+    expect(readFileSync(deliveredPathIn(prompt)).equals(VIEW_BYTES)).toBe(true);
   });
 });
 

@@ -23,7 +23,13 @@
  *   attributed to whatever call happens to be running;
  * - the worker's prompt is the plan's own prompt plus the attempt handoff
  *   (`src/graph/host/delivery.ts`), which is the ONE channel the bearer
- *   credential travels over;
+ *   credential travels over — and, when the attempt consumes upstream results,
+ *   the INPUT VIEW the host materialized (D7): the producing node, its accepted
+ *   outcome, the producing attempt, the accepted data and the paths of the real
+ *   files the worker reads. The view arrives WITH the delivery, materialized by
+ *   the host adapter before this seam is called, so this adapter never reads a
+ *   store, a credential or a policy to build a prompt and a refused view never
+ *   reaches it at all (the host raises before starting anything);
  * - the run's `result` promise is observed and translated into a completion
  *   report the host hands to the completion bridge: `completed` is a natural
  *   completion, anything else (aborted / error / max-tokens / refusal / a
@@ -109,6 +115,7 @@ import type {
   HostExecutionObservationPort,
 } from "../../../graph/host/outcome-host.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
+import type { DeliveredInputView } from "../../../graph/host/input-view.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 
@@ -597,6 +604,7 @@ export class DshOutcomeDelivery {
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
     invocation?: HostDispatchInvocation,
+    inputView?: DeliveredInputView,
   ): void => {
     const agent = request.agent;
     if (this.opts.subagents.getProvider) {
@@ -639,7 +647,10 @@ export class DshOutcomeDelivery {
       // it either: at-most-once remains the host's fenced create right, and the
       // label is the correlation, not the fence.)
       label: dispatchIdempotencyKeyOf(effect),
-      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request) }],
+      // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff
+      // and the input view the host materialized beside it. The view's file
+      // paths are the worker's own copies, verified before this call.
+      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request, inputView) }],
       parent,
       signal: controller.signal,
       sessionId: parentSessionId,
