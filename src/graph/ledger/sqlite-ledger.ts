@@ -224,6 +224,25 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
 
   private readonly store: GraphStore;
 
+  /**
+   * The accepted result of one settled attempt — a pure delegation to the store,
+   * like every other read here. The ingress needs it (and
+   * {@link readAcceptedArtifact} below) to prove that the artifact revisions a
+   * validation READ are the ones the acceptance retained.
+   */
+  readAcceptedResult(graphId: string, attemptId: string) {
+    return this.store.readAcceptedResult(graphId, attemptId);
+  }
+
+  /**
+   * The bytes of one artifact revision an accepted result retained (P4 item 5 /
+   * A17) — a pure delegation to the store, which resolves the recorded identity
+   * and never the mutable path.
+   */
+  readAcceptedArtifact(graphId: string, attemptId: string, ref: string) {
+    return this.store.readAcceptedArtifact(graphId, attemptId, ref);
+  }
+
   private constructor(store: GraphStore) {
     this.store = store;
     this.runs = store.runs;
