@@ -175,6 +175,7 @@ import {
   readInputRefusals as readPersistedInputRefusals,
   readResolvedInputs,
   type AcceptedResultReading,
+  type DownstreamInput,
   type DownstreamInputRefusal,
   type ResolvedInput,
 } from "./inputs.ts";
@@ -2932,11 +2933,22 @@ function joinSatisfiedFor(
  * members — each one's required arrival belongs to another member being re-armed
  * beside it — and the cycle waits for an arrival that is not itself superseded,
  * the same WAIT any unsatisfied join gets (see {@link joinSatisfiedFor}).
+ *
+ * The join is not the only way a candidate fails to start. One this fixpoint arms
+ * can still be left BLOCKED by its own declared input, and a blocked candidate
+ * keeps the settled entry it had, so it is NOT in flight after all: its arrival
+ * still counts and it is never dispatched. `notInFlight` names those candidates.
+ * They stay in the candidate set — their join is still evaluated, and the caller
+ * assembles them so the named refusal can be recorded (D6) — but they are never
+ * suppressed, so a convergence node that depends on the settled state they keep
+ * is not dropped from the arm set. The caller re-derives the fixpoint as that set
+ * grows, until it stops changing ({@link advanceOutcomeGraph}).
  */
 function resolveArmSet(
   plan: CompiledPlan,
   nodes: readonly OutcomeNodeState[],
   armable: readonly CompiledNode[],
+  notInFlight?: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const entries = new Map<string, OutcomeNodeState>();
   for (const entry of nodes) entries.set(entry.nodeId, entry);
@@ -2950,7 +2962,11 @@ function resolveArmSet(
   for (let round = 0; round <= armable.length; round += 1) {
     const suppressed = new Set<string>();
     for (const node of armable) {
-      if (!notArmed.has(node.id)) suppressed.add(node.id);
+      if (notArmed.has(node.id)) continue;
+      // A candidate whose dispatch is blocked is NOT in flight, so the arm set must
+      // not rest on the fiction that its previous answer was superseded.
+      if (notInFlight?.has(node.id) === true) continue;
+      suppressed.add(node.id);
     }
     const arrivals = materializeArrivals(plan, nodes, suppressed);
     let grew = false;
@@ -3726,23 +3742,63 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     const armable = candidates.filter(
       (candidate) => nodes[candidate.index].status !== "dispatched",
     );
-    const armSet = resolveArmSet(
-      plan,
-      nodes,
-      armable.map((candidate) => candidate.node),
-    );
-    for (const candidate of candidates) {
-      if (!armSet.has(candidate.node.id)) continue;
-      // A BLOCKED INPUT IS A BLOCKED DISPATCH (D6). The refusal is written onto
-      // the node's own entry — where it can be queried, one named code per input
-      // — and NOTHING is armed for it: no attempt, no dispatch intent and no
-      // effect. A node is never started with a hole where its input should be,
-      // and it is never reported as merely waiting either.
-      const assembled = assembleDownstreamInput(
-        candidate.node.inputs ?? [],
-        settledAttemptOf,
-        readAccepted,
+    // A BLOCKED INPUT IS A BLOCKED DISPATCH (D6), AND A CANDIDATE WHOSE DISPATCH IS
+    // BLOCKED IS NOT IN FLIGHT. The arm set is the fixpoint that suppresses exactly
+    // the candidates it arms, so a candidate it suppressed and then left blocked by
+    // its own declared input is a PREDICTION THAT DID NOT HOLD: the node keeps the
+    // settled entry it had, and with it the arrival that entry contributes to its
+    // successors. `blocked` names those candidates for the next derivation — they
+    // are never suppressed again, so the arm set agrees with the dispatches this
+    // advance actually produces, while they stay in the candidate set so their named
+    // refusal is still assembled and recorded. The set only grows, and a candidate
+    // blocked by an unsettled producer stays blocked as more candidates are armed,
+    // so the loop reaches a fixpoint in at most one pass per candidate. A candidate
+    // is assembled against the entries as they will stand when its turn comes: one
+    // armed earlier in this same advance has already been re-entered, so it is NOT a
+    // settled producer for a later candidate.
+    let decisions: {
+      candidate: (typeof candidates)[number];
+      assembled: DownstreamInput;
+    }[] = [];
+    const blocked = new Set<string>();
+    for (;;) {
+      const armSet = resolveArmSet(
+        plan,
+        nodes,
+        armable.map((candidate) => candidate.node),
+        blocked,
       );
+      const next: typeof decisions = [];
+      const reentered = new Set<string>();
+      let grew = false;
+      for (const candidate of candidates) {
+        if (!armSet.has(candidate.node.id)) continue;
+        // A BLOCKED INPUT IS A BLOCKED DISPATCH (D6). The refusal is written onto
+        // the node's own entry — where it can be queried, one named code per input
+        // — and NOTHING is armed for it: no attempt, no dispatch intent and no
+        // effect. A node is never started with a hole where its input should be,
+        // and it is never reported as merely waiting either.
+        const assembled = assembleDownstreamInput(
+          candidate.node.inputs ?? [],
+          (nodeId) => (reentered.has(nodeId) ? undefined : settledAttemptOf(nodeId)),
+          readAccepted,
+        );
+        next.push({ candidate, assembled });
+        if (assembled.kind === "blocked") {
+          if (!blocked.has(candidate.node.id)) {
+            blocked.add(candidate.node.id);
+            grew = true;
+          }
+          continue;
+        }
+        // The next candidate in plan order sees this one as re-entered, exactly
+        // as the state this advance commits will carry it.
+        reentered.add(candidate.node.id);
+      }
+      decisions = next;
+      if (!grew) break;
+    }
+    for (const { candidate, assembled } of decisions) {
       if (assembled.kind === "blocked") {
         const blockedEntry = nodes[candidate.index];
         if (blockedEntry === undefined) continue;
