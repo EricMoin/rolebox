@@ -1,4 +1,5 @@
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
+import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
@@ -54,6 +55,11 @@ import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, type DshGraph
  */
 
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import type { CanonicalToolContext, CanonicalToolDef } from "../platform/types.ts";
+import { createOutcomeGraphTools } from "../graph/tools/index.ts";
+import { createGraphToolSet } from "../graph/tools/graph-tools.ts";
 import { z } from "zod";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import type {
@@ -1164,273 +1170,315 @@ export async function apply(
   // The store root is deliberately a host directory beside the workspace state
   // (workers are not handed its path): see `credential-vault.ts` for what that
   // can and cannot isolate on a same-account platform.
-  let outcomeHost: OutcomeHost | undefined;
-  let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary>;
-  const outcomeDelivery = new DshOutcomeDelivery({
-    subscribeExecutionEvents: (id, listener) => ctx.on("session/event", (...args: unknown[]) => {
-      const session = args[0] as { id: string; events: import("../platform/adapters/dsh/session.ts").DshSessionEventLike[] };
-      const event = args[1] as { type: string };
-      if (session.id === id && event.type === "turn/end") listener(session.events);
-    }) ?? (() => { }),
-    readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
-    beforeStart: (label) => workerBoundary.admit(label),
-    workerTools: DSH_GRAPH_WORKER_TOOLS,
-    subagents: ctx.subagents,
-    parentResolver: (sid) => agentRegistry?.get(sid),
-    onStartFailed: (_request, effect, reason) => {
-      outcomeHost?.reportDeliveryFailure(effect, reason);
-    },
-    onStarted: (_request, effect, execution) => {
-      // The platform named the subagent run it created: the host records the
-      // FACT, which is what lets a restart reconcile the effect instead of
-      // reporting it as an unknown create.
-      outcomeHost?.confirmExecution(effect, execution);
-    },
-    onSettled: (settlement) => {
-      const { request } = settlement;
-      outcomeHost?.recordExecutionObservation(request.graphId, request.attemptId);
-      if (settlement.kind === "failed") {
-        void outcomeHost?.failObservedExecution(request.graphId, request.nodeId, request.attemptId)
-          .catch((error: unknown) => log.warn("Graph failure settlement failed", { error: error instanceof Error ? error.message : String(error) }));
-        log.warn("dsh outcome dispatch: attempt did not complete", {
-          graphId: request.graphId,
-          nodeId: request.nodeId,
-          attemptId: request.attemptId,
-          reason: settlement.reason,
-        });
-        return;
+  const graphRuntimes = new Map<string, ReturnType<typeof openGraphRuntime>>();
+  const workerBoundary = installDshGraphWorkerBoundary({
+    workerPrincipalOf: (sessionId) => {
+      for (const runtime of graphRuntimes.values()) {
+        const principal = runtime.host.workerPrincipalOf(sessionId);
+        if (principal) return principal;
       }
-      void outcomeHost
-        ?.complete(request.graphId, request.attemptId)
-        .then((report) => {
-          // Any settlement moves the graph state the console renders.
-          notifyRoleboxChanged("graph");
-          log.debug("dsh outcome completion settled", {
-            graphId: request.graphId,
-            attemptId: request.attemptId,
-            kind: report.kind,
-          });
-        })
-        .catch((err: unknown) => {
-          log.warn("dsh outcome completion failed", {
-            graphId: request.graphId,
-            attemptId: request.attemptId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
+      return undefined;
     },
-  });
-  // THE HOST'S OWN STATE ROOT IS NOT THE WORKSPACE. A dispatched worker runs
-  // with the workspace as its root, so keeping the store under
-  // `<workspace>/.rolebox/state` handed every worker the directory. This is the
-  // one path-shaped part of the boundary — `credential-vault.ts` states why it
-  // is not isolation by itself and what the vault does NOT put on disk.
-  const outcomeStoreRoot = graphStoreRoot(getDataDir(), process.cwd());
-  // THE SHIPPED CAPABILITY SET IS BUILT ONCE AND SHARED (P4 items 1, 3, 4).
-  //
-  // ONE validator registry and ONE completion-policy registry are handed to the
-  // HOST (the run path) and to the TOOLSET (graph_declare's compile step), so
-  // compile and run resolve against the same source of truth: a plan can only
-  // pin a registration this process will look up at acceptance, and a natural
-  // mapping can only be authorized by a policy revision this process installed.
-  //
-  // WHY THE ENVIRONMENT IS THE AUTHORIZATION SURFACE. Completion policies are
-  // declarations in reviewed source; the operator who launches the host
-  // authorizes exact `id@revision` pairs through
-  // `ROLEBOX_GRAPH_COMPLETION_POLICIES` (see
-  // `src/graph/policy/declarations.ts`, which documents the JSON document).
-  // Nothing in a graph declaration, a workspace file or a worker submission can
-  // add an authorization: the loader recomputes each digest from the reviewed
-  // or operator-declared body and installs nothing else. With no configuration
-  // the registry is EMPTY and a natural mapping that requests an `id@revision`
-  // is refused as `completion-policy-unknown` (the id is not installed);
-  // `completion-policy-unavailable` names the other two shapes — a natural
-  // mapping with no `completion_policy` request at all, or a compile with no
-  // policy registry handed to it. Never silently downgraded to explicit.
-  //
-  // THE TRUSTED COMMAND POLICY, when an operator configures one, is what a
-  // `command-exit` acceptance requirement is judged by; it is host
-  // configuration keyed by (graph, node, outcome), so a worker can neither
-  // author nor select the command.
-  const graphApplication = GraphApplication.open({
-    workspaceDir: process.cwd(),
-    storeRoot: outcomeStoreRoot,
-    deliver: outcomeDelivery.deliver,
-    // The registry and the credential RECORDS are durable; no credential VALUE
-    // is (the vault default), because this host cannot substantiate the
-    // platform boundary a durable value would need.
+  }, ctx.tools, (event, listener) => ctx.on(event, listener));
+  function openGraphRuntime(workspace: string) {
+    let outcomeHost: OutcomeHost | undefined;
+    const outcomeDelivery = new DshOutcomeDelivery({
+      subscribeExecutionEvents: (id, listener) => ctx.on("session/event", (...args: unknown[]) => {
+        const session = args[0] as { id: string; events: import("../platform/adapters/dsh/session.ts").DshSessionEventLike[] };
+        const event = args[1] as { type: string };
+        if (session.id === id && event.type === "turn/end") listener(session.events);
+      }) ?? (() => { }),
+      readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
+      startWorker: (label, start) => workerBoundary.start(label, start),
+      workerTools: DSH_GRAPH_WORKER_TOOLS,
+      subagents: ctx.subagents,
+      parentResolver: (sid) => agentRegistry?.get(sid),
+      onStartFailed: (_request, effect, reason) => {
+        outcomeHost?.reportDeliveryFailure(effect, reason);
+      },
+      onStarted: (_request, effect, execution) => {
+        // The platform named the subagent run it created: the host records the
+        // FACT, which is what lets a restart reconcile the effect instead of
+        // reporting it as an unknown create.
+        outcomeHost?.confirmExecution(effect, execution);
+      },
+      onSettled: (settlement) => {
+        const { request } = settlement;
+        outcomeHost?.recordExecutionObservation(request.graphId, request.attemptId);
+        if (settlement.kind === "failed") {
+          void outcomeHost?.failObservedExecution(request.graphId, request.nodeId, request.attemptId)
+            .catch((error: unknown) => log.warn("Graph failure settlement failed", { error: error instanceof Error ? error.message : String(error) }));
+          log.warn("dsh outcome dispatch: attempt did not complete", {
+            graphId: request.graphId,
+            nodeId: request.nodeId,
+            attemptId: request.attemptId,
+            reason: settlement.reason,
+          });
+          return;
+        }
+        void outcomeHost
+          ?.complete(request.graphId, request.attemptId)
+          .then((report) => {
+            // Any settlement moves the graph state the console renders.
+            notifyRoleboxChanged("graph");
+            log.debug("dsh outcome completion settled", {
+              graphId: request.graphId,
+              attemptId: request.attemptId,
+              kind: report.kind,
+            });
+          })
+          .catch((err: unknown) => {
+            log.warn("dsh outcome completion failed", {
+              graphId: request.graphId,
+              attemptId: request.attemptId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      },
+    });
+    // THE HOST'S OWN STATE ROOT IS NOT THE WORKSPACE. A dispatched worker runs
+    // with the workspace as its root, so keeping the store under
+    // `<workspace>/.rolebox/state` handed every worker the directory. This is the
+    // one path-shaped part of the boundary — `credential-vault.ts` states why it
+    // is not isolation by itself and what the vault does NOT put on disk.
+    const outcomeStoreRoot = graphStoreRoot(getDataDir(), workspace);
+    // THE SHIPPED CAPABILITY SET IS BUILT ONCE AND SHARED (P4 items 1, 3, 4).
     //
-    // THE SHIPPED ACCEPTANCE PRIMITIVES (P4 items 2 and 4): schema, artifact,
-    // command exit and human approval are installed here, each with a real
-    // implementation, and the SAME registry is handed to the toolset below so a
-    // declaration is compiled against exactly what the run path can check.
-    env: process.env,
-    // Natural completion is authorized by the operator's configuration, and the
-    // run path corroborates a plan's pinned revision against the same registry
-    // graph_declare compiled with.
+    // ONE validator registry and ONE completion-policy registry are handed to the
+    // HOST (the run path) and to the TOOLSET (graph_declare's compile step), so
+    // compile and run resolve against the same source of truth: a plan can only
+    // pin a registration this process will look up at acceptance, and a natural
+    // mapping can only be authorized by a policy revision this process installed.
+    //
+    // WHY THE ENVIRONMENT IS THE AUTHORIZATION SURFACE. Completion policies are
+    // declarations in reviewed source; the operator who launches the host
+    // authorizes exact `id@revision` pairs through
+    // `ROLEBOX_GRAPH_COMPLETION_POLICIES` (see
+    // `src/graph/policy/declarations.ts`, which documents the JSON document).
+    // Nothing in a graph declaration, a workspace file or a worker submission can
+    // add an authorization: the loader recomputes each digest from the reviewed
+    // or operator-declared body and installs nothing else. With no configuration
+    // the registry is EMPTY and a natural mapping that requests an `id@revision`
+    // is refused as `completion-policy-unknown` (the id is not installed);
+    // `completion-policy-unavailable` names the other two shapes — a natural
+    // mapping with no `completion_policy` request at all, or a compile with no
+    // policy registry handed to it. Never silently downgraded to explicit.
+    //
+    // THE TRUSTED COMMAND POLICY, when an operator configures one, is what a
+    // `command-exit` acceptance requirement is judged by; it is host
+    // configuration keyed by (graph, node, outcome), so a worker can neither
+    // author nor select the command.
+    const graphApplication = GraphApplication.open({
+      notifications: { send: createGraphNotificationSender(sessionAdapter) },
+      workspaceDir: workspace,
+      storeRoot: outcomeStoreRoot,
+      deliver: outcomeDelivery.deliver,
+      // The registry and the credential RECORDS are durable; no credential VALUE
+      // is (the vault default), because this host cannot substantiate the
+      // platform boundary a durable value would need.
+      //
+      // THE SHIPPED ACCEPTANCE PRIMITIVES (P4 items 2 and 4): schema, artifact,
+      // command exit and human approval are installed here, each with a real
+      // implementation, and the SAME registry is handed to the toolset below so a
+      // declaration is compiled against exactly what the run path can check.
+      env: process.env,
+      // Natural completion is authorized by the operator's configuration, and the
+      // run path corroborates a plan's pinned revision against the same registry
+      // graph_declare compiled with.
 
-    declareInvocationIdentity: false,
-    // The platform's own child-session fact, read back from the confirmed
-    // execution: for a local dsh run the run id IS the published child session
-    // id, so the worker of an attempt is the session `onStarted` reported.
-    workerSessionOf: (execution) => execution.executionId,
-    // THE PLATFORM PORTS (P2 part 2 / F3). The dispatch adapter's own question
-    // — "does an execution already exist for this stable effect id, and which
-    // one?" — is answered from the dsh child listing by the run's durable label,
-    // and the boot sweep's terminal read and re-subscribe are installed too.
-    // dsh's answers are what the platform can substantiate: the query can NAME
-    // an execution and can never prove one absent, the terminal read is
-    // `unknown` (no durable outcome exists on the surface rolebox consumes),
-    // and the watch is `unsupported` (a run's result promise belongs to the
-    // process that started it). Each of those is REPORTED by the host, never
-    // rounded into a launch, a settlement or a silent strand.
-    query: outcomeDelivery.executionQuery,
-    observeExecution: outcomeDelivery.observeExecution,
-    watchCompletion: outcomeDelivery.watchCompletion,
-    // THE PLATFORM CANCEL PORT (P3). A trusted cancel command's durable intents
-    // are handed to dsh through this: a run THIS process started is aborted
-    // through its run handle and confirmed by its own `result` promise
-    // (`stopReason === "aborted"`); a run it did not start is answered
-    // `unsupported` or `requested` — never "cancelled" — because dsh's
-    // `interrupt()` returns void and substantiates nothing.
-    cancelExecution: outcomeDelivery.cancelExecution,
-  });
-  outcomeHost = graphApplication.host;
-  workerBoundary = installDshGraphWorkerBoundary(outcomeHost, ctx.tools, (event, listener) => ctx.on(event, listener));
-  const workerToolDisposers = Object.entries(factory.compileAll(createDshGraphWorkerTools(outcomeHost, process.cwd(), outcomeStoreRoot)))
-    .filter(([name]) => isNamespaceEnabled(name, config.enabledNamespaces)).map(([, definition]) => definition)
-    .map(definition => ctx.tools.register(definition as DshToolDefinition));
-
-  const capabilities = graphApplication.capabilities;
-  for (const issue of capabilities.completionPolicyIssues) {
-    log.warn("dsh outcome graph: completion-policy configuration", {
-      issue: describeCompletionPolicyIssue(issue),
+      declareInvocationIdentity: false,
+      // The platform's own child-session fact, read back from the confirmed
+      // execution: for a local dsh run the run id IS the published child session
+      // id, so the worker of an attempt is the session `onStarted` reported.
+      workerSessionOf: (execution) => execution.executionId,
+      // THE PLATFORM PORTS (P2 part 2 / F3). The dispatch adapter's own question
+      // — "does an execution already exist for this stable effect id, and which
+      // one?" — is answered from the dsh child listing by the run's durable label,
+      // and the boot sweep's terminal read and re-subscribe are installed too.
+      // dsh's answers are what the platform can substantiate: the query can NAME
+      // an execution and can never prove one absent, the terminal read is
+      // `unknown` (no durable outcome exists on the surface rolebox consumes),
+      // and the watch is `unsupported` (a run's result promise belongs to the
+      // process that started it). Each of those is REPORTED by the host, never
+      // rounded into a launch, a settlement or a silent strand.
+      query: outcomeDelivery.executionQuery,
+      observeExecution: outcomeDelivery.observeExecution,
+      watchCompletion: outcomeDelivery.watchCompletion,
+      // THE PLATFORM CANCEL PORT (P3). A trusted cancel command's durable intents
+      // are handed to dsh through this: a run THIS process started is aborted
+      // through its run handle and confirmed by its own `result` promise
+      // (`stopReason === "aborted"`); a run it did not start is answered
+      // `unsupported` or `requested` — never "cancelled" — because dsh's
+      // `interrupt()` returns void and substantiates nothing.
+      cancelExecution: outcomeDelivery.cancelExecution,
     });
-  }
-  for (const issue of capabilities.approvalPolicyIssues) {
-    log.warn("graph approval-policy configuration", { issue });
-  }
-  for (const issue of capabilities.commandPolicyIssues) {
-    log.warn("dsh outcome graph: trusted command policy", {
-      index: issue.index,
-      issue: issue.message,
-    });
-  }
-  log.info("dsh outcome graph capabilities installed", {
-    validators: capabilities.validatorIds.join(","),
-    commandBindings: capabilities.commandBindings,
-    completionPolicies: capabilities.authorizedCompletionPolicies
-      .map((ref) => ref.id + "@" + ref.revision)
-      .join(","),
-    completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
-  });
+    outcomeHost = graphApplication.host;
 
-  // The outcome toolset: the four entries that operate on a DECLARED graph.
-  // No manager / dispatch seam is injected, so it can never build a legacy
-  // engine; the outcome deps are the host layer above.
-  const graphTools = graphApplication.createTools(
-    (sessionID) => sessionID ? activeRole.get(sessionID) ?? "" : "",
-    () => notifyRoleboxChanged("graph"),
-  );
-  // Boot recovery for declared graphs: a graph interrupted by the previous
-  // process is continued from its persisted state, and one that was declared
-  // but never started gets its first execution — through the same runtime entry
-  // the declaration seam uses. The sweep names each graph's recorded declaring
-  // invocation, so a pending effect re-arms under the parent it belongs to.
-  // Best-effort: a failure is logged, never gates boot.
-  void outcomeHost
-    .recoverDeclaredGraphs()
-    .then(async (report) => {
-      if (
-        report.started.length > 0 ||
-        report.resumed.length > 0 ||
-        report.refused.length > 0 ||
-        report.effectRefusals.length > 0 ||
-        report.divergences.length > 0 ||
-        // A controlled run is reported in `resumed` too, but it is named here so
-        // the gate cannot depend on that staying true (P3 item 1).
-        report.controlled.length > 0 ||
-        report.unconfirmedExecutions.length > 0 ||
-        report.cancellations.length > 0 ||
-        report.cancelBlocked.length > 0
-      ) {
-        log.warn("dsh outcome graph recovery", {
-          started: report.started,
-          resumed: report.resumed,
-          refused: report.refused,
-          // Per-effect facts a visited graph still owes: an effect the resume
-          // would not launch, and a row the host's fact contradicted.
-          effectRefusals: report.effectRefusals.map(
-            (refusal) => refusal.graphId + ":" + refusal.code,
-          ),
-          divergences: report.divergences.map(
-            (divergence) =>
-              divergence.graphId +
-              ":" +
-              divergence.effectId +
-              ":" +
-              divergence.local +
-              "->" +
-              divergence.host,
-          ),
-          // WHAT A TRUSTED CONTROL COMMAND STOPPED (P3 item 1): `graph:command`
-          // for every run a failure / timeout / cancel ended. The values are
-          // computed by the sweep, and logging them here is what keeps a
-          // restart from presenting a stopped run as merely `resumed`.
-          controlled: report.controlled,
-          // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
-          // requested / unsupported / blocked, per attempt. Only `confirmed`
-          // is the platform's own substantiation; everything else leaves the
-          // execution visible and unsettled, which is why the report names it.
-          cancellations: report.cancellations.map(
-            (entry) =>
-              entry.graphId + ":" + entry.attemptId + ":" + entry.state,
-          ),
-          cancelBlocked: report.cancelBlocked,
-          // THE EXTERNAL WORK A STOP LEFT UNCONFIRMED (P3 item 1): every
-          // `pending` / `creating` execution behind a controlled run, as
-          // `graph:attempt:state`. A `creating` row may name a task the
-          // platform really started, so it is REPORTED here rather than hidden;
-          // this runs AFTER the cancel deliveries above, so an execution the
-          // platform has since confirmed is no longer unconfirmed.
-          unconfirmedExecutions: report.unconfirmedExecutions.map(
-            (entry) =>
-              entry.graphId + ":" + entry.attemptId + ":" + entry.state,
-          ),
-        });
-      }
-      // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every
-      // confirmed execution the sweep is still waiting on is handed back to the
-      // platform adapter, which re-subscribes where dsh supports it and reports
-      // the ones it cannot keep observing. On dsh the watch is `unsupported`
-      // (a run's result promise belongs to the process that started it), so the
-      // report names each execution nobody is listening to — the observable
-      // block, never a silent strand — and the next boot sweep re-asks.
-      const watching = await outcomeHost?.retainAwaitingCompletions(
-        report.awaitingCompletion,
-        { onSettled: () => notifyRoleboxChanged("graph") },
-      );
-      if (
-        watching !== undefined &&
-        (watching.watched.length > 0 ||
-          watching.settled.length > 0 ||
-          watching.unwatched.length > 0)
-      ) {
-        log.warn("dsh outcome graph observation", {
-          watched: watching.watched,
-          settled: watching.settled,
-          unwatched: watching.unwatched.map(
-            (entry) =>
-              entry.graphId + ":" + entry.attemptId + ":" + entry.executionId,
-          ),
-        });
-      }
-    })
-    .catch((err: unknown) => {
-      log.warn("dsh outcome graph recovery failed", {
-        error: err instanceof Error ? err.message : String(err),
+    const capabilities = graphApplication.capabilities;
+    for (const issue of capabilities.completionPolicyIssues) {
+      log.warn("dsh outcome graph: completion-policy configuration", {
+        issue: describeCompletionPolicyIssue(issue),
       });
+    }
+    for (const issue of capabilities.approvalPolicyIssues) {
+      log.warn("graph approval-policy configuration", { issue });
+    }
+    for (const issue of capabilities.commandPolicyIssues) {
+      log.warn("dsh outcome graph: trusted command policy", {
+        index: issue.index,
+        issue: issue.message,
+      });
+    }
+    log.info("dsh outcome graph capabilities installed", {
+      validators: capabilities.validatorIds.join(","),
+      commandBindings: capabilities.commandBindings,
+      completionPolicies: capabilities.authorizedCompletionPolicies
+        .map((ref) => ref.id + "@" + ref.revision)
+        .join(","),
+      completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
     });
+
+    // The outcome toolset: the four entries that operate on a DECLARED graph.
+    // No manager / dispatch seam is injected, so it can never build a legacy
+    // engine; the outcome deps are the host layer above.
+    const runtimeTools = graphApplication.createTools(
+      (sessionID) => sessionID ? activeRole.get(sessionID) ?? "" : "",
+      () => notifyRoleboxChanged("graph"),
+    );
+    // Boot recovery for declared graphs: a graph interrupted by the previous
+    // process is continued from its persisted state, and one that was declared
+    // but never started gets its first execution — through the same runtime entry
+    // the declaration seam uses. The sweep names each graph's recorded declaring
+    // invocation, so a pending effect re-arms under the parent it belongs to.
+    // Best-effort: a failure is logged, never gates boot.
+    void outcomeHost
+      .recoverDeclaredGraphs()
+      .then(async (report) => {
+        if (
+          report.started.length > 0 ||
+          report.resumed.length > 0 ||
+          report.refused.length > 0 ||
+          report.effectRefusals.length > 0 ||
+          report.divergences.length > 0 ||
+          // A controlled run is reported in `resumed` too, but it is named here so
+          // the gate cannot depend on that staying true (P3 item 1).
+          report.controlled.length > 0 ||
+          report.unconfirmedExecutions.length > 0 ||
+          report.cancellations.length > 0 ||
+          report.cancelBlocked.length > 0
+        ) {
+          log.warn("dsh outcome graph recovery", {
+            started: report.started,
+            resumed: report.resumed,
+            refused: report.refused,
+            // Per-effect facts a visited graph still owes: an effect the resume
+            // would not launch, and a row the host's fact contradicted.
+            effectRefusals: report.effectRefusals.map(
+              (refusal) => refusal.graphId + ":" + refusal.code,
+            ),
+            divergences: report.divergences.map(
+              (divergence) =>
+                divergence.graphId +
+                ":" +
+                divergence.effectId +
+                ":" +
+                divergence.local +
+                "->" +
+                divergence.host,
+            ),
+            // WHAT A TRUSTED CONTROL COMMAND STOPPED (P3 item 1): `graph:command`
+            // for every run a failure / timeout / cancel ended. The values are
+            // computed by the sweep, and logging them here is what keeps a
+            // restart from presenting a stopped run as merely `resumed`.
+            controlled: report.controlled,
+            // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
+            // requested / unsupported / blocked, per attempt. Only `confirmed`
+            // is the platform's own substantiation; everything else leaves the
+            // execution visible and unsettled, which is why the report names it.
+            cancellations: report.cancellations.map(
+              (entry) =>
+                entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+            ),
+            cancelBlocked: report.cancelBlocked,
+            // THE EXTERNAL WORK A STOP LEFT UNCONFIRMED (P3 item 1): every
+            // `pending` / `creating` execution behind a controlled run, as
+            // `graph:attempt:state`. A `creating` row may name a task the
+            // platform really started, so it is REPORTED here rather than hidden;
+            // this runs AFTER the cancel deliveries above, so an execution the
+            // platform has since confirmed is no longer unconfirmed.
+            unconfirmedExecutions: report.unconfirmedExecutions.map(
+              (entry) =>
+                entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+            ),
+          });
+        }
+        // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every
+        // confirmed execution the sweep is still waiting on is handed back to the
+        // platform adapter, which re-subscribes where dsh supports it and reports
+        // the ones it cannot keep observing. On dsh the watch is `unsupported`
+        // (a run's result promise belongs to the process that started it), so the
+        // report names each execution nobody is listening to — the observable
+        // block, never a silent strand — and the next boot sweep re-asks.
+        const watching = await outcomeHost?.retainAwaitingCompletions(
+          report.awaitingCompletion,
+          { onSettled: () => notifyRoleboxChanged("graph") },
+        );
+        if (
+          watching !== undefined &&
+          (watching.watched.length > 0 ||
+            watching.settled.length > 0 ||
+            watching.unwatched.length > 0)
+        ) {
+          log.warn("dsh outcome graph observation", {
+            watched: watching.watched,
+            settled: watching.settled,
+            unwatched: watching.unwatched.map(
+              (entry) =>
+                entry.graphId + ":" + entry.attemptId + ":" + entry.executionId,
+            ),
+          });
+        }
+      })
+      .catch((err: unknown) => {
+        log.warn("dsh outcome graph recovery failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+    return { host: outcomeHost, application: graphApplication, delivery: outcomeDelivery,
+      tools: runtimeTools, workspace, storeRoot: outcomeStoreRoot };
+  }
+  function graphRuntime(directory: string) {
+    if (!isAbsolute(directory)) throw new Error("Graph tools require an absolute session workspace");
+    const workspace = realpathSync(directory);
+    let runtime = graphRuntimes.get(workspace);
+    if (!runtime) {
+      runtime = openGraphRuntime(workspace);
+      graphRuntimes.set(workspace, runtime);
+    }
+    return runtime;
+  }
+  const resolveGraphRuntime = (context: CanonicalToolContext) => graphRuntime(context.directory);
+  const graphTools: Record<string, CanonicalToolDef> = Object.fromEntries(
+    Object.entries(createOutcomeGraphTools(createGraphToolSet())).map(([name, tool]) => [name, {
+      ...tool,
+      execute: (args, context) => resolveGraphRuntime(context).tools[name]!.execute(args, context),
+    } satisfies CanonicalToolDef]),
+  );
+  Object.assign(graphTools, createDshGraphWorkerTools(resolveGraphRuntime));
+  const restoreGraphSession = (session: { id: string; header?: { cwd?: string } }) => {
+    if (!session.header?.cwd) return;
+    try {
+      graphRuntime(session.header.cwd);
+      workerBoundary.prepare(agentRegistry?.get(session.id));
+    } catch (error) {
+      log.warn("dsh session graph recovery failed", { error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  for (const session of ctx.sessions.list()) restoreGraphSession(session);
+  const stopGraphSessions = ctx.on("session/created", (...args) => {
+    restoreGraphSession(args[0] as { id: string; header?: { cwd?: string } });
+  });
 
   // ── Event-driven console updates ─────────────────────────────────────────
   // Two producers feed the web console's change channel. None of them polls:
@@ -1579,16 +1627,8 @@ export async function apply(
     );
   }
 
-  // THE GRAPH FACE IS REGISTERED GLOBALLY, AND THAT IS REPORTED, NOT HIDDEN.
-  // dsh's tool registry is global (rolebox's `ctx.tools` mirror exposes
-  // `register`, not a per-agent scope or restriction), so a dispatched worker
-  // on this host is HANDED the same four graph tools as the declaring session.
-  // What rolebox enforces is the call, not the schema: `graphTools` are bound
-  // through `OutcomeHost.bindTools`, which refuses every graph tool but
-  // `graph_submit_outcome` when the call arrives from a session this host
-  // bound as the worker of a dispatched attempt (A21 / plan §3.3), before the
-  // tool body runs. Narrowing the dsh schema itself needs a platform scope
-  // rolebox does not yet consume.
+  // Global definitions route through the caller's session workspace. Worker
+  // tool filters and the execution guard apply before the bound host tools.
   const tools = {
     ...buildCanonicalTools({
       resolvedRoles,
@@ -1601,8 +1641,8 @@ export async function apply(
   };
   const compiled = factory.compileAll(tools);
 
-  const toolDisposers: Array<() => void> = [...workerToolDisposers, () => workerBoundary.dispose()];
-  let registeredTools = workerToolDisposers.length;
+  const toolDisposers: Array<() => void> = [() => workerBoundary.dispose()];
+  let registeredTools = 0;
   for (const [key, def] of Object.entries(compiled)) {
     // The role-snapshot tools are registered as their own disposition-managed
     // generation below — never here, or the host's duplicate-name rejection
@@ -1687,8 +1727,12 @@ export async function apply(
 
   // Fiber disposer (cordis convention) + stats for callers/tests.
   const disposer = (() => {
-    outcomeDelivery.close();
-    graphApplication.close();
+    stopGraphSessions?.();
+    for (const runtime of graphRuntimes.values()) {
+      runtime.delivery.close();
+      runtime.application.close();
+    }
+    graphRuntimes.clear();
     // The crash reporter goes first: teardown failures must not be observed as
     // process-fatal events, and no handler may run after the listeners are gone.
     uninstallFatalReporter();

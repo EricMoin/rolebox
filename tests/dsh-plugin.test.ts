@@ -37,6 +37,10 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { graphStoreRoot } from "../src/graph/store/schema.ts";
+import { queryGraphs } from "../src/graph/query/graph-query.ts";
+import { getDataDir } from "../src/cli/paths.ts";
+import { realpathSync } from "node:fs";
 import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
 import { DshEventBridge, mapDshEventType } from "../src/platform/adapters/dsh/event-bridge.ts";
@@ -716,7 +720,8 @@ describe("dsh plugin apply()", () => {
 
     // Live-agent registry double (the `ctx.agents` seam): records the session
     // ids the delivery resolves and returns a sentinel live Agent.
-    const parent = { id: "live-parent", inject: () => undefined };
+    const graphNotices: unknown[] = [];
+    const parent = { id: "live-parent", inject: () => undefined, steer: (message: unknown) => { graphNotices.push(message); } };
     const requested: string[] = [];
     const agents = {
       get(id: string) {
@@ -726,9 +731,11 @@ describe("dsh plugin apply()", () => {
     };
     const { ctx, tools, started } = createFakeCtx({ agents });
 
-    // The plugin captures process.cwd() for the graph state store; isolate it.
+    // The host launcher and session deliberately use different workspaces.
     const cwd = process.cwd();
     process.chdir(tmpDir);
+    const workspace = join(tmpDir, "session-workspace");
+    mkdirSync(workspace);
     const priorApprovalPolicy = process.env.ROLEBOX_GRAPH_APPROVAL_POLICY;
     process.env.ROLEBOX_GRAPH_APPROVAL_POLICY = JSON.stringify({
       id: "plugin-review", revision: "1", rules: [{
@@ -746,7 +753,7 @@ describe("dsh plugin apply()", () => {
         concludeTurn: () => {},
         agent: {
           id: INVOKING_SESSION,
-          session: { id: INVOKING_SESSION, header: { cwd: process.cwd() } },
+          session: { id: INVOKING_SESSION, header: { cwd: workspace } },
         },
       };
 
@@ -782,6 +789,18 @@ describe("dsh plugin apply()", () => {
       // The OUTCOME delivery resolved the live parent from ctx.agents keyed by
       // the REAL invoking session and forwarded the SAME live Agent reference.
       expect(declared.graph_id).toBe("parent-graph");
+      expect(queryGraphs(graphStoreRoot(getDataDir(), realpathSync(workspace))).graphs.map(graph => graph.graphId)).toEqual(["parent-graph"]);
+      expect(existsSync(graphStoreRoot(getDataDir(), tmpDir))).toBe(false);
+      const secondWorkspace = join(tmpDir, "other-workspace");
+      mkdirSync(secondWorkspace);
+      const secondExec = { ...exec, agent: { id: "other-parent", session: { id: "other-parent", header: { cwd: secondWorkspace } } } };
+      const second = await byName.get("graph_declare")!.execute({ declaration: {
+        version: 3, name: "parent-graph", budget: { max_executions: 0 },
+        nodes: [{ id: "different-node", agent: "tester", prompt: "Other workspace", outcomes: [{ id: "done" }] }], edges: [],
+      } }, secondExec) as { graph_id: string };
+      expect(second.graph_id).toBe("parent-graph");
+      expect(queryGraphs(graphStoreRoot(getDataDir(), realpathSync(secondWorkspace))).graphs[0]?.nodes.map(node => node.nodeId)).toEqual(["different-node"]);
+      expect(queryGraphs(graphStoreRoot(getDataDir(), realpathSync(workspace))).graphs[0]?.nodes.map(node => node.nodeId)).toEqual(["N1"]);
       expect(started.length).toBeGreaterThanOrEqual(1);
       expect(started[0].request.parent).toBe(parent);
       expect(requested).toContain(INVOKING_SESSION);
@@ -796,9 +815,17 @@ describe("dsh plugin apply()", () => {
       const raised = await control.execute({ ...approvalArgs, approver_session_id: "reviewer-session" }, exec) as { kind: string; approval?: { request: { authority: { policyId: string } } } };
       expect(raised.kind).toBe("applied");
       expect(raised.approval?.request.authority.policyId).toBe("plugin-review");
-      const reviewer = { ...exec, agent: { id: "reviewer-session", session: { id: "reviewer-session", header: { cwd: process.cwd() } } } };
+      const reviewer = { ...exec, agent: { id: "reviewer-session", session: { id: "reviewer-session", header: { cwd: workspace } } } };
       const approved = await control.execute({ graph_id: "parent-graph", command: "approve", node_id: "N1", reason: "reviewed" }, reviewer) as { kind: string };
       expect(approved.kind).toBe("applied");
+      const cancelled = await control.execute({ graph_id: "parent-graph", command: "cancel", reason: "Finished fixture" }, exec) as { kind: string };
+      expect(cancelled.kind).toBe("applied");
+      for (let i = 0; i < 50 && !JSON.stringify(graphNotices).includes("Finished fixture"); i++) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      expect(JSON.stringify(graphNotices)).toContain("[GRAPH BLOCKED]");
+      expect(JSON.stringify(graphNotices)).toContain("Finished fixture");
+      expect(JSON.stringify(graphNotices)).toContain("graph_status");
     } finally {
       disposer?.();
       if (priorApprovalPolicy === undefined) delete process.env.ROLEBOX_GRAPH_APPROVAL_POLICY;
