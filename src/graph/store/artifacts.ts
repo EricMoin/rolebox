@@ -18,9 +18,18 @@
  *
  * - `putArtifact` deposits the exact bytes that were read and returns their
  *   content identity — `sha256:<hex>`. The identity IS the content, so a second
- *   deposit of the same bytes is the same object and writing it again is a
- *   no-op; there is no version, no overwrite and no way for one deposit to
- *   change what an earlier one meant;
+ *   deposit of the same bytes is the same object. The bytes are written to a
+ *   unique temporary file in the store directory and PUBLISHED with an
+ *   exists-refusing link, so an object an earlier acceptance already named can
+ *   never be truncated or replaced by a later deposit;
+ * - a deposit that finds its identity already published REUSES that object only
+ *   after the object has been re-read and hashed to the identity. An object
+ *   that does not verify is a named problem: it is refused, never overwritten
+ *   and never repaired in place, because replacing it would change what an
+ *   already-accepted result means;
+ * - `putArtifact` answers a RESULT union — the published object, or a problem —
+ *   because a caller that cannot retain these bytes must refuse the acceptance
+ *   rather than commit a revision it cannot read back;
  * - `readArtifactById` reads that object and VERIFIES the digest before
  *   returning it. A tampered or truncated object is a problem, never a
  *   silently-returned payload;
@@ -39,8 +48,8 @@
  * it without a cycle.
  */
 
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The directory holding retained artifacts, under the graph store root. */
@@ -63,12 +72,29 @@ export interface RetainedArtifact {
   readonly size: number;
 }
 
-/** What one artifact object deposit produced. */
+/** The object one successful deposit published. */
 export interface ArtifactDeposit {
   readonly artifactId: string;
   readonly digest: string;
   readonly size: number;
 }
+
+/**
+ * What depositing bytes produced: the published object, or the problem that
+ * prevented publication.
+ *
+ * This is a result union rather than an exception on purpose. A caller that
+ * cannot retain the bytes must REFUSE the acceptance that would have named
+ * them — committing a revision nobody can read back is the defect the store
+ * exists to prevent — so the failure has to be a value every caller handles,
+ * not an exception an inattentive one can drop.
+ */
+export type ArtifactDepositResult =
+  | ({ readonly kind: "deposited" } & ArtifactDeposit)
+  | { readonly kind: "problem"; readonly reason: string };
+
+/** The prefix of a deposit's in-flight temporary file; never a content identity. */
+const TEMPORARY_PREFIX = ".deposit-";
 
 /** The verdict of reading one retained artifact. */
 export type ArtifactObjectRead =
@@ -100,21 +126,93 @@ export function artifactObjectPath(root: string, artifactId: string): string {
 }
 
 /**
- * Deposit bytes and answer their content identity.
+ * Deposit bytes and answer the object they were published as — or the problem
+ * that prevented publication.
  *
- * IDEMPOTENT BY CONSTRUCTION: the identity is the digest, so depositing the same
- * bytes twice writes the same path with the same content. The write is atomic
- * enough for this store's purpose — an object is only ever readable through
- * `readArtifactById`, which verifies the digest, so a half-written file is a
- * problem rather than a wrong answer.
+ * PUBLISH-ONCE. The bytes go to a unique temporary file in the store directory
+ * and are published with an exists-refusing link, so an object an earlier
+ * acceptance already named cannot be truncated or replaced by a later deposit.
+ * That holds under concurrency too: the link creates the object at most once,
+ * and every other depositor either reuses the object or refuses it.
+ *
+ * REUSE IS VERIFIED, NEVER ASSUMED. When the identity is already published, the
+ * existing object is re-read and must still hash to it. An object that does not
+ * verify is a named problem and is NOT overwritten and NOT repaired: it may be
+ * what an accepted result already means, and replacing it would change that
+ * meaning without anyone deciding to.
  */
-export function putArtifact(root: string, bytes: Buffer): ArtifactDeposit {
+export function putArtifact(root: string, bytes: Buffer): ArtifactDepositResult {
   const digest = digestOf(bytes);
   const artifactId = artifactIdOf(digest);
   const directory = join(root, ARTIFACT_STORE_DIR);
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(artifactObjectPath(root, artifactId), bytes);
-  return Object.freeze({ artifactId, digest, size: bytes.length });
+  try {
+    mkdirSync(directory, { recursive: true });
+  } catch (error) {
+    return {
+      kind: "problem",
+      reason:
+        "the artifact store directory " +
+        JSON.stringify(directory) +
+        " could not be created (" +
+        errorText(error) +
+        "), so " +
+        artifactId +
+        " was not deposited",
+    };
+  }
+  const temporaryPath = join(
+    directory,
+    TEMPORARY_PREFIX + randomBytes(16).toString("hex"),
+  );
+  try {
+    // `wx` refuses a collision instead of truncating whatever holds the name.
+    writeFileSync(temporaryPath, bytes, { flag: "wx" });
+  } catch (error) {
+    return {
+      kind: "problem",
+      reason:
+        "the bytes of " +
+        artifactId +
+        " could not be written to a temporary file in the store (" +
+        errorText(error) +
+        "), so nothing was published",
+    };
+  }
+  try {
+    linkSync(temporaryPath, artifactObjectPath(root, artifactId));
+    return Object.freeze({ kind: "deposited", artifactId, digest, size: bytes.length });
+  } catch (error) {
+    if (!isAlreadyPublished(error)) {
+      return {
+        kind: "problem",
+        reason:
+          artifactId +
+          " could not be published (" +
+          errorText(error) +
+          ") — the temporary file was discarded and any existing object was left untouched",
+      };
+    }
+  } finally {
+    // Runs for every exit above: a temporary is never an object.
+    discardTemporary(temporaryPath);
+  }
+  const existing = readArtifactById(root, artifactId);
+  if (existing.kind !== "read") {
+    return {
+      kind: "problem",
+      reason:
+        artifactId +
+        " is already published, but the existing object does not verify (" +
+        existing.reason +
+        ") — a deposit never overwrites an object an accepted result may already name, and never repairs it in place",
+    };
+  }
+  return Object.freeze({
+    kind: "deposited",
+    artifactId,
+    digest: existing.digest,
+    size: existing.bytes.length,
+  });
 }
 
 /**
@@ -163,4 +261,34 @@ export function readArtifactById(
     };
   }
   return { kind: "read", bytes, digest };
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Whether a link failure means the identity is already published. */
+function isAlreadyPublished(error: unknown): boolean {
+  return errorCodeOf(error) === "EEXIST";
+}
+
+/** The `code` of a system error, without assuming the value is one. */
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  const code: unknown = error.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/** Remove one deposit's temporary file; nothing published ever names it. */
+function discardTemporary(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // The temporary is already gone; it was never readable as an object.
+  }
+}
+
+/** The message of a caught value, without assuming it is an Error. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -15,16 +15,25 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
   ARTIFACT_STORE_DIR,
   artifactIdOf,
+  artifactObjectPath,
   digestOf,
   putArtifact,
   readArtifactById,
+  type ArtifactDeposit,
 } from "../../src/graph/store/artifacts.ts";
 import { readArtifact } from "../../src/graph/outcome/validators.ts";
 
@@ -40,10 +49,19 @@ function withRoot<T>(fn: (root: string) => T): T {
 const A = Buffer.from("revision A: the bytes the gate judged", "utf-8");
 const B = Buffer.from("revision B: what the path holds afterwards", "utf-8");
 
+/** Deposit bytes and require the publication to have succeeded. */
+function deposited(root: string, bytes: Buffer): ArtifactDeposit {
+  const result = putArtifact(root, bytes);
+  if (result.kind !== "deposited") {
+    throw new Error("fixture: the deposit was refused: " + result.reason);
+  }
+  return result;
+}
+
 describe("the immutable artifact store", () => {
   it("round-trips bytes under their content identity", () => {
     withRoot((root) => {
-      const deposit = putArtifact(root, A);
+      const deposit = deposited(root, A);
       expect(deposit.digest).toBe(digestOf(A));
       expect(deposit.artifactId).toBe(artifactIdOf(digestOf(A)));
       expect(deposit.size).toBe(A.length);
@@ -55,9 +73,42 @@ describe("the immutable artifact store", () => {
     });
   });
 
-  it("is idempotent: the same bytes are the same object", () => {
+  it("publishes once: a second deposit of the same bytes REUSES the object byte-identical", () => {
     withRoot((root) => {
-      expect(putArtifact(root, A).artifactId).toBe(putArtifact(root, A).artifactId);
+      const first = deposited(root, A);
+      const path = artifactObjectPath(root, first.artifactId);
+      const inodeBefore = statSync(path).ino;
+      const second = deposited(root, A);
+      // The SAME object, not a rewritten one: the inode is unchanged, so a
+      // later deposit never truncated or replaced what an earlier one named.
+      expect(statSync(path).ino).toBe(inodeBefore);
+      expect(second.artifactId).toBe(first.artifactId);
+      expect(second.digest).toBe(first.digest);
+      expect(second.size).toBe(first.size);
+      const read = readArtifactById(root, first.artifactId);
+      expect(read.kind).toBe("read");
+      if (read.kind !== "read") return;
+      expect(Buffer.compare(read.bytes, A)).toBe(0);
+    });
+  });
+
+  it("REFUSES to overwrite an object that no longer hashes to its identity", () => {
+    withRoot((root) => {
+      const deposit = deposited(root, A);
+      const path = artifactObjectPath(root, deposit.artifactId);
+      // The object is damaged after publication: it no longer holds A.
+      writeFileSync(path, B);
+
+      const again = putArtifact(root, A);
+      expect(again.kind).toBe("problem");
+      if (again.kind !== "problem") return;
+      expect(again.reason).toContain("is already published, but the existing object does not verify");
+      expect(again.reason).toContain("never repairs it in place");
+      // The damaged object is LEFT EXACTLY AS IT IS: a deposit is not a repair
+      // path, because overwriting it would change what an accepted result means.
+      expect(Buffer.compare(readFileSync(path), B)).toBe(0);
+      const read = readArtifactById(root, deposit.artifactId);
+      expect(read.kind).toBe("problem");
     });
   });
 
@@ -73,7 +124,7 @@ describe("the immutable artifact store", () => {
 
   it("refuses a TAMPERED object rather than returning it", () => {
     withRoot((root) => {
-      const deposit = putArtifact(root, A);
+      const deposit = deposited(root, A);
       writeFileSync(
         join(root, ARTIFACT_STORE_DIR, deposit.artifactId.slice("sha256:".length)),
         B,
@@ -111,7 +162,7 @@ describe("THE PROPERTY: a retained revision survives the path changing", () => {
       expect(judged.evidence.digest).toBe(digestOf(A));
 
       // 2. THOSE EXACT bytes are retained under their content identity.
-      const deposit = putArtifact(storeRoot, judged.bytes);
+      const deposit = deposited(storeRoot, judged.bytes);
       expect(deposit.artifactId).toBe(judged.evidence.artifactId);
 
       // 3. The path now names DIFFERENT bytes.

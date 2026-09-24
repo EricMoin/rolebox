@@ -416,23 +416,26 @@ export function createArtifactReferenceValidator(
         // one atomic boundary §3.1 requires, and the object must exist before
         // the reference to it is committed. `read.bytes` IS the byte range the
         // digest was taken over — never a second read of the path.
-        try {
-          const deposit = putArtifact(storeRoot, read.bytes);
-          retained = Object.freeze({
-            ...read.evidence,
-            artifactId: deposit.artifactId,
-            digest: deposit.digest,
-            size: deposit.size,
-          });
-        } catch (error) {
+        //
+        // A retention that could not be PUBLISHED is a FAILED gate, not a
+        // partial one: an acceptance that named this revision could never read
+        // it back, so the submission is refused here instead.
+        const deposit = putArtifact(storeRoot, read.bytes);
+        if (deposit.kind === "problem") {
           problems.push(
             "artifact " +
               JSON.stringify(ref) +
               " could not be retained: " +
-              describeValue(error),
+              deposit.reason,
           );
           continue;
         }
+        retained = Object.freeze({
+          ...read.evidence,
+          artifactId: deposit.artifactId,
+          digest: deposit.digest,
+          size: deposit.size,
+        });
       }
       evidence.push(retained);
       if (onArtifact !== undefined) onArtifact(retained);

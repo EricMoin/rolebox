@@ -40,6 +40,9 @@ function withRoot<T>(fn: (root: string) => T): T {
 /** Write the accepted-result row exactly as the acceptance transaction does. */
 function accept(store: GraphStore, root: string, bytes: Buffer): void {
   const deposit = putArtifact(root, bytes);
+  if (deposit.kind !== "deposited") {
+    throw new Error("fixture: the deposit was refused: " + deposit.reason);
+  }
   store.writeAcceptedResult({
     graphId: GRAPH,
     attemptId: ATTEMPT,
