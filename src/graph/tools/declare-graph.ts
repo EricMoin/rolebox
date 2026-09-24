@@ -56,6 +56,12 @@ import {
   type SupportedValidatorV3,
 } from "../compiler/compile.ts";
 import {
+  resolveDeclaredValidatorCapabilities,
+  type DeclaredCapabilityIssue,
+} from "../compiler/capability-set.ts";
+import type { ValidatorRegistry } from "../outcome/validators.ts";
+
+import {
   parseGraphDeclarationV3,
   type DeclarationV3Issue,
 } from "../compiler/parse-declaration-v3.ts";
@@ -96,10 +102,17 @@ export interface GraphDeclareArgs {
    */
   graph_id?: string;
   /**
-   * The validator capabilities this caller declares installed. An acceptance
-   * requirement resolves only against these at an EXACT version; omitting the
-   * list leaves every requirement unresolved, which compiles to a DRAFT and is
-   * refused here.
+   * The validator capabilities this caller asserts, as a NARROWING of the
+   * host-installed set.
+   *
+   * This argument does NOT install anything: every entry must be substantiated
+   * by a registration the host already installed (the same registry the run
+   * path looks implementations up in), at the same exact version — or, when the
+   * entry names no version, at the single installed version of that id. An
+   * entry the host cannot substantiate refuses the declaration
+   * (`validator-capability-not-installed`), and entries only ever narrow the
+   * effective set. Omitting the list means EVERY installed capability is in
+   * scope, never "no capabilities".
    */
   supported_validators?: SupportedValidatorV3[];
   // NOTE (D6): there is deliberately NO completion-policy argument here. A
@@ -161,6 +174,11 @@ export type DeclareRefusalReason =
   | "unaddressable-declaration"
   /** The graph id already names a declared graph with DIFFERENT content. */
   | "declaration-changed"
+  /**
+   * A `supported_validators` entry names a capability the host did not
+   * install. A caller may narrow the installed set; it can never widen it.
+   */
+  | "validator-capability-not-installed"
   /**
    * A state file already exists for the graph id but cannot be read as this
    * build's own declared-graph record — overwriting it could destroy a plan
@@ -315,6 +333,34 @@ function refuseDraftPlan(
   );
 }
 
+/**
+ * Refuse a `supported_validators` entry the host did not install.
+ *
+ * The refusal is raised BEFORE compilation, so nothing is compiled against an
+ * unsubstantiated capability and nothing is persisted; every offending entry is
+ * named with its stable code.
+ */
+function refuseUnsubstantiatedCapabilities(
+  issues: readonly DeclaredCapabilityIssue[],
+): GraphDeclareRefusedError {
+  const lines = issues.map((entry) => "  - [" + entry.code + "] " + entry.message);
+  return new GraphDeclareRefusedError(
+    "validator-capability-not-installed",
+    "graph_declare refused: supported_validators declares " +
+      String(issues.length) +
+      " validator capability(ies) this host did not install, so the declaration was not compiled:" +
+      "\n" +
+      lines.join("\n") +
+      "\nThe installed capability set is the HOST's: a caller may narrow it, and can never add to it. " +
+      "Remove the entry, or have the host install that exact registration (the same registry the run path resolves acceptance against).",
+    issues.map((entry, index) => ({
+      code: entry.code,
+      message: entry.message,
+      path: "supported_validators[" + String(index) + "]",
+    })),
+  );
+}
+
 /** Render structured diagnostics as indented lines. */
 function renderDiagnostics(diagnostics: readonly DeclareDiagnostic[]): string {
   return diagnostics
@@ -330,7 +376,25 @@ export interface BuildDeclaredOutcomeGraphInput {
   readonly declaration: unknown;
   /** Optional graph id; must equal the declaration's `name` when supplied. */
   readonly graphId?: string;
-  /** The installed validator capabilities to resolve acceptance against. */
+  /**
+   * The HOST-INSTALLED validator capability: the same registry the run path
+   * resolves a pinned requirement's implementation in. It is the SOURCE OF
+   * TRUTH for what an acceptance requirement may pin, and every entry of
+   * {@link supportedValidators} must be substantiated by it.
+   *
+   * OMITTED, this builder holds no host registry and uses
+   * {@link supportedValidators} exactly as handed — the direct-embedding
+   * contract for a caller that IS the assembler. The shipped compile entry
+   * (`GraphToolSet.graph_declare`) ALWAYS supplies the registry (an empty one
+   * when the host installed nothing), so on the product path a model-supplied
+   * argument can never substitute for host authorization.
+   */
+  readonly installedValidators?: ValidatorRegistry;
+  /**
+   * The caller's NARROWING assertion over {@link installedValidators}: each
+   * entry must be substantiated by an installed registration, and the effective
+   * set is the declared subset. Never a way to install a capability.
+   */
   readonly supportedValidators?: readonly SupportedValidatorV3[];
   /** The installed contract capability to resolve node `contractRef`s against. */
   readonly contracts?: ContractRegistry;
@@ -391,11 +455,32 @@ export function buildDeclaredOutcomeGraph(
     );
   }
 
+  // THE CAPABILITY SET IS THE HOST'S WHEN ONE IS IN HAND (P4 item 1). The set
+  // the compilation resolves requirements against is DERIVED from the installed
+  // registry — the one the run path will look implementations up in — and a
+  // caller's `supported_validators` may only narrow it. An entry the host
+  // cannot substantiate refuses the declaration here, before anything is
+  // compiled or persisted, so a plan can never pin a capability this process
+  // does not have. With NO registry supplied this builder has nothing to check
+  // against and uses the declared list as handed; the shipped tool path always
+  // supplies one.
+  let capabilities: readonly SupportedValidatorV3[] | undefined;
+  if (input.installedValidators === undefined) {
+    capabilities = input.supportedValidators;
+  } else {
+    const resolved = resolveDeclaredValidatorCapabilities(
+      input.supportedValidators,
+      input.installedValidators,
+    );
+    if (resolved.kind === "refused") {
+      throw refuseUnsubstantiatedCapabilities(resolved.issues);
+    }
+    capabilities = resolved.capabilities;
+  }
+
   const compiled = compileGraph(declaration, {
     ...(input.contracts === undefined ? {} : { contracts: input.contracts }),
-    ...(input.supportedValidators === undefined
-      ? {}
-      : { supportedValidators: input.supportedValidators }),
+    ...(capabilities === undefined ? {} : { supportedValidators: capabilities }),
     ...(input.completionPolicies === undefined
       ? {}
       : { completionPolicies: input.completionPolicies }),

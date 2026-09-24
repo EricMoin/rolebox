@@ -220,8 +220,10 @@ function createGraphDeclareTool(
       "ONLY completion source, and the graph never falls back to signal semantics. " +
       "A declaration that compiles only as a DRAFT " +
       "(acceptance requirements with no resolved validator capability) is refused " +
-      "with every unresolved entry named and nothing is persisted; pass " +
-      "supported_validators to resolve them. Unknown keys, wrong types and bad loop " +
+      "with every unresolved entry named and nothing is persisted; the HOST " +
+      "installs the validator capabilities, and supported_validators may only " +
+      "narrow that installed set (an entry the host did not install refuses the " +
+      "declaration). Unknown keys, wrong types and bad loop " +
       "limits are refused with stable codes and the failing path. Re-declaring an " +
       "existing id preserves an unchanged plan and refuses a changed one — a " +
       "persisted plan is never overwritten silently.",
@@ -249,10 +251,12 @@ function createGraphDeclareTool(
         )
         .optional()
         .describe(
-          "The validator capabilities this caller declares installed, used to " +
-            "resolve every acceptance requirement at an EXACT version. Omitted, " +
-            "acceptance requirements stay unresolved, compilation answers a " +
-            "non-executable DRAFT and graph_declare refuses it.",
+          "Optional NARROWING of the validator capabilities the HOST installed: " +
+            "each entry must name an installed registration at the same exact " +
+            "version (an unversioned entry needs exactly one installed version). " +
+            "This argument never installs a capability — an entry the host did " +
+            "not install refuses the declaration instead. Omitted, every " +
+            "installed capability is in scope.",
         ),
     },
     async execute(args, context) {

@@ -120,8 +120,34 @@ export interface ValidatorRequest {
   readonly identity: ExecutionIdentity;
   /** The root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
+  /**
+   * The outcome's declared DATA CONTRACT, when the compiled plan declares one.
+   *
+   * TRUSTED PLAN CONTENT, read from the committed compiled outcome the
+   * submission is judged against — never from the proposal. A payload-shape
+   * validator therefore resolves the schema IDENTITY the plan pinned, so a
+   * worker cannot choose (or omit) the schema it is judged by, and the absence
+   * of a declared contract is visible to the implementation instead of being
+   * filled in from whatever the submission happened to carry.
+   */
+  readonly dataContract?: ValidatorDataContract;
   /** The caller-supplied clock, in epoch milliseconds. */
   readonly now: number;
+}
+
+/**
+ * The data contract one compiled outcome declares: a schema identity and, when
+ * the schema is versioned, the exact version.
+ *
+ * Structurally the plan's own `CompiledOutcomeData`, restated here so this
+ * module stays a dependency leaf (it imports no compiler module) while the
+ * acceptance core can pass the plan's value through unchanged.
+ */
+export interface ValidatorDataContract {
+  /** Schema identity, e.g. a shipped structural schema. */
+  readonly schema: string;
+  /** Exact schema version; matching is identity, never ordering. */
+  readonly version?: number;
 }
 
 /** One validator implementation: a pure function of its request. */

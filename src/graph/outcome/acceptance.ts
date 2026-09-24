@@ -614,6 +614,20 @@ export function validateSubmission(
           planRevision,
           identity,
           artifactRoot: request.artifactRoot,
+          // THE PLAN'S OWN DATA CONTRACT (P4 item 2): the schema identity the
+          // outcome declares is trusted plan content, so a payload-shape
+          // validator resolves what the PLAN pinned rather than anything the
+          // submission carried.
+          ...(outcome.data === undefined
+            ? {}
+            : {
+                dataContract: {
+                  schema: outcome.data.schema,
+                  ...(outcome.data.version === undefined
+                    ? {}
+                    : { version: outcome.data.version }),
+                },
+              }),
           now: request.now,
         });
       } catch (error) {

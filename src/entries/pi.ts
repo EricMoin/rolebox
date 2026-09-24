@@ -89,7 +89,11 @@ import {
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
-import { createValidatorRegistry } from "../graph/outcome/validators.ts";
+import { assembleHostCapabilities } from "../graph/policy/acceptance-primitives.ts";
+import {
+  COMPLETION_POLICY_AUTHORIZATION_ENV,
+  describeCompletionPolicyIssue,
+} from "../graph/policy/declarations.ts";
 import {
   createAllLspTools,
   LspClientManager,
@@ -861,17 +865,75 @@ export default async function (pi: any): Promise<void> {
     // session. The bearer credential still binds the submission to its
     // attempt: the worker binding is an ADDITIONAL constraint, never a
     // replacement.
+    // THE HOST'S OWN STATE ROOT IS NOT THE WORKSPACE. A dispatched worker runs
+    // with the workspace as its root, so keeping the store under
+    // `<workspace>/.rolebox/state` handed every worker the directory. This is
+    // the one path-shaped part of the boundary — `credential-vault.ts` states
+    // why it is not isolation by itself and what the vault does NOT put on
+    // disk.
+    const outcomeStoreRoot = graphStoreRoot(getDataDir(), process.cwd());
+    // THE SHIPPED CAPABILITY SET IS BUILT ONCE AND SHARED (P4 items 1, 3, 4).
+    //
+    // ONE validator registry and ONE completion-policy registry are handed to
+    // the HOST (the run path) and to the TOOLSET (graph_declare's compile
+    // step), so compile and run resolve against the same source of truth: a
+    // plan can only pin a registration this process will look up at acceptance,
+    // and a natural mapping can only be authorized by a policy revision this
+    // process installed.
+    //
+    // WHY THE ENVIRONMENT IS THE AUTHORIZATION SURFACE. Completion policies are
+    // declarations in reviewed source; the operator who launches the host
+    // authorizes exact `id@revision` pairs through
+    // `ROLEBOX_GRAPH_COMPLETION_POLICIES` (see
+    // `src/graph/policy/declarations.ts`, which documents the JSON document).
+    // Nothing in a graph declaration, a workspace file or a worker submission
+    // can add an authorization: the loader recomputes each digest from the
+    // reviewed or operator-declared body and installs nothing else. With no
+    // configuration the registry is EMPTY and a natural mapping is refused as
+    // `completion-policy-unavailable` — never silently downgraded to explicit.
+    //
+    // THE TRUSTED COMMAND POLICY, when an operator configures one, is what a
+    // `command-exit` acceptance requirement is judged by; it is host
+    // configuration keyed by (graph, node, outcome), so a worker can neither
+    // author nor select the command.
+    const hostCapabilities = assembleHostCapabilities({
+      artifactRoot: process.cwd(),
+      storeRoot: outcomeStoreRoot,
+      env: process.env,
+    });
+    for (const issue of hostCapabilities.completionPolicyIssues) {
+      log.warn("Pi outcome graph: completion-policy configuration", {
+        issue: describeCompletionPolicyIssue(issue),
+      });
+    }
+    for (const issue of hostCapabilities.commandPolicyIssues) {
+      log.warn("Pi outcome graph: trusted command policy", {
+        index: issue.index,
+        issue: issue.message,
+      });
+    }
+    log.info("Pi outcome graph capabilities installed", {
+      validators: hostCapabilities.validatorIds.join(","),
+      commandBindings: hostCapabilities.commandBindings,
+      completionPolicies: hostCapabilities.authorizedCompletionPolicies
+        .map((ref) => ref.id + "@" + ref.revision)
+        .join(","),
+      completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
+    });
+    const shippedValidators = hostCapabilities.validators;
     outcomeHost = OutcomeHost.open({
       workspaceDir: process.cwd(),
-      // THE HOST'S OWN STATE ROOT IS NOT THE WORKSPACE. A dispatched worker runs
-      // with the workspace as its root, so keeping the store under
-      // `<workspace>/.rolebox/state` handed every worker the directory. This is
-      // the one path-shaped part of the boundary — `credential-vault.ts` states
-      // why it is not isolation by itself and what the vault does NOT put on
-      // disk.
-      storeRoot: graphStoreRoot(getDataDir(), process.cwd()),
+      storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
-      validators: createValidatorRegistry([]),
+      // THE SHIPPED ACCEPTANCE PRIMITIVES (P4 items 2 and 4): schema, artifact,
+      // command exit and human approval are installed here, each with a real
+      // implementation, and the SAME registry is handed to the toolset below so
+      // a declaration is compiled against exactly what the run path can check.
+      validators: shippedValidators,
+      // Natural completion is authorized by the operator's configuration, and
+      // the run path corroborates a plan's pinned revision against the same
+      // registry graph_declare compiled with.
+      completionPolicies: hostCapabilities.completionPolicies,
       declareInvocationIdentity: false,
       // The platform's own child-session fact, read back from the task the
       // delivery started: `DispatchTask.sessionId` is the session the
@@ -1178,7 +1240,14 @@ export default async function (pi: any): Promise<void> {
       // authentication factor at all.
       hostIdentity: outcomeHost.workerIdentity,
       outcomeDispatch: outcomeHost.dispatch,
-      outcomeValidators: createValidatorRegistry([]),
+      // THE ONE CAPABILITY SET (P4 item 1): the registry the host installed
+      // above. `graph_declare` derives its compile-time set from this, so a
+      // caller's supported_validators can only narrow what this process can
+      // actually resolve and enforce at acceptance.
+      outcomeValidators: shippedValidators,
+      // The HOST's completion-policy capability, never a tool argument: the
+      // same registry the run path corroborates against (D6).
+      completionPolicies: hostCapabilities.completionPolicies,
       outcomeArtifactRoot: process.cwd(),
       onGraphDeclared: (graphId, invokingSessionId, agent) => {
         // The declaring invocation is handed to the HOST, which records it per

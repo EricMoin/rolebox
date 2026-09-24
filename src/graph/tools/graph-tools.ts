@@ -59,7 +59,19 @@ import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
 import type { AttemptCredentialSource } from "../outcome/attempt-credential.ts";
 import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
-import type { ValidatorRegistry } from "../outcome/validators.ts";
+import {
+  createValidatorRegistry,
+  type ValidatorRegistry,
+} from "../outcome/validators.ts";
+
+/**
+ * The capability set of a host that installed nothing: a real, empty registry.
+ *
+ * It is what an absent `outcomeValidators` dependency means here, so the tool
+ * path has ONE interpretation — "no validator is installed" — instead of
+ * falling back to a caller-supplied list (P4 item 1). The run path's absent
+ * registry resolves to the same empty set, so compile and run agree.
+ */
 import {
   auditGraphStore,
   type DrainAuditReport,
@@ -122,6 +134,16 @@ import {
   type GraphFlagData,
   type GraphLoopSummary,
 } from "./status-render.ts";
+
+/**
+ * The capability set of a host that installed nothing: a real, empty registry.
+ *
+ * It is what an absent `outcomeValidators` dependency means here, so the tool
+ * path has ONE interpretation — "no validator is installed" — instead of
+ * falling back to a caller-supplied list (P4 item 1). The run path's absent
+ * registry resolves to the same empty set, so compile and run agree.
+ */
+const EMPTY_OUTCOME_VALIDATORS: ValidatorRegistry = createValidatorRegistry([]);
 
 // Module logger (exported so tests can spy on the degradation warnings, F6).
 export const log = createSubLogger("graph:tools");
@@ -235,11 +257,22 @@ export interface GraphToolSetDeps {
    */
   outcomeDispatch?: OutcomeDispatchAdapter;
   /**
-   * Installed validator implementations for outcome-protocol graphs. The plan
-   * pins every acceptance requirement at an exact `{ validator, version }`; a
-   * requirement with no registered implementation is REFUSED rather than
-   * skipped, so absent means an EMPTY registry — a plan whose gates need a
-   * capability this process does not have can never read as accepted.
+   * Installed validator implementations for outcome-protocol graphs — THE
+   * CAPABILITY SET COMPILE AND RUN SHARE (P4 item 1).
+   *
+   * `graph_declare` derives the compile-time capability set from THIS registry
+   * (never from the caller's `supported_validators`, which may only narrow it),
+   * and the outcome run path resolves each pinned requirement's implementation
+   * in the SAME registry at acceptance. The plan pins every requirement at an
+   * exact `{ validator, version }`; a requirement with no registered
+   * implementation is REFUSED rather than skipped, so absent means an EMPTY
+   * registry — a plan whose gates need a capability this process does not have
+   * can never be compiled, and one whose capability is later removed can never
+   * read as accepted.
+   *
+   * The shipped hosts install the four closed acceptance primitives through
+   * `createShippedAcceptanceValidators` and hand the ONE registry to both the
+   * host and this toolset.
    */
   outcomeValidators?: ValidatorRegistry;
   /**
@@ -550,6 +583,16 @@ export class GraphToolSet {
     const built = buildDeclaredOutcomeGraph({
       declaration: args.declaration,
       ...(args.graph_id === undefined ? {} : { graphId: args.graph_id }),
+      // THE HOST'S INSTALLED SET IS THE SOURCE OF TRUTH (P4 item 1), and it is
+      // ALWAYS supplied here: an absent dependency means this process installed
+      // no validator, which is the empty registry — never "the caller's list is
+      // the capability set". The caller's list is passed beside it as a
+      // NARROWING assertion only, and `buildDeclaredOutcomeGraph` refuses any
+      // entry this registry cannot substantiate. The run path resolves
+      // implementations in the same registry, so a compiled plan can only pin
+      // what this process can check.
+      installedValidators:
+        this.deps.outcomeValidators ?? EMPTY_OUTCOME_VALIDATORS,
       ...(args.supported_validators === undefined
         ? {}
         : { supportedValidators: args.supported_validators }),

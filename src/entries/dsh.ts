@@ -116,7 +116,11 @@ import {
   DshOutcomeDelivery,
   type DshOutcomeSubagentRuntime,
 } from "../platform/adapters/dsh/outcome-dispatch.ts";
-import { createValidatorRegistry } from "../graph/outcome/validators.ts";
+import { assembleHostCapabilities } from "../graph/policy/acceptance-primitives.ts";
+import {
+  COMPLETION_POLICY_AUTHORIZATION_ENV,
+  describeCompletionPolicyIssue,
+} from "../graph/policy/declarations.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
 import { createLoopTools } from "../loop/loop-tools.ts";
@@ -1214,6 +1218,54 @@ export async function apply(
   // one path-shaped part of the boundary — `credential-vault.ts` states why it
   // is not isolation by itself and what the vault does NOT put on disk.
   const outcomeStoreRoot = graphStoreRoot(getDataDir(), process.cwd());
+  // THE SHIPPED CAPABILITY SET IS BUILT ONCE AND SHARED (P4 items 1, 3, 4).
+  //
+  // ONE validator registry and ONE completion-policy registry are handed to the
+  // HOST (the run path) and to the TOOLSET (graph_declare's compile step), so
+  // compile and run resolve against the same source of truth: a plan can only
+  // pin a registration this process will look up at acceptance, and a natural
+  // mapping can only be authorized by a policy revision this process installed.
+  //
+  // WHY THE ENVIRONMENT IS THE AUTHORIZATION SURFACE. Completion policies are
+  // declarations in reviewed source; the operator who launches the host
+  // authorizes exact `id@revision` pairs through
+  // `ROLEBOX_GRAPH_COMPLETION_POLICIES` (see
+  // `src/graph/policy/declarations.ts`, which documents the JSON document).
+  // Nothing in a graph declaration, a workspace file or a worker submission can
+  // add an authorization: the loader recomputes each digest from the reviewed
+  // or operator-declared body and installs nothing else. With no configuration
+  // the registry is EMPTY and a natural mapping is refused as
+  // `completion-policy-unavailable` — never silently downgraded to explicit.
+  //
+  // THE TRUSTED COMMAND POLICY, when an operator configures one, is what a
+  // `command-exit` acceptance requirement is judged by; it is host
+  // configuration keyed by (graph, node, outcome), so a worker can neither
+  // author nor select the command.
+  const capabilities = assembleHostCapabilities({
+    artifactRoot: process.cwd(),
+    storeRoot: outcomeStoreRoot,
+    env: process.env,
+  });
+  for (const issue of capabilities.completionPolicyIssues) {
+    log.warn("dsh outcome graph: completion-policy configuration", {
+      issue: describeCompletionPolicyIssue(issue),
+    });
+  }
+  for (const issue of capabilities.commandPolicyIssues) {
+    log.warn("dsh outcome graph: trusted command policy", {
+      index: issue.index,
+      issue: issue.message,
+    });
+  }
+  log.info("dsh outcome graph capabilities installed", {
+    validators: capabilities.validatorIds.join(","),
+    commandBindings: capabilities.commandBindings,
+    completionPolicies: capabilities.authorizedCompletionPolicies
+      .map((ref) => ref.id + "@" + ref.revision)
+      .join(","),
+    completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
+  });
+  const shippedValidators = capabilities.validators;
   // TWO DIFFERENT SUBJECTS, TWO DIFFERENT DECISIONS.
   //
   // D9 IS NOT DECLARED. The runtime's dispatch-identity capability binds an
@@ -1241,7 +1293,16 @@ export async function apply(
     // The registry and the credential RECORDS are durable; no credential VALUE
     // is (the vault default), because this host cannot substantiate the
     // platform boundary a durable value would need.
-    validators: createValidatorRegistry([]),
+    //
+    // THE SHIPPED ACCEPTANCE PRIMITIVES (P4 items 2 and 4): schema, artifact,
+    // command exit and human approval are installed here, each with a real
+    // implementation, and the SAME registry is handed to the toolset below so a
+    // declaration is compiled against exactly what the run path can check.
+    validators: shippedValidators,
+    // Natural completion is authorized by the operator's configuration, and the
+    // run path corroborates a plan's pinned revision against the same registry
+    // graph_declare compiled with.
+    completionPolicies: capabilities.completionPolicies,
     declareInvocationIdentity: false,
     // The platform's own child-session fact, read back from the confirmed
     // execution: for a local dsh run the run id IS the published child session
@@ -1282,7 +1343,14 @@ export async function apply(
     // factor at all.
     hostIdentity: outcomeHost.workerIdentity,
     outcomeDispatch: outcomeHost.dispatch,
-    outcomeValidators: createValidatorRegistry([]),
+    // THE ONE CAPABILITY SET (P4 item 1): the registry the host installed
+    // above. `graph_declare` derives its compile-time set from this, so a
+    // caller's supported_validators can only narrow what this process can
+    // actually resolve and enforce at acceptance.
+    outcomeValidators: shippedValidators,
+    // The HOST's completion-policy capability, never a tool argument: the same
+    // registry the run path corroborates against (D6).
+    completionPolicies: capabilities.completionPolicies,
     outcomeArtifactRoot: process.cwd(),
     onGraphDeclared: (graphId, invokingSessionId, agent) => {
       // The declaring invocation is handed to the HOST, which records it for the
