@@ -60,6 +60,7 @@ import {
   type AcceptanceLedger,
   type AcceptanceLedgerTx,
   type AcceptedEventRecord,
+  type ApprovalLedger,
   type BudgetLedger,
   type CommitResult,
   type EffectTransition,
@@ -206,12 +207,28 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
    */
   readonly budget: BudgetLedger;
 
+  /**
+   * The trusted-APPROVAL surface (P3 item 3).
+   *
+   * A pure delegation to the store, like `runs` and `budget` above: the
+   * acceptance core reads the attempt's pause through the port it already holds,
+   * so a submission the pause holds back is refused by the SAME code that would
+   * settle it — and the pre-validation check in the submission path is a real
+   * read of that row rather than a dead optional chain. Nothing about the rules
+   * lives here, and the field is REQUIRED for the same reason `budget` is: every
+   * format this build opens carries the approval table, so an absent property
+   * would silently switch off the pre-validation refusal on the shipped path
+   * while the store's guarded INSERT stayed the only refusal point.
+   */
+  readonly approvals: ApprovalLedger;
+
   private readonly store: GraphStore;
 
   private constructor(store: GraphStore) {
     this.store = store;
     this.runs = store.runs;
     this.budget = store.budget;
+    this.approvals = store.approvals;
   }
 
   /**

@@ -2662,6 +2662,28 @@ export class GraphStore {
   }
 
   /**
+   * Take the APPROVAL table's write lock for one graph, and record nothing.
+   *
+   * THE FIRST STATEMENT OF EVERY SWEEP. Both sweeps read the due rows and then
+   * update them, and a transaction that reads before it writes must PROMOTE its
+   * shared lock to reserved — which SQLite refuses IMMEDIATELY while another
+   * connection holds the write lock ("database is locked", with no
+   * `busy_timeout` wait), so two hosts booting one workspace while a request
+   * was due could reject the boot with a raw driver error instead of recording
+   * the expiry. The UPDATE below is a write whether or not it matches a row: it
+   * sets the value that is already there, so a transaction that rolls back
+   * leaves no trace, and RESERVED is taken before the first read.
+   */
+  private lockApprovalWrite(graphId: string): void {
+    this.db.run(
+      `UPDATE ${GRAPH_STORE_TABLES.approvalRequests}
+       SET status = status
+       WHERE graph_id = ?`,
+      graphId,
+    );
+  }
+
+  /**
    * Materialize the expiry of every pending request of one GRAPH whose deadline
    * has passed at `at`, and answer the rows this call expired.
    *
@@ -2676,6 +2698,7 @@ export class GraphStore {
     requireStoreEpoch(at, "approval.at");
     requireStoreIdentifier(reason, "approval.reason");
     return this.joinOrBegin(() => {
+      this.lockApprovalWrite(graphId);
       const due = this.approvalRows(graphId, "pending", at);
       if (due.length === 0) return Object.freeze([]);
       this.db.run(
@@ -2702,9 +2725,11 @@ export class GraphStore {
    * The run-stopping commands call this INSIDE their own transaction: a stopped
    * run's pause can never be answered into a settlement (the run is controlled),
    * so leaving the row `pending` would let a later approval read as a live
-   * decision about work that can no longer proceed. The stopping principal is
-   * recorded on the expired row, so the reader can tell WHO stopped the run the
-   * pause belonged to.
+   * decision about work that can no longer proceed. The expiry writes ONLY the
+   * status, the decision time and the reason: the stopping principal is NOT
+   * recorded on this row (`decided_by_session` is written by
+   * `decideApprovalRequest` alone), and WHO stopped the run is recoverable from
+   * the control-decision stream, not from the request row.
    */
   expireRunApprovals(
     graphId: string,
@@ -2717,6 +2742,7 @@ export class GraphStore {
     requireStoreEpoch(at, "approval.at");
     requireStoreIdentifier(reason, "approval.reason");
     return this.joinOrBegin(() => {
+      this.lockApprovalWrite(graphId);
       const due = this.approvalRows(graphId, "pending", undefined, runId);
       if (due.length === 0) return Object.freeze([]);
       this.db.run(

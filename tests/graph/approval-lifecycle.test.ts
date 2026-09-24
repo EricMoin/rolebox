@@ -39,6 +39,7 @@ import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
+import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -468,6 +469,42 @@ function decide(
   );
 }
 
+/**
+ * Run one control command with a TEMP TRIGGER on the store's OWN shared
+ * connection, so the write fails AT THE SQL STATEMENT below the application.
+ *
+ * The store shares one connection per file in this process, so the trigger the
+ * case creates is the one the command's transaction runs against; the trigger is
+ * dropped before the rows are read back, and the return value is whatever the
+ * command threw — the transaction rolls back on a throw, which is what the
+ * rollback case below asserts. (The same shape control-entry.test.ts uses for
+ * failure, cancel and retry.)
+ *
+ * `NEW.status <> OLD.status` is deliberate: the decision path's own no-op lock
+ * write sets the status to itself, so the trigger fires at the DECISION, not at
+ * the lock in front of it.
+ */
+function withInjectedApprovalWrite(
+  fixture: ApprovalFixture,
+  trigger: string,
+  run: () => unknown,
+): unknown {
+  const store = GraphStore.openFile(fixture.storeRoot);
+  try {
+    store.run("CREATE TEMP TRIGGER p3_approval_inject " + trigger);
+    try {
+      run();
+      return undefined;
+    } catch (thrown) {
+      return thrown;
+    } finally {
+      store.run("DROP TRIGGER p3_approval_inject");
+    }
+  } finally {
+    store.close();
+  }
+}
+
 // ── The lifecycle ───────────────────────────────────────────────────────────
 
 describe("graph_control — the approval request and its decision", () => {
@@ -600,6 +637,41 @@ describe("graph_control — the approval request and its decision", () => {
       expect(late.kind).toBe("refused");
       expect(late.refusals?.[0]?.code).toBe("approval-already-decided");
       expect(requestOf(readFacts(fixture)).status).toBe("rejected");
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── The pause is read BEFORE the declared gates ─────────────────────────────
+
+describe("graph_submit_outcome — a paused attempt is refused before validation", () => {
+  it("answers approval-pending even for an outcome the plan does not declare", async () => {
+    const fixture = await openFixture(CHAIN);
+    try {
+      // THE DISCRIMINATOR. This outcome is not in the plan, so validation has an
+      // answer ready (`undeclared-outcome`); if the pause were read after the
+      // gates, that is the answer the submission would carry.
+      const undeclared = await submit(fixture, "work", "not-declared");
+      expect(undeclared.refusals?.[0]?.code).toBe("undeclared-outcome");
+      expect(readFacts(fixture).receipts).toBe(0);
+
+      raise(fixture);
+
+      // THE PAUSE IS THE ANSWER: the pre-transaction read of the durable row
+      // fires, so the submission is refused `approval-pending` and validation
+      // never runs for it. On a ledger that exposed no approval surface this
+      // check was a dead optional chain and the same submission was answered
+      // `undeclared-outcome` — the store's guarded INSERT still refused the
+      // settlement, so this case pins WHICH refusal the shipped path gives.
+      const held = await submit(fixture, "work", "not-declared");
+      expect(held.decision).toBeUndefined();
+      expect(held.refusals?.[0]?.code).toBe("approval-pending");
+
+      const facts = readFacts(fixture);
+      expect(requestOf(facts).status).toBe("pending");
+      expect(facts.events).toEqual([]);
+      expect(facts.receipts).toBe(0);
     } finally {
       fixture.host.close();
     }
@@ -965,6 +1037,48 @@ describe("graph_control — who may decide an approval", () => {
       expect(decided.kind).toBe("applied");
       expect(decided.approval?.request.status).toBe("approved");
       expect(decided.approval?.request.decidedBy?.sessionId).toBe(APPROVER);
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── The command's own transaction (plan §4 P3 per-command row 5) ────────────
+
+describe("graph_control — an approval decision commits whole or not at all", () => {
+  it("rolls the decision back whole when the status UPDATE fails, leaving the pause pending", async () => {
+    const fixture = await openFixture(CHAIN);
+    try {
+      raise(fixture);
+      const before = readFacts(fixture);
+      expect(requestOf(before).status).toBe("pending");
+      expect(before.decisions.map((decision) => decision.command)).toEqual(["approval-request"]);
+
+      const error = withInjectedApprovalWrite(
+        fixture,
+        "BEFORE UPDATE ON " +
+          GRAPH_STORE_TABLES.approvalRequests +
+          " WHEN NEW.status <> OLD.status BEGIN SELECT RAISE(ABORT, 'p3-injected-approval-failure'); END",
+        () => decide(fixture, "approve"),
+      );
+
+      // THE THROW IS THE CONTRACT: the store's own failure reaches the caller
+      // instead of being dressed up as a refusal.
+      expect(error).toBeInstanceOf(Error);
+
+      // NOTHING HALF-LANDED: the request is still PENDING, no decision row was
+      // written, and the attempt was not settled by the rolled-back decision.
+      const after = readFacts(fixture);
+      expect(requestOf(after).status).toBe("pending");
+      expect(requestOf(after).decidedAt).toBeUndefined();
+      expect(requestOf(after).decisionReason).toBeUndefined();
+      expect(after.decisions.map((decision) => decision.command)).toEqual(["approval-request"]);
+      expect(after.events).toEqual([]);
+      expect(after.receipts).toBe(0);
+
+      // AND THE GATE IS STILL CLOSED: the pause survived the failed decision.
+      const held = await submit(fixture, "work", "done");
+      expect(held.refusals?.[0]?.code).toBe("approval-pending");
     } finally {
       fixture.host.close();
     }

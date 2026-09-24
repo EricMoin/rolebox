@@ -38,7 +38,7 @@
  */
 
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -110,6 +110,10 @@ interface WorkerReport {
   readonly decisionCommands?: readonly string[];
   readonly acceptedEvents?: number;
   readonly receipts?: number;
+  readonly rounds?: number;
+  readonly raised?: number;
+  readonly expired?: number;
+  readonly errors?: readonly string[];
 }
 
 /** The child session the platform "created" for one attempt. */
@@ -117,12 +121,24 @@ function childSessionOf(attemptId: string): string {
   return "child-session:" + attemptId;
 }
 
-/** Launch the checked-in worker and parse its ONE report line. */
-async function runWorker(
+/** One launched child, with the timer that kills a child which overruns. */
+interface LaunchedWorker {
+  readonly proc: {
+    readonly stdout: ReadableStream<Uint8Array>;
+    readonly stderr: ReadableStream<Uint8Array>;
+    readonly exited: Promise<number>;
+    kill: () => void;
+  };
+  readonly mode: string;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
+/** Launch the checked-in worker WITHOUT waiting for it (a barrier needs two). */
+function spawnWorker(
   mode: string,
   storeRoot: string,
   extra: readonly string[] = [],
-): Promise<WorkerReport> {
+): LaunchedWorker {
   const proc = Bun.spawn(
     [
       process.execPath,
@@ -139,13 +155,17 @@ async function runWorker(
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
-  const timer = setTimeout(() => proc.kill(), CHILD_DEADLINE_MS);
+  return { proc, mode, timer: setTimeout(() => proc.kill(), CHILD_DEADLINE_MS) };
+}
+
+/** Await one launched child and parse its ONE report line. */
+async function collectWorker(worker: LaunchedWorker): Promise<WorkerReport> {
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
+    new Response(worker.proc.stdout).text(),
+    new Response(worker.proc.stderr).text(),
+    worker.proc.exited,
   ]);
-  clearTimeout(timer);
+  clearTimeout(worker.timer);
   const line = stdout
     .split("\n")
     .map((entry) => entry.trim())
@@ -154,7 +174,7 @@ async function runWorker(
   if (line === undefined) {
     throw new Error(
       "approval-restart: worker " +
-        mode +
+        worker.mode +
         " printed no report (exit " +
         String(exitCode) +
         "): " +
@@ -164,10 +184,19 @@ async function runWorker(
   const report = JSON.parse(line) as WorkerReport;
   if (report.ok !== true) {
     throw new Error(
-      "approval-restart: worker " + mode + " failed: " + String(report.error ?? line),
+      "approval-restart: worker " + worker.mode + " failed: " + String(report.error ?? line),
     );
   }
   return report;
+}
+
+/** Launch the checked-in worker and parse its ONE report line. */
+async function runWorker(
+  mode: string,
+  storeRoot: string,
+  extra: readonly string[] = [],
+): Promise<WorkerReport> {
+  return collectWorker(spawnWorker(mode, storeRoot, extra));
 }
 
 /** The shipped host assembly this parent uses, over a REAL declared graph. */
@@ -347,6 +376,88 @@ describe("approval restart across real processes", () => {
       try {
         const store_decisions = store.runs.controlDecisions(APPROVAL_RESTART_GRAPH);
         expect(store_decisions.map((entry) => entry.command)).toEqual(["approval-request"]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      fixture.host.close();
+    }
+  });
+});
+
+// ── The sweep, under two real processes ─────────────────────────────────────
+
+/** How many raise-then-sweep rounds each of the two children runs. */
+const SWEEP_ROUNDS = 20;
+
+/**
+ * Wait until every barrier file exists, or fail after a safety deadline.
+ *
+ * The deadline is not an assertion: it only stops a broken child from hanging
+ * the case. Nothing here measures how long a sweep takes.
+ */
+async function waitForFiles(paths: readonly string[], timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!paths.every((path) => existsSync(path))) {
+    if (Date.now() > deadline) {
+      throw new Error("approval-restart: the sweep children never reached the barrier");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+describe("approval sweep across real processes", () => {
+  it("sweeps the same due requests from two processes with no lock failure", async () => {
+    const fixture = await openParentFixture();
+    try {
+      // THE BARRIER. Both children open their OWN connection, declare
+      // themselves ready, and then block; the parent releases them together, so
+      // the two sweeps really overlap instead of merely being capable of it.
+      const readyA = join(fixture.dir, "sweep-a.ready");
+      const readyB = join(fixture.dir, "sweep-b.ready");
+      const go = join(fixture.dir, "sweep.go");
+      const extra = (ready: string): readonly string[] => [
+        "--rounds",
+        String(SWEEP_ROUNDS),
+        "--ready",
+        ready,
+        "--go",
+        go,
+      ];
+      const children = [
+        spawnWorker("sweep-race", fixture.storeRoot, extra(readyA)),
+        spawnWorker("sweep-race", fixture.storeRoot, extra(readyB)),
+      ];
+      await waitForFiles([readyA, readyB]);
+      writeFileSync(go, "");
+      const reports = await Promise.all(children.map((child) => collectWorker(child)));
+
+      // NO CALL LOST ITS TURN TO THE LOCK. Before the sweep took the write lock
+      // as its FIRST statement, a shared-to-reserved promotion under the other
+      // connection was refused IMMEDIATELY — "database is locked", not a
+      // busy-timeout wait — and the same failure rejected a host boot instead of
+      // recording an expiry.
+      for (const report of reports) {
+        expect(report.errors).toEqual([]);
+        expect(report.rounds).toBe(SWEEP_ROUNDS);
+        expect(report.raised).toBe(SWEEP_ROUNDS);
+      }
+
+      // EVERY RAISED ROW WAS EXPIRED EXACTLY ONCE, by one process or the other:
+      // the two sweeps PARTITION the due rows rather than both claiming one, so
+      // the lock serializes them instead of letting a read race a write.
+      const expired = reports.reduce((total, report) => total + (report.expired ?? -1), 0);
+      expect(expired).toBe(2 * SWEEP_ROUNDS);
+
+      // THE DURABLE FACTS a later window reads: every race row is terminal and
+      // none was left pending by the losing sweep.
+      const store = GraphStore.openFile(fixture.storeRoot);
+      try {
+        const races = store.approvals
+          .approvalRequestsOf(APPROVAL_RESTART_GRAPH)
+          .filter((request) => request.attemptId.startsWith("race#"));
+        expect(races.length).toBe(2 * SWEEP_ROUNDS);
+        expect(races.every((request) => request.status === "expired")).toBe(true);
       } finally {
         store.close();
       }
