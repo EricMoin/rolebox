@@ -32,6 +32,9 @@
  *   whole-file JSON authority is gone.
  * - `completion-bridge.ts` — the bridge from an observed completion to
  *   `settleNatural`, which is the only settlement channel a completion uses.
+ * - `input-view.ts` / `delivery.ts` — the worker-facing half: the retained
+ *   revisions a dispatch materializes into the consumer's own directory (D7),
+ *   and the ONE prompt block that hands a worker its attempt and its inputs.
  *
  * A host wires them together around its own dispatch seam; nothing in this
  * directory imports a platform or an engine, so the layer is the same for every
@@ -84,6 +87,24 @@ export {
   type HostDispatchInvocation,
   type HostOutcomeDispatchOptions,
 } from "./dispatch-host.ts";
+export {
+  INPUT_DELIVERY_DIR,
+  INPUT_DELIVERY_REFUSAL_CODES,
+  INPUT_VIEW_MANIFEST_FILE,
+  INPUT_VIEW_VERSION,
+  InputViewRefusalError,
+  inputConsumerDirectory,
+  materializeInputView,
+  type DeliveredInput,
+  type DeliveredInputFile,
+  type DeliveredInputView,
+  type InputDeliveryLocation,
+  type InputDeliveryRefusal,
+  type InputDeliveryRefusalCode,
+  type InputViewMaterialization,
+  type MaterializeInputViewOptions,
+} from "./input-view.ts";
+export { buildAttemptDeliveryPrompt } from "./delivery.ts";
 export {
   HostInvocationOrigins,
   type HostInvocationOrigin,

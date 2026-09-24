@@ -91,6 +91,26 @@
  * ({@link HostOutcomeDispatchOptions.dispatchInvocation}) as a third argument,
  * so every window names the same parent. A host that knows no origin hands
  * none, and the platform reports the absence instead of guessing one.
+ *
+ * THE INPUT VIEW IS MATERIALIZED HERE, BEFORE ANYTHING IS HANDED OVER (D7). A
+ * resolved input names an `artifactId`; a worker with no store cannot turn that
+ * into bytes, so this adapter materializes every retained revision into the
+ * consumer's own directory — from the content store, digest verified by
+ * `input-view.ts`, never from the mutable path the proposal named — and passes
+ * the view to the delivery as a fourth argument. Every window that starts an
+ * attempt goes through this ONE `create`, so a first dispatch, a successor and a
+ * recovery all deliver a real view or none at all.
+ *
+ * A MATERIALIZATION REFUSAL IS THE SEAM'S OWN THROW. A missing object or a
+ * digest that does not verify means the worker would receive a hole where its
+ * input should be, so nothing is handed over: the refusal is raised BEFORE
+ * `deliver` is called, which releases this claim (the same proof a platform
+ * refusal gives) so no execution exists, and leaves the effect row `pending`.
+ * Every window reads the same fact: the declaring call receives the refusal
+ * itself, and a recovery reports the effect as unsettled work with a
+ * `dispatch-failed` refusal — never as a started execution. Materializing again
+ * later is safe: the view is content-addressed and published once, so a recovery
+ * reuses it instead of duplicating or overwriting it.
  */
 
 import { logWarn } from "../log-warn.ts";
@@ -114,6 +134,13 @@ import {
   type HostExecutionIdentity,
   type HostExecutionNotCreated,
 } from "./execution-index.ts";
+import {
+  InputViewRefusalError,
+  materializeInputView,
+  type DeliveredInputView,
+  type InputDeliveryLocation,
+  type InputDeliveryRefusal,
+} from "./input-view.ts";
 
 // ── The seam and the completion sink ────────────────────────────────────────
 
@@ -142,6 +169,15 @@ export type HostDispatchDelivery = (
   request: OutcomeDispatchRequest,
   effect: OutcomeDispatchEffectKey,
   invocation?: HostDispatchInvocation,
+  /**
+   * THE INPUT VIEW THIS WORKER IS HANDED (D7), materialized by this adapter from
+   * the content store. PRESENT exactly when the attempt consumes at least one
+   * upstream result — the entries' retained revisions are already real files
+   * whose digests were verified, and `undefined` means this node declares no
+   * inputs (never "the view could not be made": that dispatch is refused before
+   * the delivery is called at all).
+   */
+  inputView?: DeliveredInputView,
 ) => void;
 
 /**
@@ -230,6 +266,17 @@ export interface HostOutcomeDispatchOptions {
    * platform reports the unnamed dispatch instead of inventing a parent.
    */
   readonly dispatchInvocation?: (graphId: string) => HostDispatchInvocation | undefined;
+  /**
+   * WHERE A DISPATCH MATERIALIZES ITS INPUTS (D7): the root the retained CONTENT
+   * objects live under, and the root per-consumer directories are published in.
+   *
+   * OMITTED, a dispatch whose node declares inputs is REFUSED
+   * (`input-delivery-unavailable`) rather than started with nothing to read: an
+   * artifact identity the worker cannot resolve is not delivery, and a silent
+   * launch would present the absence as a working input. A node that declares no
+   * inputs needs no location and is delivered exactly as before.
+   */
+  readonly inputDelivery?: InputDeliveryLocation;
 }
 
 // ── The adapter ─────────────────────────────────────────────────────────────
@@ -244,6 +291,8 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
   private readonly dispatchInvocation:
     | ((graphId: string) => HostDispatchInvocation | undefined)
     | undefined;
+  /** Where this host's retained objects live and where deliveries are published. */
+  private readonly inputDelivery: InputDeliveryLocation | undefined;
   /**
    * THE PLATFORM'S OWN NAMES, as this process has read them (F2).
    *
@@ -269,6 +318,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     this.completions = options.completions;
     this.invocation = options.invocation;
     this.dispatchInvocation = options.dispatchInvocation;
+    this.inputDelivery = options.inputDelivery;
   }
 
   /**
@@ -342,7 +392,12 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     // that declared the graph, not under whoever happens to be acting.
     const dispatchInvocation = this.dispatchInvocation?.(request.graphId);
     try {
-      this.deliver(request, effect, dispatchInvocation);
+      // THE VIEW IS MATERIALIZED BEFORE THE PLATFORM SEES ANYTHING (D7), and a
+      // refusal is raised from inside this window: it is the same synchronous
+      // throw the catch below treats as "nothing was handed over", so the claim
+      // is released, the effect row stays pending and no worker is started for
+      // an input that could not become a file.
+      this.deliver(request, effect, dispatchInvocation, this.inputViewOf(request));
     } catch (error) {
       // THE SEAM'S PROOF, AND ONLY THE SEAM'S: a synchronous throw is the
       // delivery refusing to hand the request over (see HostDispatchDelivery),
@@ -369,6 +424,49 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
       attemptId: request.attemptId,
       ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     });
+  }
+
+  /**
+   * Materialize one request's bound input view, or raise the structured refusal
+   * that stops the dispatch.
+   *
+   * `undefined` is the honest answer for an attempt that consumes nothing: the
+   * node declares no inputs (or declares an empty list), so there is no file to
+   * publish and no directory is created. A request that DOES carry inputs and a
+   * host with no delivery location is refused by name — the alternative would be
+   * starting a worker whose input is an identity it cannot resolve.
+   */
+  private inputViewOf(request: OutcomeDispatchRequest): DeliveredInputView | undefined {
+    const inputs = request.inputs;
+    if (inputs === undefined || inputs.length === 0) return undefined;
+    const location = this.inputDelivery;
+    if (location === undefined) {
+      const refusals: InputDeliveryRefusal[] = inputs.map((input) =>
+        Object.freeze({
+          code: "input-delivery-unavailable" as const,
+          from: input.from,
+          outcome: input.outcome,
+          message:
+            "this host was given no input-delivery location, so the retained revisions of " +
+            "attempt " +
+            JSON.stringify(input.attemptId) +
+            " cannot be materialized as files for this node — an artifact identity the worker " +
+            "cannot resolve is not delivery, so the attempt is NOT launched",
+        }),
+      );
+      throw new InputViewRefusalError(refusals);
+    }
+    const materialized = materializeInputView({
+      contentStoreRoot: location.contentStoreRoot,
+      deliveryRoot: location.deliveryRoot,
+      graphId: request.graphId,
+      attemptId: request.attemptId,
+      inputs,
+    });
+    if (materialized.kind === "refused") {
+      throw new InputViewRefusalError(materialized.refusals);
+    }
+    return materialized.view;
   }
 
   /**

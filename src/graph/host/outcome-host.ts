@@ -112,6 +112,8 @@
  * stays in the platform adapter.
  */
 
+import { join } from "node:path";
+
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { logWarn } from "../log-warn.ts";
@@ -185,6 +187,10 @@ import type {
 } from "../outcome/runtime.ts";
 import { HostOutcomeDispatch } from "./dispatch-host.ts";
 import {
+  INPUT_DELIVERY_DIR,
+  type InputDeliveryLocation,
+} from "./input-view.ts";
+import {
   HostExecutionIndex,
   hostExecutionNotCreated,
   type HostExecutionIdentity,
@@ -234,6 +240,23 @@ export interface OutcomeHostOptions {
   readonly completionPolicies?: CompletionPolicyRegistry;
   /** Root every evidence reference resolves inside. Defaults to `workspaceDir`. */
   readonly artifactRoot?: string;
+  /**
+   * Where a dispatch publishes the input files its worker reads (D7). Defaults
+   * to `<storeRoot>/input-deliveries`.
+   *
+   * THE RETAINED OBJECTS ARE READ FROM THE HOST'S OWN STORE ROOT, not from
+   * {@link OutcomeHostOptions.artifactRoot}: that option is the root evidence
+   * REFERENCES resolve inside (the workspace), while the content the acceptance
+   * deposited lives in the immutable store the shipped assembly roots at
+   * `storeRoot` (`createShippedAcceptanceValidators`, which is handed the same
+   * value). A host whose assembly roots the content store elsewhere passes
+   * `inputDelivery` to its dispatch adapter directly.
+   *
+   * The delivery root is deliberately under the host's OWN root and outside the
+   * workspace, and each consumer gets a directory of its own inside it: a worker
+   * is handed paths into that one directory and never a path into the store.
+   */
+  readonly inputDeliveryRoot?: string;
   /** The clock reported to settlements; defaults to `Date.now`. */
   readonly clock?: () => number;
   /** Vault/index durability. Defaults to `"file"` (restart-recoverable). */
@@ -784,6 +807,8 @@ export class OutcomeHost {
   private readonly workspaceDir: string;
   private readonly storeRoot: string;
   private readonly artifactRoot: string;
+  /** Where the run path materializes each consumer's input files (D7). */
+  private readonly inputDelivery: InputDeliveryLocation;
   private readonly clock: () => number;
   private readonly validators: ValidatorRegistry;
   private readonly completionPolicies: CompletionPolicyRegistry | undefined;
@@ -869,6 +894,10 @@ export class OutcomeHost {
     this.workspaceDir = options.workspaceDir;
     this.storeRoot = options.storeRoot;
     this.artifactRoot = options.artifactRoot ?? options.workspaceDir;
+    this.inputDelivery = Object.freeze({
+      contentStoreRoot: options.storeRoot,
+      deliveryRoot: options.inputDeliveryRoot ?? join(options.storeRoot, INPUT_DELIVERY_DIR),
+    });
     this.clock = options.clock ?? (() => Date.now());
     this.validators = options.validators ?? createValidatorRegistry([]);
     this.completionPolicies = options.completionPolicies;
@@ -944,6 +973,10 @@ export class OutcomeHost {
       // port is asked with, so the child it correlates is the one this graph
       // dispatched under this parent.
       dispatchInvocation: (graphId) => this.originOf(graphId),
+      // THE INPUT VIEW'S TWO ROOTS (D7): the content store the acceptance gate
+      // deposited into (this host's own store root), and the tree each consumer's
+      // isolated directory is published under.
+      inputDelivery: this.inputDelivery,
       // THE PLATFORM'S OWN ANSWER, PLUMBED TO THE DISPATCH ADAPTER (F3): the
       // host's option is the one seam the entries install, and the adapter is
       // where the run path's crash-window questions are actually asked.
