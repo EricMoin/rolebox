@@ -49,8 +49,9 @@
     "scripts/patch-opentui-native-entry.mjs"
   ],
   "scripts": {
-    "build": "bun run build:clean && tsc && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client",
+    "build": "bun run build:clean && tsc && bun run build:bin-executable && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client",
     "build:clean": "bun run scripts/clean-dist.ts",
+    "build:bin-executable": "bun run scripts/mark-bin-executable.ts",
     "build:entry-aliases": "bun run scripts/build-entry-aliases.ts",
     "build:tui": "bun run scripts/build-tui.ts",
     "build:dsh-web-client": "NODE_ENV=production bun run scripts/build-dsh-web-client.ts",
