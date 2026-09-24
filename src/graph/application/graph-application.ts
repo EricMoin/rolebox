@@ -2,9 +2,11 @@ import { OutcomeHost, withCancelDelivery, type OutcomeHostOptions } from "../hos
 import { assembleHostCapabilities } from "../policy/acceptance-primitives.ts";
 import { createGraphToolSet } from "../tools/graph-tools.ts";
 import { createOutcomeGraphTools } from "../tools/index.ts";
+import { GraphNotifications, type GraphNotificationOptions } from "./graph-notifications.ts";
 
 export interface GraphApplicationOptions extends Omit<OutcomeHostOptions, "validators" | "completionPolicies"> {
   readonly env: Readonly<Record<string, string | undefined>>;
+  readonly notifications?: GraphNotificationOptions;
 }
 
 /** Owns the capabilities and storage boundary shared by all graph entry points. */
@@ -12,6 +14,7 @@ export class GraphApplication {
   readonly capabilities;
   readonly host: OutcomeHost;
   readonly tools;
+  readonly notifications: GraphNotifications | undefined;
 
   private constructor(options: GraphApplicationOptions) {
     this.capabilities = assembleHostCapabilities({
@@ -38,6 +41,7 @@ export class GraphApplication {
       onGraphDeclared: (graphId, sessionId, agent) =>
         this.host.startDeclaredGraph(graphId, { sessionId, agent }),
     });
+    this.notifications = options.notifications === undefined ? undefined : new GraphNotifications(options.storeRoot, options.notifications);
   }
 
   static open(options: GraphApplicationOptions): GraphApplication {
@@ -61,6 +65,7 @@ export class GraphApplication {
   }
 
   close(): void {
+    this.notifications?.close();
     this.host.close();
   }
 }

@@ -57,6 +57,14 @@ function stateFilePath(dir: string): string {
 
 describe("TaskStateStore", () => {
   describe("save() and load() round-trip", () => {
+    it("preserves graph completion-notification ownership after restart", async () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+      const task = makeTask({ suppressCompletionNotification: true });
+      await store.save(new Map([[task.id, task]]));
+      expect(store.load()!.tasks.get(task.id)!.suppressCompletionNotification).toBe(true);
+    });
+
     it("persists and retrieves a single task", async () => {
       const { store, dir } = createTestStore();
       dirs.push(dir);

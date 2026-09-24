@@ -193,6 +193,14 @@ describe("buildNotificationText", () => {
 // ── tests: notifyParent ──────────────────────────────────────────
 
 describe("notifyParent", () => {
+  it("leaves graph worker completion and failure notifications to the graph", async () => {
+    const client = createClient();
+    for (const status of ["completed", "error", "cancelled", "timeout"] as const) {
+      expect(await notifyParent(client, createTask({ status, suppressCompletionNotification: true }), 0)).toBe(true);
+    }
+    expect(client.prompt).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     mock.restore();
     clearSentFinalNotifies();

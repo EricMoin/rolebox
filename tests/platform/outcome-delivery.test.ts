@@ -372,6 +372,7 @@ describe("PiOutcomeDelivery", () => {
     expect(launches[0].subagent).toBe("agent.work");
     expect(launches[0].prompt).toContain(CREDENTIAL);
     expect(launches[0].run_in_background).toBe(true);
+    expect(launches[0].suppressCompletionNotification).toBe(true);
     // The parent context is the delivery's invocation — the adapter holds no
     // session state of its own.
     expect(contexts[0]).toEqual({

@@ -38,7 +38,7 @@ export const DISPATCH_PROGRESS_MILESTONE_MARKER = "[PROGRESS MILESTONE]";
 export const GRAPH_COMPLETION_MARKER = "[GRAPH NODE COMPLETED]";
 /**
  * Marker for graph-terminal reminders (GRAPH COMPLETE) injected into the emperor
- * session by the deleted legacy graph terminal notifier.
+ * session by the durable graph notification outbox.
  * Like every other parent-targeted reminder, it is part of
  * {@link DISPATCH_NOTIFICATION_MARKERS} so the re-entering chat.message hook
  * recognizes it as a non-user turn.
@@ -46,7 +46,7 @@ export const GRAPH_COMPLETION_MARKER = "[GRAPH NODE COMPLETED]";
 export const GRAPH_COMPLETE_MARKER = "[GRAPH COMPLETE]";
 /**
  * Marker for graph-terminal reminders (GRAPH BLOCKED) injected into the emperor
- * session by the deleted legacy graph terminal notifier.
+ * session by the durable graph notification outbox.
  * Distinct from GRAPH_COMPLETE_MARKER so a graph that is blocked-then-resumed-then-completed
  * produces two distinct terminal reminders with different markers.
  */
@@ -195,6 +195,7 @@ export async function notifyParent(
   opts?: NotifyOpts,
   resultText?: string,
 ): Promise<boolean> {
+  if (task.suppressCompletionNotification) return true;
   const maxRetries = opts?.maxRetries ?? NOTIFY_MAX_RETRIES;
   const baseDelayMs = opts?.baseDelayMs ?? NOTIFY_BASE_DELAY_MS;
   const maxDelayMs = opts?.maxDelayMs ?? NOTIFY_MAX_DELAY_MS;

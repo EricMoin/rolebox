@@ -32,6 +32,7 @@ export interface SerializedDispatchTask {
   sessionId: string;
   parentSessionId: string;
   parentAgent?: string;
+  suppressCompletionNotification?: boolean;
   status: DispatchTaskStatus;
   agent: string;
   prompt: string;

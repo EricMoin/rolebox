@@ -34,6 +34,7 @@ export async function launch(
     sessionId: "",
     parentSessionId: parentContext.sessionID,
     parentAgent: parentContext.agent,
+    suppressCompletionNotification: input.suppressCompletionNotification,
     depth: computeDepth(d, parentContext.sessionID),
     status: "pending",
     agent: input.subagent,

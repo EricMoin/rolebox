@@ -217,6 +217,12 @@ interface SharedConnection {
   depth: number;
   fileStamp?: string;
   bindingId?: string;
+  observers?: Set<GraphStoreTransactionObserver>;
+}
+
+export interface GraphStoreTransactionObserver {
+  beforeCommit(): void;
+  afterCommit(): void;
 }
 
 function verifyConnectionFile(connection: SharedConnection, filePath: string): void {
@@ -887,11 +893,29 @@ export class GraphStore {
    */
   private inTransaction<R>(work: () => R): R {
     this.connection.depth += 1;
+    let committed = false;
     try {
-      return this.db.transaction(work)();
+      const result = this.db.transaction(() => {
+        const result = work();
+        for (const observer of this.connection.observers ?? []) observer.beforeCommit();
+        return result;
+      })();
+      committed = true;
+      return result;
     } finally {
       this.connection.depth -= 1;
+      if (committed) {
+        for (const observer of this.connection.observers ?? []) observer.afterCommit();
+      }
     }
+  }
+
+  /** Observes every writer sharing this connection; delivery must happen after commit. */
+  observeTransactions(observer: GraphStoreTransactionObserver): () => void {
+    this.assertOpen("observeTransactions");
+    const observers = this.connection.observers ??= new Set();
+    observers.add(observer);
+    return () => { observers.delete(observer); };
   }
 
   // ── Ledger records (the port's own surface, delegated) ────────────────────

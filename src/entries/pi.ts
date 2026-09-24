@@ -1,4 +1,5 @@
 import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
+import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
 /**
  * Pi Extension Entry Point — `src/pi-extension.ts`
@@ -910,7 +911,9 @@ export default async function(pi: any): Promise<void> {
     // `command-exit` acceptance requirement is judged by; it is host
     // configuration keyed by (graph, node, outcome), so a worker can neither
     // author nor select the command.
+    let graphSessionId: (() => string | undefined) | undefined;
     const graphApplication = GraphApplication.open({
+      notifications: { send: createGraphNotificationSender(notifyClient, id => graphSessionId?.() === id) },
       workspaceDir: process.cwd(),
       storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
@@ -1375,6 +1378,8 @@ export default async function(pi: any): Promise<void> {
       if (typeof pi.on !== "function") return;
       pi.on(piEventName, async (event: unknown, _ctx: unknown) => {
         try {
+          const context = _ctx as { sessionManager?: { getSessionId?(): string } } | undefined;
+          if (context?.sessionManager?.getSessionId) graphSessionId = () => context.sessionManager?.getSessionId?.();
           const canonical = eventBridge.normalize(event);
           await eventBridge.emit(canonical);
         } catch (err) {

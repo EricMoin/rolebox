@@ -84,6 +84,8 @@ export interface DispatchTask {
   timeoutMs?: number;
   /** Agent ID of the parent session that dispatched this task */
   parentAgent?: string;
+  /** Graph runs own their aggregate notification; internal launch option. */
+  suppressCompletionNotification?: boolean;
   /** Execution mode: "background" (async, default) or "sync" (blocks caller). */
   mode?: "background" | "sync";
   /** Reference to materialized output once the task completes.
@@ -130,6 +132,8 @@ export interface DispatchInput {
   sync_timeout_ms?: number;
   /** When true, the dispatched session is created without parentID — it does NOT inherit the parent session's conversation history. Used by the loop system to ensure each round starts fresh. */
   noParentInherit?: boolean;
+  /** Internal graph dispatch option, not exposed by the dispatch tool. */
+  suppressCompletionNotification?: boolean;
   /** Priority: lower number = higher priority. Default 0 (normal).
    *  Higher-priority tasks (lower value) acquire concurrency slots first.
    *  Within the same priority level, tasks are dequeued in FIFO order. */

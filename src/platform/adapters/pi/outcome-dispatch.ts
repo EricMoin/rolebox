@@ -33,11 +33,8 @@
  *   delivery whose host knows no invocation is refused by name instead of
  *   being attributed to whatever call happens to be running.
  *
- * The task carries NO notification-suppression marker: the deleted legacy
- * graph engine turned off the dispatch manager's parent notification because
- * its own notifier reported node completion, and the outcome run path has no
- * such notifier, so the manager's normal completion notice stays the
- * orchestrator's visibility into a finished attempt.
+ * GraphApplication owns durable run notifications. Individual dispatch tasks
+ * suppress completion notices so intermediate attempts do not wake the parent.
  *
  * THE PLATFORM PORTS (P2 part 2). The delivery also carries the three platform
  * answers the host layer asks for, all against the manager's own records:
@@ -543,6 +540,7 @@ export class PiOutcomeDelivery {
         // paths are the worker's own copies, verified before this call.
         prompt: buildAttemptDeliveryPrompt(request, inputView),
         run_in_background: true,
+        suppressCompletionNotification: true,
         // THE STABLE IDEMPOTENCY KEY IS THE TASK DESCRIPTION (P2 item 5). The
         // manager persists a task's description with its record and recovers it
         // at boot, so the key the platform stored is exactly the string
