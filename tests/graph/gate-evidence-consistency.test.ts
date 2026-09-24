@@ -183,6 +183,10 @@ function registryOf(options: {
       version: COMMAND_EXIT_VALIDATOR_VERSION,
       implementation: createCommandExitValidator({
         commands: [commandBinding(options.fixture.dir)],
+        // The SAME content store the artifact gate retains into: the command
+        // gate DEPOSITS the revision it verified (A1). A case about what an
+        // acceptance retained must supply one, or the gate could never pass.
+        artifactStoreRoot: options.fixture.storeRoot,
         ...(options.recorded === undefined
           ? {}
           : { onCheck: (evidence: CommandExitEvidence) => options.recorded?.push(evidence) }),
@@ -294,6 +298,15 @@ describe("the command gate's pass carries the revision it verified", () => {
         recorded[0]?.artifactRevisions.map((revision) => revision.artifactId),
       ).toEqual([entry.artifactId]);
       expect(recorded[0]?.verdict).toBe("pass");
+
+      // THE COMMAND GATE DEPOSITED IT (A1): the identity the accepted result
+      // names is one a consumer can actually produce. Naming a revision nobody
+      // deposited is what made every successor of a command-only plan
+      // permanently unreadable, and this read is the one that catches it.
+      const consumed = fixture.ledger.readAcceptedArtifact(GRAPH, ATTEMPT, REF);
+      expect(consumed.kind).toBe("read");
+      if (consumed.kind !== "read") return;
+      expect(Buffer.compare(consumed.bytes, A)).toBe(0);
     });
   });
 

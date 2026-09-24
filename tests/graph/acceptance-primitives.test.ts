@@ -419,6 +419,9 @@ describe("command-exit — the host's command, the host's directory, one artifac
       createCommandExitValidator({
         commands,
         onCheck: (evidence) => recorded.push(evidence),
+        // The gate DEPOSITS the revision it verifies (A1): without a store it
+        // could never pass, so a case about the command's verdict supplies one.
+        artifactStoreRoot: join(dir, "content-store"),
       }),
     );
     // The submission claims a command of its own (one that would exit 0) and a
@@ -462,6 +465,7 @@ describe("command-exit — the host's command, the host's directory, one artifac
           }),
         ],
         onCheck: (evidence) => recorded.push(evidence),
+        artifactStoreRoot: join(dir, "content-store"),
       }),
     );
     const result = validate(
@@ -490,6 +494,7 @@ describe("command-exit — the host's command, the host's directory, one artifac
       COMMAND_EXIT_VALIDATOR_VERSION,
       createCommandExitValidator({
         commands: [bindingOf({ cwd: dir })],
+        artifactStoreRoot: join(dir, "content-store"),
       }),
     );
     const validation = validate(
@@ -533,6 +538,7 @@ describe("command-exit — the host's command, the host's directory, one artifac
             cwd: dir,
           }),
         ],
+        artifactStoreRoot: join(dir, "content-store"),
       }),
     );
     const result = validate(
@@ -556,6 +562,7 @@ describe("command-exit — the host's command, the host's directory, one artifac
         commands: [
           bindingOf({ argv: [process.execPath, "-e", SLEEP_SCRIPT], timeoutMs: 100, cwd: dir }),
         ],
+        artifactStoreRoot: join(dir, "content-store"),
       }),
     );
     expect(
@@ -571,6 +578,7 @@ describe("command-exit — the host's command, the host's directory, one artifac
         commands: [
           bindingOf({ argv: [join(dir, "no-such-program")], cwd: dir }),
         ],
+        artifactStoreRoot: join(dir, "content-store"),
       }),
     );
     expect(

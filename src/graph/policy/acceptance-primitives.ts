@@ -13,7 +13,7 @@
  * | --- | --- | --- |
  * | schema | `schema@1` | the outcome's PLAN-DECLARED data contract resolves to an installed schema implementation and the submission's payload passes it |
  * | artifact | `artifact-reference@1` | every declared evidence reference resolves to a real file inside the artifact root and is digested from the bytes actually read |
- * | command exit | `command-exit@1` | a command the HOST authorized for this exact (graph, node, outcome) ran in the policy's working directory, exited with the expected code, and judged an artifact revision that did not move while it ran — the pass carries the re-read revision it verified |
+ * | command exit | `command-exit@1` | a command the HOST authorized for this exact (graph, node, outcome) ran in the policy's working directory, exited with the expected code, and judged an artifact revision that did not move while it ran — the pass DEPOSITS that re-read revision into the host's content store and names the deposited identity, or the gate is `indeterminate` |
  * | human approval | `human-approval@1` | the trusted approval row recorded for this attempt says an authorized principal approved it |
  *
  * EVERY ONE OF THE FOUR IS CODE, NOT A FLAG. Each factory below returns a
@@ -44,13 +44,15 @@
  *   requirement).
  *
  * Dependency note: this module imports the validator leaf, the store's
- * read-only load verdict and node's child-process API. It imports no runtime,
- * tool or host module, so a host may install these primitives without a cycle.
+ * read-only load verdict, its content-addressed artifact store and node's
+ * child-process API. It imports no runtime, tool or host module, so a host may
+ * install these primitives without a cycle.
  */
 
 import { spawnSync } from "node:child_process";
 
 import type { ApprovalRequestStatus } from "../ledger/types.ts";
+import { putArtifact } from "../store/artifacts.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { loadGraphCompletionPolicies } from "./declarations.ts";
 import type {
@@ -348,6 +350,18 @@ export interface CommandExitValidatorOptions {
   readonly run?: CommandRunner;
   /** Called once per checked requirement with what actually happened. */
   readonly onCheck?: (evidence: CommandExitEvidence) => void;
+  /**
+   * The immutable content store this check DEPOSITS the revision it verified
+   * into — the SAME store the artifact-reference primitive retains into.
+   *
+   * A pass NAMES an artifact identity, and naming one whose bytes were never
+   * deposited leaves every consumer permanently refused: the accepted result
+   * points at a revision nobody can materialize. The deposit is therefore part
+   * of the gate, not an optimization, and a host that configures no store root
+   * here can never deliver a command-gated result — this implementation says
+   * exactly that by answering `indeterminate` rather than passing.
+   */
+  readonly artifactStoreRoot?: string;
 }
 
 /**
@@ -363,11 +377,21 @@ export interface CommandExitValidatorOptions {
  * "it passed for revision A while the artifacts are at revision B" is exactly
  * the mutable-artifact defect the protocol forbids.
  *
- * A PASS NAMES THE REVISION IT VERIFIED (D5). Its outcome carries the artifact
- * revisions RE-READ AFTER the command finished — the same reading the pre-run
- * comparison above accepted — so an acceptance can retain exactly what the
- * command judged. Dropping that reading left "the version the command verified"
- * inexpressible, and a command-only gate retained nothing at all.
+ * A PASS NAMES THE REVISION IT VERIFIED (D5), AND DEPOSITS IT (A1). Its outcome
+ * carries the artifact revisions RE-READ AFTER the command finished — the same
+ * reading the pre-run comparison above accepted — and those exact bytes are
+ * PUBLISHED into the host's content store before the pass is returned, so the
+ * identity the pass names is one a consumer can actually produce. Dropping that
+ * reading left "the version the command verified" inexpressible; returning it
+ * without depositing it left a command-only plan accepting once and then
+ * refusing every successor forever, because the accepted result named a
+ * revision the store had never been given.
+ *
+ * DEPOSIT-OR-REFUSE. A deposit that cannot be published, and a host with no
+ * content store to deposit into, are both `indeterminate` — a required gate
+ * that cannot be completed is never skipped and never silently passes. A
+ * host that genuinely runs without a content store therefore produces a
+ * named non-pass instead of an accepted result that can never be delivered.
  */
 export function createCommandExitValidator(
   options: CommandExitValidatorOptions,
@@ -387,6 +411,7 @@ export function createCommandExitValidator(
   }
   const run = options.run ?? runCommandDirectly;
   const onCheck = options.onCheck;
+  const storeRoot = options.artifactStoreRoot;
   return (request: ValidatorRequest): ValidationOutcome => {
     const key = commandMappingKey({
       graphId: request.identity.graphId,
@@ -407,6 +432,23 @@ export function createCommandExitValidator(
           " — the command a requirement is judged by comes from the host, never from the submission, and an unauthorized mapping is never treated as passed",
       };
     }
+    // NOWHERE TO DEPOSIT, SO THIS GATE CAN NEVER PASS (A1). The check is made
+    // BEFORE the command runs: an authorized command whose verdict could never
+    // be retained must not be started at all, and "this host has no content
+    // store" is a fact about the host, not a verdict about the work. The
+    // answer is a NAMED non-pass, so the deliberate exception — a host that
+    // genuinely runs without a content store — is honest rather than an
+    // accepted result that can never be delivered.
+    if (storeRoot === undefined) {
+      return indeterminate(
+        binding,
+        [],
+        null,
+        null,
+        "this host has no artifact store root to deposit the revision into, so a required command-exit gate could never retain the bytes it verified — no command was run, and the gate is never treated as passed",
+        onCheck,
+      );
+    }
     const before = readRevisions(request.artifactRoot, binding.artifactRefs);
     if (before.kind === "problem") {
       return indeterminate(
@@ -425,7 +467,7 @@ export function createCommandExitValidator(
     } catch (error) {
       return indeterminate(
         binding,
-        before.evidence,
+        evidenceOf(before.entries),
         null,
         null,
         "the trusted command could not be executed (" + errorText(error) + ")",
@@ -435,7 +477,7 @@ export function createCommandExitValidator(
     if (result.kind === "unavailable") {
       return indeterminate(
         binding,
-        before.evidence,
+        evidenceOf(before.entries),
         null,
         null,
         "the trusted command could not be executed: " + result.reason,
@@ -446,7 +488,7 @@ export function createCommandExitValidator(
     if (after.kind === "problem") {
       return indeterminate(
         binding,
-        before.evidence,
+        evidenceOf(before.entries),
         result.exitCode,
         result.signal,
         "the artifacts this check is bound to could not be re-read after the command ran: " +
@@ -454,14 +496,14 @@ export function createCommandExitValidator(
         onCheck,
       );
     }
-    if (!sameRevisions(before.evidence, after.evidence)) {
+    if (!sameRevisions(before.entries, after.entries)) {
       return indeterminate(
         binding,
-        before.evidence,
+        evidenceOf(before.entries),
         result.exitCode,
         result.signal,
         "the artifacts changed while the trusted command ran (" +
-          describeRevisionChange(before.evidence, after.evidence) +
+          describeRevisionChange(before.entries, after.entries) +
           "), so its result describes no fixed artifact revision",
         onCheck,
       );
@@ -469,7 +511,7 @@ export function createCommandExitValidator(
     if (result.signal !== null || result.exitCode === null) {
       return indeterminate(
         binding,
-        before.evidence,
+        evidenceOf(before.entries),
         result.exitCode,
         result.signal,
         "the trusted command did not exit on its own (signal " +
@@ -481,7 +523,7 @@ export function createCommandExitValidator(
     if (result.exitCode !== binding.expectExitCode) {
       return record(
         binding,
-        before.evidence,
+        evidenceOf(before.entries),
         result.exitCode,
         result.signal,
         "fail",
@@ -492,13 +534,30 @@ export function createCommandExitValidator(
         onCheck,
       );
     }
-    // THE PASS CARRIES THE POST-RUN READING. The artifacts were re-read after
-    // the command finished and compared with the pre-run reading above; naming
-    // THAT reading is what lets an acceptance retain exactly the revision the
-    // command verified, rather than nothing at all (D5).
+    // THE PASS CARRIES THE POST-RUN READING AND DEPOSITS IT. The artifacts were
+    // re-read after the command finished and compared with the pre-run reading
+    // above; DEPOSITING those exact bytes is what lets an acceptance retain a
+    // revision a consumer can actually produce (D5, A1). A deposit that cannot
+    // be published refuses the pass rather than naming an identity nobody can
+    // materialize.
+    const retained = depositRevisions(storeRoot, after.entries);
+    if (retained.kind === "problem") {
+      return indeterminate(
+        binding,
+        evidenceOf(after.entries),
+        result.exitCode,
+        result.signal,
+        "the trusted command exited with the required code " +
+          String(binding.expectExitCode) +
+          " against a fixed artifact revision, but that revision could not be deposited (" +
+          retained.reason +
+          ") — an acceptance naming it could never produce it, so the gate does not pass",
+        onCheck,
+      );
+    }
     return record(
       binding,
-      after.evidence,
+      retained.evidence,
       result.exitCode,
       result.signal,
       "pass",
@@ -506,7 +565,7 @@ export function createCommandExitValidator(
         String(binding.expectExitCode) +
         " in " +
         JSON.stringify(binding.cwd) +
-        " against the recorded artifact revision",
+        " against the recorded artifact revision, which was deposited as the revision this pass names",
       onCheck,
     );
   };
@@ -657,49 +716,109 @@ function assertCommandBinding(binding: TrustedCommandBinding): void {
   }
 }
 
+/**
+ * One artifact as this gate read it: the evidence it recorded, and THE EXACT
+ * BYTES that evidence was taken over.
+ *
+ * The bytes are carried rather than re-read by the depositor on purpose: a
+ * second read is a different byte range, and depositing THOSE bytes under this
+ * digest would retain something the command never judged — the very
+ * "validated A, stored B" hole the content store exists to close.
+ */
+interface RevisionEntry {
+  readonly evidence: ArtifactEvidence;
+  readonly bytes: Buffer;
+}
+
+/** One reading of every bound artifact, in reference order. */
+type RevisionReading =
+  | { readonly kind: "ok"; readonly entries: readonly RevisionEntry[] }
+  | { readonly kind: "problem"; readonly reason: string };
+
 /** Read every bound artifact once, or name the first that could not be read. */
-function readRevisions(
-  root: string,
-  refs: readonly string[],
-):
-  | { readonly kind: "ok"; readonly evidence: readonly ArtifactEvidence[] }
-  | { readonly kind: "problem"; readonly reason: string } {
-  const evidence: ArtifactEvidence[] = [];
+function readRevisions(root: string, refs: readonly string[]): RevisionReading {
+  const entries: RevisionEntry[] = [];
   for (const ref of refs) {
     const read = readArtifact(root, ref);
     if (read.kind === "problem") return { kind: "problem", reason: read.reason };
-    evidence.push(read.evidence);
+    entries.push({ evidence: read.evidence, bytes: read.bytes });
   }
-  return { kind: "ok", evidence };
+  return { kind: "ok", entries };
+}
+
+/** The recorded evidence of one reading, in reference order. */
+function evidenceOf(entries: readonly RevisionEntry[]): readonly ArtifactEvidence[] {
+  return entries.map((entry) => entry.evidence);
+}
+
+/**
+ * DEPOSIT-OR-REFUSE (A1): publish the exact bytes one reading was taken over,
+ * and answer the evidence that names the published identity.
+ *
+ * The SAME content store the artifact-reference primitive retains into, and the
+ * same publish-once contract: a deposit that finds its identity already
+ * published reuses the verified object, and an object that does not verify is a
+ * problem. A caller that cannot publish must refuse the pass — naming a
+ * revision nobody can produce is not a weaker way of retaining it.
+ */
+function depositRevisions(
+  storeRoot: string,
+  entries: readonly RevisionEntry[],
+):
+  | { readonly kind: "retained"; readonly evidence: readonly ArtifactEvidence[] }
+  | { readonly kind: "problem"; readonly reason: string } {
+  const retained: ArtifactEvidence[] = [];
+  for (const entry of entries) {
+    const deposit = putArtifact(storeRoot, entry.bytes);
+    if (deposit.kind === "problem") {
+      return {
+        kind: "problem",
+        reason:
+          "artifact " +
+          JSON.stringify(entry.evidence.ref) +
+          " could not be retained: " +
+          deposit.reason,
+      };
+    }
+    retained.push(
+      Object.freeze({
+        ...entry.evidence,
+        artifactId: deposit.artifactId,
+        digest: deposit.digest,
+        size: deposit.size,
+      }),
+    );
+  }
+  return { kind: "retained", evidence: Object.freeze(retained) };
 }
 
 /** Whether two revision readings describe the same bytes at the same refs. */
 function sameRevisions(
-  before: readonly ArtifactEvidence[],
-  after: readonly ArtifactEvidence[],
+  before: readonly RevisionEntry[],
+  after: readonly RevisionEntry[],
 ): boolean {
   if (before.length !== after.length) return false;
   return before.every((entry, index) => {
     const other = after[index];
     return (
       other !== undefined &&
-      entry.ref === other.ref &&
-      entry.digest === other.digest &&
-      entry.size === other.size
+      entry.evidence.ref === other.evidence.ref &&
+      entry.evidence.digest === other.evidence.digest &&
+      entry.evidence.size === other.evidence.size
     );
   });
 }
 
 /** Name the references whose recorded revision moved. */
 function describeRevisionChange(
-  before: readonly ArtifactEvidence[],
-  after: readonly ArtifactEvidence[],
+  before: readonly RevisionEntry[],
+  after: readonly RevisionEntry[],
 ): string {
   const changed: string[] = [];
   before.forEach((entry, index) => {
     const other = after[index];
-    if (other === undefined || other.digest !== entry.digest) {
-      changed.push(JSON.stringify(entry.ref));
+    if (other === undefined || other.evidence.digest !== entry.evidence.digest) {
+      changed.push(JSON.stringify(entry.evidence.ref));
     }
   });
   return changed.length === 0 ? "a reference set changed" : changed.join(", ");
@@ -1084,10 +1203,16 @@ export interface ShippedAcceptanceValidatorOptions {
   /** Commands this host authorizes. Default: none. */
   readonly commands?: readonly TrustedCommandBinding[];
   /**
-   * The immutable artifact store the artifact primitive RETAINS validated bytes
-   * in (P4 item 5 / A17). Without it the gate still reads and digests, and an
-   * accepted result simply carries no retained revision — a refusal downstream,
-   * never a re-read of the mutable path.
+   * The immutable content store BOTH retaining primitives deposit validated
+   * bytes into (P4 item 5 / A17, A1): the artifact primitive retains the bytes
+   * each evidence reference named, and the command primitive retains the
+   * revision it re-read after its command finished.
+   *
+   * Without it the artifact gate still reads and digests, and an accepted result
+   * simply carries no retained revision — a refusal downstream, never a re-read
+   * of the mutable path. The command gate is STRICTER on purpose: its pass
+   * exists to name a revision, so with nowhere to deposit it can never pass and
+   * answers `indeterminate`.
    */
   readonly artifactStoreRoot?: string;
 }
@@ -1139,6 +1264,9 @@ export function createShippedAcceptanceValidators(
       version: COMMAND_EXIT_VALIDATOR_VERSION,
       implementation: createCommandExitValidator({
         commands: options.commands ?? [],
+        ...(options.artifactStoreRoot === undefined
+          ? {}
+          : { artifactStoreRoot: options.artifactStoreRoot }),
       }),
       description:
         "runs the trusted command the host authorized for this exact mapping, in the policy's working directory, against a re-read artifact revision",
