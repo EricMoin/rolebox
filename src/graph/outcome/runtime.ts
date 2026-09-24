@@ -1,3 +1,7 @@
+import { errorText } from "../../utils/error-text.ts";
+import { OutcomeRuntimeBudget } from "./runtime-budget.ts";
+import { completionCapabilityRefusal, protocolCapabilityRefusal } from "./runtime-capabilities.ts";
+import { describeValue, ledgerReadRefusal, readRuntimeClock, refused } from "./runtime-refusals.ts";
 import type {
   AttemptReissueClaim,
   AttemptCredentialReissueFence,
@@ -12,7 +16,6 @@ import type {
   OutcomeEffectDivergence,
   OutcomeResumeResult,
   OutcomeBudgetUsageReport,
-  OutcomeBudgetUsageEntry,
   OutcomeBudgetReading,
   OutcomeBudgetUsageOutcome,
   OutcomeGraphRuntimeOptions,
@@ -48,30 +51,16 @@ export type {
   HostCompletionFact,
 } from "./runtime-contract.ts";
 
-
 import type { CompiledNode, CompiledPlan } from "../compiler/plan.ts";
-import {
-  buildBudgetReport,
-  hasBudgetLimits,
-  nodeBudgetLimitsOf,
-  readRunBudget, type BudgetUsageAmounts,
-  type NodeBudgetLimits
-} from "../domain/budget.ts";
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
   AcceptedResultEvidence,
-  ApprovalRequestRecord, BudgetUsageResult,
+  ApprovalRequestRecord,
   GraphStateRecord,
   PendingEffectRecord, RunControlRecord
 } from "../ledger/types.ts";
-import {
-  DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-  OUTCOME_PROTOCOL,
-  classifyExecutionProtocol,
-  isOutcomeProtocolHandler,
-  type ExecutionProtocolRegistry,
-} from "../protocol/execution-protocol.ts";
+import type { ExecutionProtocolRegistry } from "../protocol/execution-protocol.ts";
 import {
   bindingOf,
   commitSubmission,
@@ -134,7 +123,6 @@ import {
   type OutcomeExecutionLookup
 } from "./dispatch-effects.ts";
 import {
-  verifyCompletionPolicy,
   type CompletionPolicyRef,
   type CompletionPolicyRegistry,
 } from "../policy/completion-policy.ts";
@@ -346,19 +334,7 @@ export class OutcomeGraphRuntime {
    * checked against are one commit — a rolled-back start leaves neither.
    */
   private readonly credentialSource: AttemptCredentialSource;
-  /**
-   * Every node's DECLARED ceilings, read ONCE from the compiled plan (P3 item 3).
-   *
-   * Read here rather than at each dispatch so a plan whose budget this build
-   * cannot read exactly is refused by the same vocabulary everywhere, and so the
-   * claim a dispatch makes and the ceiling a report compares against are the same
-   * numbers. `max_retries` is rejected until automatic retries exist.
-   */
-  private readonly budgetLimits: ReadonlyMap<string, NodeBudgetLimits>;
-  /** Why the plan's budget is not one this build can enforce, if it is not. */
-  private readonly budgetLimitRefusal: OutcomeRuntimeRefusal | undefined;
-  /** Whether ANY node declares an enforceable ceiling. */
-  private readonly declaresBudgetLimits: boolean;
+  private readonly budget: OutcomeRuntimeBudget;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -390,83 +366,7 @@ export class OutcomeGraphRuntime {
     };
     this.hostIdentity = options.hostIdentity;
     this.hostCompletions = options.hostCompletions;
-    // ── The declared budget, read once and refused by name (P3 item 3) ─────
-    //
-    // A plan's per-node budget is declaration content: the ceilings are fixed for
-    // the run, and a spec whose limits this build cannot read exactly (an
-    // unauthorized key, a non-finite value) must not be enforced PARTIALLY — the
-    // run is refused before anything is read or written instead.
-    const limits = new Map<string, NodeBudgetLimits>();
-    let limitRefusal: OutcomeRuntimeRefusal | undefined;
-    let declares = false;
-    try {
-      declares = readRunBudget(this.plan.budget)?.max_executions !== undefined;
-    } catch (error) {
-      limitRefusal = { code: "budget-limit-unauthorized", path: "$.budget", message: String(error) };
-    }
-    for (const node of this.plan.nodes) {
-      const reading = nodeBudgetLimitsOf(node.budget);
-      if (reading.kind === "refused") {
-        limitRefusal ??= Object.freeze({
-          code: "budget-limit-unauthorized" as const,
-          path: "$.nodes." + node.id + ".budget." + reading.refusal.key,
-          message:
-            "outcome-runtime: the declared budget of node " +
-            JSON.stringify(node.id) +
-            " in plan revision " +
-            this.planRevision +
-            " is not one this build can enforce (" +
-            reading.refusal.code +
-            " on " +
-            reading.refusal.key +
-            "): " +
-            reading.refusal.message,
-        });
-        continue;
-      }
-      limits.set(node.id, reading.limits);
-      if (hasBudgetLimits(reading.limits)) declares = true;
-    }
-    this.budgetLimits = limits;
-    this.budgetLimitRefusal = limitRefusal;
-    this.declaresBudgetLimits = declares;
-  }
-
-  /**
-   * Whether this runtime can enforce the plan's declared budget (P3 item 3).
-   *
-   * TWO refusals, both BEFORE any state is read or written:
-   * - the plan declares a ceiling this build cannot read exactly
-   *   (`budget-limit-unauthorized`) — running with a subset of the declared
-   *   ceilings would be a silent widening;
-   * - the plan declares a ceiling and this ledger holds no budget surface
-   *   (`budget-unavailable`) — a ceiling a substrate cannot record a claim
-   *   against is a ceiling nothing enforces.
-   *
-   * A plan that declares NO ceiling needs no claim, so an absent surface is not
-   * refused for it: there is nothing to enforce, and the execution count a
-   * substrate with no budget table would fail to record is not a fact the
-   * declaration asked to be bounded.
-   */
-  private budgetCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
-    if (this.budgetLimitRefusal !== undefined) return this.budgetLimitRefusal;
-    if (!this.declaresBudgetLimits) return undefined;
-    if (this.ledger.budget !== undefined) return undefined;
-    return {
-      code: "budget-unavailable",
-      path: "$.nodes",
-      message:
-        "outcome-runtime: plan revision " +
-        this.planRevision +
-        " declares a per-node resource budget, and the substrate this runtime holds exposes " +
-        "no budget surface — the ceilings could not be recorded as claims, so nothing was " +
-        "started, resumed, advanced or settled under them",
-    };
-  }
-
-  /** The declared ceilings of one node, or NONE when the plan declares none. */
-  private limitsOfNode(nodeId: string): NodeBudgetLimits {
-    return this.budgetLimits.get(nodeId) ?? Object.freeze({});
+    this.budget = new OutcomeRuntimeBudget(this.plan, this.ledger, this.clock);
   }
 
   /**
@@ -477,26 +377,10 @@ export class OutcomeGraphRuntime {
    * overwrite the attempt a settled node's replay identity depends on.
    */
   start(now?: number): OutcomeStartResult {
-    const at = this.readClock(now);
+    const at = readRuntimeClock(this.clock, now);
     if (typeof at !== "number") return refused([at]);
-    const unavailable = this.protocolRefusal();
+    const unavailable = this.executionCapabilityRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
-    // Credential isolation is checked FIRST (D7): a process with no protected
-    // host capability would mint and persist attempt credentials it cannot
-    // keep out of another worker's reach, so it does not start at all.
-    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
-    if (unprotectedCredentials !== undefined) {
-      return refused([unprotectedCredentials]);
-    }
-    // The host identity capability (D9), if any, must be READABLE before this
-    // call records anything: attempts dispatched under a declared identity
-    // constraint are exactly what a later submission is checked against, so an
-    // unreadable declaration refuses the operation rather than arming attempts
-    // nobody can verify.
-    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
-    if (unreadableHostIdentity !== undefined) {
-      return refused([unreadableHostIdentity]);
-    }
     // The identity of THIS invocation, read ONCE for the whole operation. A
     // `refused` reading is a host failure (a throwing `current()`, a malformed
     // answer) and refuses the operation: recording the attempts with no binding
@@ -505,24 +389,8 @@ export class OutcomeGraphRuntime {
     if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
     const dispatchIdentity =
       hostIdentity.kind === "identified" ? hostIdentity.identity : undefined;
-    // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
-    // any state is read or written: without one, recording a dispatch would
-    // claim an execution this process cannot perform.
-    const undispatchable = this.dispatchCapabilityRefusal();
+    const undispatchable = this.dispatchPreconditionRefusal();
     if (undispatchable !== undefined) return refused([undispatchable]);
-    // The plan's completion authorization is checked before ANY state is read
-    // or written (D6), so a run this process cannot support is blocked with the
-    // state preserved rather than started under weaker semantics.
-    const unsupportedCompletion = this.completionCapabilityRefusal();
-    if (unsupportedCompletion !== undefined) {
-      return refused([unsupportedCompletion]);
-    }
-    // The plan's declared BUDGET is a run precondition too (P3 item 3): a
-    // ceiling this build cannot read exactly, or one this substrate cannot record
-    // a claim against, blocks the start before anything is written — a run must
-    // not dispatch under a subset of the ceilings its declaration claims.
-    const unbudgeted = this.budgetCapabilityRefusal();
-    if (unbudgeted !== undefined) return refused([unbudgeted]);
 
     // A TRUSTED CONTROL COMMAND OUTRANKS STARTING (P3 item 1). A run that was
     // cancelled, failed or timed out is never begun again — not by a re-declare
@@ -710,7 +578,7 @@ export class OutcomeGraphRuntime {
       // for a dispatch nothing authorized. An entry node with no declared
       // ceiling claims only the dispatch itself, which is the execution-count
       // usage fact.
-      const unbudgetedDispatch = this.reserveDispatchIn(
+      const unbudgetedDispatch = this.budget.reserveDispatchIn(
         tx,
         input.runId,
         node.id,
@@ -810,35 +678,16 @@ export class OutcomeGraphRuntime {
    * 的语义").
  */
   reexecute(now?: number): OutcomeReexecutionResult {
-    const at = this.readClock(now);
+    const at = readRuntimeClock(this.clock, now);
     if (typeof at !== "number") return refused([at]);
-    const unavailable = this.protocolRefusal();
+    const unavailable = this.executionCapabilityRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
-    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
-    if (unprotectedCredentials !== undefined) {
-      return refused([unprotectedCredentials]);
-    }
-    // The re-execution ARMS attempts, so it records the identity in effect for
-    // this invocation exactly as `start` does — and an unreadable declaration
-    // refuses rather than arming attempts nobody can verify (D9).
-    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
-    if (unreadableHostIdentity !== undefined) {
-      return refused([unreadableHostIdentity]);
-    }
     const hostIdentity = readCurrentHostIdentity(this.hostIdentity);
     if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
     const dispatchIdentity =
       hostIdentity.kind === "identified" ? hostIdentity.identity : undefined;
-    const undispatchable = this.dispatchCapabilityRefusal();
+    const undispatchable = this.dispatchPreconditionRefusal();
     if (undispatchable !== undefined) return refused([undispatchable]);
-    const unsupportedCompletion = this.completionCapabilityRefusal();
-    if (unsupportedCompletion !== undefined) {
-      return refused([unsupportedCompletion]);
-    }
-    // The re-execution ARMS a successor run's entry attempts, so the declared
-    // budget is a precondition here exactly as it is for a first start.
-    const unbudgeted = this.budgetCapabilityRefusal();
-    if (unbudgeted !== undefined) return refused([unbudgeted]);
 
     const runs = this.ledger.runs;
     if (runs === undefined) {
@@ -903,7 +752,7 @@ export class OutcomeGraphRuntime {
     try {
       record = this.ledger.readGraphState(this.graphId);
     } catch (error) {
-      return refused([this.ledgerRefusal(error)]);
+      return refused([ledgerReadRefusal(this.graphId, error)]);
     }
     if (record === undefined) {
       return refused([
@@ -971,13 +820,13 @@ export class OutcomeGraphRuntime {
     try {
       effects = this.ledger.pendingEffects(this.graphId, run.runId);
     } catch (error) {
-      return refused([this.ledgerRefusal(error)]);
+      return refused([ledgerReadRefusal(this.graphId, error)]);
     }
     let confirmedCancellations: readonly string[];
     try {
       confirmedCancellations = this.ledger.confirmedCancelAttempts(this.graphId, run.runId);
     } catch (error) {
-      return refused([this.ledgerRefusal(error)]);
+      return refused([ledgerReadRefusal(this.graphId, error)]);
     }
     const blocking = blockingReexecutionEffectsOf(effects, {
       cancelled: new Set(confirmedCancellations),
@@ -1178,49 +1027,17 @@ export class OutcomeGraphRuntime {
      */
     invocation?: HostIdentityReading,
   ): OutcomeSubmissionResult {
-    const at = this.readClock(now);
+    const at = readRuntimeClock(this.clock, now);
     if (typeof at !== "number") return refused([at]);
-    const unavailable = this.protocolRefusal();
+    const unavailable = this.executionCapabilityRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
-    // Credential isolation is checked FIRST (D7): a process with no protected
-    // host capability would resolve a submission against credentials it cannot
-    // keep out of another worker's reach, so it settles nothing.
-    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
-    if (unprotectedCredentials !== undefined) {
-      return refused([unprotectedCredentials]);
-    }
-    // The host identity capability (D9) must be READABLE, and the CURRENT
-    // invocation's identity must be answerable, before anything is read: a
-    // submission is checked against the identity its attempt recorded, and
-    // neither an unreadable declaration nor an unanswered host is allowed to
-    // turn that check into a pass.
-    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
-    if (unreadableHostIdentity !== undefined) {
-      return refused([unreadableHostIdentity]);
-    }
     // THE CALL'S OWN READING WINS OVER THE AMBIENT ONE. A caller that captured
     // the identity synchronously passes it, so a concurrent call that moved the
     // host's shared holder cannot change what this submission is judged by.
     const hostIdentity = invocation ?? readCurrentHostIdentity(this.hostIdentity);
     if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
-    // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
-    // any state is read or written: without one, recording a dispatch would
-    // claim an execution this process cannot perform.
-    const undispatchable = this.dispatchCapabilityRefusal();
+    const undispatchable = this.dispatchPreconditionRefusal();
     if (undispatchable !== undefined) return refused([undispatchable]);
-    // The plan's completion authorization is checked before ANY state is read
-    // or written (D6), so a run this process cannot support is blocked with the
-    // state preserved rather than started under weaker semantics.
-    const unsupportedCompletion = this.completionCapabilityRefusal();
-    if (unsupportedCompletion !== undefined) {
-      return refused([unsupportedCompletion]);
-    }
-    // A settlement may ARM a successor node (P3 item 3), so the claim surface
-    // the successor's budget is recorded against is checked before anything is
-    // read or written — a plan that declares a ceiling never advances on a
-    // substrate that cannot hold its claims.
-    const unbudgeted = this.budgetCapabilityRefusal();
-    if (unbudgeted !== undefined) return refused([unbudgeted]);
     // A TRUSTED CONTROL COMMAND ENDS THE RUN (P3 item 1): a failure, a timeout
     // or a cancellation is a durable fact about the run, and no submission —
     // the worker's or the host's — advances a run it stopped. The check runs
@@ -1241,7 +1058,7 @@ export class OutcomeGraphRuntime {
     try {
       record = this.ledger.readGraphState(this.graphId);
     } catch (error) {
-      return refused([this.ledgerRefusal(error)]);
+      return refused([ledgerReadRefusal(this.graphId, error)]);
     }
     if (record === undefined) {
       return refused([
@@ -1548,7 +1365,7 @@ export class OutcomeGraphRuntime {
         })),
       );
     }
-    const at = this.readClock(now);
+    const at = readRuntimeClock(this.clock, now);
     if (typeof at !== "number") return refused([at]);
     // The authorization is a PLAN-LEVEL fact, so the mapping is resolved before
     // any state is touched. An unauthorized node is refused here and can never
@@ -1595,7 +1412,7 @@ export class OutcomeGraphRuntime {
     const reading = readHostCompletionFact(delivery);
     if (reading.kind === "malformed") return refused(reading.issues);
     const fact = reading.fact;
-    const at = this.readClock(now);
+    const at = readRuntimeClock(this.clock, now);
     if (typeof at !== "number") return refused([at]);
     const authority = this.hostCompletions;
     if (authority === undefined) {
@@ -1796,50 +1613,18 @@ export class OutcomeGraphRuntime {
    * point (C3c).
  */
   resume(now?: number): OutcomeResumeResult {
-    const at = this.readClock(now);
+    const at = readRuntimeClock(this.clock, now);
     if (typeof at !== "number") return refused([at]);
-    const unavailable = this.protocolRefusal();
+    const unavailable = this.executionCapabilityRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
-    // Credential isolation is checked FIRST (D7): a process with no protected
-    // host capability would hand attempt credentials to a channel it cannot
-    // hold to a single worker, so it resumes nothing.
-    const unprotectedCredentials = this.credentialIsolationCapabilityRefusal();
-    if (unprotectedCredentials !== undefined) {
-      return refused([unprotectedCredentials]);
-    }
-    // The host identity capability (D9), if any, must be READABLE before this
-    // call reads or launches anything. Recovery does NOT ask for the current
-    // identity: a recovered attempt keeps the binding its dispatch recorded,
-    // and a restart never re-binds it to the invocation that happens to be
-    // recovering. Only a FIRST execution (delegated to `start`) records one.
-    const unreadableHostIdentity = this.hostIdentityCapabilityRefusal();
-    if (unreadableHostIdentity !== undefined) {
-      return refused([unreadableHostIdentity]);
-    }
-    // A dispatch adapter is the EXECUTION CHANNEL (D8) and is checked before
-    // any state is read or written: without one, recording a dispatch would
-    // claim an execution this process cannot perform.
-    const undispatchable = this.dispatchCapabilityRefusal();
+    const undispatchable = this.dispatchPreconditionRefusal();
     if (undispatchable !== undefined) return refused([undispatchable]);
-    // The plan's completion authorization is checked before ANY state is read
-    // or written (D6), so a run this process cannot support is blocked with the
-    // state preserved rather than started under weaker semantics.
-    const unsupportedCompletion = this.completionCapabilityRefusal();
-    if (unsupportedCompletion !== undefined) {
-      return refused([unsupportedCompletion]);
-    }
-    // A recovery that would CONTINUE a budgeted graph needs the same claim
-    // surface a first start does (P3 item 3): without it, the run could not be
-    // advanced under its declared ceilings, so it is refused rather than resumed
-    // ungated.
-    const unbudgeted = this.budgetCapabilityRefusal();
-    if (unbudgeted !== undefined) return refused([unbudgeted]);
 
     let record: GraphStateRecord | undefined;
     try {
       record = this.ledger.readGraphState(this.graphId);
     } catch (error) {
-      return refused([this.ledgerRefusal(error)]);
+      return refused([ledgerReadRefusal(this.graphId, error)]);
     }
 
     if (record === undefined) {
@@ -1874,7 +1659,7 @@ export class OutcomeGraphRuntime {
       try {
         record = this.ledger.readGraphState(this.graphId);
       } catch (error) {
-        return refused([this.ledgerRefusal(error)]);
+        return refused([ledgerReadRefusal(this.graphId, error)]);
       }
       if (record === undefined) {
         return refused([
@@ -2073,64 +1858,16 @@ export class OutcomeGraphRuntime {
 
   // ── Internals ─────────────────────────────────────────────────────────────
 
-  /** Resolve the clock input, refusing a value that is not epoch milliseconds. */
-  private readClock(
-    override: number | undefined,
-  ): number | OutcomeRuntimeRefusal {
-    const at = override ?? this.clock();
-    if (!Number.isSafeInteger(at)) {
-      return {
-        code: "invalid-timestamp",
-        path: "$.now",
-        message:
-          "outcome-runtime: now is " +
-          describeValue(at) +
-          ", not epoch milliseconds — time is an explicit input and the receipt records " +
-          "exactly the value this call was given",
-      };
-    }
-    return at;
+  private executionCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
+    return protocolCapabilityRefusal(this.protocols)
+      ?? credentialIsolationRefusal(this.credentialIsolation)
+      ?? hostIdentityRefusal(this.hostIdentity);
   }
 
-  /**
-   * Check that this process holds the HOST credential-isolation capability the
-   * run path requires (D7).
-   *
-   * THE FACT THIS ENCODES, NOT A CHECK IT PERFORMS. This build writes only the
-   * credential's DIGEST into the acceptance ledger, so a reader of that file
-   * holds nothing it can present — but the credential ITSELF has to live in a
-   * store the host owns and reach exactly one attempt, and no path comparison,
-   * permission or mount this code could inspect would establish that. The
-   * boundary is therefore the HOST's to provide and to DECLARE, and the only
-   * honest gate available here is the presence of a readable capability
-   * (`credential-isolation.ts`; the shipped store is
-   * `../host/credential-vault.ts`). Rule and wording live in that module so
-   * the runtime, the tool ingress and the startup sweep report one refusal.
-   *
-   * Refusing HERE — before any state is read or written, in `start`, `resume`
-   * and `submit` alike — is what makes "no protected host, no new execution
-   * path" true instead of aspirational: an unprotected process cannot mint,
-   * persist, hand out or settle an attempt credential at all.
-   */
-  private credentialIsolationCapabilityRefusal():
-    | OutcomeRuntimeRefusal
-    | undefined {
-    return credentialIsolationRefusal(this.credentialIsolation);
-  }
-
-  /**
-   * Check that the host identity capability this process holds is READABLE (D9).
-   *
-   * NO CAPABILITY IS NOT A FAILURE — without one the identity binding is simply
-   * not enabled, which is the core protocol's independence from any host. A
-   * capability that IS present but unreadable is refused by name instead of
-   * being ignored: dropping a constraint the host declared is exactly the
-   * silent downgrade this gate exists to prevent. Rule and wording live in
-   * `host-identity.ts` so the runtime, the tool ingress and the startup sweep
-   * report one refusal.
-   */
-  private hostIdentityCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
-    return hostIdentityRefusal(this.hostIdentity);
+  private dispatchPreconditionRefusal(): OutcomeRuntimeRefusal | undefined {
+    return this.dispatchCapabilityRefusal()
+      ?? completionCapabilityRefusal(this.plan, this.completionPolicies)
+      ?? this.budget.capabilityRefusal();
   }
 
   /**
@@ -2247,97 +1984,13 @@ export class OutcomeGraphRuntime {
     };
   }
 
-  // ── The dispatch budget (P3 item 3) ────────────────────────────────────────
-
-  /**
-   * Claim this dispatch's share of its node's declared ceilings, or name why not.
-   *
-   * CALLED INSIDE THE TRANSACTION THAT ARMS THE ATTEMPT. The claim is a row the
-   * store writes conditionally against the ceilings, so a node with no headroom
-   * yields a refusal and the caller aborts the whole transaction: no attempt, no
-   * state change, no dispatch effect and no credential row survives for a
-   * dispatch the budget did not authorize. Nothing is compensated afterwards,
-   * and there is no window between "checked" and "claimed" for a second process
-   * to slip through.
-   *
-   * A dimension with no declared ceiling claims nothing. The execution count is
-   * checked against the run ceiling. Released and reconciled reservations still
-   * consume one execution; repeating delivery of one attempt consumes none.
-   */
-  private reserveDispatchIn(
-    tx: AcceptanceLedgerTx,
-    runId: string,
-    nodeId: string,
-    attemptId: string,
-    at: number,
-  ): OutcomeRuntimeRefusal | undefined {
-    const budget = tx.budget;
-    const limits = this.limitsOfNode(nodeId);
-    if (budget === undefined) {
-      if (!hasBudgetLimits(limits) && this.plan.budget?.max_executions === undefined) return undefined;
-      return {
-        code: "budget-unavailable",
-        path: "$.nodes",
-        message:
-          "outcome-runtime: node " +
-          JSON.stringify(nodeId) +
-          " declares a resource budget and the substrate this transaction writes holds no " +
-          "budget surface, so the dispatch was not authorized — a ceiling nothing can record " +
-          "a claim against is a ceiling nothing enforces",
-      };
-    }
-    const claimed = budget.reserveDispatch({
-      maxExecutions: this.plan.budget?.max_executions,
-      graphId: this.graphId,
-      runId,
-      nodeId,
-      attemptId,
-      effectId: dispatchEffectIdOf(attemptId),
-      limits,
-      at,
-    });
-    if (claimed.kind === "reserved" || claimed.kind === "replayed") return undefined;
-    const reasons = claimed.exhausted.map((entry) => entry.message).join("; ");
-    return {
-      code: "budget-exhausted",
-      path: "$.nodes." + nodeId + ".budget",
-      message:
-        "outcome-runtime: the dispatch of node " +
-        JSON.stringify(nodeId) +
-        " as attempt " +
-        JSON.stringify(attemptId) +
-        " was NOT authorized by the declared budget (" +
-        reasons +
-        ") — no attempt, state change, effect or credential record was written for it, and " +
-        "an attempt already in flight is not affected: its own claim stands and it runs to " +
-        "its settlement",
-    };
+  /** Reconcile trusted host usage without advancing graph execution. */
+  recordUsage(report: OutcomeBudgetUsageReport): OutcomeBudgetUsageOutcome {
+    return this.budget.recordUsage(report);
   }
 
-  /**
-   * Withdraw the claim of an attempt that has just SETTLED (P3 item 3).
-   *
-   * Called in the SAME transaction as the acceptance that settles it, BEFORE any
-   * successor is claimed: a node a loop re-arms must not be refused headroom by
-   * the very attempt whose settlement freed it. The row is `released` — the
-   * attempt ended and no usage was reported for it here, so its consumption is
-   * UNKNOWN and is never recorded as zero; a later report from the platform
-   * still reconciles it and can then show the real overrun.
-   */
-  private releaseDispatchClaim(
-    tx: AcceptanceLedgerTx,
-    runId: string,
-    nodeId: string,
-    attemptId: string,
-    at: number,
-  ): void {
-    tx.budget?.releaseReservation({
-      graphId: this.graphId,
-      runId,
-      nodeId,
-      attemptId,
-      at,
-    });
+  budgetReport(runId?: string): OutcomeBudgetReading {
+    return this.budget.budgetReport(runId);
   }
 
   /**
@@ -2356,249 +2009,9 @@ export class OutcomeGraphRuntime {
     at: number,
   ): void {
     for (const intent of intents) {
-      const refusal = this.reserveDispatchIn(tx, runId, intent.nodeId, intent.attemptId, at);
+      const refusal = this.budget.reserveDispatchIn(tx, runId, intent.nodeId, intent.attemptId, at);
       if (refusal !== undefined) throw new DispatchBudgetExhaustedError(refusal);
     }
-  }
-
-  /**
-   * Record the REAL usage a trusted host path measured for attempts that already
-   * ran (P3 item 3, "再按真实 usage 对账").
-   *
-   * WHAT IT DOES. Every named attempt is reconciled against the amount the
-   * platform reported: an outstanding claim is settled with the real numbers, an
-   * attempt whose claim was already withdrawn is settled as well (a delayed bill
-   * is still a fact), and an attempt this store never reserved is APPENDED as a
-   * usage fact. A second, DIFFERENT report for the same attempt is refused as a
-   * sum (`ignored`) and the standing fact is returned: one attempt, one usage
-   * fact, so a reservation can never be counted twice.
-   *
-   * WHAT IT NEVER DOES. It writes no receipt, no accepted event, no control
-   * decision and no state advance: usage is ACCOUNTING (§3.4), and the amounts
-   * arrive through this method's caller — never through a worker's proposal, so
-   * a submitted payload cannot forge usage or move a ceiling. Nothing is clamped:
-   * an amount larger than the declared ceiling is recorded as reported, and the
-   * run's report shows the ACTUAL overrun.
-   *
-   * WHICH RUN A FACT BELONGS TO. The attempt's OWN claim decides: each entry
-   * names the run whose row it settled, and the returned report describes the run
-   * the FIRST entry belongs to (with no attempts, the run this call addressed). A
-   * delayed bill for an attempt of a superseded run is therefore filed under THAT
-   * run and shows its actual overrun there, instead of being charged to the run
-   * that happens to be current when the bill lands.
-   *
-   * TOTAL: a malformed report, an unstarted graph and an unreadable store are
-   * named refusals, not exceptions; a store failure inside the transaction rolls
-   * the WHOLE report back, so a half-recorded reconciliation cannot exist.
-   */
-  recordUsage(report: OutcomeBudgetUsageReport): OutcomeBudgetUsageOutcome {
-    const malformed = this.usageReportProblem(report);
-    if (malformed !== undefined) return refused([malformed]);
-    const at = this.readClock(report.now);
-    if (typeof at !== "number") return refused([at]);
-    const budget = this.ledger.budget;
-    if (budget === undefined) {
-      return refused([
-        {
-          code: "budget-unavailable",
-          path: "$.attempts",
-          message:
-            "outcome-runtime: graph " +
-            JSON.stringify(this.graphId) +
-            " holds no budget surface, so a usage report cannot be recorded against it",
-        },
-      ]);
-    }
-    // THE RUN THIS REPORT IS ADDRESSED TO: the run that is current when the bill
-    // lands. It is the identity of last resort for an attempt that holds no claim
-    // at all; an attempt that DOES hold one is settled against its own run by the
-    // store, however long ago that run was superseded.
-    let runId: string | undefined;
-    try {
-      runId = this.ledger.runs?.readRun(this.graphId)?.runId;
-    } catch (error) {
-      return refused([this.ledgerRefusal(error)]);
-    }
-    if (runId === undefined) {
-      return refused([
-        {
-          code: "graph-not-started",
-          path: "$.attempts",
-          message:
-            "outcome-runtime: graph " +
-            JSON.stringify(this.graphId) +
-            " has no run identity, so there is no run whose usage this report could be " +
-            "recorded against — usage is a fact about a dispatch an attempt was authorized " +
-            "for, and no attempt was",
-        },
-      ]);
-    }
-    const entries: OutcomeBudgetUsageEntry[] = [];
-    try {
-      this.ledger.runInTransaction((tx) => {
-        const surface = tx.budget;
-        if (surface === undefined) {
-          throw new Error(
-            "outcome-runtime: the transaction exposes no budget surface although the ledger does",
-          );
-        }
-        for (const attempt of report.attempts) {
-          const result = surface.reconcileUsage({
-            graphId: this.graphId,
-            runId,
-            nodeId: attempt.nodeId,
-            attemptId: attempt.attemptId,
-            effectId: dispatchEffectIdOf(attempt.attemptId),
-            usage: {
-              executions: attempt.executions === undefined ? 1 : attempt.executions,
-              durationMs: attempt.durationMs ?? 0,
-              inputTokens: attempt.inputTokens ?? 0,
-              outputTokens: attempt.outputTokens ?? 0,
-              costUsd: attempt.costUsd ?? 0,
-            },
-            at,
-          });
-          entries.push(usageEntryOf(result));
-        }
-      });
-    } catch (error) {
-      return refused([
-        {
-          code: "unreadable-state",
-          message:
-            "outcome-runtime: the usage report for graph " +
-            JSON.stringify(this.graphId) +
-            " could not be recorded (" +
-            errorText(error) +
-            ") — the whole report was rolled back, so no partial reconciliation exists",
-        },
-      ]);
-    }
-    // The ANSWER describes the run the first settled fact belongs to — the
-    // attempt's own claim decided that — falling back to the addressed run when
-    // this report carried no attempts at all.
-    const settledRunId = entries[0]?.runId ?? runId;
-    const reading = this.budgetReport(settledRunId);
-    if (reading.kind === "refused") return refused([reading.refusal]);
-    return Object.freeze({
-      kind: "recorded" as const,
-      graphId: this.graphId,
-      runId: settledRunId,
-      at,
-      entries: Object.freeze(entries),
-      report: reading.report,
-    });
-  }
-
-  /** The closed-shape check of one usage report, or the refusal it violates. */
-  private usageReportProblem(
-    report: OutcomeBudgetUsageReport,
-  ): OutcomeRuntimeRefusal | undefined {
-    const fail = (path: string, detail: string): OutcomeRuntimeRefusal => ({
-      code: "budget-usage-malformed",
-      path,
-      message:
-        "outcome-runtime: the usage report for graph " +
-        JSON.stringify(this.graphId) +
-        " is not the closed record this protocol defines — " +
-        detail +
-        ", so nothing was recorded",
-    });
-    if (!Array.isArray(report.attempts)) {
-      return fail("$.attempts", "attempts is not a list");
-    }
-    const amount = (value: unknown): boolean =>
-      value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
-    const count = (value: unknown): boolean =>
-      value === undefined ||
-      (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
-    for (let index = 0; index < report.attempts.length; index += 1) {
-      const attempt = report.attempts[index];
-      const path = "$.attempts[" + index + "]";
-      if (attempt === undefined) return fail(path, "the entry is missing");
-      if (typeof attempt.nodeId !== "string" || attempt.nodeId.length === 0) {
-        return fail(path + ".nodeId", "nodeId is not a non-empty string");
-      }
-      if (typeof attempt.attemptId !== "string" || attempt.attemptId.length === 0) {
-        return fail(path + ".attemptId", "attemptId is not a non-empty string");
-      }
-      if (!count(attempt.executions)) {
-        return fail(path + ".executions", "executions is not a non-negative safe integer");
-      }
-      if (
-        !amount(attempt.durationMs) ||
-        !amount(attempt.inputTokens) ||
-        !amount(attempt.outputTokens) ||
-        !amount(attempt.costUsd)
-      ) {
-        return fail(path, "an amount is not a finite non-negative number");
-      }
-    }
-    return undefined;
-  }
-
-  /**
-   * The budget state of one run, as the durable rows and the compiled plan
-   * together answer it (P3 item 3) — the QUERY/REPORT surface.
-   *
-   * DECLARED LIMITS COME FROM THE PLAN, RECORDED USAGE FROM THE ROWS, and the
-   * overruns are recomputed here on every read: an amount the platform reported
-   * above its ceiling is shown as the ACTUAL excess (`used - limit`), never
-   * clamped and never absorbed. A node the plan declares but nothing dispatched
-   * is reported with its ceilings and zeros, so "declared but unused" and
-   * "undeclared" never look alike.
-   */
-  budgetReport(runId?: string): OutcomeBudgetReading {
-    const budget = this.ledger.budget;
-    if (budget === undefined) {
-      return {
-        kind: "refused",
-        refusal: {
-          code: "budget-unavailable",
-          path: "$.nodes",
-          message:
-            "outcome-runtime: graph " +
-            JSON.stringify(this.graphId) +
-            " holds no budget surface, so it has no budget state to report",
-        },
-      };
-    }
-    let usage: readonly {
-      readonly nodeId: string;
-      readonly executions: number;
-      readonly used: BudgetUsageAmounts;
-      readonly reserved: BudgetUsageAmounts;
-      readonly unknownUsageAttempts: number;
-    }[];
-    try {
-      usage = budget.budgetUsageOf(this.graphId, runId);
-    } catch (error) {
-      return { kind: "refused", refusal: this.ledgerRefusal(error) };
-    }
-    let resolvedRunId: string | undefined = runId;
-    if (resolvedRunId === undefined) {
-      try {
-        resolvedRunId = this.ledger.runs?.readRun(this.graphId)?.runId;
-      } catch (error) {
-        return { kind: "refused", refusal: this.ledgerRefusal(error) };
-      }
-    }
-    // The ONE builder the control answer uses too: declared ceilings from the
-    // plan, recorded usage from the rows, overruns recomputed — never clamped.
-    return {
-      kind: "report",
-      report: buildBudgetReport({
-        graphId: this.graphId,
-        ...(resolvedRunId === undefined ? {} : { runId: resolvedRunId }),
-        planRevision: this.planRevision,
-        nodes: this.plan.nodes.map((node) => ({
-          nodeId: node.id,
-          limits: this.limitsOfNode(node.id),
-        })),
-        usage,
-        runLimits: this.plan.budget,
-      }),
-    };
   }
 
   /**
@@ -2642,151 +2055,6 @@ export class OutcomeGraphRuntime {
       out = out.split(credential).join("[redacted attempt credential]");
     }
     return out;
-  }
-
-  /**
-   * Check that this runtime can corroborate every completion authorization the
-   * plan pins (D6).
-   *
-   * THE PLAN'S AUTHORIZATION IS PART OF THE RUN'S SEMANTICS. A plan whose body
-   * pins natural-completion authorizations was compiled against exact,
-   * content-addressed policy revisions; this runtime only runs it when the
-   * HOST-INSTALLED capability still resolves each pinned ref to the SAME
-   * content. The pinned digest is the authority — an installed revision with
-   * different content is `completion-policy-digest-mismatch`, never a silent
-   * re-binding — and a plan that pins none needs no capability at all.
-   *
-   * Refusing HERE, before any state is read or written, is what makes a
-   * revocation or a missing policy an explicit BLOCK with the state preserved:
-   * `start`, `resume` and `submit` all consult this first, so a run this
-   * process cannot support does not advance one step under weaker semantics.
-   */
-  private completionCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
-    const authorizations = this.plan.completionAuthorizations ?? [];
-    if (authorizations.length === 0) return undefined;
-    const registry = this.completionPolicies;
-    if (registry === undefined) {
-      return {
-        code: "completion-policy-unavailable",
-        path: "$.completionAuthorizations",
-        message:
-          "outcome-runtime: plan revision " +
-          this.planRevision +
-          " pins " +
-          authorizations.length +
-          " natural-completion authorization(s) (" +
-          describeAuthorizations(authorizations) +
-          "), but this runtime was given no completion-policy capability — the " +
-          "authorization a plan was compiled with is part of its semantics, so nothing " +
-          "was started, resumed or settled",
-      };
-    }
-    for (const authorization of authorizations) {
-      const verified = verifyCompletionPolicy(authorization.policy, registry);
-      switch (verified.kind) {
-        case "resolved":
-          continue;
-        case "unknown-policy":
-          return {
-            code: "completion-policy-unknown",
-            path: "$.completionAuthorizations",
-            message:
-              "outcome-runtime: node " +
-              JSON.stringify(authorization.nodeId) +
-              " pins completion policy " +
-              describePolicyRef(authorization.policy) +
-              ", whose id is not installed in this process — the pinned revision is a " +
-              "missing capability, never a hint to run under another policy",
-          };
-        case "unknown-revision":
-          return {
-            code: "completion-policy-unknown-revision",
-            path: "$.completionAuthorizations",
-            message:
-              "outcome-runtime: node " +
-              JSON.stringify(authorization.nodeId) +
-              " pins completion policy " +
-              describePolicyRef(authorization.policy) +
-              ", whose exact revision is not installed in this process",
-          };
-        case "digest-mismatch":
-          return {
-            code: "completion-policy-digest-mismatch",
-            path: "$.completionAuthorizations",
-            message:
-              "outcome-runtime: node " +
-              JSON.stringify(authorization.nodeId) +
-              " pins completion policy " +
-              describePolicyRef(authorization.policy) +
-              " at digest " +
-              authorization.policy.digest +
-              ", but the installed declaration hashes to " +
-              verified.actual +
-              " — the plan's pinned content is the authority and it is never re-bound " +
-              "to a republished revision",
-          };
-      }
-    }
-    return undefined;
-  }
-
-  /**
-   * Check that the REGISTERED outcome handler really owns this protocol.
-   *
-   * The handler is read as a CAPABILITY, never as a number: it must be an
-   * outcome handler whose completion source is the accepted-outcome submission
-   * and whose legacy completion is unreachable. A build without that handler
-   * refuses to run rather than fall back to signal semantics.
-   */
-  private protocolRefusal(): OutcomeRuntimeRefusal | undefined {
-    const verdict = classifyExecutionProtocol(
-      OUTCOME_PROTOCOL,
-      this.protocols ?? DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
-    );
-    if (verdict.kind === "invalid") {
-      return {
-        code: "protocol-unavailable",
-        message:
-          "outcome-runtime: protocol " +
-          OUTCOME_PROTOCOL +
-          " is not a legal execution-protocol identifier (" +
-          describeValue(verdict.value) +
-          ")",
-      };
-    }
-    if (verdict.kind === "unsupported") {
-      return {
-        code: "protocol-unavailable",
-        message:
-          "outcome-runtime: no execution-protocol handler is registered for protocol " +
-          OUTCOME_PROTOCOL +
-          " — a declared graph is never run under legacy rules",
-      };
-    }
-    if (!isOutcomeProtocolHandler(verdict.handler)) {
-      return {
-        code: "protocol-unavailable",
-        message:
-          "outcome-runtime: the handler registered for protocol " +
-          OUTCOME_PROTOCOL +
-          " is not an outcome-protocol handler — its capability surface is not the accepted " +
-          "outcome submission, so this runtime refuses to run the graph",
-      };
-    }
-    if (
-      verdict.handler.completion !== "accepted-outcome-submission" ||
-      verdict.handler.legacyCompletion !== "unreachable"
-    ) {
-      return {
-        code: "protocol-unavailable",
-        message:
-          "outcome-runtime: the handler registered for protocol " +
-          OUTCOME_PROTOCOL +
-          " does not declare the accepted-outcome submission as its ONLY completion source " +
-          "with legacy completion unreachable — refusing to run",
-      };
-    }
-    return undefined;
   }
 
   /**
@@ -2846,7 +2114,7 @@ export class OutcomeGraphRuntime {
     try {
       effects = this.ledger.pendingEffects(this.graphId);
     } catch (error) {
-      return { refusal: this.ledgerRefusal(error) };
+      return { refusal: ledgerReadRefusal(this.graphId, error) };
     }
     const host = this.dispatch;
     if (host === undefined) {
@@ -3583,7 +2851,7 @@ export class OutcomeGraphRuntime {
     try {
       return this.ledger.pendingEffects(this.graphId);
     } catch (error) {
-      return this.ledgerRefusal(error);
+      return ledgerReadRefusal(this.graphId, error);
     }
   }
   /**
@@ -3958,7 +3226,7 @@ export class OutcomeGraphRuntime {
           // move (its attempts were never claimed).
           const settledRunId = record.runId;
           if (settledRunId !== undefined) {
-            this.releaseDispatchClaim(
+            this.budget.releaseDispatchClaim(
               writeTx,
               settledRunId,
               decision.nodeId,
@@ -4244,18 +3512,6 @@ export class OutcomeGraphRuntime {
     };
   }
 
-  /** Map a ledger read failure onto the runtime's refusal vocabulary. */
-  private ledgerRefusal(error: unknown): OutcomeRuntimeRefusal {
-    return {
-      code: "unreadable-state",
-      message:
-        "outcome-runtime: the graph state of " +
-        JSON.stringify(this.graphId) +
-        " could not be read from the ledger (" +
-        errorText(error) +
-        ")",
-    };
-  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -4383,7 +3639,6 @@ function controlledInFlightRefusals(
   return Object.freeze(refusals);
 }
 
-
 /**
  * The named refusal for one attempt paused on a trusted approval request (P3 item 3).
  *
@@ -4505,7 +3760,6 @@ function rawRunPositionOf(body: unknown): RawRunPosition | undefined {
   }
   return Object.freeze({ phase, attemptSeq });
 }
-
 
 /**
  * Internal: a re-execution whose conditional write did not land.
@@ -4790,50 +4044,6 @@ function submissionIdOf(proposal: unknown, source: SettlementSource): string {
 }
 
 /**
- * The STORE half of a credential-isolation capability, when the host declared
- * one — the version-2 addition the recovery path resolves a credential from.
- *
- * Read through the module's own strict reader rather than trusted from the
- * typed option: the capability is host-supplied data, and a version-1 value (or
- * one this build cannot read) yields NO store. Absence is not an error here —
- * the run path's enablement gate reports an unreadable capability by name
- * before this is consulted — it only means a recovery cannot re-deliver.
- */
-/** Build the refusal result for a list of refusals. */
-function refused(refusals: readonly OutcomeRuntimeRefusal[]): {
-  readonly kind: "refused";
-  readonly refusals: readonly OutcomeRuntimeRefusal[];
-} {
-  return { kind: "refused", refusals };
-}
-
-/** What one usage report did to one attempt, in the answer's own words. */
-function usageEntryOf(result: BudgetUsageResult): OutcomeBudgetUsageEntry {
-  const reservation = result.reservation;
-  const used = reservation.used;
-  const base = {
-    runId: reservation.runId,
-    nodeId: reservation.nodeId,
-    attemptId: reservation.attemptId,
-    ...(used === undefined ? {} : { used }),
-  };
-  switch (result.kind) {
-    case "reconciled":
-      return Object.freeze({ ...base, outcome: "reconciled" as const });
-    case "replayed":
-      return Object.freeze({ ...base, outcome: "replayed" as const });
-    case "recorded-late":
-      return Object.freeze({ ...base, outcome: "recorded-late" as const });
-    case "ignored":
-      return Object.freeze({
-        ...base,
-        outcome: "ignored" as const,
-        reason: result.reason,
-      });
-  }
-}
-
-/**
  * Map one UNRESOLVED declared input onto the runtime's refusal vocabulary (D6).
  *
  * The input's own code is NAMED inside the message rather than replacing the
@@ -4864,48 +4074,4 @@ function toRuntimeRefusal(refusal: SubmissionRefusal): OutcomeRuntimeRefusal {
     message: refusal.message,
     ...(refusal.path === undefined ? {} : { path: refusal.path }),
   };
-}
-
-/** A pinned completion-policy ref as a diagnostic token: `"id"@"revision"`. */
-function describePolicyRef(ref: {
-  readonly id: string;
-  readonly revision: string;
-}): string {
-  return JSON.stringify(ref.id) + "@" + JSON.stringify(ref.revision);
-}
-
-/** The pinned authorizations of a plan, for a diagnostic that must not throw. */
-function describeAuthorizations(
-  authorizations: readonly {
-    readonly nodeId: string;
-    readonly outcome: string;
-    readonly policy: { readonly id: string; readonly revision: string };
-  }[],
-): string {
-  return authorizations
-    .map(
-      (entry) =>
-        entry.nodeId +
-        "->" +
-        entry.outcome +
-        " by " +
-        describePolicyRef(entry.policy),
-    )
-    .join(", ");
-}
-
-/** Describe a rejected value for a diagnostic without ever throwing. */
-function describeValue(value: unknown): string {
-  if (typeof value === "string") return JSON.stringify(value);
-  if (value === null || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  if (Array.isArray(value)) return "an array";
-  if (typeof value === "object") return "an object";
-  return typeof value;
-}
-
-/** The message of a caught value, without assuming it is an Error. */
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

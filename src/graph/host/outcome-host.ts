@@ -1,3 +1,4 @@
+import { HostGraphRuntimes, type RunningGraphRuntime } from "./graph-runtimes.ts";
 import { WORKER_GRANTED_GRAPH_TOOLS, bindOutcomeToolInvocation, reportControlContinuation } from "./tool-binding.ts";
 import type { OutcomeWorkerPrincipal } from "./tool-binding.ts";
 import { applyGraphControl, type GraphControlResult } from "../control/application.ts";
@@ -15,11 +16,7 @@ import { join } from "node:path";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { logWarn } from "../log-warn.ts";
-import {
-  describeStoreVerdict,
-  describeStoredReading,
-  readStoredDefinition,
-} from "../persistence/declared-record.ts";
+import { describeStoreVerdict } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import type {
@@ -652,41 +649,15 @@ export interface OutcomeHostRecoveryReport {
   readonly storeBlocked?: string;
 }
 
-/**
- * One graph's open run path, held for the process lifetime.
- *
- * The two identity values are the ones the definition row carried when this
- * runtime was opened. They are NOT a second authority: they exist so
- * {@link OutcomeHost} can notice that the durable definition a cached runtime
- * was opened from is no longer the one the store holds (G14), which is a
- * comparison of two live reads, not a stored copy.
- */
-interface RunningGraphRuntime {
-  readonly runtime: OutcomeGraphRuntime;
-  readonly ledger: SqliteAcceptanceLedger;
-  /** The declaration digest this runtime's plan was decoded from. */
-  readonly declarationDigest: string;
-  /** The plan revision the same row named. */
-  readonly planRevision: string;
-}
-
-/**
- * ONE ATTEMPT'S CANCEL, AS {@link OutcomeHost.deliverCancelIntents} PREPARED IT (P3 cancel).
- *
- * Exactly one of `entry` (the attempt is not asked of any platform: no port installed, a blocked
- * intent write, …) and `port` (the attempt is ready to be asked) is present; `step` carries what
- * the durable cancel effect already said, which is what keeps a repeated delivery deterministic.
- */
-interface PreparedCancelDelivery {
-  readonly decision: ControlDecisionRecord;
-  readonly execution: HostExecutionIdentity | undefined;
-  /** The final entry, when this attempt needs no platform ask. */
-  readonly entry?: OutcomeCancelDeliveryEntry;
-  /** What the durable cancel effect said, when this attempt IS asked. */
-  readonly step?: OutcomeCancelRequestStep;
-  /** The port that will ask; present exactly when `entry` is absent. */
-  readonly port?: OutcomeExecutionCancellation;
-}
+type PreparedCancelDelivery =
+  | { readonly kind: "reported"; readonly entry: OutcomeCancelDeliveryEntry }
+  | {
+    readonly kind: "ready";
+    readonly decision: ControlDecisionRecord;
+    readonly execution: HostExecutionIdentity | undefined;
+    readonly step: OutcomeCancelRequestStep;
+    readonly port: OutcomeExecutionCancellation;
+  };
 
 // ── The host ────────────────────────────────────────────────────────────────
 
@@ -701,12 +672,9 @@ interface PreparedCancelDelivery {
 export class OutcomeHost {
   private readonly workspaceDir: string;
   private readonly storeRoot: string;
-  private readonly artifactRoot: string;
   /** Where the run path materializes each consumer's input files (D7). */
   private readonly inputDelivery: InputDeliveryLocation;
   private readonly clock: () => number;
-  private readonly validators: ValidatorRegistry;
-  private readonly completionPolicies: CompletionPolicyRegistry | undefined;
   private readonly vault: HostCredentialVault;
   private readonly executions: HostExecutionIndex;
   /**
@@ -779,23 +747,17 @@ export class OutcomeHost {
   /** One bridge per graph — a settlement needs the graph's own saved plan. */
   private readonly bridges = new Map<string, HostDispatchCompletionBridge>();
   /** One open runtime (and ledger) per graph, for settlements and resumes. */
-  private readonly runtimes = new Map<
-    string,
-    Promise<RunningGraphRuntime>
-  >();
+  private readonly runtimes: HostGraphRuntimes;
   private closed = false;
 
   private constructor(options: OutcomeHostOptions) {
     this.workspaceDir = options.workspaceDir;
     this.storeRoot = options.storeRoot;
-    this.artifactRoot = options.artifactRoot ?? options.workspaceDir;
     this.inputDelivery = Object.freeze({
       contentStoreRoot: options.storeRoot,
       deliveryRoot: options.inputDeliveryRoot ?? join(options.storeRoot, INPUT_DELIVERY_DIR),
     });
     this.clock = options.clock ?? (() => Date.now());
-    this.validators = options.validators ?? createValidatorRegistry([]);
-    this.completionPolicies = options.completionPolicies;
     const durability = options.durability ?? "file";
     const shared = durability === "memory" ? GraphStore.openMemory() : undefined;
     this.sharedStore = shared;
@@ -881,6 +843,17 @@ export class OutcomeHost {
           this.bridgeFor(binding.graphId).bind(binding);
         },
       },
+    });
+    this.runtimes = new HostGraphRuntimes(this.storeRoot, {
+      dispatch: this.dispatchAdapter,
+      reissueFence: this.reissueFence,
+      validators: options.validators ?? createValidatorRegistry([]),
+      artifactRoot: options.artifactRoot ?? options.workspaceDir,
+      clock: this.clock,
+      credentialIsolation: this.credentialIsolation,
+      ...(this.declareInvocationIdentity ? { hostIdentity: this.hostIdentity } : {}),
+      ...(options.completionPolicies === undefined ? {} : { completionPolicies: options.completionPolicies }),
+      hostCompletions: this.completionAuthority,
     });
   }
 
@@ -1821,8 +1794,7 @@ export class OutcomeHost {
       if (port === undefined) {
         prepared.push(
           Object.freeze({
-            decision,
-            execution,
+            kind: "reported" as const,
             entry: cancelDeliveryEntry(
               graphId,
               decision,
@@ -1853,8 +1825,7 @@ export class OutcomeHost {
       } catch (error) {
         prepared.push(
           Object.freeze({
-            decision,
-            execution,
+            kind: "reported" as const,
             entry: cancelDeliveryEntry(
               graphId,
               decision,
@@ -1878,8 +1849,7 @@ export class OutcomeHost {
       } catch (error) {
         prepared.push(
           Object.freeze({
-            decision,
-            execution,
+            kind: "reported" as const,
             entry: cancelDeliveryEntry(
               graphId,
               decision,
@@ -1894,26 +1864,15 @@ export class OutcomeHost {
         );
         continue;
       }
-      prepared.push(Object.freeze({ decision, execution, step, port }));
+      prepared.push(Object.freeze({ kind: "ready" as const, decision, execution, step, port }));
     }
     // STEPS 3/4 — ask the platform for every attempt whose cancel is not already confirmed, and
     // record ONLY a substantiated confirmation. The asks overlap; the entries keep decision order.
     const entries = await Promise.all(
       prepared.map(async (item): Promise<OutcomeCancelDeliveryEntry> => {
-        if (item.entry !== undefined) return item.entry;
+        if (item.kind === "reported") return item.entry;
         const ask = item.port;
-        if (ask === undefined) {
-          // Unreachable by construction (every prepared item without an entry carries its port),
-          // kept total so a missing port can never fall through to a confirmation.
-          return cancelDeliveryEntry(
-            graphId,
-            item.decision,
-            item.execution,
-            "unsupported",
-            "no platform cancel port is installed for this attempt, so nothing was handed over",
-          );
-        }
-        if (item.step?.kind === "already-confirmed") {
+        if (item.step.kind === "already-confirmed") {
           return cancelDeliveryEntry(
             graphId,
             item.decision,
@@ -1925,7 +1884,7 @@ export class OutcomeHost {
           );
         }
         const foreign =
-          item.step?.kind === "unexpected-terminal"
+          item.step.kind === "unexpected-terminal"
             ? " (the durable cancel effect is terminal '" +
             item.step.status +
             "', a state this build never writes for a cancel — it is NOT read as a confirmation)"
@@ -2296,19 +2255,7 @@ export class OutcomeHost {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const pending of this.runtimes.values()) {
-      void pending.then(
-        ({ ledger }) => {
-          try {
-            ledger.close();
-          } catch {
-            // Closing an already-closed handle is not a host failure.
-          }
-        },
-        () => { },
-      );
-    }
-    this.runtimes.clear();
+    this.runtimes.close();
     this.bridges.clear();
     // The memory-mode capabilities share ONE private store; releasing it here
     // is what keeps the host's process-only records from outliving the host.
@@ -2584,137 +2531,8 @@ export class OutcomeHost {
     return bridge;
   }
 
-  /**
-   * The graph's outcome runtime over its PERSISTED plan, opened once per graph
-   * and kept for the process lifetime (the completion bridge and the declaration
-   * seam share it). The loader is the same one the submission ingress uses, so a
-   * record that is not this build's outcome-protocol state is refused instead of
-   * being run approximately.
-   */
   private runtimeFor(graphId: string): Promise<RunningGraphRuntime> {
-    const existing = this.runtimes.get(graphId);
-    if (existing === undefined) {
-      const pending = this.openRuntime(graphId);
-      this.runtimes.set(graphId, pending);
-      return pending;
-    }
-    // THE CACHE IS VALIDATED AGAINST THE STORE ON EVERY USE (G14).
-    //
-    // A runtime is opened once per graph and kept, because a settlement needs
-    // the graph's own saved plan. The plan is not the only thing that can
-    // change: the DEFINITION ROW can become unreadable after this process
-    // cached its runtime, and continuing to run from the cached plan would make
-    // the boot sweep answer RESUMED from a plan the audit and the status
-    // surface both refuse — the same graph reported three different ways. So
-    // the durable definition is re-read here, before the cached runtime is
-    // handed to any caller, and a definition that no longer reads (or no longer
-    // names the same content) refuses by name instead.
-    return existing.then((entry) => {
-      this.assertDefinitionCurrent(graphId, entry);
-      return entry;
-    });
-  }
-
-  /**
-   * Refuse when the definition the workspace store holds is no longer the one
-   * the cached runtime was opened from.
-   *
-   * TWO FAILURES, ONE RULE — the cached plan is used only while the store still
-   * corroborates it:
-   * - the row no longer reads at all (damaged, refused by the decoder, or the
-   *   store itself unreadable): the graph is BLOCKED, exactly as the audit and
-   *   the status surface report it;
-   * - the row reads but names different content: a definition a run may be
-   *   executing is never replaced in place (`GraphStore.writeDefinition`
-   *   preserves an unchanged one and refuses a changed one), so this is a
-   *   foreign writer or corruption, and it is refused rather than run.
-   */
-  private assertDefinitionCurrent(
-    graphId: string,
-    entry: RunningGraphRuntime,
-  ): void {
-    const reading = readStoredDefinition(this.storeRoot, graphId);
-    if (reading.kind !== "ok") {
-      throw new Error(
-        "outcome-host: the stored definition of graph " +
-        JSON.stringify(graphId) +
-        " is no longer readable in " +
-        this.storeRoot +
-        " (" +
-        describeStoredReading(reading) +
-        ") — the run path this process opened for it is STALE, and nothing is started, " +
-        "resumed or settled from a plan the store no longer corroborates",
-      );
-    }
-    const declared = reading.declared;
-    if (
-      declared.declarationDigest !== entry.declarationDigest ||
-      declared.plan.planRevision !== entry.planRevision
-    ) {
-      throw new Error(
-        "outcome-host: the stored definition of graph " +
-        JSON.stringify(graphId) +
-        " changed after this process opened its run path (declaration " +
-        JSON.stringify(entry.declarationDigest) +
-        " -> " +
-        JSON.stringify(declared.declarationDigest) +
-        ", plan revision " +
-        JSON.stringify(entry.planRevision) +
-        " -> " +
-        JSON.stringify(declared.plan.planRevision) +
-        ") — a definition a run may be executing is never replaced in place, so the " +
-        "cached run path is refused rather than used",
-      );
-    }
-  }
-
-  private async openRuntime(graphId: string): Promise<RunningGraphRuntime> {
-    const reading = readStoredDefinition(this.storeRoot, graphId);
-    if (reading.kind !== "ok") {
-      throw new Error(
-        "outcome-host: graph " +
-        JSON.stringify(graphId) +
-        " has no readable stored definition in " +
-        this.storeRoot +
-        " (" +
-        describeStoredReading(reading) +
-        ") — a declared graph is dispatched only from its SAVED plan, and the " +
-        "retired per-graph v2 container is never read as one",
-      );
-    }
-    const plan = reading.declared.plan;
-    const ledger = await SqliteAcceptanceLedger.create(this.storeRoot);
-    const runtime = new OutcomeGraphRuntime({
-      plan,
-      ledger,
-      dispatch: this.dispatchAdapter,
-      // THE CREATE-RIGHT FENCE (P2 §3.3): a lost credential is re-issued only
-      // while this host holds the store's own create right for the effect, so
-      // a second recoverer cannot replace the verifier of the attempt this
-      // process is about to dispatch.
-      reissueFence: this.reissueFence,
-      validators: this.validators,
-      artifactRoot: this.artifactRoot,
-      clock: this.clock,
-      credentialIsolation: this.credentialIsolation,
-      ...(this.declareInvocationIdentity
-        ? { hostIdentity: this.hostIdentity }
-        : {}),
-      ...(this.completionPolicies === undefined
-        ? {}
-        : { completionPolicies: this.completionPolicies }),
-      // THE HOST'S COMPLETION AUTHORITY (P2 item 7). It is installed
-      // unconditionally — it is the host's own durable record, and the only
-      // thing it enables is the completion channel that would otherwise refuse
-      // by name.
-      hostCompletions: this.completionAuthority,
-    });
-    return {
-      runtime,
-      ledger,
-      declarationDigest: reading.declared.declarationDigest,
-      planRevision: reading.declared.plan.planRevision,
-    };
+    return this.runtimes.get(graphId);
   }
 
   /**

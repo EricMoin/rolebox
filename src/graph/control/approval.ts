@@ -51,6 +51,9 @@ export function approvalSpecProblem(
   spec: ApprovalRequestSpec,
   at: number,
 ): string | undefined {
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+    return "the approval specification must be an object naming its approver and deadline";
+  }
   if (typeof spec.approverSessionId !== "string" || spec.approverSessionId.length === 0) {
     return (
       "the request names no approver: `approver_session_id` must be the non-empty session " +
@@ -79,4 +82,3 @@ export function approvalSpecProblem(
   }
   return undefined;
 }
-
