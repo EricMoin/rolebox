@@ -64,14 +64,6 @@ import {
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
 
-/**
- * The capability set of a host that installed nothing: a real, empty registry.
- *
- * It is what an absent `outcomeValidators` dependency means here, so the tool
- * path has ONE interpretation — "no validator is installed" — instead of
- * falling back to a caller-supplied list (P4 item 1). The run path's absent
- * registry resolves to the same empty set, so compile and run agree.
- */
 import {
   auditGraphStore,
   type DrainAuditReport,

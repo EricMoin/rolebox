@@ -426,20 +426,26 @@ describe("the shipped completion-policy authorization path compiles and runs", (
 
   it("compiles a natural mapping to a draft when the installed revision does not grant it", () => {
     const dir = makeTmpDir("shipped-policy-ungranted-");
-    const capabilities = createShippedAcceptanceValidators({
+    // THE SHIPPED SHAPE: the same assembly the entries call, with the operator
+    // configuring nothing. The validator registry is NOT empty (the four
+    // primitives), and the completion-policy registry is DEFINED and empty.
+    const shipped = assembleHostCapabilities({
       artifactRoot: dir,
-      approvals: { read: () => ({ kind: "absent" }) },
+      storeRoot: join(dir, "store"),
+      env: {},
     });
-    expect(capabilities.keys).toHaveLength(4);
-    // No policy installed at all: the natural mapping cannot be resolved, so
+    expect(shipped.validators.keys).toHaveLength(4);
+    expect(shipped.completionPolicies.policies).toEqual([]);
+    // The natural mapping requests an id the empty registry does not carry, so
     // the compilation is a DRAFT naming the missing authorization and the
     // builder REFUSES it — never an executable plan and never a silent
-    // `explicit` downgrade.
+    // `explicit` downgrade. THIS is the code the shipped path produces.
     let refusal: unknown;
     try {
       buildDeclaredOutcomeGraph({
         declaration: naturalDeclaration(POLICY_ID),
-        installedValidators: capabilities,
+        installedValidators: shipped.validators,
+        completionPolicies: shipped.completionPolicies,
       });
     } catch (error) {
       refusal = error;
@@ -451,11 +457,103 @@ describe("the shipped completion-policy authorization path compiles and runs", (
         {
           nodeId: "ship",
           outcome: "shipped",
-          code: "completion-policy-unavailable",
+          code: "completion-policy-unknown",
           request: { id: POLICY_ID, revision: "1" },
         },
       ]);
     }
+  });
+
+  it("names completion-policy-unavailable only for a compile handed NO policy registry at all", () => {
+    // Kept separately and labelled: this is the shape an EMBEDDING caller
+    // produces by OMITTING the option, not the shape either shipped entry
+    // produces (both always pass a defined registry). Pinning both keeps the
+    // two codes distinguishable from each other.
+    const dir = makeTmpDir("shipped-policy-no-registry-");
+    let refusal: unknown;
+    try {
+      buildDeclaredOutcomeGraph({
+        declaration: naturalDeclaration(POLICY_ID),
+        installedValidators: createShippedAcceptanceValidators({
+          artifactRoot: dir,
+          approvals: { read: () => ({ kind: "absent" }) },
+        }),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(GraphDeclareRefusedError);
+    if (refusal instanceof GraphDeclareRefusedError) {
+      expect(refusal.reason).toBe("draft-plan");
+      expect(refusal.unauthorizedCompletions[0]?.code).toBe(
+        "completion-policy-unavailable",
+      );
+    }
+  });
+});
+
+// ── 2b. A mistaken command configuration is reported, never fatal ──────────
+
+describe("the shipped assembly stays total under a broken trusted-command configuration", () => {
+  it("installs nothing for a mapping authorized twice and still installs its unambiguous neighbours", () => {
+    const dir = makeTmpDir("shipped-command-ambiguous-");
+    const mapping = {
+      graph: GRAPH,
+      node: "work",
+      outcome: "done",
+      argv: [process.execPath, "-e", "process.exit(0);"],
+      cwd: dir,
+      timeout_ms: 5000,
+      expect_exit_code: 0,
+      artifact_refs: ["report.txt"],
+    };
+    // The operator typo repeats ONE mapping with a contradictory command. The
+    // assembly must not throw out of host initialization (its documented
+    // totality); the ambiguous mapping installs NO command; each configured
+    // position is reported; and the unambiguous mapping beside it still
+    // installs, so one bad entry cannot disarm the whole policy.
+    const capabilities = assembleHostCapabilities({
+      artifactRoot: dir,
+      storeRoot: join(dir, "store"),
+      env: {
+        ROLEBOX_GRAPH_COMMAND_CHECKS: JSON.stringify([
+          mapping,
+          { ...mapping, expect_exit_code: 1 },
+          { ...mapping, node: "other" },
+        ]),
+      },
+    });
+    expect(capabilities.commandBindings).toBe(1);
+    expect(capabilities.commandPolicyIssues.map((issue) => issue.index)).toEqual([
+      0, 1,
+    ]);
+    expect(capabilities.commandPolicyIssues[0]?.message).toContain(
+      "authorized more than once",
+    );
+  });
+
+  it("installs a single valid mapping and reports no issue", () => {
+    const dir = makeTmpDir("shipped-command-single-");
+    const capabilities = assembleHostCapabilities({
+      artifactRoot: dir,
+      storeRoot: join(dir, "store"),
+      env: {
+        ROLEBOX_GRAPH_COMMAND_CHECKS: JSON.stringify([
+          {
+            graph: GRAPH,
+            node: "work",
+            outcome: "done",
+            argv: [process.execPath, "-e", "process.exit(0);"],
+            cwd: dir,
+            timeout_ms: 5000,
+            expect_exit_code: 0,
+            artifact_refs: ["report.txt"],
+          },
+        ]),
+      },
+    });
+    expect(capabilities.commandBindings).toBe(1);
+    expect(capabilities.commandPolicyIssues).toEqual([]);
   });
 });
 

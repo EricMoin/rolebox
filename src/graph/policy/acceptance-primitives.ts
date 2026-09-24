@@ -717,7 +717,9 @@ export interface TrustedCommandPolicyReading {
  *
  * TOTAL: malformed JSON, a non-array document, and every malformed entry are
  * issues with the entry's index; a valid document installs only its valid
- * entries. Nothing here throws.
+ * entries. A mapping configured MORE THAN ONCE is ambiguous — the host cannot
+ * say which command judges it — so it installs NO command and every configured
+ * position is reported. Nothing here throws.
  */
 export function readTrustedCommandPolicy(
   text: string | undefined,
@@ -754,11 +756,53 @@ export function readTrustedCommandPolicy(
       ]),
     };
   }
-  const bindings: TrustedCommandBinding[] = [];
+  const candidates: Array<{
+    readonly index: number;
+    readonly binding: TrustedCommandBinding;
+  }> = [];
   parsed.forEach((entry, index) => {
     const binding = readCommandBinding(entry, index, issues);
-    if (binding !== undefined) bindings.push(binding);
+    if (binding !== undefined) candidates.push({ index, binding });
   });
+  // One mapping has exactly ONE trusted command. Two configured bindings for
+  // the same (graph, node, outcome) make it ambiguous — neither is the host's
+  // decision — so NEITHER installs, and each is reported at its own position.
+  // Resolving it HERE is what keeps the assembly's totality true: the
+  // duplicate throw in createCommandExitValidator is a programmer-error guard
+  // for direct construction and is unreachable through this reader.
+  const byMapping = new Map<
+    string,
+    Array<{ readonly index: number; readonly binding: TrustedCommandBinding }>
+  >();
+  for (const candidate of candidates) {
+    const key = commandMappingKey(candidate.binding);
+    const group = byMapping.get(key);
+    if (group === undefined) byMapping.set(key, [candidate]);
+    else group.push(candidate);
+  }
+  const bindings: TrustedCommandBinding[] = [];
+  byMapping.forEach((group) => {
+    const only = group[0];
+    if (group.length === 1 && only !== undefined) {
+      bindings.push(only.binding);
+      return;
+    }
+    const positions = group.map((candidate) => candidate.index).join(", ");
+    for (const candidate of group) {
+      issues.push(
+        Object.freeze({
+          index: candidate.index,
+          message:
+            "mapping " +
+            describeMapping(candidate.binding) +
+            " is authorized more than once (configured positions " +
+            positions +
+            ") — an ambiguous mapping installs no command",
+        }),
+      );
+    }
+  });
+  issues.sort((left, right) => left.index - right.index);
   return { bindings: Object.freeze(bindings), issues: Object.freeze(issues) };
 }
 
@@ -1037,9 +1081,12 @@ export interface ShippedAcceptanceValidatorOptions {
  * implementation rather than silently passing, and an empty configuration is
  * therefore honest rather than permissive.
  *
- * A registration that cannot be constructed (a malformed command binding) is a
- * programmer error and throws HERE, at assembly, rather than becoming a
- * validator that always misses.
+ * A registration that cannot be constructed — a malformed binding, or two
+ * bindings for one mapping — is a programmer error and throws HERE, at
+ * assembly, rather than becoming a validator that always misses. The shipped
+ * assembly cannot reach that throw: {@link readTrustedCommandPolicy} reports
+ * every malformed entry and every ambiguous mapping as an issue and never
+ * hands either to this function.
  */
 export function createShippedAcceptanceValidators(
   options: ShippedAcceptanceValidatorOptions,

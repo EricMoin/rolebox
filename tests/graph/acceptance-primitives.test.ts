@@ -646,6 +646,43 @@ describe("command-exit — the host's command, the host's directory, one artifac
     expect(missingRevision.bindings).toEqual([]);
     expect(missingRevision.issues[0]?.index).toBe(0);
   });
+
+  it("installs NO command for a mapping authorized more than once, and reports every position", () => {
+    // One mapping has exactly one trusted command. This reader is the ONLY way
+    // the shipped assembly turns configuration into bindings, so an operator
+    // who repeats (or contradicts) a mapping gets an issue — never a throw out
+    // of host initialization and never a silently arbitrary winner.
+    const mapping = {
+      graph: GRAPH,
+      node: NODE,
+      outcome: "done",
+      argv: [process.execPath, "-e", "process.exit(0);"],
+      cwd: tmpdir(),
+      timeout_ms: 5000,
+      expect_exit_code: 0,
+      artifact_refs: ["report.txt"],
+    };
+    const twice = readTrustedCommandPolicy(
+      JSON.stringify([mapping, { ...mapping, expect_exit_code: 1 }]),
+    );
+    expect(twice.bindings).toEqual([]);
+    expect(twice.issues.map((issue) => issue.index)).toEqual([0, 1]);
+    expect(twice.issues[0]?.message).toContain("authorized more than once");
+    expect(twice.issues[1]?.message).toContain("authorized more than once");
+
+    // Ambiguity is PER MAPPING: a different mapping beside the duplicated one
+    // still installs, so a single bad entry cannot disarm the whole policy.
+    const mixed = readTrustedCommandPolicy(
+      JSON.stringify([
+        mapping,
+        { ...mapping, timeout_ms: 6000 },
+        { ...mapping, node: "other" },
+      ]),
+    );
+    expect(mixed.bindings).toHaveLength(1);
+    expect(mixed.bindings[0]?.nodeId).toBe("other");
+    expect(mixed.issues.map((issue) => issue.index)).toEqual([0, 1]);
+  });
 });
 
 // ── human approval ──────────────────────────────────────────────────────────

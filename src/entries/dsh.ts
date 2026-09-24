@@ -1234,8 +1234,11 @@ export async function apply(
   // Nothing in a graph declaration, a workspace file or a worker submission can
   // add an authorization: the loader recomputes each digest from the reviewed
   // or operator-declared body and installs nothing else. With no configuration
-  // the registry is EMPTY and a natural mapping is refused as
-  // `completion-policy-unavailable` — never silently downgraded to explicit.
+  // the registry is EMPTY and a natural mapping that requests an `id@revision`
+  // is refused as `completion-policy-unknown` (the id is not installed);
+  // `completion-policy-unavailable` names the other two shapes — a natural
+  // mapping with no `completion_policy` request at all, or a compile with no
+  // policy registry handed to it. Never silently downgraded to explicit.
   //
   // THE TRUSTED COMMAND POLICY, when an operator configures one, is what a
   // `command-exit` acceptance requirement is judged by; it is host

@@ -125,9 +125,12 @@ export const REPOSITORY_COMPLETION_POLICIES: readonly RepositoryCompletionPolicy
  *   address is derived, and the compiled plan pins it.
  *
  * A malformed document authorizes NOTHING and is reported: the loader is total,
- * so a typo can never widen the installed capability, and the shipped entries
- * refuse natural completion with `completion-policy-unavailable` rather than
- * crashing or guessing.
+ * so a typo can never widen the installed capability, and a natural mapping
+ * that requests an `id@revision` the installed (possibly empty) registry does
+ * not carry is refused as `completion-policy-unknown` rather than crashing or
+ * guessing. `completion-policy-unavailable` is the OTHER shape: a natural
+ * mapping with no `completion_policy` request at all, or a compile that was
+ * handed no policy registry.
  */
 export const COMPLETION_POLICY_AUTHORIZATION_ENV =
   "ROLEBOX_GRAPH_COMPLETION_POLICIES";
