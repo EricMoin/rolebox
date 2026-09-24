@@ -10,6 +10,10 @@
  *
  * - the bytes at the delivered path are the RETAINED ones, and the mutable
  *   source path is never read as a substitute;
+ * - the bytes are reached through the assembly's own address rule
+ *   (`readResolvedArtifact`), so each producer's OWN revision comes back and an
+ *   address that names more than one revision is refused rather than published
+ *   by list order;
  * - the digest is verified before the view is returned, and a missing, tampered
  *   or inconsistent object refuses the WHOLE view with nothing published;
  * - two consumers receive disjoint directories and independent copies, so
@@ -292,6 +296,63 @@ describe("materializeInputView — a refusal publishes nothing", () => {
       expect(refusals.map((refusal) => refusal.code)).toEqual([
         "input-artifact-record-mismatch",
       ]);
+    });
+  });
+});
+
+// ── The one address rule ────────────────────────────────────────────────────
+
+describe("materializeInputView — the assembly's (producer, reference) address rule is the one applied", () => {
+  it("delivers each producer's OWN revision when two producers retained one reference", async () => {
+    await withRoots((roots) => {
+      const fromWork = retain(roots.contentStoreRoot, A, REF);
+      const fromAudit = retain(roots.contentStoreRoot, B, REF);
+      const view = materialize(roots, [
+        inputOf([fromWork], { kind: "absent" }, "work", "work#1"),
+        inputOf([fromAudit], { kind: "absent" }, "audit", "audit#1"),
+      ]);
+
+      const workFile = view.entries.find((entry) => entry.from === "work")?.artifacts[0];
+      const auditFile = view.entries.find((entry) => entry.from === "audit")?.artifacts[0];
+      expect(workFile).toBeDefined();
+      expect(auditFile).toBeDefined();
+      if (workFile === undefined || auditFile === undefined) return;
+      // THE ADDRESS IS (producer, reference): the same reference under two
+      // producers is two revisions, and neither is the other's.
+      expect(readFileSync(workFile.path).equals(A)).toBe(true);
+      expect(readFileSync(auditFile.path).equals(B)).toBe(true);
+      expect(workFile.artifactId).toBe(fromWork.artifactId);
+      expect(auditFile.artifactId).toBe(fromAudit.artifactId);
+    });
+  });
+
+  it("refuses an address one producer retained under TWO identities instead of publishing both", async () => {
+    await withRoots((roots) => {
+      const first = retain(roots.contentStoreRoot, A, REF);
+      const second = retain(roots.contentStoreRoot, B, REF);
+      // A bound view naming ONE address under two identities is not reachable
+      // through the acceptance (D5 conflict-checks and dedupes evidence by
+      // reference), but it IS constructible from a hand-built or damaged view —
+      // and the delivery path must apply the assembly's own address rule rather
+      // than publish whichever revisions the list happens to hold.
+      const refusals = refusalsOf(roots, [inputOf([first, second])]);
+
+      expect(refusals.map((refusal) => refusal.code)).toEqual([
+        "input-artifact-unreadable",
+        "input-artifact-unreadable",
+      ]);
+      // ONE REFUSAL PER OFFENDING RECORD, each naming the revision it was about.
+      expect(refusals.map((refusal) => refusal.artifactId)).toEqual([
+        first.artifactId,
+        second.artifactId,
+      ]);
+      expect(refusals[0]?.message).toContain("more than one content identity");
+      expect(refusals[0]?.message).toContain("rather than resolved by position");
+      // NOTHING WAS PUBLISHED: the refusal is the address rule's, and it happens
+      // before any file exists.
+      expect(
+        existsSync(inputConsumerDirectory(roots.deliveryRoot, GRAPH, "review#2")),
+      ).toBe(false);
     });
   });
 });

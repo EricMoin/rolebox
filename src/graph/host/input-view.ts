@@ -12,9 +12,13 @@
  * the dispatch hands it FILES.
  *
  * WHAT IS MATERIALIZED, AND FROM WHERE. For every retained revision this module
- * reads the object from the CONTENT STORE by its identity — never the mutable
- * path the proposal named, which by dispatch time may hold a different revision
- * — verifies that the bytes still hash to the identity the acceptance recorded,
+ * resolves the (producer, reference) address through `readResolvedArtifact`
+ * (`inputs.ts`), then reads the object that rule names from the CONTENT STORE by
+ * its identity — never the mutable path the proposal named, which by dispatch
+ * time may hold a different revision. REACHING THE BYTES IS ONE RULE, not two:
+ * the assembly and the delivery apply the same address, so a view can never be
+ * materialized under an addressing rule the assembly did not write it under. It
+ * verifies that the bytes still hash to the identity the acceptance recorded,
  * and publishes an INDEPENDENT copy in the consumer's own directory. The copy is
  * independent on purpose: a hard link would make a worker's own write reach the
  * store's object, and what an already-accepted result means must not depend on
@@ -39,8 +43,8 @@
  * is data plus the paths of the files that data was accepted with, and nothing
  * else about the host that produced it.
  *
- * Dependency leaf: node:fs / node:crypto / node:path, the content store's own
- * reader, and the domain types the view carries.
+ * Dependency leaf: node:fs / node:crypto / node:path, the address rule and the
+ * view types it resolves (`inputs.ts`), and the content store's own reader.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -55,7 +59,7 @@ import {
 import { dirname, join } from "node:path";
 
 import type { AcceptedArtifact, AcceptedData } from "../domain/model.ts";
-import type { ResolvedInput } from "../outcome/inputs.ts";
+import { readResolvedArtifact, type ResolvedInput } from "../outcome/inputs.ts";
 import { artifactIdOf, digestOf, readArtifactById } from "../store/artifacts.ts";
 
 /** The directory, under a host's own root, holding per-consumer deliveries. */
@@ -146,7 +150,11 @@ export interface InputDeliveryLocation {
 export const INPUT_DELIVERY_REFUSAL_CODES = Object.freeze([
   /** The host has no content-store/delivery location to materialize into. */
   "input-delivery-unavailable",
-  /** The retained object is missing, or the store refuses its own read. */
+  /**
+   * The retained revision could not be produced: the store refuses its own read
+   * (absent or tampered object), or the (producer, reference) address does not
+   * name exactly one content identity to read.
+   */
   "input-artifact-unreadable",
   /** The accepted record and the object it names do not describe one revision. */
   "input-artifact-record-mismatch",
@@ -277,13 +285,23 @@ export function materializeInputView(
   for (const input of options.inputs) {
     const files: StagedFile[] = [];
     for (const artifact of input.artifacts) {
-      const read = readArtifactById(options.contentStoreRoot, artifact.artifactId);
+      // THE BYTES ARE REACHED THE ONE WAY THIS CHAIN DEFINES: the identity is
+      // re-derived from the bound entries by (producer, reference) — the very
+      // rule that assembled them — rather than read off the record being
+      // verified. `readResolvedArtifact` owns the refusals of an address that
+      // names no entry, no retained revision, or more than one identity, so a
+      // second, weaker spelling of the address cannot drift from it.
+      const read = readResolvedArtifact(
+        options.inputs,
+        { from: input.from, ref: artifact.ref },
+        (artifactId) => readArtifactById(options.contentStoreRoot, artifactId),
+      );
       if (read.kind !== "read") {
         refusals.push(
           refusalOf(input, artifact, "input-artifact-unreadable",
             "the retained revision of reference " +
               JSON.stringify(artifact.ref) +
-              " could not be produced from the content store (" +
+              " could not be produced through the (producer, reference) address rule (" +
               read.reason +
               ") — the path the reference named is NOT re-read as a substitute, and a view " +
               "missing the bytes the acceptance retained is not delivered"),

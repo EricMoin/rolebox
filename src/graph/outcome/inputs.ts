@@ -269,8 +269,12 @@ export interface ResolvedArtifactAddress {
  * (producer, reference).
  *
  * Kept beside the assembly so a consumer has exactly one way to reach the bytes:
- * the identity the acceptance recorded, never the reference's path. A missing or
- * tampered object is the store's own named problem, returned unchanged.
+ * the identity the acceptance recorded, never the reference's path. THE DELIVERY
+ * PATH IS THAT CONSUMER — `host/input-view.ts` materializes every retained
+ * revision through this function — so the address rule below is the one a
+ * worker's view is built under, not a rule the consuming side re-spells. A
+ * missing or tampered object is the store's own named problem, returned
+ * unchanged.
  *
  * TOTAL: the two ways an address can fail to name exactly one revision — no
  * producer entry or no retained artifact for the reference, and the SAME address
