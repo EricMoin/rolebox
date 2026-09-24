@@ -67,6 +67,7 @@
  * runtime.
  */
 
+import type { GraphAcceptanceBatch } from "../store/records.ts";
 import {
   readPlanExecutability,
   type CompiledNode,
@@ -97,6 +98,7 @@ import {
   type ValidatorKey,
   type ValidatorRegistry,
   type ValidationOutcome,
+  type ArtifactEvidence,
 } from "./validators.ts";
 
 // ── Request ─────────────────────────────────────────────────────────────────
@@ -288,6 +290,22 @@ export type SubmissionValidation =
       readonly kind: "validated";
       readonly decision: AcceptanceDecision;
       readonly binding: ValidationBinding;
+      /**
+       * What the acceptance must RETAIN if it commits (P4 item 5 / A17): the
+       * normalized proposal's payload and the artifact revisions the gates
+       * actually read.
+       *
+       * It is captured at VALIDATION time on purpose. Re-deriving it at commit
+       * time would read the paths again, and a path is exactly what may have
+       * changed in the window between the two — the "validated A, committed B"
+       * defect this record exists to make impossible.
+       *
+       * Present only for an ACCEPTED decision.
+       */
+      readonly retained?: {
+        readonly payload: unknown;
+        readonly artifacts: readonly ArtifactEvidence[];
+      };
     }
   | { readonly kind: "refused"; readonly refusals: readonly SubmissionRefusal[] };
 
@@ -655,10 +673,27 @@ export function validateSubmission(
     outcomeId: outcome.id,
     requirements: Object.freeze(requirements),
   });
+  // THE EVIDENCE THE GATES THEMSELVES PRODUCED, in requirement order. It comes
+  // from the pass results rather than from a second read of the paths, so what
+  // is retained is exactly what was judged.
+  const evidence = requirements.flatMap((entry) =>
+    entry.outcome.kind === "pass" ? (entry.outcome.evidence ?? []) : [],
+  );
   return {
     kind: "validated",
     decision,
     binding: bindingOf(identity, planRevision, digest),
+    ...(accepted
+      ? {
+          retained: Object.freeze({
+            // A submission that carried no data is stored as `null`: an absent
+            // payload is a VALUE here, not an unrepresentable one, and the
+            // store's JSON gate refuses `undefined`.
+            payload: normalized.data ?? null,
+            artifacts: Object.freeze(evidence),
+          }),
+        }
+      : {}),
   };
 }
 
@@ -703,6 +738,11 @@ export function commitSubmission(
   }
 
   const decision = validation.decision;
+  // The payload and the retained artifact revisions the VALIDATION observed.
+  // Absent when the decision was rejected, or when the plan's gates took no
+  // artifact evidence — never synthesized at commit time, where the path may
+  // already name different bytes.
+  const retained = validation.retained;
   const now = request.now;
   const identity = request.identity;
   const effects = pendingEffectsOf(request.effects, identity, now);
@@ -729,7 +769,7 @@ export function commitSubmission(
       decision.kind === "accepted" && join !== undefined
         ? join(tx, decision)
         : undefined;
-    const batch: AcceptanceBatch =
+    const batch: GraphAcceptanceBatch =
       decision.kind === "accepted"
         ? {
             receipt,
@@ -746,6 +786,24 @@ export function commitSubmission(
             // receipt's, which is the guarantee that one batch describes one
             // submission.
             effects,
+            // THE ACCEPTED RESULT RIDES THE SAME BATCH (P4 item 5 / A17). The
+            // payload and the artifact revisions this acceptance RETAINED commit
+            // with the receipt, the event and the effects, so a result can never
+            // be readable for an attempt whose receipt did not commit — and a
+            // consumer resolves the revision THIS RECORD names, never the path
+            // the reference once pointed at.
+            ...(retained === undefined
+              ? {}
+              : {
+                  acceptedResult: {
+                    graphId: identity.graphId,
+                    attemptId: identity.attemptId,
+                    planRevision: receipt.planRevision,
+                    payload: retained.payload,
+                    artifacts: retained.artifacts,
+                    acceptedAt: now,
+                  },
+                }),
           }
         : { receipt };
     const verdict = tx.commitAccepted(batch);

@@ -268,6 +268,16 @@ function toAcceptedResult(
     attemptId: readText(row, "attempt_id", path, table),
     planRevision: readText(row, "plan_revision", path, table),
     payload: readJsonBody(row, "payload", path, table),
+    ...(row["artifacts"] === null || row["artifacts"] === undefined
+      ? {}
+      : {
+          artifacts: readJsonBody(
+            row,
+            "artifacts",
+            path,
+            table,
+          ) as AcceptedResultRecord["artifacts"],
+        }),
     acceptedAt: readEpoch(row, "accepted_at", path, table),
   };
 }
@@ -1328,8 +1338,8 @@ export class LedgerTables {
     try {
       this.db.run(
         `INSERT INTO ${GRAPH_STORE_TABLES.acceptedResults}
-           (graph_id, attempt_id, plan_revision, payload, accepted_at)
-         VALUES (?, ?, ?, ?, ?)
+           (graph_id, attempt_id, plan_revision, payload, artifacts, accepted_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(graph_id, attempt_id) DO NOTHING`,
         record.graphId,
         record.attemptId,
@@ -1339,6 +1349,13 @@ export class LedgerTables {
           `the accepted result of attempt ${record.attemptId}`,
           "unrepresentable-record",
         ),
+        record.artifacts === undefined
+          ? null
+          : encodeJsonBody(
+              record.artifacts,
+              `the retained artifacts of attempt ${record.attemptId}`,
+              "unrepresentable-record",
+            ),
         record.acceptedAt,
       );
     } catch (error) {
@@ -1357,7 +1374,7 @@ export class LedgerTables {
   ): AcceptedResultRecord | undefined {
     const row = this.db
       .query(
-        `SELECT graph_id, attempt_id, plan_revision, payload, accepted_at
+        `SELECT graph_id, attempt_id, plan_revision, payload, artifacts, accepted_at
          FROM ${GRAPH_STORE_TABLES.acceptedResults}
          WHERE graph_id = ? AND attempt_id = ?`,
       )

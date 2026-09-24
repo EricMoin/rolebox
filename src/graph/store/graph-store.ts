@@ -61,7 +61,12 @@
  */
 
 import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+
+import {
+  readArtifactById,
+  type ArtifactObjectRead,
+} from "./artifacts.ts";
 
 import {
   createDatabase,
@@ -978,6 +983,53 @@ export class GraphStore {
   ): AcceptedResultRecord | undefined {
     this.assertOpen("readAcceptedResult");
     return this.ledger.readAcceptedResult(graphId, attemptId);
+  }
+
+  /**
+   * The BYTES of one artifact revision an accepted result retained (P4 item 5 /
+   * A17).
+   *
+   * SQLite names which revision was accepted; the immutable store holds its
+   * bytes. Every way this can fail is a PROBLEM — the attempt has no accepted
+   * result, the reference was not retained by that acceptance, or the object is
+   * gone or no longer hashes to its identity. The mutable path the reference
+   * names is NEVER read as a substitute: by the time a consumer asks, that path
+   * may hold a different revision, and delivering it would be the very
+   * "validated A, consumed B" defect this record exists to make impossible.
+   */
+  readAcceptedArtifact(
+    graphId: string,
+    attemptId: string,
+    ref: string,
+  ): ArtifactObjectRead {
+    this.assertOpen("readAcceptedArtifact");
+    const record = this.ledger.readAcceptedResult(graphId, attemptId);
+    if (record === undefined) {
+      return {
+        kind: "problem",
+        reason:
+          "attempt " +
+          JSON.stringify(attemptId) +
+          " of graph " +
+          JSON.stringify(graphId) +
+          " has no accepted result, so no artifact revision was accepted for it — a reference is not resolved without an acceptance",
+      };
+    }
+    const retained = (record.artifacts ?? []).find(
+      (artifact) => artifact.ref === ref,
+    );
+    if (retained === undefined) {
+      return {
+        kind: "problem",
+        reason:
+          "the accepted result of attempt " +
+          JSON.stringify(attemptId) +
+          " retained no artifact for reference " +
+          JSON.stringify(ref) +
+          " — a reference the acceptance did not retain is REFUSED, never resolved from the path",
+      };
+    }
+    return readArtifactById(dirname(this.filePath), retained.artifactId);
   }
 
   // ── Graph definition ──────────────────────────────────────────────────────

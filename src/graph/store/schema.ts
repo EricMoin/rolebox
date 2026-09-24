@@ -263,6 +263,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      attempt_id TEXT NOT NULL,
      plan_revision TEXT NOT NULL,
      payload TEXT NOT NULL,
+     artifacts TEXT,
      accepted_at INTEGER NOT NULL,
      PRIMARY KEY (graph_id, attempt_id)
    )`,
@@ -560,6 +561,10 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "attempt_id", affinity: "text", primaryKey: 2, notNull: true },
     { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
     { name: "payload", affinity: "text", primaryKey: 0, notNull: true },
+    // The retained artifact revisions, as JSON text. NULLABLE on purpose: an
+    // acceptance that retained none is a legitimate row, and `NULL` says so
+    // rather than an empty array pretending the question was answered.
+    { name: "artifacts", affinity: "text", primaryKey: 0, notNull: false },
     { name: "accepted_at", affinity: "integer", primaryKey: 0, notNull: true },
   ],
   definitions: [

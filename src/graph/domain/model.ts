@@ -170,6 +170,24 @@ export type NodeAttempt = OutcomeNodeState;
  * ROUTING identity of the acceptance, and this record carries only the payload
  * beside it. Like the event, at most one accepted result exists per attempt.
  */
+/**
+ * One artifact revision an acceptance RETAINED, named by its content.
+ *
+ * Structurally the artifact primitive's own `ArtifactEvidence`: the reference
+ * the proposal declared (PROVENANCE, never resolved again), the content identity
+ * `sha256:<hex>` the bytes are stored under, that digest, and the size.
+ *
+ * It is restated here so the domain model stays free of any store or validator
+ * import while still owning the shape every writer and reader shares — the
+ * compiler checks the two are structurally identical at every assignment.
+ */
+export interface AcceptedArtifact {
+  readonly ref: string;
+  readonly artifactId: string;
+  readonly digest: string;
+  readonly size: number;
+}
+
 export interface AcceptedResult {
   /** The graph the settled attempt belongs to. */
   readonly graphId: string;
@@ -182,6 +200,17 @@ export interface AcceptedResult {
    * never truncated into a smaller accepted value.
    */
   readonly payload: unknown;
+  /**
+   * The artifact revisions this acceptance RETAINED, in evidence-reference
+   * order (P4 item 5 / A17).
+   *
+   * ABSENT means the acceptance retained none — a submission whose gates took
+   * no artifact evidence, or a host with no artifact store. It never means
+   * "resolve the path again": a consumer that needs a revision and finds none
+   * REFUSES, because the path may name different bytes by then and this record
+   * is the only thing that says which revision was accepted.
+   */
+  readonly artifacts?: readonly AcceptedArtifact[];
 }
 
 /**
