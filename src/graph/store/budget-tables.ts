@@ -591,6 +591,14 @@ export class BudgetTables {
    * attempt is the double count plan §5 A13 forbids. An attempt this store
    * never reserved is APPENDED as a settled fact: external billing that arrives
    * after the fact is recorded, never dropped.
+   *
+   * THE ATTEMPT'S OWN ROW DECIDES WHICH RUN THE FACT BELONGS TO. A report arrives
+   * with the run that is CURRENT when the bill lands, which is not necessarily the
+   * run that made the claim: a delayed bill for an attempt of a superseded run
+   * settles THAT attempt's row, against the ceiling that row was checked against,
+   * instead of appending a second fact under a run that never dispatched it. The
+   * addressed run is the fallback for an attempt that holds no row at all — the
+   * only case in which "never reserved here" is a fact this store can know.
    */
   reconcileUsage(input: BudgetUsageInput): BudgetUsageResult {
     const graphId = requireIdentifier(input.graphId, "budget.graphId");
@@ -614,7 +622,16 @@ export class BudgetTables {
     return this.join(() => {
       this.lockWrite(graphId);
       this.requireRunId(graphId, runId);
-      const existing = this.readReservationIn(graphId, attemptId, runId);
+      // THE ROW THE ATTEMPT ALREADY HOLDS IS THE AUTHORITY ON WHICH RUN THE FACT
+      // BELONGS TO. The addressed run is tried first — it is the row's run in every
+      // ordinary report — and the graph-wide fallback exists for exactly one case:
+      // a delayed bill whose attempt was dispatched by a run that has since been
+      // superseded. Filing that bill under the run that is current when it lands
+      // would charge a run that never dispatched the attempt, while leaving the
+      // claim that actually holds the budget outstanding forever.
+      const existing =
+        this.readReservationIn(graphId, attemptId, runId) ??
+        this.attemptRowOf(graphId, attemptId);
       if (existing === undefined) {
         this.db.run(
           `INSERT INTO ${table} (
@@ -672,8 +689,8 @@ export class BudgetTables {
         used.costUsd,
         at,
         graphId,
-        runId,
-        nodeId,
+        existing.runId,
+        existing.nodeId,
         attemptId,
       );
       const changed = this.changes();
@@ -691,7 +708,7 @@ export class BudgetTables {
             ") — nothing was reported as settled",
         );
       }
-      const reconciled = this.readReservationIn(graphId, attemptId, runId);
+      const reconciled = this.readReservationIn(graphId, attemptId, existing.runId);
       if (reconciled === undefined) {
         throw new GraphStoreWriteError(
           "invalid-record",
@@ -807,6 +824,33 @@ export class BudgetTables {
          WHERE graph_id = ? AND run_id = ? AND attempt_id = ?`,
       )
       .get(graphId, resolved, attemptId);
+    if (row === null || row === undefined) return undefined;
+    return this.toReservation(asRow(row, this.filePath, table));
+  }
+
+  /**
+   * The row an ATTEMPT already holds, under whichever run of this graph made it.
+   *
+   * ATTEMPT IDS ARE UNIQUE PER GRAPH — the run path continues the attempt counter
+   * when it forms a successor run — so this lookup names at most one row in every
+   * state this store can produce. It exists because a usage report is addressed to
+   * the run that is current when the bill lands, which is not necessarily the run
+   * that spent the resource; reconciliation uses it so the bill settles the claim
+   * that exists rather than creating a second fact under the addressed run.
+   */
+  private attemptRowOf(
+    graphId: string,
+    attemptId: string,
+  ): BudgetReservationRecord | undefined {
+    const table = GRAPH_STORE_TABLES.budgetReservations;
+    const row = this.db
+      .query(
+        `SELECT ${RESERVATION_COLUMNS} FROM ${table}
+         WHERE graph_id = ? AND attempt_id = ?
+         ORDER BY reserved_at ASC, run_id ASC
+         LIMIT 1`,
+      )
+      .get(graphId, attemptId);
     if (row === null || row === undefined) return undefined;
     return this.toReservation(asRow(row, this.filePath, table));
   }

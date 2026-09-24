@@ -34,6 +34,8 @@ import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
 
 const GRAPH = "budget.store";
 const RUN = "run-1";
+/** The successor run a re-execution forms: the CURRENT run when a bill lands. */
+const RUN2 = "run-2";
 const NOW = 1_700_000_000_000;
 
 const tmpDirs: string[] = [];
@@ -268,6 +270,58 @@ describe("the dispatch budget — the claim is the conditional write", () => {
       expect(usage[0]?.used.inputTokens).toBe(5000);
       expect(usage[0]?.used.costUsd).toBe(12.5);
       expect(usage[0]?.executions).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("settles a delayed bill against the run that MADE the claim, not the current one", () => {
+    const { store } = openStoreWithRun();
+    try {
+      // run-1 claims the whole ceiling for an attempt that has not reported yet.
+      withBudget(store, (budget) =>
+        budget.reserveDispatch(reserveInput("work#1", { inputTokens: 1000 })),
+      );
+      // The graph is re-executed: run-2 is minted and becomes the CURRENT run
+      // while run-1's claim is still outstanding.
+      store.transaction((tx) => {
+        tx.runs?.mintNextRun(
+          { graphId: GRAPH, runId: RUN2, startedAt: NOW + 5, planRevision: "plan-2" },
+          RUN,
+        );
+      });
+      expect(store.runs.readRun(GRAPH)?.runId).toBe(RUN2);
+
+      // The platform's bill for run-1's attempt arrives while run-2 is current —
+      // the run a naive "resolve the run from readRun" path would file it under.
+      const settled = withBudget(store, (budget) =>
+        budget.reconcileUsage({ ...usageInput("work#1", { inputTokens: 1600 }), runId: RUN2 }),
+      );
+      expect(settled.kind).toBe("reconciled");
+      if (settled.kind !== "reconciled") return;
+      // THE CLAIM'S OWN RUN WINS over the run the caller addressed.
+      expect(settled.reservation.runId).toBe(RUN);
+      expect(settled.reservation.status).toBe("reconciled");
+      expect(settled.reservation.used?.inputTokens).toBe(1600);
+
+      // The claim was SETTLED where it was made — neither left outstanding nor
+      // re-filed as a second fact under the current run.
+      expect(store.budget.reservationsOf(GRAPH, RUN2)).toEqual([]);
+      expect(store.budget.budgetUsageOf(GRAPH, RUN2)).toEqual([]);
+      const first = store.budget.budgetUsageOf(GRAPH, RUN);
+      expect(first[0]?.reserved.inputTokens).toBe(0);
+      expect(first[0]?.used.inputTokens).toBe(1600);
+
+      // The overrun is computed against the ceiling the claim CARRIED, so the run
+      // that spent the tokens is the run that shows the actual excess.
+      const report = buildBudgetReport({
+        graphId: GRAPH,
+        runId: RUN,
+        planRevision: "plan-1",
+        nodes: [{ nodeId: "work", limits: { inputTokens: 1000 } }],
+        usage: first,
+      });
+      expect(report.overruns.map((entry) => entry.overBy)).toEqual([600]);
     } finally {
       store.close();
     }

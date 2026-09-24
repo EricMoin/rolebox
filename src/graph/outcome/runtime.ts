@@ -1109,6 +1109,14 @@ export interface OutcomeBudgetUsageReport {
 
 /** What recording one usage report did, per attempt. */
 export interface OutcomeBudgetUsageEntry {
+  /**
+   * The RUN whose claim this fact belongs to — the run that was CHARGED, not
+   * necessarily the run the report addressed: a delayed bill for an attempt of a
+   * superseded run settles THAT run's claim and names it here. For
+   * `recorded-late` (an attempt that holds no claim at all) it is the run the
+   * report addressed, the only run the store can know.
+   */
+  readonly runId: string;
   readonly nodeId: string;
   readonly attemptId: string;
   /**
@@ -1159,6 +1167,12 @@ export type OutcomeBudgetUsageOutcome =
   | {
       readonly kind: "recorded";
       readonly graphId: string;
+      /**
+       * The run the returned report describes: the run the FIRST entry's fact
+       * belongs to, or the run this report addressed when it carried no attempts.
+       * Every entry names its own run, so a report crossing a run boundary stays
+       * fully attributable while the report itself is one run's state.
+       */
       readonly runId: string;
       readonly at: number;
       /** What each attempt's report did, in report order. */
@@ -3574,6 +3588,13 @@ export class OutcomeGraphRuntime {
    * an amount larger than the declared ceiling is recorded as reported, and the
    * run's report shows the ACTUAL overrun.
    *
+   * WHICH RUN A FACT BELONGS TO. The attempt's OWN claim decides: each entry
+   * names the run whose row it settled, and the returned report describes the run
+   * the FIRST entry belongs to (with no attempts, the run this call addressed). A
+   * delayed bill for an attempt of a superseded run is therefore filed under THAT
+   * run and shows its actual overrun there, instead of being charged to the run
+   * that happens to be current when the bill lands.
+   *
    * TOTAL: a malformed report, an unstarted graph and an unreadable store are
    * named refusals, not exceptions; a store failure inside the transaction rolls
    * the WHOLE report back, so a half-recorded reconciliation cannot exist.
@@ -3596,6 +3617,10 @@ export class OutcomeGraphRuntime {
         },
       ]);
     }
+    // THE RUN THIS REPORT IS ADDRESSED TO: the run that is current when the bill
+    // lands. It is the identity of last resort for an attempt that holds no claim
+    // at all; an attempt that DOES hold one is settled against its own run by the
+    // store, however long ago that run was superseded.
     let runId: string | undefined;
     try {
       runId = this.ledger.runs?.readRun(this.graphId)?.runId;
@@ -3657,12 +3682,16 @@ export class OutcomeGraphRuntime {
         },
       ]);
     }
-    const reading = this.budgetReport(runId);
+    // The ANSWER describes the run the first settled fact belongs to — the
+    // attempt's own claim decided that — falling back to the addressed run when
+    // this report carried no attempts at all.
+    const settledRunId = entries[0]?.runId ?? runId;
+    const reading = this.budgetReport(settledRunId);
     if (reading.kind === "refused") return refused([reading.refusal]);
     return Object.freeze({
       kind: "recorded" as const,
       graphId: this.graphId,
-      runId,
+      runId: settledRunId,
       at,
       entries: Object.freeze(entries),
       report: reading.report,
@@ -5889,6 +5918,7 @@ function usageEntryOf(result: BudgetUsageResult): OutcomeBudgetUsageEntry {
   const reservation = result.reservation;
   const used = reservation.used;
   const base = {
+    runId: reservation.runId,
     nodeId: reservation.nodeId,
     attemptId: reservation.attemptId,
     ...(used === undefined ? {} : { used }),

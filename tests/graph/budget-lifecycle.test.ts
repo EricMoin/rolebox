@@ -314,6 +314,44 @@ function reportOf(reading: Awaited<ReturnType<OutcomeHost["budgetReportOf"]>>): 
   return reading.report;
 }
 
+/**
+ * Run one control command with a TEMP TRIGGER on the store's OWN shared
+ * connection, so the write fails AT THE SQL STATEMENT below the application.
+ *
+ * The store shares one connection per file in this process, so the trigger this
+ * case creates is the one the command's transaction runs against; the trigger is
+ * dropped before the rows are read back, and the answer is whatever the command
+ * returned or threw — the transaction rolls back either way, which is what the
+ * rollback case below asserts. (The same shape approval-lifecycle.test.ts uses
+ * for the approval decision and control-entry.test.ts for the other commands.)
+ *
+ * `NEW.control_command IS NOT NULL` is deliberate: the run-control claim is the
+ * statement under test, and a run-row write that does not set the command fact is
+ * not the write this case means to fail.
+ */
+async function withInjectedRunControlWrite(
+  fixture: BudgetFixture,
+  run: () => Promise<ControlAnswer>,
+): Promise<{ readonly answer?: ControlAnswer; readonly thrown?: unknown }> {
+  const store = GraphStore.openFile(fixture.storeRoot);
+  try {
+    store.run(
+      "CREATE TEMP TRIGGER p3_budget_stop_inject BEFORE UPDATE OF control_command ON " +
+        GRAPH_STORE_TABLES.runs +
+        " WHEN NEW.control_command IS NOT NULL BEGIN SELECT RAISE(ABORT, 'p3 budget-stop inject'); END",
+    );
+    try {
+      return { answer: await run() };
+    } catch (thrown) {
+      return { thrown };
+    } finally {
+      store.run("DROP TRIGGER p3_budget_stop_inject");
+    }
+  } finally {
+    store.close();
+  }
+}
+
 // ── The reserve half ────────────────────────────────────────────────────────
 
 describe("the dispatch budget — reserve before dispatch", () => {
@@ -506,6 +544,91 @@ describe("the dispatch budget — reconcile against real usage", () => {
     }
   });
 
+  it("files a delayed bill for a SUPERSEDED run's attempt under that run, with the actual overrun", async () => {
+    const fixture = await openBudgetFixture(BUDGETED_ENTRY);
+    try {
+      // run-1 dispatches the entry attempt, which finishes with no usage reported
+      // (its claim is WITHDRAWN as unknown, not reconciled).
+      const accepted = await submitOutcome(fixture, { nodeId: "work", outcomeId: "done" });
+      expect(accepted.decision).toBe("accepted");
+      const before = storeOf(fixture);
+      let firstRunId: string | undefined;
+      try {
+        firstRunId = before.runs.readRun(fixture.graphId)?.runId;
+        expect(before.budget.readReservation(fixture.graphId, "work#1")?.status).toBe("released");
+      } finally {
+        before.close();
+      }
+      if (firstRunId === undefined) throw new Error("budget fixture: run-1 was not minted");
+
+      // The trusted order that replaces the finished run, honoured by the shipped
+      // follow-up: a NEW run dispatches a NEW attempt, and it is now the run a
+      // naive report path would file everything under.
+      const ordered = await control(fixture, {
+        graph_id: fixture.graphId,
+        command: "retry",
+        reason: "re-run the graph after its first execution",
+      });
+      expect(ordered.kind).toBe("applied");
+      // THE ORDER IS DURABLE AND THE BOOT SWEEP IS ITS WINDOW. This fixture binds
+      // the tools WITHOUT the shipped entries' `withCancelDelivery` follow-up (dsh
+      // and Pi apply it), so the successor run is minted by the same recovery sweep
+      // a restart leaves — and the sweep reports it in its own bucket.
+      const recovered = await fixture.host.recoverDeclaredGraphs();
+      expect(recovered.reexecuted).toHaveLength(1);
+      const after = storeOf(fixture);
+      let secondRunId: string | undefined;
+      try {
+        expect(after.runs.runsOf(fixture.graphId)).toHaveLength(2);
+        secondRunId = after.runs.readRun(fixture.graphId)?.runId;
+        expect(secondRunId).not.toBe(firstRunId);
+      } finally {
+        after.close();
+      }
+      if (secondRunId === undefined) throw new Error("budget fixture: run-2 was not minted");
+
+      // The platform's bill for the FIRST run's attempt arrives late.
+      const late = await fixture.host.recordBudgetUsage(fixture.graphId, {
+        attempts: [{ nodeId: "work", attemptId: "work#1", inputTokens: 1500 }],
+        now: NOW + 40,
+      });
+      expect(late.kind).toBe("recorded");
+      if (late.kind !== "recorded") return;
+      // THE BILL IS A FACT ABOUT run-1: it settles run-1's claim and says so.
+      expect(late.entries[0]?.outcome).toBe("reconciled");
+      expect(late.entries[0]?.runId).toBe(firstRunId);
+      expect(late.runId).toBe(firstRunId);
+      expect(late.report.overruns.map((entry) => entry.overBy)).toEqual([500]);
+      expect(late.report.totals.inputTokens).toBe(1500);
+
+      // The CURRENT run is not charged for a dispatch it never made...
+      const current = reportOf(await fixture.host.budgetReportOf(fixture.graphId, secondRunId));
+      expect(current.totals.inputTokens).toBe(0);
+      expect(current.overruns).toEqual([]);
+      // ...and the run that spent the tokens shows the ACTUAL overrun.
+      const first = reportOf(await fixture.host.budgetReportOf(fixture.graphId, firstRunId));
+      expect(first.overruns.map((entry) => entry.overBy)).toEqual([500]);
+
+      // DURABLE, on a fresh connection: the claim is settled where it was made and
+      // no second fact was created under the current run.
+      const store = storeOf(fixture);
+      try {
+        const row = store.budget.readReservation(fixture.graphId, "work#1", firstRunId);
+        expect(row?.status).toBe("reconciled");
+        expect(row?.used?.inputTokens).toBe(1500);
+        expect(
+          store.budget
+            .reservationsOf(fixture.graphId, secondRunId)
+            .map((entry) => entry.attemptId),
+        ).toEqual(["work#2"]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      fixture.host.close();
+    }
+  });
+
   it("cannot be forged by a worker's submission, which moves no usage and no ceiling", async () => {
     const fixture = await openBudgetFixture(BUDGETED_ENTRY);
     try {
@@ -665,6 +788,35 @@ describe("the dispatch budget — budget-stop through the one control entry", ()
       try {
         expect(store.runs.controlDecisions(fixture.graphId).length).toBe(0);
         expect(store.runs.readRunControl(fixture.graphId)).toBeUndefined();
+      } finally {
+        store.close();
+      }
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("rolls the whole command back when the run-control claim fails below the application", async () => {
+    const fixture = await openBudgetFixture(BUDGETED_ENTRY);
+    try {
+      const outcome = await withInjectedRunControlWrite(fixture, () =>
+        control(fixture, {
+          graph_id: fixture.graphId,
+          command: "budget-stop",
+          reason: "the declared ceiling was exceeded",
+        }),
+      );
+      // The command either threw or reported a refusal; an APPLIED answer would
+      // mean the failed statement was not the write this command's fact comes from.
+      expect(outcome.answer?.kind ?? "refused").not.toBe("applied");
+
+      // NOTHING of the command survived the failed statement: no decision row, no
+      // run-control fact, and the in-flight attempt's claim still stands.
+      const store = storeOf(fixture);
+      try {
+        expect(store.runs.controlDecisions(fixture.graphId).length).toBe(0);
+        expect(store.runs.readRunControl(fixture.graphId)).toBeUndefined();
+        expect(store.budget.readReservation(fixture.graphId, "work#1")?.status).toBe("reserved");
       } finally {
         store.close();
       }

@@ -1044,7 +1044,11 @@ export interface BudgetLedger {
    *
    * The transition is conditional on the row still being `reserved` or
    * `released`, so the FIRST report stands and a second, different report is
-   * `ignored` rather than added.
+   * `ignored` rather than added. WHEN THE ATTEMPT ALREADY HOLDS A ROW, THAT ROW'S
+   * RUN WINS over the `runId` the caller addressed: a delayed bill for an attempt
+   * of a superseded run settles the claim that run made — against the ceiling the
+   * claim was checked against — instead of being filed under whichever run is
+   * current when the bill arrives.
    */
   reconcileUsage(input: BudgetUsageInput): BudgetUsageResult;
   /**
