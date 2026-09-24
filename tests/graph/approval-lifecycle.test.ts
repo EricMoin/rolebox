@@ -931,4 +931,42 @@ describe("graph_control — who may decide an approval", () => {
       fixture.host.close();
     }
   });
+
+  it("raises and decides through the shipped graph_control TOOL (schema + pass-through)", async () => {
+    const fixture = await openFixture(CHAIN);
+    try {
+      // THE TOOL FACE IS THE ONE THE MODEL CALLS: the approval arguments travel
+      // through its zod schema and into the same service, and the answer is the
+      // service's own.
+      const raised = await controlTool(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "approval-request",
+          node_id: "work",
+          reason: "hold the work for sign-off",
+          approver_session_id: APPROVER,
+          expires_at: DEADLINE,
+        },
+        DECLARER,
+        "agent.declarer",
+      );
+      expect(raised.kind).toBe("applied");
+      expect(raised.approval?.request.status).toBe("pending");
+      expect(raised.approval?.request.approverSessionId).toBe(APPROVER);
+      expect(raised.approval?.request.expiresAt).toBe(DEADLINE);
+
+      const decided = await controlTool(
+        fixture,
+        { graph_id: fixture.graphId, command: "approve", node_id: "work", reason: "signed off" },
+        APPROVER,
+        "agent.approver",
+      );
+      expect(decided.kind).toBe("applied");
+      expect(decided.approval?.request.status).toBe("approved");
+      expect(decided.approval?.request.decidedBy?.sessionId).toBe(APPROVER);
+    } finally {
+      fixture.host.close();
+    }
+  });
 });
