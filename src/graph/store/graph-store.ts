@@ -602,14 +602,9 @@ export class GraphStore {
     filePath: string,
   ): Promise<BorrowedConnection> {
     const key = "ro\u0000" + resolvePath(filePath);
-    const existing = CONNECTIONS.get(key);
-    if (existing !== undefined) {
-      existing.refs += 1;
-      return { connection: existing, key };
-    }
-    const db = await createDatabase(filePath, { readonly: true });
-    const connection: SharedConnection = { db, refs: 1, depth: 0 };
-    CONNECTIONS.set(key, connection);
+    const connection = await GraphStore.acquireConnectionAsync(key, () =>
+      createDatabase(filePath, { readonly: true }),
+    );
     return { connection, key };
   }
 
@@ -669,20 +664,9 @@ export class GraphStore {
     const storeId = initialize ? initializeStoreIdentity(filePath) : undefined;
     const key = "rw\u0000" + resolvePath(filePath);
     if (async) {
-      // The existing shared connection is reused even on the async path: the
-      // open is still awaited so the async factory's shape is unchanged.
-      const existing = CONNECTIONS.get(key);
-      if (existing !== undefined) {
-        existing.refs += 1;
-        return Promise.resolve(
-          GraphStore.openVerified(existing, key, filePath, initialize, storeId),
-        );
-      }
-      return createDatabase(filePath).then((db) => {
-        const connection: SharedConnection = { db, refs: 1, depth: 0 };
-        CONNECTIONS.set(key, connection);
-        return GraphStore.openVerified(connection, key, filePath, initialize, storeId);
-      });
+      return GraphStore.acquireConnectionAsync(key, () => createDatabase(filePath)).then(
+        (connection) => GraphStore.openVerified(connection, key, filePath, initialize, storeId),
+      );
     }
     return GraphStore.openVerified(
       GraphStore.acquireConnection(key, () => createDatabaseSync(filePath)),
@@ -740,6 +724,28 @@ export class GraphStore {
       return existing;
     }
     const connection: SharedConnection = { db: open(), refs: 1, depth: 0 };
+    CONNECTIONS.set(key, connection);
+    return connection;
+  }
+
+  private static async acquireConnectionAsync(
+    key: string,
+    open: () => Promise<DatabaseDriver>,
+  ): Promise<SharedConnection> {
+    const existing = CONNECTIONS.get(key);
+    if (existing !== undefined) {
+      existing.refs += 1;
+      return existing;
+    }
+    const db = await open();
+    // A sync or async opener may have published the connection while we awaited the driver.
+    const raced = CONNECTIONS.get(key);
+    if (raced !== undefined) {
+      db.close();
+      raced.refs += 1;
+      return raced;
+    }
+    const connection: SharedConnection = { db, refs: 1, depth: 0 };
     CONNECTIONS.set(key, connection);
     return connection;
   }
