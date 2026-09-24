@@ -2990,6 +2990,15 @@ function resolveArmSet(
   return armed;
 }
 
+/** Whether two id sets hold exactly the same members. */
+function sameMembers(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
+  }
+  return true;
+}
+
 /** Whether two arrival lists are field-for-field identical, in order. */
 function sameArrivals(
   a: readonly OutcomeArrival[],
@@ -3752,10 +3761,9 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     // advance actually produces, while they stay in the candidate set so their named
     // refusal is still assembled and recorded. The set only grows, and a candidate
     // blocked by an unsettled producer stays blocked as more candidates are armed,
-    // so the loop reaches a fixpoint in at most one pass per candidate. A candidate
-    // is assembled against the entries as they will stand when its turn comes: one
-    // armed earlier in this same advance has already been re-entered, so it is NOT a
-    // settled producer for a later candidate.
+    // so the loop reaches a fixpoint in at most one pass per candidate. WHICH
+    // candidates count as re-entered is derived from the WHOLE advance below, not
+    // from the ones already met in plan order (D1).
     let decisions: {
       candidate: (typeof candidates)[number];
       assembled: DownstreamInput;
@@ -3768,32 +3776,67 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         armable.map((candidate) => candidate.node),
         blocked,
       );
+      const routedCandidates = candidates.filter((candidate) =>
+        armSet.has(candidate.node.id),
+      );
+      // THE RE-ENTRY BASIS IS THE WHOLE ADVANCE'S, NEVER A PLAN-ORDER PREFIX (D1).
+      // A candidate is assembled against the candidates this advance RE-ENTERS —
+      // the ones the assembly arms — and that set and the assembly define each
+      // other: arming a candidate can block a consumer of it, and a consumer left
+      // blocked is not re-entered after all. The basis is therefore derived as a
+      // fixpoint OVER THE ASSEMBLY, so the node ids' plan order cannot decide the
+      // answer. `assembleAgainst` is one such assembly; `armedAgainst` is the set
+      // it arms.
+      //
+      // `armedAgainst` is ANTITONE — treating more candidates as re-entered can
+      // only block more — so applying it twice is monotone and the iteration
+      // below, from the FULL candidate set, is a decreasing chain that reaches the
+      // greatest solution G within one round per candidate. The assembly is then
+      // taken AT G: the candidates that resolve there are exactly the ones that can
+      // be armed without resting on an arrival this advance supersedes, and every
+      // other candidate is blocked by name. When G is its own answer too — every
+      // declaration whose declared inputs among these candidates are acyclic, which
+      // is the ordinary shape — G is the ONE self-consistent reading. When it is
+      // not, the candidates whose declared inputs form a cycle stay blocked
+      // together instead of one of them being armed on an attempt its sibling
+      // supersedes: arming neither leaves both settled entries (and both arrivals)
+      // intact.
+      const assembleAgainst = (inFlight: ReadonlySet<string>) =>
+        routedCandidates.map((candidate) => ({
+          candidate,
+          assembled: assembleDownstreamInput(
+            candidate.node.inputs ?? [],
+            (nodeId) => (inFlight.has(nodeId) ? undefined : settledAttemptOf(nodeId)),
+            readAccepted,
+          ),
+        }));
+      const armedAgainst = (inFlight: ReadonlySet<string>): ReadonlySet<string> =>
+        new Set(
+          assembleAgainst(inFlight)
+            .filter((entry) => entry.assembled.kind === "resolved")
+            .map((entry) => entry.candidate.node.id),
+        );
+      let basis: ReadonlySet<string> = new Set(
+        routedCandidates.map((candidate) => candidate.node.id),
+      );
+      for (let round = 0; round <= routedCandidates.length; round += 1) {
+        const swung = armedAgainst(armedAgainst(basis));
+        if (sameMembers(swung, basis)) break;
+        basis = swung;
+      }
       const next: typeof decisions = [];
-      const reentered = new Set<string>();
       let grew = false;
-      for (const candidate of candidates) {
-        if (!armSet.has(candidate.node.id)) continue;
+      for (const { candidate, assembled } of assembleAgainst(basis)) {
         // A BLOCKED INPUT IS A BLOCKED DISPATCH (D6). The refusal is written onto
         // the node's own entry — where it can be queried, one named code per input
         // — and NOTHING is armed for it: no attempt, no dispatch intent and no
         // effect. A node is never started with a hole where its input should be,
         // and it is never reported as merely waiting either.
-        const assembled = assembleDownstreamInput(
-          candidate.node.inputs ?? [],
-          (nodeId) => (reentered.has(nodeId) ? undefined : settledAttemptOf(nodeId)),
-          readAccepted,
-        );
         next.push({ candidate, assembled });
-        if (assembled.kind === "blocked") {
-          if (!blocked.has(candidate.node.id)) {
-            blocked.add(candidate.node.id);
-            grew = true;
-          }
-          continue;
+        if (assembled.kind === "blocked" && !blocked.has(candidate.node.id)) {
+          blocked.add(candidate.node.id);
+          grew = true;
         }
-        // The next candidate in plan order sees this one as re-entered, exactly
-        // as the state this advance commits will carry it.
-        reentered.add(candidate.node.id);
       }
       decisions = next;
       if (!grew) break;

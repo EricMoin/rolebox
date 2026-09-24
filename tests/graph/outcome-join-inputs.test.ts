@@ -31,10 +31,15 @@
  * the sibling case in outcome-runtime.test.ts ("a loop join is decided per
  * round") covers the same rule without declared inputs.
  *
- * NOT DECIDED HERE: a join:any/quorum consumer that declares inputs from MORE
- * feeders than its threshold waits for the last declared producer (O1 in the gap
- * analysis). The any case below declares its input from exactly the feeder it is
- * armed on, so the open question is neither pinned nor changed by this file.
+ * ONE CASE OF THE O1 FAMILY IS DECIDED HERE. A join:any/quorum consumer that
+ * declares inputs from MORE feeders than its threshold normally waits for the
+ * last declared producer (O1 in the gap analysis) — but D1 shows that reading is
+ * not universal: with a settled producer re-entered LATER in plan order the
+ * consumer used to be armed on the superseded attempt, so behaviour depended on
+ * the declaration's node-id order. The last case below pins the corrected rule.
+ * The rest of O1 (whether an any/quorum consumer should really wait for the last
+ * declared producer, or such a declaration should be refused at compile time)
+ * is still open.
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
@@ -47,7 +52,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
+import type {
+  GraphDeclarationV3,
+  NodeDeclarationV3,
+} from "../../src/graph/compiler/declaration-v3.ts";
 import type { CompiledPlan } from "../../src/graph/compiler/plan.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
@@ -387,6 +395,78 @@ function overlappingGroupsDeclaration(maxInnerTraversals: number): GraphDeclarat
         max_traversals: maxInnerTraversals,
         continuation_outcome: "revise",
         exit_outcome: "approve",
+      },
+    ],
+  };
+}
+
+/**
+ * D1: a `join:any` consumer that declares an input from a producer the SAME
+ * advance re-enters LATER in the plan's order. That order is the compiler's
+ * canonicalisation of the node IDS (compile.ts sorts nodes by id), so a plan
+ * walk assembles the consumer before it has seen that the producer is
+ * re-entered beside it — and binds the consumer to `P#3`, the very attempt the
+ * advance supersedes. An id order is not a declared semantic, so the answer
+ * must not depend on it: the twin case below swaps the ids and must read the
+ * same.
+ *
+ *   a --done--> P          s --go--> P, C          P --ready--> C
+ *
+ * `C` joins `any` and consumes s/go + P/ready; `P` joins `any` and consumes
+ * nothing. The loop group re=[s,P,C] takes `go` as its continuation, so s/go
+ * re-enters P (and C, when C is not already in flight).
+ */
+function lateReentryDeclaration(producerIdSortsFirst: boolean): GraphDeclarationV3 {
+  // "c" < "f" puts the CONSUMER first; "b" < "z" puts the PRODUCER first.
+  const consumer = producerIdSortsFirst ? "z" : "c";
+  const producer = producerIdSortsFirst ? "b" : "f";
+  const a: NodeDeclarationV3 = {
+    id: "a",
+    agent: "agent.a",
+    prompt: "Open the loop.",
+    outcomes: [{ id: "done" }],
+  };
+  const converge: NodeDeclarationV3 = {
+    id: consumer,
+    agent: "agent.converge",
+    prompt: "Converge.",
+    outcomes: [{ id: "fin" }],
+    join: { strategy: "any" },
+    inputs: [
+      { from: "s", outcome: "go" },
+      { from: producer, outcome: "ready" },
+    ],
+  };
+  const follow: NodeDeclarationV3 = {
+    id: producer,
+    agent: "agent.follow",
+    prompt: "Follow the round.",
+    outcomes: [{ id: "ready" }],
+    join: { strategy: "any" },
+  };
+  const s: NodeDeclarationV3 = {
+    id: "s",
+    agent: "agent.s",
+    prompt: "Drive the round.",
+    outcomes: [{ id: "go" }],
+  };
+  return {
+    version: 3,
+    name: "p43.late-reentry",
+    nodes: [a, converge, follow, s],
+    edges: [
+      { from: "a", to: producer, outcome: "done" },
+      { from: "s", to: consumer, outcome: "go" },
+      { from: "s", to: producer, outcome: "go" },
+      { from: producer, to: consumer, outcome: "ready" },
+    ],
+    loop_groups: [
+      {
+        id: "re",
+        nodes: ["s", producer, consumer],
+        max_traversals: 10,
+        continuation_outcome: "go",
+        exit_outcome: "fin",
       },
     ],
   };
@@ -887,5 +967,119 @@ describe("overlapping loop groups advance the group that declares the continuati
         "work#5",
       ]);
     });
+  });
+});
+
+// ── D1: the re-entry set is the WHOLE advance, not a plan-order prefix ──────
+
+describe("the assembly reads the WHOLE advance's re-entries (D1)", () => {
+  /**
+   * Drive the D1 sequence and assert the whole reading. `producerIdSortsFirst`
+   * changes ONLY which node id sorts first — the same declaration shape, the
+   * same events — and the two readings must agree: which attempt an advance
+   * supersedes is a declared fact, not an artefact of the ids it was written
+   * with.
+   */
+  async function driveLateReentry(producerIdSortsFirst: boolean): Promise<void> {
+    const consumer = producerIdSortsFirst ? "z" : "c";
+    const producer = producerIdSortsFirst ? "b" : "f";
+    const order = producerIdSortsFirst ? "producer-id-first" : "consumer-id-first";
+    await withHarness(lateReentryDeclaration(producerIdSortsFirst), (harness) => {
+      harness.runtime.start(NOW);
+
+      // a opens the loop and the producer follows it.
+      const opened = accept(harness, "a", "done", "a#1", NOW + 1, { seed: "A" });
+      expect(attemptIds(opened.dispatched)).toEqual([producer + "#3"]);
+
+      // The producer's #3 answers on "ready". The consumer's join:any is
+      // satisfied by that arrival, but its OTHER declared input (s/go) has no
+      // settled attempt yet, so it is refused by name and stays pending — the
+      // advance below is the one that would arm it.
+      const first = accept(harness, producer, "ready", producer + "#3", NOW + 2, {
+        part: "F1",
+      });
+      expect(attemptIds(first.dispatched)).toEqual([]);
+      expect(nodeOf(first.state, consumer)).toMatchObject({ status: "pending" });
+      expect(refusalCodes(first.state, consumer)).toEqual(["input-producer-unsettled"]);
+
+      // D1. s/go arrives and routes to BOTH the consumer and the producer: the
+      // consumer's join is satisfied (s#2 is settled by this acceptance, the
+      // producer's #3 is settled) and the producer is re-entered from #3 in the
+      // SAME advance. The consumer's declared input names the producer, and the
+      // #3 answer is exactly the arrival this advance supersedes — so the
+      // consumer must NOT be armed on it, whatever the plan's id order is.
+      const driven = accept(harness, "s", "go", "s#2", NOW + 3, { drive: "s1" });
+      expect(attemptIds(driven.dispatched)).toEqual([producer + "#4"]);
+      expect(nodeOf(driven.state, producer)).toMatchObject({
+        status: "dispatched",
+        attemptId: producer + "#4",
+      });
+      // (Pre-fix, in THIS id order the advance minted the consumer's #4 bound to
+      // P@P#3 and then the producer's #5; the twin below already agreed pre-fix
+      // — that asymmetry is the order dependence. Removing the consumer attempt
+      // is why the new producer attempt is numbered one lower now.)
+      const waiting = nodeOf(driven.state, consumer);
+      expect(waiting.status).toBe("pending");
+      expect(waiting.attemptId).toBeUndefined();
+      expect(boundRefs(waiting)).toEqual([]);
+      expect(refusalCodes(driven.state, consumer)).toEqual(["input-producer-unsettled"]);
+      // The persisted arrival record names only the round's own producer: the
+      // superseded attempt is not an arrival while the producer is in flight.
+      expect(waiting.arrivals ?? []).toEqual([
+        { from: "s", outcome: "go", attemptId: "s#2" },
+      ]);
+      // Nothing at all was dispatched to the consumer in this advance.
+      expect(attemptIds(harness.requests)).toEqual([
+        "a#1",
+        "s#2",
+        producer + "#3",
+        producer + "#4",
+      ]);
+
+      // The producer's NEW attempt settles on "ready": the consumer is armed
+      // now, bound to s#2 and to the NEW attempt — never to the superseded #3.
+      const settled = accept(harness, producer, "ready", producer + "#4", NOW + 4, {
+        part: "F2",
+      });
+      expect(attemptIds(settled.dispatched)).toEqual([consumer + "#5"]);
+      const armed = nodeOf(settled.state, consumer);
+      expect(armed).toMatchObject({ status: "dispatched", attemptId: consumer + "#5" });
+      expect(boundRefs(armed)).toEqual(["s@s#2", producer + "@" + producer + "#4"]);
+      expect(boundPayloads(armed)).toEqual([
+        { kind: "value", value: { drive: "s1" } },
+        { kind: "value", value: { part: "F2" } },
+      ]);
+      expect(deliveredTo(harness, consumer + "#5")?.inputs).toEqual(armed.inputs);
+      // Its named refusal is gone: the round it waited for has produced.
+      expect(refusalCodes(settled.state, consumer)).toEqual([]);
+      console.log(
+        "[probe:late-reentry] order=" +
+          order +
+          " driven=" +
+          JSON.stringify(attemptIds(driven.dispatched)) +
+          " waiting=" +
+          JSON.stringify({
+            status: waiting.status,
+            attemptId: waiting.attemptId,
+            refusals: refusalCodes(driven.state, consumer),
+            arrivals: (waiting.arrivals ?? []).map(
+              (arrival) => arrival.from + "@" + arrival.attemptId,
+            ),
+          }) +
+          " armed=" +
+          JSON.stringify({
+            attemptId: armed.attemptId,
+            inputs: boundRefs(armed),
+          }),
+      );
+    });
+  }
+
+  it("blocks a join:any consumer whose producer is re-entered later in the plan's id order, then binds it to the new attempt", async () => {
+    await driveLateReentry(false);
+  });
+
+  it("reads the same advance when the producer's id sorts before the consumer's", async () => {
+    await driveLateReentry(true);
   });
 });
