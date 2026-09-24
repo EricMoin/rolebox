@@ -1735,6 +1735,27 @@ function progressLoopDeclaration(options: {
 }
 
 /**
+ * The progress loop where REVIEW declares an input: the D6 binding rides every
+ * round, so a test can prove the stagnation judgement reads the DECLARED subject
+ * and is not moved by anything else the payload carries (R1).
+ */
+function progressInputLoopDeclaration(options: {
+  readonly maxTraversals: number;
+  readonly maxUnchanged: number;
+}): GraphDeclarationV3 {
+  const base = progressLoopDeclaration(options);
+  return {
+    ...base,
+    name: "graph.progress-input",
+    nodes: base.nodes.map((node) =>
+      node.id === "review"
+        ? { ...node, inputs: [{ from: "work", outcome: "done" }] }
+        : node,
+    ),
+  };
+}
+
+/**
  * The same loop declared as TWO groups that BOTH take "revise" as their
  * continuation and BOTH declare a progress policy: one comparison is a fact
  * about the accepted outcome for every governing group, so both counters
@@ -1981,6 +2002,139 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         expect(progressEntry(incomparable.state, "revise-loop").unchanged).toBe(0);
         // The run is still executing: an unknown never reaches the threshold.
         expect(incomparable.state.phase).toBe("executing");
+      },
+    );
+  });
+
+  it("is not moved by a payload field that is not the declared progress subject (R1)", async () => {
+    await withHarness(
+      progressInputLoopDeclaration({ maxTraversals: 20, maxUnchanged: 3 }),
+      async ({ runtime, requests, graphId, ledger }) => {
+        runtime.start(NOW);
+        // One round: work settles with its own free text, then review submits
+        // the payload under test.
+        const round = (
+          workAttempt: string,
+          reviewAttempt: string,
+          report: string,
+          review: Record<string, unknown>,
+          at: number,
+        ): OutcomeSubmissionResult => {
+          const worked = runtime.submit(
+            {
+              nodeId: "work",
+              outcomeId: "done",
+              credential: credentialOf(requests, workAttempt),
+              data: { report },
+            },
+            at,
+          );
+          expect(worked.kind).toBe("accepted");
+          return runtime.submit(
+            {
+              nodeId: "review",
+              outcomeId: "revise",
+              credential: credentialOf(requests, reviewAttempt),
+              data: review,
+            },
+            at + 1,
+          );
+        };
+
+        // ROUND 1 — the first comparable token establishes the baseline, and
+        // the declared continuation arms the next round's producer.
+        const first = round(
+          "work#1",
+          "review#2",
+          "W1",
+          { revision: "r1", findings: ["f1"], reason: "first pass", severity: "low" },
+          NOW + 1,
+        );
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+        expect(onlyProgress(first.progress)).toMatchObject({
+          verdict: "progressed",
+          unchanged: 0,
+          baseline: "r1",
+        });
+        expect(attemptIds(first.dispatched)).toEqual(["work#3"]);
+
+        // ROUND 2 — the SAME declared revision with every undeclared field
+        // rewritten: findings, reason and severity are free text a worker may
+        // replace on every pass. They are not the declared subject, so the
+        // streak must stand still and the SAME successor must be armed; a reset
+        // to "progressed" here is the defect R1 forbids.
+        const second = round(
+          "work#3",
+          "review#4",
+          "W2",
+          {
+            revision: "r1",
+            findings: ["totally", "different"],
+            reason: "another pass",
+            severity: "critical",
+          },
+          NOW + 3,
+        );
+        expect(second.kind).toBe("accepted");
+        if (second.kind !== "accepted") return;
+        expect(onlyProgress(second.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 1,
+          baseline: "r1",
+          stalled: false,
+        });
+        expect(second.stop).toBeUndefined();
+        expect(attemptIds(second.dispatched)).toEqual(["work#5"]);
+
+        // ROUND 3 — the DECLARED subject moves, with the same free text shape.
+        // A declared progress input IS allowed to move the declared policy.
+        const third = round(
+          "work#5",
+          "review#6",
+          "W3",
+          { revision: "r2", findings: ["moved on"], reason: "third pass", severity: "high" },
+          NOW + 5,
+        );
+        expect(third.kind).toBe("accepted");
+        if (third.kind !== "accepted") return;
+        expect(onlyProgress(third.progress)).toMatchObject({
+          verdict: "progressed",
+          unchanged: 0,
+          baseline: "r2",
+        });
+        expect(attemptIds(third.dispatched)).toEqual(["work#7"]);
+
+        // THE PERSISTED RECORD IS THE DECLARED COMPARISON AND NOTHING ELSE: the
+        // six declared fields, with no payload digest a later round could be
+        // judged against.
+        expect(Object.keys(progressEntry(third.state, "revise-loop")).sort()).toEqual([
+          "baseline",
+          "evaluator",
+          "loopGroupId",
+          "subject",
+          "unchanged",
+          "version",
+        ]);
+        expect(JSON.stringify(progressEntry(third.state, "revise-loop"))).not.toContain(
+          "critical",
+        );
+        // Nothing above reached the threshold, so the run keeps executing.
+        expect(third.state.phase).toBe("executing");
+        expect(ledger.acceptedEvents(graphId).map((event) => event.attemptId)).toEqual([
+          "work#1",
+          "review#2",
+          "work#3",
+          "review#4",
+          "work#5",
+          "review#6",
+        ]);
+        console.log(
+          "[probe:undeclared-payload] progress=" +
+            JSON.stringify(third.state.loopProgress?.["revise-loop"]) +
+            " dispatched=" +
+            JSON.stringify(attemptIds(third.dispatched)),
+        );
       },
     );
   });
