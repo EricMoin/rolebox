@@ -42,6 +42,7 @@ let unsafeCalls = 0;
 let sandboxProbes = 0;
 let deniedProbes = 0;
 let consumedInputs = 0;
+const parentNotices: string[] = [];
 class ScriptedAdapter extends LlmAdapter {
   async *stream(options: any): AsyncIterable<any> {
     const texts = options.messages.flatMap((message: any) => (message.content ?? []).filter((block: any) => block.type === "text").map((block: any) => block.text)).join("\n");
@@ -50,6 +51,11 @@ class ScriptedAdapter extends LlmAdapter {
     const nodeId = texts.match(/node_id:\s+([^\s]+)/)?.[1];
     const credential = texts.match(/credential:\s+([^\s]+)/)?.[1];
     const history = JSON.stringify(options.messages);
+    const graphNotice = last.includes("[GRAPH COMPLETE]") || last.includes("[GRAPH BLOCKED]");
+    if (!graphId && graphNotice) parentNotices.push(last);
+    if (graphId) {
+      assert.deepEqual(options.tools.map((tool: any) => tool.name).sort(), ["graph_submit_outcome", "graph_worker_exec"], "Worker's first and subsequent requests must expose only native graph tools");
+    }
     if (graphId) writeFileSync(join(root, graphId + ".ready"), "ready");
     if (graphId && texts.includes("FAIL_FIXTURE") && !existsSync(join(root, graphId + ".failed"))) {
       writeFileSync(join(root, graphId + ".failed"), "failed");
@@ -62,14 +68,14 @@ class ScriptedAdapter extends LlmAdapter {
     }
     if (graphId && last.includes("probe-okay")) sandboxProbes++;
     if (nodeId === "review" && last.includes("accepted-upstream")) consumedInputs++;
-    if (!texts.includes("NATURAL_FIXTURE") && ((graphId && !history.includes('"name":"graph_submit_outcome"')) || !last.includes('"tool-result"'))) {
+    if (!graphNotice && !texts.includes("NATURAL_FIXTURE") && ((graphId && !history.includes('"name":"graph_submit_outcome"')) || !last.includes('"tool-result"'))) {
       let tool = graphId ? "graph_submit_outcome" : parentAction?.tool ?? "graph_declare";
       let args: unknown = graphId ? { graph_id: graphId, node_id: nodeId, outcome_id: "done", credential, ...(graphId === "dsh.explicit" && nodeId === "work" ? { data: { marker: "accepted-upstream" } } : {}) } : parentAction?.args ?? { declaration: parentDeclaration };
       if (graphId && !history.includes('"name":"graph_worker_exec"')) {
         tool = "graph_worker_exec";
         const manifestPath = nodeId === "review" ? texts.match(/manifest:\s+([^\n]+)/)?.[1] : undefined;
         const readInput = manifestPath ? "cat '" + manifestPath.replaceAll("'", "'\\''") + "'; " : "";
-        args = { command: readInput + "if cat data/protected >/dev/null 2>&1; then exit 40; fi; if (echo modified > data/protected) 2>/dev/null; then exit 41; fi; echo probe-okay" };
+        args = { command: readInput + "if cat data/protected >/dev/null 2>&1; then exit 40; fi; if (echo modified > data/protected) 2>/dev/null; then exit 41; fi; /usr/bin/git --version && echo worker-output > worker-output.txt && echo probe-okay" };
       } else if (graphId && !history.includes('"name":"unsafe_probe"')) {
         tool = "unsafe_probe"; args = {};
       }
@@ -85,10 +91,13 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 try {
-  process.chdir(root);
+  const launcher = join(root, "launcher");
+  mkdirSync(launcher, { recursive: true });
+  process.chdir(launcher);
   mkdirSync(join(root, "rolebox", "smoke"), { recursive: true });
   writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n");
-  for (const plugin of [SessionStore, AgentRegistry, LlmService, SystemPrompt, ToolRegistry, SubagentService]) fibers.push(ctx.plugin(plugin));
+  for (const plugin of [SessionStore, AgentRegistry, LlmService, SystemPrompt, SubagentService]) fibers.push(ctx.plugin(plugin));
+  fibers.push(ctx.plugin(ToolRegistry, { mode: "code" }));
   fibers.push(ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 }));
   fibers.push(ctx.plugin(spawn, { providerName: "spawn" }));
 
@@ -104,7 +113,7 @@ try {
   ctx.tools.register({ name: "unsafe_probe", description: "A forbidden worker fixture", parameters: { type: "object", properties: {} },
     output: { schema: {}, render: () => [{ type: "text", text: "unsafe" }] }, execute: async () => { unsafeCalls++; return "unsafe"; } });
   let dispose = await rolebox.apply(ctx as unknown as rolebox.DshPluginContext, rolebox.Config.parse({ roleboxDir: join(root, "rolebox") }));
-  const handle = await ctx.agents.create({ sessionId: SessionId("dsh-parent"), meta: { cwd: root }, agentOptions: { provider: "example-provider", model: "deterministic" } });
+  const handle = await ctx.agents.create({ sessionId: SessionId("dsh-parent"), meta: { cwd: root }, setup: (scope: any) => { scope.tools.presentAs("native"); }, agentOptions: { provider: "example-provider", model: "deterministic" } });
   if (restoreRoot) {
     parentAction = { tool: "graph_status", args: { scope: "all", format: "json" } };
     handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Read restored graphs." }] });
@@ -134,10 +143,16 @@ try {
   }
   assert.equal(explicit?.phase, "complete", "Real dsh child execution did not complete");
   assert.equal(explicit.current.attempts.length, 2);
+  assert.ok(existsSync(join(root, "worker-output.txt")));
+  assert.equal(existsSync(join(launcher, "worker-output.txt")), false);
+  assert.equal(existsSync(graphStoreRoot(data, launcher)), false);
   assert.equal(consumedInputs, 1, "Real dsh consumer did not read its accepted input manifest");
   assert.equal(unsafeCalls, 0, "Worker reached an unfiltered host tool");
   assert.equal(sandboxProbes, 2, "Worker sandbox probe did not run through the real registry");
   assert.equal(deniedProbes, 2, "Host did not report denial of the forbidden tool");
+  await eventually(() => parentNotices.some(text => text.includes("[GRAPH COMPLETE]") && text.includes("dsh.explicit")),
+    notified => notified, "Real dsh parent did not process graph completion");
+  await handle.agent.whenIdle();
   parentDeclaration = { version: 3, name: "dsh.natural", completion_policy: { id: "smoke", revision: "1" },
     nodes: [{ id: "work", agent: "smoke--worker", prompt: "NATURAL_FIXTURE", completion: { mode: "natural", outcome: "done" }, outcomes: [{ id: "done" }] }], edges: [] };
   handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Execute natural completion." }] });
@@ -150,7 +165,10 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.equal(natural?.phase, "complete", "Real dsh natural completion did not settle");
-  const other = await ctx.agents.create({ sessionId: SessionId("dsh-other"), meta: { cwd: root }, agentOptions: { provider: "example-provider", model: "deterministic" } });
+  await eventually(() => parentNotices.some(text => text.includes("[GRAPH COMPLETE]") && text.includes("dsh.natural")),
+    notified => notified, "Real dsh parent did not process natural graph completion");
+  await handle.agent.whenIdle();
+  const other = await ctx.agents.create({ sessionId: SessionId("dsh-other"), meta: { cwd: root }, setup: (scope: any) => { scope.tools.presentAs("native"); }, agentOptions: { provider: "example-provider", model: "deterministic" } });
   const controls = await controlScenarios({ host: "dsh", workspace: root, approver: "dsh-other",
     read: id => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === id),
     async call(tool, args, actor = "owner") {
@@ -185,7 +203,7 @@ try {
   await handle.dispose();
   await dispose();
   await verifyHostProcessRestart(import.meta.path, root, queryGraphs(graphStoreRoot(data, root)).graphs);
-  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", natural: "complete", sandbox: "enforced", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
+  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
   }
 } catch (error) { console.error(error); throw error; } finally {
   for (const fiber of fibers.reverse()) await fiber.dispose();

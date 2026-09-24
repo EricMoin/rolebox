@@ -105,6 +105,7 @@ export default async function (pi) {
       { id: "review", agent: "smoke--worker", prompt: "Consume.", inputs: [{ from: "work", outcome: "done" }], outcomes: [{ id: "done" }] },
     ], edges: [{ from: "work", to: "review", outcome: "done" }] } }), { stopReason: "toolUse" }),
     fauxAssistantMessage("execution started"),
+    fauxAssistantMessage("graph completion received"),
   ]);
   await session.prompt("Execute the explicit graph fixture.");
   const deadline = Date.now() + 20_000;
@@ -117,11 +118,16 @@ export default async function (pi) {
   assert.equal(explicit?.phase, "complete", "real Pi child execution did not complete");
   assert.equal(explicit.current?.attempts.length, 2);
   assert.ok(existsSync(join(root, "pi.explicit.consumed")), "Real Pi consumer did not read the accepted input manifest");
+  await eventually(() => session!.messages.some(message => message.role === "custom" &&
+    typeof message.content === "string" && message.content.includes("[GRAPH COMPLETE]") && message.content.includes('"graph_id":"pi.explicit"')),
+  notified => notified, "Real Pi parent did not receive graph completion");
+  await eventually(() => session!.isStreaming, streaming => !streaming, "Pi parent did not finish its notification turn");
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("graph_declare", { declaration: { version: 3, name: "pi.natural",
       completion_policy: { id: "smoke", revision: "1" },
       nodes: [{ id: "work", agent: "smoke--worker", prompt: "NATURAL_FIXTURE", completion: { mode: "natural", outcome: "done" }, outcomes: [{ id: "done" }] }], edges: [] } }), { stopReason: "toolUse" }),
     fauxAssistantMessage("natural execution started"),
+    fauxAssistantMessage("natural graph completion received"),
   ]);
   await session.prompt("Execute the natural completion fixture.");
   let natural;
@@ -132,6 +138,10 @@ export default async function (pi) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.equal(natural?.phase, "complete", "Real Pi natural completion did not settle");
+  await eventually(() => session!.messages.some(message => message.role === "custom" &&
+    typeof message.content === "string" && message.content.includes("[GRAPH COMPLETE]") && message.content.includes('"graph_id":"pi.natural"')),
+  notified => notified, "Real Pi parent did not receive natural graph completion");
+  await eventually(() => session!.isStreaming, streaming => !streaming, "Pi parent did not finish its natural notification turn");
   other = (await createAgentSession({ cwd: root, agentDir, modelRuntime: runtime, model, resourceLoader: loader, sessionManager: otherManager,
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }), tools: ["graph_declare", "graph_status", "graph_audit", "graph_control"] })).session;
   const controls = await controlScenarios({ host: "pi", workspace: root, approver: otherManager.getSessionId(),
