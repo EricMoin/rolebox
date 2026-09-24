@@ -44,10 +44,20 @@
  * input to the protocol (docs § "State, storage, and effects"), so the store
  * never reads a clock and a commit is reproducible from its batch alone.
  *
- * Dependency leaf: this module imports nothing (not even a type), so any
- * implementation, reducer or recovery module may depend on it without a cycle —
- * the same rationale as `storage-format.ts` / `execution-protocol.ts`.
+ * Dependency LEAF: this module imports exactly one thing — the TYPE-ONLY
+ * budget vocabulary from `../domain/budget.ts`, which itself imports nothing.
+ * So any implementation, reducer or recovery module may depend on this port
+ * without a cycle, and the P1 property the previous version of this paragraph
+ * claimed (no runtime dependency, no container dragged in) still holds — the
+ * budget records below need the plan's own ceiling and usage names rather than a
+ * second, drifting spelling of them.
  */
+
+import type {
+  BudgetLimitKind,
+  BudgetUsageAmounts,
+  NodeBudgetLimits,
+} from "../domain/budget.ts";
 
 // ── Format identity ─────────────────────────────────────────────────────────
 
@@ -95,8 +105,16 @@
  * process paused, which is exactly the "a payload the pause was meant to hold
  * back is accepted" failure §3.4 forbids. Same rule, same answer: refused by
  * name, never widened, never migrated (plan §3.6).
+ *
+ * VERSION 6 ADDS THE DISPATCH BUDGET RESERVATIONS AND USAGE (P3 item 3, the
+ * budget). A version-5 file holds no reservation row, so it cannot answer "is
+ * this dispatch's share of the node's declared ceiling already claimed?" —
+ * reading it as this build's store would answer *nothing reserved* for a
+ * dispatch a previous process armed, and the next parallel dispatch would be
+ * authorized past a ceiling that was already spent. Same rule, same answer:
+ * refused by name, never widened, never migrated (plan §3.6).
  */
-export const LEDGER_FORMAT_VERSION = 5;
+export const LEDGER_FORMAT_VERSION = 6;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 
@@ -824,6 +842,237 @@ export interface RunControlLedger {
   claimRunControl(control: RunControlRecord): RunControlRecord | undefined;
 }
 
+// ── Budget (P3 item 3, the third increment) ─────────────────────────────────
+
+/**
+ * What one dispatch's budget reservation claimed, in the store's own words.
+ *
+ * OWNERSHIP. Exactly one row exists per ARMED DISPATCH, keyed
+ * `(graphId, runId, nodeId, attemptId)` — the attempt's own identity is the
+ * idempotency key, so a repeated reservation for the same attempt REPLAYS and a
+ * second dispatch of the same node claims what is LEFT rather than claiming the
+ * ceiling twice. The row is written INSIDE the transaction that arms the
+ * attempt, so a dispatch that committed without a reservation does not exist.
+ *
+ * WHY THE ROW CARRIES BOTH THE CEILING AND THE CLAIM. `checked` records the
+ * declared ceilings the claim was granted against (absent = the declaration
+ * declared none), `reserved` records how much of each dimension this dispatch
+ * claimed, and `used` records the real usage once it is known. A reader can
+ * therefore tell three different facts apart — "the node declared 1000 input
+ * tokens", "this dispatch claimed the 700 that were left", "it actually used
+ * 900" — and the LAST one exceeding the first is the recorded overrun plan §4
+ * P3 requires to be reported instead of clamped away.
+ */
+export type BudgetReservationStatus =
+  /** Outstanding: the dispatch is authorized and its usage is not known yet. */
+  | "reserved"
+  /** The attempt ended and its REAL usage was reported: `used` is the fact. */
+  | "reconciled"
+  /**
+   * The attempt ended and NO usage was ever reported for it. The claim is
+   * WITHDRAWN so the node's remaining budget is not held by a finished
+   * dispatch, and the usage is recorded as UNKNOWN — `used` stays absent
+   * rather than becoming a fabricated zero. A late report still transitions
+   * the row to `reconciled`.
+   */
+  | "released";
+
+/** One dispatch's durable budget reservation and, later, its real usage. */
+export interface BudgetReservationRecord {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  /** The dispatch effect this reservation authorized. */
+  readonly effectId: string;
+  readonly status: BudgetReservationStatus;
+  /** The DECLARED ceilings the claim was checked against; absent = undeclared. */
+  readonly checked: NodeBudgetLimits;
+  /** What this dispatch claimed of each dimension when it was armed. */
+  readonly reserved: BudgetUsageAmounts;
+  /** The REAL usage, present exactly once the row is `reconciled`. */
+  readonly used?: BudgetUsageAmounts;
+  readonly reservedAt: number;
+  /** Epoch milliseconds the claim was reconciled or released at. */
+  readonly settledAt?: number;
+}
+
+/** One dimension that had no room left for a dispatch, with the numbers. */
+export interface BudgetExhaustion {
+  readonly kind: BudgetLimitKind;
+  /** The declared ceiling. */
+  readonly limit: number;
+  /** Recorded usage PLUS outstanding reservations at the refusal. */
+  readonly committed: number;
+  readonly message: string;
+}
+
+/** One reservation request: the attempt about to be armed and its ceilings. */
+export interface BudgetReserveInput {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly effectId: string;
+  /** The node's declared ceilings, read from the run's compiled plan. */
+  readonly limits: NodeBudgetLimits;
+  /** Epoch milliseconds, supplied by the caller: time is an explicit input. */
+  readonly at: number;
+}
+
+/**
+ * What reserving one dispatch produced.
+ *
+ * `exhausted` is the OVER-LIMIT verdict (plan §4 P3 "超限停止新派发"): at least
+ * one declared dimension has no remaining budget, so this dispatch is NOT
+ * authorized. The caller must not arm the attempt — nothing was written.
+ */
+export type BudgetReserveResult =
+  | { readonly kind: "reserved"; readonly reservation: BudgetReservationRecord }
+  /** This attempt already holds a reservation; nothing was written. */
+  | { readonly kind: "replayed"; readonly reservation: BudgetReservationRecord }
+  | { readonly kind: "exhausted"; readonly exhausted: readonly BudgetExhaustion[] };
+
+/** One attempt's REAL usage, as the trusted host path reports it. */
+export interface BudgetUsageInput {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  /**
+   * The dispatch effect the usage belongs to. Callers that hold no binding may
+   * pass the attempt's own dispatch-effect id; the field exists so a usage row
+   * is addressable by the same key every other dispatch fact uses.
+   */
+  readonly effectId: string;
+  /** The measured amounts. `executions` defaults to the dispatch itself (1). */
+  readonly usage: Omit<BudgetUsageAmounts, "executions"> & {
+    readonly executions?: number;
+  };
+  readonly at: number;
+}
+
+/**
+ * What recording one usage report produced.
+ *
+ * ONE ATTEMPT, ONE USAGE FACT. A row that is already `reconciled` with the SAME
+ * numbers is the REPLAY of the fact that stands; with DIFFERENT numbers it is
+ * `ignored` and the standing fact is returned, because summing two reports for
+ * one attempt is exactly the double count plan §5 A13 forbids. A report for an
+ * attempt the store never reserved is `recorded-late`: DELAYED BILLING is a
+ * usage fact like any other and is APPENDED, never dropped.
+ */
+export type BudgetUsageResult =
+  | {
+      readonly kind: "reconciled" | "replayed" | "recorded-late";
+      readonly reservation: BudgetReservationRecord;
+    }
+  | {
+      readonly kind: "ignored";
+      readonly reservation: BudgetReservationRecord;
+      readonly reason: string;
+    };
+
+/** One reservation's release: the attempt is over and no usage was reported. */
+export interface BudgetReleaseInput {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly at: number;
+}
+
+/**
+ * What releasing one reservation produced. `absent` means there was nothing to
+ * release — a lease this store never granted — and is reported rather than
+ * fabricated into a row.
+ */
+export type BudgetReleaseResult =
+  | { readonly kind: "released" | "replayed"; readonly reservation: BudgetReservationRecord }
+  | { readonly kind: "absent" };
+
+/**
+ * One node's accumulated budget facts for one run, as the store answers them.
+ *
+ * EVERY FIELD IS A SUM OF ROWS, never a counter stored beside them: the store
+ * owns per-dispatch FACTS and this is the read that adds them up, so a restart
+ * cannot lose a counter that was never kept separately and no two counters can
+ * disagree.
+ *
+ * `used` and `reserved` are what the ceiling comparison consumes;
+ * `unknownUsageAttempts` are dispatches that ended without a usage report —
+ * their consumption is UNKNOWN and is deliberately NOT counted as zero, which is
+ * why a run can be reported complete while some of its usage is unaccounted for.
+ */
+export interface BudgetNodeUsage {
+  readonly nodeId: string;
+  /** Every dispatch of this node authorized in this run. */
+  readonly executions: number;
+  /** Recorded usage of the attempts whose usage was reported. */
+  readonly used: BudgetUsageAmounts;
+  /** Outstanding claims of dispatches that have not ended yet. */
+  readonly reserved: BudgetUsageAmounts;
+  /** Dispatches that ENDED with no usage report: usage unknown, not zero. */
+  readonly unknownUsageAttempts: number;
+}
+
+/**
+ * The budget surface of a substrate.
+ *
+ * OPTIONAL on the transaction surface (`budget` below) for the same reason the
+ * run and approval surfaces are: a focused test double need not hold budget
+ * rows. ABSENT IS NOT NEUTRAL FOR A PLAN THAT DECLARES A CEILING — the runtime
+ * refuses such a plan by name rather than dispatching ungated, because a ceiling
+ * the substrate cannot record a claim against is a ceiling nothing enforces.
+ */
+export interface BudgetLedger {
+  /**
+   * Claim this dispatch's share of its node's declared ceilings — the
+   * CONDITIONAL WRITE that is the enforcement point.
+   *
+   * THE CHECK AND THE INSERT ARE ONE STATEMENT, evaluated against the committed
+   * store inside the caller's transaction: a dimension with no remaining budget
+   * yields NO row (`exhausted`), so two dispatches racing for the last unit
+   * cannot both be authorized. A check-then-write in a caller would leave
+   * exactly that window open, which is why the port has no "read the remaining
+   * budget" method for a caller to decide from.
+   */
+  reserveDispatch(input: BudgetReserveInput): BudgetReserveResult;
+  /**
+   * Reconcile one attempt against its REAL usage — or append the fact when the
+   * attempt was never reserved (delayed billing).
+   *
+   * The transition is conditional on the row still being `reserved` or
+   * `released`, so the FIRST report stands and a second, different report is
+   * `ignored` rather than added.
+   */
+  reconcileUsage(input: BudgetUsageInput): BudgetUsageResult;
+  /**
+   * Withdraw one attempt's claim because it ENDED with no usage report.
+   *
+   * Conditional on the row still being `reserved`: a reconciled row keeps its
+   * real usage, and a released row stays released. A late report may still
+   * reconcile a released row.
+   */
+  releaseReservation(input: BudgetReleaseInput): BudgetReleaseResult;
+  /** One attempt's reservation, or `undefined`. */
+  readReservation(
+    graphId: string,
+    attemptId: string,
+    runId?: string,
+  ): BudgetReservationRecord | undefined;
+  /** Every reservation of one run, in reservation order. */
+  reservationsOf(graphId: string, runId?: string): readonly BudgetReservationRecord[];
+  /**
+   * The per-node accumulation of one run's reservation facts, in node order.
+   *
+   * A node with no row at all is absent from the answer — the caller joins the
+   * plan's node list, so "no dispatch yet" is the caller's own fact rather than
+   * a fabricated zero row.
+   */
+  budgetUsageOf(graphId: string, runId?: string): readonly BudgetNodeUsage[];
+}
+
 // ── Commit surface ──────────────────────────────────────────────────────────
 
 /** The idempotency key of one logical submission. */
@@ -1104,6 +1353,17 @@ export interface AcceptanceLedgerTx {
    * cannot record rather than treating a missing surface as "no request".
    */
   readonly approvals?: ApprovalLedger;
+  /**
+   * The dispatch budget reservations of this substrate, or `undefined` when it
+   * holds none.
+   *
+   * OPTIONAL, AND ABSENT IS NOT NEUTRAL FOR A BUDGETED PLAN: a substrate
+   * without this surface cannot hold a claim, so the runtime REFUSES to
+   * dispatch a plan that declares a ceiling (`budget-unavailable`) rather than
+   * arming attempts nothing gates. A plan that declares no ceiling needs no
+   * claim, and dispatching it is not refused.
+   */
+  readonly budget?: BudgetLedger;
 }
 
 /**

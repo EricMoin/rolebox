@@ -117,8 +117,12 @@ function createGraphControlTool(
       "never substitute for the decision. 'approve'/'reject' record that decision; only the " +
       "named approver may issue them, a repeat replays, a competing decision is refused, " +
       "and a decision arriving after the deadline is refused as 'approval-expired'. " +
-      "'budget-stop' is part of the declared vocabulary but its semantics are not " +
-      "implemented in this build and it is refused by name.",
+      "'budget-stop' stops the RUN for the budget's sake: it claims the run's control " +
+      "fact so no submission settles and no further dispatch is armed, records one " +
+      "budget-stop decision per in-flight attempt, and its answer carries the run's budget " +
+      "state — declared ceilings, recorded usage and the ACTUAL overrun when a delayed " +
+      "platform bill exceeded a ceiling. It is not a platform cancellation: the executions " +
+      "those attempts may hold stay visible and unsettled.",
     args: {
       graph_id: z.string().min(1).describe("The declared graph whose run is controlled."),
       command: z
@@ -133,11 +137,10 @@ function createGraphControlTool(
           "reject",
         ])
         .describe(
-          "The control command. 'failure', 'timeout', 'cancel', 'retry' and the three " +
-            "approval commands are applied and recorded durably; 'budget-stop' is refused " +
-            "by name until its own semantics exist. No command is ever inferred from worker " +
-            "data, and no worker submission — including a payload field named 'approved' — " +
-            "can satisfy an approval request.",
+          "The control command. Every member of the closed vocabulary is applied and " +
+            "recorded durably. No command is ever inferred from worker data, and no worker " +
+            "submission — including a payload field named 'approved' — can satisfy an " +
+            "approval request or forge budget usage.",
         ),
       node_id: z
         .string()

@@ -75,8 +75,17 @@
  *   A run-stopping command expires its run's still-pending requests in the same
  *   transaction, because a stopped run's pause can never be answered into
  *   anything.
- * - BUDGET-STOP: refused by name (`command-unimplemented`) until its own work
- *   package exists. The vocabulary is durable; the semantics are not invented here.
+ * - BUDGET-STOP (P3 item 3): a RUN-WIDE STOPPING command, the trusted answer to
+ *   a budget the run has spent. It records the run's control fact (so no
+ *   submission can settle and no further dispatch is armed) and one `budget-stop`
+ *   decision per attempt still in flight, exactly as a cancel does — and it is
+ *   deliberately NOT a platform cancellation: the executions those attempts may
+ *   hold stay visible (their effects stay unsettled and their unconfirmed rows are
+ *   reported), and the host's own follow-up hands the intent to a platform that
+ *   has a cancel port. It claims no budget fact: the ceilings and the recorded
+ *   usage are the STORE's rows, and this command's answer carries the run's
+ *   budget report so the operator sees the ACTUAL overrun the stop responds to
+ *   instead of a claim that nothing was overspent.
  *
  * PERMISSION: THE DECLARING PRINCIPAL, AND NOBODY ELSE. The subject that may
  * control a graph is the invocation the graph's declaration was attributed to —
@@ -156,6 +165,13 @@ import {
   isApprovalDecision,
   type ApprovalRequestSpec,
 } from "./approval.ts";
+import {
+  buildBudgetReport,
+  hasBudgetLimits,
+  nodeBudgetLimitsOf,
+  type BudgetReport,
+  type NodeBudgetLimits,
+} from "../domain/budget.ts";
 import {
   attemptCredentialBinding,
   attemptCredentialDigest,
@@ -262,8 +278,6 @@ export type GraphControlRefusalCode =
   | "control-declarant-unknown"
   /** The caller is not the declaring principal of this graph. */
   | "control-not-authorized"
-  /** The command's own semantics are a later work package's; nothing is recorded. */
-  | "command-unimplemented"
   /**
    * A NODE-SCOPED retry names a run a trusted control command already STOPPED
    * (or a declared stop ended). Re-attempting a node inside a stopped run would
@@ -343,7 +357,27 @@ export type GraphControlRefusalCode =
    */
   | "approval-expired"
   /** This substrate cannot hold approval records, so no approval command is applied. */
-  | "approval-unavailable";
+  | "approval-unavailable"
+  /**
+   * A retry mints a NEW attempt and therefore a new dispatch, and the node's
+   * declared budget leaves no headroom for it (P3 item 3). The claim is refused
+   * by the store's conditional write; nothing is written — no decision, no state,
+   * no effect and no credential — and the superseded attempt keeps its own claim,
+   * because its external execution may still be running.
+   */
+  | "budget-exhausted"
+  /**
+   * This substrate holds no budget surface, and the node a retry would re-arm
+   * declares a ceiling. A ceiling nothing can record a claim against is not
+   * enforced, so the retry is refused rather than minted ungated.
+   */
+  | "budget-unavailable"
+  /**
+   * The node's declared budget carries a key the v3 grammar never authorizes (or
+   * a value that is not a finite non-negative number). The limit is neither
+   * enforced nor defaulted away, so the retry is refused.
+   */
+  | "budget-limit-unauthorized";
 
 /** One structured control refusal. */
 export interface GraphControlRefusal {
@@ -499,6 +533,15 @@ export type GraphControlResult =
        * request.
        */
       readonly approval?: GraphControlApproval;
+      /**
+       * The run's BUDGET state, present exactly for an applied `budget-stop`
+       * whose plan's ceilings could be read (P3 item 3): the declared limits, the
+       * recorded usage, the outstanding reservations and — recomputed from the
+       * rows — every ACTUAL overrun. It is the evidence the stop answers to, so
+       * a delayed platform bill is visible in the very answer that stops the run
+       * instead of being reported as "nothing was overspent".
+       */
+      readonly budget?: BudgetReport;
     }
   | {
       readonly kind: "refused";
@@ -532,13 +575,19 @@ function principalOf(
   return Object.freeze({ sessionId: principal.sessionId, agentId: principal.agentId });
 }
 
-/** The commands whose own semantics a later work package owns. */
-const UNIMPLEMENTED_COMMANDS: ReadonlySet<ControlCommandName> = new Set([
+/**
+ * The commands that apply to the whole run rather than to one named attempt.
+ *
+ * `budget-stop` is here beside `cancel` because it is the RUN that spent the
+ * budget: the stop is a fact about the run (no further dispatch, no settlement),
+ * and the attempts it names are whatever is in flight when the command lands.
+ * Neither command is a node-scoped decision, and a caller that passes a node is
+ * refused by the same check below.
+ */
+const RUN_WIDE_COMMANDS: ReadonlySet<ControlCommandName> = new Set([
+  "cancel",
   "budget-stop",
 ]);
-
-/** The commands that apply to the whole run rather than to one named attempt. */
-const RUN_WIDE_COMMANDS: ReadonlySet<ControlCommandName> = new Set(["cancel"]);
 
 /**
  * The executions of this run the host has NOT confirmed.
@@ -607,20 +656,6 @@ export function applyGraphControl(
         "the call, never to a value in the request, and nothing was written",
     );
   }
-  if (UNIMPLEMENTED_COMMANDS.has(request.command)) {
-    return refuse(
-      graphId,
-      "command-unimplemented",
-      "$.command",
-      "graph-control refused [command-unimplemented]: command " +
-        JSON.stringify(request.command) +
-        " is part of the durable control vocabulary but its semantics are not implemented " +
-        "in this build (budget-stop reconciles reserved budget against real usage), so " +
-        "nothing was recorded — recording an intent no path would honour is not a control " +
-        "capability",
-    );
-  }
-
   return store.transaction((tx): GraphControlResult => {
     // ── The write lock is taken FIRST, before any read ─────────────────────
     //
@@ -1022,8 +1057,9 @@ export function applyGraphControl(
       graphId,
       runId: run.runId,
       command: request.command,
-      // A stopping command names the attempts it decided; only a cancel acts on
-      // the run itself, and it is the one run-wide member of this set.
+      // A stopping command names the attempts it decided. The RUN-WIDE members
+      // (a cancel and a budget-stop) act on the run itself, which is what their
+      // scope says; the node-scoped members act on one attempt.
       scope: RUN_WIDE_COMMANDS.has(request.command) ? ("run" as const) : ("attempt" as const),
       minted: Object.freeze([]),
       decided: Object.freeze(decided),
@@ -1032,8 +1068,58 @@ export function applyGraphControl(
       skipped: Object.freeze(skipped),
       unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
       unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
+      // THE STOP'S OWN EVIDENCE (P3 item 3). A `budget-stop` is a decision about
+      // a budget, so its answer carries the run's budget state: the declared
+      // ceilings, the recorded usage and — when the platform's bill arrived after
+      // the fact — the ACTUAL overrun. Absent for every other command, and absent
+      // here when the plan's ceilings cannot be read exactly: a report that
+      // guessed at them would be the silent widening this module refuses
+      // elsewhere.
+      ...(request.command === "budget-stop"
+        ? budgetReportField(tx, plan, graphId, run.runId)
+        : {}),
     });
   });
+}
+
+/**
+ * The `budget` field of a control answer, or nothing when it cannot be honest.
+ *
+ * READ FROM THE SAME TRANSACTION the command wrote in, so the report a stop
+ * carries is the state the stop decided against. The ceilings come from the
+ * run's compiled plan and the usage from the store's rows — the same two sources
+ * the runtime's own report uses, through the same {@link buildBudgetReport}, so
+ * the two surfaces cannot disagree about what was overspent.
+ */
+function budgetReportField(
+  tx: GraphStoreTx,
+  plan: CompiledPlan,
+  graphId: string,
+  runId: string,
+): { readonly budget?: BudgetReport } {
+  const budget = tx.budget;
+  if (budget === undefined) return {};
+  const nodes: { readonly nodeId: string; readonly limits: NodeBudgetLimits }[] = [];
+  for (const node of plan.nodes) {
+    const reading = nodeBudgetLimitsOf(node.budget);
+    if (reading.kind === "refused") return {};
+    nodes.push({ nodeId: node.id, limits: reading.limits });
+  }
+  try {
+    return {
+      budget: buildBudgetReport({
+        graphId,
+        runId,
+        planRevision: plan.planRevision,
+        nodes,
+        usage: budget.budgetUsageOf(graphId, runId),
+      }),
+    };
+  } catch {
+    // An unreadable budget row is NOT dressed up as an empty report: the stop
+    // stands, and the field is simply absent.
+    return {};
+  }
 }
 
 /**
@@ -1852,6 +1938,74 @@ function applyRetryCommand(ctx: RetryCommandContext): GraphControlResult {
 
   const attemptSeq = state.attemptSeq + 1;
   const successorAttemptId = node.nodeId + "#" + attemptSeq;
+  // ── The successor's dispatch is CLAIMED before it is authorized ──────────
+  //
+  // (P3 item 3.) A retry is a DISPATCH: it mints an attempt and an effect, so
+  // it passes the same budget gate every other dispatch does, and the gate is
+  // the STORE's conditional write. It runs BEFORE the decision that names the
+  // successor, because a recorded decision naming an attempt nothing can
+  // dispatch must not exist — and because the whole command rolls back when the
+  // claim is refused. The superseded attempt's own claim is deliberately NOT
+  // released here: its external execution may still be running, so it keeps its
+  // share of the node's budget until it settles or a platform report reconciles
+  // it.
+  const limitsReading = nodeBudgetLimitsOf(planNode.budget);
+  if (limitsReading.kind === "refused") {
+    return refuse(
+      graphId,
+      "budget-limit-unauthorized",
+      "$.node_id",
+      "graph-control refused [budget-limit-unauthorized]: the declared budget of node " +
+        JSON.stringify(node.nodeId) +
+        " is not one this build can enforce (" +
+        limitsReading.refusal.code +
+        " on " +
+        limitsReading.refusal.key +
+        "): " +
+        limitsReading.refusal.message,
+    );
+  }
+  const budget = tx.budget;
+  if (budget === undefined) {
+    if (hasBudgetLimits(limitsReading.limits)) {
+      return refuse(
+        graphId,
+        "budget-unavailable",
+        "$.node_id",
+        "graph-control refused [budget-unavailable]: node " +
+          JSON.stringify(node.nodeId) +
+          " declares a resource budget and this substrate holds no budget surface, so the " +
+          "successor attempt was NOT minted — a ceiling nothing can record a claim against " +
+          "is a ceiling nothing enforces",
+      );
+    }
+  } else {
+    const claimed = budget.reserveDispatch({
+      graphId,
+      runId: run.runId,
+      nodeId: node.nodeId,
+      attemptId: successorAttemptId,
+      effectId: dispatchEffectIdOf(successorAttemptId),
+      limits: limitsReading.limits,
+      at: request.at,
+    });
+    if (claimed.kind === "exhausted") {
+      return refuse(
+        graphId,
+        "budget-exhausted",
+        "$.node_id",
+        "graph-control refused [budget-exhausted]: the successor attempt " +
+          JSON.stringify(successorAttemptId) +
+          " of node " +
+          JSON.stringify(node.nodeId) +
+          " was NOT authorized by the declared budget (" +
+          claimed.exhausted.map((entry) => entry.message).join("; ") +
+          ") — nothing was written: no decision, no state, no effect and no credential, and " +
+          "the superseded attempt keeps its own claim because its execution may still be " +
+          "running",
+      );
+    }
+  }
   const payload: OutcomeDispatchTarget = Object.freeze({
     graphId,
     planRevision: plan.planRevision,

@@ -904,6 +904,59 @@ describe("graph_control cancel — the durable intent and the platform delivery"
       fixture.host.close();
     }
   });
+  it("delivers a budget-stop's stopping decision through the same platform path, keeping the command that stopped the run", async () => {
+    // P3 item 3: a budget stop leaves the SAME kind of intent a cancel does — a
+    // run-wide stopping decision plus one decision per in-flight attempt — so a
+    // host with a cancel port hands each execution over. The run's control fact
+    // still names the BUDGET stop, not an operator cancel.
+    const fixture = await openCancelFixture(CHAIN);
+    try {
+      fixture.platform.answer = {
+        kind: "confirmed",
+        reason: "the fake platform disposed the run the budget stop named",
+      };
+      const answer = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "budget-stop",
+          reason: "the declared ceiling is spent",
+        },
+        "session.declarer",
+      );
+      expect(answer["kind"]).toBe("applied");
+      expect((answer["runControl"] as { command?: string }).command).toBe("budget-stop");
+
+      expect(fixture.platform.asked).toHaveLength(1);
+      const probe = fixture.platform.asked[0];
+      expect(probe?.effect.effectId).toBe("dispatch:work#1");
+      expect(probe?.nodeId).toBe("work");
+      expect(probe?.reason).toBe("the declared ceiling is spent");
+      // The durable facts at the ask already named the budget stop.
+      expect(fixture.platform.atAsk).toEqual([
+        { attemptId: "work#1", effect: "started", runCommand: "budget-stop" },
+      ]);
+
+      const rows = readRows(fixture);
+      expect(rows.control?.command).toBe("budget-stop");
+      expect(decisionOf(rows, "work#1").command).toBe("budget-stop");
+      expect(cancelRowOf(rows, "work#1")).toEqual({
+        effectId: "cancel:work#1",
+        status: "done",
+      });
+      // Nothing was settled by the stop: no accepted event, no receipt.
+      expect(rows.events).toEqual([]);
+      expect(rows.receipts).toBe(0);
+
+      // A LATER window re-reads the same durable facts and asks nothing again.
+      const replay = await fixture.host.deliverCancelIntents(fixture.graphId);
+      expect(replay.entries).toHaveLength(1);
+      expect(replay.entries[0]?.state).toBe("confirmed");
+      expect(fixture.platform.asked).toHaveLength(1);
+    } finally {
+      fixture.host.close();
+    }
+  });
 });
 
 // ── Deterministic races ─────────────────────────────────────────────────────

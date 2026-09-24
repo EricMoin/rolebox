@@ -44,6 +44,11 @@
  * would answer "no request" for an attempt a previous process paused — and the
  * acceptance gate, which reads exactly that row, would accept a submission the
  * pause was meant to hold back.
+ * It moves to 6 with the DISPATCH BUDGET RESERVATIONS (P3 item 3, the budget):
+ * a version-5 file holds no `graph_dispatch_reservations` row, so reading it as
+ * this build's store would answer "nothing reserved" for a dispatch a previous
+ * process armed — and the NEXT dispatch of that node would be authorized past a
+ * ceiling the earlier claim had already spent.
  * Every older version is refused as an older format this build registers no
  * migration for (`unsupported`), never widened in place, never downgraded.
  *
@@ -187,6 +192,8 @@ export const GRAPH_STORE_TABLES = Object.freeze({
   runReexecutions: "graph_run_reexecutions",
   /** The durable approval requests and their trusted decisions (P3 item 3). */
   approvalRequests: "graph_approval_requests",
+  /** The dispatch budget reservations and their recorded usage (P3 item 3). */
+  budgetReservations: "graph_dispatch_reservations",
 });
 
 /** The ledger's own table names, as the ledger port's reader knows them. */
@@ -422,6 +429,51 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      CHECK (decided_by_agent IS NULL OR decided_by_session IS NOT NULL),
      CHECK (length(approver_session_id) > 0)
    )`,
+  // THE DISPATCH BUDGET RESERVATIONS (P3 item 3, the budget). ONE row per ARMED
+  // DISPATCH, keyed by the attempt it authorizes, so the reservation is the
+  // attempt's own fact and a repeated reservation replays. The row carries three
+  // kinds of numbers that must not be confused: `checked_*` is the CEILING the
+  // declaration authorized (NULL = the declaration declared none for that
+  // dimension), `reserved_*` is how much of it this dispatch CLAIMED, and
+  // `used_*` is the REAL usage once the host reports it. The status is the
+  // reconciliation state machine: `reserved` (the claim is outstanding),
+  // `reconciled` (real usage recorded — the only status that carries `used_*`)
+  // or `released` (the attempt ended with NO usage report; its claim is
+  // withdrawn and its consumption stays UNKNOWN rather than being recorded as
+  // zero). Every used/checked number is constrained non-negative, and the CHECK
+  // group makes a half-written row — a status without its settlement time, or a
+  // `reconciled` row without its used amounts — unrepresentable.
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.budgetReservations} (
+     graph_id TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     node_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     effect_id TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('reserved', 'reconciled', 'released')),
+     checked_duration_ms INTEGER CHECK (checked_duration_ms IS NULL OR checked_duration_ms >= 0),
+     checked_input_tokens INTEGER CHECK (checked_input_tokens IS NULL OR checked_input_tokens >= 0),
+     checked_output_tokens INTEGER CHECK (checked_output_tokens IS NULL OR checked_output_tokens >= 0),
+     checked_cost_usd REAL CHECK (checked_cost_usd IS NULL OR checked_cost_usd >= 0),
+     reserved_executions INTEGER NOT NULL CHECK (reserved_executions >= 0),
+     reserved_duration_ms INTEGER NOT NULL CHECK (reserved_duration_ms >= 0),
+     reserved_input_tokens INTEGER NOT NULL CHECK (reserved_input_tokens >= 0),
+     reserved_output_tokens INTEGER NOT NULL CHECK (reserved_output_tokens >= 0),
+     reserved_cost_usd REAL NOT NULL CHECK (reserved_cost_usd >= 0),
+     used_executions INTEGER CHECK (used_executions IS NULL OR used_executions >= 0),
+     used_duration_ms INTEGER CHECK (used_duration_ms IS NULL OR used_duration_ms >= 0),
+     used_input_tokens INTEGER CHECK (used_input_tokens IS NULL OR used_input_tokens >= 0),
+     used_output_tokens INTEGER CHECK (used_output_tokens IS NULL OR used_output_tokens >= 0),
+     used_cost_usd REAL CHECK (used_cost_usd IS NULL OR used_cost_usd >= 0),
+     reserved_at INTEGER NOT NULL,
+     settled_at INTEGER,
+     PRIMARY KEY (graph_id, run_id, node_id, attempt_id),
+     CHECK ((status = 'reserved') = (settled_at IS NULL)),
+     CHECK ((status = 'reconciled') = (used_executions IS NOT NULL)),
+     CHECK ((status = 'reconciled') = (used_duration_ms IS NOT NULL)),
+     CHECK ((status = 'reconciled') = (used_input_tokens IS NOT NULL)),
+     CHECK ((status = 'reconciled') = (used_output_tokens IS NOT NULL)),
+     CHECK ((status = 'reconciled') = (used_cost_usd IS NOT NULL))
+   )`,
 ];
 
 // ── Expected column shapes ──────────────────────────────────────────────────
@@ -438,7 +490,13 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
  */
 export interface GraphStoreColumn {
   readonly name: string;
-  readonly affinity: "text" | "integer";
+  /**
+   * SQLite's storage class, not the spelled type. `numeric` is the class a
+   * REAL/DOUBLE/DECIMAL column has and is what the budget rows' cost columns
+   * declare: a monetary amount is not a count, and forcing it into an INTEGER
+   * column would truncate exactly the fraction a real overrun is reported in.
+   */
+  readonly affinity: "text" | "integer" | "numeric";
   readonly primaryKey: number;
   readonly notNull: boolean;
 }
@@ -595,5 +653,29 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "decided_by_agent", affinity: "text", primaryKey: 0, notNull: false },
     { name: "decided_at", affinity: "integer", primaryKey: 0, notNull: false },
     { name: "decision_reason", affinity: "text", primaryKey: 0, notNull: false },
+  ],
+  budgetReservations: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "run_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "node_id", affinity: "text", primaryKey: 3, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 4, notNull: true },
+    { name: "effect_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "status", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "checked_duration_ms", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "checked_input_tokens", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "checked_output_tokens", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "checked_cost_usd", affinity: "numeric", primaryKey: 0, notNull: false },
+    { name: "reserved_executions", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "reserved_duration_ms", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "reserved_input_tokens", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "reserved_output_tokens", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "reserved_cost_usd", affinity: "numeric", primaryKey: 0, notNull: true },
+    { name: "used_executions", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "used_duration_ms", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "used_input_tokens", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "used_output_tokens", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "used_cost_usd", affinity: "numeric", primaryKey: 0, notNull: false },
+    { name: "reserved_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "settled_at", affinity: "integer", primaryKey: 0, notNull: false },
   ],
 });

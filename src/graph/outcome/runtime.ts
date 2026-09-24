@@ -204,10 +204,21 @@
  */
 
 import type { CompiledPlan } from "../compiler/plan.ts";
+import {
+  buildBudgetReport,
+  hasBudgetLimits,
+  nodeBudgetLimitsOf,
+  type BudgetReport,
+  type BudgetReportNode,
+  type BudgetUsageAmounts,
+  type NodeBudgetLimits,
+} from "../domain/budget.ts";
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
   ApprovalRequestRecord,
+  BudgetReservationRecord,
+  BudgetUsageResult,
   GraphStateRecord,
   PendingEffectRecord,
   ReceiptRecord,
@@ -665,7 +676,40 @@ export type OutcomeRuntimeRefusalCode =
    * outcome. An expired request is never approved afterwards, so this attempt
    * cannot settle; the trusted repair is a retry or a cancellation of the run.
    */
-  | "approval-expired";
+  | "approval-expired"
+  /**
+   * This runtime was handed no BUDGET surface, and the plan declares at least
+   * one per-node ceiling (P3 item 3). A ceiling a substrate cannot record a
+   * claim against is a ceiling NOTHING enforces, so the operation is refused by
+   * name rather than dispatched ungated. A plan that declares no ceiling needs
+   * no claim and is not refused by this code.
+   */
+  | "budget-unavailable"
+  /**
+   * The node's declared ceiling leaves no headroom for the dispatch this call
+   * would arm (P3 item 3, "超限停止新派发"). The claim is refused by the STORE's
+   * conditional write — the refusal names the dimension, the committed amount
+   * and the declared ceiling — so the attempt is NOT recorded and no external
+   * execution is created for it. An attempt already in flight is not killed by
+   * this: its own claim stands and it runs to its settlement.
+   */
+  | "budget-exhausted"
+  /**
+   * A node's declared per-node budget carries a key the v3 grammar never
+   * authorizes (or a value that is not a finite non-negative number). This build
+   * neither enforces the unknown limit nor defaults it away, so the operation is
+   * refused before anything is read or written: a run must not execute with a
+   * subset of the ceilings its declaration claims.
+   */
+  | "budget-limit-unauthorized"
+  /**
+   * A usage report is not the closed record this protocol defines: an attempt
+   * reference is missing or empty, or an amount is not a finite non-negative
+   * number. Nothing was recorded — a report that cannot be read exactly must not
+   * move a recorded usage fact, because the number it would move is the one an
+   * overrun is reported from.
+   */
+  | "budget-usage-malformed";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -1029,6 +1073,123 @@ export type OutcomeResumeResult =
       readonly refusals: readonly OutcomeRuntimeRefusal[];
     };
 
+// ── The budget contract (P3 item 3) ─────────────────────────────────────────
+
+/** One attempt's REAL usage, as the trusted host path reports it. */
+export interface OutcomeAttemptUsage {
+  /** The node whose attempt consumed this. */
+  readonly nodeId: string;
+  /** The attempt the usage belongs to. */
+  readonly attemptId: string;
+  /**
+   * How many executions this report accounts for. Defaults to ONE — the armed
+   * dispatch itself — which is also the count the reservation recorded.
+   */
+  readonly executions?: number;
+  readonly durationMs?: number;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly costUsd?: number;
+}
+
+/**
+ * One usage report: measured amounts for attempts that have ALREADY run.
+ *
+ * IT IS NOT A SUBMISSION PAYLOAD. Nothing in the acceptance path reads this
+ * shape, and no field of a worker's proposal reaches it: a submitted payload
+ * must not be able to forge usage or raise a ceiling (P3 hard constraint). The
+ * report arrives through this runtime's own host-facing method, which the host
+ * wiring calls with amounts the PLATFORM measured.
+ */
+export interface OutcomeBudgetUsageReport {
+  readonly attempts: readonly OutcomeAttemptUsage[];
+  /** Epoch milliseconds; defaults to the runtime's clock. */
+  readonly now?: number;
+}
+
+/** What recording one usage report did, per attempt. */
+export interface OutcomeBudgetUsageEntry {
+  readonly nodeId: string;
+  readonly attemptId: string;
+  /**
+   * `reconciled` — the outstanding claim was settled with these amounts;
+   * `replayed` — the same amounts were already the standing fact;
+   * `recorded-late` — the attempt was never reserved here and the usage was
+   * APPENDED (delayed billing); `ignored` — the attempt already carries a
+   * DIFFERENT usage fact, which stands and was not summed.
+   */
+  readonly outcome: "reconciled" | "replayed" | "recorded-late" | "ignored";
+  /** The recorded fact after this call (never this call's numbers when ignored). */
+  readonly used?: BudgetUsageAmounts;
+  readonly reason?: string;
+}
+
+/**
+ * One node's budget facts, as a report reads them.
+ *
+ * An ALIAS of the domain report node: the same shape is what a `budget-stop`
+ * control answer carries, and a second declaration of it would be a second
+ * place for the two surfaces to drift apart.
+ */
+export type OutcomeBudgetNodeReport = BudgetReportNode;
+
+/**
+ * The budget state of one RUN: the declared limits and the recorded usage, as
+ * the durable rows answer them.
+ *
+ * THIS IS THE QUERY/REPORT SURFACE the plan's §4 P3 budget bullet asks for, and
+ * it is a READ: nothing here writes, and an overrun shown here is the arithmetic
+ * of recorded amounts against declared ceilings. `totals.executions` counts
+ * every authorized dispatch; `used.executions`, `reserved.executions` and
+ * `unknownUsageAttempts` account for them separately, so "no usage reported
+ * yet" can never be misread as "used nothing".
+ *
+ * An ALIAS of the domain's {@link BudgetReport}, built by the one shared
+ * {@link buildBudgetReport} — the same numbers a `budget-stop` answer reports.
+ */
+export type OutcomeBudgetReport = BudgetReport;
+
+/** The verdict of reading one run's budget state. */
+export type OutcomeBudgetReading =
+  | { readonly kind: "report"; readonly report: OutcomeBudgetReport }
+  | { readonly kind: "refused"; readonly refusal: OutcomeRuntimeRefusal };
+
+/** The verdict of recording one usage report. */
+export type OutcomeBudgetUsageOutcome =
+  | {
+      readonly kind: "recorded";
+      readonly graphId: string;
+      readonly runId: string;
+      readonly at: number;
+      /** What each attempt's report did, in report order. */
+      readonly entries: readonly OutcomeBudgetUsageEntry[];
+      /** The run's budget state AFTER the report, read from the rows. */
+      readonly report: OutcomeBudgetReport;
+    }
+  | { readonly kind: "refused"; readonly refusals: readonly OutcomeRuntimeRefusal[] };
+
+/**
+ * The run was refused because a dispatch could not be CLAIMED (P3 item 3).
+ *
+ * WHY A THROW AND NOT A VERDICT. It is raised from INSIDE the transaction that
+ * arms an attempt — `start`'s first snapshot, `reexecute`'s successor run and
+ * the acceptance that arms a successor node — so the whole transaction rolls
+ * back: no attempt, no state change, no dispatch effect and no credential record
+ * survives for a dispatch the budget did not authorize. The caller catches it
+ * and answers with the SAME named refusal the store's verdict carries
+ * (`budget-exhausted`), so a refusal at the claim and a refusal reported by the
+ * store are indistinguishable to the caller.
+ */
+class DispatchBudgetExhaustedError extends Error {
+  readonly refusal: OutcomeRuntimeRefusal;
+
+  constructor(refusal: OutcomeRuntimeRefusal) {
+    super(refusal.message);
+    this.name = "DispatchBudgetExhaustedError";
+    this.refusal = refusal;
+  }
+}
+
 /** What the join reduced inside the acceptance transaction. */
 interface JoinedReduction {
   readonly result: AcceptanceJoinResult;
@@ -1299,6 +1460,21 @@ export class OutcomeGraphRuntime {
    * checked against are one commit — a rolled-back start leaves neither.
    */
   private readonly credentialSource: AttemptCredentialSource;
+  /**
+   * Every node's DECLARED ceilings, read ONCE from the compiled plan (P3 item 3).
+   *
+   * Read here rather than at each dispatch so a plan whose budget this build
+   * cannot read exactly is refused by the same vocabulary everywhere, and so the
+   * claim a dispatch makes and the ceiling a report compares against are the same
+   * numbers. `max_retries` is deliberately NOT a ceiling this map carries: the
+   * v3 grammar authorizes it as an automatic-retry count and no path in this
+   * build consumes it (a named gap, not a silently enforced limit).
+   */
+  private readonly budgetLimits: ReadonlyMap<string, NodeBudgetLimits>;
+  /** Why the plan's budget is not one this build can enforce, if it is not. */
+  private readonly budgetLimitRefusal: OutcomeRuntimeRefusal | undefined;
+  /** Whether ANY node declares an enforceable ceiling. */
+  private readonly declaresBudgetLimits: boolean;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -1330,6 +1506,78 @@ export class OutcomeGraphRuntime {
     };
     this.hostIdentity = options.hostIdentity;
     this.hostCompletions = options.hostCompletions;
+    // ── The declared budget, read once and refused by name (P3 item 3) ─────
+    //
+    // A plan's per-node budget is declaration content: the ceilings are fixed for
+    // the run, and a spec whose limits this build cannot read exactly (an
+    // unauthorized key, a non-finite value) must not be enforced PARTIALLY — the
+    // run is refused before anything is read or written instead.
+    const limits = new Map<string, NodeBudgetLimits>();
+    let limitRefusal: OutcomeRuntimeRefusal | undefined;
+    let declares = false;
+    for (const node of this.plan.nodes) {
+      const reading = nodeBudgetLimitsOf(node.budget);
+      if (reading.kind === "refused") {
+        limitRefusal ??= Object.freeze({
+          code: "budget-limit-unauthorized" as const,
+          path: "$.nodes." + node.id + ".budget." + reading.refusal.key,
+          message:
+            "outcome-runtime: the declared budget of node " +
+            JSON.stringify(node.id) +
+            " in plan revision " +
+            this.planRevision +
+            " is not one this build can enforce (" +
+            reading.refusal.code +
+            " on " +
+            reading.refusal.key +
+            "): " +
+            reading.refusal.message,
+        });
+        continue;
+      }
+      limits.set(node.id, reading.limits);
+      if (hasBudgetLimits(reading.limits)) declares = true;
+    }
+    this.budgetLimits = limits;
+    this.budgetLimitRefusal = limitRefusal;
+    this.declaresBudgetLimits = declares;
+  }
+
+  /**
+   * Whether this runtime can enforce the plan's declared budget (P3 item 3).
+   *
+   * TWO refusals, both BEFORE any state is read or written:
+   * - the plan declares a ceiling this build cannot read exactly
+   *   (`budget-limit-unauthorized`) — running with a subset of the declared
+   *   ceilings would be a silent widening;
+   * - the plan declares a ceiling and this ledger holds no budget surface
+   *   (`budget-unavailable`) — a ceiling a substrate cannot record a claim
+   *   against is a ceiling nothing enforces.
+   *
+   * A plan that declares NO ceiling needs no claim, so an absent surface is not
+   * refused for it: there is nothing to enforce, and the execution count a
+   * substrate with no budget table would fail to record is not a fact the
+   * declaration asked to be bounded.
+   */
+  private budgetCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
+    if (this.budgetLimitRefusal !== undefined) return this.budgetLimitRefusal;
+    if (!this.declaresBudgetLimits) return undefined;
+    if (this.ledger.budget !== undefined) return undefined;
+    return {
+      code: "budget-unavailable",
+      path: "$.nodes",
+      message:
+        "outcome-runtime: plan revision " +
+        this.planRevision +
+        " declares a per-node resource budget, and the substrate this runtime holds exposes " +
+        "no budget surface — the ceilings could not be recorded as claims, so nothing was " +
+        "started, resumed, advanced or settled under them",
+    };
+  }
+
+  /** The declared ceilings of one node, or NONE when the plan declares none. */
+  private limitsOfNode(nodeId: string): NodeBudgetLimits {
+    return this.budgetLimits.get(nodeId) ?? Object.freeze({});
   }
 
   /**
@@ -1380,6 +1628,12 @@ export class OutcomeGraphRuntime {
     if (unsupportedCompletion !== undefined) {
       return refused([unsupportedCompletion]);
     }
+    // The plan's declared BUDGET is a run precondition too (P3 item 3): a
+    // ceiling this build cannot read exactly, or one this substrate cannot record
+    // a claim against, blocks the start before anything is written — a run must
+    // not dispatch under a subset of the ceilings its declaration claims.
+    const unbudgeted = this.budgetCapabilityRefusal();
+    if (unbudgeted !== undefined) return refused([unbudgeted]);
 
     // A TRUSTED CONTROL COMMAND OUTRANKS STARTING (P3 item 1). A run that was
     // cancelled, failed or timed out is never begun again — not by a re-declare
@@ -1430,20 +1684,32 @@ export class OutcomeGraphRuntime {
     // so a start that rolls back leaves no credential row for an attempt that
     // does not exist. The dispatch seam runs only after the commit, and what it
     // cannot deliver stays a durable, reconcilable row.
-    const run = this.ledger.runInTransaction((tx) =>
-      this.mintRunInTransaction(tx, at, {
-        runId,
-        // The identity the run's attempts are armed under (D9). Absent when the
-        // host declared none: the absence IS the record, and no later process
-        // back-fills one.
-        dispatchIdentity,
-        // A first run starts its graph-wide attempt counter at zero; a
-        // re-execution continues it (P3 item 2), so attempt ids are unique for
-        // the whole graph and a later run can never address an earlier run's
-        // attempt.
-        fromAttemptSeq: 0,
-      }),
-    );
+    let run: {
+      readonly state: OutcomeGraphState;
+      readonly dispatched: readonly OutcomeDispatchRequest[];
+    };
+    try {
+      run = this.ledger.runInTransaction((tx) =>
+        this.mintRunInTransaction(tx, at, {
+          runId,
+          // The identity the run's attempts are armed under (D9). Absent when the
+          // host declared none: the absence IS the record, and no later process
+          // back-fills one.
+          dispatchIdentity,
+          // A first run starts its graph-wide attempt counter at zero; a
+          // re-execution continues it (P3 item 2), so attempt ids are unique for
+          // the whole graph and a later run can never address an earlier run's
+          // attempt.
+          fromAttemptSeq: 0,
+        }),
+      );
+    } catch (error) {
+      // A dispatch the declared budget did not authorize rolls the WHOLE start
+      // back — no run identity, no state, no effect, no credential — and is
+      // answered the named refusal the store's claim produced.
+      if (error instanceof DispatchBudgetExhaustedError) return refused([error.refusal]);
+      throw error;
+    }
     this.launchDispatches(run.dispatched);
     return { kind: "started", state: run.state, dispatched: run.dispatched };
   }
@@ -1527,6 +1793,23 @@ export class OutcomeGraphRuntime {
       }
       attemptSeq += 1;
       const attemptId = node.id + "#" + attemptSeq;
+      // THE DISPATCH IS CLAIMED AGAINST THE DECLARED BUDGET BEFORE IT IS ARMED
+      // (P3 item 3). The claim is a conditional row write inside THIS
+      // transaction, so a node whose ceiling has no headroom aborts the whole
+      // start: no attempt, no state, no effect and no credential is left behind
+      // for a dispatch nothing authorized. An entry node with no declared
+      // ceiling claims only the dispatch itself, which is the execution-count
+      // usage fact.
+      const unbudgetedDispatch = this.reserveDispatchIn(
+        tx,
+        input.runId,
+        node.id,
+        attemptId,
+        at,
+      );
+      if (unbudgetedDispatch !== undefined) {
+        throw new DispatchBudgetExhaustedError(unbudgetedDispatch);
+      }
       // The credential is minted WITH the attempt INSIDE this transaction:
       // the source adopts it in the host's store, whose write joins the
       // boundary this snapshot commits in. The binding a later submission is
@@ -1664,6 +1947,10 @@ export class OutcomeGraphRuntime {
     if (unsupportedCompletion !== undefined) {
       return refused([unsupportedCompletion]);
     }
+    // The re-execution ARMS a successor run's entry attempts, so the declared
+    // budget is a precondition here exactly as it is for a first start.
+    const unbudgeted = this.budgetCapabilityRefusal();
+    if (unbudgeted !== undefined) return refused([unbudgeted]);
 
     const runs = this.ledger.runs;
     if (runs === undefined) {
@@ -1900,6 +2187,10 @@ export class OutcomeGraphRuntime {
       if (error instanceof OutcomeStateError) {
         return refused([this.stateRefusal(error)]);
       }
+      // A successor run whose entry dispatch the declared budget did not
+      // authorize rolls the whole mint back — run row, order link, state, effect
+      // and credential — and is answered the named refusal.
+      if (error instanceof DispatchBudgetExhaustedError) return refused([error.refusal]);
       throw error;
     }
     this.launchDispatches(started.dispatched);
@@ -2030,6 +2321,12 @@ export class OutcomeGraphRuntime {
     if (unsupportedCompletion !== undefined) {
       return refused([unsupportedCompletion]);
     }
+    // A settlement may ARM a successor node (P3 item 3), so the claim surface
+    // the successor's budget is recorded against is checked before anything is
+    // read or written — a plan that declares a ceiling never advances on a
+    // substrate that cannot hold its claims.
+    const unbudgeted = this.budgetCapabilityRefusal();
+    if (unbudgeted !== undefined) return refused([unbudgeted]);
     // A TRUSTED CONTROL COMMAND ENDS THE RUN (P3 item 1): a failure, a timeout
     // or a cancellation is a durable fact about the run, and no submission —
     // the worker's or the host's — advances a run it stopped. The check runs
@@ -2169,6 +2466,10 @@ export class OutcomeGraphRuntime {
       if (error instanceof OutcomeStateError) {
         return refused([this.stateRefusal(error)]);
       }
+      // A successor the declared budget did not authorize (P3 item 3) rolls the
+      // WHOLE acceptance back — receipt, accepted event, accepted result, state
+      // advance and the successor's effect — and is answered the named refusal.
+      if (error instanceof DispatchBudgetExhaustedError) return refused([error.refusal]);
       throw error;
     }
 
@@ -2721,6 +3022,12 @@ export class OutcomeGraphRuntime {
     if (unsupportedCompletion !== undefined) {
       return refused([unsupportedCompletion]);
     }
+    // A recovery that would CONTINUE a budgeted graph needs the same claim
+    // surface a first start does (P3 item 3): without it, the run could not be
+    // advanced under its declared ceilings, so it is refused rather than resumed
+    // ungated.
+    const unbudgeted = this.budgetCapabilityRefusal();
+    if (unbudgeted !== undefined) return refused([unbudgeted]);
 
     let record: GraphStateRecord | undefined;
     try {
@@ -3131,6 +3438,344 @@ export class OutcomeGraphRuntime {
         transition.reason +
         ") — the host may already hold this execution, so the attempt is not " +
         "re-launched and the effect stays unsettled",
+    };
+  }
+
+  // ── The dispatch budget (P3 item 3) ────────────────────────────────────────
+
+  /**
+   * Claim this dispatch's share of its node's declared ceilings, or name why not.
+   *
+   * CALLED INSIDE THE TRANSACTION THAT ARMS THE ATTEMPT. The claim is a row the
+   * store writes conditionally against the ceilings, so a node with no headroom
+   * yields a refusal and the caller aborts the whole transaction: no attempt, no
+   * state change, no dispatch effect and no credential row survives for a
+   * dispatch the budget did not authorize. Nothing is compensated afterwards,
+   * and there is no window between "checked" and "claimed" for a second process
+   * to slip through.
+   *
+   * A dimension with no declared ceiling claims nothing. The execution count is
+   * NOT ceilinged — the v3 grammar authorizes no count limit — but every claim
+   * still records the dispatch itself, which is what makes the count a durable
+   * usage fact.
+   */
+  private reserveDispatchIn(
+    tx: AcceptanceLedgerTx,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+    at: number,
+  ): OutcomeRuntimeRefusal | undefined {
+    const budget = tx.budget;
+    const limits = this.limitsOfNode(nodeId);
+    if (budget === undefined) {
+      if (!hasBudgetLimits(limits)) return undefined;
+      return {
+        code: "budget-unavailable",
+        path: "$.nodes",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(nodeId) +
+          " declares a resource budget and the substrate this transaction writes holds no " +
+          "budget surface, so the dispatch was not authorized — a ceiling nothing can record " +
+          "a claim against is a ceiling nothing enforces",
+      };
+    }
+    const claimed = budget.reserveDispatch({
+      graphId: this.graphId,
+      runId,
+      nodeId,
+      attemptId,
+      effectId: dispatchEffectIdOf(attemptId),
+      limits,
+      at,
+    });
+    if (claimed.kind === "reserved" || claimed.kind === "replayed") return undefined;
+    const reasons = claimed.exhausted.map((entry) => entry.message).join("; ");
+    return {
+      code: "budget-exhausted",
+      path: "$.nodes." + nodeId + ".budget",
+      message:
+        "outcome-runtime: the dispatch of node " +
+        JSON.stringify(nodeId) +
+        " as attempt " +
+        JSON.stringify(attemptId) +
+        " was NOT authorized by the declared budget (" +
+        reasons +
+        ") — no attempt, state change, effect or credential record was written for it, and " +
+        "an attempt already in flight is not affected: its own claim stands and it runs to " +
+        "its settlement",
+    };
+  }
+
+  /**
+   * Withdraw the claim of an attempt that has just SETTLED (P3 item 3).
+   *
+   * Called in the SAME transaction as the acceptance that settles it, BEFORE any
+   * successor is claimed: a node a loop re-arms must not be refused headroom by
+   * the very attempt whose settlement freed it. The row is `released` — the
+   * attempt ended and no usage was reported for it here, so its consumption is
+   * UNKNOWN and is never recorded as zero; a later report from the platform
+   * still reconciles it and can then show the real overrun.
+   */
+  private releaseDispatchClaim(
+    tx: AcceptanceLedgerTx,
+    runId: string,
+    nodeId: string,
+    attemptId: string,
+    at: number,
+  ): void {
+    tx.budget?.releaseReservation({
+      graphId: this.graphId,
+      runId,
+      nodeId,
+      attemptId,
+      at,
+    });
+  }
+
+  /**
+   * Arm every successor the advance computed, claiming each one's budget — or
+   * abort the whole transaction by naming the first node that has no headroom.
+   *
+   * The throw is deliberate: the acceptance that would arm this dispatch is
+   * refused WHOLE, so a graph never commits a state whose successor cannot be
+   * started, and the caller is answered the same `budget-exhausted` refusal a
+   * refused claim produces at `start`.
+   */
+  private claimSuccessorDispatches(
+    tx: AcceptanceLedgerTx,
+    runId: string,
+    intents: OutcomeAdvance["dispatches"],
+    at: number,
+  ): void {
+    for (const intent of intents) {
+      const refusal = this.reserveDispatchIn(tx, runId, intent.nodeId, intent.attemptId, at);
+      if (refusal !== undefined) throw new DispatchBudgetExhaustedError(refusal);
+    }
+  }
+
+  /**
+   * Record the REAL usage a trusted host path measured for attempts that already
+   * ran (P3 item 3, "再按真实 usage 对账").
+   *
+   * WHAT IT DOES. Every named attempt is reconciled against the amount the
+   * platform reported: an outstanding claim is settled with the real numbers, an
+   * attempt whose claim was already withdrawn is settled as well (a delayed bill
+   * is still a fact), and an attempt this store never reserved is APPENDED as a
+   * usage fact. A second, DIFFERENT report for the same attempt is refused as a
+   * sum (`ignored`) and the standing fact is returned: one attempt, one usage
+   * fact, so a reservation can never be counted twice.
+   *
+   * WHAT IT NEVER DOES. It writes no receipt, no accepted event, no control
+   * decision and no state advance: usage is ACCOUNTING (§3.4), and the amounts
+   * arrive through this method's caller — never through a worker's proposal, so
+   * a submitted payload cannot forge usage or move a ceiling. Nothing is clamped:
+   * an amount larger than the declared ceiling is recorded as reported, and the
+   * run's report shows the ACTUAL overrun.
+   *
+   * TOTAL: a malformed report, an unstarted graph and an unreadable store are
+   * named refusals, not exceptions; a store failure inside the transaction rolls
+   * the WHOLE report back, so a half-recorded reconciliation cannot exist.
+   */
+  recordUsage(report: OutcomeBudgetUsageReport): OutcomeBudgetUsageOutcome {
+    const malformed = this.usageReportProblem(report);
+    if (malformed !== undefined) return refused([malformed]);
+    const at = this.readClock(report.now);
+    if (typeof at !== "number") return refused([at]);
+    const budget = this.ledger.budget;
+    if (budget === undefined) {
+      return refused([
+        {
+          code: "budget-unavailable",
+          path: "$.attempts",
+          message:
+            "outcome-runtime: graph " +
+            JSON.stringify(this.graphId) +
+            " holds no budget surface, so a usage report cannot be recorded against it",
+        },
+      ]);
+    }
+    let runId: string | undefined;
+    try {
+      runId = this.ledger.runs?.readRun(this.graphId)?.runId;
+    } catch (error) {
+      return refused([this.ledgerRefusal(error)]);
+    }
+    if (runId === undefined) {
+      return refused([
+        {
+          code: "graph-not-started",
+          path: "$.attempts",
+          message:
+            "outcome-runtime: graph " +
+            JSON.stringify(this.graphId) +
+            " has no run identity, so there is no run whose usage this report could be " +
+            "recorded against — usage is a fact about a dispatch an attempt was authorized " +
+            "for, and no attempt was",
+        },
+      ]);
+    }
+    const entries: OutcomeBudgetUsageEntry[] = [];
+    try {
+      this.ledger.runInTransaction((tx) => {
+        const surface = tx.budget;
+        if (surface === undefined) {
+          throw new Error(
+            "outcome-runtime: the transaction exposes no budget surface although the ledger does",
+          );
+        }
+        for (const attempt of report.attempts) {
+          const result = surface.reconcileUsage({
+            graphId: this.graphId,
+            runId,
+            nodeId: attempt.nodeId,
+            attemptId: attempt.attemptId,
+            effectId: dispatchEffectIdOf(attempt.attemptId),
+            usage: {
+              executions: attempt.executions === undefined ? 1 : attempt.executions,
+              durationMs: attempt.durationMs ?? 0,
+              inputTokens: attempt.inputTokens ?? 0,
+              outputTokens: attempt.outputTokens ?? 0,
+              costUsd: attempt.costUsd ?? 0,
+            },
+            at,
+          });
+          entries.push(usageEntryOf(result));
+        }
+      });
+    } catch (error) {
+      return refused([
+        {
+          code: "unreadable-state",
+          message:
+            "outcome-runtime: the usage report for graph " +
+            JSON.stringify(this.graphId) +
+            " could not be recorded (" +
+            errorText(error) +
+            ") — the whole report was rolled back, so no partial reconciliation exists",
+        },
+      ]);
+    }
+    const reading = this.budgetReport(runId);
+    if (reading.kind === "refused") return refused([reading.refusal]);
+    return Object.freeze({
+      kind: "recorded" as const,
+      graphId: this.graphId,
+      runId,
+      at,
+      entries: Object.freeze(entries),
+      report: reading.report,
+    });
+  }
+
+  /** The closed-shape check of one usage report, or the refusal it violates. */
+  private usageReportProblem(
+    report: OutcomeBudgetUsageReport,
+  ): OutcomeRuntimeRefusal | undefined {
+    const fail = (path: string, detail: string): OutcomeRuntimeRefusal => ({
+      code: "budget-usage-malformed",
+      path,
+      message:
+        "outcome-runtime: the usage report for graph " +
+        JSON.stringify(this.graphId) +
+        " is not the closed record this protocol defines — " +
+        detail +
+        ", so nothing was recorded",
+    });
+    if (!Array.isArray(report.attempts)) {
+      return fail("$.attempts", "attempts is not a list");
+    }
+    const amount = (value: unknown): boolean =>
+      value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+    const count = (value: unknown): boolean =>
+      value === undefined ||
+      (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+    for (let index = 0; index < report.attempts.length; index += 1) {
+      const attempt = report.attempts[index];
+      const path = "$.attempts[" + index + "]";
+      if (attempt === undefined) return fail(path, "the entry is missing");
+      if (typeof attempt.nodeId !== "string" || attempt.nodeId.length === 0) {
+        return fail(path + ".nodeId", "nodeId is not a non-empty string");
+      }
+      if (typeof attempt.attemptId !== "string" || attempt.attemptId.length === 0) {
+        return fail(path + ".attemptId", "attemptId is not a non-empty string");
+      }
+      if (!count(attempt.executions)) {
+        return fail(path + ".executions", "executions is not a non-negative safe integer");
+      }
+      if (
+        !amount(attempt.durationMs) ||
+        !amount(attempt.inputTokens) ||
+        !amount(attempt.outputTokens) ||
+        !amount(attempt.costUsd)
+      ) {
+        return fail(path, "an amount is not a finite non-negative number");
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The budget state of one run, as the durable rows and the compiled plan
+   * together answer it (P3 item 3) — the QUERY/REPORT surface.
+   *
+   * DECLARED LIMITS COME FROM THE PLAN, RECORDED USAGE FROM THE ROWS, and the
+   * overruns are recomputed here on every read: an amount the platform reported
+   * above its ceiling is shown as the ACTUAL excess (`used - limit`), never
+   * clamped and never absorbed. A node the plan declares but nothing dispatched
+   * is reported with its ceilings and zeros, so "declared but unused" and
+   * "undeclared" never look alike.
+   */
+  budgetReport(runId?: string): OutcomeBudgetReading {
+    const budget = this.ledger.budget;
+    if (budget === undefined) {
+      return {
+        kind: "refused",
+        refusal: {
+          code: "budget-unavailable",
+          path: "$.nodes",
+          message:
+            "outcome-runtime: graph " +
+            JSON.stringify(this.graphId) +
+            " holds no budget surface, so it has no budget state to report",
+        },
+      };
+    }
+    let usage: readonly {
+      readonly nodeId: string;
+      readonly executions: number;
+      readonly used: BudgetUsageAmounts;
+      readonly reserved: BudgetUsageAmounts;
+      readonly unknownUsageAttempts: number;
+    }[];
+    try {
+      usage = budget.budgetUsageOf(this.graphId, runId);
+    } catch (error) {
+      return { kind: "refused", refusal: this.ledgerRefusal(error) };
+    }
+    let resolvedRunId: string | undefined = runId;
+    if (resolvedRunId === undefined) {
+      try {
+        resolvedRunId = this.ledger.runs?.readRun(this.graphId)?.runId;
+      } catch (error) {
+        return { kind: "refused", refusal: this.ledgerRefusal(error) };
+      }
+    }
+    // The ONE builder the control answer uses too: declared ceilings from the
+    // plan, recorded usage from the rows, overruns recomputed — never clamped.
+    return {
+      kind: "report",
+      report: buildBudgetReport({
+        graphId: this.graphId,
+        ...(resolvedRunId === undefined ? {} : { runId: resolvedRunId }),
+        planRevision: this.planRevision,
+        nodes: this.plan.nodes.map((node) => ({
+          nodeId: node.id,
+          limits: this.limitsOfNode(node.id),
+        })),
+        usage,
+      }),
     };
   }
 
@@ -4472,6 +5117,33 @@ export class OutcomeGraphRuntime {
       result: {
         effects: Object.freeze(effects),
         settle: (writeTx) => {
+          // ── The budget moves WITH the settlement (P3 item 3) ─────────────
+          //
+          // THE SETTLED ATTEMPT'S CLAIM IS WITHDRAWN FIRST, in this same
+          // transaction, so a node a loop re-arms is not refused headroom by the
+          // very attempt whose acceptance freed it. It is released, not zeroed:
+          // no usage was reported HERE, so its consumption stays UNKNOWN (a
+          // platform report that arrives later still reconciles it).
+          //
+          // THE RUN COMES FROM THE STATE ROW THIS TRANSACTION READ, not from a
+          // second read: the acceptance is committing against exactly that run,
+          // and a substrate that mints no run identity has no budget rows to
+          // move (its attempts were never claimed).
+          const settledRunId = record.runId;
+          if (settledRunId !== undefined) {
+            this.releaseDispatchClaim(
+              writeTx,
+              settledRunId,
+              decision.nodeId,
+              decision.identity.attemptId,
+              now,
+            );
+            // EVERY SUCCESSOR THIS ACCEPTANCE ARMS IS CLAIMED BEFORE IT IS
+            // WRITTEN. A node with no headroom throws, which rolls the entire
+            // acceptance back: the graph never commits a state whose successor
+            // cannot be dispatched.
+            this.claimSuccessorDispatches(writeTx, settledRunId, advance.dispatches, now);
+          }
           writeTx.writeGraphState(stateRecordOf(advance.state, now));
           // THE ATTEMPT'S DISPATCH IS COMPLETE ONCE ITS OUTCOME IS ACCEPTED
           // (D8). The transition rides the SAME transaction as the settlement,
@@ -5210,6 +5882,31 @@ function refused(refusals: readonly OutcomeRuntimeRefusal[]): {
   readonly refusals: readonly OutcomeRuntimeRefusal[];
 } {
   return { kind: "refused", refusals };
+}
+
+/** What one usage report did to one attempt, in the answer's own words. */
+function usageEntryOf(result: BudgetUsageResult): OutcomeBudgetUsageEntry {
+  const reservation = result.reservation;
+  const used = reservation.used;
+  const base = {
+    nodeId: reservation.nodeId,
+    attemptId: reservation.attemptId,
+    ...(used === undefined ? {} : { used }),
+  };
+  switch (result.kind) {
+    case "reconciled":
+      return Object.freeze({ ...base, outcome: "reconciled" as const });
+    case "replayed":
+      return Object.freeze({ ...base, outcome: "replayed" as const });
+    case "recorded-late":
+      return Object.freeze({ ...base, outcome: "recorded-late" as const });
+    case "ignored":
+      return Object.freeze({
+        ...base,
+        outcome: "ignored" as const,
+        reason: result.reason,
+      });
+  }
 }
 
 /** Map an acceptance-core refusal onto the runtime's vocabulary verbatim. */

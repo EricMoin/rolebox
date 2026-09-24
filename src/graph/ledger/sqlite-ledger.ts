@@ -60,6 +60,7 @@ import {
   type AcceptanceLedger,
   type AcceptanceLedgerTx,
   type AcceptedEventRecord,
+  type BudgetLedger,
   type CommitResult,
   type EffectTransition,
   type GraphStateRecord,
@@ -191,11 +192,26 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
    */
   readonly runs: RunControlLedger;
 
+  /**
+   * The dispatch BUDGET surface (P3 item 3).
+   *
+   * A pure delegation to the store, like `runs` above: the run path claims its
+   * dispatch's share of the node's declared ceilings through the port it already
+   * holds, reconciles real usage through the same boundary, and a restart reads
+   * the claims a previous process made. Nothing about the rules lives here, and
+   * the field is REQUIRED (not optional) because a ledger this build opens can
+   * always hold a claim — a plan that declares a ceiling refuses to dispatch
+   * when the surface is missing, and an absent property on the shipped ledger
+   * would make every budgeted graph refuse.
+   */
+  readonly budget: BudgetLedger;
+
   private readonly store: GraphStore;
 
   private constructor(store: GraphStore) {
     this.store = store;
     this.runs = store.runs;
+    this.budget = store.budget;
   }
 
   /**

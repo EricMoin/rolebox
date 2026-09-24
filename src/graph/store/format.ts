@@ -291,7 +291,7 @@ export function inspectTables(db: DatabaseDriver, filePath: string): string[] {
 /** One column a store declares, as `PRAGMA table_info` reports it. */
 interface ObservedColumn {
   readonly name: string;
-  readonly affinity: "text" | "integer" | "other";
+  readonly affinity: "text" | "integer" | "numeric" | "other";
   readonly primaryKey: number;
   readonly notNull: boolean;
 }
@@ -301,14 +301,29 @@ interface ObservedColumn {
  *
  * The gate compares AFFINITY rather than the spelled type because affinity is
  * what SQLite itself applies when it stores or converts a value: `TEXT` and
- * `VARCHAR` describe the same column here, `BLOB` where this format writes
- * `TEXT` is a reshape, and anything else is `other` and refused.
+ * `VARCHAR` describe the same column here, `REAL` and `DOUBLE` the same
+ * numeric one, `BLOB` where this format writes `TEXT` is a reshape, and
+ * anything else is `other` and refused.
+ *
+ * `numeric` was added with the budget rows, whose cost columns are REAL: a
+ * monetary amount cannot be stored in an INTEGER column without truncating the
+ * fraction an overrun is reported in, and refusing the class the format itself
+ * writes would make the budget table unopenable by its own gate.
  */
 function affinityOf(declaredType: string): ObservedColumn["affinity"] {
   const type = declaredType.toUpperCase();
   if (type.includes("INT")) return "integer";
   if (type.includes("CHAR") || type.includes("CLOB") || type.includes("TEXT")) {
     return "text";
+  }
+  if (
+    type.includes("REAL") ||
+    type.includes("FLOA") ||
+    type.includes("DOUB") ||
+    type.includes("NUMERIC") ||
+    type.includes("DECIMAL")
+  ) {
+    return "numeric";
   }
   return "other";
 }

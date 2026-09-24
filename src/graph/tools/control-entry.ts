@@ -15,14 +15,15 @@
  * or check a principal, and a defect here can only mis-address the store, which
  * the service then reports by name.
  *
- * WHAT THE CALLER MAY SAY. `graph_id`, one of the five declared command names,
- * an optional node and attempt, and a reason. The PRINCIPAL is not an argument:
- * it is the session the platform attributed to THIS tool call, threaded by the
+ * WHAT THE CALLER MAY SAY. `graph_id`, one of the declared command names, an
+ * optional node and attempt, and a reason. The PRINCIPAL is not an argument: it
+ * is the session the platform attributed to THIS tool call, threaded by the
  * canonical facade exactly as the submission ingress threads its call session.
  * A worker's payload is therefore never authority, and there is no field a
  * caller could set to become someone else — or to infer a command from worker
- * data, which §3.4 forbids (`retry` and `budget-stop` are refused by name
- * rather than guessed at).
+ * data, which §3.4 forbids: the command is an explicit enum, and a shape the
+ * command's own scope forbids (a node on a run-wide `cancel` or
+ * `budget-stop`) is refused by name rather than reinterpreted.
  *
  * NO STORE IS EVER CREATED HERE. A workspace whose authoritative store is
  * ABSENT (or retired, or damaged, or of a format this build cannot read) is

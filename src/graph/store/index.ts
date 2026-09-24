@@ -14,6 +14,8 @@
  * - `json.ts` — the one JSON representability rule;
  * - `ledger-tables.ts` — the acceptance tables and their protocol rules ON the
  *   store's connection;
+ * - `budget-tables.ts` — the dispatch budget reservations and the CONDITIONAL
+ *   write that enforces a declared ceiling before a dispatch exists (P3);
  * - `graph-store.ts` — the store, its ONE transaction interface and every
  *   record it owns;
  * - `load.ts` — the `absent` / `valid` / `corrupt` / `unsupported` verdict.

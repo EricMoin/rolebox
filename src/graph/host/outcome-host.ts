@@ -132,6 +132,9 @@ import {
   type AttemptCredentialReissueFence,
   type HostCompletionAttemptRef,
   type HostCompletionAuthority,
+  type OutcomeBudgetReading,
+  type OutcomeBudgetUsageOutcome,
+  type OutcomeBudgetUsageReport,
   type OutcomeResumeResult,
 } from "../outcome/runtime.ts";
 import type {
@@ -1870,11 +1873,14 @@ export class OutcomeHost {
   }
 
   /**
-   * DELIVER THIS RUN'S TRUSTED CANCEL INTENTS TO THE PLATFORM (P3 cancel).
+   * DELIVER THIS RUN'S TRUSTED STOPPING INTENTS TO THE PLATFORM (P3 cancel, P3 budget-stop).
    *
-   * THE REPLAY HALF OF A CANCELLATION. The trusted cancel command is already durable when this runs:
-   * the control application service committed one `"cancel"` decision per in-flight attempt plus the
-   * run's control fact, and the intent therefore outlives the process that decided it. This method
+   * THE REPLAY HALF OF A STOPPING DECISION. The trusted command is already durable when this runs:
+   * the control application service committed one `"cancel"` — or `"budget-stop"` — decision per
+   * in-flight attempt plus the run's control fact, and the intent therefore outlives the process that
+   * decided it. A budget stop is the same KIND of fact, so it is delivered by this same path and the
+   * run's control fact keeps the command that actually stopped it: a later reader still learns it was
+   * a budget stop rather than an operator cancel. This method
    * turns those intents into cancel EFFECTS and asks the platform to stop the executions they name,
    * in this order — and the order is the contract:
    *
@@ -1920,9 +1926,19 @@ export class OutcomeHost {
     let decisions: readonly ControlDecisionRecord[];
     try {
       runId = ledger.runs.readRun(graphId)?.runId;
+      // A `budget-stop` IS A STOPPING DECISION TOO (P3 item 3). It stops the run
+      // for the same reason a cancel does — the graph must not dispatch or settle
+      // any more — so the platform intent it leaves behind is delivered through
+      // exactly this path: a host with a cancel port hands each in-flight
+      // execution's cancellation over, records the durable cancel effect and
+      // reports what the platform substantiated, while an attempt whose execution
+      // the platform cannot confirm stays visible and unsettled.
       decisions = ledger.runs
         .controlDecisions(graphId)
-        .filter((decision) => decision.command === "cancel");
+        .filter(
+          (decision) =>
+            decision.command === "cancel" || decision.command === "budget-stop",
+        );
     } catch (error) {
       return Object.freeze({
         graphId,
@@ -2255,6 +2271,80 @@ export class OutcomeHost {
     const key = dispatchEffectKeyOf(graphId, attemptId);
     const answer = this.dispatchAdapter.lookup(key);
     return answer.kind === "created" ? answer.execution : undefined;
+  }
+
+  /**
+   * Record the PLATFORM's measured usage for attempts that already ran (P3 item 3).
+   *
+   * THE HOST IS WHERE A BILL ARRIVES. The runtime's `recordUsage` is the
+   * accounting path — it writes no receipt, no accepted event and no control
+   * decision — and this method is the host-facing door to it: a platform
+   * adapter that learns what an attempt actually consumed calls this with the
+   * amounts IT measured. Nothing here reads a worker's submission, so a
+   * submitted payload can never forge usage or move a ceiling.
+   *
+   * DELAYED FEEDBACK IS THE POINT. A report that arrives after the attempt
+   * settled still reconciles its reservation and, when the amount exceeds the
+   * declared ceiling, the run's report shows the ACTUAL overrun — the host never
+   * reports "nothing was overspent" on the platform's behalf.
+   *
+   * TOTAL: a graph this host cannot open is answered with the runtime's own
+   * refusal shape, never thrown; the durable rows the next window reads are
+   * unchanged.
+   */
+  async recordBudgetUsage(
+    graphId: string,
+    report: OutcomeBudgetUsageReport,
+  ): Promise<OutcomeBudgetUsageOutcome> {
+    this.assertOpen();
+    try {
+      const { runtime } = await this.runtimeFor(graphId);
+      return runtime.recordUsage(report);
+    } catch (error) {
+      return Object.freeze({
+        kind: "refused" as const,
+        refusals: Object.freeze([
+          Object.freeze({
+            code: "unreadable-state" as const,
+            message:
+              "outcome-host: graph " +
+              JSON.stringify(graphId) +
+              " could not be opened to record a usage report (" +
+              describeWatchFailure(error) +
+              ") — nothing was recorded",
+          }),
+        ]),
+      });
+    }
+  }
+
+  /**
+   * The run's budget state, as the durable rows and the plan answer it (P3
+   * item 3) — the host-facing read of the query/report surface.
+   *
+   * A READ: it writes nothing, and an overrun it reports is the arithmetic of
+   * recorded amounts against declared ceilings. A graph this host cannot open
+   * is answered with the runtime's own refusal shape, never thrown.
+   */
+  async budgetReportOf(graphId: string, runId?: string): Promise<OutcomeBudgetReading> {
+    this.assertOpen();
+    try {
+      const { runtime } = await this.runtimeFor(graphId);
+      return runtime.budgetReport(runId);
+    } catch (error) {
+      return Object.freeze({
+        kind: "refused" as const,
+        refusal: Object.freeze({
+          code: "unreadable-state" as const,
+          message:
+            "outcome-host: graph " +
+            JSON.stringify(graphId) +
+            " could not be opened to read its budget state (" +
+            describeWatchFailure(error) +
+            ")",
+        }),
+      });
+    }
   }
 
   /**

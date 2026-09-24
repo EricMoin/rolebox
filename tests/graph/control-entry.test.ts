@@ -694,25 +694,83 @@ describe("graph_control — the permission check", () => {
 // ── Explicit command types ──────────────────────────────────────────────────
 
 describe("graph_control — explicit command types only", () => {
-  it("refuses budget-stop by name, and APPLIES retry rather than pretending it is unimplemented", async () => {
+  it("APPLIES budget-stop as a run-wide stop, and refuses a node-scoped call", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
-      // A command whose own semantics this build does not implement is refused by
-      // name: recording an intent no path would honour is not a capability.
-      const unimplemented = await control(
+      // BUDGET-STOP IS IMPLEMENTED (P3 item 3): it is a run-wide stopping
+      // command, so naming a node on it is the same call-shape refusal a cancel
+      // gets — and nothing is written for the refused shape.
+      const nodeScoped = await control(
         fixture,
         {
           graph_id: fixture.graphId,
           command: "budget-stop",
           node_id: "work",
-          reason: "not implemented yet",
+          reason: "name a node on a run-wide command",
         },
         declarerOf(fixture),
       );
-      expect(unimplemented.kind).toBe("refused");
-      expect(unimplemented.refusals?.[0]?.code).toBe("command-unimplemented");
+      expect(nodeScoped.kind).toBe("refused");
+      expect(nodeScoped.refusals?.[0]?.code).toBe("unknown-node");
       expect(readControlRows(fixture).decisions).toEqual([]);
+      expect(readControlRows(fixture).control).toBeUndefined();
 
+      // THE RUN-WIDE FORM IS APPLIED: the run's first control fact is the budget
+      // stop, and the attempt in flight carries its own decision.
+      const stopped = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "budget-stop",
+          reason: "the declared budget is spent",
+        },
+        declarerOf(fixture),
+      );
+      expect(stopped.kind).toBe("applied");
+      expect(stopped.command).toBe("budget-stop");
+      expect(stopped.scope).toBe("run");
+      expect(stopped.runControl?.command).toBe("budget-stop");
+      expect(stopped.decided?.map((entry) => entry.attemptId)).toEqual(["work#1"]);
+      const rows = readControlRows(fixture);
+      expect(rows.decisions.map((entry) => entry.attemptId)).toEqual(["work#1"]);
+      expect(rows.control?.command).toBe("budget-stop");
+
+      // NEW DISPATCH AND SETTLEMENT ARE STOPPED. A node-scoped retry would mint
+      // an attempt nothing could settle, so it is refused by the run's control
+      // fact, and a worker's submission for the attempt still in flight is
+      // refused by the SAME fact rather than accepted.
+      const retried = await control(
+        fixture,
+        { graph_id: fixture.graphId, command: "retry", node_id: "work", reason: "stuck" },
+        declarerOf(fixture),
+      );
+      expect(retried.kind).toBe("refused");
+      expect(retried.refusals?.[0]?.code).toBe("run-stopped");
+      const raw = String(
+        await fixture.tools.graph_submit_outcome.execute(
+          {
+            graph_id: fixture.graphId,
+            node_id: "work",
+            outcome_id: "done",
+            credential: credentialOf(fixture, "work"),
+          },
+          fixture.contextOf(childSessionOf("work#1"), "agent.work"),
+        ),
+      );
+      const held = JSON.parse(raw) as {
+        readonly decision?: string;
+        readonly refusals?: readonly { readonly code?: string }[];
+      };
+      expect(held.decision).toBeUndefined();
+      expect(held.refusals?.[0]?.code).toBe("control-stopped");
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("APPLIES retry rather than pretending it is unimplemented", async () => {
+    const fixture = await openControlFixture(CHAIN);
+    try {
       // RETRY IS IMPLEMENTED (P3 item 2): it supersedes the node's attempt with a
       // new one, so it is APPLIED and no longer refused as unimplemented.
       const retried = await control(

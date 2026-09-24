@@ -78,6 +78,15 @@ import type {
   ApprovalRaiseResult,
   ApprovalRequestRecord,
   ApprovalRequestStatus,
+  BudgetLedger,
+  BudgetReleaseInput,
+  BudgetReleaseResult,
+  BudgetReservationRecord,
+  BudgetReserveInput,
+  BudgetReserveResult,
+  BudgetUsageInput,
+  BudgetUsageResult,
+  BudgetNodeUsage,
   CommitResult,
   ControlCommandName,
   ControlDecisionRecord,
@@ -108,6 +117,7 @@ import {
   retiredAuthorityRefusal,
   verifyStore,
 } from "./format.ts";
+import { BudgetTables } from "./budget-tables.ts";
 import { encodeJsonBody } from "./json.ts";
 import { LedgerTables } from "./ledger-tables.ts";
 import {
@@ -286,6 +296,8 @@ export class GraphStore {
   private readonly ledger: LedgerTables;
   private readonly runsView: RunControlLedger;
   private readonly approvalsView: ApprovalLedger;
+  private readonly budgetTables: BudgetTables;
+  private readonly budgetView: BudgetLedger;
   private readonly txView: GraphStoreTx;
   private closed = false;
 
@@ -399,6 +411,38 @@ export class GraphStore {
         reason: string,
       ): readonly ApprovalRequestRecord[] => this.expireRunApprovals(graphId, runId, at, reason),
     });
+    // THE BUDGET SURFACE (P3 item 3). The dispatch reservations are ordinary
+    // rows of THIS database, written through THIS connection and THIS boundary:
+    // the runtime claims one inside the transaction that arms an attempt, so a
+    // dispatch that committed without its claim does not exist, and a restart
+    // reads the claims a previous process made.
+    this.budgetTables = new BudgetTables(
+      connection.db,
+      filePath,
+      (work) => this.joinOrBegin(work),
+      (graphId) => this.readRun(graphId)?.runId,
+    );
+    this.budgetView = Object.freeze({
+      reserveDispatch: (input: BudgetReserveInput): BudgetReserveResult =>
+        this.budgetTables.reserveDispatch(input),
+      reconcileUsage: (input: BudgetUsageInput): BudgetUsageResult =>
+        this.budgetTables.reconcileUsage(input),
+      releaseReservation: (input: BudgetReleaseInput): BudgetReleaseResult =>
+        this.budgetTables.releaseReservation(input),
+      readReservation: (
+        graphId: string,
+        attemptId: string,
+        runId?: string,
+      ): BudgetReservationRecord | undefined =>
+        this.budgetTables.readReservation(graphId, attemptId, runId),
+      reservationsOf: (
+        graphId: string,
+        runId?: string,
+      ): readonly BudgetReservationRecord[] =>
+        this.budgetTables.reservationsOf(graphId, runId),
+      budgetUsageOf: (graphId: string, runId?: string): readonly BudgetNodeUsage[] =>
+        this.budgetTables.budgetUsageOf(graphId, runId),
+    });
     this.txView = Object.freeze({
       commitAccepted: (batch: GraphAcceptanceBatch): CommitResult =>
         this.commitAccepted(batch),
@@ -498,6 +542,7 @@ export class GraphStore {
       definitionGraphIds: (): readonly string[] => this.definitionGraphIds(),
       runs: this.runsView,
       approvals: this.approvalsView,
+      budget: this.budgetView,
     });
   }
 
@@ -1709,6 +1754,20 @@ export class GraphStore {
   get approvals(): ApprovalLedger {
     this.assertOpen("approvals");
     return this.approvalsView;
+  }
+
+  /**
+   * The dispatch BUDGET surface, as the ledger port exposes it (P3 item 3).
+   *
+   * The SAME object the transaction surface hands out, so the claim a dispatch
+   * is authorized by, the reconciliation against real usage and the read a
+   * report is built from all address one interface and one boundary. Exposed on
+   * the STORE (not only inside a transaction) because the read side — a report,
+   * a query — must stay available without opening a write boundary.
+   */
+  get budget(): BudgetLedger {
+    this.assertOpen("budget");
+    return this.budgetView;
   }
 
   /**
