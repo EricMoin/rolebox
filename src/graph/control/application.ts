@@ -60,6 +60,21 @@
  *   receipt or an accepted result, and neither arms a successor node: a retry
  *   invalidates exactly the attempt it supersedes, which is why a downstream node
  *   whose external side effect already completed is never re-run.
+ * - APPROVAL (P3 item 3): a PAUSE and the trusted decision that answers it, not an
+ *   outcome. `approval-request` records a durable `pending` request on one node's
+ *   in-flight attempt, naming the ONLY session that may decide it and the deadline
+ *   it expires at; it claims NO run control fact, so the run keeps executing and
+ *   only that attempt's SETTLEMENT is held. `approve`/`reject` resolve it, and only
+ *   the named approver may — the declaring principal's control authority does not
+ *   imply approval authority, which is why those two commands skip the
+ *   declaring-principal check and are checked against the request instead. The
+ *   acceptance gate reads the request row (never a submission, so an `approved`
+ *   field can satisfy nothing), a repeated decision replays, a competing one is
+ *   refused with the status that stands, and a decision that arrives after the
+ *   deadline materializes the expiry durably and is refused `approval-expired`.
+ *   A run-stopping command expires its run's still-pending requests in the same
+ *   transaction, because a stopped run's pause can never be answered into
+ *   anything.
  * - BUDGET-STOP: refused by name (`command-unimplemented`) until its own work
  *   package exists. The vocabulary is durable; the semantics are not invented here.
  *
@@ -126,6 +141,7 @@ import {
   decodeStoredDefinition,
 } from "../persistence/declared-record.ts";
 import type {
+  ApprovalRequestRecord,
   ControlCommandName,
   ControlDecisionRecord,
   ControlPrincipalRecord,
@@ -134,6 +150,12 @@ import type {
   RunReexecutionRecord,
   StoredRunIdentity,
 } from "../ledger/types.ts";
+import {
+  approvalSpecProblem,
+  isApprovalCommand,
+  isApprovalDecision,
+  type ApprovalRequestSpec,
+} from "./approval.ts";
 import {
   attemptCredentialBinding,
   attemptCredentialDigest,
@@ -156,6 +178,7 @@ import {
   type OutcomeGraphState,
   type OutcomeNodeState,
 } from "../outcome/graph-state.ts";
+import { APPROVAL_DEADLINE_REASON } from "../store/graph-store.ts";
 import type { GraphStore, GraphStoreTx } from "../store/graph-store.ts";
 import type { GraphDefinitionRecord } from "../store/records.ts";
 
@@ -213,6 +236,14 @@ export interface GraphControlRequest {
    * credential.
    */
   readonly retry?: GraphControlRetryCapability;
+  /**
+   * What an `approval-request` must carry: the ONLY session that may decide it
+   * and the deadline it expires at (P3 item 3). Required for that command — a
+   * request with no named approver would let the declaring principal's control
+   * authority imply approval authority, and a request with no deadline would be
+   * a pause nothing can end on its own. Ignored by every other command.
+   */
+  readonly approval?: ApprovalRequestSpec;
 }
 
 // ── The answer ──────────────────────────────────────────────────────────────
@@ -283,7 +314,36 @@ export type GraphControlRefusalCode =
   /** The attempt already settled through the acceptance core. */
   | "attempt-already-settled"
   /** The attempt already carries a DIFFERENT control decision. */
-  | "control-already-decided";
+  | "control-already-decided"
+  /**
+   * An `approval-request` does not carry a recordable approver and deadline (or
+   * names a deadline that has already passed). Nothing is recorded: a request
+   * no decision could ever legitimately resolve is not a pause, it is a strand.
+   */
+  | "approval-request-malformed"
+  /**
+   * The caller is not the session the request NAMES as its approver. This is the
+   * separation §P3 asks for: the declaring principal may RAISE and may stop a
+   * run, and that authority deliberately does NOT imply the right to decide an
+   * approval it named someone else for.
+   */
+  | "approval-not-authorized"
+  /** The node's current attempt carries no approval request, so there is nothing to decide. */
+  | "approval-absent"
+  /**
+   * The request already carries a DIFFERENT terminal status (or the opposite
+   * decision): nothing was written and the decision that stands is reported.
+   * One request, one answer.
+   */
+  | "approval-already-decided"
+  /**
+   * The request's deadline passed before this decision arrived. The expiry was
+   * materialized durably BY THIS CALL (so the outcome is recorded even though the
+   * decision was refused) and an expired request is never approved afterwards.
+   */
+  | "approval-expired"
+  /** This substrate cannot hold approval records, so no approval command is applied. */
+  | "approval-unavailable";
 
 /** One structured control refusal. */
 export interface GraphControlRefusal {
@@ -361,6 +421,22 @@ export interface GraphControlReexecution {
   readonly successorRunSeq?: number;
 }
 
+/**
+ * One approval command's own report (P3 item 3).
+ *
+ * CREDENTIAL-FREE and payload-free, like every other answer here: it names the
+ * request, the attempt it pauses, and whether this call actually recorded
+ * anything. `request` is the row's state AFTER the command, so a caller reads
+ * the fact that stands rather than what it asked for.
+ */
+export interface GraphControlApproval {
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly request: ApprovalRequestRecord;
+  /** True when this call recorded nothing new: the fact already stood. */
+  readonly replayed: boolean;
+}
+
 /** What one control command did. */
 export type GraphControlResult =
   | {
@@ -406,6 +482,23 @@ export type GraphControlResult =
       readonly unsettledEffects: readonly PendingEffectRecord[];
       /** Every execution row of those attempts the host has not confirmed. */
       readonly unconfirmedExecutions: readonly GraphControlUnconfirmedExecution[];
+      /**
+       * Every approval request this call EXPIRED. A command issued under the
+       * graph's DECLARING authority (a stop, a retry, an `approval-request`) runs
+       * the graph-wide deadline sweep first and then, when it stops the run, the
+       * pending requests of that run. A DECISION command sweeps nothing: it
+       * materializes at most ITS OWN request's expiry, and reports that through
+       * the `approval-expired` refusal instead. Present for EVERY applied command
+       * and empty when nothing was due, so an expiry is never inferred from a
+       * silence: the answer names the rows whose status changed (P3 item 3).
+       */
+      readonly expiredApprovals: readonly ApprovalRequestRecord[];
+      /**
+       * The request this command acted on, present exactly for the three approval
+       * commands. Absent for a stopping command or a retry, which never touch a
+       * request.
+       */
+      readonly approval?: GraphControlApproval;
     }
   | {
       readonly kind: "refused";
@@ -581,7 +674,14 @@ export function applyGraphControl(
           "authorize to control it — an unattributed graph is not a graph anyone may stop",
       );
     }
-    if (origin.sessionId !== principal.sessionId) {
+    // THE APPROVAL DECISION IS AUTHORIZED BY ITS REQUEST, NOT BY THE DECLARER
+    // (P3 item 3). `approve` and `reject` are the two commands whose authority
+    // is the session the request NAMES: skipping the declaring-principal check
+    // for them is what makes that separation real, and it grants nothing on its
+    // own — `applyApprovalCommand` refuses every caller that is not the request's
+    // approver by name, and a caller that is not even the declarer can therefore
+    // never reach a raise, a stop or a retry.
+    if (origin.sessionId !== principal.sessionId && !isApprovalDecision(request.command)) {
       return refuse(
         graphId,
         "control-not-authorized",
@@ -659,8 +759,47 @@ export function applyGraphControl(
         settled: new Set(tx.acceptedEvents(graphId).map((event) => event.attemptId)),
         request,
         principal,
+        // A retry is issued under the DECLARING authority and drives the deadline
+        // sweep exactly as a stopping command does (P3 item 3).
+        expiredApprovals: sweepApprovals(tx, graphId, request.at),
       });
     }
+
+    // ── APPROVAL IS ITS OWN COMMAND FAMILY (P3 item 3) ──────────────────────
+    //
+    // It shares every read above — the definition, the declaring principal, the
+    // run, the state, the accepted events — the same write lock and the same
+    // sweep, but what it writes is an APPROVAL REQUEST rather than a stop: the
+    // run keeps executing, the attempt keeps its execution, and only the
+    // acceptance gate changes. That is why it is a branch here and not a member
+    // of the run-wide or stopping sets: neither of those may claim the run's
+    // control fact on this command's behalf.
+    if (isApprovalCommand(request.command)) {
+      return applyApprovalCommand({
+        tx,
+        graphId,
+        run,
+        state,
+        settled: new Set(tx.acceptedEvents(graphId).map((event) => event.attemptId)),
+        request,
+        principal,
+        // A RAISE is declarer-authorized (the check above passed) and therefore
+        // drives the deadline sweep. A DECISION is answered by the request's own
+        // named approver and sweeps nothing: it materializes at most ITS OWN
+        // request's expiry, inside the decision call, so a late approval is
+        // answered `approval-expired` rather than as a competing status.
+        expiredApprovals: isApprovalDecision(request.command)
+          ? Object.freeze([])
+          : sweepApprovals(tx, graphId, request.at),
+      });
+    }
+
+    // ── The deadline sweep this command drives (P3 item 3) ──────────────────
+    //
+    // It runs HERE, past the declaring-principal check, so only an AUTHORIZED
+    // command can expire anything, and BEFORE the command's own decisions, so a
+    // command that names a request reads the status that actually stands.
+    const expiredApprovals = sweepApprovals(tx, graphId, request.at);
 
     // ── The attempts this command decides ───────────────────────────────────
     const settled = new Set(tx.acceptedEvents(graphId).map((event) => event.attemptId));
@@ -701,84 +840,16 @@ export function applyGraphControl(
         targets.push({ nodeId: node.nodeId, attemptId: node.attemptId });
       }
     } else {
-      if (request.nodeId === undefined) {
-        return refuse(
-          graphId,
-          "unknown-node",
-          "$.node_id",
-          "graph-control refused [unknown-node]: command " +
-            JSON.stringify(request.command) +
-            " names the attempt it applies to, so node_id is required and was not supplied",
-        );
-      }
-      const node = state.nodes.find((entry) => entry.nodeId === request.nodeId);
-      if (node === undefined) {
-        return refuse(
-          graphId,
-          "unknown-node",
-          "$.node_id",
-          "graph-control refused [unknown-node]: graph " +
-            JSON.stringify(graphId) +
-            " declares no node " +
-            JSON.stringify(request.nodeId),
-        );
-      }
-      if (node.attemptId === undefined) {
-        return refuse(
-          graphId,
-          "attempt-absent",
-          "$.node_id",
-          "graph-control refused [attempt-absent]: node " +
-            JSON.stringify(node.nodeId) +
-            " records no attempt at all (" +
-            node.status +
-            "), so there is no attempt for " +
-            JSON.stringify(request.command) +
-            " to record",
-        );
-      }
-      if (request.attemptId !== undefined && request.attemptId !== node.attemptId) {
-        return refuse(
-          graphId,
-          "attempt-not-current",
-          "$.attempt_id",
-          "graph-control refused [attempt-not-current]: node " +
-            JSON.stringify(node.nodeId) +
-            " is in flight on attempt " +
-            JSON.stringify(node.attemptId) +
-            " and the command names " +
-            JSON.stringify(request.attemptId) +
-            " — a control fact is never attached to an attempt the run no longer holds",
-        );
-      }
-      if (settled.has(node.attemptId)) {
-        return refuse(
-          graphId,
-          "attempt-already-settled",
-          "$.node_id",
-          "graph-control refused [attempt-already-settled]: node " +
-            JSON.stringify(node.nodeId) +
-            " attempt " +
-            JSON.stringify(node.attemptId) +
-            " already settled through the acceptance core, and a settled attempt is never " +
-            "re-labelled as failed, timed out or cancelled",
-        );
-      }
-      if (node.status !== "dispatched") {
-        return refuse(
-          graphId,
-          "attempt-absent",
-          "$.node_id",
-          "graph-control refused [attempt-absent]: node " +
-            JSON.stringify(node.nodeId) +
-            " is " +
-            node.status +
-            ", not in flight, so there is nothing for " +
-            JSON.stringify(request.command) +
-            " to record",
-        );
-      }
-      targets.push({ nodeId: node.nodeId, attemptId: node.attemptId });
+      const target = resolveNodeTarget({
+        graphId,
+        state,
+        settled,
+        nodeId: request.nodeId,
+        attemptId: request.attemptId,
+        command: request.command,
+      });
+      if (target.kind === "refused") return target.result;
+      targets.push({ nodeId: target.nodeId, attemptId: target.attemptId });
     }
 
     // ── Write the decisions and the run's control fact ──────────────────────
@@ -925,6 +996,27 @@ export function applyGraphControl(
       runControl = claimed;
     }
 
+    // A STOPPED RUN'S PAUSES ARE MOOT (P3 item 3). Every request still `pending`
+    // for this run is expired IN THE SAME TRANSACTION that records the stop: the
+    // stop already refuses every settlement, so a pending request could never be
+    // answered into anything, and leaving it pending would let a later approval
+    // read as a live decision. The expiry carries the reason that stopped the run
+    // and is reported in the answer, so the transition is observable rather than
+    // silent.
+    const stoppedApprovals =
+      tx.approvals === undefined
+        ? Object.freeze([])
+        : tx.approvals.expireRunApprovals(
+            graphId,
+            run.runId,
+            request.at,
+            "the run was stopped by the trusted control command " +
+              JSON.stringify(request.command) +
+              " (" +
+              request.reason +
+              "), so the approval pause it carried can never be answered",
+          );
+
     return Object.freeze({
       kind: "applied" as const,
       graphId,
@@ -936,10 +1028,563 @@ export function applyGraphControl(
       minted: Object.freeze([]),
       decided: Object.freeze(decided),
       runControl,
+      expiredApprovals: Object.freeze([...expiredApprovals, ...stoppedApprovals]),
       skipped: Object.freeze(skipped),
       unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
       unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
     });
+  });
+}
+
+/**
+ * Materialize the deadline expiry of every due request of one graph.
+ *
+ * THE ONE DRIVER OF EXPIRY, called by every command issued under the graph's
+ * DECLARING authority (a stop, a retry, an approval request) and NOT by a
+ * decision: a late decision materializes its own request's expiry inside
+ * `decideApprovalRequest`, which is the more precise answer (`approval-expired`
+ * rather than a competing-status conflict). Time is the caller's explicit `at` —
+ * this module never reads a clock — so expiry is reproducible from the command
+ * alone and a test drives it by moving `at` past a deadline, never by waiting.
+ * A substrate that cannot hold approval records sweeps nothing.
+ */
+function sweepApprovals(
+  tx: GraphStoreTx,
+  graphId: string,
+  at: number,
+): readonly ApprovalRequestRecord[] {
+  if (tx.approvals === undefined) return Object.freeze([]);
+  return tx.approvals.expireDueApprovals(graphId, at, APPROVAL_DEADLINE_REASON);
+}
+
+// ── One node's in-flight attempt ────────────────────────────────────────────
+
+/** What resolving one node-scoped command's target answered. */
+type NodeTargetResult =
+  | { readonly kind: "resolved"; readonly nodeId: string; readonly attemptId: string }
+  | { readonly kind: "refused"; readonly result: GraphControlResult };
+
+/**
+ * Resolve the attempt one NODE-SCOPED command names — the run's CURRENT
+ * in-flight attempt of that node, or the refusal that says why there is none.
+ *
+ * EXTRACTED so the stopping commands, the retry and the three approval commands
+ * share ONE resolution rule and ONE set of refusals: a node the plan does not
+ * declare, a node with no attempt, an attempt that is not the one in flight, an
+ * attempt that already settled and a node that is not dispatched are five
+ * different facts, and every node-scoped command must answer them identically.
+ * The wording is the one the stopping commands already used; the only variation
+ * is the settled-attempt tail, because an approval command does not re-label a
+ * settled attempt as failed — it refuses to pause it.
+ *
+ * `requireInFlight` is what an APPROVAL DECISION turns off. A raise, a failure,
+ * a timeout, a cancel and a retry act on an execution that is still owed, so a
+ * settled node has nothing for them to act on. A decision acts on the REQUEST
+ * ROW: a request that already stands approved must answer a repeat with the
+ * replay even after the attempt settled through that very approval, and refusing
+ * it as `attempt-already-settled` would turn an idempotent repeat into an error
+ * and hide the fact that stands. The node and the attempt are still resolved the
+ * same way (a node the plan does not declare, a node with no attempt and an
+ * attempt that is not the recorded one are the same three refusals).
+ */
+function resolveNodeTarget(args: {
+  readonly graphId: string;
+  readonly state: OutcomeGraphState;
+  readonly settled: ReadonlySet<string>;
+  readonly nodeId: string | undefined;
+  readonly attemptId: string | undefined;
+  readonly command: ControlCommandName;
+  readonly requireInFlight?: boolean;
+}): NodeTargetResult {
+  const { graphId, state, settled, nodeId, attemptId, command } = args;
+  const requireInFlight = args.requireInFlight ?? true;
+  if (nodeId === undefined) {
+    return {
+      kind: "refused",
+      result: refuse(
+        graphId,
+        "unknown-node",
+        "$.node_id",
+        "graph-control refused [unknown-node]: command " +
+          JSON.stringify(command) +
+          " names the attempt it applies to, so node_id is required and was not supplied",
+      ),
+    };
+  }
+  const node = state.nodes.find((entry) => entry.nodeId === nodeId);
+  if (node === undefined) {
+    return {
+      kind: "refused",
+      result: refuse(
+        graphId,
+        "unknown-node",
+        "$.node_id",
+        "graph-control refused [unknown-node]: graph " +
+          JSON.stringify(graphId) +
+          " declares no node " +
+          JSON.stringify(nodeId),
+      ),
+    };
+  }
+  if (node.attemptId === undefined) {
+    return {
+      kind: "refused",
+      result: refuse(
+        graphId,
+        "attempt-absent",
+        "$.node_id",
+        "graph-control refused [attempt-absent]: node " +
+          JSON.stringify(node.nodeId) +
+          " records no attempt at all (" +
+          node.status +
+          "), so there is no attempt for " +
+          JSON.stringify(command) +
+          " to record",
+      ),
+    };
+  }
+  if (attemptId !== undefined && attemptId !== node.attemptId) {
+    return {
+      kind: "refused",
+      result: refuse(
+        graphId,
+        "attempt-not-current",
+        "$.attempt_id",
+        "graph-control refused [attempt-not-current]: node " +
+          JSON.stringify(node.nodeId) +
+          " is in flight on attempt " +
+          JSON.stringify(node.attemptId) +
+          " and the command names " +
+          JSON.stringify(attemptId) +
+          " — a control fact is never attached to an attempt the run no longer holds",
+      ),
+    };
+  }
+  if (requireInFlight && settled.has(node.attemptId)) {
+    return {
+      kind: "refused",
+      result: refuse(
+        graphId,
+        "attempt-already-settled",
+        "$.node_id",
+        "graph-control refused [attempt-already-settled]: node " +
+          JSON.stringify(node.nodeId) +
+          " attempt " +
+          JSON.stringify(node.attemptId) +
+          " already settled through the acceptance core, and a settled attempt is never " +
+          (isApprovalCommand(command)
+            ? "paused for approval or otherwise re-labelled"
+            : "re-labelled as failed, timed out or cancelled"),
+      ),
+    };
+  }
+  if (requireInFlight && node.status !== "dispatched") {
+    return {
+      kind: "refused",
+      result: refuse(
+        graphId,
+        "attempt-absent",
+        "$.node_id",
+        "graph-control refused [attempt-absent]: node " +
+          JSON.stringify(node.nodeId) +
+          " is " +
+          node.status +
+          ", not in flight, so there is nothing for " +
+          JSON.stringify(command) +
+          " to record",
+      ),
+    };
+  }
+  return { kind: "resolved", nodeId: node.nodeId, attemptId: node.attemptId };
+}
+
+// ── Approval (P3 item 3) ────────────────────────────────────────────────────
+
+/**
+ * Everything an approval command decides from, read ONCE inside the control
+ * transaction — the same context shape the retry takes, plus the sweep's report.
+ */
+interface ApprovalCommandContext {
+  readonly tx: GraphStoreTx;
+  readonly graphId: string;
+  readonly run: StoredRunIdentity;
+  readonly state: OutcomeGraphState;
+  /** The attempts that already settled through the acceptance core. */
+  readonly settled: ReadonlySet<string>;
+  readonly request: GraphControlRequest;
+  readonly principal: GraphControlPrincipal;
+  /** The requests this command's deadline sweep expired, in this transaction. */
+  readonly expiredApprovals: readonly ApprovalRequestRecord[];
+}
+
+/**
+ * Apply ONE approval command, in the transaction the caller already opened.
+ *
+ * THREE COMMANDS, ONE ROW, ONE RULE (see `./approval.ts` for why they are part of
+ * the closed control vocabulary rather than a second authority):
+ *
+ * - `approval-request` RAISES the durable pause. It resolves the node's current
+ *   in-flight attempt, refuses a run a trusted command already stopped (a pause on
+ *   a stopped run can never be answered into anything), checks the request's
+ *   approver and deadline, and writes the `pending` row. It does NOT claim the
+ *   run's control fact: the run keeps executing, the attempt keeps its execution
+ *   and its credential, and the ONLY thing that changes is that the attempt can no
+ *   longer settle until the named approver approves. A repeated raise replays the
+ *   persisted request.
+ * - `approve` / `reject` DECIDE the request of that same attempt. The caller must
+ *   be the session the request NAMES as its approver — the declaring principal's
+ *   control authority deliberately does not imply this — and the transition is one
+ *   conditional update of the `pending` row, so the FIRST decision stands, a
+ *   repeat replays, a competing decision is refused with the fact that stands, and
+ *   a decision that arrives after the deadline materializes the expiry durably and
+ *   is refused as `approval-expired`.
+ *
+ * WHAT NO APPROVAL COMMAND DOES: it writes no accepted event, no receipt, no
+ * accepted result and no state advance — approval is CONTROL, not outcome (§3.4) —
+ * and it never launches, cancels or supersedes an execution. The gate it changes
+ * is read by the acceptance core, not by this module.
+ */
+function applyApprovalCommand(ctx: ApprovalCommandContext): GraphControlResult {
+  const { tx, graphId, run, state, settled, request, principal, expiredApprovals } = ctx;
+  // NARROWED ONCE, INTO A CONST. A property access loses its control-flow
+  // narrowing after a call (the call could mutate the object), so the decision
+  // commands are read here — where the early return below still proves the
+  // command is not `approval-request`, and therefore that the next block's
+  // decision writes carry exactly the two decision commands.
+  const command = request.command;
+  const approvals = tx.approvals;
+  if (approvals === undefined) {
+    return refuse(
+      graphId,
+      "approval-unavailable",
+      "$.command",
+      "graph-control refused [approval-unavailable]: this substrate holds no approval " +
+        "records, so command " +
+        JSON.stringify(request.command) +
+        " was not applied — a pause that cannot be stored is not a pause, and nothing was " +
+        "written",
+    );
+  }
+  const runs = tx.runs;
+  if (runs === undefined) {
+    return refuse(
+      graphId,
+      "run-state-unreadable",
+      "$.graph_id",
+      "graph-control refused [run-state-unreadable]: this substrate holds no run surface, " +
+        "so the run an approval belongs to cannot be established and nothing was written",
+    );
+  }
+  const decidedBy = principalOf(principal);
+
+  if (request.command === "approval-request") {
+    // A RAISE MUST NAME WORK THAT IS OWED: a pause is only meaningful on an
+    // in-flight attempt, so the STRICT resolution applies here.
+    const target = resolveNodeTarget({
+      graphId,
+      state,
+      settled,
+      nodeId: request.nodeId,
+      attemptId: request.attemptId,
+      command,
+    });
+    if (target.kind === "refused") return target.result;
+    const spec = request.approval;
+    if (spec === undefined) {
+      return refuse(
+        graphId,
+        "approval-request-malformed",
+        "$.approval",
+        "graph-control refused [approval-request-malformed]: an approval request must carry " +
+          "the session that may decide it and the deadline it expires at, and this call " +
+          "carried neither — a request no decision could legitimately resolve is a strand, " +
+          "so nothing was written",
+      );
+    }
+    const problem = approvalSpecProblem(spec, request.at);
+    if (problem !== undefined) {
+      return refuse(
+        graphId,
+        "approval-request-malformed",
+        "$.approval",
+        "graph-control refused [approval-request-malformed]: " + problem + " — nothing was written",
+      );
+    }
+    // A STOPPED RUN CANNOT BE PAUSED. The stop already refuses every settlement, so
+    // a request on it could only ever expire; the honest answer is the stop.
+    const stopped = runs.readRunControlOf(graphId, run.runId);
+    if (stopped !== undefined) {
+      return refuse(
+        graphId,
+        "run-stopped",
+        "$.graph_id",
+        "graph-control refused [run-stopped]: run " +
+          JSON.stringify(run.runId) +
+          " was already stopped by the trusted control command " +
+          JSON.stringify(stopped.command) +
+          " (" +
+          stopped.reason +
+          "), so an approval request would pause work that can no longer proceed — nothing " +
+          "was written",
+      );
+    }
+    const raised = approvals.raiseApprovalRequest(
+      Object.freeze({
+        graphId,
+        runId: run.runId,
+        nodeId: target.nodeId,
+        attemptId: target.attemptId,
+        status: "pending" as const,
+        reason: request.reason,
+        requestedAt: request.at,
+        ...(decidedBy === undefined ? {} : { requestedBy: decidedBy }),
+        approverSessionId: spec.approverSessionId,
+        expiresAt: spec.expiresAt,
+      }),
+    );
+    if (raised.kind === "settled") {
+      return refuse(
+        graphId,
+        "attempt-already-settled",
+        "$.node_id",
+        "graph-control refused [attempt-already-settled]: node " +
+          JSON.stringify(target.nodeId) +
+          " attempt " +
+          JSON.stringify(target.attemptId) +
+          " settled through the acceptance core while this request was being raised, so it " +
+          "is not paused — a settled attempt's result is immutable and nothing was written",
+      );
+    }
+    // THE DECISION ROW is the audit half of the pause: the request row carries the
+    // deadline and the named approver, and this row carries WHO raised it, when and
+    // why. It is written only after the request row landed, so the two facts commit
+    // together or not at all.
+    const written = runs.writeControlDecision({
+      decision: Object.freeze({
+        graphId,
+        runId: run.runId,
+        nodeId: target.nodeId,
+        attemptId: target.attemptId,
+        command: "approval-request",
+        reason: request.reason,
+        decidedAt: request.at,
+        ...(decidedBy === undefined ? {} : { decidedBy }),
+      }),
+    });
+    if (written.kind !== "recorded" && written.kind !== "replayed") {
+      throw new Error(
+        "graph-control: the approval request of attempt " +
+          JSON.stringify(target.attemptId) +
+          " landed but its control decision did not (" +
+          written.kind +
+          ") — the transaction is rolled back so no half-written pause survives",
+      );
+    }
+    return Object.freeze({
+      kind: "applied" as const,
+      graphId,
+      runId: run.runId,
+      command: request.command,
+      scope: "attempt" as const,
+      minted: Object.freeze([]),
+      decided: Object.freeze([
+        Object.freeze({
+          nodeId: target.nodeId,
+          attemptId: target.attemptId,
+          decision: written.decision,
+          replayed: raised.kind === "replayed" || written.kind === "replayed",
+        }),
+      ]),
+      runControl: runs.readRunControlOf(graphId, run.runId),
+      skipped: Object.freeze([]),
+      approval: Object.freeze({
+        nodeId: target.nodeId,
+        attemptId: target.attemptId,
+        request: raised.request,
+        replayed: raised.kind === "replayed",
+      }),
+      expiredApprovals,
+      unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
+      unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
+    });
+  }
+
+  // ── approve / reject ──────────────────────────────────────────────────────
+  // THE REQUEST ROW IS THE AUTHORITY, so the attempt is resolved WITHOUT the
+  // in-flight requirement: a request that already stands approved answers a
+  // repeat with the replay even after the attempt settled through that very
+  // approval, and the decision never re-labels the attempt.
+  const target = resolveNodeTarget({
+    graphId,
+    state,
+    settled,
+    nodeId: request.nodeId,
+    attemptId: request.attemptId,
+    command,
+    requireInFlight: false,
+  });
+  if (target.kind === "refused") return target.result;
+  const existing = approvals.readApprovalRequest(graphId, target.attemptId);
+  if (existing === undefined) {
+    return refuse(
+      graphId,
+      "approval-absent",
+      "$.node_id",
+      "graph-control refused [approval-absent]: node " +
+        JSON.stringify(target.nodeId) +
+        " attempt " +
+        JSON.stringify(target.attemptId) +
+        " carries no approval request, so " +
+        JSON.stringify(request.command) +
+        " has nothing to decide — raise one first with an 'approval-request' command",
+    );
+  }
+  if (existing.approverSessionId !== principal.sessionId) {
+    return refuse(
+      graphId,
+      "approval-not-authorized",
+      "$.principal",
+      "graph-control refused [approval-not-authorized]: the caller is session " +
+        JSON.stringify(principal.sessionId) +
+        " while the approval request of node " +
+        JSON.stringify(target.nodeId) +
+        " attempt " +
+        JSON.stringify(target.attemptId) +
+        " names " +
+        JSON.stringify(existing.approverSessionId) +
+        " as the ONLY session that may decide it — the declaring principal's control " +
+        "authority does not imply approval authority, and nothing was written",
+    );
+  }
+  if (decidedBy === undefined) {
+    return refuse(
+      graphId,
+      "control-principal-absent",
+      "$.principal",
+      "graph-control refused [control-principal-absent]: the call carries no session " +
+        "attribution, so it cannot be the request's named approver and nothing was written",
+    );
+  }
+  // TS NARROWING IS RESTORED HERE: the block above returned for `approval-request`,
+  // and `command` is a const, so the decision commands are exactly these two.
+  const decisionCommand: "approve" | "reject" =
+    command === "approve" ? "approve" : "reject";
+  const decided = approvals.decideApprovalRequest(
+    Object.freeze({
+      graphId,
+      runId: run.runId,
+      nodeId: target.nodeId,
+      attemptId: target.attemptId,
+      command: decisionCommand,
+      reason: request.reason,
+      decidedAt: request.at,
+      decidedBy,
+    }),
+  );
+  if (decided.kind === "absent") {
+    return refuse(
+      graphId,
+      "approval-absent",
+      "$.node_id",
+      "graph-control refused [approval-absent]: the approval request of attempt " +
+        JSON.stringify(target.attemptId) +
+        " disappeared before it could be decided, so nothing was written",
+    );
+  }
+  if (decided.kind === "expired") {
+    return refuse(
+      graphId,
+      "approval-expired",
+      "$.node_id",
+      "graph-control refused [approval-expired]: the approval request of node " +
+        JSON.stringify(target.nodeId) +
+        " attempt " +
+        JSON.stringify(target.attemptId) +
+        " reached its deadline " +
+        String(decided.request.expiresAt) +
+        " before this " +
+        JSON.stringify(request.command) +
+        " arrived, so the request is durably EXPIRED (" +
+        String(decided.request.decisionReason ?? "") +
+        ") and an expired request is never approved afterwards — the attempt cannot settle " +
+        "unless the trusted path retries the node or cancels the run",
+    );
+  }
+  if (decided.kind === "conflict") {
+    return refuse(
+      graphId,
+      "approval-already-decided",
+      "$.node_id",
+      "graph-control refused [approval-already-decided]: the approval request of node " +
+        JSON.stringify(target.nodeId) +
+        " attempt " +
+        JSON.stringify(target.attemptId) +
+        " already stands " +
+        JSON.stringify(decided.request.status) +
+        " (" +
+        String(decided.request.decisionReason ?? "") +
+        ", decided at " +
+        String(decided.request.decidedAt ?? 0) +
+        " by " +
+        JSON.stringify(decided.request.decidedBy?.sessionId ?? "the deadline") +
+        "), so " +
+        JSON.stringify(request.command) +
+        " is not recorded over it — one request carries exactly one answer and nothing was " +
+        "written",
+    );
+  }
+  // `decided` or `replayed`: the row now stands at the requested decision. The
+  // control decision row is the audit half and is written only now, so a refused
+  // command never leaves a decision behind.
+  const written = runs.writeControlDecision({
+    decision: Object.freeze({
+      graphId,
+      runId: run.runId,
+      nodeId: target.nodeId,
+      attemptId: target.attemptId,
+      command: request.command,
+      reason: request.reason,
+      decidedAt: decided.request.decidedAt ?? request.at,
+      decidedBy,
+    }),
+  });
+  if (written.kind !== "recorded" && written.kind !== "replayed") {
+    throw new Error(
+      "graph-control: approval " +
+        JSON.stringify(request.command) +
+        " of attempt " +
+        JSON.stringify(target.attemptId) +
+        " landed but its control decision did not (" +
+        written.kind +
+        ") — the transaction is rolled back so no half-written decision survives",
+    );
+  }
+  return Object.freeze({
+    kind: "applied" as const,
+    graphId,
+    runId: run.runId,
+    command: request.command,
+    scope: "attempt" as const,
+    minted: Object.freeze([]),
+    decided: Object.freeze([
+      Object.freeze({
+        nodeId: target.nodeId,
+        attemptId: target.attemptId,
+        decision: written.decision,
+        replayed: decided.kind === "replayed" || written.kind === "replayed",
+      }),
+    ]),
+    runControl: runs.readRunControlOf(graphId, run.runId),
+    skipped: Object.freeze([]),
+    approval: Object.freeze({
+      nodeId: target.nodeId,
+      attemptId: target.attemptId,
+      request: decided.request,
+      replayed: decided.kind === "replayed",
+    }),
+    expiredApprovals,
+    unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
+    unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
   });
 }
 
@@ -963,6 +1608,8 @@ interface RetryCommandContext {
   readonly settled: ReadonlySet<string>;
   readonly request: GraphControlRequest;
   readonly principal: GraphControlPrincipal;
+  /** The requests this command's deadline sweep expired, in this transaction. */
+  readonly expiredApprovals: readonly ApprovalRequestRecord[];
 }
 
 /**
@@ -1003,7 +1650,7 @@ interface RetryCommandContext {
  *   run's control fact is deliberately not claimed.
  */
 function applyRetryCommand(ctx: RetryCommandContext): GraphControlResult {
-  const { tx, graphId, plan, run, state, settled, request, principal } = ctx;
+  const { tx, graphId, plan, run, state, settled, request, principal, expiredApprovals } = ctx;
   const runs = tx.runs;
   if (runs === undefined) {
     // Unreachable: the run was read through this surface above.
@@ -1353,6 +2000,7 @@ function applyRetryCommand(ctx: RetryCommandContext): GraphControlResult {
     ]),
     runControl: written.runControl,
     skipped: Object.freeze([]),
+    expiredApprovals: ctx.expiredApprovals,
     // THE SUPERSEDED ATTEMPT'S WORK STAYS VISIBLE. The report is computed over
     // the state this command read, so the attempt it just replaced is still named
     // with its unsettled effect and any unconfirmed execution: a retry never
@@ -1418,6 +2066,7 @@ function replayedRetry(
     ]),
     runControl: tx.runs?.readRunControlOf(graphId, run.runId),
     skipped: Object.freeze([]),
+    expiredApprovals: ctx.expiredApprovals,
     unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
     unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
   });
@@ -1551,6 +2200,7 @@ function orderReexecution(
     decided: Object.freeze([]),
     runControl: runs.readRunControlOf(graphId, run.runId),
     skipped: Object.freeze([]),
+    expiredApprovals: ctx.expiredApprovals,
     reexecution: Object.freeze({
       fromRunId: run.runId,
       order,

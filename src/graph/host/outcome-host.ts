@@ -188,7 +188,8 @@ import {
 } from "./execution-index.ts";
 import { HostCredentialVault } from "./credential-vault.ts";
 import { HostInvocationOrigins } from "./invocation-origins.ts";
-import { GraphStore } from "../store/graph-store.ts";
+import { APPROVAL_DEADLINE_REASON, GraphStore } from "../store/graph-store.ts";
+import { readStoreDirectory } from "../store/format.ts";
 import {
   HostDispatchCompletionBridge,
   type HostCompletionAttempt,
@@ -584,6 +585,21 @@ export interface OutcomeCancelDeliveryOptions {
 }
 
 /**
+ * One approval request the host's boot sweep EXPIRED (P3 item 3).
+ *
+ * CREDENTIAL-FREE and payload-free, like every other host report: it names the
+ * graph, the node, the attempt and the deadline that passed, and nothing else —
+ * the request row itself stays the authority.
+ */
+export interface OutcomeHostExpiredApproval {
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  /** The deadline that had passed when the sweep ran. */
+  readonly expiresAt: number;
+}
+
+/**
  * What a boot sweep over the declared graphs did.
  *
  * A STARTED OR RESUMED GRAPH STILL CARRIES ITS PER-EFFECT DIAGNOSTICS. A
@@ -686,6 +702,15 @@ export interface OutcomeHostRecoveryReport {
    * intent and every unconfirmed execution stay visible; nothing was confirmed.
    */
   readonly cancelBlocked: readonly string[];
+  /**
+   * `graph:node:attempt` for every approval request this sweep EXPIRED (P3 item
+   * 3). THE BOOT IS ONE OF THE DRIVERS OF EXPIRY: a deadline is a durable fact,
+   * and a workspace that restarts after a pause's deadline passed must record
+   * that outcome instead of leaving the row `pending` until someone happens to
+   * issue a control command. Each entry names the row whose status changed, so
+   * the transition is reported rather than applied silently.
+   */
+  readonly expiredApprovals: readonly string[];
   /**
    * `graph:fromRunId->runId` for each graph this sweep RE-EXECUTED as a NEW RUN
    * (P3 item 2): a run-scoped `retry` recorded the trusted order, and this sweep
@@ -1292,6 +1317,76 @@ export class OutcomeHost {
   }
 
   /**
+   * Drive every declared graph's APPROVAL DEADLINES and answer what this call
+   * expired (P3 item 3).
+   *
+   * WHY THE HOST DRIVES IT. A deadline is a durable fact about a request, and the
+   * expiry is the outcome of the pause. The control entry sweeps whenever a
+   * trusted command is applied, but a workspace that simply RESTARTS after a
+   * deadline passed has no command coming: without this call the row would stay
+   * \`pending\` until an operator happened to issue one, and "the request expired"
+   * would depend on someone asking. The boot is therefore a driver too.
+   *
+   * TIME IS THE HOST'S OWN CLOCK INPUT, exactly as it is for every other
+   * settlement: \`at\` defaults to {@link OutcomeHostOptions.clock} and is never read
+   * anywhere else in this method.
+   *
+   * IT CREATES NOTHING AND READS NOTHING IT DOES NOT OWN. A workspace with no
+   * store (or one this build cannot read) is an EMPTY sweep, not a new store: the
+   * same discipline every other entry applies, because "no store" is not "a
+   * workspace with no pauses". A store the format gate refuses is reported by the
+   * graph inventory the caller already reads, never by this method.
+   */
+  sweepApprovalDeadlines(
+    at: number = this.clock(),
+  ): readonly OutcomeHostExpiredApproval[] {
+    this.assertOpen();
+    if (!Number.isSafeInteger(at) || at < 0) return Object.freeze([]);
+    // MEMORY DURABILITY SHARES THE HOST'S OWN STORE; file durability opens the
+    // workspace's one store, and only when it really is one.
+    let store: GraphStore;
+    let owned = false;
+    if (this.sharedStore !== undefined) {
+      store = this.sharedStore;
+    } else {
+      const reading = readStoreDirectory(this.storeRoot);
+      if (reading.kind !== "store" || reading.empty) return Object.freeze([]);
+      try {
+        store = GraphStore.openFile(this.storeRoot);
+      } catch {
+        // A store this build cannot open is the INVENTORY's refusal to report
+        // (it names the problem); this sweep has nothing it may write.
+        return Object.freeze([]);
+      }
+      owned = true;
+    }
+    try {
+      const inventory = this.declaredGraphInventory();
+      if (inventory.blocked !== undefined) return Object.freeze([]);
+      const expired: OutcomeHostExpiredApproval[] = [];
+      for (const graphId of inventory.graphIds) {
+        for (const row of store.approvals.expireDueApprovals(
+          graphId,
+          at,
+          APPROVAL_DEADLINE_REASON,
+        )) {
+          expired.push(
+            Object.freeze({
+              graphId,
+              nodeId: row.nodeId,
+              attemptId: row.attemptId,
+              expiresAt: row.expiresAt,
+            }),
+          );
+        }
+      }
+      return Object.freeze(expired);
+    } finally {
+      if (owned) store.close();
+    }
+  }
+
+  /**
    * The boot sweep: every graph whose DEFINITION the workspace's store holds gets
    * the same first-execution/resume treatment as {@link startDeclaredGraph}, one
    * graph at a time. The definition row is the sweep's whole inventory — the
@@ -1302,6 +1397,16 @@ export class OutcomeHost {
    */
   async recoverDeclaredGraphs(): Promise<OutcomeHostRecoveryReport> {
     this.assertOpen();
+    // THE APPROVAL DEADLINES ARE DRIVEN BEFORE ANY GRAPH IS TOUCHED (P3 item 3).
+    // A request whose deadline passed while this process was not running is a
+    // decision that can no longer be taken, and the boot is the window that
+    // records it — one row at a time, reported below, never inferred from a
+    // silence. The sweep is idempotent and a request that is not due is
+    // untouched, so a boot that finds nothing to do writes nothing.
+    const expiredApprovals = this.sweepApprovalDeadlines();
+    const expiredReports = expiredApprovals.map(
+      (entry) => entry.graphId + ":" + entry.nodeId + ":" + entry.attemptId,
+    );
     const started: string[] = [];
     const resumed: string[] = [];
     const refused: string[] = [];
@@ -1663,6 +1768,7 @@ export class OutcomeHost {
       // cancellation unless the platform substantiated it.
       cancellations: Object.freeze(cancellations),
       cancelBlocked: Object.freeze(cancelBlocked),
+      expiredApprovals: Object.freeze(expiredReports),
       // WHAT THE SWEEP RE-EXECUTED AS A NEW RUN (P3 item 2). These graphs are in
       // neither `started` nor `resumed`: a NEW run identity carries them, and
       // the run it replaced is over and still readable by its own id.

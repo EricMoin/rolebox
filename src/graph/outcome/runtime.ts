@@ -207,6 +207,7 @@ import type { CompiledPlan } from "../compiler/plan.ts";
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
+  ApprovalRequestRecord,
   GraphStateRecord,
   PendingEffectRecord,
   ReceiptRecord,
@@ -641,7 +642,30 @@ export type OutcomeRuntimeRefusalCode =
    * this call's read and its write. Nothing was written: the caller re-reads the
    * graph and sees the successor that stands.
    */
-  | "reexecution-raced";
+  | "reexecution-raced"
+  /**
+   * The attempt is PAUSED on a trusted approval request that is still `pending`
+   * (P3 item 3). Approval is CONTROL, not an outcome (§3.4): the worker's
+   * submission — including any `approved` field, any claim inside `data`, and
+   * every other byte of it — is not read as an approval, and nothing was
+   * accepted. The refusal names the request, the session that must decide it and
+   * the deadline it expires at; the repair is that session's decision through
+   * the trusted control entry.
+   */
+  | "approval-pending"
+  /**
+   * The attempt's approval request was REJECTED (P3 item 3): the pause was
+   * answered with a no, so the attempt can never settle and nothing was accepted.
+   * A rejection is terminal — no later approval rewrites it.
+   */
+  | "approval-rejected"
+  /**
+   * The attempt's approval request EXPIRED (P3 item 3): the deadline passed
+   * before a decision was recorded, and the expiry is itself the durable
+   * outcome. An expired request is never approved afterwards, so this attempt
+   * cannot settle; the trusted repair is a retry or a cancellation of the run.
+   */
+  | "approval-expired";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -2057,6 +2081,18 @@ export class OutcomeGraphRuntime {
       hostCompletion,
     );
     if ("refusal" in identity) return refused([identity.refusal]);
+    // AN ATTEMPT PAUSED ON A TRUSTED APPROVAL CANNOT SETTLE (P3 item 3). The
+    // durable request row is the ONLY source of this fact — no field of the
+    // submission is read, so an `approved` flag inside the payload reaches
+    // nothing. The check runs AFTER the attempt is resolved (the request is
+    // keyed by attempt) and BEFORE the declared gates are evaluated, so a paused
+    // attempt costs no validation work. It is NOT the guarantee: validation and
+    // the progress projection run outside the acceptance transaction, so the
+    // ledger's own guarded INSERT re-reads the same row inside it (verdict
+    // `approval-blocked`) and whichever of a raising command and an acceptance
+    // commits first is the fact that stands.
+    const paused = this.ledger.approvals?.blockingApproval(this.graphId, identity.attemptId);
+    if (paused !== undefined) return refused([approvalBlockRefusal(paused)]);
 
     const submission = {
       plan: this.plan,
@@ -2151,6 +2187,17 @@ export class OutcomeGraphRuntime {
     // `control-stopped`, never a settlement.
     if (verdict.kind === "controlled") {
       return refused([this.controlStopRefusal(verdict.control)]);
+    }
+    // AN ATTEMPT PAUSED ON A TRUSTED APPROVAL ACCEPTS NOTHING (P3 item 3). The
+    // ledger's own guard refused the batch because the attempt carries an
+    // approval request whose status is not `approved` — or because a raising
+    // command committed while this submission was being validated — so nothing
+    // was accepted and the request is answered by name. This is the INVERSE half
+    // of the rule the fast path below applies before validation: whichever of the
+    // raising command and the acceptance COMMITS first is the fact that stands,
+    // and no field of the submission is consulted either way.
+    if (verdict.kind === "approval-blocked") {
+      return refused([approvalBlockRefusal(verdict.request)]);
     }
     // A SUPERSEDED ATTEMPT ACCEPTS NOTHING (P3 item 2, the retry). The ledger's
     // own guard refused the batch because a trusted retry replaced this attempt
@@ -4752,6 +4799,60 @@ function controlledInFlightRefusals(
     );
   });
   return Object.freeze(refusals);
+}
+
+
+/**
+ * The named refusal for one attempt paused on a trusted approval request (P3 item 3).
+ *
+ * ONE owner of the mapping from the request's own status onto the runtime's closed
+ * refusal vocabulary, so the fast path and the ledger verdict answer in the same
+ * words: `pending` → `approval-pending`, `rejected` → `approval-rejected`, and
+ * anything else that is not `approved` → `approval-expired` (the status vocabulary
+ * has exactly four members and `approved` never reaches here).
+ *
+ * The message names the ONLY session that can decide the request and says in so many
+ * words that no submitted payload can: the gate reads the durable row, not the
+ * submission, which is the whole point of separating control from outcome (§3.4).
+ */
+function approvalBlockRefusal(request: ApprovalRequestRecord): OutcomeRuntimeRefusal {
+  const code =
+    request.status === "pending"
+      ? ("approval-pending" as const)
+      : request.status === "rejected"
+        ? ("approval-rejected" as const)
+        : ("approval-expired" as const);
+  const state =
+    code === "approval-pending"
+      ? "is still PENDING"
+      : code === "approval-rejected"
+        ? "was REJECTED"
+        : "EXPIRED";
+  return {
+    code,
+    path: "$.attempt_id",
+    message:
+      "outcome-runtime: attempt " +
+      JSON.stringify(request.attemptId) +
+      " of node " +
+      JSON.stringify(request.nodeId) +
+      " in graph " +
+      JSON.stringify(request.graphId) +
+      " is PAUSED on a trusted approval request that " +
+      state +
+      " (raised at " +
+      String(request.requestedAt) +
+      ", deadline " +
+      String(request.expiresAt) +
+      ", reason " +
+      JSON.stringify(request.reason) +
+      "), so nothing was accepted: no receipt, no accepted event, no accepted result " +
+      "and no state advance was written. Approval is CONTROL, not an outcome — no field " +
+      "of a submission (an `approved` flag, a claim inside `data`, any other content) " +
+      "can satisfy it — and only session " +
+      JSON.stringify(request.approverSessionId) +
+      " can decide it through the trusted control entry",
+  };
 }
 
 /**

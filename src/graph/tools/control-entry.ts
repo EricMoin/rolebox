@@ -49,6 +49,21 @@ export interface GraphControlEntryArgs {
   readonly node_id?: string;
   readonly attempt_id?: string;
   readonly reason: string;
+  /**
+   * The ONLY session that may decide this approval request (P3 item 3).
+   * REQUIRED for `approval-request`: the declaring principal raises the pause and
+   * NAMES who may answer it, so its own control authority never implies approval
+   * authority. Never read from a worker's submission, and ignored by every other
+   * command.
+   */
+  readonly approver_session_id?: string;
+  /**
+   * The epoch-millisecond instant the request stops being answerable at (P3 item
+   * 3). REQUIRED for `approval-request`: a pause with no deadline is a strand, and
+   * a deadline that has already passed is refused rather than stored. Ignored by
+   * every other command.
+   */
+  readonly expires_at?: number;
 }
 
 /** What the entry needs to reach the workspace's one store. */
@@ -161,6 +176,18 @@ export function runGraphControlEntry(
               ...(agent === undefined || agent.length === 0 ? {} : { agentId: agent }),
             }),
       at: deps.now ?? Date.now(),
+      // WHAT AN APPROVAL REQUEST MUST CARRY. Passed through verbatim, never
+      // inferred: no default approver, no default deadline. The service refuses
+      // a raise that lacks either (or names a deadline already past) by name,
+      // so "omitted" can never become "the declarer may decide".
+      ...(args.approver_session_id === undefined && args.expires_at === undefined
+        ? {}
+        : {
+            approval: Object.freeze({
+              approverSessionId: args.approver_session_id ?? "",
+              expiresAt: args.expires_at ?? 0,
+            }),
+          }),
       ...(deps.credentialIsolation === undefined
         ? {}
         : {

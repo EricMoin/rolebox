@@ -87,8 +87,16 @@
  * key gains the command so a `retry` can be recorded beside the fact it
  * supersedes. Same rule, same answer: refused by name, never widened, never
  * migrated (plan §3.6).
+ *
+ * VERSION 5 ADDS THE DURABLE APPROVAL REQUESTS (P3 item 3). A version-4 file
+ * holds no `graph_approval_requests` row, so it cannot answer "is this attempt
+ * paused on a trusted approval request, and was it decided?" — reading it as
+ * this build's store would answer *no request* for an attempt a previous
+ * process paused, which is exactly the "a payload the pause was meant to hold
+ * back is accepted" failure §3.4 forbids. Same rule, same answer: refused by
+ * name, never widened, never migrated (plan §3.6).
  */
-export const LEDGER_FORMAT_VERSION = 4;
+export const LEDGER_FORMAT_VERSION = 5;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 
@@ -244,11 +252,19 @@ export interface GraphStateRecord {
  * The lifecycle/control commands this format can RECORD.
  *
  * The durable vocabulary is closed and spelled here (a SQL CHECK cannot import
- * a TypeScript union), and it is the same five commands the domain's
+ * a TypeScript union), and it is the same eight commands the domain's
  * `ControlCommand` names (`src/graph/domain/model.ts`). None of them is a
- * business outcome: a failure, a cancellation, a timeout, a retry and a budget
- * stop are decided by the trusted control path, never derived from a submitted
- * payload (plan §3.4).
+ * business outcome: a failure, a cancellation, a timeout, a retry, a budget
+ * stop, an approval request and the two approval decisions are decided by the
+ * trusted control path, never derived from a submitted payload (plan §3.4).
+ *
+ * WHY THE APPROVAL COMMANDS ARE PART OF THIS VOCABULARY (P3 item 3). Approval
+ * is a TRUSTED LIFECYCLE FACT — a pause and the decision that answers it — and
+ * the alternative (a second table with its own permission rule, its own
+ * idempotency rule and its own writer) is exactly the second authority §3.1
+ * forbids. Keeping them here means one permission model, one decision stream
+ * and one transaction: the pause is recorded beside the run it pauses, and the
+ * decision is a conditional transition of the request row.
  *
  * A command being SPELLABLE is not a promise that this build applies it: the
  * control application refuses a command whose own semantics have not been
@@ -259,7 +275,13 @@ export type ControlCommandName =
   | "cancel"
   | "timeout"
   | "retry"
-  | "budget-stop";
+  | "budget-stop"
+  /** Raise a durable approval request: the pause on one node's attempt. */
+  | "approval-request"
+  /** Resolve a pending request in the affirmative: the only status that opens the gate. */
+  | "approve"
+  /** Resolve a pending request in the negative: a terminal refusal. */
+  | "reject";
 
 /** The control commands this format records, in canonical order. */
 export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freeze([
@@ -268,6 +290,9 @@ export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freez
   "timeout",
   "retry",
   "budget-stop",
+  "approval-request",
+  "approve",
+  "reject",
 ]);
 
 /**
@@ -490,6 +515,179 @@ export type RunControlWriteResult =
       readonly runControl: RunControlRecord | undefined;
     };
 
+// ── Trusted approval (P3 item 3) ────────────────────────────────────────────
+
+/**
+ * The lifecycle status of one durable approval request.
+ *
+ * `pending` is the ONLY non-terminal status: the node's attempt is paused and
+ * nothing but a recorded decision moves it. `approved` is the only status that
+ * OPENS the gate (an accepted submission may settle the attempt afterwards);
+ * `rejected` and `expired` are terminal refusals — the pause was answered, and
+ * the answer was no — so a late approval can never rewrite one of them.
+ */
+export type ApprovalRequestStatus = "pending" | "approved" | "rejected" | "expired";
+
+/**
+ * One durable human-approval request and its trusted decision (P3 item 3).
+ *
+ * Owns: the paused node, run and ATTEMPT, the time the pause was raised, the
+ * ONLY session whose decision resolves it, the deadline it expires at, and the
+ * terminal decision with its approver, time and reason. Keyed by the attempt,
+ * so ONE attempt carries at most one approval fact — a second request for the
+ * same attempt replays the first, and a decided request is never re-decided.
+ *
+ * WHY THE APPROVER IS NAMED HERE. The subject that may RAISE a request (the
+ * graph's declaring principal) is not thereby the subject that may DECIDE it:
+ * the requester names the approver session explicitly, and a decision that
+ * arrives from any other session is refused by name. A worker's own `approved`
+ * field, a claim in `data`, and any other submitted content are not read at
+ * all — the gate reads THIS row, and the row carries no field a submission can
+ * reach (plan §3.4).
+ *
+ * WHY A DEADLINE IS PART OF THE RECORD. A pause with no deadline is a strand:
+ * the plan requires expiry to be a real, deterministically recorded outcome, and
+ * the only way it can be deterministic is for the record itself to say WHEN the
+ * request stops being answerable. Expiry is measured against `expiresAt` and an
+ * explicit `at` input, never a clock read inside the protocol, so the same
+ * store replays the same transitions.
+ */
+export interface ApprovalRequestRecord {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly status: ApprovalRequestStatus;
+  /** Why the pause was raised. Never overwritten by the decision. */
+  readonly reason: string;
+  /** Epoch milliseconds the pause was recorded at. */
+  readonly requestedAt: number;
+  /** The trusted principal that raised it, when the host attributed one. */
+  readonly requestedBy?: ControlPrincipalRecord;
+  /**
+   * The ONE session whose decision resolves this request. The requester names
+   * it; the control path compares the PLATFORM-attributed session of the
+   * deciding call against it and refuses every other session by name.
+   */
+  readonly approverSessionId: string;
+  /** Epoch milliseconds this request stops being answerable at. */
+  readonly expiresAt: number;
+  /** The approver that decided, present exactly once the request is decided. */
+  readonly decidedBy?: ControlPrincipalRecord;
+  /** Epoch milliseconds the decision was taken at, when decided. */
+  readonly decidedAt?: number;
+  /** Why the request was approved, rejected or expired. */
+  readonly decisionReason?: string;
+}
+
+/** The verdict of raising one approval request. */
+export type ApprovalRaiseResult =
+  | { readonly kind: "raised"; readonly request: ApprovalRequestRecord }
+  /** The same request is already recorded; nothing was written. */
+  | { readonly kind: "replayed"; readonly request: ApprovalRequestRecord }
+  /**
+   * The attempt already has an ACCEPTED EVENT, so it cannot be paused: the
+   * check is part of the raising INSERT itself (a conditional `INSERT ... WHERE
+   * NOT EXISTS (accepted event)`), so a request and an acceptance can never both
+   * land for one attempt, whichever commits first.
+   */
+  | { readonly kind: "settled"; readonly attemptId: string };
+
+/** The two commands that RESOLVE an approval request. */
+export type ApprovalDecisionCommand = "approve" | "reject";
+
+/** One trusted decision a named approver asks to record. */
+export interface ApprovalDecisionWrite {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly command: ApprovalDecisionCommand;
+  readonly reason: string;
+  /** Epoch milliseconds, supplied by the caller. */
+  readonly decidedAt: number;
+  /** The approver, as the platform attributed the deciding call. */
+  readonly decidedBy: ControlPrincipalRecord;
+}
+
+/**
+ * The verdict of one approval decision.
+ *
+ * - `decided` — the request was `pending` and this call's decision is what now
+ *   stands.
+ * - `replayed` — the request already carries EXACTLY this decision: nothing was
+ *   written, and the persisted row is returned. A repeated approval is a no-op,
+ *   never a second decision.
+ * - `expired` — the request was still `pending` but its deadline had passed:
+ *   THIS call materialized the expiry durably (status `expired`, decided at the
+ *   call's own `at`) and the approval or rejection is refused. Expiry is the
+ *   fact that stands, and an expired request is never approved afterwards.
+ * - `conflict` — the request already carries a DIFFERENT terminal status
+ *   (rejected vs approved, or either after an expiry): nothing was written and
+ *   the standing decision is returned.
+ * - `absent` — no request exists for that attempt: there is nothing to decide.
+ */
+export type ApprovalDecideResult =
+  | { readonly kind: "decided"; readonly request: ApprovalRequestRecord }
+  | { readonly kind: "replayed"; readonly request: ApprovalRequestRecord }
+  | { readonly kind: "expired"; readonly request: ApprovalRequestRecord }
+  | { readonly kind: "conflict"; readonly request: ApprovalRequestRecord }
+  | { readonly kind: "absent" };
+
+/**
+ * The TRUSTED-APPROVAL surface of a substrate.
+ *
+ * OPTIONAL on the transaction surface (`approvals` below) for the same reason
+ * the control surface is: a substrate that cannot hold an approval request
+ * cannot have one, and the run path reads NO pause from it — while the control
+ * entry refuses by name, because a command it cannot record must not look
+ * applied. The shipped store implements it.
+ */
+export interface ApprovalLedger {
+  /** One attempt's request, or `undefined`. Inside a tx, its own uncommitted row. */
+  readApprovalRequest(graphId: string, attemptId: string): ApprovalRequestRecord | undefined;
+  /**
+   * Every request of ONE RUN (the graph's current run when `runId` is
+   * omitted), in raise order.
+   */
+  approvalRequestsOf(graphId: string, runId?: string): readonly ApprovalRequestRecord[];
+  /**
+   * The request that BLOCKS one attempt's acceptance, or `undefined` when the
+   * attempt may settle. Exactly one status opens the gate (`approved`); a
+   * `pending`, `rejected` or `expired` row is a block, and an attempt with no
+   * row at all is not gated — the shipped behavior for every graph that raises
+   * no request.
+   */
+  blockingApproval(graphId: string, attemptId: string): ApprovalRequestRecord | undefined;
+  /** Raise one pending request; see {@link ApprovalRaiseResult}. */
+  raiseApprovalRequest(record: ApprovalRequestRecord): ApprovalRaiseResult;
+  /** Apply one trusted decision to a `pending` request; see {@link ApprovalDecideResult}. */
+  decideApprovalRequest(write: ApprovalDecisionWrite): ApprovalDecideResult;
+  /**
+   * Materialize the expiry of every `pending` request of one graph whose
+   * deadline has passed at `at`, and return the rows this call expired.
+   *
+   * IDEMPOTENT and terminal: a request is expired at most once, and a request
+   * whose deadline has not passed is untouched. Time is the caller's explicit
+   * input, so a test drives expiry by passing an `at` past the deadline instead
+   * of waiting on a clock.
+   */
+  expireDueApprovals(graphId: string, at: number, reason: string): readonly ApprovalRequestRecord[];
+  /**
+   * Expire every still-`pending` request of ONE RUN, whatever its deadline.
+   *
+   * Called INSIDE the transaction that records a run-stopping command: a stopped
+   * run's pause is moot, and leaving it `pending` would let a later approval
+   * read as a live decision about a run that can no longer settle anything.
+   */
+  expireRunApprovals(
+    graphId: string,
+    runId: string,
+    at: number,
+    reason: string,
+  ): readonly ApprovalRequestRecord[];
+}
+
 /**
  * The RUN-IDENTITY and TRUSTED-CONTROL surface of a substrate.
  *
@@ -679,6 +877,11 @@ export interface AcceptanceBatch {
  *   the graph's current run, so that run was superseded (P3 item 2,
  *   re-execution): nothing is written. A closed run's attempts accept nothing,
  *   exactly like a controlled run's.
+ * - `approval-blocked` — the attempt is PAUSED on a trusted approval request
+ *   (P3 item 3) whose status is not `approved`: nothing is written. Approval is
+ *   control, not outcome (§3.4), so no field of a submission reaches this gate —
+ *   the check reads the durable request row, and the request row is written only
+ *   by the trusted control path.
  */
 export type CommitResult =
   | { readonly kind: "committed"; readonly receipt: ReceiptRecord }
@@ -741,6 +944,28 @@ export type CommitResult =
        * had a run identity.
        */
       readonly runId: string;
+      readonly reason: string;
+    }
+  | {
+      /**
+       * The ATTEMPT is PAUSED on a trusted approval request that is not
+       * `approved` (P3 item 3): nothing was written.
+       *
+       * APPROVAL IS CONTROL, NOT OUTCOME (§3.4). A worker's submitted payload
+       * cannot satisfy this gate — no field of a submission is read here; the
+       * check reads the durable request row, which only the trusted control path
+       * writes. The check is part of the FIRST statement of the batch write (a
+       * receipt INSERT conditioned on no non-approved request existing for this
+       * attempt), so it decides against the COMMITTED store: a request that
+       * commits while a submission is being validated still wins, and whichever
+       * of a raising command and an acceptance commits first is the fact that
+       * stands. An `approved` row opens the gate; `pending`, `rejected` and
+       * `expired` rows do not, and an attempt with no request at all is not
+       * gated.
+       */
+      readonly kind: "approval-blocked";
+      /** The request that refused this acceptance. */
+      readonly request: ApprovalRequestRecord;
       readonly reason: string;
     };
 
@@ -868,6 +1093,17 @@ export interface AcceptanceLedgerTx {
    * store implements it; a focused test double need not.
    */
   readonly runs?: RunControlLedger;
+  /**
+   * The trusted-approval records of this substrate, or `undefined` when it
+   * holds none.
+   *
+   * OPTIONAL, AND ABSENT IS NOT NEUTRAL — the same rule as {@link runs}. A
+   * substrate without this surface cannot hold an approval request, so the
+   * acceptance core reads NO pause from it (there is nothing to read); the
+   * shipped store implements it, and the control entry refuses a command it
+   * cannot record rather than treating a missing surface as "no request".
+   */
+  readonly approvals?: ApprovalLedger;
 }
 
 /**

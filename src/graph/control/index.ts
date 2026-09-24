@@ -8,8 +8,10 @@
  * turns a lifecycle command into a durable fact, plus the record and refusal
  * vocabulary it answers with. Failure, cancel and timeout (P3 item 1) stop a run;
  * \`retry\` (P3 item 2) supersedes one attempt in place — or, run-scoped, orders a
- * terminal run re-executed as a NEW run. \`budget-stop\` is the one command whose own
- * work package has not landed, and it is refused by name.
+ * terminal run re-executed as a NEW run; \`approval-request\` / \`approve\` /
+ * \`reject\` (P3 item 3) raise and answer the durable pause on one attempt, with
+ * the approval rules in `./approval.ts`. \`budget-stop\` is the one command whose
+ * own work package has not landed, and it is refused by name.
  *
  * WHY IT IS NOT PART OF `outcome/`. §3.4 separates an explicit business result
  * from trusted control. The outcome package owns proposals, acceptance,
@@ -27,6 +29,7 @@
 
 export {
   applyGraphControl,
+  type GraphControlApproval,
   type GraphControlAttemptDecision,
   type GraphControlMintedAttempt,
   type GraphControlPrincipal,
@@ -39,3 +42,9 @@ export {
   type GraphControlSkippedAttempt,
   type GraphControlUnconfirmedExecution,
 } from "./application.ts";
+export {
+  approvalSpecProblem,
+  isApprovalCommand,
+  type ApprovalCommandName,
+  type ApprovalRequestSpec,
+} from "./approval.ts";

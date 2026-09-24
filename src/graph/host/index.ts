@@ -110,6 +110,7 @@ export {
   OutcomeHost,
   bindOutcomeToolInvocation,
   type OutcomeHostDurability,
+  type OutcomeHostExpiredApproval,
   type OutcomeHostInvocation,
   type OutcomeHostOptions,
   type OutcomeHostRecoveryReport,

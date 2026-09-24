@@ -109,17 +109,35 @@ function createGraphControlTool(
       "a competing command is refused rather than applied. Only the session that DECLARED " +
       "the graph may control it; a dispatched worker is refused before this body runs. " +
       "The answer names every still-unsettled effect and every execution the host has not " +
-      "confirmed, so a stopped graph never hides an external task. 'retry' and " +
-      "'budget-stop' are part of the declared vocabulary but their semantics are not " +
-      "implemented in this build and are refused by name.",
+      "confirmed, so a stopped graph never hides an external task. 'retry' supersedes one " +
+      "attempt (or orders a terminal run re-executed). 'approval-request' RAISES a durable " +
+      "approval pause on one node's in-flight attempt: it names the only session that may " +
+      "decide it and the deadline it expires at, and the paused attempt cannot settle until " +
+      "that session approves — a worker's payload, including a field named 'approved', can " +
+      "never substitute for the decision. 'approve'/'reject' record that decision; only the " +
+      "named approver may issue them, a repeat replays, a competing decision is refused, " +
+      "and a decision arriving after the deadline is refused as 'approval-expired'. " +
+      "'budget-stop' is part of the declared vocabulary but its semantics are not " +
+      "implemented in this build and it is refused by name.",
     args: {
       graph_id: z.string().min(1).describe("The declared graph whose run is controlled."),
       command: z
-        .enum(["failure", "cancel", "timeout", "retry", "budget-stop"])
+        .enum([
+          "failure",
+          "cancel",
+          "timeout",
+          "retry",
+          "budget-stop",
+          "approval-request",
+          "approve",
+          "reject",
+        ])
         .describe(
-          "The control command. 'failure', 'timeout' and 'cancel' are applied and " +
-            "recorded durably; 'retry' and 'budget-stop' are refused by name until their " +
-            "own semantics exist. No command is ever inferred from worker data.",
+          "The control command. 'failure', 'timeout', 'cancel', 'retry' and the three " +
+            "approval commands are applied and recorded durably; 'budget-stop' is refused " +
+            "by name until its own semantics exist. No command is ever inferred from worker " +
+            "data, and no worker submission — including a payload field named 'approved' — " +
+            "can satisfy an approval request.",
         ),
       node_id: z
         .string()
@@ -144,6 +162,27 @@ function createGraphControlTool(
         .describe(
           "Why the command is applied. Stored verbatim on the durable decision and " +
             "reported by every later refusal, so it is the human-readable half of the fact.",
+        ),
+      approver_session_id: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "REQUIRED for 'approval-request': the ONLY session whose decision resolves the " +
+            "request. The declaring principal names it explicitly, and the request can only " +
+            "be decided by that session — the declarer's own control authority does not imply " +
+            "approval authority. Ignored by every other command.",
+        ),
+      expires_at: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "REQUIRED for 'approval-request': the epoch-millisecond instant the request stops " +
+            "being answerable at. A request that reaches its deadline is durably EXPIRED and " +
+            "can never be approved afterwards; the deadline is an explicit input, never a " +
+            "clock read by the engine. Ignored by every other command.",
         ),
     },
     async execute(args, context) {

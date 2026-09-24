@@ -72,6 +72,12 @@ import { errorText } from "../../utils/error-text.ts";
 import type {
   AcceptanceLedgerTx,
   AcceptedEventRecord,
+  ApprovalDecideResult,
+  ApprovalDecisionWrite,
+  ApprovalLedger,
+  ApprovalRaiseResult,
+  ApprovalRequestRecord,
+  ApprovalRequestStatus,
   CommitResult,
   ControlCommandName,
   ControlDecisionRecord,
@@ -279,6 +285,7 @@ export class GraphStore {
   private readonly filePath: string;
   private readonly ledger: LedgerTables;
   private readonly runsView: RunControlLedger;
+  private readonly approvalsView: ApprovalLedger;
   private readonly txView: GraphStoreTx;
   private closed = false;
 
@@ -307,6 +314,11 @@ export class GraphStore {
       // The inverse acceptance rule (P3 item 2): an attempt a trusted retry
       // SUPERSEDED accepts nothing, checked in the same boundary as the batch.
       (graphId, attemptId) => this.readSupersedingRetry(graphId, attemptId),
+      // THE APPROVAL GATE, in the same boundary (P3 item 3): an attempt paused
+      // on a request that is not `approved` accepts nothing. The read goes
+      // through THIS store, so the gate sees the row a control command wrote in
+      // the very transaction that is committing the batch.
+      (graphId, attemptId) => this.blockingApproval(graphId, attemptId),
     );
     // THE RUN/CONTROL SURFACE IS ONE OBJECT, bound to this store. It is built
     // before the transaction view because that view hands the SAME object out
@@ -361,6 +373,31 @@ export class GraphStore {
       claimRunControl: (control: RunControlRecord): RunControlRecord | undefined =>
         this.claimRunControl(control),
       lockControlWrite: (graphId: string): void => this.lockControlWrite(graphId),
+    });
+    // THE APPROVAL SURFACE IS ONE OBJECT TOO (P3 item 3), built before the
+    // transaction view because that view hands the SAME object out: a caller
+    // inside a transaction and a caller holding the store address one interface
+    // and one boundary, and the acceptance gate reads the request through the
+    // very rows a raising command wrote in the same transaction.
+    this.approvalsView = Object.freeze({
+      readApprovalRequest: (graphId: string, attemptId: string): ApprovalRequestRecord | undefined =>
+        this.readApprovalRequest(graphId, attemptId),
+      approvalRequestsOf: (graphId: string, runId?: string): readonly ApprovalRequestRecord[] =>
+        this.approvalRequestsOf(graphId, runId),
+      blockingApproval: (graphId: string, attemptId: string): ApprovalRequestRecord | undefined =>
+        this.blockingApproval(graphId, attemptId),
+      raiseApprovalRequest: (record: ApprovalRequestRecord): ApprovalRaiseResult =>
+        this.raiseApprovalRequest(record),
+      decideApprovalRequest: (write: ApprovalDecisionWrite): ApprovalDecideResult =>
+        this.decideApprovalRequest(write),
+      expireDueApprovals: (graphId: string, at: number, reason: string): readonly ApprovalRequestRecord[] =>
+        this.expireDueApprovals(graphId, at, reason),
+      expireRunApprovals: (
+        graphId: string,
+        runId: string,
+        at: number,
+        reason: string,
+      ): readonly ApprovalRequestRecord[] => this.expireRunApprovals(graphId, runId, at, reason),
     });
     this.txView = Object.freeze({
       commitAccepted: (batch: GraphAcceptanceBatch): CommitResult =>
@@ -460,6 +497,7 @@ export class GraphStore {
         this.invocationOriginGraphIds(),
       definitionGraphIds: (): readonly string[] => this.definitionGraphIds(),
       runs: this.runsView,
+      approvals: this.approvalsView,
     });
   }
 
@@ -1662,6 +1700,18 @@ export class GraphStore {
   }
 
   /**
+   * The trusted-approval surface, as the ledger port exposes it (P3 item 3).
+   *
+   * The SAME object the transaction surface hands out, so the acceptance gate, a
+   * control command and a reader all address one boundary — and the gate reads a
+   * row a raising command wrote in the very transaction that is committing.
+   */
+  get approvals(): ApprovalLedger {
+    this.assertOpen("approvals");
+    return this.approvalsView;
+  }
+
+  /**
    * Record one run identity, or return the one already recorded.
    *
    * IDEMPOTENT BY CONSTRUCTION: `ON CONFLICT DO NOTHING` then a read, so two
@@ -2331,6 +2381,340 @@ export class GraphStore {
     });
   }
 
+  // ── Trusted approval (P3 item 3) ───────────────────────────────────────────
+
+  /**
+   * ONE ATTEMPT'S approval request, or `undefined`. Inside a transaction it
+   * reads that transaction's own uncommitted row, which is what makes a
+   * decision and the gate that reads it one boundary.
+   */
+  readApprovalRequest(graphId: string, attemptId: string): ApprovalRequestRecord | undefined {
+    this.assertOpen("readApprovalRequest");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
+                requested_by_session, requested_by_agent, approver_session_id, expires_at,
+                decided_by_session, decided_by_agent, decided_at, decision_reason
+         FROM ${GRAPH_STORE_TABLES.approvalRequests}
+         WHERE graph_id = ? AND attempt_id = ?
+         ORDER BY requested_at, rowid LIMIT 1`,
+      )
+      .get(graphId, attemptId);
+    if (row === undefined || row === null) return undefined;
+    return readApprovalRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.approvalRequests),
+      this.filePath,
+    );
+  }
+
+  /**
+   * Every request of ONE RUN — the graph's CURRENT run when `runId` is omitted,
+   * exactly like {@link controlDecisions} — in raise order.
+   */
+  approvalRequestsOf(graphId: string, runId?: string): readonly ApprovalRequestRecord[] {
+    this.assertOpen("approvalRequestsOf");
+    const scope = runId ?? this.readRun(graphId)?.runId;
+    const rows =
+      scope === undefined
+        ? this.db
+            .query(
+              `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
+                      requested_by_session, requested_by_agent, approver_session_id, expires_at,
+                      decided_by_session, decided_by_agent, decided_at, decision_reason
+               FROM ${GRAPH_STORE_TABLES.approvalRequests}
+               WHERE graph_id = ? ORDER BY requested_at, rowid`,
+            )
+            .all(graphId)
+        : this.db
+            .query(
+              `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
+                      requested_by_session, requested_by_agent, approver_session_id, expires_at,
+                      decided_by_session, decided_by_agent, decided_at, decision_reason
+               FROM ${GRAPH_STORE_TABLES.approvalRequests}
+               WHERE graph_id = ? AND run_id = ? ORDER BY requested_at, rowid`,
+            )
+            .all(graphId, scope);
+    const requests: ApprovalRequestRecord[] = [];
+    for (const row of rows) {
+      requests.push(
+        readApprovalRow(
+          asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.approvalRequests),
+          this.filePath,
+        ),
+      );
+    }
+    return Object.freeze(requests);
+  }
+
+  /**
+   * The request that BLOCKS one attempt's acceptance, or `undefined`.
+   *
+   * The gate is a PURE FUNCTION OF THE PERSISTED STATUS: `approved` opens it,
+   * and `pending` / `rejected` / `expired` hold it. Time is deliberately NOT
+   * part of this read — a deadline that has passed does not open a gate by
+   * itself; only a recorded decision can, and the sweep (or a decision attempt)
+   * is what records the expiry. An attempt with no request is not gated, which
+   * is the shipped behavior for every graph that raises none.
+   */
+  blockingApproval(graphId: string, attemptId: string): ApprovalRequestRecord | undefined {
+    const request = this.readApprovalRequest(graphId, attemptId);
+    if (request === undefined || request.status === "approved") return undefined;
+    return request;
+  }
+
+  /**
+   * Raise one PENDING approval request — the durable pause.
+   *
+   * TWO CONDITIONAL RULES IN THE ONE INSERT, both decided against the COMMITTED
+   * store rather than a value read earlier: the row lands only when the attempt
+   * has NO ACCEPTED EVENT (a settled attempt cannot be paused, and a request and
+   * an acceptance can therefore never both land for one attempt, whichever
+   * commits first) and only when no request exists under the attempt's key (a
+   * repeated raise REPLAYS the persisted request instead of writing a second
+   * one). Being the first statement also takes SQLite's RESERVED lock
+   * immediately, so a racing acceptance WAITS rather than failing a lock
+   * promotion. A row that does not land is CLASSIFIED from the committed store
+   * by the re-read below, never assumed.
+   */
+  raiseApprovalRequest(record: ApprovalRequestRecord): ApprovalRaiseResult {
+    this.assertOpen("raiseApprovalRequest");
+    assertApprovalRequestShape(record);
+    return this.joinOrBegin(() => {
+      this.db.run(
+        `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.approvalRequests}
+           (graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
+            requested_by_session, requested_by_agent, approver_session_id, expires_at)
+         SELECT ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.acceptedEvents}
+           WHERE graph_id = ? AND attempt_id = ?
+         )`,
+        record.graphId,
+        record.runId,
+        record.nodeId,
+        record.attemptId,
+        record.reason,
+        record.requestedAt,
+        record.requestedBy?.sessionId ?? null,
+        record.requestedBy?.agentId ?? null,
+        record.approverSessionId,
+        record.expiresAt,
+        record.graphId,
+        record.attemptId,
+      );
+      const stored = this.readApprovalRequest(record.graphId, record.attemptId);
+      if (stored === undefined) {
+        // NOTHING LANDED AND NO ROW EXISTS: the guard found an accepted event,
+        // so the attempt had already settled when this statement ran.
+        return Object.freeze({ kind: "settled" as const, attemptId: record.attemptId });
+      }
+      if (this.changes() === 0) {
+        return Object.freeze({ kind: "replayed" as const, request: stored });
+      }
+      return Object.freeze({ kind: "raised" as const, request: stored });
+    });
+  }
+
+  /**
+   * Apply one trusted decision to a PENDING request — one conditional UPDATE.
+   *
+   * THE CONDITION IS THE RULE: `WHERE status = 'pending'` makes the FIRST
+   * decision the only one (a decided request is never re-decided), and the
+   * verdict is classified from the row as it stands afterwards: the same
+   * decision replayed, a different terminal status (`conflict`), or a deadline
+   * that had already passed when the decision arrived (`expired`, materialized
+   * by THIS statement so the expiry is durable even though the approval was
+   * refused). An `expired` row is terminal like the other two.
+   */
+  decideApprovalRequest(write: ApprovalDecisionWrite): ApprovalDecideResult {
+    this.assertOpen("decideApprovalRequest");
+    assertApprovalDecisionShape(write);
+    return this.joinOrBegin(() => {
+      const status: ApprovalRequestStatus = write.command === "approve" ? "approved" : "rejected";
+      // THE WRITE LOCK FIRST: this operation reads (does the request exist? is
+      // its deadline past?) and then writes, and a read-then-write promotion is
+      // what SQLite refuses immediately under another connection's write lock.
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.approvalRequests}
+         SET status = status
+         WHERE graph_id = ? AND attempt_id = ?`,
+        write.graphId,
+        write.attemptId,
+      );
+      const existing = this.readApprovalRequest(write.graphId, write.attemptId);
+      if (existing === undefined) return Object.freeze({ kind: "absent" as const });
+      if (existing.status === status) {
+        return Object.freeze({ kind: "replayed" as const, request: existing });
+      }
+      if (existing.status !== "pending") {
+        return Object.freeze({ kind: "conflict" as const, request: existing });
+      }
+      if (existing.expiresAt <= write.decidedAt) {
+        // THE DEADLINE PASSED BEFORE THE DECISION ARRIVED. The expiry is
+        // materialized HERE and now, by the same conditional update the sweep
+        // uses, so an expired request is never approved afterwards and the
+        // outcome is durable even if nothing else ever sweeps.
+        this.db.run(
+          `UPDATE ${GRAPH_STORE_TABLES.approvalRequests}
+           SET status = 'expired', decided_at = ?, decision_reason = ?
+           WHERE graph_id = ? AND attempt_id = ? AND status = 'pending'`,
+          write.decidedAt,
+          APPROVAL_DEADLINE_REASON,
+          write.graphId,
+          write.attemptId,
+        );
+        const expired = this.readApprovalRequest(write.graphId, write.attemptId);
+        if (expired === undefined) {
+          throw new GraphStoreWriteError(
+            "invalid-record",
+            "graph-store: the approval request of attempt " +
+              JSON.stringify(write.attemptId) +
+              " disappeared between the expiry and the read — nothing was recorded",
+          );
+        }
+        return Object.freeze({ kind: "expired" as const, request: expired });
+      }
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.approvalRequests}
+         SET status = ?, decided_by_session = ?, decided_by_agent = ?, decided_at = ?,
+             decision_reason = ?
+         WHERE graph_id = ? AND attempt_id = ? AND status = 'pending'`,
+        status,
+        write.decidedBy.sessionId,
+        write.decidedBy.agentId ?? null,
+        write.decidedAt,
+        write.reason,
+        write.graphId,
+        write.attemptId,
+      );
+      const decided = this.readApprovalRequest(write.graphId, write.attemptId);
+      if (decided === undefined || decided.status !== status) {
+        throw new GraphStoreWriteError(
+          "invalid-record",
+          "graph-store: approval decision " +
+            JSON.stringify(write.command) +
+            " for attempt " +
+            JSON.stringify(write.attemptId) +
+            " did not land although the request was pending — nothing was recorded",
+        );
+      }
+      return Object.freeze({ kind: "decided" as const, request: decided });
+    });
+  }
+
+  /**
+   * Materialize the expiry of every pending request of one GRAPH whose deadline
+   * has passed at `at`, and answer the rows this call expired.
+   *
+   * IDEMPOTENT AND TERMINAL: a request is expired at most once (the conditional
+   * UPDATE only touches `pending` rows), and a request whose deadline has not
+   * passed is untouched. The `at` is the caller's explicit input, so expiry is
+   * reproducible from the call alone and a test drives it by moving `at`, never
+   * by waiting on a clock.
+   */
+  expireDueApprovals(graphId: string, at: number, reason: string): readonly ApprovalRequestRecord[] {
+    this.assertOpen("expireDueApprovals");
+    requireStoreEpoch(at, "approval.at");
+    requireStoreIdentifier(reason, "approval.reason");
+    return this.joinOrBegin(() => {
+      const due = this.approvalRows(graphId, "pending", at);
+      if (due.length === 0) return Object.freeze([]);
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.approvalRequests}
+         SET status = 'expired', decided_at = ?, decision_reason = ?
+         WHERE graph_id = ? AND status = 'pending' AND expires_at <= ?`,
+        at,
+        reason,
+        graphId,
+        at,
+      );
+      const expired: ApprovalRequestRecord[] = [];
+      for (const request of due) {
+        const row = this.readApprovalRequest(graphId, request.attemptId);
+        if (row !== undefined) expired.push(row);
+      }
+      return Object.freeze(expired);
+    });
+  }
+
+  /**
+   * Expire every still-PENDING request of ONE RUN, whatever its deadline.
+   *
+   * The run-stopping commands call this INSIDE their own transaction: a stopped
+   * run's pause can never be answered into a settlement (the run is controlled),
+   * so leaving the row `pending` would let a later approval read as a live
+   * decision about work that can no longer proceed. The stopping principal is
+   * recorded on the expired row, so the reader can tell WHO stopped the run the
+   * pause belonged to.
+   */
+  expireRunApprovals(
+    graphId: string,
+    runId: string,
+    at: number,
+    reason: string,
+  ): readonly ApprovalRequestRecord[] {
+    this.assertOpen("expireRunApprovals");
+    requireStoreIdentifier(runId, "approval.runId");
+    requireStoreEpoch(at, "approval.at");
+    requireStoreIdentifier(reason, "approval.reason");
+    return this.joinOrBegin(() => {
+      const due = this.approvalRows(graphId, "pending", undefined, runId);
+      if (due.length === 0) return Object.freeze([]);
+      this.db.run(
+        `UPDATE ${GRAPH_STORE_TABLES.approvalRequests}
+         SET status = 'expired', decided_at = ?, decision_reason = ?
+         WHERE graph_id = ? AND run_id = ? AND status = 'pending'`,
+        at,
+        reason,
+        graphId,
+        runId,
+      );
+      const expired: ApprovalRequestRecord[] = [];
+      for (const request of due) {
+        const row = this.readApprovalRequest(graphId, request.attemptId);
+        if (row !== undefined) expired.push(row);
+      }
+      return Object.freeze(expired);
+    });
+  }
+
+  /** Pending (and optionally already-due) request rows of one graph. */
+  private approvalRows(
+    graphId: string,
+    status: ApprovalRequestStatus,
+    dueAt?: number,
+    runId?: string,
+  ): readonly ApprovalRequestRecord[] {
+    const rows =
+      dueAt === undefined
+        ? this.db
+            .query(
+              `SELECT attempt_id FROM ${GRAPH_STORE_TABLES.approvalRequests}
+               WHERE graph_id = ? AND status = ?${runId === undefined ? "" : " AND run_id = ?"}
+               ORDER BY requested_at, rowid`,
+            )
+            .all(...(runId === undefined ? [graphId, status] : [graphId, status, runId]))
+        : this.db
+            .query(
+              `SELECT attempt_id FROM ${GRAPH_STORE_TABLES.approvalRequests}
+               WHERE graph_id = ? AND status = ? AND expires_at <= ?${runId === undefined ? "" : " AND run_id = ?"}
+               ORDER BY requested_at, rowid`,
+            )
+            .all(
+              ...(runId === undefined
+                ? [graphId, status, dueAt]
+                : [graphId, status, dueAt, runId]),
+            );
+    const requests: ApprovalRequestRecord[] = [];
+    for (const row of rows) {
+      const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.approvalRequests);
+      const attemptId = readStoreText(entry, "attempt_id", this.filePath, GRAPH_STORE_TABLES.approvalRequests);
+      const request = this.readApprovalRequest(graphId, attemptId);
+      if (request !== undefined) requests.push(request);
+    }
+    return Object.freeze(requests);
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /** Refuse any use of a closed store with a clear, typed error. */
@@ -2465,7 +2849,10 @@ function readControlCommand(
     value === "cancel" ||
     value === "timeout" ||
     value === "retry" ||
-    value === "budget-stop"
+    value === "budget-stop" ||
+    value === "approval-request" ||
+    value === "approve" ||
+    value === "reject"
   ) {
     return value;
   }
@@ -2565,6 +2952,153 @@ function readControlDecisionRow(
     ...(successorAttemptId === undefined ? {} : { successorAttemptId }),
     ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
   });
+}
+
+/**
+ * Read one `graph_approval_requests` row.
+ *
+ * STRICT, like every other row reader here: the status must be one this format
+ * writes, a non-`pending` row MUST carry the decision time and reason and a
+ * `pending` row MUST carry neither (the DDL's CHECKs say so; a hand-edited or
+ * foreign row that disagrees is refused rather than read approximately), and an
+ * `approved` or `rejected` row MUST name the approver that decided it — an
+ * approval with no principal would be a decision nobody took.
+ */
+function readApprovalRow(
+  row: Record<string, unknown>,
+  path: string,
+): ApprovalRequestRecord {
+  const table = GRAPH_STORE_TABLES.approvalRequests;
+  const status = readApprovalStatus(row, path, table);
+  const decidedAt = readOptionalStoreEpoch(row, "decided_at", path, table);
+  const decisionReason = readOptionalStoreText(row, "decision_reason", path, table);
+  const decidedBy = readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table);
+  if (status === "pending") {
+    if (decidedAt !== undefined || decisionReason !== undefined || decidedBy.decidedBy !== undefined) {
+      throw new GraphStoreFormatError(
+        "malformed-row",
+        path,
+        `graph-store: a ${table} row of ${path} is pending yet carries a decision — refusing to read it approximately`,
+        status,
+        GRAPH_STORE_FORMAT_VERSION,
+      );
+    }
+  } else if (decidedAt === undefined || decisionReason === undefined) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} is ${status} with no decision time or reason — refusing to read it approximately`,
+      status,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  if ((status === "approved" || status === "rejected") && decidedBy.decidedBy === undefined) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} is ${status} with no deciding approver — refusing to read it approximately`,
+      status,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  const requestedBy = readDecidedBy(
+    row,
+    "requested_by_session",
+    "requested_by_agent",
+    path,
+    table,
+  );
+  return Object.freeze({
+    graphId: readStoreText(row, "graph_id", path, table),
+    runId: readStoreText(row, "run_id", path, table),
+    nodeId: readStoreText(row, "node_id", path, table),
+    attemptId: readStoreText(row, "attempt_id", path, table),
+    status,
+    reason: readStoreText(row, "reason", path, table),
+    requestedAt: readStoreEpoch(row, "requested_at", path, table),
+    approverSessionId: readStoreText(row, "approver_session_id", path, table),
+    expiresAt: readStoreEpoch(row, "expires_at", path, table),
+    ...(requestedBy.decidedBy === undefined ? {} : { requestedBy: requestedBy.decidedBy }),
+    ...(decidedBy.decidedBy === undefined ? {} : { decidedBy: decidedBy.decidedBy }),
+    ...(decidedAt === undefined ? {} : { decidedAt }),
+    ...(decisionReason === undefined ? {} : { decisionReason }),
+  });
+}
+
+/** Read one approval status, or refuse a value this format does not write. */
+function readApprovalStatus(
+  row: Record<string, unknown>,
+  path: string,
+  table: string,
+): ApprovalRequestStatus {
+  const value = row["status"];
+  if (value === "pending" || value === "approved" || value === "rejected" || value === "expired") {
+    return value;
+  }
+  throw new GraphStoreFormatError(
+    "malformed-row",
+    path,
+    `graph-store: a ${table} row of ${path} carries an approval status of ${describeValue(value)}, which is not one this format records — refusing to read it approximately`,
+    value,
+    GRAPH_STORE_FORMAT_VERSION,
+  );
+}
+
+/**
+ * The reason text one deadline expiry records.
+ *
+ * ONE constant for both drivers — the deadline sweep and a decision that arrives
+ * after the deadline — so the row reads the same whichever path materialized it.
+ * The deadline itself is the row's own `expires_at`, so the text does not repeat
+ * it and cannot go stale against it.
+ */
+export const APPROVAL_DEADLINE_REASON =
+  "the approval deadline passed before a decision was recorded";
+
+/** Refuse an approval request that violates the record model before it is stored. */
+function assertApprovalRequestShape(record: ApprovalRequestRecord): void {
+  requireStoreIdentifier(record.graphId, "approval.graphId");
+  requireStoreIdentifier(record.runId, "approval.runId");
+  requireStoreIdentifier(record.nodeId, "approval.nodeId");
+  requireStoreIdentifier(record.attemptId, "approval.attemptId");
+  requireStoreIdentifier(record.reason, "approval.reason");
+  requireStoreIdentifier(record.approverSessionId, "approval.approverSessionId");
+  requireStoreEpoch(record.requestedAt, "approval.requestedAt");
+  requireStoreEpoch(record.expiresAt, "approval.expiresAt");
+  if (record.status !== "pending") {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: an approval request is RAISED as pending; " +
+        JSON.stringify(record.status) +
+        " is a decision and is written by the decision path, never by the raise",
+    );
+  }
+  assertPrincipalShape(record.requestedBy, "approval.requestedBy");
+}
+
+/** Refuse an approval decision that violates the record model before it is stored. */
+function assertApprovalDecisionShape(write: ApprovalDecisionWrite): void {
+  requireStoreIdentifier(write.graphId, "approval.graphId");
+  requireStoreIdentifier(write.runId, "approval.runId");
+  requireStoreIdentifier(write.nodeId, "approval.nodeId");
+  requireStoreIdentifier(write.attemptId, "approval.attemptId");
+  requireStoreIdentifier(write.reason, "approval.reason");
+  requireStoreEpoch(write.decidedAt, "approval.decidedAt");
+  if (write.command !== "approve" && write.command !== "reject") {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: " +
+        JSON.stringify(write.command) +
+        " is not an approval decision command — only approve and reject resolve a request",
+    );
+  }
+  assertPrincipalShape(write.decidedBy, "approval.decidedBy");
+  if (write.decidedBy === undefined) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: an approval decision without a deciding principal is a decision nobody took, so it is not recorded",
+    );
+  }
 }
 
 /** Read one `graph_run_reexecutions` row. */

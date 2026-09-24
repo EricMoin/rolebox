@@ -38,7 +38,12 @@
  * RUN-SCOPED layout (P3 item 2): a version-3 file keys the graph state, the
  * effects and the runs by GRAPH, which is exactly the one-run-per-graph
  * assumption re-execution makes false, so reading it as this build's store would
- * answer a later run's reader with the earlier run's effects and decisions.
+ * answer a later run's reader with the earlier run's effects and decisions. It
+ * moves to 5 with the DURABLE APPROVAL REQUESTS (P3 item 3): a version-4 file
+ * holds no `graph_approval_requests` row, so reading it as this build's store
+ * would answer "no request" for an attempt a previous process paused — and the
+ * acceptance gate, which reads exactly that row, would accept a submission the
+ * pause was meant to hold back.
  * Every older version is refused as an older format this build registers no
  * migration for (`unsupported`), never widened in place, never downgraded.
  *
@@ -67,8 +72,11 @@
  *   that stopped the run first;
  * - one immutable definition per graph, one run STATE per run, one run identity
  *   per `(graph, run)` with a graph-local `run_seq` whose greatest value is the
- *   CURRENT run, one re-execution decision per terminal run, and one declaring
- *   invocation per graph.
+ *   CURRENT run, one re-execution decision per terminal run, one declaring
+ *   invocation per graph, and ONE APPROVAL REQUEST per `(graph, run, node,
+ *   attempt)` — an attempt carries at most one approval fact, its decision is a
+ *   conditional update of a `pending` row (so a repeated decision replays and a
+ *   competing one conflicts), and the acceptance gate reads exactly that row.
  *
  * Dependency leaf: this module imports only the ledger port (for the shared
  * format identity) and two path/utility helpers; no record model and no driver.
@@ -177,6 +185,8 @@ export const GRAPH_STORE_TABLES = Object.freeze({
   controlDecisions: "graph_control_decisions",
   /** The trusted orders to re-execute a terminal run (P3 item 2). */
   runReexecutions: "graph_run_reexecutions",
+  /** The durable approval requests and their trusted decisions (P3 item 3). */
+  approvalRequests: "graph_approval_requests",
 });
 
 /** The ledger's own table names, as the ledger port's reader knows them. */
@@ -320,7 +330,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      run_seq INTEGER NOT NULL CHECK (run_seq >= 1),
      plan_revision TEXT NOT NULL,
      started_at INTEGER NOT NULL,
-     control_command TEXT CHECK (control_command IS NULL OR control_command IN ('failure', 'cancel', 'timeout', 'retry', 'budget-stop')),
+     control_command TEXT CHECK (control_command IS NULL OR control_command IN ('failure', 'cancel', 'timeout', 'retry', 'budget-stop', 'approval-request', 'approve', 'reject')),
      control_reason TEXT,
      control_decided_at INTEGER,
      control_decided_by_session TEXT,
@@ -346,7 +356,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      run_id TEXT NOT NULL,
      node_id TEXT NOT NULL,
      attempt_id TEXT NOT NULL,
-     command TEXT NOT NULL CHECK (command IN ('failure', 'cancel', 'timeout', 'retry', 'budget-stop')),
+     command TEXT NOT NULL CHECK (command IN ('failure', 'cancel', 'timeout', 'retry', 'budget-stop', 'approval-request', 'approve', 'reject')),
      reason TEXT NOT NULL,
      decided_at INTEGER NOT NULL,
      decided_by_session TEXT,
@@ -376,6 +386,41 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      PRIMARY KEY (graph_id, run_id),
      CHECK ((successor_run_id IS NULL) = (successor_started_at IS NULL)),
      CHECK (decided_by_agent IS NULL OR decided_by_session IS NOT NULL)
+   )`,
+  // THE DURABLE APPROVAL REQUESTS (P3 item 3). One row per ATTEMPT: the row is
+  // the pause, its status is the answer, and the acceptance gate reads exactly
+  // this row. `status` is `pending` until a trusted decision records one of the
+  // three terminal answers, and every terminal status is written by a
+  // CONDITIONAL UPDATE of the `pending` row (`WHERE status = 'pending'`), so a
+  // repeated or competing decision writes NOTHING and is answered with the fact
+  // that stands. The CHECK group makes a half-written decision — a status with
+  // no approver, time or reason, or a `pending` row carrying one —
+  // unrepresentable. `approver_session_id` is the ONLY session whose decision
+  // resolves the request; `expires_at` is the explicit deadline expiry is
+  // measured against, never a clock read by the store.
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.approvalRequests} (
+     graph_id TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     node_id TEXT NOT NULL,
+     attempt_id TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
+     reason TEXT NOT NULL,
+     requested_at INTEGER NOT NULL,
+     requested_by_session TEXT,
+     requested_by_agent TEXT,
+     approver_session_id TEXT NOT NULL,
+     expires_at INTEGER NOT NULL,
+     decided_by_session TEXT,
+     decided_by_agent TEXT,
+     decided_at INTEGER,
+     decision_reason TEXT,
+     PRIMARY KEY (graph_id, run_id, node_id, attempt_id),
+     CHECK ((status = 'pending') = (decided_at IS NULL)),
+     CHECK ((status = 'pending') = (decision_reason IS NULL)),
+     CHECK ((status <> 'approved' AND status <> 'rejected') OR decided_by_session IS NOT NULL),
+     CHECK ((requested_by_agent IS NULL) OR (requested_by_session IS NOT NULL)),
+     CHECK (decided_by_agent IS NULL OR decided_by_session IS NOT NULL),
+     CHECK (length(approver_session_id) > 0)
    )`,
 ];
 
@@ -533,5 +578,22 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "decided_by_agent", affinity: "text", primaryKey: 0, notNull: false },
     { name: "successor_run_id", affinity: "text", primaryKey: 0, notNull: false },
     { name: "successor_started_at", affinity: "integer", primaryKey: 0, notNull: false },
+  ],
+  approvalRequests: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "run_id", affinity: "text", primaryKey: 2, notNull: true },
+    { name: "node_id", affinity: "text", primaryKey: 3, notNull: true },
+    { name: "attempt_id", affinity: "text", primaryKey: 4, notNull: true },
+    { name: "status", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "reason", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "requested_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "requested_by_session", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "requested_by_agent", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "approver_session_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "expires_at", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "decided_by_session", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "decided_by_agent", affinity: "text", primaryKey: 0, notNull: false },
+    { name: "decided_at", affinity: "integer", primaryKey: 0, notNull: false },
+    { name: "decision_reason", affinity: "text", primaryKey: 0, notNull: false },
   ],
 });

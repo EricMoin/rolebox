@@ -125,22 +125,35 @@ describe("createOutcomeGraphTools", () => {
     expect(command.safeParse("timeout").success).toBe(true);
     expect(command.safeParse("retry").success).toBe(true);
     expect(command.safeParse("budget-stop").success).toBe(true);
+    // THE APPROVAL COMMANDS ARE EXPLICIT MEMBERS OF THE SAME CLOSED ENUM (P3 item
+    // 3): a pause and the two decisions that answer it, never inferred from a
+    // submitted payload.
+    expect(command.safeParse("approval-request").success).toBe(true);
+    expect(command.safeParse("approve").success).toBe(true);
+    expect(command.safeParse("reject").success).toBe(true);
     expect(command.safeParse("stop").success).toBe(false);
     expect(command.safeParse("failed").success).toBe(false);
+    expect(command.safeParse("approved").success).toBe(false);
     // The minimum a trusted caller states: which graph, which command, why, and
-    // optionally which node/attempt.
+    // optionally which node/attempt — plus, for an approval request, WHO may
+    // decide it and WHEN it expires.
     expect(Object.keys(graph_control.args).sort()).toEqual([
+      "approver_session_id",
       "attempt_id",
       "command",
+      "expires_at",
       "graph_id",
       "node_id",
       "reason",
     ]);
     // NO PRINCIPAL ARGUMENT EXISTS: the caller is the session the platform
-    // attributed to the call, never a field it can set.
+    // attributed to the call, never a field it can set. The APPROVER is not a
+    // principal argument either — it is the session a request names, and the
+    // decision is checked against the call's own attribution.
     expect(graph_control.args.session_id).toBeUndefined();
     expect(graph_control.args.principal).toBeUndefined();
     expect(graph_control.args.decided_by).toBeUndefined();
+    expect(graph_control.args.approved).toBeUndefined();
   });
 
   it("graph_declare exposes the declaration ingress args", () => {

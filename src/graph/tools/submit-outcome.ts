@@ -196,7 +196,13 @@ export interface GraphSubmitOutcomeResult {
     // result or state advance was written. The run path answers this as the
     // named `run-superseded` refusal; the verdict is spelled here for the same
     // reason as the one above.
-    | "run-superseded";
+    | "run-superseded"
+    // The attempt is PAUSED on a trusted approval request whose status is not
+    // `approved` (P3 item 3): nothing was written. The run path answers this by
+    // name before it reaches this projection (`approval-pending` /
+    // `approval-rejected` / `approval-expired`), and the verdict is spelled here
+    // because the ledger's own vocabulary is what this field renders.
+    | "approval-blocked";
   /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
   /** Every required gate's outcome, for an accepted or rejected decision. */

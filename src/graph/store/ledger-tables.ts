@@ -39,6 +39,7 @@ import type { DatabaseDriver } from "../../memory/db-driver.ts";
 import { errorText } from "../../utils/error-text.ts";
 import {
   type AcceptedEventRecord,
+  type ApprovalRequestRecord,
   type CommitResult,
   type ControlDecisionRecord,
   type EffectStatus,
@@ -528,6 +529,36 @@ function supersededVerdict(decision: ControlDecisionRecord): CommitResult {
   };
 }
 
+
+/**
+ * The `approval-blocked` verdict for an attempt paused on a request that is not
+ * `approved` (P3 item 3).
+ *
+ * ONE owner of the wording, exactly like {@link controlledVerdict}, so the fast
+ * path and the guarded write refuse a batch in the same words. The text names
+ * the request's own status and deadline and says what opens the gate, so a
+ * worker reading the refusal knows the repair is a DECISION, which a submitted
+ * payload can never be (§3.4).
+ */
+function approvalBlockedVerdict(request: ApprovalRequestRecord): CommitResult {
+  const gate =
+    request.status === "approved"
+      ? "is approved"
+      : request.status === "pending"
+        ? "is still pending"
+        : "was " + request.status;
+  return {
+    kind: "approval-blocked",
+    request,
+    reason:
+      `attempt ${request.attemptId} of node ${request.nodeId} in graph ${request.graphId} is PAUSED on ` +
+      `a trusted approval request (${request.reason}) raised at ${String(request.requestedAt)} that ${gate}` +
+      " — approval is CONTROL, not an outcome, so no submitted payload can satisfy it and no receipt, " +
+      "accepted event, state advance or successor effect was written; only an `approved` decision by " +
+      `session ${request.approverSessionId} opens the gate`,
+  };
+}
+
 /**
  * The `run-superseded` verdict for a batch whose attempt belongs to a run the
  * graph has replaced — or to the reserved PRE-RUN generation, which is closed
@@ -656,6 +687,18 @@ export class LedgerTables {
     graphId: string,
     attemptId: string,
   ) => ControlDecisionRecord | undefined;
+  /**
+   * The approval request that BLOCKS one attempt's acceptance, if any (P3 item
+   * 3), read through the store that owns the approval table. Injected for the
+   * same reason the two facts above are: the acceptance core needs the row
+   * inside the transaction that refuses the batch, and the SQL of
+   * `graph_approval_requests` keeps ONE owner. An `approved` request is NOT a
+   * block and is answered `undefined`.
+   */
+  private readonly readBlockingApproval: (
+    graphId: string,
+    attemptId: string,
+  ) => ApprovalRequestRecord | undefined;
 
   constructor(
     db: DatabaseDriver,
@@ -667,6 +710,10 @@ export class LedgerTables {
       graphId: string,
       attemptId: string,
     ) => ControlDecisionRecord | undefined,
+    readBlockingApproval: (
+      graphId: string,
+      attemptId: string,
+    ) => ApprovalRequestRecord | undefined,
   ) {
     this.db = db;
     this.filePath = filePath;
@@ -674,6 +721,7 @@ export class LedgerTables {
     this.readRunControl = readRunControl;
     this.readCurrentRunId = readCurrentRunId;
     this.readSupersedingRetry = readSupersedingRetry;
+    this.readBlockingApproval = readBlockingApproval;
   }
 
   /**
@@ -786,6 +834,14 @@ export class LedgerTables {
     if (closedRun !== undefined) {
       return supersededRunVerdict(receipt.graphId, receipt.attemptId, closedRun);
     }
+    // AN ATTEMPT PAUSED ON A TRUSTED APPROVAL ACCEPTS NOTHING (P3 item 3). Same
+    // shape as the four checks above: the row's status never becomes MORE
+    // permissive on its own (only a recorded decision moves it, and a decision is
+    // terminal once taken), so a block read here cannot go stale into an
+    // acceptance, and the authoritative check is the fourth `WHERE NOT EXISTS` of
+    // the batch write below.
+    const blocked = this.readBlockingApproval(receipt.graphId, receipt.attemptId);
+    if (blocked !== undefined) return approvalBlockedVerdict(blocked);
 
     const write = (): CommitResult => {
       if (!this.writeBatch(batch)) {
@@ -803,13 +859,15 @@ export class LedgerTables {
         if (racedRun !== undefined) {
           return supersededRunVerdict(receipt.graphId, receipt.attemptId, racedRun);
         }
+        const racedApproval = this.readBlockingApproval(receipt.graphId, receipt.attemptId);
+        if (racedApproval !== undefined) return approvalBlockedVerdict(racedApproval);
         throw new GraphStoreWriteError(
           "invalid-record",
           "acceptance-ledger: the batch write for graph " +
             JSON.stringify(receipt.graphId) +
-            " was refused by the run-control, supersession or closed-run guard, but the store holds " +
-            "none of those facts for that graph and attempt — the guarded write and the store " +
-            "disagree, so the batch was rolled back and no verdict is reported",
+            " was refused by the run-control, supersession, closed-run or approval guard, but the " +
+            "store holds none of those facts for that graph and attempt — the guarded write and the " +
+            "store disagree, so the batch was rolled back and no verdict is reported",
         );
       }
       return { kind: "committed", receipt };
@@ -824,7 +882,7 @@ export class LedgerTables {
    * Write the receipt, the accepted event, the accepted result and every
    * pending effect — and answer whether the batch actually landed.
    *
-   * THE THREE GUARDS ARE THE FIRST STATEMENT (P3 items 1-2, plan §3.4). The
+   * THE FOUR GUARDS ARE THE FIRST STATEMENT (P3 items 1-3, plan §3.4). The
    * receipt INSERT carries its own `WHERE NOT EXISTS (...)` clauses, so they
    * decide against the COMMITTED STORE at the moment of the write rather than
    * against the values the fast path read earlier — the structural twin of the
@@ -850,6 +908,14 @@ export class LedgerTables {
    *   holds a run identity — `run:unminted` is never that identity — and the
    *   classifier names the generation rather than leaving the refusal
    *   unexplained.
+   * - THE ATTEMPT IS PAUSED ON A TRUSTED APPROVAL REQUEST (P3 item 3): a request
+   *   whose status is not `approved` holds the batch, because approval is CONTROL
+   *   and a submitted payload can never satisfy it (§3.4). The row this guard
+   *   reads is written ONLY by the trusted control path, and only a recorded
+   *   decision moves it — so a raising command that commits while a submission is
+   *   being validated still wins, and whichever of the raising command and the
+   *   acceptance COMMITS first is the fact that stands. An attempt with no
+   *   request at all is not gated (`NOT EXISTS` is satisfied by absence).
    *
    * BEING FIRST IS ALSO WHAT MAKES THE RACE A WAIT. A write statement takes
    * SQLite's RESERVED lock immediately, so a racing control writer WAITS on
@@ -892,6 +958,10 @@ export class LedgerTables {
                SELECT run_id FROM ${GRAPH_STORE_TABLES.runs}
                WHERE graph_id = ? ORDER BY run_seq DESC LIMIT 1
              )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.approvalRequests}
+           WHERE graph_id = ? AND attempt_id = ? AND status <> 'approved'
          )`,
         receipt.graphId,
         receipt.attemptId,
@@ -907,6 +977,9 @@ export class LedgerTables {
         receipt.graphId,
         receipt.attemptId,
         receipt.graphId,
+        // The approval guard: the attempt's request, if any.
+        receipt.graphId,
+        receipt.attemptId,
       );
       // A conditional INSERT that matched nothing changed no row. A PRIMARY KEY
       // violation is NOT this case: the guard passing means the row was

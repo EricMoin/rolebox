@@ -257,16 +257,31 @@ export type ExecutionBinding = HostDispatchExecution;
 /**
  * The lifecycle/control commands a TRUSTED principal may apply to a run.
  *
- * None of these is a business outcome: failure, cancellation, timeout, retry and
- * a budget stop are decided by the trusted lifecycle path, and a worker cannot
- * manufacture one by submitting a payload (§3.4).
+ * None of these is a business outcome: failure, cancellation, timeout, retry, a
+ * budget stop and an approval (a pause and the decision that answers it) are
+ * decided by the trusted lifecycle path, and a worker cannot manufacture one by
+ * submitting a payload (§3.4). The approval commands join this closed
+ * vocabulary rather than getting a second table with its own permission rule:
+ * §3.1 allows ONE trusted decision path, and an approval is a lifecycle fact
+ * like the rest.
  */
 export type ControlCommand =
   | "failure"
   | "cancel"
   | "timeout"
   | "retry"
-  | "budget-stop";
+  | "budget-stop"
+  /**
+   * Raise a durable approval request: the PAUSE on one node's in-flight attempt
+   * (P3 item 3). Raised by the graph's declaring principal through the one
+   * control entry, it names the ONLY session whose decision resolves it and the
+   * deadline it expires at.
+   */
+  | "approval-request"
+  /** Resolve a pending request in the affirmative; the only status that opens the gate. */
+  | "approve"
+  /** Resolve a pending request in the negative; a terminal refusal. */
+  | "reject";
 
 /**
  * One durable lifecycle/control decision.
@@ -301,13 +316,18 @@ export interface ControlDecision {
 /**
  * One durable human-approval request and its trusted decision.
  *
- * Owns: the paused node and attempt, the request time, and the terminal decision
- * — `approved`, `rejected` or `expired` — with the approver identity, the
- * decision time and the reason. A repeated approval or rejection is a no-op on
- * an already-decided request rather than a second decision.
- * Writers: the reducer records `pending` when a pause is reached; ONLY an
- * authorized approver may write a decision. A worker's own `approved` field is
- * NOT an approval and never settles this record (§P3).
+ * Owns: the paused node, run and ATTEMPT, the time the pause was raised, the
+ * ONLY session whose decision resolves it, the deadline it expires at, and the
+ * terminal decision — `approved`, `rejected` or `expired` — with the approver
+ * identity, the decision time and the reason. A repeated approval or rejection
+ * is a no-op on an already-decided request rather than a second decision, and
+ * an expired request is never approved afterwards.
+ * Writers: the trusted control path records `pending` when a pause is raised;
+ * ONLY the request's NAMED approver may write a decision, and the expiry may
+ * also be materialized by a deadline sweep. A worker's own `approved` field is
+ * NOT an approval and never settles this record (§P3): this record is written
+ * by the control service and read by the acceptance gate, and no field of a
+ * submission is consulted by either.
  * Replaces: nothing — the v3 grammar declares no approval at all
  * (`NodeDeclarationV3` has no approval flag) and the v2 model treated a
  * synthetic human signal as approval (`SignalLedgerSource` `"approval"` in the
@@ -321,12 +341,37 @@ export interface ApprovalRequest {
   readonly nodeId: string;
   readonly attemptId: string;
   readonly status: "pending" | "approved" | "rejected" | "expired";
+  /** Why the pause was raised. Never overwritten by the decision. */
+  readonly reason: string;
   /** Epoch milliseconds the pause was recorded at. */
   readonly requestedAt: number;
-  /** The authorized approver, present exactly when the request is decided. */
+  /**
+   * The trusted principal that RAISED the request, as the host attributed it.
+   * Absent when the host attributed no invocation — absence is a fact, and it
+   * never grants a decision right: {@link approverSessionId} is what does.
+   */
+  readonly requestedBy?: HostInvocationIdentity;
+  /**
+   * The ONE session whose decision resolves this request. The requester names
+   * it, so the declaring principal's control authority does NOT imply approval
+   * authority: a decision from any other session — including the declarer when
+   * it named someone else — is refused by name.
+   */
+  readonly approverSessionId: string;
+  /**
+   * Epoch milliseconds this request stops being answerable at. The deadline is
+   * part of the record because a pause with no deadline is a strand: expiry is
+   * measured against THIS value and an explicit `at` input, never a clock read
+   * inside the protocol.
+   */
+  readonly expiresAt: number;
+  /** The approver that decided, present exactly when a principal decided it. */
   readonly decidedBy?: HostInvocationIdentity;
   /** Epoch milliseconds the decision was taken at, when decided. */
   readonly decidedAt?: number;
-  /** Why the request was approved, rejected or expired. */
-  readonly reason?: string;
+  /**
+   * Why the request was approved, rejected or expired. Absent exactly when the
+   * request is still `pending`.
+   */
+  readonly decisionReason?: string;
 }
