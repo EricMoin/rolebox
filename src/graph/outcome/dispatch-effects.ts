@@ -115,13 +115,20 @@ export interface OutcomeDispatchTarget {
   readonly agent: string;
   readonly prompt: string;
   /**
-   * The accepted upstream revisions this node consumes, resolved from what the
-   * acceptances RECORDED (§3.5, P4 item 5 / A17).
+   * The accepted upstream revisions this attempt was ARMED with, resolved from
+   * what the acceptances RECORDED (§3.5, P4 item 5 / A17; D6).
    *
-   * Absent means the node declares no inputs. It NEVER means "resolve the path
-   * later": a declared input that cannot be resolved is a BLOCKED dispatch, and
-   * the runtime refuses to arm one rather than starting a node with a hole where
-   * its input should be.
+   * PRESENT on every dispatch this build creates, INCLUDING the empty list that
+   * says "this node declares no inputs". The binding is therefore DELIVERED from
+   * the record written when it was decided, never re-derived from whatever the
+   * producing nodes hold at delivery time: a consumer that is re-armed (a loop
+   * round, a retry, a re-execution) gets a new binding, bound to the attempt each
+   * producer settled, and an already-armed consumer never gets one.
+   *
+   * ABSENT means the row was written before this build bound inputs to an
+   * attempt. It NEVER means "resolve the path later": the runtime refuses to
+   * launch that dispatch for a node which DECLARES inputs, rather than starting
+   * a node with a hole where its input should be.
    */
   readonly inputs?: readonly ResolvedInput[];
 }

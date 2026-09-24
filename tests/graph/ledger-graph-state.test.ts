@@ -63,6 +63,7 @@ import {
   OUTCOME_STATE_BODY_V6,
   OUTCOME_STATE_BODY_V7,
   OUTCOME_STATE_BODY_V8,
+  OUTCOME_STATE_BODY_V9,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -1135,8 +1136,8 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(extended.message).toContain("round");
   });
 
-  it("installs a reader for versions 1 to 8, and writes version 8", () => {
-    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V8);
+  it("installs a reader for versions 1 to 9, and writes version 9", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V9);
     expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
@@ -1146,6 +1147,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       OUTCOME_STATE_BODY_V6,
       OUTCOME_STATE_BODY_V7,
       OUTCOME_STATE_BODY_V8,
+      OUTCOME_STATE_BODY_V9,
     ]);
     for (const version of [
       OUTCOME_STATE_BODY_V1,
@@ -1156,6 +1158,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       OUTCOME_STATE_BODY_V6,
       OUTCOME_STATE_BODY_V7,
       OUTCOME_STATE_BODY_V8,
+      OUTCOME_STATE_BODY_V9,
     ]) {
       const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
       expect(verdict.kind).toBe("supported");
@@ -1298,7 +1301,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       now: NOW + 1,
       mintCredential: RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
     });
-    expect(advance.state.bodyVersion).toBe(OUTCOME_STATE_BODY_V8);
+    expect(advance.state.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
     expect(advance.dispatches).toEqual([]);
     const settled = advance.state.nodes.find((node) => node.nodeId === "ship");
     expect(settled?.status).toBe("settled");

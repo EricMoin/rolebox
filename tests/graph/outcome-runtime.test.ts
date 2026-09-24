@@ -2353,7 +2353,15 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         // exactly what that version's writer would have written.
         const v5Nodes = rawNodes.map((node) => {
           const entry = recordOf(node, "a node entry");
-          const { attemptCredentialDigest: _digest, ...rest } = entry;
+          // Version 5 defines neither the bound input view nor the refusals of
+          // version 9, so both are stripped with the digest: a body handed to the
+          // reader is exactly what that version's writer would have written.
+          const {
+            attemptCredentialDigest: _digest,
+            inputs: _inputs,
+            inputRefusals: _refusals,
+            ...rest
+          } = entry;
           return { ...rest, attemptCredential: "fixture-credential:" + String(entry.nodeId) };
         });
         ledger.writeGraphState({
@@ -3395,6 +3403,10 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
           attemptCredentialDigest: _digest,
           attemptCredential: _credential,
           arrivals: _arrivals,
+          // Version 1 defines neither the bound input view nor the refusals of
+          // version 9, so both are stripped with the rest.
+          inputs: _inputs,
+          inputRefusals: _refusals,
           ...rest
         } = node as Record<string, unknown>;
         return rest;

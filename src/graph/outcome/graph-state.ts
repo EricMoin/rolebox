@@ -170,6 +170,14 @@ import {
   readHostInvocationIdentity,
   type HostInvocationIdentity,
 } from "./host-identity.ts";
+import {
+  assembleDownstreamInput,
+  readInputRefusals as readPersistedInputRefusals,
+  readResolvedInputs,
+  type AcceptedResultReading,
+  type DownstreamInputRefusal,
+  type ResolvedInput,
+} from "./inputs.ts";
 
 // ── The state model ─────────────────────────────────────────────────────────
 
@@ -270,6 +278,34 @@ export interface OutcomeNodeState {
    * entries, so the two representations cannot drift.
    */
   readonly arrivals?: readonly OutcomeArrival[];
+  /**
+   * The accepted upstream revisions THIS ATTEMPT was armed with, resolved from
+   * the durable facts inside the transaction that armed it (body version 9 and
+   * later; D6).
+   *
+   * PRESENT EXACTLY WHEN THIS BUILD ARMED THE ATTEMPT — an empty list is the
+   * resolved view of "this node declares no inputs", so presence itself says the
+   * binding was written down when it was decided. ABSENT means the attempt was
+   * armed by a body version that did not bind one; it never means "resolve the
+   * facts again", and a launch of such an attempt for a node that DECLARES
+   * inputs is refused by name rather than started with a hole.
+   *
+   * Each entry names the producing ATTEMPT, not the node: a loop round, a retry
+   * or a re-execution can move a producing node to a newer attempt, and a
+   * consumer that was already armed must keep receiving what it was armed with.
+   */
+  readonly inputs?: readonly ResolvedInput[];
+  /**
+   * Why this node's most recent arming was REFUSED instead of dispatched — one
+   * named entry per input that could not be resolved (body version 9 and later;
+   * D6).
+   *
+   * A blocked input is a blocked DISPATCH: no worker request and no dispatch
+   * effect are created, the node stays exactly where it was, and this list is
+   * the durable record of why. It is cleared by a later arming that succeeds
+   * (the entry is replaced) and it is never a substitute for one.
+   */
+  readonly inputRefusals?: readonly DownstreamInputRefusal[];
 }
 
 /**
@@ -644,9 +680,46 @@ export const OUTCOME_STATE_BODY_V7 = 7 as const;
  * it too, and the older ones cannot carry the credentials, arrivals, stop or
  * progress baselines this build writes.
  *
- * This is the layout this build writes.
+ * This was the layout this build wrote before version 9 bound a node's declared
+ * inputs to the attempt they were assembled for; it stays readable AND
+ * advanceable (see {@link OUTCOME_STATE_BODY_V9}).
  */
 export const OUTCOME_STATE_BODY_V8 = 8 as const;
+
+/**
+ * The ninth versioned state-body layout: a node entry MAY carry `inputs` — the
+ * accepted upstream revisions the attempt was ARMED WITH, each bound to the
+ * attempt that produced it — and `inputRefusals`, the named reasons a dispatch
+ * of that node was refused instead of started.
+ *
+ * WHY A BOUND INPUT VIEW IS LAYOUT AND NOT AN EXTRA. The binding is decided
+ * inside the acceptance transaction that arms the attempt, and it has to be
+ * delivered by whatever process reads the state afterwards — possibly a
+ * different one, after a restart. A body version with no field for it cannot
+ * carry the view across that boundary, and the later process would have to
+ * RE-DERIVE it from "the producing node's latest result", which is exactly how a
+ * consumer already armed for one round gets rebound to a newer producer result:
+ * a loop round, a retry and a re-execution each move a producing node to a newer
+ * attempt. The view is therefore written down where it was decided, and read
+ * back unchanged.
+ *
+ * THE FIELD IS OPTIONAL WITHIN THE VERSION, and ABSENCE IS A FACT. An attempt
+ * armed by a version that did not bind inputs keeps none — this build never
+ * back-fills a binding onto it — and the LAUNCH of such an attempt for a node
+ * that declares inputs is refused by name rather than started with a hole where
+ * its input should be. That is what keeps version 8 ADVANCEABLE: advancing it
+ * invents no binding (an already-armed entry keeps the honest absence) while
+ * every attempt armed from that point on records one, and the body is written in
+ * this version from then on.
+ *
+ * `inputRefusals` records the OTHER half of the same rule: a node whose inputs
+ * could not be resolved is not dispatched at all, and the refusal — one entry
+ * per input, naming the code — is durable beside the node so it can be queried
+ * instead of leaving a node that merely looks like it is waiting.
+ *
+ * This is the layout this build writes.
+ */
+export const OUTCOME_STATE_BODY_V9 = 9 as const;
 
 /**
  * The state-body format this build writes.
@@ -657,7 +730,7 @@ export const OUTCOME_STATE_BODY_V8 = 8 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V8;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V9;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -923,6 +996,69 @@ function readDispatchIdentity(
 }
 
 /**
+ * Read one node entry's BOUND INPUT VIEW, in the layout of the body version
+ * that declared it (D6).
+ *
+ * ABSENT IS READ AS ABSENT. A version that defines the field returns
+ * `undefined` for an entry that carries none — an attempt armed before the
+ * binding existed — and a version that forbids it refuses an entry that carries
+ * one rather than reading a field that version never wrote. The list's own shape
+ * is read by {@link readResolvedInputs}, the ONE spelling of the wire shape the
+ * dispatch-effect payload reader uses too, so a body this reader accepts is
+ * exactly a payload that one accepts.
+ */
+function readBoundInputs(
+  raw: Record<string, unknown>,
+  where: string,
+  layout: OutcomeStateLayout,
+): readonly ResolvedInput[] | undefined {
+  const value = raw.inputs;
+  if (layout.inputs === "forbidden") {
+    if (value !== undefined) {
+      throw malformedState(
+        where + " carries an inputs list, which body version " + layout.version +
+          " does not define — the bound input view is refused rather than dropped",
+      );
+    }
+    return undefined;
+  }
+  if (value === undefined) return undefined;
+  const reading = readResolvedInputs(value, where + ".inputs");
+  if (reading.kind === "malformed") throw malformedState(reading.message);
+  return reading.entries;
+}
+
+/**
+ * Read one node entry's INPUT REFUSALS, in the layout of the body version that
+ * declared it (D6).
+ *
+ * The refusal is a NAMED value, so its code is checked against the closed
+ * vocabulary this build produces: a body carrying a code this build does not
+ * define is refused rather than reported as a refusal nobody can interpret.
+ */
+function readNodeInputRefusals(
+  raw: Record<string, unknown>,
+  where: string,
+  layout: OutcomeStateLayout,
+): readonly DownstreamInputRefusal[] | undefined {
+  const value = raw.inputRefusals;
+  if (layout.inputRefusals === "forbidden") {
+    if (value !== undefined) {
+      throw malformedState(
+        where + " carries an inputRefusals list, which body version " + layout.version +
+          " does not define — the refusals are refused rather than dropped",
+      );
+    }
+    return undefined;
+  }
+  if (value === undefined) return undefined;
+  const reading = readPersistedInputRefusals(value, where + ".inputRefusals");
+  if (reading.kind === "malformed") throw malformedState(reading.message);
+  return reading.refusals;
+}
+
+
+/**
  * One state-body layout: the NODE fields the version defines per status, the
  * BODY fields it defines, the phases its writer can produce, and whether it
  * requires the attempt credential the run path checks a submission against.
@@ -975,6 +1111,24 @@ interface OutcomeStateLayout {
    * field this version never wrote.
    */
   readonly dispatchIdentity: "defined" | "forbidden";
+  /**
+   * `defined` — the version defines the per-entry `inputs` list (version 9
+   * and later), which its writer writes on every attempt IT arms, including the
+   * empty list that says "this node declares no inputs"; it is OPTIONAL within
+   * the version, because an attempt armed by an older body keeps the honest
+   * absence. `forbidden` — the version does not define the field, so an entry
+   * that carries one is refused rather than read with a field this version
+   * never wrote.
+   */
+  readonly inputs: "defined" | "forbidden";
+  /**
+   * `defined` — the version defines the per-entry `inputRefusals` list
+   * (version 9 and later), written EXACTLY when an arming was refused for one
+   * or more unresolvable inputs. `forbidden` — the version does not define the
+   * field, so an entry that carries one is refused rather than read with a
+   * field this version never wrote.
+   */
+  readonly inputRefusals: "defined" | "forbidden";
 }
 
 /**
@@ -1011,6 +1165,8 @@ const OUTCOME_STATE_LAYOUT_V1: OutcomeStateLayout = Object.freeze({
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "forbidden" as const,
   dispatchIdentity: "forbidden" as const,
+  inputs: "forbidden" as const,
+  inputRefusals: "forbidden" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
   loopProgress: "forbidden" as const,
@@ -1046,6 +1202,8 @@ const OUTCOME_STATE_LAYOUT_V2: OutcomeStateLayout = Object.freeze({
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
+  inputs: "forbidden" as const,
+  inputRefusals: "forbidden" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
   loopProgress: "forbidden" as const,
@@ -1085,6 +1243,8 @@ const OUTCOME_STATE_LAYOUT_V3: OutcomeStateLayout = Object.freeze({
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
+  inputs: "forbidden" as const,
+  inputRefusals: "forbidden" as const,
   arrivals: "required" as const,
   stop: "forbidden" as const,
   loopProgress: "forbidden" as const,
@@ -1127,6 +1287,8 @@ const OUTCOME_STATE_LAYOUT_V4: OutcomeStateLayout = Object.freeze({
   phases: OUTCOME_STATE_PHASES_V4,
   credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
+  inputs: "forbidden" as const,
+  inputRefusals: "forbidden" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
   loopProgress: "forbidden" as const,
@@ -1171,6 +1333,8 @@ const OUTCOME_STATE_LAYOUT_V5: OutcomeStateLayout = Object.freeze({
   phases: OUTCOME_STATE_PHASES_V4,
   credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
+  inputs: "forbidden" as const,
+  inputRefusals: "forbidden" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
   loopProgress: "required" as const,
@@ -1263,6 +1427,36 @@ const OUTCOME_STATE_LAYOUT_V8: OutcomeStateLayout = Object.freeze({
 });
 
 /**
+ * The node fields body version 9 defines: version 8's fields plus the OPTIONAL
+ * `inputs` the attempt was armed with and the `inputRefusals` that record a
+ * refused arming (see {@link OUTCOME_STATE_BODY_V9}). The key lists are built
+ * FROM version 8's, so the two layouts cannot drift apart in the fields they
+ * share.
+ */
+const OUTCOME_STATE_LAYOUT_V9: OutcomeStateLayout = Object.freeze({
+  ...OUTCOME_STATE_LAYOUT_V8,
+  version: OUTCOME_STATE_BODY_V9,
+  inputs: "defined" as const,
+  inputRefusals: "defined" as const,
+  keys: Object.freeze({
+    pending: Object.freeze([
+      ...OUTCOME_STATE_LAYOUT_V8.keys.pending,
+      "inputRefusals",
+    ]),
+    dispatched: Object.freeze([
+      ...OUTCOME_STATE_LAYOUT_V8.keys.dispatched,
+      "inputs",
+      "inputRefusals",
+    ]),
+    settled: Object.freeze([
+      ...OUTCOME_STATE_LAYOUT_V8.keys.settled,
+      "inputs",
+      "inputRefusals",
+    ]),
+  }),
+});
+
+/**
  * Refuse every node field the declared body version does not define for this
  * status.
  *
@@ -1327,6 +1521,8 @@ function readNodeState(
   const attemptCredential = raw.attemptCredential;
   const attemptCredentialDigest = raw.attemptCredentialDigest;
   const dispatchIdentity = readDispatchIdentity(raw, where, layout);
+  const boundInputs = readBoundInputs(raw, where, layout);
+  const inputRefusals = readNodeInputRefusals(raw, where, layout);
   const outcomeId = raw.outcomeId;
   const dispatchedAt = readOptionalEpoch(raw, "dispatchedAt", where);
   const settledAt = readOptionalEpoch(raw, "settledAt", where);
@@ -1361,6 +1557,7 @@ function readNodeState(
       nodeId: expected.id,
       status: "pending" as const,
       ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+      ...(inputRefusals === undefined ? {} : { inputRefusals }),
     });
   }
   if (typeof attemptId !== "string" || attemptId.length === 0) {
@@ -1440,6 +1637,8 @@ function readNodeState(
       dispatchedAt,
       settledAt,
       ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+      ...(boundInputs === undefined ? {} : { inputs: boundInputs }),
+      ...(inputRefusals === undefined ? {} : { inputRefusals }),
     });
   }
   if (outcomeId !== undefined || settledAt !== undefined) {
@@ -1459,6 +1658,8 @@ function readNodeState(
     ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     dispatchedAt,
     ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+    ...(boundInputs === undefined ? {} : { inputs: boundInputs }),
+    ...(inputRefusals === undefined ? {} : { inputRefusals }),
   });
 }
 
@@ -2440,16 +2641,17 @@ const OUTCOME_STATE_BODY_V5_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V5);
 const OUTCOME_STATE_BODY_V6_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V6);
 const OUTCOME_STATE_BODY_V7_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V7);
 const OUTCOME_STATE_BODY_V8_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V8);
+const OUTCOME_STATE_BODY_V9_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V9);
 
 /**
- * The state-body capabilities this build installs: version 8 (what it writes,
- * version 7's fields with the credential persisted as a DIGEST instead of the
- * credential itself) as the only ADVANCEABLE layout, and versions 7 down to 1
- * as READ-ONLY older layouts — version 7 (and 6 and 5) record the credential
- * itself, which this build never re-persists, never compares against a digest
- * and never re-delivers, and the older ones cannot carry the credentials,
- * arrivals, stop or progress baselines this build writes. None of them is
- * migrated.
+ * The state-body capabilities this build installs: version 9 (what it writes,
+ * version 8's fields plus the bound input view a consumer is delivered) and
+ * version 8 (the same layout without that optional field) as the ADVANCEABLE
+ * layouts, and versions 7 down to 1 as READ-ONLY older layouts — version 7 (and
+ * 6 and 5) record the credential itself, which this build never re-persists,
+ * never compares against a digest and never re-delivers, and the older ones
+ * cannot carry the credentials, arrivals, stop or progress baselines this build
+ * writes. None of them is migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
@@ -2463,6 +2665,7 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
       OUTCOME_STATE_BODY_V6_READER,
       OUTCOME_STATE_BODY_V7_READER,
       OUTCOME_STATE_BODY_V8_READER,
+      OUTCOME_STATE_BODY_V9_READER,
     ],
   });
 
@@ -2849,6 +3052,7 @@ function verifyArrivals(
  */
 const ADVANCEABLE_STATE_BODY_VERSIONS: readonly number[] = Object.freeze([
   OUTCOME_STATE_BODY_V8,
+  OUTCOME_STATE_BODY_V9,
 ]);
 
 /** Why an accepted outcome could not be applied to the state. */
@@ -2928,6 +3132,17 @@ export interface OutcomeDispatchIntent {
   readonly prompt: string;
   /** The credential minted for this fresh attempt (see {@link OutcomeAdvanceInput}). */
   readonly credential: string;
+  /**
+   * The accepted upstream revisions THIS attempt is armed with, assembled from
+   * the durable facts inside this advance (D6). An empty list is the resolved
+   * view of "this node declares no inputs".
+   *
+   * It is carried here so the caller builds the dispatch request and the
+   * persisted dispatch target from the SAME value the state entry records: a
+   * request that carried a different view than the state would be a binding the
+   * run never made.
+   */
+  readonly inputs: readonly ResolvedInput[];
 }
 
 /** What one accepted outcome produced: the next state and what to dispatch. */
@@ -2957,6 +3172,23 @@ export interface OutcomeAdvanceInput {
    * one, and an advance is reproducible for a given source.
    */
   readonly mintCredential: AttemptCredentialSource;
+  /**
+   * The DURABLE accepted-result read the input assembly uses for every producer
+   * this advance consumes (D6).
+   *
+   * The caller owns it because reading accepted results is I/O: this module
+   * stays pure and applies the RULES (see `inputs.ts`) to the facts it is
+   * handed. The ONE attempt it cannot answer for is the attempt this advance is
+   * settling — the acceptance transaction writes that result in the same commit,
+   * after this advance runs — so the caller overlays it and answers for it
+   * itself; a caller that does not is answered `unreadable` rather than
+   * "no result", because a read that never happened is not evidence of absence.
+   *
+   * OMITTED means this caller has no durable source at all, and a node that
+   * declares inputs is then BLOCKED by name instead of being dispatched with a
+   * hole where its input should be.
+   */
+  readonly readAcceptedResult?: (attemptId: string) => AcceptedResultReading;
   /**
    * The progress projections this submission was measured into, produced OUTSIDE
    * the acceptance transaction and bound to this proposal, attempt and plan
@@ -3213,13 +3445,13 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       "outcome-advance: the state was written in body version " + state.bodyVersion +
         ", which this build does not advance (it advances body versions " +
         ADVANCEABLE_STATE_BODY_VERSIONS.join(", ") +
-        ") — only body version " + CURRENT_OUTCOME_STATE_BODY +
-        " records the attempt credential as the DIGEST this build verifies against, while " +
-        "every earlier version persists the credential itself (never re-persisted, never " +
-        "compared against a presentation and never re-delivered) or cannot carry the join " +
-        "arrivals and progress baselines this build writes on every attempt, and a newer " +
-        "one is not read by this build — the state is refused rather than advanced and " +
-        "rewritten in body version " + CURRENT_OUTCOME_STATE_BODY,
+        ") — the layouts it advances record the attempt credential as the DIGEST it " +
+        "verifies against, while every version below them persists the credential itself " +
+        "(never re-persisted, never compared against a presentation and never " +
+        "re-delivered) or cannot carry the join arrivals and progress baselines this build " +
+        "writes on every attempt, and a newer one is not read by this build — the state is " +
+        "refused rather than advanced and rewritten in body version " +
+        CURRENT_OUTCOME_STATE_BODY,
     );
   }
   if (state.loopProgress === undefined) {
@@ -3300,6 +3532,12 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     status: "settled" as const,
     ...(current.attemptId === undefined ? {} : { attemptId: current.attemptId }),
     ...(current.attemptSeq === undefined ? {} : { attemptSeq: current.attemptSeq }),
+    // The input view the attempt was ARMED with is kept for the same reason its
+    // credential is: it is what THIS attempt was started with, decided when it
+    // was armed, and a later read must not re-derive it from whatever the
+    // producers hold now (D6). An entry armed before the binding existed keeps
+    // the honest absence.
+    ...(current.inputs === undefined ? {} : { inputs: current.inputs }),
     // The credential DIGEST of the attempt that SETTLED the node is kept,
     // exactly as its attempt id is: a repeated submission must resolve back to
     // this same attempt (and its receipt), never to a newer one.
@@ -3464,6 +3702,27 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     // apart from its arrival record, which is the durable evidence this
     // acceptance contributed; no attempt id, no dispatched status and no effect
     // are written for it.
+    // THE BINDING IS ASSEMBLED FROM THE DURABLE FACTS, IN THIS TRANSACTION
+    // (D6). The producing attempt is the one the STATE records as settled — the
+    // node this advance is settling included, so the result this very acceptance
+    // commits participates in its successor's input view — and the accepted
+    // result of that attempt is read through the caller's durable read. Nothing
+    // here looks at "the node's latest result": the attempt is pinned first, and
+    // the accepted result is looked up BY that attempt.
+    const settledAttemptOf = (nodeId: string): string | undefined => {
+      const entry = nodes.find((candidate) => candidate.nodeId === nodeId);
+      return entry !== undefined && entry.status === "settled"
+        ? entry.attemptId
+        : undefined;
+    };
+    const readAccepted: (attemptId: string) => AcceptedResultReading =
+      input.readAcceptedResult ??
+      ((): AcceptedResultReading => ({
+        kind: "unreadable",
+        reason:
+          "this advance was given no durable accepted-result read, so a declared input " +
+          "cannot be resolved from what the producers accepted",
+      }));
     const armable = candidates.filter(
       (candidate) => nodes[candidate.index].status !== "dispatched",
     );
@@ -3474,6 +3733,25 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     );
     for (const candidate of candidates) {
       if (!armSet.has(candidate.node.id)) continue;
+      // A BLOCKED INPUT IS A BLOCKED DISPATCH (D6). The refusal is written onto
+      // the node's own entry — where it can be queried, one named code per input
+      // — and NOTHING is armed for it: no attempt, no dispatch intent and no
+      // effect. A node is never started with a hole where its input should be,
+      // and it is never reported as merely waiting either.
+      const assembled = assembleDownstreamInput(
+        candidate.node.inputs ?? [],
+        settledAttemptOf,
+        readAccepted,
+      );
+      if (assembled.kind === "blocked") {
+        const blockedEntry = nodes[candidate.index];
+        if (blockedEntry === undefined) continue;
+        nodes[candidate.index] = Object.freeze({
+          ...blockedEntry,
+          inputRefusals: assembled.refusals,
+        });
+        continue;
+      }
       attemptSeq += 1;
       const attemptId = candidate.node.id + "#" + attemptSeq;
       const targetNode = candidate.node;
@@ -3509,6 +3787,9 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         // The canonical arrival list is materialized once the whole advance is
         // applied (below); an armed node's list is the arrivals that armed it.
         arrivals: Object.freeze([]),
+        // The input view THIS attempt was armed with (D6), written where it was
+        // decided so a later process delivers it instead of re-deriving one.
+        inputs: assembled.entries,
       });
       dispatches.push(
         Object.freeze({
@@ -3517,6 +3798,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
           agent: targetNode.agent,
           prompt: targetNode.prompt,
           credential,
+          inputs: assembled.entries,
         }),
       );
     }

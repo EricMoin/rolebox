@@ -44,13 +44,18 @@
  * input to the protocol (docs § "State, storage, and effects"), so the store
  * never reads a clock and a commit is reproducible from its batch alone.
  *
- * Dependency LEAF: this module imports exactly one thing — the TYPE-ONLY
- * budget vocabulary from `../domain/budget.ts`, which itself imports nothing.
- * So any implementation, reducer or recovery module may depend on this port
- * without a cycle, and the P1 property the previous version of this paragraph
- * claimed (no runtime dependency, no container dragged in) still holds — the
- * budget records below need the plan's own ceiling and usage names rather than a
- * second, drifting spelling of them.
+ * Dependency LEAF: this module imports exactly two things, BOTH type-only — the
+ * budget vocabulary from `../domain/budget.ts` and the accepted-data presence
+ * envelope from `../domain/model.ts` — each of which imports nothing at
+ * runtime. So any implementation, reducer or recovery module may depend on this
+ * port without a cycle, and the P1 property the previous version of this
+ * paragraph claimed (no runtime dependency, no container dragged in) still
+ * holds: the budget records need the plan's own ceiling and usage names rather
+ * than a second, drifting spelling of them, and the accepted-data read below
+ * needs the ONE presence envelope the domain model owns rather than a second
+ * one declared here. (`domain/model.ts` names this module's `ReceiptRecord`
+ * as a type in return; the two type-only edges are erased and create no runtime
+ * coupling in either direction.)
  */
 
 import type {
@@ -58,6 +63,7 @@ import type {
   BudgetUsageAmounts,
   NodeBudgetLimits,
 } from "../domain/budget.ts";
+import type { AcceptedData } from "../domain/model.ts";
 
 // ── Format identity ─────────────────────────────────────────────────────────
 
@@ -1283,6 +1289,21 @@ export interface RetainedArtifactRef {
   readonly size: number;
 }
 
+/**
+ * One settled attempt's accepted result, as a consumer asks the ledger for it.
+ *
+ * It is the two things a downstream consumer needs and cannot derive: WHAT the
+ * acceptance accepted, with its presence made explicit ({@link AcceptedData}),
+ * and WHICH artifact revisions it retained. The settled OUTCOME is deliberately
+ * not here — that is the accepted event's identity — so a caller that needs it
+ * reads the event stream it already has rather than this record growing a
+ * second copy of a routing fact.
+ */
+export interface AcceptedResultEvidence {
+  readonly payload: AcceptedData;
+  readonly artifacts?: readonly RetainedArtifactRef[];
+}
+
 export interface AcceptanceLedgerTx {
   /** Commit one batch atomically; see {@link CommitResult}. */
   commitAccepted(batch: AcceptanceBatch): CommitResult;
@@ -1326,6 +1347,26 @@ export interface AcceptanceLedgerTx {
     graphId: string,
     attemptId: string,
   ): readonly RetainedArtifactRef[] | undefined;
+  /**
+   * The accepted result one attempt's acceptance recorded, or `undefined` when
+   * the substrate holds none for that attempt (D6's input binding).
+   *
+   * WHY THE DATA, NOT ONLY THE ARTIFACTS. {@link retainedArtifacts} answers
+   * which revisions an acceptance retained, which is enough for a consumer that
+   * only needs bytes; a consumer of a business VALUE also has to be handed what
+   * was accepted, with a submission that carried no `data` at all kept distinct
+   * from one that accepted JSON `null` (D1). A consumer that is handed the
+   * artifact list alone can answer "which bytes" and never "what did it say".
+   *
+   * OPTIONAL, AND ABSENT IS NOT AN EMPTY VALUE. A substrate that keeps no
+   * accepted results answers nothing, and a node that declares an input is then
+   * BLOCKED by name rather than dispatched with a hole where its input should
+   * be — the runtime never synthesizes a value for a read that did not happen.
+   */
+  readAcceptedResult?(
+    graphId: string,
+    attemptId: string,
+  ): AcceptedResultEvidence | undefined;
   /**
    * The UNSETTLED effects of ONE RUN — rows still `pending` or `started`.
    * Terminal effects are never listed; that stream IS the resume set.

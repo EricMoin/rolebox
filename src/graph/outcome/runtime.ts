@@ -203,7 +203,7 @@
  * Still DEFERRED: the remaining routing and loop work.
  */
 
-import type { CompiledPlan } from "../compiler/plan.ts";
+import type { CompiledNode, CompiledPlan } from "../compiler/plan.ts";
 import {
   buildBudgetReport,
   hasBudgetLimits,
@@ -216,6 +216,7 @@ import {
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
+  AcceptedResultEvidence,
   ApprovalRequestRecord,
   BudgetReservationRecord,
   BudgetUsageResult,
@@ -305,6 +306,14 @@ import {
   type CompletionPolicyRef,
   type CompletionPolicyRegistry,
 } from "../policy/completion-policy.ts";
+import {
+  assembleDownstreamInput,
+  readResolvedInputs,
+  type AcceptedResultFacts,
+  type AcceptedResultReading,
+  type DownstreamInputRefusal,
+  type ResolvedInput,
+} from "./inputs.ts";
 import { proposalDigest, readOutcomeProposal } from "./proposal.ts";
 import {
   naturalCompletionProposalOf,
@@ -396,6 +405,14 @@ export type OutcomeRuntimeRefusalCode =
   | "invalid-timestamp"
   /** The plan declares no node a run could start from. */
   | "no-entry-node"
+  /**
+   * A dispatch was NOT created because the node's declared inputs could not be
+   * resolved from the durable facts (D6). The attempt is not started with a hole
+   * where its input should be: at a start the refusal names every offending
+   * input and nothing is written, and at an arming the refusals are recorded on
+   * the node's own state entry.
+   */
+  | "dispatch-input-unbound"
   /** The graph has never written a state snapshot. */
   | "graph-not-started"
   /** A persisted state exists but is not this build's state for this plan. */
@@ -1204,10 +1221,55 @@ class DispatchBudgetExhaustedError extends Error {
   }
 }
 
+/**
+ * A dispatch this transaction would have armed has an UNRESOLVABLE input, so the
+ * transaction writes nothing at all (D6).
+ *
+ * WHY A THROW AND NOT A BLOCKED NODE. This is the FIRST-dispatch path: a run
+ * whose entry node cannot be given what it declared has nothing to start from,
+ * and committing a state that records an attempt nobody may run would be worse
+ * than refusing the start. The caller catches it and answers with the named
+ * refusals the assembly produced — one per offending input.
+ *
+ * On the SUCCESSOR path the same refusal does NOT throw: the acceptance is a
+ * decision about the producing node and stands, while the successor is left
+ * un-armed with its refusals recorded on its own state entry.
+ */
+class DispatchInputBlockedError extends Error {
+  readonly refusals: readonly DownstreamInputRefusal[];
+
+  constructor(refusals: readonly DownstreamInputRefusal[]) {
+    super(
+      "outcome-runtime: a dispatch was not armed because its declared inputs could " +
+        "not be resolved (" +
+        refusals.map((refusal) => refusal.code).join(", ") +
+        ")",
+    );
+    this.name = "DispatchInputBlockedError";
+    this.refusals = refusals;
+  }
+}
+
 /** What the join reduced inside the acceptance transaction. */
 interface JoinedReduction {
   readonly result: AcceptanceJoinResult;
   readonly advance?: OutcomeAdvance;
+}
+
+/**
+ * The accepted result the acceptance transaction is committing RIGHT NOW, which
+ * no read can see yet (D6).
+ *
+ * The successor's input assembly runs inside the same transaction as the
+ * acceptance, BEFORE the batch that writes this result — so the one producer it
+ * cannot read back is the attempt being settled, and the validation's retained
+ * payload and revisions ARE that result. Overlaying them is what makes the
+ * just-accepted result participate in the successor's binding in that same
+ * transaction, instead of a later write filling the gap.
+ */
+interface JustAcceptedResult {
+  readonly attemptId: string;
+  readonly facts: AcceptedResultFacts;
 }
 
 /**
@@ -1722,6 +1784,12 @@ export class OutcomeGraphRuntime {
       // back — no run identity, no state, no effect, no credential — and is
       // answered the named refusal the store's claim produced.
       if (error instanceof DispatchBudgetExhaustedError) return refused([error.refusal]);
+      // An ENTRY dispatch whose declared inputs cannot be resolved rolls the
+      // whole start back the same way (D6): nothing is written, and the caller
+      // is answered one named refusal per input that could not be resolved.
+      if (error instanceof DispatchInputBlockedError) {
+        return refused(error.refusals.map(inputRefusalOf));
+      }
       throw error;
     }
     this.launchDispatches(run.dispatched);
@@ -1807,6 +1875,21 @@ export class OutcomeGraphRuntime {
       }
       attemptSeq += 1;
       const attemptId = node.id + "#" + attemptSeq;
+      // THE ENTRY DISPATCH IS BOUND BEFORE ANYTHING IS RECORDED (D6). An entry
+      // node normally declares no inputs — but a plan may declare one whose
+      // producer is reachable only through a loop's back edge, and at a start
+      // NOTHING has settled, so such an input cannot resolve. The refusal aborts
+      // the WHOLE start: a run whose entry node nobody may start has nothing to
+      // begin from, and a state recording an attempt that was never bound would
+      // be worse than no state at all.
+      const entryInputs = assembleDownstreamInput(
+        node.inputs ?? [],
+        () => undefined,
+        this.acceptedResultReaderIn(tx),
+      );
+      if (entryInputs.kind === "blocked") {
+        throw new DispatchInputBlockedError(entryInputs.refusals);
+      }
       // THE DISPATCH IS CLAIMED AGAINST THE DECLARED BUDGET BEFORE IT IS ARMED
       // (P3 item 3). The claim is a conditional row write inside THIS
       // transaction, so a node whose ceiling has no headroom aborts the whole
@@ -1853,10 +1936,20 @@ export class OutcomeGraphRuntime {
             : { dispatchIdentity: input.dispatchIdentity }),
           dispatchedAt: at,
           arrivals: Object.freeze([]),
+          // The input view this attempt was armed with (D6) — empty for the
+          // ordinary entry node, and written down where it was decided.
+          inputs: entryInputs.entries,
         }),
       );
       dispatched.push(
-        this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
+        this.dispatchRequestOf(
+          node.id,
+          attemptId,
+          node.agent,
+          node.prompt,
+          entryInputs.entries,
+          credential,
+        ),
       );
       // THE INTENT IS PART OF THE SAME SNAPSHOT (D8). The effect names this
       // attempt under the stable id its host dedupes and looks up by, so a
@@ -1868,7 +1961,13 @@ export class OutcomeGraphRuntime {
           effectId: dispatchEffectIdOf(attemptId),
           attemptId,
           kind: "dispatch",
-          payload: this.dispatchTargetOf(node.id, attemptId, node.agent, node.prompt),
+          payload: this.dispatchTargetOf(
+            node.id,
+            attemptId,
+            node.agent,
+            node.prompt,
+            entryInputs.entries,
+          ),
           createdAt: at,
           status: "pending" as const,
         }),
@@ -2205,6 +2304,12 @@ export class OutcomeGraphRuntime {
       // authorize rolls the whole mint back — run row, order link, state, effect
       // and credential — and is answered the named refusal.
       if (error instanceof DispatchBudgetExhaustedError) return refused([error.refusal]);
+      // The same rule for an entry dispatch whose declared inputs cannot be
+      // resolved (D6): the whole mint rolls back and the refusals are named, so
+      // a re-executed run never begins on a hole.
+      if (error instanceof DispatchInputBlockedError) {
+        return refused(error.refusals.map(inputRefusalOf));
+      }
       throw error;
     }
     this.launchDispatches(started.dispatched);
@@ -2433,6 +2538,27 @@ export class OutcomeGraphRuntime {
       projections = projected;
     }
 
+    // THE JUST-ACCEPTED RESULT IS AN INPUT OF THE SUCCESSOR'S BINDING (D6). It
+    // is the validation's own retained payload and revisions — the values the
+    // acceptance batch is about to write — so the successor's assembly sees
+    // exactly what this commit makes durable, IN this commit, instead of a later
+    // write filling the gap. Absent when the validation retained nothing, which
+    // means no accepted result is written for this attempt at all: a consumer of
+    // it is then blocked by name rather than handed a synthesized value.
+    const justAccepted: JustAcceptedResult | undefined =
+      validation.kind === "validated" &&
+      validation.decision.kind === "accepted" &&
+      validation.retained !== undefined
+        ? {
+            attemptId: validation.decision.identity.attemptId,
+            facts: Object.freeze({
+              outcomeId: validation.decision.outcomeId,
+              payload: validation.retained.payload,
+              artifacts: validation.retained.artifacts,
+            }),
+          }
+        : undefined;
+
     let planned: OutcomeAdvance | undefined;
     const join: AcceptanceJoin = (tx, decision) => {
       // THE INVERSE RACE IS CLOSED HERE (P3 item 1, plan §3.4). The check above
@@ -2458,6 +2584,7 @@ export class OutcomeGraphRuntime {
         at,
         projections,
         hostIdentity.kind === "identified" ? hostIdentity.identity : undefined,
+        justAccepted,
       );
       planned = joined.advance;
       return joined.result;
@@ -4124,6 +4251,45 @@ export class OutcomeGraphRuntime {
         });
         continue;
       }
+      // THE INPUT VIEW IS DELIVERED FROM THE PERSISTED STATE, NEVER RE-DERIVED
+      // (D6). The binding was decided in the transaction that armed this attempt
+      // and the state carries it verbatim, so a restarted process hands the
+      // worker exactly what the arming process resolved — a loop round, a retry
+      // or a re-execution that moved a producing node to a newer attempt cannot
+      // rebind a consumer that is already in flight.
+      //
+      // AN ATTEMPT WITH NO BOUND VIEW FOR A NODE THAT DECLARES INPUTS IS NEVER
+      // LAUNCHED (D6): it was armed by a body version that did not bind one, and
+      // starting it would give the worker a hole where its input should be. The
+      // refusal is reported here, before the credential is re-issued, so nothing
+      // is prepared for an execution that must not exist.
+      const declaredInputs = this.compiledNodeOf(target.nodeId)?.inputs ?? [];
+      if (armed.inputs === undefined && declaredInputs.length > 0) {
+        refusals.push({
+          code: "dispatch-input-unbound",
+          path: "$.attemptId",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effect.effectId) +
+            " targets node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            ", which DECLARES " +
+            String(declaredInputs.length) +
+            " input(s), but the persisted state entry for that attempt records no bound " +
+            "input view — it was armed before this build bound inputs to the attempt, so " +
+            "it is NOT launched with a hole where its input should be: the effect stays " +
+            "unsettled and this node must be armed again under this build (a trusted " +
+            "retry or a re-execution mints an attempt that carries the binding)",
+        });
+        continue;
+      }
+      // THE STATE ENTRY IS THE AUTHORITY for the delivered view: it is the record
+      // the reader verifies and the one this decision has just been made
+      // against. An entry armed by this build always carries a list — empty when
+      // the node declares none.
+      const boundInputs: readonly ResolvedInput[] = armed.inputs ?? Object.freeze([]);
       // THE BINDING IS READ FROM THE PERSISTED STATE, AND THE CREDENTIAL FROM
       // THE HOST'S STORE. The payload is credential-free on purpose and the
       // state records only the DIGEST, so the credential a recovered worker
@@ -4257,6 +4423,7 @@ export class OutcomeGraphRuntime {
             target.attemptId,
             target.agent,
             target.prompt,
+            boundInputs,
             credential,
           ),
         );
@@ -4285,6 +4452,7 @@ export class OutcomeGraphRuntime {
           target.attemptId,
           target.agent,
           target.prompt,
+          boundInputs,
           credential,
         ),
       );
@@ -5073,6 +5241,13 @@ export class OutcomeGraphRuntime {
     now: number,
     progress: readonly ProgressProjection[],
     dispatchIdentity: HostInvocationIdentity | undefined,
+    /**
+     * The accepted result THIS transaction commits (see
+     * {@link JustAcceptedResult}). Absent when the validation retained none —
+     * which means no accepted result is written for this attempt at all, so a
+     * consumer of it is blocked by name rather than handed a synthesized value.
+     */
+    justAccepted: JustAcceptedResult | undefined,
   ): JoinedReduction {
     const record = tx.readGraphState(this.graphId);
     if (record === undefined) {
@@ -5123,6 +5298,10 @@ export class OutcomeGraphRuntime {
       // onto every attempt this advance arms. Absent records nothing, which is
       // the honest statement for a host that declared no identity.
       ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
+      // THE DURABLE FACTS THE INPUT BINDING IS ASSEMBLED FROM (D6), read
+      // through THIS transaction, with the result this very acceptance commits
+      // overlaid because no read can see it yet.
+      readAcceptedResult: this.acceptedResultReaderIn(tx, justAccepted),
     });
     const effects = advance.dispatches.map((intent) => ({
       effectId: dispatchEffectIdOf(intent.attemptId),
@@ -5270,6 +5449,7 @@ export class OutcomeGraphRuntime {
       intent.attemptId,
       intent.agent,
       intent.prompt,
+      intent.inputs,
       intent.credential,
     );
   }
@@ -5283,6 +5463,7 @@ export class OutcomeGraphRuntime {
       intent.attemptId,
       intent.agent,
       intent.prompt,
+      intent.inputs,
     );
   }
 
@@ -5298,6 +5479,7 @@ export class OutcomeGraphRuntime {
     attemptId: string,
     agent: string,
     prompt: string,
+    inputs: readonly ResolvedInput[],
   ): OutcomeDispatchTarget {
     return Object.freeze({
       graphId: this.graphId,
@@ -5306,6 +5488,10 @@ export class OutcomeGraphRuntime {
       attemptId,
       agent,
       prompt,
+      // ALWAYS PRESENT on a dispatch this build creates (D6): the empty list is
+      // the resolved view of "this node declares no inputs", so an absent field
+      // says only that the row was written before the binding existed.
+      inputs,
     });
   }
 
@@ -5315,6 +5501,7 @@ export class OutcomeGraphRuntime {
     attemptId: string,
     agent: string,
     prompt: string,
+    inputs: readonly ResolvedInput[],
     credential: string,
   ): OutcomeDispatchRequest {
     return Object.freeze({
@@ -5324,8 +5511,88 @@ export class OutcomeGraphRuntime {
       attemptId,
       agent,
       prompt,
+      inputs,
       credential,
     });
+  }
+
+  /** The compiled node with this id, or `undefined` when the plan has none. */
+  private compiledNodeOf(nodeId: string): CompiledNode | undefined {
+    return this.plan.nodes.find((node) => node.id === nodeId);
+  }
+
+  /**
+   * The DURABLE accepted-result read one transaction's input assembly uses (D6).
+   *
+   * WHY IT IS BUILT PER TRANSACTION. The facts a consumer's binding is made of
+   * are read through the SAME boundary that is deciding it — the state and the
+   * accepted results the transaction sees — and the attempt this transaction is
+   * settling is overlaid from the validation because its accepted result is
+   * written by the batch that has not landed yet (see
+   * {@link JustAcceptedResult}). Everything else is read back by ATTEMPT ID:
+   * what a producer accepted is looked up under the attempt the state records as
+   * settled, never under "the node's latest result".
+   *
+   * TOTAL: a substrate without the read, a throwing read and a missing row are
+   * three different answers (`unreadable`, `unreadable`, `none`) and never a
+   * synthesized value. The accepted-event stream is read LAZILY — only when a
+   * declared input actually resolves to an attempt — because the outcome an
+   * attempt settled on is the accepted event's identity, not this record's.
+   */
+  private acceptedResultReaderIn(
+    tx: AcceptanceLedgerTx,
+    justAccepted?: JustAcceptedResult,
+  ): (attemptId: string) => AcceptedResultReading {
+    let outcomes: ReadonlyMap<string, string> | undefined;
+    return (attemptId: string): AcceptedResultReading => {
+      if (justAccepted !== undefined && justAccepted.attemptId === attemptId) {
+        return Object.freeze({ kind: "facts" as const, facts: justAccepted.facts });
+      }
+      if (tx.readAcceptedResult === undefined) {
+        return Object.freeze({
+          kind: "unreadable" as const,
+          reason:
+            "this substrate exposes no accepted-result read " +
+            "(AcceptanceLedgerTx.readAcceptedResult), so what attempt " +
+            JSON.stringify(attemptId) +
+            " accepted cannot be read back",
+        });
+      }
+      outcomes ??= new Map(
+        tx
+          .acceptedEvents(this.graphId)
+          .map((event) => [event.attemptId, event.outcomeId] as const),
+      );
+      const outcomeId = outcomes.get(attemptId);
+      if (outcomeId === undefined) {
+        return Object.freeze({ kind: "none" as const });
+      }
+      let record: AcceptedResultEvidence | undefined;
+      try {
+        record = tx.readAcceptedResult(this.graphId, attemptId);
+      } catch (error) {
+        return Object.freeze({
+          kind: "unreadable" as const,
+          reason:
+            "the accepted result of attempt " +
+            JSON.stringify(attemptId) +
+            " could not be read (" +
+            errorText(error) +
+            ")",
+        });
+      }
+      if (record === undefined) {
+        return Object.freeze({ kind: "none" as const });
+      }
+      return Object.freeze({
+        kind: "facts" as const,
+        facts: Object.freeze({
+          outcomeId,
+          payload: record.payload,
+          artifacts: record.artifacts ?? Object.freeze([]),
+        }),
+      });
+    };
   }
 
   /**
@@ -5842,6 +6109,18 @@ function readDispatchRequest(
         "non-empty strings",
     };
   }
+  // THE BOUND INPUT VIEW IS DECODED WITH THE STATE READER'S OWN RULES (D6), so a
+  // body the state accepts is exactly a payload this accepts. ABSENT is read as
+  // absent — a row written before this build bound inputs — and a row that
+  // carries a malformed one is REPORTED rather than launched at a guessed view.
+  let inputs: readonly ResolvedInput[] | undefined;
+  if (payload.inputs !== undefined) {
+    const reading = readResolvedInputs(payload.inputs, "$.inputs");
+    if (reading.kind === "malformed") {
+      return { kind: "malformed", message: reading.message };
+    }
+    inputs = reading.entries;
+  }
   return {
     kind: "ok",
     target: Object.freeze({
@@ -5851,6 +6130,7 @@ function readDispatchRequest(
       attemptId,
       agent,
       prompt,
+      ...(inputs === undefined ? {} : { inputs }),
     }),
   };
 }
@@ -5937,6 +6217,30 @@ function usageEntryOf(result: BudgetUsageResult): OutcomeBudgetUsageEntry {
         reason: result.reason,
       });
   }
+}
+
+/**
+ * Map one UNRESOLVED declared input onto the runtime's refusal vocabulary (D6).
+ *
+ * The input's own code is NAMED inside the message rather than replacing the
+ * runtime code: `dispatch-input-unbound` says what was not done (a dispatch
+ * that would have started with a hole), and the nested code says exactly which
+ * rule refused it, so a caller diagnoses from one value.
+ */
+function inputRefusalOf(refusal: DownstreamInputRefusal): OutcomeRuntimeRefusal {
+  return {
+    code: "dispatch-input-unbound",
+    path: "$.nodes." + refusal.from + ".inputs",
+    message:
+      "outcome-runtime: the dispatch of a node that consumes " +
+      JSON.stringify(refusal.from) +
+      "/" +
+      JSON.stringify(refusal.outcome) +
+      " was NOT created [" +
+      refusal.code +
+      "]: " +
+      refusal.message,
+  };
 }
 
 /** Map an acceptance-core refusal onto the runtime's vocabulary verbatim. */
