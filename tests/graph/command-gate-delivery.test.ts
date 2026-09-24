@@ -51,7 +51,7 @@ import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts"
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import { readResolvedArtifact } from "../../src/graph/outcome/inputs.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import {
   COMMAND_EXIT_VALIDATOR_ID,
   COMMAND_EXIT_VALIDATOR_VERSION,

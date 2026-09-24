@@ -219,8 +219,8 @@ describe("GraphStore — ONE workspace database", () => {
       for (const table of Object.values(GRAPH_STORE_TABLES)) {
         expect(tables).toContain(table);
       }
-      // Nothing else was written beside it: no second database, no side channel.
-      expect(readdirSync(dir)).toEqual([GRAPH_STORE_FILE]);
+      // The additional marker carries storage identity, never execution state.
+      expect(readdirSync(dir).sort()).toEqual([GRAPH_STORE_FILE, "graph-store.identity"].sort());
 
       // A fresh process (a new connection) reads all of it back.
       const reopened = GraphStore.openFile(dir);

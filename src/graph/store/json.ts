@@ -1,27 +1,3 @@
-/**
- * Graph store — the ONE JSON representability rule
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * Every JSON column the unified store writes (an effect payload, a run-state
- * body, an accepted result, a graph definition) is encoded HERE, so "what the
- * store can represent" is one rule rather than one rule per table. A value JSON
- * has no representation for — `undefined`, a function, a symbol, a BigInt, a
- * non-finite number, a reference cycle — throws BEFORE the row is inserted, so a
- * hostile body rolls the whole transaction back instead of storing a silently
- * truncated one.
- *
- * The rule is parameterized by `subject` (what the body belongs to, for the
- * diagnostic) and `problem` (the code the caller reports); the ledger's own
- * codes are unchanged.
- *
- * Dependency leaf: this module imports the store's error type, the record
- * module that declares the accepted-data ceiling, and two named bounds — the
- * graph-state bound and the accepted-data bound — so a size rule is stated once
- * and enforced where the text is produced.
- */
-
 import { errorText } from "../../utils/error-text.ts";
 import { GraphStoreWriteError, type GraphStoreWriteProblem } from "./errors.ts";
 import { GRAPH_STATE_MAX_BYTES } from "../ledger/types.ts";
@@ -45,8 +21,7 @@ export function encodeJsonBody(
       ) {
         throw new GraphStoreWriteError(
           problem,
-          `acceptance-ledger: ${subject} contains ${
-            entry === undefined ? "an undefined value" : `a ${typeof entry} value`
+          `acceptance-ledger: ${subject} contains ${entry === undefined ? "an undefined value" : `a ${typeof entry} value`
           }, which JSON cannot represent — nothing from this transaction was committed`,
         );
       }

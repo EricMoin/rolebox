@@ -1,3 +1,10 @@
+import type { HostExecutionObservation } from "../../../graph/host/outcome-host.ts";
+import { graphWorkerSandbox } from "../../sandbox/graph-worker.ts";
+import { getDataDir } from "../../../cli/paths.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { WorkerChannelGrant } from "../../../graph/application/worker-channel.ts";
+import { childSessionFile } from "./child-session.ts";
+import { readPiGraphObservation } from "./graph-observation.ts";
 /**
  * PiProcessSessionAdapter — ISessionClient adapter with spawn-based
  * process session management.
@@ -83,6 +90,7 @@ interface ProcessRecord {
   messages: Message[];
   /** Exit code from the completed process, or null if still running. */
   exitCode: number | null;
+  exited?: boolean;
   /** Aggregated stderr output from the child process. */
   stderr: string;
   /** Agent configuration used for the spawn CLI arguments. */
@@ -299,11 +307,12 @@ export function buildSpawnArgs(
   sysPromptPath: string,
   promptText: string,
   extra?: string[],
+  sessionFile?: string,
 ): string[] {
   const args: string[] = [
     "--mode", "json",
     "-p",
-    "--no-session",
+    ...(sessionFile === undefined ? ["--no-session"] : ["--session", sessionFile]),
     "--model", model,
   ];
 
@@ -387,6 +396,16 @@ export class PiProcessSessionAdapter implements ISessionClient {
    */
   setEventBridge(bridge: IEventBridge): void {
     this.eventBridge = bridge;
+  }
+
+  private readonly graphDispatch = new AsyncLocalStorage<readonly string[]>();
+
+  runGraphWorker<T>(launch: () => T, inputPaths: readonly string[] = []): T { return this.graphDispatch.run(inputPaths, launch); }
+
+  private graphWorkerChannel?: (sessionId: string, agent?: string) => WorkerChannelGrant;
+
+  setGraphWorkerChannel(issue: (sessionId: string, agent?: string) => WorkerChannelGrant): void {
+    this.graphWorkerChannel = issue;
   }
 
   // ── Recovery ──────────────────────────────────────────────────────────────
@@ -742,6 +761,26 @@ export class PiProcessSessionAdapter implements ISessionClient {
     return { type: "idle" };
   }
 
+  observeGraphWorker(id: string): HostExecutionObservation {
+    const record = this.processes.get(id);
+    if (!record?.proc) return readPiGraphObservation(process.cwd(), id);
+    const last = record.messages[record.messages.length - 1];
+    if (last?.info.error || last?.info.finish === "error" || last?.info.finish === "aborted") {
+      return { kind: "failed", reason: "Pi reported an unsuccessful terminal response" };
+    }
+    if (this._isFinalTurn(record)) return { kind: "completed" };
+    if (record.exited) return { kind: "failed", reason: "Pi process exited without a successful final response" };
+    return record.proc ? { kind: "running" } : { kind: "unknown", reason: "A retained Pi transcript does not prove the process has ended" };
+  }
+
+  async confirmGraphWorkerStopped(id: string): Promise<boolean> {
+    const record = this.processes.get(id);
+    if (!record?.proc) return record?.exited === true;
+    const deadline = Date.now() + 2_000;
+    while (!record.exited && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    return record.exited === true;
+  }
+
   // ── abort() ─────────────────────────────────────────────────────────────
 
   /**
@@ -1024,7 +1063,8 @@ export class PiProcessSessionAdapter implements ISessionClient {
     void writeSystemPrompt(id, systemPrompt ?? record.agentConfig.systemPrompt);
 
     // Build CLI arguments (ordering locked by buildSpawnArgs + unit tests).
-    const args = buildSpawnArgs(model, tools, sysPromptPath, promptText);
+    const nativeSessionFile = await childSessionFile(process.cwd(), id);
+    const args = buildSpawnArgs(model, tools, sysPromptPath, promptText, undefined, nativeSessionFile);
 
     this.log.debug("Spawning Pi process", { id, model, toolCount: tools.length, agent: agentId });
 
@@ -1036,7 +1076,18 @@ export class PiProcessSessionAdapter implements ISessionClient {
       childEnv.ROLEBOX_ACTIVE_AGENT = agentId;
     }
 
-    const proc = spawn(this._resolvePiBinary(), args, {
+    let command = { executable: this._resolvePiBinary(), args };
+    if (this.graphWorkerChannel && this.graphDispatch.getStore()) {
+      const grant = this.graphWorkerChannel(id, agentId);
+      childEnv.ROLEBOX_GRAPH_WORKER_ENDPOINT = grant.endpoint;
+      childEnv.ROLEBOX_GRAPH_WORKER_TOKEN = grant.token;
+      if (grant.routeFile) childEnv.ROLEBOX_GRAPH_WORKER_ROUTE = grant.routeFile;
+      command = graphWorkerSandbox({ executable: command.executable, args, workspace: process.cwd(),
+        dataDirectory: getDataDir(), sessionFile: nativeSessionFile, routeFile: grant.routeFile,
+        agentDirectory: childEnv.PI_CODING_AGENT_DIR, inputPaths: this.graphDispatch.getStore() });
+    }
+
+    const proc = spawn(command.executable, command.args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv,
     });
@@ -1102,6 +1153,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // ── exit handler ───────────────────────────────────────────────
     proc.on("exit", (code: number | null) => {
       record.exitCode = code;
+      record.exited = true;
       this.log.debug("Pi process exited", { id, code });
 
       // Clear the timeout.

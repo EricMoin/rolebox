@@ -1,82 +1,3 @@
-/**
- * Graph Execution Engine v2 — Graph Compiler (v3)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The compiler: `GraphDeclarationV3` in, `CompiledPlan` out, structurally. It
- * proves declared structure — outcome references, completion policies, loop
- * routes, contract resolution and (optionally) validator capability — and
- * nothing else. It does not execute, persist, load or wire anything, and it
- * never reinterprets a legacy v2 document
- * (docs/graph-outcome-protocol.md § "Compiler and runtime boundary").
- *
- * Two properties the rest of the pipeline depends on:
- * - TOTALITY. `compileGraph` answers a `CompileResult` for every input. A
- *   malformed declaration is an ERROR, never an exception: the structural guard
- *   and the deep readers only ever hand back diagnostics, and the whole
- *   compilation is wrapped so a value that throws while being read is reported
- *   as a compile error rather than escaping into the caller.
- * - DETERMINISM. Nodes are validated in id order, edges in
- *   (from, to, outcome) order and loop groups in id order, so warnings/errors
- *   have a stable order and the plan is canonical before `plan.ts` addresses
- *   it by content. The same content therefore always compiles to the same
- *   revision, whatever order the declaration wrote it in.
- *
- * Contract resolution is DELEGATED, never re-implemented: a node's
- * `contractRef` goes through B4's `resolveContractRef` against
- * `CompileOptions.contracts`, the resolved CONTENT lands once in
- * `plan.contractSnapshots[digest]` (deduplicated by digest), the identity
- * `(id, revision) → digest` lands in `plan.contractIdentities` (one entry per
- * identity, never overwriting another), and the node carries the exact ref. Two
- * identities whose bodies are byte-identical therefore share one snapshot and
- * keep two index entries. A node WITHOUT a contractRef is legal in this slice;
- * contracts become mandatory for outcome nodes in a later slice, once load-time
- * refusal exists.
- *
- * ACCEPTANCE CAPABILITY is RESOLVED and PINNED (B9). With
- * `CompileOptions.supportedValidators` supplied, every acceptance requirement
- * must resolve to an installed capability at an EXACT version: a versioned
- * requirement is satisfied only by that exact version, an unversioned one is
- * pinned to the version of the first matching installed capability, and
- * anything else is an error — `unsupported-validator` when nothing has the
- * name, `unpinned-validator-version` when only an unversioned capability has
- * it. The resolved version is written back into the plan, so the plan records
- * what was checked and a syntactically fine requirement never silently means
- * "any version". With NO capability set the compilation still answers, but as
- * an explicitly NON-EXECUTABLE DRAFT whose `executability` records what is
- * unresolved.
- *
- * NATURAL COMPLETION IS AUTHORIZED, NEVER ASSUMED (D6). A node's `completion`
- * policy is a REQUEST; the graph's `completion_policy` names the exact policy
- * revision it asks to be judged by, and only the registry the HOST installed
- * (`CompileOptions.completionPolicies`, built from content-pinned
- * authorizations) can resolve it. The compiler never reads a policy file, so a
- * declaration the repository ships, or a file some worker just wrote, is not an
- * authorization. An explicitly denied mapping is `completion-policy-denied`;
- * a mapping that is merely not authorized compiles to a NON-EXECUTABLE DRAFT
- * carrying `unauthorizedCompletions` with a stable code — it is NEVER
- * downgraded to `explicit`, which would hide the missing authorization and
- * change what the author declared. An authorized mapping is PINNED: the plan
- * body carries the policy snapshot, its identity index and the authorization
- * itself, all covered by `planRevision`, and the inspector requires every
- * natural mapping of an executable plan to be pinned.
- *
- * THE PLAN IS INSPECTED BEFORE IT IS RETURNED. The body the compiler assembles
- * goes through `plan.ts`'s `inspectCompiledTopology` — the SAME plan-level
- * inspector and the SAME codes the load gate uses — and a rejection is returned
- * as compile errors. Cycles must be inside a declared loop group, a loop's
- * continuation outcome must have an edge that stays inside it, a node must
- * declare outcomes, the body must state non-empty and edge-consistent terminal
- * outcomes, and an executable plan must pin every acceptance requirement. The
- * writer therefore satisfies its own reader structurally, not by convention.
- *
- * Dependencies: `declaration-v3.ts` (the grammar and its structural guard),
- * `plan.ts` (the immutable plan model, its ONE content-addressed revision and
- * its ONE plan-level inspector) and `contracts/` (the ONE digest and the
- * resolution surface).
- */
-
 import {
   isContractRef,
   type ContractContentSnapshot,
@@ -87,7 +8,9 @@ import {
   resolveContractRef,
   type ContractRegistry,
 } from "../contracts/resolve.ts";
-import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
+import type { JoinConfig } from "../domain/join.ts";
+import type { NodeBudgetSpec } from "../domain/budget.ts";
+import { nodeBudgetLimitsOf, readRunBudget } from "../domain/budget.ts";
 import {
   isGraphDeclarationV3,
   type AcceptanceRequirementV3,
@@ -286,83 +209,29 @@ export interface CompileOptions {
  */
 export type CompileResult =
   | {
-      readonly ok: true;
-      readonly kind: "executable";
-      readonly plan: CompiledPlan;
-      readonly warnings: readonly CompileIssue[];
-    }
+    readonly ok: true;
+    readonly kind: "executable";
+    readonly plan: CompiledPlan;
+    readonly warnings: readonly CompileIssue[];
+  }
   | {
-      readonly ok: true;
-      readonly kind: "draft";
-      readonly plan: CompiledPlan;
-      readonly unresolved: readonly CompiledUnresolvedRequirement[];
-      readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
-      readonly warnings: readonly CompileIssue[];
-    }
+    readonly ok: true;
+    readonly kind: "draft";
+    readonly plan: CompiledPlan;
+    readonly unresolved: readonly CompiledUnresolvedRequirement[];
+    readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
+    readonly warnings: readonly CompileIssue[];
+  }
   | {
-      readonly ok: false;
-      readonly errors: readonly CompileIssue[];
-      readonly warnings: readonly CompileIssue[];
-    };
+    readonly ok: false;
+    readonly errors: readonly CompileIssue[];
+    readonly warnings: readonly CompileIssue[];
+  };
 
 // ── Compiler ────────────────────────────────────────────────────────────────
 
 /**
  * Compile a v3 declaration into an immutable plan.
- *
- * Rules, each with its stable code:
- * - `malformed-declaration` — not a v3 declaration at all, or a field shape
- *   wrong at any depth the structural guard does not police;
- * - `duplicate-node-id` — one node id has more than one declaration;
- * - `missing-outcomes` — a node declares no outcomes;
- * - `duplicate-outcome-id` — an outcome id is declared twice on one node;
- * - `unknown-edge-endpoint` — an edge names a node that is not declared;
- * - `missing-edge-outcome` — an edge binds no outcome (unreachable through the
- *   typed grammar, reachable through the structural guard);
- * - `unknown-outcome-reference` — an edge binds an outcome its SOURCE node
- *   does not declare;
- * - `natural-completion-unknown-outcome` — a natural policy names an outcome
- *   the node does not declare;
- * - `duplicate-natural-completion` — more than one natural claim reaches the
- *   compiler (only through an array-valued policy, which the shape-level guard
- *   deliberately lets through so this precise code can name it);
- * - `duplicate-loop-group-id` — one loop group id has more than one group;
- * - `loop-group-missing-limits` — `max_traversals` is absent or not a positive
- *   safe integer;
- * - `unknown-loop-member` — a loop group names an undeclared node;
- * - `unknown-loop-continuation-outcome` / `unknown-loop-exit-outcome` — a route
- *   outcome no member node declares;
- * - `loop-continuation-outside-group` — an edge carries the continuation
- *   outcome out of the group;
- * - `unresolved-contract` — a node's `contractRef` has no installed snapshot
- *   (or no registry was supplied);
- * - `contract-digest-mismatch` — the installed snapshot's body does not hash to
- *   the ref's digest;
- * - `unsupported-validator` — an acceptance requirement no declared capability
- *   covers (only when `supportedValidators` is provided);
- * - `unpinned-validator-version` — an acceptance requirement covered only by an
- *   unversioned capability, so no exact version can be pinned (only when
- *   `supportedValidators` is provided);
- * - `completion-policy-denied` — the requested policy resolved and its rules
- *   (or its declared default) EXPLICITLY deny the node's natural mapping. A
- *   policy that is merely absent, unknown, or silent about the mapping is NOT
- *   this error: those compile to a draft naming the missing authorization, so
- *   "not authorized (yet)" is never reported as "forbidden";
- *
- * and the PLAN-LEVEL rules of `plan.ts`'s `inspectCompiledTopology`, applied to
- * the body the compiler just built and reported with the SAME codes the load
- * gate uses: `cycle-not-in-loop-group`, `loop-continuation-without-edge`,
- * `missing-outcomes`, `missing-terminal-outcome`,
- * `terminal-outcomes-inconsistent`, `unpinned-validator-version` and the
- * shape/topology members of `CompiledTopologyIssueCode`. A declaration whose
- * body the inspector would reject is a compile error, so the compiler can never
- * return a plan its own reader refuses.
- *
- * There is no warning code: `unused-outcome` was retired because an outcome
- * with no outbound edge is now the plan's explicit `terminalOutcomes` entry.
- *
- * PURE and TOTAL: no I/O, no mutation of the declaration, and no exception for
- * any input.
  */
 export function compileGraph(
   declaration: unknown,
@@ -433,6 +302,12 @@ function compileDeclaration(
   }
 
   const log: IssueLog = { errors: [], warnings: [] };
+  let budget;
+  try {
+    budget = readRunBudget(declaration.budget);
+  } catch (error) {
+    log.errors.push(issue("malformed-declaration", String(error), "$.budget"));
+  }
   const nodesById = indexNodes(declaration, log);
   const declaredOutcomes = new Map<string, ReadonlySet<string>>();
   for (const node of nodesById.values()) {
@@ -507,6 +382,7 @@ function compileDeclaration(
   const body: CompiledPlanBody = {
     graphId: declaration.name,
     declarationVersion: 3,
+    ...(budget === undefined ? {} : { budget }),
     nodes,
     edges: compiledEdges,
     loopGroups,
@@ -527,16 +403,16 @@ function compileDeclaration(
       unresolved.length === 0 && completion.unauthorized.length === 0
         ? { kind: "executable" }
         : {
-            kind: "draft",
-            unresolved,
-            unauthorizedCompletions: Object.freeze(
-              [...completion.unauthorized].sort(
-                (a, b) =>
-                  compareText(a.nodeId, b.nodeId) ||
-                  compareText(a.outcome, b.outcome),
-              ),
+          kind: "draft",
+          unresolved,
+          unauthorizedCompletions: Object.freeze(
+            [...completion.unauthorized].sort(
+              (a, b) =>
+                compareText(a.nodeId, b.nodeId) ||
+                compareText(a.outcome, b.outcome),
             ),
-          },
+          ),
+        },
   };
 
   // THE WRITER SATISFIES ITS OWN READER: the body the compiler just assembled
@@ -696,7 +572,7 @@ function compileNode(
     log.errors.push(
       issue(
         "malformed-declaration",
-        `budget of node ${JSON.stringify(node.id)} carries a non-finite number in a budget field`,
+        `budget of node ${JSON.stringify(node.id)} is invalid or unsupported; max_retries is unavailable until automatic retries are implemented`,
         `${base}.budget`,
       ),
     );
@@ -956,6 +832,9 @@ function missingConcreteCapability(
   capabilities: AcceptanceCapabilitySet | undefined,
 ): string | undefined {
   if (capabilities === undefined) return undefined;
+  if (where.validator === "principal-approval" && !capabilities.approvalMappings?.some(
+    (mapping) => mapping.graphId === where.graphId && mapping.nodeId === where.nodeId,
+  )) return "no installed approval policy authorizes approvers for this graph and node";
   if (where.validator === SCHEMA_VALIDATOR_ID) {
     if (where.data === undefined) {
       return "the outcome declares no data contract, so a schema requirement has nothing to check — an undeclared contract is not a passing one";
@@ -1246,9 +1125,9 @@ type GraphCompletionPolicyReading =
   /** The id is installed, but not at the requested exact revision. */
   | { readonly kind: "unknown-revision" }
   | {
-      readonly kind: "resolved";
-      readonly snapshot: CompletionPolicySnapshot;
-    };
+    readonly kind: "resolved";
+    readonly snapshot: CompletionPolicySnapshot;
+  };
 
 /**
  * The per-compilation authorization state: the resolved policy reading, the
@@ -1385,11 +1264,11 @@ function authorizeCompletion(
         ...(context.request === undefined
           ? {}
           : {
-              request: {
-                id: context.request.id,
-                revision: context.request.revision,
-              },
-            }),
+            request: {
+              id: context.request.id,
+              revision: context.request.revision,
+            },
+          }),
       }),
     );
   };
@@ -1516,6 +1395,7 @@ const BUDGET_FIELDS = [
 function readBudget(raw: unknown): NodeBudgetSpec | null {
   if (raw === undefined) return null;
   if (!isRecord(raw)) return null;
+  if (nodeBudgetLimitsOf(raw).kind === "refused") return null;
   const budget: NodeBudgetSpec = {};
   for (const field of BUDGET_FIELDS) {
     const value = raw[field];
@@ -1903,11 +1783,11 @@ function compileProgressPolicy(
     record === undefined
       ? undefined
       : readCompiledProgressPolicy({
-          evaluator: record.evaluator,
-          version: record.version,
-          subject: record.subject,
-          maxUnchanged: record.max_unchanged,
-        });
+        evaluator: record.evaluator,
+        version: record.version,
+        subject: record.subject,
+        maxUnchanged: record.max_unchanged,
+      });
   if (policy === undefined) {
     log.errors.push(
       issue(

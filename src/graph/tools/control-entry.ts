@@ -1,37 +1,4 @@
-/**
- * Graph v3 — the `graph_control` ENTRY: one explicit, permissioned command
- * (P3 item 1)
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * THE ONE EXPLICIT CONTROL ENTRY POINT. Plan §4 P3: "统一控制入口使用明确的命令
- * 类型和权限" — one entry, explicit command types, and a permission check. This
- * module is the toolset-facing adapter of that entry: it resolves the
- * WORKSPACE'S ONE STORE (the same directory the declaration, the submission
- * ingress and the audit address), then hands the command to the trusted control
- * application service (`src/graph/control/application.ts`). It contains NO
- * control semantics of its own — it cannot apply a command, decide idempotency
- * or check a principal, and a defect here can only mis-address the store, which
- * the service then reports by name.
- *
- * WHAT THE CALLER MAY SAY. `graph_id`, one of the declared command names, an
- * optional node and attempt, and a reason. The PRINCIPAL is not an argument: it
- * is the session the platform attributed to THIS tool call, threaded by the
- * canonical facade exactly as the submission ingress threads its call session.
- * A worker's payload is therefore never authority, and there is no field a
- * caller could set to become someone else — or to infer a command from worker
- * data, which §3.4 forbids: the command is an explicit enum, and a shape the
- * command's own scope forbids (a node on a run-wide `cancel` or
- * `budget-stop`) is refused by name rather than reinterpreted.
- *
- * NO STORE IS EVER CREATED HERE. A workspace whose authoritative store is
- * ABSENT (or retired, or damaged, or of a format this build cannot read) is
- * refused as `store-unavailable`, never initialized: "no store" is not "a new
- * graph", and a control command must not be able to bring a store into
- * existence.
- */
-
+import type { ApprovalPolicy } from "../policy/approval-policy.ts";
 import type { ControlCommandName } from "../ledger/types.ts";
 import {
   applyGraphControl,
@@ -69,6 +36,7 @@ export interface GraphControlEntryArgs {
 
 /** What the entry needs to reach the workspace's one store. */
 export interface GraphControlEntryDeps {
+  readonly approvalPolicy?: ApprovalPolicy;
   /**
    * The directory holding the workspace's ONE graph store — resolved by the
    * toolset through the SAME function the declaration, the submission ingress
@@ -126,8 +94,8 @@ export function runGraphControlEntry(
       "store-unavailable",
       "$.graph_id",
       "graph_control refused [store-unavailable]: this process resolves no graph store " +
-        "directory (no host store root and no workspace state directory), so there is no " +
-        "authoritative store a control command could be recorded in — nothing was written",
+      "directory (no host store root and no workspace state directory), so there is no " +
+      "authoritative store a control command could be recorded in — nothing was written",
     );
   }
   const reading = readStoreDirectory(directory);
@@ -137,10 +105,10 @@ export function runGraphControlEntry(
       "store-unavailable",
       "$.graph_id",
       "graph_control refused [store-unavailable]: no graph store exists in this workspace " +
-        "(" +
-        reading.filePath +
-        " is absent), so no graph is declared here and there is nothing to control — a " +
-        "control command never initializes a store",
+      "(" +
+      reading.filePath +
+      " is absent), so no graph is declared here and there is nothing to control — a " +
+      "control command never initializes a store",
     );
   }
 
@@ -154,10 +122,10 @@ export function runGraphControlEntry(
         "store-unavailable",
         "$.graph_id",
         "graph_control refused [store-unavailable]: the workspace's authoritative store " +
-          "cannot be opened by this build (" +
-          error.problem +
-          "): " +
-          error.message,
+        "cannot be opened by this build (" +
+        error.problem +
+        "): " +
+        error.message,
       );
     }
     throw error;
@@ -173,10 +141,11 @@ export function runGraphControlEntry(
         invokingSessionId === undefined || invokingSessionId.length === 0
           ? undefined
           : Object.freeze({
-              sessionId: invokingSessionId,
-              ...(agent === undefined || agent.length === 0 ? {} : { agentId: agent }),
-            }),
+            sessionId: invokingSessionId,
+            ...(agent === undefined || agent.length === 0 ? {} : { agentId: agent }),
+          }),
       at: deps.now ?? Date.now(),
+      approvalPolicy: deps.approvalPolicy,
       // WHAT AN APPROVAL REQUEST MUST CARRY. Passed through verbatim, never
       // inferred: no default approver, no default deadline. The service refuses
       // a raise that lacks either (or names a deadline already past) by name,
@@ -184,21 +153,21 @@ export function runGraphControlEntry(
       ...(args.approver_session_id === undefined && args.expires_at === undefined
         ? {}
         : {
-            approval: Object.freeze({
-              approverSessionId: args.approver_session_id ?? "",
-              expiresAt: args.expires_at ?? 0,
-            }),
+          approval: Object.freeze({
+            approverSessionId: args.approver_session_id ?? "",
+            expiresAt: args.expires_at ?? 0,
           }),
+        }),
       ...(deps.credentialIsolation === undefined
         ? {}
         : {
-            retry: Object.freeze({
-              credentialIsolation: deps.credentialIsolation,
-              ...(deps.mintCredential === undefined
-                ? {}
-                : { mintCredential: deps.mintCredential }),
-            }),
+          retry: Object.freeze({
+            credentialIsolation: deps.credentialIsolation,
+            ...(deps.mintCredential === undefined
+              ? {}
+              : { mintCredential: deps.mintCredential }),
           }),
+        }),
     });
   } finally {
     store.close();

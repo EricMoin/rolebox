@@ -307,6 +307,8 @@ export function renderEngineGraphActivity(props: {
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{effectivePhase}</span>
       </text>
       {liveSignal && liveSignal !== "" && dimRow(c, { label: "sig", value: liveSignal, fg: c.secondary })}
+      {graph.graph?.current?.control && dimRow(c, { label: "stopped", value: graph.graph.current.control.reason })}
+      {graph.graph?.current && dimRow(c, { label: "attempts", value: `${graph.graph.current.attempts.length} · approvals ${graph.graph.current.approvals.filter((item) => item.status === "pending").length} · unsettled ${graph.graph.current.unsettledEffects.length}` })}
       {budgetLine !== null && dimRow(c, { label: "budget", value: budgetLine, budget: SIDEBAR_WIDTH - INDENT.length })}
       {shown.length > 0 && (
         <>

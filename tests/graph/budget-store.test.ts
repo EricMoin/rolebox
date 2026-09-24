@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { compileGraph } from "../../src/graph/compiler/compile.ts";
 import { parseGraphDeclarationV3 } from "../../src/graph/compiler/parse-declaration-v3.ts";
 import {
   buildBudgetReport,
@@ -473,13 +474,12 @@ describe("the dispatch budget — the claim is the conditional write", () => {
 });
 
 describe("the dispatch budget — which limits a plan authorizes", () => {
-  it("reads exactly the four ceiling dimensions, and ignores max_retries", () => {
+  it("reads exactly the four node resource ceilings", () => {
     const reading = nodeBudgetLimitsOf({
       max_input_tokens: 10,
       max_output_tokens: 20,
       max_cost_usd: 0.5,
       timeout_ms: 1000,
-      max_retries: 2,
     });
     expect(reading.kind).toBe("ok");
     if (reading.kind !== "ok") return;
@@ -539,5 +539,46 @@ describe("the dispatch budget — the format gate", () => {
     );
     raw.close();
     expect(() => GraphStore.openFile(root)).toThrow(/format/);
+  });
+});
+
+
+describe("run execution limits", () => {
+  it("rejects unsupported automatic retries at both authoring boundaries", () => {
+    const declaration = { version: 3, name: "retry.unsupported", nodes: [{ id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }], budget: { max_retries: 0 } }], edges: [] };
+    expect(parseGraphDeclarationV3(declaration).ok).toBe(false);
+    expect(compileGraph(declaration).ok).toBe(false);
+    expect(nodeBudgetLimitsOf({ max_retries: 0 }).kind).toBe("refused");
+  });
+
+  it("includes the run ceiling in the immutable plan identity", () => {
+    const declaration = { version: 3, name: "bounded", nodes: [{ id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }] }], edges: [], budget: { max_executions: 1 } };
+    const first = compileGraph(declaration);
+    const second = compileGraph({ ...declaration, budget: { max_executions: 2 } });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) throw new Error("compile failed");
+    expect(first.plan.planRevision).not.toBe(second.plan.planRevision);
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, null, "2"]) {
+      expect(compileGraph({ ...declaration, budget: { max_executions: value } }).ok).toBe(false);
+    }
+  });
+
+  it("counts released attempts, replays delivery without counting, and persists across reopen", () => {
+    const { store, root } = openStoreWithRun();
+    const first = { ...reserveInput("work#1", {}), maxExecutions: 1 };
+    expect(store.budget.reserveDispatch(first).kind).toBe("reserved");
+    store.budget.releaseReservation({ graphId: GRAPH, runId: RUN, nodeId: "work", attemptId: "work#1", at: NOW + 2 });
+    store.close();
+    const reopened = GraphStore.openFile(root);
+    try {
+      expect(reopened.budget.reserveDispatch(first).kind).toBe("replayed");
+      const retry = reopened.budget.reserveDispatch({ ...first, attemptId: "work#2", effectId: "dispatch:work#2" });
+      expect(retry.kind).toBe("exhausted");
+      if (retry.kind !== "exhausted") throw new Error("expected exhaustion");
+      expect(retry.exhausted).toEqual([expect.objectContaining({ kind: "executions", committed: 1, limit: 1 })]);
+      expect(reopened.budget.reserveDispatch({ ...first, nodeId: "review", attemptId: "review#1", effectId: "dispatch:review#1" }).kind).toBe("exhausted");
+      expect(reopened.budget.reservationsOf(GRAPH)).toHaveLength(1);
+    } finally { reopened.close(); }
   });
 });

@@ -1,3 +1,4 @@
+import { approvalPolicyFor, approvalGrantFor } from "./approval-policy.ts";
 /**
  * Cross-process worker for the P3 item 3 APPROVAL restart evidence.
  *
@@ -118,7 +119,7 @@ function control(
   now: number,
 ): Record<string, unknown> {
   const result = runGraphControlEntry(
-    { storeDirectory: storeRoot, now },
+    { storeDirectory: storeRoot, now, approvalPolicy: approvalPolicyFor(args.graph_id, APPROVAL_RESTART_APPROVER) },
     args,
     sessionID,
     agent,
@@ -286,6 +287,7 @@ function sweepRace(input: {
       const attemptId = "race#" + String(process.pid) + "#" + String(round);
       try {
         const result = store.approvals.raiseApprovalRequest({
+          authority: approvalGrantFor(input.graphId, APPROVAL_RESTART_APPROVER),
           graphId: input.graphId,
           runId: run.runId,
           nodeId: "work",

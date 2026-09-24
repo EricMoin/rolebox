@@ -1,41 +1,3 @@
-/**
- * Graph domain — the P1 field-ownership model
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The ONE declaration of what each P1 domain object owns, who may write it, and
- * which existing durable record it replaces (P1 item 1). It exists so P1 item 3
- * can converge the three durable substrates — the v2 EngineState container, the
- * acceptance ledger and the host store — into ONE workspace-scoped database
- * without a second, unowned copy of any shape.
- *
- * RULES THIS MODULE ENCODES
- * - One definition per concept. A record that already exists and is CORRECT is
- *   ALIASED here (`CompiledPlan`, `NodeAttempt`, `Receipt`, `DispatchEffect`,
- *   `ExecutionBinding`) and never restated. Every reference is `import type`, so
- *   this module has no runtime dependency and any layer may import it.
- * - Every type names its existing counterpart under `Replaces:`, so a later node
- *   can tell a pure alias from a migration target.
- * - Nothing here imports either retired v2 type container — not even a type
- *   (P1 item 2's exit condition).
- *
- * WORKSPACE IS THE STORE'S SCOPE. §3.1 keeps one authoritative database per
- * workspace, so the workspace is not repeated on every row; a row cannot move
- * between stores without being re-addressed.
- *
- * KNOWN IDENTITY GAP (§3.2 vs the P0-frozen records). §3.2 requires every effect
- * and receipt to belong to a definite RUN/attempt, while today's ledger keys are
- * graph/attempt-qualified only (`ReceiptRecord`, `PendingEffectRecord`,
- * `HostDispatchExecution`) and a graph's state holds at most one run. The
- * aliases below keep those frozen shapes unchanged; the converged store must
- * RUN-QUALIFY those keys once a graph can have several runs. That decision
- * belongs to P1 item 3, and the aliases exist so no second copy appears before
- * it is taken.
- *
- * STATUS: declarations only — this module adds no runtime behavior.
- */
-
 import type { GraphDeclarationV3 } from "../compiler/declaration-v3.ts";
 import type { CompiledPlan as CompiledPlanRecord } from "../compiler/plan.ts";
 import type { HostDispatchExecution } from "../host/execution-index.ts";
@@ -45,29 +7,7 @@ import type { HostInvocationIdentity } from "../outcome/host-identity.ts";
 
 // ── Definition ──────────────────────────────────────────────────────────────
 
-/**
- * The immutable definition of one logical graph.
- *
- * Owns: the logical graph identity (`graphId`), the validated declaration it was
- * compiled from, that declaration's canonical digest (the ADOPTION key: an
- * unchanged re-declaration is the same definition, a changed one is a new
- * revision), and the compiled plan that pins the effective contracts and
- * completion policies.
- * Writers: the declaration path only (`buildDeclaredOutcomeGraph`,
- * `src/graph/tools/declare-graph.ts`); the store commits the definition once and
- * no run, worker or query path rewrites it. A re-declaration with changed
- * content is a new definition, never an edit.
- * Replaces: `EngineState.graphDeclaration` + `EngineState.compiledPlan` +
- * `EngineState.planBinding` in the retired v2 engine container, today the only
- * durable copy and the carrier P1 item 5 stops writing, plus the `DeclaredOutcomeGraph`
- * carrier in `src/graph/tools/declare-graph.ts`. It also takes over the
- * DECLARING-PRINCIPAL attribution that `src/graph/host/invocation-origins.ts`
- * (`HostInvocationOrigin`) keeps today as a separate whole-file authority; that
- * attribution is PROVENANCE, not content, so it must not enter the definition's
- * content revision. `ReceiptRecord.planRevision` and
- * `GraphStateRecord.planRevision` remain the foreign keys that address a
- * definition.
- */
+/** The immutable declaration and compiled plan of one logical graph. Declaration writes it once; runs only reference its content revision. */
 export interface GraphDefinition {
   /**
    * The logical graph id — the declaration's own name, because the v3 grammar
@@ -85,43 +25,12 @@ export interface GraphDefinition {
   readonly plan: CompiledPlan;
 }
 
-/**
- * The immutable compiled plan — topology, outcome edges, terminal outcomes,
- * pinned contract and completion-policy snapshots, and executability: the
- * effective contract one definition revision executes.
- *
- * Owns: the compiled content addressed by `planRevision`. It is content, not
- * state: nothing in a run mutates it.
- * Writers: the compiler (`createCompiledPlan`, `src/graph/compiler/plan.ts`) at
- * declaration time; every other path only reads it.
- * Replaces: an ALIAS of the plan record the compiler already owns
- * (`CompiledPlan`) and of its durable projection `PersistedCompiledPlan` — no
- * shape is restated here. The durable record it replaces is
- * `EngineState.compiledPlan` / `EngineState.planBinding` in the v2 container.
- */
+/** The compiler-owned immutable plan, including topology and pinned outcome contracts. */
 export type CompiledPlan = CompiledPlanRecord;
 
 // ── Execution ───────────────────────────────────────────────────────────────
 
-/**
- * One execution of one logical graph.
- *
- * Owns: run IDENTITY (`runId`, minted once per execution; a terminal graph
- * re-run mints a NEW one) on top of the run state the outcome reducer already
- * owns. It deliberately does not restate that state: the alias intersects
- * `OutcomeGraphState`, whose fields are the run phase, per-node progress, join
- * arrivals, loop traversals and progress, the stop record, and the state-body
- * version.
- * Writers: the run path mints `runId` (NEW in P1 item 3 — today a graph has a
- * single state row and no run identity); the reducer owns every other field and
- * commits the body inside the acceptance transaction (the ledger's
- * `runInTransaction` / `writeGraphState`). A load never writes.
- * Replaces: the ledger's `GraphStateRecord` (`src/graph/ledger/types.ts`), whose
- * `body` already IS this run state for an outcome-protocol graph — the record
- * gains the run identity §3.2 requires. The v2 container's `EngineState`
- * snapshot (phase, frontier, signal ledger, pending completions) is NOT replaced
- * by an equivalent; it is deleted with the container (§P1.5).
- */
+/** One execution of a graph, with its durable run identity and reducer state. */
 export type GraphRun = OutcomeGraphState & {
   /** Identity of this execution; unique within the workspace's store. */
   readonly runId: string;
@@ -345,22 +254,7 @@ export type ControlCommand =
   /** Resolve a pending request in the negative; a terminal refusal. */
   | "reject";
 
-/**
- * One durable lifecycle/control decision.
- *
- * Owns: the record that one {@link ControlCommand} was applied to a definite run
- * and node (and attempt, when one exists), the reason, the decision time, and
- * the trusted invocation that decided when the host attributes one. A retry
- * decision is what mints the next attempt; a cancellation records the INTENT,
- * while the execution fact remains the {@link ExecutionBinding} it targets.
- * Writers: the control application service (P3) and ONLY it. A worker's
- * submission can never write one: control is not derived from a submitted
- * payload.
- * Replaces: nothing durable — there is no control record today. What it removes
- * is the v2 practice of inferring control from worker signal fields
- * (`NodeRuntimeState.signalsObserved`, `EngineState.pendingCompletions`),
- * which §3.4 forbids; those containers are deleted rather than migrated.
- */
+/** A trusted lifecycle decision targeting one run and node. Worker payloads cannot create control decisions. */
 export interface ControlDecision {
   readonly graphId: string;
   readonly runId: string;
@@ -376,7 +270,7 @@ export interface ControlDecision {
 }
 
 /**
- * One durable human-approval request and its trusted decision.
+ * One durable principal-approval request and its trusted decision.
  *
  * Owns: the paused node, run and ATTEMPT, the time the pause was raised, the
  * ONLY session whose decision resolves it, the deadline it expires at, and the

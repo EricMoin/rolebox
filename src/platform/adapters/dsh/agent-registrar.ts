@@ -622,7 +622,7 @@ function buildCapabilities(_definition: AgentDefinition): DshSubagentCapabilitie
     agentOptions: true,
     outputSchema: false,
     depthLimit: false,
-    toolFilter: false,
+    toolFilter: true,
     persona: false,
   };
 }

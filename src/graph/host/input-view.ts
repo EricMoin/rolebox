@@ -1,52 +1,3 @@
-/**
- * Graph Execution Engine v2 — the worker-facing input view (D7)
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * WHY A CONTENT IDENTITY IS NOT DELIVERY. A resolved input (`inputs.ts`) names
- * the producing node, its accepted outcome, the producing attempt, the accepted
- * data and the retained content identities. Handing a worker those identities is
- * an instruction to go and find the bytes somewhere — and the worker has no
- * store, no entry in the ledger and no access to the path the proposal named. So
- * the dispatch hands it FILES.
- *
- * WHAT IS MATERIALIZED, AND FROM WHERE. For every retained revision this module
- * resolves the (producer, reference) address through `readResolvedArtifact`
- * (`inputs.ts`), then reads the object that rule names from the CONTENT STORE by
- * its identity — never the mutable path the proposal named, which by dispatch
- * time may hold a different revision. REACHING THE BYTES IS ONE RULE, not two:
- * the assembly and the delivery apply the same address, so a view can never be
- * materialized under an addressing rule the assembly did not write it under. It
- * verifies that the bytes still hash to the identity the acceptance recorded,
- * and publishes an INDEPENDENT copy in the consumer's own directory. The copy is
- * independent on purpose: a hard link would make a worker's own write reach the
- * store's object, and what an already-accepted result means must not depend on
- * what a worker does with its copy of it.
- *
- * ISOLATION IS STRUCTURAL. The directory is derived from the graph and the
- * CONSUMER ATTEMPT, so two consumers never share one and a view names only files
- * inside its own; the file names are the content identity, so re-delivering the
- * same dispatch (a recovery, a restart, a repeated window) finds the same names
- * and REUSES them instead of duplicating or truncating anything. A file that is
- * already there is read back and must hash to the identity: an object another
- * owner's delivery left in a bad state is a refusal, never something to
- * overwrite.
- *
- * A REFUSAL PUBLISHES NOTHING. Every object is read and verified BEFORE the
- * first file is written, so a missing object or a digest mismatch leaves no
- * partial delivery behind — the caller refuses the dispatch rather than handing a
- * worker a view with a hole in it.
- *
- * THE WORKER IS HANDED NO CAPABILITY. Nothing here returns a store handle, a
- * credential, a policy or a path outside the consumer's own directory: the view
- * is data plus the paths of the files that data was accepted with, and nothing
- * else about the host that produced it.
- *
- * Dependency leaf: node:fs / node:crypto / node:path, the address rule and the
- * view types it resolves (`inputs.ts`), and the content store's own reader.
- */
-
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -205,18 +156,18 @@ export class InputViewRefusalError extends Error {
   constructor(refusals: readonly InputDeliveryRefusal[]) {
     super(
       "graph input delivery: this dispatch was NOT launched, because " +
-        String(refusals.length) +
-        " of its inputs could not be materialized as files: " +
-        refusals
-          .map(
-            (refusal) =>
-              refusal.code +
-              " " +
-              describeInputOf(refusal) +
-              " — " +
-              refusal.message,
-          )
-          .join("; "),
+      String(refusals.length) +
+      " of its inputs could not be materialized as files: " +
+      refusals
+        .map(
+          (refusal) =>
+            refusal.code +
+            " " +
+            describeInputOf(refusal) +
+            " — " +
+            refusal.message,
+        )
+        .join("; "),
     );
     this.name = "InputViewRefusalError";
     this.refusals = Object.freeze([...refusals]);
@@ -300,11 +251,11 @@ export function materializeInputView(
         refusals.push(
           refusalOf(input, artifact, "input-artifact-unreadable",
             "the retained revision of reference " +
-              JSON.stringify(artifact.ref) +
-              " could not be produced through the (producer, reference) address rule (" +
-              read.reason +
-              ") — the path the reference named is NOT re-read as a substitute, and a view " +
-              "missing the bytes the acceptance retained is not delivered"),
+            JSON.stringify(artifact.ref) +
+            " could not be produced through the (producer, reference) address rule (" +
+            read.reason +
+            ") — the path the reference named is NOT re-read as a substitute, and a view " +
+            "missing the bytes the acceptance retained is not delivered"),
         );
         continue;
       }
@@ -316,15 +267,15 @@ export function materializeInputView(
         refusals.push(
           refusalOf(input, artifact, "input-artifact-record-mismatch",
             "the accepted record names digest " +
-              artifact.digest +
-              " at " +
-              String(artifact.size) +
-              " bytes, but the object it names reads back as " +
-              artifactIdOf(read.digest) +
-              " at " +
-              String(read.bytes.length) +
-              " bytes — a record and an object that disagree do not describe one revision, " +
-              "so neither is delivered"),
+            artifact.digest +
+            " at " +
+            String(artifact.size) +
+            " bytes, but the object it names reads back as " +
+            artifactIdOf(read.digest) +
+            " at " +
+            String(read.bytes.length) +
+            " bytes — a record and an object that disagree do not describe one revision, " +
+            "so neither is delivered"),
         );
         continue;
       }
@@ -367,8 +318,8 @@ export function materializeInputView(
         publishRefusals.push(
           refusalOf(entry.input, file.artifact, "input-view-not-published",
             published.reason +
-              " — this attempt's view is refused whole rather than delivered with a file it " +
-              "cannot read back"),
+            " — this attempt's view is refused whole rather than delivered with a file it " +
+            "cannot read back"),
         );
         continue;
       }
@@ -731,9 +682,9 @@ function describeInputOf(refusal: InputDeliveryRefusal): string {
     refusal.from === undefined
       ? "this dispatch"
       : "input " +
-        JSON.stringify(refusal.from) +
-        "/" +
-        JSON.stringify(refusal.outcome ?? "");
+      JSON.stringify(refusal.from) +
+      "/" +
+      JSON.stringify(refusal.outcome ?? "");
   return refusal.ref === undefined ? input : input + " reference " + JSON.stringify(refusal.ref);
 }
 

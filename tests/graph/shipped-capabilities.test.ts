@@ -32,7 +32,7 @@ import {
 } from "../../src/graph/compiler/capability-set.ts";
 import type { AcceptanceRequirementV3, GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
@@ -566,16 +566,8 @@ describe("the shipped entries assemble the capability set (static wiring check)"
     const repoRoot = join(import.meta.dir, "..", "..");
     for (const entry of entries) {
       const text = readFileSync(join(repoRoot, entry), "utf8");
-      // The one assembly both hosts use (P4 items 1, 2 and 3).
-      expect(text).toContain("assembleHostCapabilities({");
-      // ONE validator registry, given to the host (run) ...
-      expect(text).toContain("validators: shippedValidators,");
-      // ... and to the toolset (compile).
-      expect(text).toContain("outcomeValidators: shippedValidators,");
-      // ONE completion-policy registry, given to both halves as well.
-      expect(
-        text.match(/completionPolicies: \w+\.completionPolicies,/g) ?? [],
-      ).toHaveLength(2);
+      expect(text).toContain("GraphApplication.open({");
+      expect(text).toContain("graphApplication.createTools(");
       // The frozen gap this package closes: no shipped entry may install an
       // EMPTY validator registry again.
       expect(text).not.toContain("createValidatorRegistry([])");

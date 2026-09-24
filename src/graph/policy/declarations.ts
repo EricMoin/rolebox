@@ -1,43 +1,3 @@
-/**
- * Graph Execution Engine v2 — the repository's completion-policy declarations
- * (D6)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * THE REVIEWABLE DATA. These are the completion-policy declarations this
- * repository ships and reviews (docs/graph-outcome-protocol.md § "Contract
- * ownership and authority"). Each declaration is VERSIONED by an immutable
- * `revision` string and content-addressed by the ONE canonical
- * `contractDigest` over its body
- * (`src/graph/policy/completion-policy.ts`, `completionPolicyRefOf`); git
- * history is the review trail for the source, and the digest is what an
- * authorization actually pins, so editing a body after review produces a
- * DIFFERENT identity rather than silently changing what was granted.
- *
- * WHY SOURCE, NOT A POLICY FILE IN THE WORKSPACE. A file's presence is not
- * authority: the working tree is writable by the very workers a graph runs, so
- * a policy document a worker can drop next to the graph would let it authorize
- * itself. The declarations live in reviewed source and are compiled into the
- * build; a host installs a selection of them by content-pinned ref through
- * `loadCompletionPolicies({ catalog, authorized })`, which admits nothing the
- * host did not authorize. The compiler and the runtime never read a policy
- * file at all — they receive the resulting registry.
- *
- * WHAT IS SHIPPED, AND WHY THESE TWO. The same policy id has two revisions that
- * differ in the one place a policy states what its silence means:
- * - `@1` — `default: "ungranted"`: it grants nothing and forbids nothing, so
- *   a natural mapping it does not list compiles to a NON-EXECUTABLE DRAFT. It
- *   is the neutral starting point an operator extends with grants.
- * - `@2` — `default: "deny"`: it explicitly forbids every natural mapping, so
- *   a graph that requests it and asks for natural completion is REFUSED at
- *   compile time. It is the "no natural completion here" policy.
- *
- * Neither revision ships a grant: authorizing a concrete mapping is a decision
- * about a concrete graph, and this repository ships no graph whose natural
- * completion would be authorized by default.
- */
-
 import {
   completionPolicyRefOf,
   createCompletionPolicyRegistry,
@@ -46,8 +6,7 @@ import {
   type CompletionPolicyCatalogEntry,
   type CompletionPolicyLoadIssue,
   type CompletionPolicyLoadResult,
-  type CompletionPolicyRef,
-  type CompletionPolicyRegistry,
+  type CompletionPolicyRef
 } from "./completion-policy.ts";
 
 /** One shipped declaration: a catalog entry whose body is type-checked here. */
@@ -94,43 +53,6 @@ export const REPOSITORY_COMPLETION_POLICIES: readonly RepositoryCompletionPolicy
 /**
  * The environment variable an operator authorizes completion-policy revisions
  * with.
- *
- * WHY AN ENVIRONMENT VARIABLE AND NOT A WORKSPACE FILE. The declarations above
- * live in reviewed source because the working tree is writable by the very
- * workers a graph runs; a policy document a worker could drop next to the graph
- * would let it authorize itself. The host process's own environment is set by
- * the operator who launched the host and is not writable by a dispatched
- * worker, so it is authority surface rather than untrusted input — and the
- * BODY still comes from reviewed source (or from an explicit declaration in
- * this same operator-owned document), so the digest an authorization pins is
- * always computed from content this process can read.
- *
- * THE FORMAT (a JSON document, no comments):
- *
- * ```json
- * {
- *   "declare":   [ { "id": "…", "revision": "…", "body": { "version": 1, "default": "ungranted", "rules": [ … ] } } ],
- *   "authorize": [ "id@revision", … ]
- * }
- * ```
- *
- * - `declare` is OPTIONAL and adds the host's own declarations to the catalog
- *   this repository ships. An entry that repeats a repository `(id, revision)`
- *   is reported and NOT installed: the repository's reviewed body keeps that
- *   identity, so a configuration cannot quietly redefine a published revision.
- * - `authorize` names the exact `id@revision` pairs the host authorizes
- *   (split at the LAST `@`; an id must not contain one). Each token must name a
- *   declaration in the combined catalog, and its digest is RECOMPUTED from that
- *   declaration's body — the operator authorizes an identity, the content
- *   address is derived, and the compiled plan pins it.
- *
- * A malformed document authorizes NOTHING and is reported: the loader is total,
- * so a typo can never widen the installed capability, and a natural mapping
- * that requests an `id@revision` the installed (possibly empty) registry does
- * not carry is refused as `completion-policy-unknown` rather than crashing or
- * guessing. `completion-policy-unavailable` is the OTHER shape: a natural
- * mapping with no `completion_policy` request at all, or a compile that was
- * handed no policy registry.
  */
 export const COMPLETION_POLICY_AUTHORIZATION_ENV =
   "ROLEBOX_GRAPH_COMPLETION_POLICIES";

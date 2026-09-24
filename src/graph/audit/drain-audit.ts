@@ -1,99 +1,12 @@
-/**
- * Graph Execution Engine v2 — Read-only drain / migration audit (E stage entry)
- *
- * Version: 2.0
- * Date: 2026-09-23
- *
- * The read-only inventory of the workspace's ONE graph store, kept after the
- * legacy execution path was retired: it is how a store is shown to hold nothing
- * the deleted runtime would have been needed for. One total, read-only inventory
- * of the store, in which every declared graph is
- *
- * - `terminal` — readable and quiescent: the record takes no further step;
- * - `in-flight` — readable and still owed work: the outcome run path has
- *   not finished it; or
- * - `blocked` — the record cannot be read, its definition fails a gate, or
- *   its run-state row is not the state the strict reader accepts. Every blocked
- *   entry is a BLOCKER for the drain decision and is listed individually — it is
- *   never folded into a count and never ignored.
- *
- * THE UNIVERSE IS THE STORE, NOT A DIRECTORY OF FILES (P1 item 5). The audit
- * used to list `engine-*.json` and classify each through the v2 container
- * loader. That container is no longer written, so the inventory is now the
- * `graph_definitions` table of `graph-acceptance-ledger.sqlite`, and each
- * graph is classified from its DEFINITION plus its `ledger_graph_state` row
- * and its `ledger_pending_effects` rows — all read from the same open
- * store. The retired per-graph container is never a record this audit
- * interprets: a non-empty one found where the previous layout kept it is
- * reported as a `retired-state-record` blocker that names the file (plan
- * §P6.4), and one beside the store itself makes the store `unsupported` at
- * the gate.
- *
- * STRICTLY READ-ONLY, BY CONSTRUCTION. Nothing here writes a graph, a state row,
- * a definition row or a file: the store is opened through
- * `loadGraphStoreSync`, which runs the format gate and hands back a handle
- * whose connection refuses every write at the SQLite layer. A store the gate
- * refuses — a foreign file, a zero-byte file, an unknown format, a retired
- * authority beside it, a WAL-mode store whose read-only open would rewrite its
- * `-shm` side file — is refused BEFORE a row is read and reported as a
- * blocker, so the no-write promise holds for every store, not only the ones this
- * build writes. A store that does not exist is `absent`, which is a reading
- * and never a licence to initialize one.
- *
- * TERMINAL MEANS QUIESCENT, AND THE PHASE IS ALWAYS REPORTED. A run is terminal
- * when its phase is `complete` OR `stopped`: a stopped run is
- * deliberately NOT `complete` (it was cut short by a declared hard limit or
- * progress threshold), but it refuses every further advance and launches nothing
- * on recovery, so it takes no further step and is migration-quiescent. The entry
- * carries the exact `phase` and, for a stop, its reason and description, so
- * "cut short" is never read as "finished" and the audit's judgement stays
- * checkable.
- *
- * IN-FLIGHT IS MORE THAN "NOT TERMINAL". A readable entry is in flight when it
- * is not quiescent: a definition whose run-state row is `ready` /
- * `executing`, or one whose store holds no run-state row yet — nothing has
- * ever committed one, so the graph's first execution is still owed and the run
- * path (not the audit) is what performs it. The entry names the WORK, not just
- * the phase: every node the run state records as in flight, with its attempt,
- * and every effect still `pending` or `started`.
- *
- * UNSETTLED EFFECTS ARE REPORTED FOR EVERY READABLE GRAPH, terminal or not. An
- * effect a process left `started` is real outstanding work even when the
- * graph around it finished, so it is listed rather than filtered by phase — and
- * it holds the verdict below open even when the graph count alone would look
- * drained.
- *
- * THE VERDICT IS NOT A COUNT. `drained` requires BOTH halves: no blocker
- * AND no in-flight graph AND no unsettled effect. A store with zero non-terminal
- * graphs but one unreadable definition, or one `started` effect nobody
- * settled, is NOT drained — it is `blocked` or `in-flight`
- * respectively. That is the whole point of the report: "nothing looked
- * non-terminal" is not evidence that the store is quiescent.
- *
- * THE IN-FLIGHT SET IS DECIDABLE, NOT MERELY COUNTED (E gate, step 1). "Six
- * graphs are in flight" cannot be acted on; "six records with nothing queued and
- * no state update for 9 to 13 days" can. Every readable in-flight entry carries
- * a `staleness` block — the record's own last update, its age, the
- * threshold that was applied, the queue facts and the inference — and
- * `totals` splits the in-flight count into `staleLocks` /
- * `activelyExecuting`. It is an INFERENCE with a stated basis, never a
- * write: a stale lock is reported, never resolved, and the verdict rules above
- * are unchanged.
- *
- * Dependency note: this module reads the store, the domain loader verdict and
- * the outcome state reader, and imports no run path. It dispatches nothing,
- * recovers nothing, migrates nothing and compiles nothing.
- */
+import { readGraphView, type GraphView } from "../query/graph-query.ts";
+
 
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { errorText } from "../../utils/error-text.ts";
 import {
-  describeOutcomeStop,
-  readOutcomeGraphState,
-  type OutcomeGraphState,
-  type OutcomeStop,
+  describeOutcomeStop, type OutcomeStop
 } from "../outcome/graph-state.ts";
 import { ledgerFilePath } from "../ledger/sqlite-ledger.ts";
 import type {
@@ -101,7 +14,7 @@ import type {
   PendingEffectRecord,
   RunControlRecord,
 } from "../ledger/types.ts";
-import { engineStateDir } from "../persistence/engine-persistence.ts";
+import { engineStateDir } from "../persistence/paths.ts";
 import {
   decodeStoredDefinition,
   describeStoreVerdict,
@@ -120,35 +33,6 @@ import type { GraphStore } from "../store/graph-store.ts";
  * Everything that makes one graph unusable as drain evidence. A CLOSED
  * vocabulary: each code names one condition the audit decided from the store
  * itself, so a caller branches on the code instead of parsing a message.
- *
- * - `state-store-unreadable` — the store could not be listed at all;
- *   nothing was audited. The verdict's own text rides in `detail`.
- * - `retired-state-record` — a NON-EMPTY retired per-graph v2 container
- *   (`engine-<slug>.json`) is still present where the previous layout kept
- *   it. This build neither reads nor converts it, so its graph must be
- *   inventoried and archived by an operator before the workspace can be called
- *   drained (plan §P6.4). The blocker names the file.
- * - `corrupt-record` — the authoritative store exists but is not a store
- *   this build can read (a foreign file, a zero-byte file, a reshaped layout).
- *   `dimension` names the violated axis.
- * - `unsupported-version` — a well-formed store format this build has no
- *   decoder for (newer, older, unknown). `dimension` names the axis.
- * - `unrunnable-definition` — the store holds a definition row for this
- *   graph that fails a decode gate: the declaration is not a strict v3
- *   declaration, its digest does not address its content, or the persisted plan
- *   is a draft, malformed, or disagrees with its binding. The detail names the
- *   gate.
- * - `ledger-refused` / `ledger-unreadable` — the store exists but
- *   this build may not read it (foreign / unknown / newer / older / reshaped
- *   format), or could not be opened. Every definition's run state is in that
- *   store, so every graph is a blocker.
- * - `state-plan-mismatch` / `state-version-unsupported` /
- *   `state-malformed` / `state-unreadable` — the store's run-state
- *   row for this graph is not the state the strict reader accepts: bound to
- *   another plan revision, written in a body version this build has no reader
- *   for, malformed, or refused by an unexpected error — including an effect-row
- *   read the store's own gate threw on, which is contained here rather than
- *   escaping.
  */
 export type DrainAuditBlockerCode =
   | "state-store-unreadable"
@@ -308,6 +192,7 @@ export interface DrainAuditControl {
 
 /** One graph's audited record. */
 export interface DrainAuditEntry {
+  readonly graph?: GraphView;
   /** The graph id this entry was read from — the store's own key. */
   readonly graphId: string;
   readonly protocol: DrainAuditProtocol;
@@ -480,7 +365,7 @@ function blockedEntry(
 }
 
 /** Project one effect row into the report's own shape. */
-function toAuditEffect(effect: PendingEffectRecord): DrainAuditEffect {
+function toAuditEffect(effect: Omit<PendingEffectRecord, "payload">): DrainAuditEffect {
   return Object.freeze({
     effectId: effect.effectId,
     attemptId: effect.attemptId,
@@ -506,11 +391,11 @@ function toAuditControl(control: RunControlRecord): DrainAuditControl {
     ...(control.decidedBy === undefined
       ? {}
       : {
-          decidedBySession: control.decidedBy.sessionId,
-          ...(control.decidedBy.agentId === undefined
-            ? {}
-            : { decidedByAgent: control.decidedBy.agentId }),
-        }),
+        decidedBySession: control.decidedBy.sessionId,
+        ...(control.decidedBy.agentId === undefined
+          ? {}
+          : { decidedByAgent: control.decidedBy.agentId }),
+      }),
   });
 }
 
@@ -528,6 +413,7 @@ interface EntryQueue {
 
 /** Everything a classification pass may add to an entry. */
 interface EntryBody {
+  readonly graph?: GraphView;
   readonly protocol: DrainAuditProtocol;
   readonly classification: DrainAuditClassification;
   readonly phase?: string;
@@ -627,133 +513,30 @@ function readUnsettledEffects(
  * reader, against the SAVED plan. A state this build cannot read is a BLOCKER,
  * never a clean start and never a guess.
  */
-function classifyOutcome(
-  declared: StoredDeclaredGraph,
-  store: GraphStore,
-): EntryBody {
-  const graphId = declared.graphId;
-  const planRevision = declared.plan.planRevision;
-
-  // THE RUN'S CONTROL FACT FIRST (P3 item 1). The store's own row gate can
-  // refuse a control row, and a row this build cannot read is NOT "no stop" —
-  // the entry is blocked rather than reported as an advancing one.
-  let control: DrainAuditControl | undefined;
-  try {
-    const written = store.readRunControl(graphId);
-    control = written === undefined ? undefined : toAuditControl(written);
-  } catch (error) {
-    const detail =
-      "graph " + JSON.stringify(graphId) +
-      " has a run-control row this build could not read (" + errorText(error) + ")";
+function classifyOutcome(declared: StoredDeclaredGraph, store: GraphStore): EntryBody {
+  let graph: GraphView;
+  try { graph = store.transaction(() => readGraphView(store, declared.graphId)); }
+  catch (error) {
     return {
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision,
-      blockerCodes: ["state-unreadable"],
-      blockerDetails: { "state-unreadable": detail },
+      protocol: "outcome", classification: "blocked", planRevision: declared.plan.planRevision,
+      blockerCodes: ["state-malformed"], blockerDetails: { "state-malformed": errorText(error) }
     };
   }
-
-  const effects = readUnsettledEffects(store, graphId);
-  if (!effects.ok) {
-    const detail =
-      "graph " + JSON.stringify(graphId) +
-      " has effect rows this build could not read (" + effects.reason + ")";
-    return {
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision,
-      blockerCodes: ["state-unreadable"],
-      blockerDetails: { "state-unreadable": detail },
-    };
-  }
-
-  let raw: ReturnType<GraphStore["readGraphState"]>;
-  try {
-    raw = store.readGraphState(graphId);
-  } catch (error) {
-    // The store's own row gate refused a row (a hand-edited or foreign record):
-    // contained as a blocker, never thrown past the audit.
-    const detail =
-      "graph " + JSON.stringify(graphId) +
-      " has a run-state row this build could not read (" + errorText(error) + ")";
-    return {
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision,
-      blockerCodes: ["state-unreadable"],
-      blockerDetails: { "state-unreadable": detail },
-    };
-  }
-  if (raw === undefined) {
-    // No run-state row: the graph was declared but never started, so its first
-    // execution is still owed. That is in flight, NOT blocked — nothing about
-    // the record is unreadable.
-    return {
-      protocol: "outcome",
-      classification: "in-flight",
-      planRevision,
-      ...(control === undefined ? {} : { control }),
-      hasState: false,
-      armed: Object.freeze([]),
-      unsettledEffects: effects.effects,
-      lastUpdatedAt: declared.recordedAt,
-      queue: UNSTARTED_OUTCOME_QUEUE,
-      blockerCodes: [],
-    };
-  }
-
-  let outcomeState: OutcomeGraphState;
-  try {
-    outcomeState = readOutcomeGraphState(raw, declared.plan);
-  } catch (error) {
-    const detail =
-      "graph " + JSON.stringify(graphId) +
-      " has a run-state row that is not the state its plan defines: " +
-      errorText(error);
-    return {
-      protocol: "outcome",
-      classification: "blocked",
-      planRevision,
-      hasState: true,
-      blockerCodes: ["state-malformed"],
-      blockerDetails: { "state-malformed": detail },
-    };
-  }
-
-  const armed: DrainAuditArmedNode[] = [];
-  for (const node of outcomeState.nodes) {
-    if (node.status === "dispatched" && node.attemptId !== undefined) {
-      armed.push(Object.freeze({ nodeId: node.nodeId, attemptId: node.attemptId }));
-    }
-  }
-  const quiescent =
-    outcomeState.phase === "complete" || outcomeState.phase === "stopped";
+  const run = graph.current;
+  const effects = graph.runs.flatMap((entry) => entry.unsettledEffects).map(toAuditEffect);
+  const armed = graph.nodes.flatMap((node) => node.status === "dispatched" && node.attemptId !== undefined
+    ? [{ nodeId: node.nodeId, attemptId: node.attemptId }] : []);
   return {
-    protocol: "outcome",
-    classification: quiescent ? "terminal" : "in-flight",
-    phase: outcomeState.phase,
-    planRevision: outcomeState.planRevision,
-    // THE STOP IS NAMED (P3 item 1, A09): a controlled run whose phase still
-    // reads `executing` is in flight only because unsettled work remains — it
-    // is not advancing, and the command, reason and decided instant say so.
-    ...(control === undefined ? {} : { control }),
-    hasState: true,
-    armed: Object.freeze(armed),
-    unsettledEffects: effects.effects,
-    lastUpdatedAt: raw.updatedAt,
-    queue: outcomeQueue(armed.length, effects.effects.length),
-    ...(outcomeState.stop === undefined
-      ? {}
-      : { stop: toAuditStop(outcomeState.stop) }),
+    graph, protocol: "outcome", classification: graph.phase === "complete" || graph.phase === "stopped" ? "terminal" : "in-flight",
+    phase: graph.phase, planRevision: graph.planRevision, hasState: run !== undefined,
+    armed, unsettledEffects: effects, lastUpdatedAt: graph.updatedAt,
+    queue: run === undefined ? UNSTARTED_OUTCOME_QUEUE : outcomeQueue(armed.length, effects.length),
+    ...(run?.control === undefined ? {} : { control: toAuditControl(run.control) }),
+    ...(run?.stop === undefined ? {} : { stop: toAuditStop(run.stop) }),
     blockerCodes: [],
   };
 }
 
-/**
- * Turn one stored definition (or the decode refusal it produced) into an entry
- * plus the blockers it produced.
- */
 function entryForDefinition(
   graphId: string,
   decoded: ReturnType<typeof decodeStoredDefinition>,
@@ -793,8 +576,8 @@ function entryForDefinition(
   const { lastUpdatedAt, queue, ...reportable } = body;
   const staleness =
     body.classification === "in-flight" &&
-    lastUpdatedAt !== undefined &&
-    queue !== undefined
+      lastUpdatedAt !== undefined &&
+      queue !== undefined
       ? stalenessFacts(lastUpdatedAt, queue, now, staleAfterMs)
       : undefined;
   const entry = Object.freeze({
@@ -952,10 +735,10 @@ export async function auditGraphStore(
       blocker(
         "retired-state-record",
         "the retired per-graph engine-state container " +
-          join(retiredDirectory, name) +
-          " is still present; this build neither reads it nor converts it, so " +
-          "its graph must be inventoried and archived before the workspace can " +
-          "be called drained",
+        join(retiredDirectory, name) +
+        " is still present; this build neither reads it nor converts it, so " +
+        "its graph must be inventoried and archived before the workspace can " +
+        "be called drained",
         { file: name },
         "storage",
       ),
@@ -981,7 +764,7 @@ export async function auditGraphStore(
       blocker(
         "ledger-refused",
         "graph store " + filePath + " is not a store this build may read (" +
-          describeStoreVerdict(loaded) + ")",
+        describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
@@ -993,7 +776,7 @@ export async function auditGraphStore(
       blocker(
         "ledger-unreadable",
         "graph store " + filePath + " could not be read (" +
-          describeStoreVerdict(loaded) + ")",
+        describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
@@ -1007,7 +790,7 @@ export async function auditGraphStore(
       blocker(
         "ledger-refused",
         "graph store " + filePath + " needs a registered conversion (" +
-          describeStoreVerdict(loaded) + ")",
+        describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
@@ -1026,7 +809,7 @@ export async function auditGraphStore(
         blocker(
           "state-store-unreadable",
           "the graph store " + storeDirectory + " could not be listed: " +
-            errorText(error),
+          errorText(error),
           {},
           "storage",
         ),
@@ -1047,8 +830,8 @@ export async function auditGraphStore(
           blocker(
             "unrunnable-definition",
             "graph " + JSON.stringify(graphId) +
-              " has a definition row the store could not read (" +
-              errorText(error) + ")",
+            " has a definition row the store could not read (" +
+            errorText(error) + ")",
             { graphId },
             "contract",
           ),

@@ -1,51 +1,7 @@
-/**
- * Graph Execution Engine v2 — Authoring Grammar v3
- *
- * Version: 3.0
- * Date: 2026-09-22
- *
- * The v3 authoring grammar — the declaration shape `compile.ts` accepts — plus
- * the structural guard that turns malformed input into a compile error instead
- * of a throw. This module owns the grammar TYPES and the shallow shape check;
- * the deep rules (outcome references, completion policies, loop routes,
- * contract resolution, validator capability) belong to the compiler, and the
- * immutable result belongs to `plan.ts`
- * (docs/graph-outcome-protocol.md § "Compiler and runtime boundary").
- *
- * What v3 declares that v2 does not:
- * - Every node declares OUTCOMES. A node with none is a compile error, so
- *   routing never has to interpret a free-form payload field.
- * - Every control edge binds an outcome explicitly. There is deliberately no
- *   implicit "any signal" edge in this grammar: an edge that binds nothing
- *   cannot be compiled into a decision. Typed predicates are a LATER addition
- *   and have no field here yet.
- * - A node may map natural (runtime) completion to exactly one of its outcomes
- *   and attach acceptance requirements to each outcome. A graph REQUESTS a
- *   versioned completion-policy revision for those mappings; the request is
- *   never an authorization, because the installed policy — not the declaring
- *   worker — decides whether a mapping is granted.
- * - A loop group declares its continuation and exit outcomes instead of relying
- *   on an inferred marker, and may declare a progress POLICY — the comparison
- *   semantics, the comparison object and an explicit stagnation threshold.
- *
- * Compiling this grammar validates STRUCTURE only. A YAML/JSON authoring
- * front-end for it, plan persistence, binding compiled refs into runtime state,
- * load-time refusal, adapters/schema compatibility, the typed-predicate
- * vocabulary and any engine wiring are deferred to later slices. Legacy v2
- * documents are not this grammar: `GraphDeclaration.version` is still 2 for
- * them, and the v2 parser/validator/engine path is untouched by this module.
- *
- * Dependency-clean by construction: every import is TYPE-ONLY — the shared
- * `JoinConfig` / `NodeBudgetSpec` vocabulary from
- * `src/types.graph-v2.ts` and the canonical `ContractRef` identity from
- * `contracts/contract-definition.ts` — so the grammar reuses the runtime's
- * join/budget shapes and the resolver's exact ref type instead of declaring
- * second, drift-prone copies, and this module adds no runtime dependency at
- * all.
- */
-
+import type { RunBudgetSpec } from "../domain/budget.ts";
 import type { ContractRef } from "../contracts/contract-definition.ts";
-import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
+import type { JoinConfig } from "../domain/join.ts";
+import type { NodeBudgetSpec } from "../domain/budget.ts";
 
 // ── Outcomes ────────────────────────────────────────────────────────────────
 
@@ -287,6 +243,7 @@ export interface LoopGroupDeclarationV3 {
  * grammar 3 only.
  */
 export interface GraphDeclarationV3 {
+  budget?: RunBudgetSpec;
   /** Authoring grammar version — always 3 for this type. */
   version: 3;
   /**

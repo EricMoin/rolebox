@@ -298,7 +298,7 @@ describe("the worker tool face judged by a process that never dispatched anythin
     // snapshot would read every node `pending`.
     expect(
       judged.declarer?.nodes?.map((node) => node.node_id + ":" + node.status).sort(),
-    ).toEqual(["alpha:completed", "beta:running"]);
+    ).toEqual(["alpha:settled", "beta:dispatched"]);
     // The positive control's answer is a body, and it never names the store.
     expect(judged.declarer?.leaks_store_root).toBe(false);
   });

@@ -247,7 +247,7 @@ function key(): { graphId: string; attemptId: string; submissionId: string } {
 function expectRefusedWithNothingWritten(
   result: SubmissionResult,
   fixture: GateFixture,
-  code: string,
+  code: Extract<SubmissionResult, { kind: "refused" }>["refusals"][number]["code"],
 ): readonly string[] {
   expect(result.kind).toBe("refused");
   if (result.kind !== "refused") return [];

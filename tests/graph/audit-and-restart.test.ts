@@ -32,7 +32,7 @@ import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import {

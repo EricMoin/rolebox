@@ -1,229 +1,69 @@
-/**
- * Graph Execution Engine v2 — Outcome-protocol run path (C3b)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The RUN PATH of a DECLARED (protocol 2) graph
- * (docs/graph-outcome-protocol.md § "Submission and acceptance" and
- * § "State, storage, and effects"). It dispatches the compiled plan's entry
- * nodes, binds every submission to a trusted execution identity of its own
- * making, hands the proposal to the acceptance core, and APPLIES the accepted
- * outcome to the graph state — all in the acceptance core's ONE transaction, so
- * the state snapshot, the receipt, the accepted event and the pending effects
- * commit together or not at all.
- *
- * THE LEGACY ENGINE IS GONE. This runtime never builds a v2 engine, never
- * imports `src/graph/engine/**` (deleted) or `src/dispatch/**`, and never lets
- * a severity-ranked signal decide a node's completion: for a graph bound to the
- * outcome protocol the SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE, which
- * is exactly what the registered outcome handler declares.
- *
- * EXECUTION IDENTITY IS DERIVED HERE, NEVER SUPPLIED. The graph id is the
- * compiled plan's own `graphId`; the attempt id is resolved from the ATTEMPT
- * CREDENTIAL the runtime issued when that attempt was dispatched, matched
- * against the binding the persisted state records; the submission id is
- * content-addressed from the proposal's canonical digest. A worker that puts
- * `graphId`, `attemptId`, `submissionId` or a plan revision in its proposal
- * is refused by the shape gate as an unknown key, and nothing it supplies can
- * name — or overwrite — the execution its claim belongs to.
- *
- * AN ATTEMPT IS NAMED BY ITS CREDENTIAL, NEVER BY ITS NODE. Every attempt is
- * issued a high-entropy nonce at dispatch (`attempt-credential.ts`); the
- * attempt's own state entry persists its DIGEST together with the binding, and
- * `submit` resolves the attempt by HASHING the presented credential and
- * matching it before it looks at any execution state: an unknown, tampered,
- * superseded or other node's credential is refused without ever consulting
- * "the node's current attempt".
- * A late submission that still carries the credential of an attempt a loop
- * round has since superseded therefore cannot be re-bound to the newer attempt
- * — which is exactly the defect this rule exists to remove — and a repeated
- * submission of a still-recorded (settled) attempt keeps resolving to that
- * attempt, so the ledger replays its original receipt instead of settling a
- * second time.
- *
- * A DUPLICATE SUBMISSION IS A REPLAY, NOT A SECOND ADVANCE. The content-derived
- * submission id makes repeating the same proposal for the same attempt the SAME
- * logical submission, so the ledger replays the persisted receipt; the join
- * sees the node already settled, contributes no effects and no state write, and
- * the graph stays where the first acceptance put it.
- *
- * A SUCCESSOR IS ARMED BY ITS JOIN, ONCE. The reducer applies the plan's
- * declared fan-in before it dispatches anything: a convergence node is armed
- * only when every feeder its strategy requires has arrived (the arrivals are
- * persisted on the target's entry in the same transaction, so a restart decides
- * the join from the state), an unsatisfied join arms nothing at all, and a node
- * already in flight is never armed a second time — two feeders completing out
- * of order can no longer overwrite the attempt that is running. A feeder that
- * has been re-armed stops counting, so a later round cannot be satisfied by an
- * earlier round's arrival.
- *
- * RESTART RECOVERY IS `resume()` (C3c). It reads the graph state from the
- * LEDGER, refuses a state bound to another plan revision, and continues the
- * graph from that state: every UNSETTLED dispatch effect is RESOLVED against
- * the host (D8 below) and every node the state records as in flight is reported
- * as armed. A graph with no state at all is STARTED from this runtime's plan —
- * the same SAVED plan a later recovery continues (the review's D5), never a
- * fresh reinterpretation.
- *
- * FIRST DISPATCH, SUCCESSOR DISPATCH AND RECOVERY ARE ONE EXECUTOR (D8). Every
- * dispatch intent is an effect row written in the SAME transaction as the state
- * change that arms it — the entry dispatches of `start`, the successor
- * dispatches of an accepted outcome, and the rows a later process finds — and
- * every execution goes through the one host adapter. The status of a row is a
- * record of a host call that RETURNED, never a substitute for making one: a row
- * is marked `started` after the create returns, so a crash inside the window
- * leaves a `pending` row. Recovery then asks the host whether an execution
- * exists — `created` reconciles the row without a second create, `absent`
- * creates exactly once, and `unknown` (or no query capability at all) reports
- * the effect as `dispatch-unreconciled` work for the host to reconcile instead
- * of guessing in either direction. Nothing is re-dispatched blindly and nothing
- * is recorded as dispatched that a host did not create.
- *
- * A HARD LIMIT ENDS THE RUN IN A DURABLE STOP. When an accepted outcome asks to
- * continue a declared loop past its `max_traversals` cap, the round is NOT taken:
- * the outcome stays accepted, its node settles, no successor is armed, and the
- * reducer writes the stop into the state the SAME transaction commits — so the
- * receipt, the accepted event and the reason the run ended cannot come apart in a
- * crash window. `phase` becomes `stopped` and a `stop` report is carried by the
- * accepted result; `resume` reports the persisted stop and launches NOTHING (a
- * stopped run is never re-dispatched, and its stop is never cleared), and an
- * outcome from any branch still recorded in flight is refused with
- * `graph-stopped` rather than settled into a run that has ended.
- *
- * THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE. A graph bound to this
- * protocol has no legacy runtime instance anywhere: the legacy registry and
- * every legacy tool entry point were deleted with the runtime, and this module
- * never imports `src/graph/engine/**` (deleted) or `src/dispatch/**`. No
- * severity-ranked signal and no synthesized answer can settle one of its nodes;
- * only an accepted outcome committed through this runtime can (see
- * `src/graph/tools/submit-outcome.ts`, which is the model-facing ingress into
- * this same `submit`).
- *
- * THE PLAN'S COMPLETION AUTHORIZATION IS A RUN PRECONDITION (D6). A plan body
- * that pins natural-completion authorizations was compiled against exact policy
- * revisions; `start`, `resume`, `submit` and `settleNatural` all corroborate
- * every pinned ref against the HOST-INSTALLED completion-policy capability
- * BEFORE they read or write anything. A missing capability is
- * `completion-policy-unavailable`, a missing id or revision is reported by
- * name, and a revision installed with different content is
- * `completion-policy-digest-mismatch` — the plan's pinned digest is the
- * authority and is never re-bound. A plan that pins no authorization needs no
- * capability, so this gate changes nothing for it.
- *
- * A NATURAL COMPLETION SETTLES THROUGH THE SAME TRANSACTION, NOT A SECOND ONE.
- * `settleNatural` is the entry point the host's dispatch completion bridge
- * calls when a dispatched attempt REACHES ITS END: the delivery names the
- * attempt and presents its bearer credential, and the runtime resolves the
- * OUTCOME from the plan's pinned authorization — the delivery cannot name an
- * outcome and carries no payload at all (`natural-completion.ts`). The
- * settlement then runs through the same acceptance core, the same declared
- * acceptance gates, the same reducer (loop counters and hard caps included) and
- * the same atomic receipt/event/state/effects transaction as `submit`
- * (`settleSubmission` is the one implementation of that path). A node with no
- * pinned authorization is refused `natural-completion-unauthorized` — never
- * downgraded to the explicit path. The settlement's provenance is READABLE BACK
- * from the durable record: its submission key lives in the
- * `natural-completion:<digest>` namespace that the ordinary ingress cannot
- * mint, and the receipt, the accepted event and the decision all carry it. The
- * production bridge that delivers these facts is now shipped too:
- * `../host/completion-bridge.ts` resolves the attempt's binding and credential
- * from the host layer and calls `settleNatural` — this module still owns the
- * settlement and reads no host state of its own.
- *
- * A COMPLETION IS AUTHENTICATED BY WHICHEVER PROOF THE HOST ACTUALLY HAS
- * (§3.3, P2 items 6/7). `settleNatural` presents the attempt's bearer
- * credential; `settleHostCompletion` presents the host's own durable record of
- * the execution it created, checked through the injected
- * {@link HostCompletionAuthority}. The two channels are authenticated
- * SEPARATELY — a restart that lost the worker's bearer can still settle the
- * execution the host really made — and they then enter the SAME acceptance
- * core, the same declared gates, the same reducer and the same atomic
- * transaction. Neither channel can name an outcome: the mapping is always the
- * plan's pinned natural-completion authorization.
- *
- * A LOST CREDENTIAL IS RE-ISSUED ONLY ON A PROVEN ABSENCE (§3.3, P2 item 8).
- * `resume` will mint a NEW GENERATION of an attempt's credential — replacing
- * the recorded verifier in the same transaction that adopts the value, so the
- * old credential stops matching anything — only when the effect was NEVER handed
- * to the platform AND the host proves no execution exists for it. When the host
- * answers `unknown`, re-issuing and re-delivering are FORBIDDEN
- * (`credential-reissue-forbidden`) and the effect is reported: a blind retry
- * could run the attempt twice, and "the create failed" is not "no execution
- * exists".
- *
- * CREDENTIAL ISOLATION IS THE FIRST RUN PRECONDITION (D7). The durable state
- * records only the credential's DIGEST, so reading the ledger yields nothing a
- * reader can present — but the credential ITSELF has to be stored and delivered
- * per attempt, and that is the host's. `start`, `resume` and `submit` all
- * refuse with `credential-isolation-unavailable` unless the HOST injected a
- * readable credential-isolation capability declaring a protected store and
- * per-attempt delivery (`credential-isolation.ts`; version 2 adds the
- * `{ remember, resolve }` store the shipped host implements in
- * `../host/credential-vault.ts`). It is checked before the plan's completion
- * authorization and before any state is read or written, so an unprotected
- * process mints, persists, hands out and settles NOTHING — the capability is the
- * enablement condition, not a hardening option.
- *
- * A HOST IDENTITY IS AN ADDITIONAL CONSTRAINT, NEVER A PREREQUISITE (D9). A
- * host may inject a host identity capability naming the invoking session and
- * agent. With one, every attempt this runtime dispatches records the identity
- * of the invocation that dispatched it, and a submission that settles that
- * attempt must come from the SAME host attribution: a mismatch
- * (`host-identity-mismatch`), an absent identity where one was recorded
- * (`host-identity-absent`) or an unreadable declaration
- * (`host-identity-unavailable`) is refused before anything is written. WITHOUT
- * one, nothing is recorded and nothing is checked — the core protocol depends
- * on no host, and every path that existed before this rule behaves exactly as
- * it did. The reference is always the identity the DISPATCH recorded on the
- * attempt's own entry: a restart never re-binds it, and an attempt dispatched
- * under no identity is never given one on read.
- *
- * RESTART RECONCILIATION REPORTS ITS DISAGREEMENTS (D9). `resume` compares each
- * unsettled effect's persisted LOCAL status with the host's fact about the same
- * stable effect id and reports every contradiction in `divergences`: a `pending`
- * row the host reports `created` is marked `started` without a second create
- * (`reconciled-started`), and a `started` row the host reports `absent` is left
- * exactly as it is and reported for reconciliation (`reported-unreconciled`).
- * A host that answers `unknown` stated no fact and is reported as unsettled
- * work instead, never as a divergence.
- *
- * SCOPE, STATED PLAINLY. This module owns the run path (start/resume/submit,
- * the settlement transaction and the state it commits) and the contracts it
- * requires from a host. The host capabilities themselves now SHIP in
- * `src/graph/host/**`: the credential vault, the execution index, the dispatch
- * adapter, the invocation-identity holder and the completion bridge. The
- * legacy signal runtime was deleted on 2026-09-23, so this is the only graph
- * run path: there is no legacy v2 run or recovery path left to fall back to.
- * THE STORE FORMAT IS 3 (P3 item 1): the run identity and the trusted control
- * records live in the SAME store as the state this runtime commits, and every
- * entry point below refuses a run a control command stopped (`control-stopped`)
- * before it reads or writes anything. There is deliberately NO migrator: an
- * older file is refused by name, never widened (§3.6).
- * Still DEFERRED: the remaining routing and loop work.
- */
+import type {
+  AttemptReissueClaim,
+  AttemptCredentialReissueFence,
+  OutcomeRuntimeRefusal,
+  OutcomeStartResult,
+  OutcomeReexecutionResult,
+  OutcomeSubmissionResult,
+  OutcomeNaturalSettlementResult,
+  OutcomeArmedNode,
+  OutcomeReconciledReason,
+  OutcomeReconciledEffect,
+  OutcomeEffectDivergence,
+  OutcomeResumeResult,
+  OutcomeBudgetUsageReport,
+  OutcomeBudgetUsageEntry,
+  OutcomeBudgetReading,
+  OutcomeBudgetUsageOutcome,
+  OutcomeGraphRuntimeOptions,
+  HostCompletionExecution,
+  HostCompletionAuthority,
+  HostCompletionFact,
+} from "./runtime-contract.ts";
+export type {
+  AttemptReissueClaim,
+  AttemptCredentialReissueFence,
+  OutcomeRuntimeRefusalCode,
+  OutcomeRuntimeRefusal,
+  OutcomeStartResult,
+  OutcomeReexecutionResult,
+  OutcomeSubmissionResult,
+  OutcomeNaturalSettlementResult,
+  OutcomeArmedNode,
+  OutcomeReconciledReason,
+  OutcomeReconciledEffect,
+  OutcomeEffectDivergence,
+  OutcomeResumeResult,
+  OutcomeAttemptUsage,
+  OutcomeBudgetUsageReport,
+  OutcomeBudgetUsageEntry,
+  OutcomeBudgetNodeReport,
+  OutcomeBudgetReport,
+  OutcomeBudgetReading,
+  OutcomeBudgetUsageOutcome,
+  OutcomeGraphRuntimeOptions,
+  HostCompletionExecution,
+  HostCompletionAttemptRef,
+  HostCompletionAuthority,
+  HostCompletionFact,
+} from "./runtime-contract.ts";
+
 
 import type { CompiledNode, CompiledPlan } from "../compiler/plan.ts";
 import {
   buildBudgetReport,
   hasBudgetLimits,
   nodeBudgetLimitsOf,
-  type BudgetReport,
-  type BudgetReportNode,
-  type BudgetUsageAmounts,
-  type NodeBudgetLimits,
+  readRunBudget, type BudgetUsageAmounts,
+  type NodeBudgetLimits
 } from "../domain/budget.ts";
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
   AcceptedResultEvidence,
-  ApprovalRequestRecord,
-  BudgetReservationRecord,
-  BudgetUsageResult,
+  ApprovalRequestRecord, BudgetUsageResult,
   GraphStateRecord,
-  PendingEffectRecord,
-  ReceiptRecord,
-  RunControlRecord,
+  PendingEffectRecord, RunControlRecord
 } from "../ledger/types.ts";
 import {
   DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
@@ -239,9 +79,7 @@ import {
   type AcceptanceDecision,
   type AcceptanceJoin,
   type AcceptanceJoinResult,
-  type SubmissionRefusal,
-  type SubmissionRefusalCode,
-  type SubmissionResult,
+  type SubmissionRefusal, type SubmissionResult
 } from "./acceptance.ts";
 import {
   CURRENT_OUTCOME_STATE_BODY,
@@ -256,14 +94,12 @@ import {
   type OutcomeDispatchIntent,
   type OutcomeGraphPhase,
   type OutcomeGraphState,
-  type OutcomeNodeState,
-  type OutcomeStop,
+  type OutcomeNodeState
 } from "./graph-state.ts";
 import {
   projectProgress,
   type OutcomeLoopProgress,
-  type ProgressProjection,
-  type ProgressReport,
+  type ProgressProjection
 } from "./progress.ts";
 import {
   RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
@@ -293,13 +129,9 @@ import {
   dispatchEffectIdOf,
   dispatchEffectKeyOf,
   normalizeOutcomeDispatch,
-  type NormalizedOutcomeDispatch,
-  type OutcomeDispatchAdapter,
-  type OutcomeDispatchEffectKey,
-  type OutcomeDispatchRequest,
-  type OutcomeDispatchSeam,
-  type OutcomeDispatchTarget,
-  type OutcomeExecutionLookup,
+  type NormalizedOutcomeDispatch, type OutcomeDispatchEffectKey,
+  type OutcomeDispatchRequest, type OutcomeDispatchTarget,
+  type OutcomeExecutionLookup
 } from "./dispatch-effects.ts";
 import {
   verifyCompletionPolicy,
@@ -319,8 +151,7 @@ import {
   naturalCompletionProposalOf,
   naturalCompletionSettlementOf,
   naturalCompletionSubmissionId,
-  readNaturalCompletionDelivery,
-  type NaturalCompletionSettlement,
+  readNaturalCompletionDelivery
 } from "./natural-completion.ts";
 import type { ExecutionIdentity, ValidatorRegistry } from "./validators.ts";
 
@@ -341,505 +172,6 @@ export type {
   OutcomeExecutionLookup,
 } from "./dispatch-effects.ts";
 
-// ── The create-right fence a credential re-issue runs under ─────────────────
-
-/**
- * What one fence claim answered: this process now holds the create right for
- * the effect, or somebody else does.
- */
-export type AttemptReissueClaim =
-  | {
-      readonly kind: "claimed";
-      /** The owner to name when the claim is given back. */
-      readonly ownerId: string;
-    }
-  | {
-      readonly kind: "held";
-      /** Host-authored: which claim holds it, never a credential. */
-      readonly reason: string;
-    };
-
-/**
- * The host's CREATE-RIGHT fence for a lost attempt credential (plan §3.3).
- *
- * WHY A RE-ISSUE NEEDS ONE. "The effect row is `pending` and the host answered
- * `absent`" says nothing about whether another process is between its OWN
- * re-issue and its create. Without a fence, a second recoverer can replace the
- * recorded verifier after the first one has re-issued but before it has
- * delivered, so the worker the first process dispatches holds a credential that
- * no longer matches the recorded verifier — credential re-binding, the failure
- * §1 forbids. The create right is the one durable fact that changes at exactly
- * that boundary, so the re-issue is performed only while this process holds it
- * and a loser refuses by name instead of overwriting the winner's verifier.
- *
- * A HOST THAT CANNOT SUBSTANTIATE IT DOES NOT GET THE RE-ISSUE. Omitting the
- * capability leaves the re-issue refusing with `credential-reissue-forbidden`:
- * a check that is only declared and has no mechanism does not count, and the
- * path must not silently accept (plan §3.3).
- */
-export interface AttemptCredentialReissueFence {
-  /** Take the create right for one effect, or report it held elsewhere. */
-  claim(effect: OutcomeDispatchEffectKey): AttemptReissueClaim;
-  /**
-   * Give back a claim this runtime took and did NOT hand to the platform. The
-   * caller states the reason as the proof: no create was attempted, so nothing
-   * was created and a later recovery may create exactly once.
-   */
-  abandon(effect: OutcomeDispatchEffectKey, ownerId: string, reason: string): void;
-}
-
-// ── Refusals ────────────────────────────────────────────────────────────────
-
-/**
- * Why the runtime refused to act. Stable identifiers; wording is not API.
- *
- * The acceptance core's own repair codes ({@link SubmissionRefusalCode}) are
- * part of this vocabulary: a submission the core refuses is reported through
- * exactly the code the core chose, so a caller never has to translate it.
- */
-export type OutcomeRuntimeRefusalCode =
-  | SubmissionRefusalCode
-  /** The registered handler does not own this protocol's semantics. */
-  | "protocol-unavailable"
-  /** The clock is not epoch milliseconds. */
-  | "invalid-timestamp"
-  /** The plan declares no node a run could start from. */
-  | "no-entry-node"
-  /**
-   * A dispatch was NOT created because the node's declared inputs could not be
-   * resolved from the durable facts (D6). The attempt is not started with a hole
-   * where its input should be: at a start the refusal names every offending
-   * input and nothing is written, and at an arming the refusals are recorded on
-   * the node's own state entry.
-   */
-  | "dispatch-input-unbound"
-  /** The graph has never written a state snapshot. */
-  | "graph-not-started"
-  /** A persisted state exists but is not this build's state for this plan. */
-  | "unreadable-state"
-  /**
-   * The persisted state declares a state-body version this build has no reader
-   * for. Reported separately from `unreadable-state`: the body is a legal,
-   * well-formed snapshot of a LAYOUT this build does not know, so recovery is
-   * blocked and the body is left exactly as it is.
-   */
-  | "unsupported-state-version"
-  /** The proposal names a node the plan does not declare. */
-  | "unknown-node"
-  /** The node has no attempt in flight, so no outcome can settle one. */
-  | "node-not-dispatched"
-  /**
-   * The submission carries no attempt credential. The runtime never derives
-   * one: without the credential there is no attempt this submission may settle.
-   */
-  | "credential-missing"
-  /**
-   * The credential names no attempt the persisted state records — it was never
-   * issued here (a guess or a tampered value), or the attempt it was issued for
-   * has since been superseded and its entry replaced. Refused WITHOUT falling
-   * back to the node's current attempt.
-   */
-  | "credential-unknown"
-  /**
-   * The credential was issued for another node's recorded attempt. A credential
-   * is bound to one node, so this is never re-aimed at the node it names.
-   */
-  | "credential-node-mismatch"
-  /** The accepted outcome belongs to a different attempt than the state's. */
-  | "attempt-mismatch"
-  /** No edge routes a non-terminal outcome. */
-  | "no-route"
-  /** The route re-enters a settled node outside its declared loop group. */
-  | "reentry-outside-loop"
-  /**
-   * The run is already STOPPED by a declared hard limit (body version 4), so
-   * a submission for a node that is still recorded in flight is refused and
-   * no settlement is fabricated for it. The stop itself is reported by
-   * resume() and by the persisted state; it is never cleared.
-   */
-  | "graph-stopped"
-  /** The state says an attempt settled and the ledger holds no such event. */
-  | "state-ledger-disagreement"
-  /**
-   * The persisted record is bound to the outcome protocol but carries no
-   * compiled plan (or no plan binding), so the run had nothing to resume FROM.
-   * Recovery never guesses a plan: an absent one is reported, not recompiled.
-   */
-  | "missing-persisted-plan"
-  /** A dispatch seam threw while launching an unsettled effect (C3c resume). */
-  | "dispatch-failed"
-  /**
-   * No dispatch adapter is installed, so a node cannot be started at all
-   * (D8). Production entry points refuse with this BEFORE opening a ledger
-   * rather than running the graph against a no-op that would record an
-   * execution nobody started. The runtime itself refuses with it too, for a
-   * caller that bypasses the typed option.
-   */
-  | "dispatch-unavailable"
-  /**
-   * The creation of a dispatch effect could not be established from host facts
-   * (D8). The effect stays unsettled and is reported for host/manual
-   * reconciliation: a process may have started the execution and died inside
-   * the window, and this runtime has no query capability (or its host answered
-   * `unknown`) — so it neither re-issues the create (which could duplicate a
-   * started execution) nor reports success.
-   */
-  | "dispatch-unreconciled"
-  /**
-   * The advance reached a loop group whose plan declares a progress policy, but
-   * the projection bound to this submission was missing or belonged to another
-   * proposal, attempt or plan revision. A declared comparison is never skipped,
-   * so the acceptance is refused and nothing is written.
-   */
-  | "progress-unbound"
-  /**
-   * A declared progress policy governs this outcome and the submission did not
-   * carry the declared comparison object. The field is REQUIRED, so the
-   * submission is refused for repair (nothing is written) rather than measured
-   * as "unknown": a missing field is the worker's to fix, while an incomparable
-   * value is the data's own answer.
-   */
-  | "progress-subject-missing"
-  /**
-   * The plan declares a comparison semantics this build does not implement.
-   * Refused by name instead of running the comparison under different semantics.
-   */
-  | "progress-evaluator-unavailable"
-  /**
-   * The plan pins at least one natural-completion authorization (D6), but this
-   * runtime was given no completion-policy capability at all, so it cannot
-   * corroborate an authorization the plan depends on. Nothing is started,
-   * resumed or settled, and no state is written.
-   */
-  | "completion-policy-unavailable"
-  /**
-   * The policy id a plan's authorization pins is not installed in this
-   * process. Reported by name instead of running under another policy: the
-   * authorization the plan was compiled with is part of its semantics.
-   */
-  | "completion-policy-unknown"
-  /** The pinned policy id is installed, but not at the pinned exact revision. */
-  | "completion-policy-unknown-revision"
-  /**
-   * The pinned revision is installed with DIFFERENT content than the plan
-   * authorized — a republished declaration, or a host that authorized
-   * something else. The plan's pinned digest is the authority, so this is
-   * refused rather than re-bound to the installed body.
-   */
-  | "completion-policy-digest-mismatch"
-  /**
-   * This process was given no readable HOST credential-isolation capability
-   * (D7), so the credential itself has no store that can hold it and no
-   * channel that can deliver it per attempt. The durable record now carries
-   * only a digest, but a digest cannot be handed to a recovered worker, so the
-   * outcome run path REFUSES to start, resume or settle anything without the
-   * capability; nothing is written and no fallback is taken.
-   */
-  | "credential-isolation-unavailable"
-  /**
-   * The host identity capability this process holds is unreadable (D9): a value
-   * was injected that is not a version-1 `{ version, id, current }` capability.
-   * A declared identity constraint is never downgraded to an unconstrained run,
-   * so the operation is refused rather than performed without the check.
-   */
-  | "host-identity-unavailable"
-  /**
-   * The host reports an invocation identity for this submission that differs
-   * from the identity recorded when the attempt was dispatched (D9). The
-   * attempt's own record is the reference, so nothing is written and no
-   * rebinding to the current invocation is attempted.
-   */
-  | "host-identity-mismatch"
-  /**
-   * The attempt recorded a dispatch identity and the host reports NO identity
-   * for this submission (D9), so the binding cannot be checked. Distinct from a
-   * mismatch: there is nothing to compare, and settling anyway would drop the
-   * constraint the host declared at dispatch.
-   */
-  | "host-identity-absent"
-  /**
-   * A natural-completion delivery is not the closed record this protocol
-   * defines: it is missing `nodeId` or `attemptId`, names a credential that is
-   * not a non-empty string, or carries a field the envelope does not define.
-   * The last case is the NO-DATA-CHANNEL rule: an `outcomeId`, a payload or an
-   * evidence list offered alongside a completion fact is refused by name, never
-   * dropped, because a completion fact that could carry a result would be a
-   * second submission channel.
-   */
-  | "malformed-natural-delivery"
-  /**
-   * The plan pins NO natural-completion authorization for the delivered node
-   * (D6): either the node is not in the plan, or it is not declared with a
-   * `natural` completion policy, or the mapping the plan pinned does not agree
-   * with the node's own declared mapping. The delivery is refused — a completion
-   * is NEVER re-interpreted as an explicit submission and the policy is never
-   * ignored, because the outcome a natural completion settles is exactly the
-   * mapping the plan was authorized for.
-   */
-  | "natural-completion-unauthorized"
-  /**
-   * A HOST-COMPLETION delivery is not the closed record this protocol defines:
-   * it is missing `nodeId`, `attemptId` or `executionId`, one of them is not a
-   * non-empty string, or it carries a key the envelope does not define. The
-   * last case is the same no-data-channel rule the bearer envelope enforces: a
-   * completion fact that could carry an outcome or a payload would be a second
-   * submission channel.
-   */
-  | "malformed-host-completion"
-  /**
-   * A completion fact arrived through the HOST-COMPLETION channel
-   * ({@link OutcomeGraphRuntime.settleHostCompletion}) but this runtime holds
-   * no HOST COMPLETION AUTHORITY, so it cannot check the fact against the
-   * host's own durable execution record. The channel is refused by name rather
-   * than settled on the caller's word: "the host says so" is exactly the claim
-   * that has to be substantiated (plan §3.3).
-   */
-  | "host-completion-unavailable"
-  /**
-   * The host completion authority does not corroborate the delivery: it holds
-   * no confirmed execution for the attempt, or it names a DIFFERENT execution
-   * than the one the delivery reports. Nothing was written, and the completion
-   * is never re-bound to whichever execution happens to exist.
-   */
-  | "host-completion-unauthenticated"
-  /**
-   * A recovered attempt's credential is gone and the runtime refuses to
-   * re-issue one, because the restart-authorization conditions of plan §3.3 are
-   * not met: the effect is not an UNSTARTED one, or the host did not answer
-   * `absent` for it (the answer was `unknown` or `created`). Re-issuing and
-   * re-delivering under an unknown create outcome is forbidden — a blind retry
-   * could run the attempt twice — so the effect stays unsettled and is reported.
-   */
-  | "credential-reissue-forbidden"
-  /**
-   * A TRUSTED CONTROL COMMAND stopped this run (P3 item 1): a failure, a
-   * timeout or a cancellation is recorded on the run, so the run takes no
-   * further step — it dispatches nothing, arms nothing and settles nothing.
-   * The command, its reason and the principal that decided it are the durable
-   * record this refusal reports; the attempt entries the stop left in flight
-   * are reported, never settled and never dropped. It is deliberately NOT a
-   * successful outcome: a stopped run can never be advanced by a submission,
-   * and the same code is what a late worker submission and a late completion
-   * fact both meet.
-   */
-  | "control-stopped"
-  /**
-   * The attempt was SUPERSEDED by a trusted `retry` (P3 item 2). The retry is a
-   * successor command, not a stopping one: the run continues, but the attempt it
-   * replaced accepts nothing — its result would belong to an execution the node
-   * no longer holds. The successor attempt named in the refusal carries the node
-   * forward, and the superseded attempt's own receipts, accepted event and
-   * decisions (if it ever had any) stay exactly as they were.
-   */
-  | "attempt-superseded"
-  /**
-   * The attempt belongs to a run the graph has SUPERSEDED (P3 item 2). A
-   * run-scoped `retry` closed that run and minted a successor, so the closed
-   * run's attempts can never settle afterwards: their results would be new
-   * terminal facts about a run whose receipts are already the record of what it
-   * accepted. Nothing was accepted, and the successor run carries the graph
-   * forward — the closed run's own receipts, accepted events, decisions, state
-   * and effects stay exactly as they were.
-   */
-  | "run-superseded"
-  /**
-   * No trusted order to re-execute this run is recorded, so the runtime refuses
-   * to mint a successor run on its own. A new run is a trusted decision (§3.2:
-   * "终态图重新运行创建新 Run"), and the order is what makes it durable before
-   * anything is minted; a caller that wants one applies the run-scoped `retry`
-   * command through the control entry.
-   */
-  | "reexecution-not-authorized"
-  /**
-   * The run the order names is not TERMINAL: its state still records work in
-   * flight, so re-executing the graph would run nodes the current run has not
-   * finished. A node-scoped `retry` is the command for a live run.
-   */
-  | "reexecution-not-terminal"
-  /**
-   * The terminal run still owes external work whose fate is UNKNOWN — at least
-   * one unsettled dispatch effect whose attempt the run never superseded and
-   * which no platform-confirmed cancellation covers. Re-executing the graph
-   * could run a side effect that is still live, which is exactly what §4's
-   * "不能把已完成外部副作用自动重跑" forbids; the effects stay visible and the
-   * caller resolves them (or waits) before re-executing.
-   */
-  | "reexecution-unsettled-effects"
-  /**
-   * Another process minted the successor run, or consumed the order, between
-   * this call's read and its write. Nothing was written: the caller re-reads the
-   * graph and sees the successor that stands.
-   */
-  | "reexecution-raced"
-  /**
-   * The attempt is PAUSED on a trusted approval request that is still `pending`
-   * (P3 item 3). Approval is CONTROL, not an outcome (§3.4): the worker's
-   * submission — including any `approved` field, any claim inside `data`, and
-   * every other byte of it — is not read as an approval, and nothing was
-   * accepted. The refusal names the request, the session that must decide it and
-   * the deadline it expires at; the repair is that session's decision through
-   * the trusted control entry.
-   */
-  | "approval-pending"
-  /**
-   * The attempt's approval request was REJECTED (P3 item 3): the pause was
-   * answered with a no, so the attempt can never settle and nothing was accepted.
-   * A rejection is terminal — no later approval rewrites it.
-   */
-  | "approval-rejected"
-  /**
-   * The attempt's approval request EXPIRED (P3 item 3): the deadline passed
-   * before a decision was recorded, and the expiry is itself the durable
-   * outcome. An expired request is never approved afterwards, so this attempt
-   * cannot settle; the trusted repair is a retry or a cancellation of the run.
-   */
-  | "approval-expired"
-  /**
-   * This runtime was handed no BUDGET surface, and the plan declares at least
-   * one per-node ceiling (P3 item 3). A ceiling a substrate cannot record a
-   * claim against is a ceiling NOTHING enforces, so the operation is refused by
-   * name rather than dispatched ungated. A plan that declares no ceiling needs
-   * no claim and is not refused by this code.
-   */
-  | "budget-unavailable"
-  /**
-   * The node's declared ceiling leaves no headroom for the dispatch this call
-   * would arm (P3 item 3, "超限停止新派发"). The claim is refused by the STORE's
-   * conditional write — the refusal names the dimension, the committed amount
-   * and the declared ceiling — so the attempt is NOT recorded and no external
-   * execution is created for it. An attempt already in flight is not killed by
-   * this: its own claim stands and it runs to its settlement.
-   */
-  | "budget-exhausted"
-  /**
-   * A node's declared per-node budget carries a key the v3 grammar never
-   * authorizes (or a value that is not a finite non-negative number). This build
-   * neither enforces the unknown limit nor defaults it away, so the operation is
-   * refused before anything is read or written: a run must not execute with a
-   * subset of the ceilings its declaration claims.
-   */
-  | "budget-limit-unauthorized"
-  /**
-   * A usage report is not the closed record this protocol defines: an attempt
-   * reference is missing or empty, or an amount is not a finite non-negative
-   * number. Nothing was recorded — a report that cannot be read exactly must not
-   * move a recorded usage fact, because the number it would move is the one an
-   * overrun is reported from.
-   */
-  | "budget-usage-malformed";
-
-/** One structured reason the runtime refused. */
-export interface OutcomeRuntimeRefusal {
-  readonly code: OutcomeRuntimeRefusalCode;
-  readonly message: string;
-  readonly path?: string;
-}
-
-/** What {@link OutcomeGraphRuntime.start} produced. */
-export type OutcomeStartResult =
-  | {
-      readonly kind: "started";
-      readonly state: OutcomeGraphState;
-      readonly dispatched: readonly OutcomeDispatchRequest[];
-    }
-  /** The graph already has a state snapshot; start is idempotent. */
-  | { readonly kind: "already-started"; readonly state: OutcomeGraphState }
-  | {
-      readonly kind: "refused";
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    };
-
-/**
- * What {@link OutcomeGraphRuntime.reexecute} produced.
- *
- * A re-execution is NOT a resume and NOT a second start: it mints a NEW RUN for
- * one TERMINAL run's graph, under a durable trusted order the control service
- * recorded, and keeps every fact of the run it supersedes exactly as it was —
- * its run row, its state snapshot, its receipts, its accepted events, its
- * effects and its control decisions.
- */
-export type OutcomeReexecutionResult =
-  | {
-      readonly kind: "reexecuted";
-      /** The NEW run's identity. */
-      readonly runId: string;
-      /** Its graph-local sequence; exactly one greater than the run it supersedes. */
-      readonly runSeq: number;
-      /** The plan revision THIS run executes (recorded on its row and its state). */
-      readonly planRevision: string;
-      /** The terminal run this one succeeds. */
-      readonly fromRunId: string;
-      readonly state: OutcomeGraphState;
-      readonly dispatched: readonly OutcomeDispatchRequest[];
-      /**
-       * The attempts the new run records as in flight, CREDENTIAL-FREE, exactly as
-       * `resume` reports them: a re-execution arms its entry nodes, so the caller
-       * gets the same inventory a first execution does rather than an empty
-       * "armed" list that would make the new run look idle.
-       */
-      readonly armed: readonly OutcomeArmedNode[];
-      /** The new run's unsettled effects (the intents a host is to launch). */
-      readonly unsettledEffects: readonly PendingEffectRecord[];
-    }
-  | {
-      readonly kind: "refused";
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    };
-
-/** What {@link OutcomeGraphRuntime.submit} produced. */
-export type OutcomeSubmissionResult =
-  /** The submission was refused before anything was written. */
-  | {
-      readonly kind: "refused";
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    }
-  /**
-   * An accepted outcome advanced the graph. `replayed` distinguishes the FIRST
-   * settlement from a repeated submission of the same content: a replay returns
-   * the persisted receipt, dispatches nothing and changes no state. The
-   * PERSISTED receipt's decision governs the answer: on a replay `decision.kind`
-   * is the terminal kind the ledger recorded — never this call's re-evaluation,
-   * whose `requirements` cannot overturn it — so a repeated submission answers
-   * with the SAME persisted decision the receipt holds.
-   */
-  | {
-      readonly kind: "accepted";
-      readonly decision: AcceptanceDecision;
-      readonly receipt: ReceiptRecord;
-      readonly state: OutcomeGraphState;
-      readonly dispatched: readonly OutcomeDispatchRequest[];
-      readonly replayed: boolean;
-      /**
-       * Present exactly when this acceptance STOPPED the run: a declared hard
-       * limit or progress policy refused the continuation the outcome asked for,
-       * so no successor was armed and `state.phase` is `stopped`. The outcome
-       * itself is a real, accepted result — the stop is the run's ending, not a
-       * fabricated settlement — and a repeated submission of it still replays
-       * this receipt.
-       */
-      readonly stop?: OutcomeStop;
-      /**
-       * Every progress comparison THIS call made, in plan loop-group order.
-       * Present only on a committed first settlement: a replay re-runs no
-       * comparison and writes nothing, so it reports none. The report is
-       * evidence (which group was compared, against what, and what it answered),
-       * never a second source of truth — the persisted state is.
-       */
-      readonly progress?: readonly ProgressReport[];
-    }
-  /** A gate failed: the receipt records the rejection, the attempt stays open. */
-  | {
-      readonly kind: "rejected";
-      readonly decision: AcceptanceDecision;
-      readonly receipt: ReceiptRecord;
-    }
-  /** A conflict or a settlement: this submission's decision was not committed. */
-  | {
-      readonly kind: "not-committed";
-      readonly decision: AcceptanceDecision;
-      readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
-    };
-
 /**
  * Which trusted channel settles one attempt.
  *
@@ -851,353 +183,6 @@ export type OutcomeSubmissionResult =
  * mint), so a caller cannot claim the other channel's provenance.
  */
 type SettlementSource = "submission" | "natural-completion";
-
-/**
- * What {@link OutcomeGraphRuntime.settleNatural} produced.
- *
- * The variants mirror {@link OutcomeSubmissionResult} because a natural
- * completion IS a settlement through the same acceptance core and the same
- * atomic transaction — one attempt, the plan's pinned authorization, the
- * outcome's declared acceptance gates, one receipt, one accepted event. Each
- * non-refused variant adds the {@link NaturalCompletionSettlement} record: the
- * attempt, the outcome the PLAN authorized, the exact policy revision behind
- * it, and the namespaced submission key the receipt persists.
- */
-export type OutcomeNaturalSettlementResult =
-  /** The delivery was refused before anything was written. */
-  | {
-      readonly kind: "refused";
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    }
-  /**
-   * The natural completion settled the attempt through the shared transaction.
-   * Like a submission's replay, a repeated delivery answers with the PERSISTED
-   * receipt's decision: the completion fact's gates are re-evaluated for the
-   * record, but they can neither overturn a persisted rejection into an
-   * acceptance nor a persisted acceptance into a rejection.
-   */
-  | {
-      readonly kind: "accepted";
-      readonly completion: NaturalCompletionSettlement;
-      readonly decision: AcceptanceDecision;
-      readonly receipt: ReceiptRecord;
-      readonly state: OutcomeGraphState;
-      readonly dispatched: readonly OutcomeDispatchRequest[];
-      readonly replayed: boolean;
-      readonly stop?: OutcomeStop;
-      readonly progress?: readonly ProgressReport[];
-    }
-  /**
-   * A declared acceptance gate did not pass, so the attempt is NOT settled: the
-   * receipt records the rejection, no accepted event exists, and the attempt
-   * stays open for the ordinary submission path.
-   */
-  | {
-      readonly kind: "rejected";
-      readonly completion: NaturalCompletionSettlement;
-      readonly decision: AcceptanceDecision;
-      readonly receipt: ReceiptRecord;
-    }
-  /**
-   * The attempt was already settled by a DIFFERENT logical submission (the
-   * worker's own claimed outcome, for example), so this delivery's decision was
-   * not committed and the original settlement stands.
-   */
-  | {
-      readonly kind: "not-committed";
-      readonly completion: NaturalCompletionSettlement;
-      readonly decision: AcceptanceDecision;
-      readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
-    };
-
-/**
- * One node the persisted state records as in flight, awaiting an outcome.
- *
- * Deliberately CREDENTIAL-FREE: this is a report, not a dispatch channel. The
- * credential reaches the worker through {@link OutcomeDispatchRequest} (at
- * launch) and nowhere else, so a resumed-but-not-relaunched attempt does not
- * hand its capability to whoever reads the recovery report.
- */
-export interface OutcomeArmedNode {
-  readonly nodeId: string;
-  /** The attempt a submission for this node must settle (runtime-minted). */
-  readonly attemptId: string;
-}
-
-/** Why a resume resolved an unsettled effect without launching it (D8). */
-export type OutcomeReconciledReason =
-  /** The row already recorded a create that returned; nothing was re-created. */
-  | "recorded-started"
-  /** The host answered `created` for a pending row; it was marked, not re-created. */
-  | "host-reported-created"
-  /**
-   * The state records the attempt as SETTLED, so its dispatch is complete: the
-   * effect is marked `done` and nothing is launched. Reachable when a
-   * settlement happened against a row the settle-time transition could not
-   * cover — a create that returned inside the crash window, whose row was still
-   * `pending` when the worker's outcome arrived.
-   */
-  | "attempt-settled";
-
-/**
- * One unsettled dispatch effect a resume RESOLVED WITHOUT LAUNCHING (D8).
- *
- * This is the positive half of the reconciliation report: the runtime asked the
- * host whether an execution exists and got an answer of `created` (or found a
- * row that already recorded a returned create), so it neither re-issued the
- * create nor left the question open. The credential is never part of this
- * record — it names the effect and the attempt, nothing more.
- */
-export interface OutcomeReconciledEffect {
-  readonly effectId: string;
-  readonly attemptId: string;
-  readonly reason: OutcomeReconciledReason;
-}
-
-/**
- * One restart DIVERGENCE: the persisted local effect status and a host FACT
- * about the same stable effect id disagree (D9).
- *
- * The two reachable shapes are opposite directions of the same crash window:
- * `pending` locally while the host reports the execution `created` (the create
- * returned and the row was not marked, so the host is AHEAD), and `started`
- * locally while the host reports `absent` (the row records a returned create
- * the host cannot corroborate, so the record is AHEAD).
- *
- * A host that answers `unknown` is NOT a divergence: it stated no fact, so
- * there is nothing to disagree with — the effect is reported as unsettled work
- * (`dispatch-unreconciled`) instead.
- */
-export interface OutcomeEffectDivergence {
-  /** The stable effect id both records name. */
-  readonly effectId: string;
-  /** The attempt the effect belongs to. */
-  readonly attemptId: string;
-  /** The status the LEDGER recorded before this recovery. */
-  readonly local: "pending" | "started";
-  /** The fact the HOST reported for the same effect id. */
-  readonly host: "created" | "absent";
-  /**
-   * What this recovery did about it — never a re-dispatch and never a silent
-   * drop: `reconciled-started` marked the row started without creating (the
-   * host is ahead), `reported-unreconciled` changed nothing and reported the
-   * disagreement for host/manual reconciliation (the record is ahead).
-   */
-  readonly resolution: "reconciled-started" | "reported-unreconciled";
-}
-
-/**
- * What {@link OutcomeGraphRuntime.resume} produced.
- *
- * `started` and `resumed` carry the SAME reports, because the first execution
- * and a restart recovery must be indistinguishable to the caller that owns the
- * effects:
- * - `dispatched` — the dispatch requests this call actually launched (every
- *   one a formerly `pending` effect, whose node the state already records as
- *   in flight). A `started` effect is NEVER re-launched.
- * - `armed` — every node the state records as dispatched ON AN ATTEMPT THAT
- *   CARRIES A CREDENTIAL, with its attempt, so a caller can see what is awaiting
- *   a submission even when nothing was launched (an entry dispatch recorded by
- *   `start()`, or work a dead process began). An in-flight attempt whose
- *   persisted entry carries no credential cannot be settled by any submission,
- *   so it is reported in `refusals` instead of being offered as armed. The
- *   credential itself is never part of this report.
- * - `unsettledEffects` — every effect still `pending` or `started` after this
- *   call, read from the ledger. Nothing in this set is dropped or silently
- *   rewound; a `started` row from a dead process is reported here.
- * - `reconciled` — every unsettled effect this call RESOLVED WITHOUT
- *   LAUNCHING, with the host fact that resolved it (D8): the host answered
- *   `created`, or the row already recorded a create that returned. A
- *   reconciled effect is not a failure and not a launch; it is the evidence
- *   that a crash window was closed by asking the host rather than by retrying.
- * - `divergences` — every effect whose persisted LOCAL status and the host's
- *   FACT about it disagree (D9), with what this call did about it. The pair is
- *   always the same crash window seen from both sides: a `pending` row the host
- *   reports `created` (reconciled to `started`, never re-created) or a
- *   `started` row the host reports `absent` (left exactly as it is and reported
- *   for reconciliation). A host that answers `unknown` states no fact and is
- *   therefore not a divergence; a first execution (`started`) has no earlier
- *   record to diverge from and reports none.
- *
- * `refusals` on a started/resumed answer are per-effect diagnostics (an effect
- * whose payload is unreadable, whose node the state does not corroborate, whose
- * creation the host cannot establish — `dispatch-unreconciled` — or a create
- * the host threw on). They do not stop the rest of the resume; the effect they
- * name stays unsettled and therefore also appears in `unsettledEffects`.
- */
-export type OutcomeResumeResult =
-  | {
-      readonly kind: "started";
-      readonly state: OutcomeGraphState;
-      readonly dispatched: readonly OutcomeDispatchRequest[];
-      readonly reconciled: readonly OutcomeReconciledEffect[];
-      readonly divergences: readonly OutcomeEffectDivergence[];
-      readonly armed: readonly OutcomeArmedNode[];
-      readonly unsettledEffects: readonly PendingEffectRecord[];
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    }
-  | {
-      readonly kind: "resumed";
-      readonly state: OutcomeGraphState;
-      readonly dispatched: readonly OutcomeDispatchRequest[];
-      readonly reconciled: readonly OutcomeReconciledEffect[];
-      readonly divergences: readonly OutcomeEffectDivergence[];
-      readonly armed: readonly OutcomeArmedNode[];
-      readonly unsettledEffects: readonly PendingEffectRecord[];
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-      /**
-       * Present exactly when the run this call continued is STOPPED (body
-       * version 4): the persisted stop, with its reason and the round it hit.
-       * A stopped run launches NOTHING and arms NOTHING — a second resume
-       * reports the same stop, clears nothing and dispatches nothing. A
-       * `started` answer cannot carry one: a first execution has nothing to
-       * have stopped.
-       */
-      readonly stop?: OutcomeStop;
-      /**
-       * Present exactly when the run this call found is STOPPED BY A TRUSTED
-       * CONTROL COMMAND (P3 item 1): the failure, timeout or cancellation
-       * recorded on the run, with its reason, its decision time and the
-       * principal that decided it.
-       *
-       * A controlled run behaves exactly like a body-stopped one — nothing is
-       * launched, nothing is armed, nothing is settled, and a second resume
-       * reports the same fact — but the reason is a TRUSTED LIFECYCLE COMMAND,
-       * not a declared limit, so it is carried as its own field instead of
-       * being rounded into {@link OutcomeStop} (plan §3.4: control is not an
-       * outcome). The attempts the stop left in flight are named in `refusals`
-       * and their effects stay in `unsettledEffects`: an external execution
-       * this process cannot confirm is REPORTED, never hidden.
-       */
-      readonly control?: RunControlRecord;
-      /**
-       * Present exactly when this call MINTED A NEW RUN in place of a terminal
-       * one (P3 item 2): the successor's identity, its graph-local sequence, the
-       * run it succeeds and the plan revision it executes. Every other field of
-       * this answer then describes THE SUCCESSOR — its state, its armed attempts
-       * and its unsettled effects — and the superseded run is untouched and still
-       * addressable by its own id.
-       */
-      readonly reexecuted?: {
-        readonly runId: string;
-        readonly runSeq: number;
-        readonly fromRunId: string;
-        readonly planRevision: string;
-      };
-    }
-  | {
-      readonly kind: "refused";
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    };
-
-// ── The budget contract (P3 item 3) ─────────────────────────────────────────
-
-/** One attempt's REAL usage, as the trusted host path reports it. */
-export interface OutcomeAttemptUsage {
-  /** The node whose attempt consumed this. */
-  readonly nodeId: string;
-  /** The attempt the usage belongs to. */
-  readonly attemptId: string;
-  /**
-   * How many executions this report accounts for. Defaults to ONE — the armed
-   * dispatch itself — which is also the count the reservation recorded.
-   */
-  readonly executions?: number;
-  readonly durationMs?: number;
-  readonly inputTokens?: number;
-  readonly outputTokens?: number;
-  readonly costUsd?: number;
-}
-
-/**
- * One usage report: measured amounts for attempts that have ALREADY run.
- *
- * IT IS NOT A SUBMISSION PAYLOAD. Nothing in the acceptance path reads this
- * shape, and no field of a worker's proposal reaches it: a submitted payload
- * must not be able to forge usage or raise a ceiling (P3 hard constraint). The
- * report arrives through this runtime's own host-facing method, which the host
- * wiring calls with amounts the PLATFORM measured.
- */
-export interface OutcomeBudgetUsageReport {
-  readonly attempts: readonly OutcomeAttemptUsage[];
-  /** Epoch milliseconds; defaults to the runtime's clock. */
-  readonly now?: number;
-}
-
-/** What recording one usage report did, per attempt. */
-export interface OutcomeBudgetUsageEntry {
-  /**
-   * The RUN whose claim this fact belongs to — the run that was CHARGED, not
-   * necessarily the run the report addressed: a delayed bill for an attempt of a
-   * superseded run settles THAT run's claim and names it here. For
-   * `recorded-late` (an attempt that holds no claim at all) it is the run the
-   * report addressed, the only run the store can know.
-   */
-  readonly runId: string;
-  readonly nodeId: string;
-  readonly attemptId: string;
-  /**
-   * `reconciled` — the outstanding claim was settled with these amounts;
-   * `replayed` — the same amounts were already the standing fact;
-   * `recorded-late` — the attempt was never reserved here and the usage was
-   * APPENDED (delayed billing); `ignored` — the attempt already carries a
-   * DIFFERENT usage fact, which stands and was not summed.
-   */
-  readonly outcome: "reconciled" | "replayed" | "recorded-late" | "ignored";
-  /** The recorded fact after this call (never this call's numbers when ignored). */
-  readonly used?: BudgetUsageAmounts;
-  readonly reason?: string;
-}
-
-/**
- * One node's budget facts, as a report reads them.
- *
- * An ALIAS of the domain report node: the same shape is what a `budget-stop`
- * control answer carries, and a second declaration of it would be a second
- * place for the two surfaces to drift apart.
- */
-export type OutcomeBudgetNodeReport = BudgetReportNode;
-
-/**
- * The budget state of one RUN: the declared limits and the recorded usage, as
- * the durable rows answer them.
- *
- * THIS IS THE QUERY/REPORT SURFACE the plan's §4 P3 budget bullet asks for, and
- * it is a READ: nothing here writes, and an overrun shown here is the arithmetic
- * of recorded amounts against declared ceilings. `totals.executions` counts
- * every authorized dispatch; `used.executions`, `reserved.executions` and
- * `unknownUsageAttempts` account for them separately, so "no usage reported
- * yet" can never be misread as "used nothing".
- *
- * An ALIAS of the domain's {@link BudgetReport}, built by the one shared
- * {@link buildBudgetReport} — the same numbers a `budget-stop` answer reports.
- */
-export type OutcomeBudgetReport = BudgetReport;
-
-/** The verdict of reading one run's budget state. */
-export type OutcomeBudgetReading =
-  | { readonly kind: "report"; readonly report: OutcomeBudgetReport }
-  | { readonly kind: "refused"; readonly refusal: OutcomeRuntimeRefusal };
-
-/** The verdict of recording one usage report. */
-export type OutcomeBudgetUsageOutcome =
-  | {
-      readonly kind: "recorded";
-      readonly graphId: string;
-      /**
-       * The run the returned report describes: the run the FIRST entry's fact
-       * belongs to, or the run this report addressed when it carried no attempts.
-       * Every entry names its own run, so a report crossing a run boundary stays
-       * fully attributable while the report itself is one run's state.
-       */
-      readonly runId: string;
-      readonly at: number;
-      /** What each attempt's report did, in report order. */
-      readonly entries: readonly OutcomeBudgetUsageEntry[];
-      /** The run's budget state AFTER the report, read from the rows. */
-      readonly report: OutcomeBudgetReport;
-    }
-  | { readonly kind: "refused"; readonly refusals: readonly OutcomeRuntimeRefusal[] };
 
 /**
  * The run was refused because a dispatch could not be CLAIMED (P3 item 3).
@@ -1241,9 +226,9 @@ class DispatchInputBlockedError extends Error {
   constructor(refusals: readonly DownstreamInputRefusal[]) {
     super(
       "outcome-runtime: a dispatch was not armed because its declared inputs could " +
-        "not be resolved (" +
-        refusals.map((refusal) => refusal.code).join(", ") +
-        ")",
+      "not be resolved (" +
+      refusals.map((refusal) => refusal.code).join(", ") +
+      ")",
     );
     this.name = "DispatchInputBlockedError";
     this.refusals = refusals;
@@ -1292,189 +277,14 @@ class ControlStoppedError extends Error {
   constructor(control: RunControlRecord) {
     super(
       "outcome-runtime: graph " +
-        JSON.stringify(control.graphId) +
-        " was stopped by the trusted control command " +
-        JSON.stringify(control.command) +
-        " while this settlement was in flight",
+      JSON.stringify(control.graphId) +
+      " was stopped by the trusted control command " +
+      JSON.stringify(control.command) +
+      " while this settlement was in flight",
     );
     this.name = "ControlStoppedError";
     this.control = control;
   }
-}
-
-// ── The runtime ─────────────────────────────────────────────────────────────
-
-/** Inputs to {@link OutcomeGraphRuntime}. */
-export interface OutcomeGraphRuntimeOptions {
-  /** The committed compiled plan this runtime executes. Its graphId IS the id. */
-  readonly plan: CompiledPlan;
-  /** The durable ledger the state and the acceptance share. */
-  readonly ledger: AcceptanceLedger;
-  /**
-   * Where a dispatched node goes — the HOST dispatch adapter (D8), called only
-   * after the effect and the state it belongs to have committed together.
-   *
-   * A bare seam is accepted and is the degenerate host: it can create an
-   * execution but cannot answer whether one already exists, so a recovery that
-   * needs that answer reports the effect instead of re-issuing the create.
-   *
-   * OMITTED IS NOT NEUTRAL: `start`, `resume` and `submit` all refuse with
-   * `dispatch-unavailable` before they read or write anything, because a no-op
-   * dispatcher would let this runtime record a dispatch it never performed.
-   * The production entries check the same condition before opening a ledger.
-   */
-  readonly dispatch?: OutcomeDispatchAdapter;
-  /**
-   * The host's CREATE-RIGHT fence (plan §3.3) — the mechanism that makes a
-   * credential re-issue single-winner.
-   *
-   * A lost credential is re-issued only while this process holds the create
-   * right for the effect, so a second recoverer (another process, or a second
-   * boot sweep over the same workspace) cannot replace the verifier between
-   * the first process's re-issue and its create — the window in which the
-   * worker it is about to dispatch would otherwise be handed a credential the
-   * store no longer records.
-   *
-   * OMITTED IS NOT NEUTRAL: without it a lost credential is NOT re-issued.
-   * `resume` reports `credential-reissue-forbidden` naming the missing fence,
-   * because "the effect looks pending" is not proof that the old create right
-   * has lapsed and a capability without an enforcing mechanism does not count.
-   */
-  readonly reissueFence?: AttemptCredentialReissueFence;
-  /** The installed validator implementations the plan's gates resolve against. */
-  readonly validators: ValidatorRegistry;
-  /** The root every evidence reference must resolve inside. */
-  readonly artifactRoot: string;
-  /** The clock. Time is an explicit input; defaults to `Date.now`. */
-  readonly clock?: () => number;
-  /** The installed execution-protocol handlers; defaults to the shipped set. */
-  readonly protocols?: ExecutionProtocolRegistry;
-  /**
-   * Mints the attempt credential every attempt this runtime dispatches is
-   * issued. Defaults to {@link RUNTIME_ATTEMPT_CREDENTIAL_SOURCE} (the platform
-   * CSPRNG); a test injects a deterministic source.
-   */
-  readonly mintCredential?: AttemptCredentialSource;
-  /**
-   * The HOST-INSTALLED completion-policy capability (D6).
-   *
-   * A plan whose body pins natural-completion authorizations depends on the
-   * policy revisions it authorized; this runtime corroborates each pinned ref
-   * against this registry before it starts, resumes or settles anything.
-   * OMITTED is legal only for a plan that pins none: a plan that pins one is
-   * refused with `completion-policy-unavailable`, because the authorization is
-   * part of the run's declared semantics and this process cannot check it.
-   */
-  readonly completionPolicies?: CompletionPolicyRegistry;
-  /**
-   * The HOST's credential-isolation capability (D7) — the production
-   * enablement condition of this run path.
-   *
-   * An attempt credential is a bearer nonce: whatever holds the value can be
-   * accepted for the attempt it was issued for. This build therefore persists
-   * only its DIGEST, and the credential itself belongs to the host, which
-   * declares and provides it here (`credential-isolation.ts`): a protected
-   * store and per-attempt delivery — version 2 injects the store the runtime
-   * adopts every minted credential into and resolves a recovery's re-delivery
-   * from. Whether that store is readable by a same-account worker is a property
-   * of the host's platform that no value here can attest.
-   *
-   * OMITTED IS NOT NEUTRAL: every entry — `start`, `resume` and `submit` —
-   * refuses with `credential-isolation-unavailable` before it reads or writes
-   * anything, because an unprotected run is exactly the defect this gate
-   * exists to prevent. There is no default adapter and no test-only bypass in
-   * this module.
-   */
-  readonly credentialIsolation?: CredentialIsolationCapability;
-  /**
-   * The HOST's invocation-identity capability (D9) — the ADDITIONAL constraint
-   * a host may declare on top of the bearer credential.
-   *
-   * With a readable capability, every attempt this runtime dispatches records
-   * the host identity of the invocation that dispatched it, and a submission
-   * that settles that attempt must come from the SAME host attribution; a
-   * mismatched, absent or unverifiable identity is refused by name and nothing
-   * is written. A capability that is present but UNREADABLE refuses the
-   * operation (`host-identity-unavailable`) rather than running unconstrained.
-   *
-   * OMITTED IS NOT A DOWNGRADE: without the capability nothing is recorded and
-   * nothing is checked, which is exactly how every path behaved before this
-   * slice — the core protocol depends on no host and works without one. The
-   * constraint is additive: it binds attempts dispatched under a host identity
-   * and leaves every other attempt exactly as it was.
-   */
-  readonly hostIdentity?: HostIdentityCapability;
-  /**
-   * The HOST-COMPLETION AUTHORITY (P2 items 6/7) — the host's own durable
-   * record of the execution it created for one attempt.
-   *
-   * WHY A COMPLETION NEEDS A SECOND AUTHENTICATION CHANNEL. §3.3: a worker's
-   * submission and a host's completion fact are authenticated SEPARATELY and
-   * then enter the SAME acceptance core. The bearer credential above proves
-   * that whoever presents it was handed the attempt's capability; it says
-   * nothing about the host having created, or observed the end of, an
-   * execution — and re-obtaining a lost bearer after a restart is exactly what
-   * the plan forbids a trusted completion from depending on. This capability is
-   * the other half: the host answers with the execution its OWN durable record
-   * carries (the row its platform confirmation wrote, with the platform's real
-   * execution id), and {@link OutcomeGraphRuntime.settleHostCompletion} settles
-   * only a fact that capability corroborates.
-   *
-   * OMITTED IS NOT A DOWNGRADE FOR THE OTHER CHANNELS: without it the run path
-   * behaves exactly as before, and only the host-completion entry refuses
-   * (host-completion-unavailable) — the completion channel is the one thing the
-   * capability enables. It carries no credential and never reads one.
-   */
-  readonly hostCompletions?: HostCompletionAuthority;
-}
-
-/**
- * One attempt's CONFIRMED host execution, as the host's own record holds it.
- *
- * Structural on purpose: the shipped record is the execution index's
- * HostExecutionIdentity (src/graph/host/execution-index.ts), and this module
- * must not import the host layer. The execution id is the platform's own id —
- * the token a recovery can ask the platform about — so a completion fact is
- * never authenticated against a locally invented identifier.
- */
-export interface HostCompletionExecution {
-  readonly executionId: string;
-  readonly taskId?: string;
-}
-
-/** The attempt one host-completion question is about. */
-export interface HostCompletionAttemptRef {
-  readonly graphId: string;
-  readonly attemptId: string;
-}
-
-/**
- * The HOST's completion authority: what the host can substantiate about the
- * execution it created for one attempt.
- *
- * ONE METHOD, ONE FACT, NO CREDENTIAL. It answers with the confirmed execution
- * the host's OWN durable record carries, or undefined when the host holds no
- * confirmed execution for that attempt — never a guess, never the node's
- * current attempt and never a value derived from one. A host that throws has
- * not answered, and the caller refuses rather than settling.
- */
-export interface HostCompletionAuthority {
-  executionFor(attempt: HostCompletionAttemptRef): HostCompletionExecution | undefined;
-}
-
-/**
- * One host completion fact as it crosses the settlement boundary.
- *
- * The closed shape the host-completion channel accepts: the attempt that
- * finished, the node it belongs to and the platform execution the host
- * recorded. No outcome and no payload — the outcome is the plan's pinned
- * natural-completion authorization, exactly as it is on the bearer channel, so
- * a completion can never choose what it settles.
- */
-export interface HostCompletionFact {
-  readonly nodeId: string;
-  readonly attemptId: string;
-  readonly executionId: string;
 }
 
 /**
@@ -1542,9 +352,7 @@ export class OutcomeGraphRuntime {
    * Read here rather than at each dispatch so a plan whose budget this build
    * cannot read exactly is refused by the same vocabulary everywhere, and so the
    * claim a dispatch makes and the ceiling a report compares against are the same
-   * numbers. `max_retries` is deliberately NOT a ceiling this map carries: the
-   * v3 grammar authorizes it as an automatic-retry count and no path in this
-   * build consumes it (a named gap, not a silently enforced limit).
+   * numbers. `max_retries` is rejected until automatic retries exist.
    */
   private readonly budgetLimits: ReadonlyMap<string, NodeBudgetLimits>;
   /** Why the plan's budget is not one this build can enforce, if it is not. */
@@ -1591,6 +399,11 @@ export class OutcomeGraphRuntime {
     const limits = new Map<string, NodeBudgetLimits>();
     let limitRefusal: OutcomeRuntimeRefusal | undefined;
     let declares = false;
+    try {
+      declares = readRunBudget(this.plan.budget)?.max_executions !== undefined;
+    } catch (error) {
+      limitRefusal = { code: "budget-limit-unauthorized", path: "$.budget", message: String(error) };
+    }
     for (const node of this.plan.nodes) {
       const reading = nodeBudgetLimitsOf(node.budget);
       if (reading.kind === "refused") {
@@ -1995,45 +808,7 @@ export class OutcomeGraphRuntime {
    * RE-EXECUTE one terminal run as a NEW RUN (P3 item 2; plan §4 "终态图重新执行：
    * 创建新 run，保留旧 run 和回执；修改有效 plan 形成新 revision，不能改写旧 attempt
    * 的语义").
-   *
-   * WHAT THIS IS. The execution half of the run-scoped `retry` command: the
-   * control service records the trusted ORDER (who, why, when) and this mints
-   * the run that honours it. The split is deliberate and is the same shape a
-   * dispatch has — the INTENT is durable before anything is created, so a
-   * process that dies in between leaves an order the next window can finish
-   * instead of a command nothing would ever honour. The order is consumed inside
-   * the minting transaction (`markReexecutionExecuted`, conditional), so it can
-   * never produce two runs.
-   *
-   * WHAT IS NEW, AND WHAT IS UNTOUCHED. New: a run row (`runSeq` one greater than
-   * the run it supersedes, carrying THIS runtime's plan revision), a state
-   * snapshot whose attempt counter CONTINUES the graph-wide one, a credential
-   * per armed attempt, and one dispatch effect per armed attempt. Untouched: the
-   * superseded run's row, its state snapshot, every receipt, accepted event,
-   * accepted result, effect and control decision it holds — nothing is rewritten
-   * and no attempt is re-labelled. The old run stays addressable by its own id
-   * (`readRunOf`, `readGraphStateOf`, `controlDecisions(graphId, runId)`) and a
-   * submission for one of its attempts is refused because the run path resolves
-   * attempts against the CURRENT run's state, where that attempt no longer
-   * exists.
-   *
-   * WHAT IT REFUSES TO DO. It never re-executes a run that is still executing, a
-   * run nobody ordered re-executed, or a run whose external work is unaccounted
-   * for (an unsettled dispatch the run never superseded and no confirmed
-   * cancellation covers): re-running a graph whose side effects may still be
-   * live is the one thing §4 forbids outright. It never reuses an attempt id:
-   * the counter continues, so a successor attempt can never be confused with the
-   * attempt it replaced, and the old attempt's immutable facts stay readable
-   * under their own ids.
-   *
-   * A CHANGED EFFECTIVE PLAN FORMS A NEW REVISION. The run row and the state both
-   * record `this.planRevision`, so a runtime constructed with a different
-   * revision re-executes INTO that revision while every earlier run keeps the
-   * revision its receipts were accepted under. The superseded run's state is read
-   * DEFENSIVELY for the two facts this needs (its phase and its attempt counter)
-   * when it is not a snapshot this plan can verify — a revision change is exactly
-   * that case, and refusing the read would make a changed plan unrunnable.
-   */
+ */
   reexecute(now?: number): OutcomeReexecutionResult {
     const at = this.readClock(now);
     if (typeof at !== "number") return refused([at]);
@@ -2209,17 +984,17 @@ export class OutcomeGraphRuntime {
       ...(state === undefined
         ? {}
         : {
-            inFlight: new Set(
-              state.nodes
-                .filter((node) => node.status === "dispatched" && node.attemptId !== undefined)
-                .map((node) => node.attemptId as string),
-            ),
-            settled: new Set(
-              state.nodes
-                .filter((node) => node.status === "settled" && node.attemptId !== undefined)
-                .map((node) => node.attemptId as string),
-            ),
-          }),
+          inFlight: new Set(
+            state.nodes
+              .filter((node) => node.status === "dispatched" && node.attemptId !== undefined)
+              .map((node) => node.attemptId as string),
+          ),
+          settled: new Set(
+            state.nodes
+              .filter((node) => node.status === "settled" && node.attemptId !== undefined)
+              .map((node) => node.attemptId as string),
+          ),
+        }),
     });
     if (blocking.length > 0) {
       return refused([
@@ -2547,23 +1322,23 @@ export class OutcomeGraphRuntime {
     // it is then blocked by name rather than handed a synthesized value.
     const justAccepted: JustAcceptedResult | undefined =
       validation.kind === "validated" &&
-      validation.decision.kind === "accepted" &&
-      validation.retained !== undefined
+        validation.decision.kind === "accepted" &&
+        validation.retained !== undefined
         ? {
-            attemptId: validation.decision.identity.attemptId,
-            facts: Object.freeze({
-              outcomeId: validation.decision.outcomeId,
-              payload: validation.retained.payload,
-              artifacts: validation.retained.artifacts,
-            }),
-          }
+          attemptId: validation.decision.identity.attemptId,
+          facts: Object.freeze({
+            outcomeId: validation.decision.outcomeId,
+            payload: validation.retained.payload,
+            artifacts: validation.retained.artifacts,
+          }),
+        }
         : undefined;
 
     let planned: OutcomeAdvance | undefined;
     const join: AcceptanceJoin = (tx, decision) => {
       // THE INVERSE RACE IS CLOSED HERE (P3 item 1, plan §3.4). The check above
       // ran before validation, and validation — the declared gates, the
-      // artifact reads, a human approval — happens OUTSIDE this transaction, so
+      // artifact reads, a principal approval — happens OUTSIDE this transaction, so
       // a `failure`, `timeout` or `cancel` that commits during that window
       // would otherwise be followed by an accepted event, a receipt, a state
       // advance and the successor's dispatch effect: a business success forged
@@ -2758,46 +1533,7 @@ export class OutcomeGraphRuntime {
   /**
    * Settle one attempt from its COMPLETION FACT — the natural-completion entry
    * point the host's dispatch completion bridge calls.
-   *
-   * WHAT THIS IS NOT. It is not a second submission channel. The delivery names
-   * the attempt and presents that attempt's bearer credential; it does NOT name
-   * an outcome and cannot carry a payload. The outcome is resolved from the
-   * plan's PINNED natural-completion authorization (D6), and the settlement then
-   * runs through the SAME acceptance core, the same declared acceptance gates
-   * and the same atomic transaction as `submit` — see
-   * {@link settleSubmission}. A node with no pinned authorization is refused
-   * (`natural-completion-unauthorized`); it is never downgraded to the explicit
-   * path and its policy is never skipped.
-   *
-   * THE CREDENTIAL RESOLVES THE ATTEMPT, NOT THE DELIVERY. The delivery's
-   * `nodeId` and `attemptId` are CROSS-CHECKS against the binding the runtime
-   * persisted at dispatch: a credential that names no recorded attempt is
-   * `credential-unknown`, one issued for another node is
-   * `credential-node-mismatch`, and one issued for another attempt of the same
-   * node is `attempt-mismatch` (with `$.attemptId`). A missing credential is
-   * `credential-missing`. Nothing falls back to "the node's current attempt".
-   *
-   * IDEMPOTENT BY CONTENT. The synthesized submission is the canonical
-   * `{ nodeId, outcomeId, credential }` of the authorized mapping, so a
-   * repeated delivery derives the SAME `natural-completion:<digest>` key and
-   * the ledger REPLAYS the first receipt: no second settlement, no second
-   * accepted event, no state advance. A delivery for an attempt already settled
-   * by a different logical submission is reported `not-committed` with the
-   * ledger's `settled` verdict; the original settlement is never overwritten.
-   *
-   * THE RUN'S OWN SEMANTICS APPLY UNCHANGED. A natural completion that
-   * continues a declared loop advances the same counters through the same
-   * reducer and stops through the same durable stop (`loop-exhausted`,
-   * `progress-stalled`) as any other accepted outcome — and a continuation of a
-   * progress-governed loop, whose declared comparison subject the payload-free
-   * envelope cannot carry, is refused `progress-subject-missing` exactly as a
-   * submission without it is, because a declared comparison is never skipped.
-   *
-   * The delivery envelope is read by the TOTAL gate in `natural-completion.ts`
-   * before anything else: an extra field, an outcome or a payload offered
-   * alongside the completion fact is `malformed-natural-delivery` at its own
-   * path.
-   */
+ */
   settleNatural(delivery: unknown, now?: number): OutcomeNaturalSettlementResult {
     // The envelope is read FIRST because a malformed delivery is not a delivery:
     // an unknown key is refused by name before the plan, the capability or the
@@ -2852,41 +1588,7 @@ export class OutcomeGraphRuntime {
 
   /**
    * Settle one attempt from a HOST-AUTHENTICATED completion fact (P2 items 6/7).
-   *
-   * THE SECOND AUTHENTICATION CHANNEL, AND WHY IT EXISTS. Plan §3.3: a worker's
-   * submission and a host's completion fact are authenticated SEPARATELY and
-   * then enter the SAME acceptance core. {@link settleNatural} authenticates
-   * with the attempt's bearer credential — fine while the host still holds the
-   * value, impossible once a restart has lost it (the shipped durable store
-   * keeps NO value by default, and re-obtaining the worker's bearer is exactly
-   * what a trusted completion must not depend on). This entry authenticates the
-   * SAME completion with the other fact the host owns: the durable record of
-   * the execution IT created, checked through the injected
-   * {@link HostCompletionAuthority}. No credential is read, presented or
-   * fabricated on this path.
-   *
-   * EVERYTHING ELSE IS SHARED, DELIBERATELY. The outcome is still the plan's
-   * pinned natural-completion authorization (a delivery cannot name one), the
-   * attempt is still resolved against the persisted state, and the settlement
-   * still runs through {@link settleSubmission} — the same acceptance core, the
-   * same declared gates, the same reducer and the same atomic
-   * receipt/event/state/effects transaction. The only difference is WHICH proof
-   * of the attempt the identity resolution accepts.
-   *
-   * IDEMPOTENT BY CONTENT, LIKE ITS BEARER TWIN. The synthesized proposal is the
-   * canonical (nodeId, outcomeId) of the authorized mapping with no credential,
-   * so a repeated host completion derives the SAME submission key and the
-   * ledger REPLAYS the first receipt: no second settlement, no second accepted
-   * event, no state advance. A completion for an attempt another channel
-   * already settled is reported not-committed, and the original settlement is
-   * never overwritten.
-   *
-   * REFUSED BY NAME WHEN THE HOST CANNOT SUBSTANTIATE IT. With no authority
-   * (host-completion-unavailable), an authority that holds no confirmed
-   * execution for the attempt, or one that names a DIFFERENT execution than the
-   * delivery reports (host-completion-unauthenticated), nothing is written: a
-   * completion that cannot be bound is reported, never guessed.
-   */
+ */
   settleHostCompletion(delivery: unknown, now?: number): OutcomeNaturalSettlementResult {
     // The envelope is read first, exactly as the bearer channel reads its own:
     // a malformed completion fact is not a completion.
@@ -3092,44 +1794,7 @@ export class OutcomeGraphRuntime {
   /**
    * Continue this graph from its PERSISTED state — the restart-recovery entry
    * point (C3c).
-   *
-   * `start()` answers "begin this plan"; `submit()` answers "here is an
-   * outcome"; this answers "this process died — pick the run up from what is
-   * durably true", and it is the ONLY entry point that may do so. It:
-   *
-   * 1. reads the state from the LEDGER (never from a caller, never from a
-   *    fresh plan-derived default) and refuses a record bound to another graph
-   *    or another plan revision;
-   * 2. RESOLVES every unsettled dispatch effect the state corroborates by
-   *    asking the host whether an execution exists (D8): `created` marks the
-   *    row `started` without re-creating it, `absent` creates exactly once and
-   *    marks the row AFTER the create returned, and `unknown` — including a
-   *    host with no query capability — reports the effect as
-   *    `dispatch-unreconciled` and creates nothing;
-   * 3. reports every effect still `pending` or `started` afterwards, so a
-   *    `started` effect a dead process left behind is never dropped and never
-   *    silently re-run, and every effect this call resolved WITHOUT launching in
-   *    `reconciled`, with the host fact that resolved it;
-   * 4. reports every node the state records as in flight ("armed") with the
-   *    attempt a submission must settle.
-   *
-   * IDEMPOTENT. Nothing here re-applies a state: the only writes are effect
-   * status transitions, and a row is marked `started` only after a create
-   * returned (or the host said the execution already exists), so a second call
-   * asks the host again, re-creates nothing, and reports the same ledger rows.
-   *
-   * A STOPPED RUN IS REPORTED, NEVER CONTINUED. A state carrying a stop (body
-   * version 4) short-circuits before any effect is read for launch: the call
-   * reports the stop, dispatches nothing, arms nothing, and writes nothing at
-   * all — so a second resume is idempotent by construction and the stop is never
-   * cleared. The nodes still recorded in flight are reported as refused, with
-   * the stop as the reason.
-   *
-   * NEVER STARTS FROM SCRATCH WHEN A STATE EXISTS. A state that cannot be read,
-   * or that is bound to another revision, is a REFUSAL — never a fresh run and
-   * never a rewritten record. Only a graph with NO state at all is started, and
-   * it is started from this runtime's plan (the saved one).
-   */
+ */
   resume(now?: number): OutcomeResumeResult {
     const at = this.readClock(now);
     if (typeof at !== "number") return refused([at]);
@@ -3596,9 +2261,8 @@ export class OutcomeGraphRuntime {
    * to slip through.
    *
    * A dimension with no declared ceiling claims nothing. The execution count is
-   * NOT ceilinged — the v3 grammar authorizes no count limit — but every claim
-   * still records the dispatch itself, which is what makes the count a durable
-   * usage fact.
+   * checked against the run ceiling. Released and reconciled reservations still
+   * consume one execution; repeating delivery of one attempt consumes none.
    */
   private reserveDispatchIn(
     tx: AcceptanceLedgerTx,
@@ -3610,7 +2274,7 @@ export class OutcomeGraphRuntime {
     const budget = tx.budget;
     const limits = this.limitsOfNode(nodeId);
     if (budget === undefined) {
-      if (!hasBudgetLimits(limits)) return undefined;
+      if (!hasBudgetLimits(limits) && this.plan.budget?.max_executions === undefined) return undefined;
       return {
         code: "budget-unavailable",
         path: "$.nodes",
@@ -3623,6 +2287,7 @@ export class OutcomeGraphRuntime {
       };
     }
     const claimed = budget.reserveDispatch({
+      maxExecutions: this.plan.budget?.max_executions,
       graphId: this.graphId,
       runId,
       nodeId,
@@ -3931,6 +2596,7 @@ export class OutcomeGraphRuntime {
           limits: this.limitsOfNode(node.id),
         })),
         usage,
+        runLimits: this.plan.budget,
       }),
     };
   }
@@ -3958,8 +2624,8 @@ export class OutcomeGraphRuntime {
       sanitized === raw
         ? raw
         : "outcome-runtime: the dispatch seam failed and its message echoed an attempt " +
-          "credential, which was removed from this report: " +
-          sanitized;
+        "credential, which was removed from this report: " +
+        sanitized;
     const wrapped = new Error(reported, { cause: error });
     if (error instanceof Error) wrapped.name = error.name;
     return wrapped;
@@ -4164,17 +2830,17 @@ export class OutcomeGraphRuntime {
     at: number,
   ):
     | {
-        readonly launched: readonly OutcomeDispatchRequest[];
-        readonly reconciled: readonly OutcomeReconciledEffect[];
-        readonly divergences: readonly OutcomeEffectDivergence[];
-        readonly refusals: readonly OutcomeRuntimeRefusal[];
-        /**
-         * Whether this pass REWROTE the persisted state by re-issuing a lost
-         * attempt credential (§3.3). The caller re-reads the state it reports
-         * when it did, so the reported state is the one that is stored.
-         */
-        readonly reissued: boolean;
-      }
+      readonly launched: readonly OutcomeDispatchRequest[];
+      readonly reconciled: readonly OutcomeReconciledEffect[];
+      readonly divergences: readonly OutcomeEffectDivergence[];
+      readonly refusals: readonly OutcomeRuntimeRefusal[];
+      /**
+       * Whether this pass REWROTE the persisted state by re-issuing a lost
+       * attempt credential (§3.3). The caller re-reads the state it reports
+       * when it did, so the reported state is the one that is stored.
+       */
+      readonly reissued: boolean;
+    }
     | { readonly refusal: OutcomeRuntimeRefusal } {
     let effects: readonly PendingEffectRecord[];
     try {
@@ -4550,54 +3216,7 @@ export class OutcomeGraphRuntime {
 
   /**
    * THE RESTART AUTHORIZATION POLICY (plan §3.3, P2 item 8).
-   *
-   * A recovered attempt whose credential the host can no longer produce is
-   * either re-issued or reported — never re-dispatched blind. The conditions
-   * are the whole rule, and every one of them must hold:
-   *
-   * 1. THE EFFECT WAS NEVER HANDED OVER (`status === "pending"`). A `started`
-   *    row says a create returned, so an execution exists and re-issuing would
-   *    mean replacing the capability of a worker that may be running.
-   * 2. THE HOST PROVES NO EXECUTION EXISTS (`lookup === "absent"`). That answer
-   *    is the JOIN of the host's own durable registry with the platform's query
-   *    port when one is installed: a `pending` claim owned by another live
-   *    process, a `creating` row whose result is unknown, a platform that
-   *    cannot answer, and a platform that names an execution ALL block here.
-   *    "The create failed" and "no execution exists" are different facts, and
-   *    only the second one licenses a second create (P2 item 4).
-   * 3. THE OLD GENERATION IS INVALIDATED BY THE WRITE ITSELF. The re-issued
-   *    credential's DIGEST replaces the recorded verifier in the SAME
-   *    transaction that adopts the value into the host store, so the previous
-   *    generation no longer matches any recorded verifier: a delivery that
-   *    still carries it is refused `credential-unknown`, exactly as a
-   *    superseded attempt's credential is. The previous value is never kept
-   *    beside the new one, and no report names either.
-   * 4. THE RE-ISSUE HOLDS THE CREATE RIGHT (`reissueFence`). The fence is the
-   *    store's own claim, taken BEFORE the new generation is minted and kept
-   *    until the create returns, so a second recoverer that reaches the same
-   *    effect while this process is between the re-issue and its create is told
-   *    `held` and refuses instead of replacing the verifier of an attempt about
-   *    to be dispatched. A host that installs no fence gets no re-issue: the
-   *    refusal names the missing mechanism (plan §3.3).
-   * 5. THE WRITE IS CONDITIONAL ON THE OBSERVED GENERATION. The transaction
-   *    re-reads the recorded verifier and replaces it only while it is still
-   *    the one recovery OBSERVED; a verifier that moved in between is reported
-   *    (`credential-reissue-forbidden`) rather than overwritten, so two
-   *    re-issues over one store can never both commit.
-   *
-   * WHEN THE ANSWER IS `unknown` THIS REFUSES (`credential-reissue-forbidden`)
-   * and the effect stays exactly as it is. Re-issuing and re-delivering under an
-   * unknown create outcome is forbidden because a blind retry could run the
-   * attempt twice — the failure the whole dispatch-effect ledger exists to
-   * prevent — and the refusal is carried in the recovery report so the block is
-   * OBSERVABLE rather than a silent strand.
-   *
-   * THE RE-ISSUED CREDENTIAL IS NOT A FABRICATION. It proves possession of a
-   * capability this host issued for exactly this attempt, and the state records
-   * its digest; nothing about the attempt, the node or the plan is invented. It
-   * is a NEW GENERATION of the same binding, not a new attempt: a retry that
-   * creates a new attempt is P3's command, and it goes through the reducer.
-   */
+ */
   private reissueLostCredential(input: {
     readonly effect: PendingEffectRecord;
     readonly target: OutcomeDispatchTarget;
@@ -4795,9 +3414,9 @@ export class OutcomeGraphRuntime {
             throw new OutcomeAdvanceRefusedError(
               "state-ledger-disagreement",
               "outcome-runtime: the state of graph " +
-                JSON.stringify(this.graphId) +
-                " disappeared between recovery's read and the credential re-issue — nothing " +
-                "was re-issued",
+              JSON.stringify(this.graphId) +
+              " disappeared between recovery's read and the credential re-issue — nothing " +
+              "was re-issued",
             );
           }
           const state = readOutcomeGraphState(record, this.plan);
@@ -4805,11 +3424,11 @@ export class OutcomeGraphRuntime {
             throw new OutcomeAdvanceRefusedError(
               "unsupported-state-version",
               "outcome-runtime: graph " +
-                JSON.stringify(this.graphId) +
-                " records state body version " +
-                String(state.bodyVersion) +
-                ", which this build does not rewrite — the credential of a recovered attempt is " +
-                "never re-issued into an older layout",
+              JSON.stringify(this.graphId) +
+              " records state body version " +
+              String(state.bodyVersion) +
+              ", which this build does not rewrite — the credential of a recovered attempt is " +
+              "never re-issued into an older layout",
             );
           }
           const position = this.plan.nodes.findIndex((node) => node.id === nodeId);
@@ -4818,25 +3437,25 @@ export class OutcomeGraphRuntime {
             throw new OutcomeAdvanceRefusedError(
               "attempt-mismatch",
               "outcome-runtime: the credential re-issue was asked for node " +
-                JSON.stringify(nodeId) +
-                " attempt " +
-                JSON.stringify(attemptId) +
-                ", but the state records " +
-                (current === undefined || current.attemptId === undefined
-                  ? "no such attempt"
-                  : "attempt " + JSON.stringify(current.attemptId)) +
-                " — nothing was re-issued",
+              JSON.stringify(nodeId) +
+              " attempt " +
+              JSON.stringify(attemptId) +
+              ", but the state records " +
+              (current === undefined || current.attemptId === undefined
+                ? "no such attempt"
+                : "attempt " + JSON.stringify(current.attemptId)) +
+              " — nothing was re-issued",
             );
           }
           if (current.status !== "dispatched" || current.attemptCredentialDigest === undefined) {
             throw new OutcomeAdvanceRefusedError(
               "node-not-dispatched",
               "outcome-runtime: node " +
-                JSON.stringify(nodeId) +
-                " is " +
-                current.status +
-                " (or records no credential digest), so its attempt is not one whose lost " +
-                "credential this build re-issues — nothing was written",
+              JSON.stringify(nodeId) +
+              " is " +
+              current.status +
+              " (or records no credential digest), so its attempt is not one whose lost " +
+              "credential this build re-issues — nothing was written",
             );
           }
           // THE CONDITIONAL WRITE (R1). The verifier is replaced only while it
@@ -4870,9 +3489,9 @@ export class OutcomeGraphRuntime {
           const nodes = state.nodes.map((entry, index) =>
             index === position
               ? Object.freeze({
-                  ...entry,
-                  attemptCredentialDigest: attemptCredentialDigest(minted),
-                })
+                ...entry,
+                attemptCredentialDigest: attemptCredentialDigest(minted),
+              })
               : entry,
           );
           tx.writeGraphState(
@@ -5254,8 +3873,8 @@ export class OutcomeGraphRuntime {
       throw new OutcomeAdvanceRefusedError(
         "state-ledger-disagreement",
         "outcome-runtime: the acceptance transaction sees no state snapshot for graph " +
-          JSON.stringify(this.graphId) +
-          " — nothing was applied",
+        JSON.stringify(this.graphId) +
+        " — nothing was applied",
       );
     }
     const current = readOutcomeGraphState(record, this.plan);
@@ -5267,8 +3886,8 @@ export class OutcomeGraphRuntime {
       throw new OutcomeAdvanceRefusedError(
         "unknown-node",
         "outcome-runtime: the accepted decision names node " +
-          JSON.stringify(decision.nodeId) +
-          ", which the state does not carry — nothing was applied",
+        JSON.stringify(decision.nodeId) +
+        ", which the state does not carry — nothing was applied",
       );
     }
     if (nodeState.status === "settled") {
@@ -5279,10 +3898,10 @@ export class OutcomeGraphRuntime {
         throw new OutcomeAdvanceRefusedError(
           "state-ledger-disagreement",
           "outcome-runtime: node " +
-            JSON.stringify(decision.nodeId) +
-            " is settled in the state, but the ledger holds no accepted event for attempt " +
-            JSON.stringify(decision.identity.attemptId) +
-            " — refusing to advance on a state the ledger does not corroborate",
+          JSON.stringify(decision.nodeId) +
+          " is settled in the state, but the ledger holds no accepted event for attempt " +
+          JSON.stringify(decision.identity.attemptId) +
+          " — refusing to advance on a state the ledger does not corroborate",
         );
       }
       return { result: {} };
@@ -5663,7 +4282,6 @@ function armedReading(state: OutcomeGraphState): {
   state.nodes.forEach((node, index) => {
     if (node.status !== "dispatched" || node.attemptId === undefined) return;
     if (node.attemptCredentialDigest === undefined) {
-      const legacy = node.attemptCredential !== undefined;
       refusals.push({
         code: "credential-missing",
         path: "$.nodes[" + index + "].attemptCredentialDigest",
@@ -5673,10 +4291,6 @@ function armedReading(state: OutcomeGraphState): {
           " is recorded as in flight on attempt " +
           JSON.stringify(node.attemptId) +
           " but its persisted state entry carries no attempt-credential digest — " +
-          (legacy
-            ? "it was dispatched by a body version that persisted the credential itself, " +
-              "which this build never compares against a presentation and never re-delivers, "
-            : "the attempt was dispatched by a body version that issues none, ") +
           "so no submission can settle it and it is reported as refused rather than armed",
       });
       return;
@@ -5977,11 +4591,11 @@ function readHostCompletionFact(value: unknown): HostCompletionFactReading {
         malformed(
           "$." + key,
           "unknown key " +
-            JSON.stringify(key) +
-            " — a host-completion delivery carries only the node, the attempt and the host " +
-            "execution that finished, and an unrecognized field is refused rather than " +
-            "dropped: a completion fact is not a submission and has no channel for an outcome, " +
-            "a payload or evidence",
+          JSON.stringify(key) +
+          " — a host-completion delivery carries only the node, the attempt and the host " +
+          "execution that finished, and an unrecognized field is refused rather than " +
+          "dropped: a completion fact is not a submission and has no channel for an outcome, " +
+          "a payload or evidence",
         );
       }
     }
@@ -6006,8 +4620,8 @@ function readHostCompletionFact(value: unknown): HostCompletionFactReading {
       malformed(
         "$.executionId",
         "executionId is " +
-          describeValue(value.executionId) +
-          ", not the non-empty host execution id the platform named",
+        describeValue(value.executionId) +
+        ", not the non-empty host execution id the platform named",
       );
     }
     if (nodeId === undefined || attemptId === undefined || executionId === undefined) {

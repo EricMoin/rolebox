@@ -1,55 +1,3 @@
-/**
- * Graph Execution Engine v2 — the host's attempt-credential vault
- *
- * Version: 2.0
- * Date: 2026-09-23
- *
- * THE STORE HALF OF THE CREDENTIAL-ISOLATION CAPABILITY
- * (`src/graph/outcome/credential-isolation.ts`). The outcome runtime persists
- * only the DIGEST of an attempt credential in the acceptance ledger, so this
- * host module is the one place the credential ITSELF lives — and the only place
- * a recovery can obtain one from.
- *
- * WHAT IT ENFORCES, AND WHAT IT DOES NOT.
- *
- * - ENFORCED BY THIS BUILD. No durable artifact this vault writes holds a
- *   credential VALUE unless the host explicitly declares a store it can
- *   protect. The default (`durableCredentialStore: "none"`) writes a row per
- *   attempt that records the binding and `not-retained`, so a same-account
- *   process that reads the whole store obtains no credential, and a recovery
- *   reports the effect as UNSETTLED instead of inventing one. The previous
- *   shape mirrored every credential into one 0600 JSON file while the
- *   capability declared `protectedCredentialStore: true`: a plain
- *   `readFileSync` recovered every live attempt's credential, and two
- *   processes rewriting that file from their own in-memory snapshots ERASED
- *   each other's rows. Both are gone: the value is not on disk by default, and
- *   the rows live in the host's transactional store with a per-attempt primary
- *   key.
- * - NOT ENFORCED, AND NOT CLAIMED. A host that opts into
- *   `durableCredentialStore: "platform-isolated"` puts the value back on disk
- *   so it can re-deliver a crash-window attempt after a restart. This build
- *   cannot verify that the host's store is protected: a same-account process
- *   can read the file, and no mode bit, path or mount option this module could
- *   inspect would change that. The option is therefore the deployment's
- *   ASSERTION (a different OS account, a container or mount namespace the
- *   worker is not in), it is stated as such in the capability
- *   (`durableCredentialStore`), and it is refused together with
- *   `durability: "memory"` because that combination claims a store that does
- *   not exist.
- * - THE AUTHORITATIVE COPY IS IN THIS PROCESS'S MEMORY. A credential resolves
- *   only for the exact attempt it was issued for, the API hands out at most one
- *   credential and never a listing, and no value is written to a report, a log
- *   line, an effect payload, a graph-state entry or a status surface.
- *
- * THE BINDING IS THE KEY. Every entry is addressed by
- * `(graphId, nodeId, attemptId)` — the runtime's own attempt identity — so a
- * credential can only ever be resolved for the exact attempt it was issued for.
- * The ledger's digest and this vault's exact-attempt lookup are two independent
- * halves of the same binding: neither can re-aim a credential at another
- * attempt, and neither can fabricate one for an attempt that was never issued
- * one.
- */
-
 import { randomBytes } from "node:crypto";
 
 import type {
@@ -158,10 +106,10 @@ export class HostCredentialVault {
     if (this.durability === "memory" && durable !== "none") {
       throw new Error(
         "host-credential-vault: " +
-          JSON.stringify(durable) +
-          " declares a durable credential store, but this vault was opened with " +
-          "durability 'memory' — a store that does not outlive the process cannot hold " +
-          "one, and the capability must not declare what the vault does not build",
+        JSON.stringify(durable) +
+        " declares a durable credential store, but this vault was opened with " +
+        "durability 'memory' — a store that does not outlive the process cannot hold " +
+        "one, and the capability must not declare what the vault does not build",
       );
     }
     this.retainValues = durable === "platform-isolated";
@@ -197,8 +145,8 @@ export class HostCredentialVault {
     if (!isAttemptCredential(credential)) {
       throw new Error(
         "host-credential-vault: the configured mint source produced no usable credential " +
-          "for attempt " +
-          JSON.stringify(binding.attemptId),
+        "for attempt " +
+        JSON.stringify(binding.attemptId),
       );
     }
     this.remember(
@@ -221,7 +169,7 @@ export class HostCredentialVault {
     if (!isAttemptCredential(credential)) {
       throw new Error(
         "host-credential-vault: refusing to store a non-credential for attempt " +
-          JSON.stringify(identity.attemptId),
+        JSON.stringify(identity.attemptId),
       );
     }
     this.entries.set(entryKey(identity), credential);
@@ -352,13 +300,13 @@ export class HostCredentialVault {
       if (!isAttemptCredential(entry.credential)) {
         throw new Error(
           "host-credential-vault: the store holds a retained entry this build cannot read " +
-            "(graph " +
-            JSON.stringify(entry.identity.graphId) +
-            ", node " +
-            JSON.stringify(entry.identity.nodeId) +
-            ", attempt " +
-            JSON.stringify(entry.identity.attemptId) +
-            ") — refusing the whole store rather than dropping one attempt's credential",
+          "(graph " +
+          JSON.stringify(entry.identity.graphId) +
+          ", node " +
+          JSON.stringify(entry.identity.nodeId) +
+          ", attempt " +
+          JSON.stringify(entry.identity.attemptId) +
+          ") — refusing the whole store rather than dropping one attempt's credential",
         );
       }
       this.entries.set(entryKey(entry.identity), entry.credential);

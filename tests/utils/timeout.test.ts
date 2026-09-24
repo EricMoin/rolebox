@@ -8,6 +8,17 @@ function fakeLogger(): Logger<any> {
   return { warn: mock(() => {}) } as unknown as Logger<any>;
 }
 
+test("settled guards release their timers so a host process can exit", async () => {
+  const source = `import { withTimeout } from ${JSON.stringify(import.meta.resolve("../../src/utils/timeout.ts"))};
+    const log = { warn() {} };
+    await withTimeout(Promise.resolve("done"), 10000, "success", log);
+    await withTimeout(Promise.reject(new Error("failed")), 10000, "failure", log).catch(() => {});`;
+  const child = Bun.spawn([process.execPath, "-e", source], { stdout: "ignore", stderr: "pipe" });
+  const timer = setTimeout(() => child.kill(), 2000);
+  try { expect(await child.exited).toBe(0); }
+  finally { clearTimeout(timer); }
+});
+
 // ── withTimeout ──────────────────────────────────────────────────────
 describe("withTimeout", () => {
   beforeEach(() => {

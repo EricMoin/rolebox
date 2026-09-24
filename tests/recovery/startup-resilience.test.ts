@@ -17,7 +17,6 @@ import { shortHash } from "../../src/utils/state-paths";
 import { LoopStore } from "../../src/loop/loop-store";
 import { FunctionRuntimeStore } from "../../src/function/runtime-store";
 import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
-import { loadEngineStateForResume } from "../../src/graph/persistence/engine-persistence";
 import { BudgetTracker } from "../../src/dispatch/budget/budget-tracker";
 import { DEFAULT_CONFIG } from "../../src/dispatch/config";
 
@@ -74,7 +73,7 @@ function namedFile(prefix: string, dir: string): string {
 // ── Failure-mode fixtures ────────────────────────────────────────────────────
 
 /** The five version-gated state prefixes StartupChecker scans. */
-const PREFIXES = ["loops", "dispatch", "fnstate", "engine", "budget"] as const;
+const PREFIXES = ["loops", "dispatch", "fnstate", "budget"] as const;
 
 /** (a) Corrupted JSON — garbage bytes that JSON.parse rejects. */
 function seedCorrupt(sd: string, prefix: string): string {
@@ -179,16 +178,11 @@ describe("store load() under seeded failure modes", () => {
       expect(() => new TaskStateStore(dir).load()).not.toThrow();
       expect(new TaskStateStore(dir).load()).toBeNull();
 
-      // The graph store's read path is the total structured loader (the
-      // deleted legacy runtime's null-shaped wrapper is gone): a corrupt
-      // engine-*.json is a non-valid verdict, never a throw.
       const enginePath = join(sd, namedFile("engine", sd));
-      const rawEngine = readFileSync(enginePath, "utf-8");
-      let loaded: ReturnType<typeof loadEngineStateForResume> | undefined;
-      expect(() => {
-        loaded = loadEngineStateForResume(rawEngine, enginePath);
-      }).not.toThrow();
-      expect(loaded!.kind).toBe("corrupt");
+      const before = readFileSync(enginePath, "utf-8");
+      StartupChecker.checkAll(dir, sd);
+      expect(readFileSync(enginePath, "utf-8")).toBe(before);
+
     });
   }
 

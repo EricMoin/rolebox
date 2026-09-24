@@ -1,47 +1,3 @@
-/**
- * Graph Execution Engine v2 — Completion-policy declarations (D6)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The AUTHORIZATION half of natural completion
- * (docs/graph-outcome-protocol.md § "Contract ownership and authority" and the
- * D6 delivery note). A v3 node's `completion` policy is a REQUEST — "runtime
- * completion of this node maps to this outcome" — and this module owns the
- * versioned declarations that decide whether that request is granted.
- *
- * WHERE THE DECLARATIONS LIVE. `src/graph/policy/declarations.ts` is this
- * repository's own catalog: reviewable source, one immutable `revision` per
- * declaration, covered by git. A declaration's digest is the ONE canonical
- * `contractDigest` over its body — there is no second digest — so an
- * authorization names exact content rather than a mutable file, and a body
- * edited after review no longer matches the digest that was authorized.
- *
- * WHO AUTHORIZES. Never the graph declaration, and never the compiler.
- * {@link loadCompletionPolicies} takes the HOST's trusted `authorized` list of
- * exact `{ id, revision, digest }` refs plus a catalog, and admits a
- * declaration only when the host authorized that identity AND the catalog body
- * hashes to the authorized digest. A declaration that merely EXISTS — in the
- * repository, in the workspace, or in a file some worker just wrote — is not an
- * authorization. The compiler and the runtime are handed only the resulting
- * {@link CompletionPolicyRegistry}; neither reads a file, and neither can add
- * to what the host installed.
- *
- * THE DECISION TABLE. A request is resolved against the installed registry by
- * exact `(id, revision)` identity (never ordering, never a range, never a
- * "nearest" revision), and the resolved body decides the exact
- * `(graphId, nodeId, outcome)` mapping:
- * - a rule for the mapping answers `allowed` or `denied`;
- * - no rule answers the body's declared `default`: `"deny"` denies every
- *   mapping the policy does not list, while `"ungranted"` leaves an unlisted
- *   mapping UNDECIDED — neither granted nor forbidden, which the compiler
- *   answers as a non-executable draft rather than a refusal.
- *
- * Dependency leaf: imports only `contractDigest` from
- * `../contracts/contract-definition.ts`, so the compiler, the runtime and a
- * host loader may all depend on it.
- */
-
 import { contractDigest } from "../contracts/contract-definition.ts";
 
 // ── The declaration ─────────────────────────────────────────────────────────
@@ -292,8 +248,8 @@ export function createCompletionPolicyRegistry(
     if (revisions.has(ref.revision)) {
       throw new Error(
         "completion-policy: duplicate policy " +
-          describeCompletionPolicy(ref) +
-          " — one exact (id, revision) pair has exactly one declaration",
+        describeCompletionPolicy(ref) +
+        " — one exact (id, revision) pair has exactly one declaration",
       );
     }
     revisions.add(ref.revision);
@@ -303,10 +259,10 @@ export function createCompletionPolicyRegistry(
     if (body === undefined) {
       throw new Error(
         "completion-policy: declaration " +
-          describeCompletionPolicy(ref) +
-          " is not a version-" +
-          COMPLETION_POLICY_VERSION +
-          ' completion policy ({ version, default: "deny" | "ungranted", rules })',
+        describeCompletionPolicy(ref) +
+        " is not a version-" +
+        COMPLETION_POLICY_VERSION +
+        ' completion policy ({ version, default: "deny" | "ungranted", rules })',
       );
     }
     let actual: string;
@@ -315,19 +271,19 @@ export function createCompletionPolicyRegistry(
     } catch (error) {
       throw new Error(
         "completion-policy: declaration " +
-          describeCompletionPolicy(ref) +
-          " cannot be content-addressed: " +
-          errorText(error),
+        describeCompletionPolicy(ref) +
+        " cannot be content-addressed: " +
+        errorText(error),
       );
     }
     if (actual !== ref.digest) {
       throw new Error(
         "completion-policy: declaration " +
-          describeCompletionPolicy(ref) +
-          " declares digest " +
-          ref.digest +
-          " but its body hashes to " +
-          actual,
+        describeCompletionPolicy(ref) +
+        " declares digest " +
+        ref.digest +
+        " but its body hashes to " +
+        actual,
       );
     }
     snapshots.push(Object.freeze({ ref: Object.freeze({ ...ref }), body }));
@@ -353,14 +309,14 @@ export type CompletionPolicyResolution =
   | { readonly kind: "resolved"; readonly snapshot: CompletionPolicySnapshot }
   | { readonly kind: "unknown-policy"; readonly id: string }
   | {
-      readonly kind: "unknown-revision";
-      readonly request: CompletionPolicyRequest;
-    }
+    readonly kind: "unknown-revision";
+    readonly request: CompletionPolicyRequest;
+  }
   | {
-      readonly kind: "digest-mismatch";
-      readonly ref: CompletionPolicyRef;
-      readonly actual: string;
-    };
+    readonly kind: "digest-mismatch";
+    readonly ref: CompletionPolicyRef;
+    readonly actual: string;
+  };
 
 /**
  * Resolve one declaration REQUEST against the installed capability, by exact
@@ -416,14 +372,14 @@ export function verifyCompletionPolicy(
 /** What one policy body decides about one exact mapping. */
 export type CompletionAuthorizationVerdict =
   | {
-      readonly kind: "allowed";
-      readonly rule: CompletionPolicyRule;
-    }
+    readonly kind: "allowed";
+    readonly rule: CompletionPolicyRule;
+  }
   | {
-      readonly kind: "denied";
-      /** The rule that denied it, or absent when the declared default did. */
-      readonly rule?: CompletionPolicyRule;
-    }
+    readonly kind: "denied";
+    /** The rule that denied it, or absent when the declared default did. */
+    readonly rule?: CompletionPolicyRule;
+  }
   /**
    * The policy is installed and read, but it neither grants nor forbids this
    * mapping (no rule, and its declared default is `"ungranted"`). The
@@ -528,46 +484,46 @@ export interface CompletionPolicyCatalogEntry {
 export type CompletionPolicyLoadIssue =
   /** The catalog entry itself is not `{ id, revision, body }`. */
   | {
-      readonly kind: "malformed-catalog-entry";
-      readonly index: number;
-      readonly message: string;
-    }
+    readonly kind: "malformed-catalog-entry";
+    readonly index: number;
+    readonly message: string;
+  }
   /** The host's authorized list carries a value that names no identity. */
   | {
-      readonly kind: "malformed-authorization";
-      readonly index: number;
-      readonly message: string;
-    }
+    readonly kind: "malformed-authorization";
+    readonly index: number;
+    readonly message: string;
+  }
   /** The host authorized this identity more than once with different digests. */
   | {
-      readonly kind: "conflicting-authorization";
-      readonly id: string;
-      readonly revision: string;
-      readonly digests: readonly string[];
-    }
+    readonly kind: "conflicting-authorization";
+    readonly id: string;
+    readonly revision: string;
+    readonly digests: readonly string[];
+  }
   /** A declared catalog entry the host did not authorize: present, not loaded. */
   | {
-      readonly kind: "not-authorized";
-      readonly id: string;
-      readonly revision: string;
-    }
+    readonly kind: "not-authorized";
+    readonly id: string;
+    readonly revision: string;
+  }
   /** The host authorized an identity the catalog does not offer. */
   | {
-      readonly kind: "catalog-missing";
-      readonly ref: CompletionPolicyRef;
-    }
+    readonly kind: "catalog-missing";
+    readonly ref: CompletionPolicyRef;
+  }
   /** The catalog body is not a readable completion-policy declaration. */
   | {
-      readonly kind: "malformed-policy";
-      readonly ref: CompletionPolicyRef;
-      readonly message: string;
-    }
+    readonly kind: "malformed-policy";
+    readonly ref: CompletionPolicyRef;
+    readonly message: string;
+  }
   /** The catalog body does not hash to the authorized digest. */
   | {
-      readonly kind: "digest-mismatch";
-      readonly ref: CompletionPolicyRef;
-      readonly actual: string;
-    };
+    readonly kind: "digest-mismatch";
+    readonly ref: CompletionPolicyRef;
+    readonly actual: string;
+  };
 
 /** Inputs to {@link loadCompletionPolicies}. */
 export interface CompletionPolicyLoadInput {

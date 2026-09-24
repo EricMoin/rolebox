@@ -41,7 +41,7 @@ A general coding agent is one agent with one prompt. rolebox turns it into *your
 - **Autonomy on declared rails.** Workflows run as an explicit graph with bounded loops, and a node advances only when its worker submits one of the outcomes the declaration allows — a free-form report is never interpreted as progress.
 - **Edits that never drift.** 30+ language-server tools (go-to-definition, diagnostics, references, rename) plus content-hash-anchored editing that survives concurrent file changes.
 
-The graph engine is how the team runs: `graph_declare` writes a version-3 declaration — each node's agent, prompt and the outcomes it may report, plus the edges that route an accepted outcome — and starts nothing itself. The host dispatches the entry nodes, and a worker settles its node with `graph_submit_outcome`, which commits the node's state and arms the next node; `graph_status` reads the recorded state back and `graph_audit` inventories the persisted store. Architecture and the full toolset: [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
+The graph engine is how the team runs: `graph_declare` writes a version-3 declaration — each node's agent, prompt and the outcomes it may report, plus the edges that route an accepted outcome — and reports persistence separately from the host’s initial start decision. The host dispatches the entry nodes, and a worker settles its node with `graph_submit_outcome`, which commits the node's state and arms the next node; `graph_status` reads the recorded state back and `graph_audit` inventories the persisted store. Architecture and the full toolset: [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
 
 ---
 

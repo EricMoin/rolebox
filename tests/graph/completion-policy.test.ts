@@ -58,7 +58,8 @@ import {
   REPOSITORY_COMPLETION_POLICY_ID,
   type RepositoryCompletionPolicyDeclaration,
 } from "../../src/graph/policy/declarations.ts";
-import { engineStateDir, verifyPersistedCompiledPlan } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
+import { verifyPersistedCompiledPlan } from "../../src/graph/compiler/verify-plan.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";
 import { resumePersistedOutcomeGraph } from "../../src/graph/outcome/recovery.ts";
@@ -925,7 +926,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
       const before = JSON.stringify(ledger.readGraphState(GRAPH_ID));
       const effectsBefore = JSON.stringify(ledger.pendingEffects(GRAPH_ID));
       const refused = resumePersistedOutcomeGraph({
-        state: declared.state,
+        state: declared,
         ledger,
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),
@@ -946,7 +947,7 @@ describe("a plan whose policy this process lacks is blocked, with the state pres
       // The block is the missing capability, not the state: the same recovery
       // succeeds once the host injects the policy.
       const resumed = resumePersistedOutcomeGraph({
-        state: declared.state,
+        state: declared,
         ledger,
         dispatch: () => undefined,
         validators: createValidatorRegistry([]),

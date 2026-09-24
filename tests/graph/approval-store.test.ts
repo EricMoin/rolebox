@@ -1,3 +1,4 @@
+import { approvalGrantFor } from "./helpers/approval-policy.ts";
 /**
  * P3 item 3 — THE APPROVAL TABLE of the ONE authoritative store.
  *
@@ -77,6 +78,7 @@ const DECLARER = "session.declarer";
 function request(overrides: Partial<ApprovalRequestRecord> = {}): ApprovalRequestRecord {
   return Object.freeze({
     graphId: GRAPH,
+    authority: approvalGrantFor(GRAPH, APPROVER),
     runId: RUN,
     nodeId: "work",
     attemptId: "work#1",

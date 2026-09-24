@@ -1,97 +1,3 @@
-/**
- * Graph Execution Engine v2 — Dispatch-effect execution contract (D8)
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE HOST ADAPTER FOR DISPATCH EFFECTS (docs/graph-outcome-protocol.md
- * § "State, storage, and effects" and the D8 section): the create channel the
- * outcome runtime already had, plus the one fact only the host can supply —
- * whether an execution for a stable effect id HAS ALREADY BEEN CREATED.
- *
- * WHY A QUERY IS PART OF THE CONTRACT. A dispatch effect is committed
- * atomically with the state it belongs to, and the create call happens after
- * that commit. A process that dies inside that window leaves an effect the
- * ledger records and the runtime cannot resolve on its own: the execution may
- * or may not exist. Neither pre-marking the effect "started" before the create
- * (the previous design) nor re-issuing the create blindly answers that
- * question — one hides a never-created execution, the other can duplicate a
- * created one. The host is the only party that knows, so the runtime asks it.
- *
- * THE CONTRACT, IN FULL:
- *
- * - `create(request, effect)` starts the node's execution. It MUST be
- *   IDEMPOTENT per `(effect.graphId, effect.effectId)`: calling it twice for
- *   one effect must yield AT MOST ONE execution. The effect id is stable
- *   across processes and is derived from the attempt id, so a host that keys
- *   its own records on it satisfies this by construction.
- * - `lookup(effect)` answers whether an execution for that stable id exists:
- *   `created` (it does), `absent` (it does not, and the host can tell),
- *   or `unknown` (the host cannot answer, with a `reason`). A host that
- *   cannot guarantee an answer MUST say `unknown` rather than guess: the
- *   runtime treats `unknown` as "needs reconciliation" and never converts it
- *   into a launch or into a silent success.
- *
- * A PLAIN SEAM IS STILL ACCEPTED, AND IT ANSWERS `unknown`. Passing a bare
- * `(request) => void` keeps every existing wiring and test working, and it is
- * exactly the degenerate host that can create but cannot be queried: a
- * recovery that would need to know whether the create already happened reports
- * the effect instead of re-issuing it. The restriction is honest and is
- * documented at every entry (`dispatch-unreconciled`).
- *
- * THE PLATFORM QUERY PORT (P2 item 5). `lookup` above is the runtime's
- * question; {@link OutcomeExecutionQuery} is the PLATFORM'S OWN answer, and it
- * is a separate seam because a host can hold durable records of what it created
- * and still be unable to ask the platform about an execution whose create
- * outcome it never saw. Only the platform can prove that a stranded `creating`
- * effect has no execution — and only a PROOF of that may release the create
- * right and license one more create (P2 item 4). A host that has no such port
- * omits it, and every effect whose create outcome is unknown stays `unknown`
- * and is BLOCKED: never blind-retried.
- *
- * WHAT A PORT MUST ANSWER FOR. The SAME stable correlation key the create
- * carried: {@link OutcomeDispatchEffectKey.graphId} plus
- * {@link OutcomeDispatchEffectKey.effectId} (`"dispatch:" + attemptId`), or the
- * one-string spelling {@link dispatchIdempotencyKeyOf} when the platform needs
- * a single token. That is why BOTH shipped adapters now carry the one-string
- * spelling ON THE CREATE CALL itself — a dsh subagent run's durable `label`,
- * a Pi dispatch task's `description` — so the key a platform stored is the
- * exact string the query is asked for it. The probe also carries the
- * {@link OutcomeExecutionProbe.invocation} the create was handed, because
- * correlating a child with its effect needs the parent whose children are
- * listed. A platform that cannot correlate that key with certainty — no
- * listing, no per-task lookup, a control plane it does not own — MUST answer
- * `unknown`, and the effect stays blocked. `absent` is a proof, not a guess:
- * neither shipped platform can prove that an execution it cannot find never
- * existed (dsh's child listing is live-preferred without session persistence,
- * and Pi's task registry is a recovered, TTL-cleaned cache), so BOTH answer
- * `unknown` rather than `absent`.
- *
- * A `created` ANSWER MUST BE ABLE TO SAY WHICH EXECUTION (F2). A platform that
- * reports an execution exists names it ({@link OutcomeExecutionLookup.created}
- * carries the platform's own execution id), so a process that never saw the
- * create confirmation binds the SAME execution locally instead of creating a
- * second one — the "host created it, local never got the confirmation" window.
- * A `created` that names no execution is still a fact about EXISTENCE, but it
- * is not a licence to re-create: a caller that needs the identity treats the
- * missing name as "not named" and blocks.
- *
- * PRIMING AN ASYNCHRONOUS PLATFORM. The run path asks SYNCHRONOUSLY — the
- * dispatch create, the crash-window reconciliation and the host's own lookup
- * are all synchronous — while a platform's correlation call may not be (dsh's
- * `ctx.subagents.listChildren` returns a promise). The port therefore has two
- * phases: {@link OutcomeExecutionQuery.prime} is awaited by the host's own
- * asynchronous entry points (the declaration seam and the boot sweep) BEFORE
- * the synchronous window opens, and {@link OutcomeExecutionQuery.lookup} then
- * answers from the readings that window produced. A question with no primed
- * reading is `unknown` — never a guess, and never a synchronous call into an
- * asynchronous control plane.
- *
- * Dependency leaf except for the request type: this module imports nothing at
- * runtime, so the runtime, the recovery seam and any adapter may depend on it
- * without a cycle.
- */
-
 import type { PendingEffectRecord } from "../ledger/types.ts";
 import type { ResolvedInput } from "./inputs.ts";
 
@@ -222,10 +128,10 @@ export interface OutcomeExecutionIdentity {
  */
 export type OutcomeExecutionLookup =
   | {
-      readonly kind: "created";
-      /** The platform's own name for the execution, when the answerer has it. */
-      readonly execution?: OutcomeExecutionIdentity;
-    }
+    readonly kind: "created";
+    /** The platform's own name for the execution, when the answerer has it. */
+    readonly execution?: OutcomeExecutionIdentity;
+  }
   | { readonly kind: "absent" }
   | { readonly kind: "unknown"; readonly reason: string };
 
@@ -390,38 +296,6 @@ export function dispatchIdempotencyKeyOf(effect: OutcomeDispatchEffectKey): stri
 
 /**
  * The unsettled effects that make RE-EXECUTING a run unsafe (P3 item 2).
- *
- * §4: "明确下游失效范围，不能把已完成外部副作用自动重跑." A run may be replaced by a new
- * run only when no external side effect of it can still be live:
- *
- * - an effect a `done` CANCEL covers is accounted for — the platform confirmed
- *   the execution was stopped — so it does not block;
- * - an attempt the run itself SUPERSEDED (a node-scoped retry replaced it) does
- *   not block: the trusted retry already decided that this work is redone, and
- *   its execution stays visible as an unsettled effect;
- * - an attempt the run records as SETTLED does not block: the settlement proves
- *   the execution ran and produced its accepted outcome;
- * - everything else does: the attempt is still the node's in-flight attempt and
- *   nothing proves the external execution is over.
- *
- * THE ATTEMPT AN EFFECT IS JUDGED BY IS ITS OWN COLUMN, AND THAT COLUMN NAMES
- * THE DISPATCHED ATTEMPT — the one its effect id spells — never the feeder
- * whose acceptance produced the row. A `work -> review` chain files
- * `dispatch:review#2` under `review#2`, so the SETTLED feeder (`work#1`) cannot
- * exempt the armed execution: `review#2` is the run's in-flight attempt and
- * nothing proves its execution is over, so the armed dispatch blocks exactly
- * like an entry dispatch.
- *
- * `attempts` is what the caller could establish about the run's state. Passing
- * `undefined` — a snapshot that is not this plan's state — makes the rule
- * CONSERVATIVE: without the node entries the last two exemptions cannot be
- * established, so an unsettled dispatch blocks unless a confirmed cancellation
- * covers it.
- *
- * PURE and TOTAL: it decides from the values it is given and never reads a
- * store, so the control service (deciding whether to record the order) and the
- * run path (deciding whether to honour one) apply the SAME rule instead of two
- * that could drift.
  */
 export function blockingReexecutionEffectsOf(
   effects: readonly PendingEffectRecord[],

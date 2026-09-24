@@ -1,101 +1,3 @@
-/**
- * Graph Execution Engine v2 — the host's durable dispatch-execution registry
- *
- * Version: 2.0
- * Date: 2026-09-23
- *
- * THE FACTS HALF OF THE DISPATCH HOST (D8). `src/graph/outcome/dispatch-effects.ts`
- * gives the runtime two answers it cannot derive on its own: create this
- * effect's execution (idempotently per `(graphId, effectId)`) and say whether an
- * execution for that stable id ALREADY EXISTS. This module owns both for a real
- * host, over the workspace's ONE authoritative store
- * ({@link GraphStore}, `src/graph/store/`) — the SAME database that holds the
- * acceptance ledger, so the effect intent and the host's bind to it are rows in
- * one file and one transaction can write both.
- *
- * THIS MODULE IS A FACADE OVER THE STORE'S `host_dispatch_executions` TABLE:
- * the lease, the owner identity, the owner GENERATION and the three-answer
- * lookup policy live here, while the row's shape, its primary key and its
- * conditional transitions live in the store. Every write delegates, so an
- * application service that opens `GraphStore.transaction` can claim, confirm or
- * release in the SAME transaction as the acceptance that authorized the effect.
- *
- * THE THREE STATES, AND WHY TWO WERE NOT ENOUGH. A create is not a single
- * event: the host first takes the right to create, then hands the request to a
- * platform it cannot see into, then (maybe) learns what the platform made. The
- * registry therefore records WHICH of those steps happened:
- *
- * - `pending` — a create right is held and NOTHING has been handed to the
- *   platform. No execution can exist, so a stale claim may be taken over and
- *   the effect is a genuine `absent` (a claim released after a PROVEN
- *   not-created is `pending` too, marked with `releasedAt`).
- * - `creating` — the request WAS handed over and the result is unknown. A crash
- *   here leaves an execution that may or may not exist; `lookup` answers
- *   `unknown` and NEVER `absent`, because a blind retry could run the attempt
- *   twice. This is the state the previous design could not express: it wrote
- *   its "preparing to create" record into the same set as "created", so a fresh
- *   reader answered `created` for an execution nobody had confirmed.
- * - `created` — the platform CONFIRMED the execution and named a real host
- *   execution/task id ({@link HostExecutionIdentity}). The store's own CHECK
- *   constraint makes `created` without an id unrepresentable, so `lookup` can
- *   answer `created` only from a host fact.
- *
- * CROSS-INSTANCE UNIQUENESS IS STRUCTURAL. The primary key
- * `(graph_id, effect_id)` and a conditional `UPDATE ... WHERE owner_id = ?` are
- * what make "only one instance gets the create right" a property of the store
- * rather than of a lock in one process: a second instance's `claim` either
- * loses the conditional update and is told the effect is HELD, or takes over a
- * claim whose lease expired — it is never silently granted a second dispatch.
- * Two processes each keeping an in-memory snapshot and rewriting one file (the
- * previous shape) could not express either guarantee, and the reproduced defect
- * was exactly that: the later writer erased the other's rows.
- *
- * THE OWNER GENERATION, AND WHY THE OWNER ID WAS NOT ENOUGH (P2 item 3). A row
- * records not just WHICH host instance holds the create right but WHICH CLAIM of
- * it: `owner_generation` is minted at 1 with the row and moves by one on every
- * ownership transition (a lease takeover, or a re-claim after a proven
- * not-created release). Every transition this module performs — mark creating,
- * confirm, release — names the `(ownerId, generation)` it believes is current,
- * and the STORE decides with one conditional `UPDATE ... WHERE`; nothing here
- * checks a row and then writes it. The generation is what an owner id cannot
- * give: an instance restarted with the same configured id, or a process whose
- * claim was taken over while a platform callback was in flight, presents a
- * generation the row no longer carries and the write is REFUSED.
- *
- * A REFUSED WRITE IS KEPT, NOT DROPPED. The last write a row refused — the
- * stale confirmation, the conflicting execution, the unproven failure — is
- * recorded ON the row (`refused_kind` / `refused_owner_id` /
- * `refused_generation` / `refused_execution_id` / `refused_at` /
- * `refused_count`) instead of vanishing into a returned `false`: a diagnosis
- * after the fact can see that owner A tried to bind execution X to a row that
- * belongs to owner B, and how many times. Only ids and instants are recorded —
- * never a credential value and never free-form host text.
- *
- * ONLY A PROVEN NOT-CREATED RELEASES THE CREATE RIGHT (P2 item 4). This class
- * has exactly one release, and it REQUIRES a {@link HostExecutionNotCreated}
- * proof: the delivery refused synchronously, before handing the request to the
- * platform, or the platform's own execution query answered `absent`. A delivery
- * failure that proves nothing (an asynchronous rejection, a timeout) goes
- * through {@link HostExecutionIndex.release} WITHOUT a proof, and a proof-less
- * call is a REPORT: the claim is KEPT — the row stays `creating`, every lookup
- * answers `unknown`, and the refusal is recorded — because "the create failed"
- * and "no execution exists" are different facts and only the second one
- * licenses a second create.
- *
- * WHAT SURVIVES A PROCESS EXIT. The row does: the effect identity, the state,
- * the owner, its generation, the confirmed host execution/task ids, the release
- * instant and the last refusal. What does NOT survive is the in-memory
- * `(effect -> generation)` map below — it is not authority, it is the token
- * THIS process must present, and a fresh process presents none: its
- * confirmation is fenced (and recorded) rather than applied. That is the
- * conservative direction: a platform callback from a process that is gone is
- * not evidence about the row the new process owns.
- *
- * WHAT THE REGISTRY IS NOT. It is not a completion source and not a scheduler:
- * nothing here executes, cancels or settles anything. A confirmed execution is
- * a FACT a recovery may reconcile against, not a promise that the attempt ran.
- */
-
 import { randomUUID } from "node:crypto";
 
 import { logWarn } from "../log-warn.ts";
@@ -220,7 +122,7 @@ export function hostExecutionNotCreated(reason: string): HostExecutionNotCreated
   if (typeof reason !== "string" || reason.length === 0) {
     throw new Error(
       "host-execution-index: a not-created proof needs a non-empty reason — refusing to " +
-        "release a create right for an unexplained claim",
+      "release a create right for an unexplained claim",
     );
   }
   return Object.freeze({ kind: "not-created" as const, reason });
@@ -245,20 +147,20 @@ export type HostExecutionConfirmation =
   | { readonly kind: "confirmed"; readonly execution: HostExecutionIdentity }
   | { readonly kind: "replayed"; readonly execution: HostExecutionIdentity }
   | {
-      readonly kind: "conflict";
-      readonly recorded: HostExecutionIdentity;
-      readonly reported: HostExecutionIdentity;
-    }
+    readonly kind: "conflict";
+    readonly recorded: HostExecutionIdentity;
+    readonly reported: HostExecutionIdentity;
+  }
   | {
-      readonly kind: "fenced";
-      /** Host-authored: which claim the row carries versus which one asked. */
-      readonly reason: string;
-      readonly state: HostExecutionState;
-      readonly ownerId: string;
-      readonly generation: number;
-      readonly attemptedOwnerId: string;
-      readonly attemptedGeneration: number;
-    }
+    readonly kind: "fenced";
+    /** Host-authored: which claim the row carries versus which one asked. */
+    readonly reason: string;
+    readonly state: HostExecutionState;
+    readonly ownerId: string;
+    readonly generation: number;
+    readonly attemptedOwnerId: string;
+    readonly attemptedGeneration: number;
+  }
   | { readonly kind: "absent" };
 
 /**
@@ -285,18 +187,18 @@ export interface HostExecutionClaimRef {
  */
 export type HostExecutionClaim =
   | {
-      readonly kind: "claimed";
-      readonly ownerId: string;
-      /** The generation this store minted for the claim. */
-      readonly generation: number;
-    }
+    readonly kind: "claimed";
+    readonly ownerId: string;
+    /** The generation this store minted for the claim. */
+    readonly generation: number;
+  }
   | {
-      readonly kind: "held";
-      readonly state: HostExecutionState;
-      readonly ownerId: string;
-      readonly generation: number;
-      readonly execution?: HostExecutionIdentity;
-    };
+    readonly kind: "held";
+    readonly state: HostExecutionState;
+    readonly ownerId: string;
+    readonly generation: number;
+    readonly execution?: HostExecutionIdentity;
+  };
 
 /** Inputs to {@link HostExecutionIndex.open}. */
 export interface HostExecutionIndexOptions {
@@ -510,10 +412,10 @@ export class HostExecutionIndex {
       this.store.recordUnprovenFailure(effect, ownerId, generation, this.now());
       logWarn(
         "execution-index: the delivery of effect " +
-          JSON.stringify(effect.effectId) +
-          " failed WITHOUT proving that no execution was created, so the create right is KEPT " +
-          "— the row stays 'creating', every lookup answers 'unknown', and the effect is " +
-          "reported as unresolved instead of being re-dispatched",
+        JSON.stringify(effect.effectId) +
+        " failed WITHOUT proving that no execution was created, so the create right is KEPT " +
+        "— the row stays 'creating', every lookup answers 'unknown', and the effect is " +
+        "reported as unresolved instead of being re-dispatched",
       );
       return false;
     }

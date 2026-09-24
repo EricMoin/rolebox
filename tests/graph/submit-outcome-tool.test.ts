@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { proposalDigest } from "../../src/graph/outcome/proposal.ts";

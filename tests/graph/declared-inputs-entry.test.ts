@@ -28,7 +28,7 @@ import {
 } from "../../src/graph/tools/declare-graph.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import { graphStoreFilePath } from "../../src/graph/store/index.ts";
 
 const GRAPH = "p42.declared-inputs";
@@ -150,10 +150,10 @@ function storedPlan(storeRoot: string) {
 }
 
 describe("declared inputs enter through the graph_declare entry", () => {
-  it("compiles a legal declaration with inputs and pins each (from, outcome)", () => {
+  it("compiles a legal declaration with inputs and pins each (from, outcome)", async () => {
     const fixture = workspace();
     try {
-      const result = fixture.toolset.graph_declare({
+      const result = await fixture.toolset.graph_declare_and_start({
         declaration: chain([{ from: "work", outcome: "done" }]),
       });
       expect(result.graph_id).toBe(GRAPH);

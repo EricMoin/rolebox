@@ -348,7 +348,6 @@ export interface StartupHealth {
  * - `fnstate-`      → function runtime store
  * - `dispatch-`     → TaskStore (task-store.ts:258, `dispatch-{dirHash}.json`)
  * - `metrics-`      → metrics persister
- * - `engine-`       → per-graph engine state (src/graph/persistence/engine-persistence.ts, `engineStatePath`)
  * - `budget-`       → budget tracker (budget-tracker.ts:281)
  * - `activerole-`   → dsh active-role sidecar (active-role-store.ts:105)
  */
@@ -357,7 +356,6 @@ const VERSION_GATED_STATE_FILE_PATTERNS: ReadonlyArray<(name: string) => boolean
   (n) => n.startsWith("fnstate-") && n.endsWith(".json"),
   (n) => n.startsWith("dispatch-") && n.endsWith(".json"),
   (n) => n.startsWith("metrics-") && n.endsWith(".json"),
-  (n) => n.startsWith("engine-") && n.endsWith(".json"),
   (n) => n.startsWith("budget-") && n.endsWith(".json"),
   (n) => n.startsWith("activerole-") && n.endsWith(".json"),
 ];

@@ -1,63 +1,4 @@
-/**
- * Graph Execution Engine v2 — Durable acceptance ledger: record model and port
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The durable half of the outcome protocol's submission path
- * (docs/graph-outcome-protocol.md § "Submission and acceptance" and § "State,
- * storage, and effects"): the records an accepted submission commits, and the
- * PORT every substrate implements so the store stays swappable.
- *
- * What this module owns:
- * - `ReceiptRecord` — one committed decision per logical submission, keyed by
- *   `(graphId, attemptId, submissionId)`. That key is the idempotency key: the
- *   same key with the same normalized proposal returns the PERSISTED receipt,
- *   the same key with a different digest is a conflict, and a distinct terminal
- *   submission for an attempt that already settled is refused. All three rules
- *   are encoded in {@link CommitResult}.
- * - `AcceptedEventRecord` — the accepted-event stream, with AT MOST ONE event
- *   per `(graphId, attemptId)`: accepting a second terminal outcome for one
- *   execution is impossible by construction, not by convention.
- * - `PendingEffectRecord` — the effect ledger. Effects carry a STABLE id and a
- *   status, so a process that dies between the commit and the work can list
- *   what a previous process left `pending` or `started` and reconcile by id.
- *   Nothing in this module (or in the shipped store) EXECUTES an effect; it
- *   records one.
- *
- * {@link AcceptanceLedger} is the port. `ledgerFormatVersion` names the
- * durable layout the implementation writes, and every method is SYNCHRONOUS so
- * it can join a caller-supplied transaction. `runInTransaction` is the
- * documented EXTENSION POINT for the ONE atomic boundary the protocol requires
- * — acceptance receipt + accepted event + engine state change + pending effects
- * committed together — and it exposes the same write surface inside the
- * caller's transaction: {@link GraphStateRecord} IS that engine state for an
- * outcome-protocol graph, so `writeGraphState` joins the acceptance batch
- * instead of landing beside it (C3b).
- *
- * THE GRAPH STATE IS THE ONLY ENGINE STATE THIS PORT CARRIES. The legacy v2
- * run path and its file persistence were deleted with the legacy runtime;
- * nothing here reads or writes a legacy snapshot, and no module imports this
- * ledger for one.
- *
- * Timestamps are EPOCH MILLISECONDS supplied by the CALLER. Time is an explicit
- * input to the protocol (docs § "State, storage, and effects"), so the store
- * never reads a clock and a commit is reproducible from its batch alone.
- *
- * Dependency LEAF: this module imports exactly two things, BOTH type-only — the
- * budget vocabulary from `../domain/budget.ts` and the accepted-data presence
- * envelope from `../domain/model.ts` — each of which imports nothing at
- * runtime. So any implementation, reducer or recovery module may depend on this
- * port without a cycle, and the P1 property the previous version of this
- * paragraph claimed (no runtime dependency, no container dragged in) still
- * holds: the budget records need the plan's own ceiling and usage names rather
- * than a second, drifting spelling of them, and the accepted-data read below
- * needs the ONE presence envelope the domain model owns rather than a second
- * one declared here. (`domain/model.ts` names this module's `ReceiptRecord`
- * as a type in return; the two type-only edges are erased and create no runtime
- * coupling in either direction.)
- */
-
+import type { ApprovalGrant } from "../policy/approval-policy.ts";
 import type {
   BudgetLimitKind,
   BudgetUsageAmounts,
@@ -69,70 +10,9 @@ import type { AcceptedData } from "../domain/model.ts";
 
 /**
  * The ledger layout this build writes.
- *
- * It is a named identity rather than a bare literal because the durable layout
- * is versioned independently of the records it holds: a store may only open a
- * file whose version row says EXACTLY this value, and an unknown, newer or
- * older version is refused rather than recreated or downgraded.
- *
- * VERSION 2 IS THE CONVERGED STORE (P1 item 3). The ledger's file became the
- * workspace's ONE authoritative store — the graph definition, the run state,
- * the accepted results, the host's execution bindings, the credential records
- * and the declaring-invocation record now live in the SAME database — so the
- * layout genuinely changed. A version-1 file holds five of the ten tables and
- * none of the host records; reading it as this build's store would answer
- * "no execution binding" for every effect it never carried, which is what lets
- * a recovery create a second execution for one effect. This build registers NO
- * migration, so a version-1 file is refused by name (`older-format`), never
- * widened in place and never downgraded.
- *
- * VERSION 3 ADDS THE RUN IDENTITY AND THE TRUSTED CONTROL RECORDS (P3 item 1).
- * A version-2 file holds neither `graph_runs` nor `graph_control_decisions`,
- * so it could not answer "which run is this, and was it stopped by a trusted
- * command?" — reading it as this build's store would report every controlled
- * run as merely executing. Same rule, same answer: refused by name, never
- * widened, never migrated (plan §3.6).
- *
- * VERSION 4 MAKES THE RUN THE SCOPING KEY (P3 item 2). A version-3 file keys the
- * graph state by GRAPH and holds runs one-per-graph, which is exactly the
- * assumption re-executing a terminal graph makes false: its `pendingEffects`
- * and `controlDecisions` reads answer every row of the GRAPH, so a later run's
- * recovery would be offered the earlier run's dispatches and cancellations. The
- * run id becomes part of the graph-state key, an explicit column of every
- * effect, and the `(graph, run)` pair of the run table; the control decision's
- * key gains the command so a `retry` can be recorded beside the fact it
- * supersedes. Same rule, same answer: refused by name, never widened, never
- * migrated (plan §3.6).
- *
- * VERSION 5 ADDS THE DURABLE APPROVAL REQUESTS (P3 item 3). A version-4 file
- * holds no `graph_approval_requests` row, so it cannot answer "is this attempt
- * paused on a trusted approval request, and was it decided?" — reading it as
- * this build's store would answer *no request* for an attempt a previous
- * process paused, which is exactly the "a payload the pause was meant to hold
- * back is accepted" failure §3.4 forbids. Same rule, same answer: refused by
- * name, never widened, never migrated (plan §3.6).
- *
- * VERSION 6 ADDS THE DISPATCH BUDGET RESERVATIONS AND USAGE (P3 item 3, the
- * budget). A version-5 file holds no reservation row, so it cannot answer "is
- * this dispatch's share of the node's declared ceiling already claimed?" —
- * reading it as this build's store would answer *nothing reserved* for a
- * dispatch a previous process armed, and the next parallel dispatch would be
- * authorized past a ceiling that was already spent. Same rule, same answer:
- * refused by name, never widened, never migrated (plan §3.6).
- *
- * VERSION 7 MAKES THE ACCEPTED DATA'S PRESENCE EXPLICIT (P4 item 5 / D1). A
- * version-6 file stores the accepted payload as the BARE value the submission
- * carried, so a submission that supplied no `data` at all and one that supplied
- * JSON `null` are byte-identical rows (`null`) — no reader can recover which
- * of the two was accepted, and a downstream consumer is handed the same bytes
- * for both. Version 7 stores the explicit envelope (`{"kind":"absent"}` /
- * `{"kind":"value","value":…}`) and refuses a body that is not one of those two
- * members. Reading a version-6 row as this build's accepted data would report
- * an accepted `null` where the earlier build recorded an absence, which is
- * exactly the distinction this version exists to preserve. Same rule, same
- * answer: refused by name, never widened, never migrated (plan §3.6).
  */
-export const LEDGER_FORMAT_VERSION = 7;
+/** Format 8 adds storage identity and the approval authority pinned to each request. */
+export const LEDGER_FORMAT_VERSION = 9;
 
 // ── Records ─────────────────────────────────────────────────────────────────
 
@@ -421,10 +301,10 @@ export interface RunReexecutionRecord {
 export type RunReexecutionWriteResult =
   | { readonly kind: "recorded"; readonly reexecution: RunReexecutionRecord }
   | {
-      /** The same order is already recorded; nothing was written. */
-      readonly kind: "replayed";
-      readonly reexecution: RunReexecutionRecord;
-    };
+    /** The same order is already recorded; nothing was written. */
+    readonly kind: "replayed";
+    readonly reexecution: RunReexecutionRecord;
+  };
 
 /**
  * One durable TRUSTED CONTROL DECISION for one attempt (P3 item 1).
@@ -524,32 +404,32 @@ export interface RunControlWrite {
  */
 export type RunControlWriteResult =
   | {
-      readonly kind: "recorded";
-      readonly decision: ControlDecisionRecord;
-      /**
-       * The run's control fact AFTER the write — the one that stands, which is
-       * the FIRST command recorded and therefore not necessarily this call's.
-       * `undefined` when the run has none and this call did not claim one (a
-       * retry), and when the graph holds no run row at all.
-       */
-      readonly runControl: RunControlRecord | undefined;
-    }
+    readonly kind: "recorded";
+    readonly decision: ControlDecisionRecord;
+    /**
+     * The run's control fact AFTER the write — the one that stands, which is
+     * the FIRST command recorded and therefore not necessarily this call's.
+     * `undefined` when the run has none and this call did not claim one (a
+     * retry), and when the graph holds no run row at all.
+     */
+    readonly runControl: RunControlRecord | undefined;
+  }
   | {
-      readonly kind: "replayed";
-      readonly decision: ControlDecisionRecord;
-      readonly runControl: RunControlRecord | undefined;
-    }
+    readonly kind: "replayed";
+    readonly decision: ControlDecisionRecord;
+    readonly runControl: RunControlRecord | undefined;
+  }
   | {
-      readonly kind: "conflict";
-      readonly existing: ControlDecisionRecord;
-      readonly runControl: RunControlRecord | undefined;
-    }
+    readonly kind: "conflict";
+    readonly existing: ControlDecisionRecord;
+    readonly runControl: RunControlRecord | undefined;
+  }
   | {
-      readonly kind: "settled";
-      /** The attempt that had already settled when the write was attempted. */
-      readonly attemptId: string;
-      readonly runControl: RunControlRecord | undefined;
-    };
+    readonly kind: "settled";
+    /** The attempt that had already settled when the write was attempted. */
+    readonly attemptId: string;
+    readonly runControl: RunControlRecord | undefined;
+  };
 
 // ── Trusted approval (P3 item 3) ────────────────────────────────────────────
 
@@ -565,7 +445,7 @@ export type RunControlWriteResult =
 export type ApprovalRequestStatus = "pending" | "approved" | "rejected" | "expired";
 
 /**
- * One durable human-approval request and its trusted decision (P3 item 3).
+ * One durable principal-approval request and its trusted decision (P3 item 3).
  *
  * Owns: the paused node, run and ATTEMPT, the time the pause was raised, the
  * ONLY session whose decision resolves it, the deadline it expires at, and the
@@ -589,6 +469,7 @@ export type ApprovalRequestStatus = "pending" | "approved" | "rejected" | "expir
  * store replays the same transitions.
  */
 export interface ApprovalRequestRecord {
+  readonly authority: ApprovalGrant;
   readonly graphId: string;
   readonly runId: string;
   readonly nodeId: string;
@@ -917,7 +798,7 @@ export interface BudgetReservationRecord {
 
 /** One dimension that had no room left for a dispatch, with the numbers. */
 export interface BudgetExhaustion {
-  readonly kind: BudgetLimitKind;
+  readonly kind: BudgetLimitKind | "executions";
   /** The declared ceiling. */
   readonly limit: number;
   /** Recorded usage PLUS outstanding reservations at the refusal. */
@@ -927,6 +808,7 @@ export interface BudgetExhaustion {
 
 /** One reservation request: the attempt about to be armed and its ceilings. */
 export interface BudgetReserveInput {
+  readonly maxExecutions?: number;
   readonly graphId: string;
   readonly runId: string;
   readonly nodeId: string;
@@ -982,14 +864,14 @@ export interface BudgetUsageInput {
  */
 export type BudgetUsageResult =
   | {
-      readonly kind: "reconciled" | "replayed" | "recorded-late";
-      readonly reservation: BudgetReservationRecord;
-    }
+    readonly kind: "reconciled" | "replayed" | "recorded-late";
+    readonly reservation: BudgetReservationRecord;
+  }
   | {
-      readonly kind: "ignored";
-      readonly reservation: BudgetReservationRecord;
-      readonly reason: string;
-    };
+    readonly kind: "ignored";
+    readonly reservation: BudgetReservationRecord;
+    readonly reason: string;
+  };
 
 /** One reservation's release: the attempt is over and no usage was reported. */
 export interface BudgetReleaseInput {
@@ -1122,37 +1004,6 @@ export interface AcceptanceBatch {
 /**
  * The verdict of one `commitAccepted`, encoding the protocol's idempotency
  * rules verbatim:
- *
- * - `committed` — the submission key and the attempt were both unclaimed: the
- *   receipt, the accepted event and every pending effect were written in ONE
- *   transaction that has ALREADY committed when this verdict is returned.
- * - `replayed` — the SAME logical submission (`graphId + attemptId +
- *   submissionId`) with the SAME `proposalDigest`: nothing is written and the
- *   PERSISTED receipt is returned exactly as it was first committed.
- * - `conflict` — the same submission key with a DIFFERENT digest: nothing is
- *   written, and the key stays bound to the proposal already committed under
- *   it.
- * - `settled` — the attempt already has an accepted event and this is a
- *   distinct terminal submission: nothing is written and the accepted result
- *   is never overwritten. `reason` names the settlement.
- * - `controlled` — the RUN has a trusted control fact (P3 item 1) and this
- *   batch belongs to it: nothing is written. CONTROL IS NOT OUTCOME (§3.4), so
- *   a controlled run commits no acceptance at all — no receipt, no accepted
- *   event, no state advance and no successor effect — and the fact that stopped
- *   the run is returned instead. It is the STRUCTURAL half of the rule the run
- *   path applies by name (`control-stopped`) before it settles: the check is the
- *   FIRST statement of the batch write, inside the committing transaction and
- *   against the COMMITTED store, so whichever of control and acceptance COMMITS
- *   first is the fact that stands and the loser writes nothing.
- * - `run-superseded` — the batch's attempt belongs to a run that is NO LONGER
- *   the graph's current run, so that run was superseded (P3 item 2,
- *   re-execution): nothing is written. A closed run's attempts accept nothing,
- *   exactly like a controlled run's.
- * - `approval-blocked` — the attempt is PAUSED on a trusted approval request
- *   (P3 item 3) whose status is not `approved`: nothing is written. Approval is
- *   control, not outcome (§3.4), so no field of a submission reaches this gate —
- *   the check reads the durable request row, and the request row is written only
- *   by the trusted control path.
  */
 export type CommitResult =
   | { readonly kind: "committed"; readonly receipt: ReceiptRecord }
@@ -1160,85 +1011,85 @@ export type CommitResult =
   | { readonly kind: "conflict"; readonly reason: string }
   | { readonly kind: "settled"; readonly reason: string }
   | {
-      readonly kind: "controlled";
-      /** The run-level control fact that refused this acceptance. */
-      readonly control: RunControlRecord;
-      readonly reason: string;
-    }
+    readonly kind: "controlled";
+    /** The run-level control fact that refused this acceptance. */
+    readonly control: RunControlRecord;
+    readonly reason: string;
+  }
   | {
-      /**
-       * The ATTEMPT was SUPERSEDED by a trusted `retry`: nothing was written.
-       *
-       * The check is part of the FIRST statement of the batch write (a receipt
-       * INSERT conditioned on no `retry` decision existing for this attempt), so
-       * it decides against the COMMITTED store, not against a value read before
-       * the write. A retry therefore can never race an acceptance into "both
-       * facts landed": whichever commits first stands, and a retried attempt
-       * accepts nothing afterwards — its result would belong to an execution the
-       * node no longer holds, and the successor attempt carries the node
-       * forward.
-       */
-      readonly kind: "superseded";
-      /** The retry decision that superseded this attempt. */
-      readonly decision: ControlDecisionRecord;
-      readonly reason: string;
-    }
+    /**
+     * The ATTEMPT was SUPERSEDED by a trusted `retry`: nothing was written.
+     *
+     * The check is part of the FIRST statement of the batch write (a receipt
+     * INSERT conditioned on no `retry` decision existing for this attempt), so
+     * it decides against the COMMITTED store, not against a value read before
+     * the write. A retry therefore can never race an acceptance into "both
+     * facts landed": whichever commits first stands, and a retried attempt
+     * accepts nothing afterwards — its result would belong to an execution the
+     * node no longer holds, and the successor attempt carries the node
+     * forward.
+     */
+    readonly kind: "superseded";
+    /** The retry decision that superseded this attempt. */
+    readonly decision: ControlDecisionRecord;
+    readonly reason: string;
+  }
   | {
-      /**
-       * The attempt belongs to a run the graph has SUPERSEDED (P3 item 2,
-       * re-execution): nothing was written.
-       *
-       * A run-scoped retry closes the run it replaces and mints a successor, so
-       * the closed run's attempts can never settle afterwards — their results
-       * would be new terminal facts about a run whose receipts are already the
-       * record of what it accepted. The check is part of the FIRST statement of
-       * the batch write (a receipt INSERT conditioned on the attempt's own
-       * dispatch effect being filed under the graph's CURRENT run), so it decides
-       * against the COMMITTED store and a re-execution and a late acceptance can
-       * never both land for one attempt, in either order.
-       *
-       * The attempt is bound to its run by the dispatch effect rows the
-       * acceptance core itself settles: an attempt is armed by writing its effect
-       * in the same transaction that records it, so an attempt that reached a
-       * real acceptance always has one. An attempt with no effect row anywhere is
-       * not attributable to a closed run by this store and is not refused here.
-       *
-       * A row filed under the reserved PRE-RUN generation (the implicit run of a
-       * substrate that never minted one) IS attributable once the graph holds a
-       * run identity: the graph has replaced the generation that row belonged
-       * to, and `runId` reports the reserved id rather than inventing a run.
-       */
-      readonly kind: "run-superseded";
-      /**
-       * The run the attempt belongs to — no longer the graph's current run; the
-       * reserved pre-run id when the attempt's effect was filed before the graph
-       * had a run identity.
-       */
-      readonly runId: string;
-      readonly reason: string;
-    }
+    /**
+     * The attempt belongs to a run the graph has SUPERSEDED (P3 item 2,
+     * re-execution): nothing was written.
+     *
+     * A run-scoped retry closes the run it replaces and mints a successor, so
+     * the closed run's attempts can never settle afterwards — their results
+     * would be new terminal facts about a run whose receipts are already the
+     * record of what it accepted. The check is part of the FIRST statement of
+     * the batch write (a receipt INSERT conditioned on the attempt's own
+     * dispatch effect being filed under the graph's CURRENT run), so it decides
+     * against the COMMITTED store and a re-execution and a late acceptance can
+     * never both land for one attempt, in either order.
+     *
+     * The attempt is bound to its run by the dispatch effect rows the
+     * acceptance core itself settles: an attempt is armed by writing its effect
+     * in the same transaction that records it, so an attempt that reached a
+     * real acceptance always has one. An attempt with no effect row anywhere is
+     * not attributable to a closed run by this store and is not refused here.
+     *
+     * A row filed under the reserved PRE-RUN generation (the implicit run of a
+     * substrate that never minted one) IS attributable once the graph holds a
+     * run identity: the graph has replaced the generation that row belonged
+     * to, and `runId` reports the reserved id rather than inventing a run.
+     */
+    readonly kind: "run-superseded";
+    /**
+     * The run the attempt belongs to — no longer the graph's current run; the
+     * reserved pre-run id when the attempt's effect was filed before the graph
+     * had a run identity.
+     */
+    readonly runId: string;
+    readonly reason: string;
+  }
   | {
-      /**
-       * The ATTEMPT is PAUSED on a trusted approval request that is not
-       * `approved` (P3 item 3): nothing was written.
-       *
-       * APPROVAL IS CONTROL, NOT OUTCOME (§3.4). A worker's submitted payload
-       * cannot satisfy this gate — no field of a submission is read here; the
-       * check reads the durable request row, which only the trusted control path
-       * writes. The check is part of the FIRST statement of the batch write (a
-       * receipt INSERT conditioned on no non-approved request existing for this
-       * attempt), so it decides against the COMMITTED store: a request that
-       * commits while a submission is being validated still wins, and whichever
-       * of a raising command and an acceptance commits first is the fact that
-       * stands. An `approved` row opens the gate; `pending`, `rejected` and
-       * `expired` rows do not, and an attempt with no request at all is not
-       * gated.
-       */
-      readonly kind: "approval-blocked";
-      /** The request that refused this acceptance. */
-      readonly request: ApprovalRequestRecord;
-      readonly reason: string;
-    };
+    /**
+     * The ATTEMPT is PAUSED on a trusted approval request that is not
+     * `approved` (P3 item 3): nothing was written.
+     *
+     * APPROVAL IS CONTROL, NOT OUTCOME (§3.4). A worker's submitted payload
+     * cannot satisfy this gate — no field of a submission is read here; the
+     * check reads the durable request row, which only the trusted control path
+     * writes. The check is part of the FIRST statement of the batch write (a
+     * receipt INSERT conditioned on no non-approved request existing for this
+     * attempt), so it decides against the COMMITTED store: a request that
+     * commits while a submission is being validated still wins, and whichever
+     * of a raising command and an acceptance commits first is the fact that
+     * stands. An `approved` row opens the gate; `pending`, `rejected` and
+     * `expired` rows do not, and an attempt with no request at all is not
+     * gated.
+     */
+    readonly kind: "approval-blocked";
+    /** The request that refused this acceptance. */
+    readonly request: ApprovalRequestRecord;
+    readonly reason: string;
+  };
 
 /**
  * The verdict of one effect status transition.
@@ -1259,10 +1110,10 @@ export type EffectTransition =
   | { readonly kind: "transitioned"; readonly effect: PendingEffectRecord }
   | { readonly kind: "unchanged"; readonly effect: PendingEffectRecord }
   | {
-      readonly kind: "refused";
-      readonly reason: string;
-      readonly effect: PendingEffectRecord;
-    }
+    readonly kind: "refused";
+    readonly reason: string;
+    readonly effect: PendingEffectRecord;
+  }
   | { readonly kind: "missing"; readonly reason: string };
 
 // ── Port ────────────────────────────────────────────────────────────────────

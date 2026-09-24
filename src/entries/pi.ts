@@ -1,3 +1,5 @@
+import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
+import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
 /**
  * Pi Extension Entry Point — `src/pi-extension.ts`
  *
@@ -13,7 +15,7 @@
  * @module
  */
 
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { PiLightweightServiceStack } from "../platform/adapters/pi/service-stack.ts";
@@ -22,8 +24,7 @@ import type { PiEventType } from "../platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "../platform/adapters/pi/agent-registrar.ts";
 import { createPiHookPipeline } from "../platform/adapters/pi/hook-pipeline.ts";
 import {
-  extractPiSessionId,
-  runPiSystemTransform,
+  runPiSystemTransform
 } from "../platform/adapters/pi/system-transform.ts";
 import { wirePiChatActivation } from "../platform/adapters/pi/chat-activation.ts";
 import {
@@ -33,7 +34,6 @@ import {
 import { wireRoleSwitcher } from "../platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "../platform/adapters/pi/active-agent.ts";
 import type { ToolInterceptorHooks } from "../platform/adapters/pi/tool-interceptor.ts";
-import type { CanonicalEventType } from "../platform/types.ts";
 import { piCapabilities } from "../platform/capabilities.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type {
@@ -55,8 +55,6 @@ import { PiNotificationSessionClient } from "../platform/adapters/pi/notificatio
 import { DispatchAdapter } from "../loop/dispatch-adapter.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
-import { createDispatchTools } from "../dispatch/tools.ts";
-import { createLoopTools } from "../loop/loop-tools.ts";
 import { createTaskTools } from "../dispatch/query/task-tools.ts";
 import { createMemoryUpdateTool } from "../memory/tools.ts";
 import { createFunctionGraphTool } from "../function/function-graph.ts";
@@ -73,23 +71,17 @@ import {
 } from "../platform/adapters/pi/sidecar-persister.ts";
 import {
   seedSentFinalNotifies,
-  getSentFinalNotifies,
-  enqueueNotify,
+  getSentFinalNotifies
 } from "../dispatch/notification.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import {
-  createGraphToolSet,
-  createOutcomeGraphTools,
-} from "../graph/tools/index.ts";
-import {
   OutcomeHost,
-  WORKER_GRANTED_GRAPH_TOOLS,
-  withCancelDelivery,
+  WORKER_GRANTED_GRAPH_TOOLS
 } from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { PiOutcomeDelivery } from "../platform/adapters/pi/outcome-dispatch.ts";
-import { assembleHostCapabilities } from "../graph/policy/acceptance-primitives.ts";
+import { GraphApplication } from "../graph/application/graph-application.ts";
 import {
   COMPLETION_POLICY_AUTHORIZATION_ENV,
   describeCompletionPolicyIssue,
@@ -448,7 +440,8 @@ export function wirePiSessionStatusEvents(
  * @param pi - Pi ExtensionAPI instance (loosely typed since it is an
  *             optional peer dependency).
  */
-export default async function (pi: any): Promise<void> {
+export default async function(pi: any): Promise<void> {
+  if (registerPiGraphWorker(pi)) return;
   try {
     // ── 1. Resolve directories (delegates to R5's PlatformPaths) ─────────
 
@@ -656,7 +649,16 @@ export default async function (pi: any): Promise<void> {
     //
     // Register process-level handlers to clean up child processes and
     // persist notification dedup on exit/SIGINT/SIGTERM.
+    let shutdown = false;
+    let disposeDispatch: (() => Promise<void>) | undefined;
+    let dispatchDisposal: Promise<void> | undefined;
     const shutdownHandler = (): void => {
+      if (shutdown) return;
+      shutdown = true;
+      process.off("SIGINT", interruptHandler);
+      process.off("SIGTERM", terminateHandler);
+      process.off("exit", shutdownHandler);
+      dispatchDisposal = disposeDispatch?.();
       log.debug("Pi extension shutdown — persisting notification dedup");
       persistNotifyDedupSync(getSentFinalNotifies());
       for (const unsub of bridgeUnsubscribers) unsub();
@@ -691,15 +693,15 @@ export default async function (pi: any): Promise<void> {
       }
     };
 
-    process.once("SIGINT", () => {
-      shutdownHandler();
-      process.exit(130);
-    });
-    process.once("SIGTERM", () => {
-      shutdownHandler();
-      process.exit(143);
-    });
+    const interruptHandler = () => { shutdownHandler(); process.exit(130); };
+    const terminateHandler = () => { shutdownHandler(); process.exit(143); };
+    process.once("SIGINT", interruptHandler);
+    process.once("SIGTERM", terminateHandler);
     process.on("exit", shutdownHandler);
+    if (typeof pi.on === "function") pi.on("session_shutdown", async () => {
+      shutdownHandler();
+      await dispatchDisposal;
+    });
 
     // Construct DispatchManager via shared factory.
     //
@@ -722,6 +724,7 @@ export default async function (pi: any): Promise<void> {
       storeDirectory: resolveChildDispatchStoreDir(process.pid, isPiChildProcess()),
     });
     const dispatchManager = result.manager;
+    disposeDispatch = () => dispatchManager.dispose();
 
     // Graceful degradation: recover() failure → log error + use empty state.
     // Mirrors the opencode path (dispatch-service.ts:120-126) so a pre-fix lock
@@ -778,7 +781,7 @@ export default async function (pi: any): Promise<void> {
       });
     }
 
-        log.info("Loop coordinator initialized");
+    log.info("Loop coordinator initialized");
     log.debug("Loop coordinator details", {
       delayMs: 2000,
       loadedLoops: loadedLoops?.size ?? 0,
@@ -804,7 +807,11 @@ export default async function (pi: any): Promise<void> {
     // cannot isolate on a same-account platform.
     let outcomeHost: OutcomeHost | undefined;
     const outcomeDelivery = new PiOutcomeDelivery({
+      observeWorker: execution => sessionAdapter.observeGraphWorker(execution.executionId),
+      confirmWorkerStopped: execution => sessionAdapter.confirmGraphWorkerStopped(execution.executionId),
       manager: dispatchManager,
+      launchWorker: (args, context, inputView) => sessionAdapter.runGraphWorker(
+        () => dispatchManager.launch(args, context), inputView ? [inputView.directory] : []),
       directory: process.cwd(),
       onStartFailed: (_request, effect, reason) => {
         outcomeHost?.reportDeliveryFailure(effect, reason);
@@ -817,7 +824,10 @@ export default async function (pi: any): Promise<void> {
       },
       onSettled: (settlement) => {
         const { request } = settlement;
+        outcomeHost?.recordExecutionObservation(request.graphId, request.attemptId);
         if (settlement.kind === "failed") {
+          void outcomeHost?.failObservedExecution(request.graphId, request.nodeId, request.attemptId)
+            .catch((error: unknown) => log.warn("Graph failure settlement failed", { error: formatError(error) }));
           log.warn("Pi outcome dispatch: attempt did not complete", {
             graphId: request.graphId,
             nodeId: request.nodeId,
@@ -900,32 +910,7 @@ export default async function (pi: any): Promise<void> {
     // `command-exit` acceptance requirement is judged by; it is host
     // configuration keyed by (graph, node, outcome), so a worker can neither
     // author nor select the command.
-    const hostCapabilities = assembleHostCapabilities({
-      artifactRoot: process.cwd(),
-      storeRoot: outcomeStoreRoot,
-      env: process.env,
-    });
-    for (const issue of hostCapabilities.completionPolicyIssues) {
-      log.warn("Pi outcome graph: completion-policy configuration", {
-        issue: describeCompletionPolicyIssue(issue),
-      });
-    }
-    for (const issue of hostCapabilities.commandPolicyIssues) {
-      log.warn("Pi outcome graph: trusted command policy", {
-        index: issue.index,
-        issue: issue.message,
-      });
-    }
-    log.info("Pi outcome graph capabilities installed", {
-      validators: hostCapabilities.validatorIds.join(","),
-      commandBindings: hostCapabilities.commandBindings,
-      completionPolicies: hostCapabilities.authorizedCompletionPolicies
-        .map((ref) => ref.id + "@" + ref.revision)
-        .join(","),
-      completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
-    });
-    const shippedValidators = hostCapabilities.validators;
-    outcomeHost = OutcomeHost.open({
+    const graphApplication = GraphApplication.open({
       workspaceDir: process.cwd(),
       storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
@@ -933,11 +918,11 @@ export default async function (pi: any): Promise<void> {
       // command exit and human approval are installed here, each with a real
       // implementation, and the SAME registry is handed to the toolset below so
       // a declaration is compiled against exactly what the run path can check.
-      validators: shippedValidators,
+      env: process.env,
       // Natural completion is authorized by the operator's configuration, and
       // the run path corroborates a plan's pinned revision against the same
       // registry graph_declare compiled with.
-      completionPolicies: hostCapabilities.completionPolicies,
+
       declareInvocationIdentity: false,
       // The platform's own child-session fact, read back from the task the
       // delivery started: `DispatchTask.sessionId` is the session the
@@ -945,8 +930,7 @@ export default async function (pi: any): Promise<void> {
       // could not reconcile) answers NOTHING, and the attempt is then unbound
       // and refuses a worker submission rather than accepting one on its
       // credential alone.
-      workerSessionOf: (execution) =>
-        dispatchManager.getTask(execution.executionId)?.sessionId,
+      workerSessionOf: (execution) => execution.executionId,
       // THE PLATFORM PORTS (P2 part 2 / F3). The dispatch adapter's own question
       // — "does an execution already exist for this stable effect id, and which
       // one?" — is answered from the manager's own task records by the stable
@@ -965,6 +949,35 @@ export default async function (pi: any): Promise<void> {
       cancelExecution: outcomeDelivery.cancelExecution,
       watchCompletion: outcomeDelivery.watchCompletion,
     });
+    outcomeHost = graphApplication.host;
+    bridgeUnsubscribers.push(() => { outcomeDelivery.close(); graphApplication.close(); });
+    const graphWorkerChannel = await openGraphWorkerChannel(graphApplication.createTools(), process.cwd(), graphStoreRoot(getDataDir(), process.cwd()));
+    sessionAdapter.setGraphWorkerChannel((sessionId, agent) => graphWorkerChannel.issue(sessionId, agent));
+    bridgeUnsubscribers.push(() => graphWorkerChannel.close());
+    const hostCapabilities = graphApplication.capabilities;
+    for (const issue of hostCapabilities.completionPolicyIssues) {
+      log.warn("Pi outcome graph: completion-policy configuration", {
+        issue: describeCompletionPolicyIssue(issue),
+      });
+    }
+    for (const issue of hostCapabilities.approvalPolicyIssues) {
+      log.warn("graph approval-policy configuration", { issue });
+    }
+    for (const issue of hostCapabilities.commandPolicyIssues) {
+      log.warn("Pi outcome graph: trusted command policy", {
+        index: issue.index,
+        issue: issue.message,
+      });
+    }
+    log.info("Pi outcome graph capabilities installed", {
+      validators: hostCapabilities.validatorIds.join(","),
+      commandBindings: hostCapabilities.commandBindings,
+      completionPolicies: hostCapabilities.authorizedCompletionPolicies
+        .map((ref) => ref.id + "@" + ref.revision)
+        .join(","),
+      completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
+    });
+
 
     // Boot recovery for DECLARED graphs: a graph interrupted by the previous
     // process is continued from its persisted state, and one that was declared
@@ -1233,85 +1246,7 @@ export default async function (pi: any): Promise<void> {
     // and `graph_declare` starts (or resumes) the declared graph through the
     // host's own runtime entry. Only the four declared-graph entries are
     // registered — the legacy construction tools are not assembled.
-    const outcomeToolset = createGraphToolSet({
-      directory: process.cwd(),
-      stateDir: process.cwd(),
-      credentialIsolation: outcomeHost.credentialIsolation,
-      // THE WORKER-IDENTITY CAPABILITY, not the D9 one: the identity option
-      // carries whichever shape the host declared, and this shape names the
-      // child session the platform created for the attempt's worker. Without
-      // it the session a submission arrives from would not be an
-      // authentication factor at all.
-      hostIdentity: outcomeHost.workerIdentity,
-      outcomeDispatch: outcomeHost.dispatch,
-      // THE ONE CAPABILITY SET (P4 item 1): the registry the host installed
-      // above. `graph_declare` derives its compile-time set from this, so a
-      // caller's supported_validators can only narrow what this process can
-      // actually resolve and enforce at acceptance.
-      outcomeValidators: shippedValidators,
-      // THE CONCRETE capability from the SAME assembly (A22) — see dsh.ts.
-      outcomeAcceptanceCapabilities: hostCapabilities.capabilities,
-      // The HOST's completion-policy capability, never a tool argument: the
-      // same registry the run path corroborates against (D6).
-      completionPolicies: hostCapabilities.completionPolicies,
-      outcomeArtifactRoot: process.cwd(),
-      onGraphDeclared: (graphId, invokingSessionId, agent) => {
-        // The declaring invocation is handed to the HOST, which records it per
-        // graph and re-supplies it on every dispatch window — the entry attempt
-        // here, and every successor a later acceptance arms (a worker's
-        // submission, an observed completion, the boot sweep). The delivery seam
-        // is stateless about invocations, so no window's end can lose the
-        // attribution. The acting-agent fallback the entry already applied is
-        // recorded with it, so a restored origin carries the same attribution.
-        void outcomeHost
-          .startDeclaredGraph(graphId, {
-            sessionId: invokingSessionId,
-            agent: agent ?? activeAgent.get() ?? "",
-          })
-          .then((result) => {
-            if (result.kind === "refused") {
-              log.warn("Pi outcome graph start refused", {
-                graphId,
-                refusals: result.refusals.map((r) => r.code).join(","),
-              });
-              return;
-            }
-            log.info("Pi outcome graph started", {
-              graphId,
-              kind: result.kind,
-              dispatched: result.dispatched.length,
-              // The effects this window could NOT launch (and the rows a host
-              // fact contradicted) are named, never folded into "started".
-              ...(result.refusals.length === 0
-                ? {}
-                : { refusals: result.refusals.map((r) => r.code).join(",") }),
-              ...(result.divergences.length === 0
-                ? {}
-                : { divergences: result.divergences.length }),
-            });
-          })
-          .catch((err: unknown) => {
-            log.warn("Pi outcome graph start failed", {
-              graphId,
-              error: formatError(err),
-            });
-          });
-      },
-    });
-    const outcomeGraphTools = outcomeHost.bindTools(
-      // THE CANCEL DELIVERY IS WIRED TO THE CONTROL ENTRY (P3). After a
-      // `graph_control` call returns — the trusted command is durable by then —
-      // the host hands the graph's cancel intents to the platform port above.
-      // The wrapper runs INSIDE `bindTools`, so the worker boundary refuses a
-      // dispatched child's call before the tool body and before this delivery.
-      withCancelDelivery(
-        createOutcomeGraphTools(outcomeToolset, {
-          getEffectiveAgent: () => activeAgent.get() ?? "",
-        }),
-        outcomeHost,
-      ),
-      () => activeAgent.get() ?? "",
-    );
+    const outcomeGraphTools = graphApplication.createTools(() => activeAgent.get() ?? "");
 
     const serviceStack = new PiLightweightServiceStack(
       pi,

@@ -28,14 +28,14 @@ import {
   GraphDeclareRefusedError,
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
-import { engineStateDir, engineStatePath } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir, engineStatePath } from "../../src/graph/persistence/paths.ts";
 import { ledgerFilePath } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { loadGraphStoreSync } from "../../src/graph/store/load.ts";
 import { graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
-import { scanPersistedStates } from "../../src/graph/tools/persisted-state.ts";
+import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import {
   AUTHORIZED,
   EMPTY_VALIDATORS,
@@ -98,7 +98,7 @@ describe("the stored graph record", () => {
       expect(stateRow).toBeDefined();
       expect(readPhase(stateRow)).toBe("complete");
 
-      const summaries = scanPersistedStates(storeRoot).loaded;
+      const summaries = queryGraphs(storeRoot).graphs;
       expect(summaries.map((state) => state.graphId + ":" + state.phase)).toEqual([
         GRAPH_ID + ":complete",
       ]);
@@ -107,7 +107,7 @@ describe("the stored graph record", () => {
       // snapshot the toolset registered.
       const sessionStatus = toolset.graph_status({ graph_id: GRAPH_ID });
       expect(sessionStatus).toContain("[phase: complete]");
-      expect(sessionStatus).toContain("completed");
+      expect(sessionStatus).toContain("settled");
       const allStatus = toolset.graph_status({ graph_id: GRAPH_ID, scope: "all" });
       expect(allStatus).toContain("[phase: complete]");
       const persistedStatus = toolset.graph_status({
@@ -262,7 +262,7 @@ describe("the stored graph record", () => {
         caught = error;
       }
       expect(caught).toBeInstanceOf(Error);
-      expect(String(caught)).toContain("cannot read it");
+      expect(String(caught)).toContain("unreadable");
       expect(String(caught)).not.toContain("[phase: idle]");
 
       // THE DECLARING PROCESS — the graph is in THIS process's session
@@ -291,8 +291,8 @@ describe("the stored graph record", () => {
         }
         expect(declaringCaught).toBeInstanceOf(Error);
         const text = String(declaringCaught);
-        expect(text).toContain("cannot read it");
-        expect(text).toContain("graph_audit names the blocker");
+        expect(text).toContain("unreadable");
+        expect(text).toContain("foreign-plan-revision");
         expect(text).not.toContain("[phase: idle]");
         refusals.set(scope, text);
       }
@@ -307,7 +307,7 @@ describe("the stored graph record", () => {
       } catch (error) {
         nodeCaught = error;
       }
-      expect(String(nodeCaught)).toContain("cannot read it");
+      expect(String(nodeCaught)).toContain("unreadable");
       expect(String(nodeCaught)).not.toContain("pending");
 
       // THE AUDIT names the same condition by blocker...

@@ -25,17 +25,8 @@ import {
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
-import {
-  scanPersistedStates,
-  scanPersistedSummaries,
-  buildPersistedSummary,
-  getNode,
-  listNodes,
-  getLoopGroup,
-  listLoopGroups,
-  getBudget,
-} from "../../src/graph/tools/persisted-state.ts";
-
+import { queryGraphs } from "../../src/graph/query/graph-query.ts";
+import { projectEngineGraph } from "../../src/cli/commands/monitor/monitor-reader-engine.ts";
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 const GRAPH_ONE = "persisted.one";
@@ -116,11 +107,11 @@ describe("stored-graph scanner", () => {
   });
 
   it("returns an empty result for a missing store (never throws)", () => {
-    const scan = scanPersistedStates(dir);
-    expect(scan.count).toBe(0);
-    expect(scan.loaded).toEqual([]);
-    expect(scan.skipped).toBe(0);
-    expect(scan.skippedGraphs).toEqual([]);
+    const scan = queryGraphs(dir);
+    expect(scan.graphs.length + scan.refused.length).toBe(0);
+    expect(scan.graphs).toEqual([]);
+    expect(scan.refused.length).toBe(0);
+    expect(scan.refused.map((entry) => entry.graphId)).toEqual([]);
     expect(scan.blocked).toBeUndefined();
   });
 
@@ -130,14 +121,14 @@ describe("stored-graph scanner", () => {
     const second = declareGraph(dir, GRAPH_TWO);
     await runToSecondNode(dir, second, 300);
 
-    const scan = scanPersistedStates(dir);
-    expect(scan.count).toBe(2);
-    expect(scan.loaded).toHaveLength(2);
-    expect(scan.skipped).toBe(0);
+    const scan = queryGraphs(dir);
+    expect(scan.graphs.length + scan.refused.length).toBe(2);
+    expect(scan.graphs).toHaveLength(2);
+    expect(scan.refused.length).toBe(0);
 
-    const summaries = scanPersistedSummaries(dir);
+    const summaries = queryGraphs(dir).graphs.map(projectEngineGraph);
     expect(summaries.map((s) => s.graphId)).toEqual([GRAPH_TWO, GRAPH_ONE]);
-    expect(summaries[0]!.updatedAt).toBeGreaterThan(summaries[1]!.updatedAt);
+    expect(summaries[0]!.updatedAtMs).toBeGreaterThan(summaries[1]!.updatedAtMs);
     expect(summaries.every((s) => s.nodeCount === 2)).toBe(true);
   });
 
@@ -145,22 +136,22 @@ describe("stored-graph scanner", () => {
     const graph = declareGraph(dir, GRAPH_ONE);
     await runToSecondNode(dir, graph, 100);
 
-    const state = scanPersistedStates(dir).loaded[0]!;
+    const state = queryGraphs(dir).graphs[0]!;
     expect(state.graphId).toBe(GRAPH_ONE);
     expect(state.phase).toBe("executing");
     // The declared per-node fields come from the STORED PLAN, not from a
     // fabricated carrier declaration.
-    expect(state.nodes.get("A")?.agent).toBe("a1");
-    expect(state.nodes.get("A")?.prompt).toBe("p1");
-    expect(state.nodes.get("A")?.status).toBe("completed");
-    expect(state.nodes.get("A")?.completedAt).toBe(130);
-    expect(state.nodes.get("B")?.status).toBe("running");
+    expect(state.nodes.find((node) => node.nodeId === "A")?.agent).toBe("a1");
+    expect(state.nodes.find((node) => node.nodeId === "A")?.prompt).toBe("p1");
+    expect(state.nodes.find((node) => node.nodeId === "A")?.status).toBe("settled");
+    expect(state.nodes.find((node) => node.nodeId === "A")?.settledAt).toBe(130);
+    expect(state.nodes.find((node) => node.nodeId === "B")?.status).toBe("dispatched");
   });
 
   it("reports a declared-but-never-started graph as idle with every node pending", () => {
     declareGraph(dir, GRAPH_ONE);
-    const state = scanPersistedStates(dir).loaded[0]!;
-    expect(state.phase).toBe("idle");
+    const state = queryGraphs(dir).graphs[0]!;
+    expect(state.phase).toBe("ready");
     expect([...state.nodes.values()].map((n) => n.status)).toEqual([
       "pending",
       "pending",
@@ -189,11 +180,11 @@ describe("stored-graph scanner", () => {
       store.close();
     }
 
-    const scan = scanPersistedStates(dir);
-    expect(scan.count).toBe(1);
-    expect(scan.loaded).toEqual([]);
-    expect(scan.skipped).toBe(1);
-    expect(scan.skippedGraphs).toEqual([GRAPH_ONE]);
+    const scan = queryGraphs(dir);
+    expect(scan.graphs.length + scan.refused.length).toBe(1);
+    expect(scan.graphs).toEqual([]);
+    expect(scan.refused.length).toBe(1);
+    expect(scan.refused.map((entry) => entry.graphId)).toEqual([GRAPH_ONE]);
   });
 
   it("skips a graph whose run state cannot be decoded instead of projecting idle", async () => {
@@ -212,20 +203,20 @@ describe("stored-graph scanner", () => {
       store.close();
     }
 
-    const scan = scanPersistedStates(dir);
-    expect(scan.count).toBe(1);
-    expect(scan.loaded).toEqual([]);
-    expect(scan.skipped).toBe(1);
-    expect(scan.skippedGraphs).toEqual([GRAPH_ONE]);
+    const scan = queryGraphs(dir);
+    expect(scan.graphs.length + scan.refused.length).toBe(1);
+    expect(scan.graphs).toEqual([]);
+    expect(scan.refused.length).toBe(1);
+    expect(scan.refused.map((entry) => entry.graphId)).toEqual([GRAPH_ONE]);
   });
 
   it("reports an unreadable store by its verdict, never as an empty one", () => {
     // A zero-byte authoritative file is a damaged store.
     mkdirSync(dir, { recursive: true });
     writeFileSync(graphStoreFilePath(dir), "");
-    const scan = scanPersistedStates(dir);
-    expect(scan.count).toBe(0);
-    expect(scan.loaded).toEqual([]);
+    const scan = queryGraphs(dir);
+    expect(scan.graphs.length + scan.refused.length).toBe(0);
+    expect(scan.graphs).toEqual([]);
     expect(scan.blocked).toBeDefined();
     expect(scan.blocked).toContain("corrupt");
   });
@@ -233,42 +224,31 @@ describe("stored-graph scanner", () => {
   it("buildPersistedSummary exposes graphId, phase, node counts and timestamps", async () => {
     const graph = declareGraph(dir, GRAPH_ONE);
     await runToSecondNode(dir, graph, 100);
-    const state = scanPersistedStates(dir).loaded[0]!;
-    const summary = buildPersistedSummary(state);
+    const state = queryGraphs(dir).graphs[0]!;
+    const summary = projectEngineGraph(state);
 
     expect(summary.graphId).toBe(GRAPH_ONE);
     expect(summary.phase).toBe("executing");
     expect(summary.nodeCount).toBe(2);
     expect(summary.nodeStatusCounts).toEqual({ completed: 1, running: 1 });
-    expect(summary.updatedAt).toBe(130);
+    expect(summary.updatedAtMs).toBe(130);
 
     const a = summary.nodes.find((n) => n.nodeId === "A")!;
     expect(a.agent).toBe("a1");
-    expect(a.completedAt).toBe(130);
+    expect(a.completedAt).toBe(new Date(130).toISOString());
     const b = summary.nodes.find((n) => n.nodeId === "B")!;
     expect(b.agent).toBe("a2");
     expect(b.completedAt).toBeUndefined();
   });
 
-  it("node / loop / budget accessors read without Map unwrapping", async () => {
+  it("retains attempts, accepted business data and budget instead of empty legacy counters", async () => {
     const graph = declareGraph(dir, GRAPH_ONE);
     await runToSecondNode(dir, graph, 100);
-    const state = scanPersistedStates(dir).loaded[0]!;
-
-    expect(getNode(state, "A")!.agent).toBe("a1");
-    expect(getNode(state, "missing")).toBeUndefined();
-
-    const nodes = listNodes(state);
-    expect(nodes.map((n) => n.nodeId).sort()).toEqual(["A", "B"]);
-
-    expect(getLoopGroup(state, "lg1")).toBeUndefined();
-    expect(listLoopGroups(state)).toEqual([]);
-
-    expect(getBudget(state)).toEqual({
-      sessionsSpawned: 0,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCost: 0,
-    });
+    const state = queryGraphs(dir).graphs[0]!;
+    expect(state.current?.attempts.map((attempt) => attempt.attemptId)).toEqual(["A#1", "B#2"]);
+    expect(state.current?.attempts[0]?.accepted?.outcomeId).toBe("done");
+    expect(state.current?.budget.totals.executions).toBe(2);
+    expect(state.current?.loops).toEqual([]);
+    expect(JSON.stringify(state)).not.toContain("attemptCredential");
   });
 });

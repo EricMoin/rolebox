@@ -1,41 +1,3 @@
-/**
- * Graph Execution Engine v2 — Acceptance validators: the closed, versioned
- * registry (C3a)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The capability half of the submission path's evidence step
- * (docs/graph-outcome-protocol.md § "Acceptance validators"): acceptance uses a
- * CLOSED, versioned registry of trusted implementations, never agent-authored
- * expressions or a general-purpose rule language.
- *
- * - A validator is keyed by an EXACT `{ id, version }` identity. Matching is
- *   identity, never ordering — the same capability-not-membership rule as the
- *   storage-format, execution-protocol and contract registries. The PLAN pins
- *   `{ validator, version }` per acceptance requirement; the CALLER supplies
- *   the implementations. A requirement whose implementation is not registered
- *   is a REFUSAL in the acceptance core, never a silent skip: an unenforced
- *   gate that reads as "passed" is the one failure mode this design must not
- *   have.
- * - `ValidationOutcome` is pass, fail, or indeterminate/error. The three are
- *   deliberately not a boolean: an indeterminate result (a missing tool, a
- *   timeout, an exception inside an implementation) is its own answer and can
- *   NEVER satisfy a required gate. The acceptance core turns an implementation
- *   that throws into exactly that outcome rather than letting the exception
- *   decide by accident.
- * - `createArtifactReferenceValidator` is the one shipped implementation: it
- *   reads every evidence reference the submission declares, requires each to be
- *   a regular file that resolves INSIDE the configured artifact root (a
- *   `..` escape or a symlink pointing out of the root is refused), and
- *   digests the bytes it actually read — never a path-exists probe followed by
- *   an unrelated later read. The digest and byte size of each artifact are
- *   recorded through the caller's optional recorder.
- *
- * This module imports no engine, dispatch or tool module, so the acceptance
- * core and any later reducer may depend on it without a cycle.
- */
-
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
@@ -82,18 +44,18 @@ export function validatorKeysEqual(a: ValidatorKey, b: ValidatorKey): boolean {
  */
 export type ValidationOutcome =
   | {
-      readonly kind: "pass";
-      /**
-       * The artifacts this gate READ and digested, in evidence-reference order.
-       *
-       * This is the ONLY channel by which a validation's own reading reaches the
-       * acceptance transaction, and it deliberately carries the identity the
-       * bytes HASH to rather than a path: the acceptance retains those bytes
-       * under that identity, so what a downstream consumer receives is what the
-       * gate judged — not whatever the path holds by then (P4 item 5 / A17).
-       */
-      readonly evidence?: readonly ArtifactEvidence[];
-    }
+    readonly kind: "pass";
+    /**
+     * The artifacts this gate READ and digested, in evidence-reference order.
+     *
+     * This is the ONLY channel by which a validation's own reading reaches the
+     * acceptance transaction, and it deliberately carries the identity the
+     * bytes HASH to rather than a path: the acceptance retains those bytes
+     * under that identity, so what a downstream consumer receives is what the
+     * gate judged — not whatever the path holds by then (P4 item 5 / A17).
+     */
+    readonly evidence?: readonly ArtifactEvidence[];
+  }
   | { readonly kind: "fail"; readonly reason: string }
   | { readonly kind: "indeterminate"; readonly reason: string };
 
@@ -280,6 +242,7 @@ export interface CommandMappingCapabilityIdentity {
  * compiled against capabilities the run path cannot resolve.
  */
 export interface AcceptanceCapabilitySet {
+  readonly approvalMappings?: readonly { readonly graphId: string; readonly nodeId: string }[];
   readonly validators: readonly ValidatorKey[];
   readonly schemas: readonly SchemaCapabilityIdentity[];
   readonly commandMappings: readonly CommandMappingCapabilityIdentity[];
@@ -336,18 +299,18 @@ export interface ArtifactEvidence {
 /** The outcome of reading one evidence reference. */
 export type ArtifactRead =
   | {
-      readonly kind: "read";
-      readonly evidence: ArtifactEvidence;
-      /**
-       * THE EXACT BYTES the digest above was taken over.
-       *
-       * They are returned rather than re-read by the caller on purpose: a second
-       * read is a different byte range, and retaining THOSE bytes under THIS
-       * digest would retain something the gate never judged — the very
-       * "validated A, stored B" hole this path exists to close.
-       */
-      readonly bytes: Buffer;
-    }
+    readonly kind: "read";
+    readonly evidence: ArtifactEvidence;
+    /**
+     * THE EXACT BYTES the digest above was taken over.
+     *
+     * They are returned rather than re-read by the caller on purpose: a second
+     * read is a different byte range, and retaining THOSE bytes under THIS
+     * digest would retain something the gate never judged — the very
+     * "validated A, stored B" hole this path exists to close.
+     */
+    readonly bytes: Buffer;
+  }
   | { readonly kind: "problem"; readonly reason: string };
 
 /** Options for {@link createArtifactReferenceValidator}. */
@@ -424,9 +387,9 @@ export function createArtifactReferenceValidator(
         if (deposit.kind === "problem") {
           problems.push(
             "artifact " +
-              JSON.stringify(ref) +
-              " could not be retained: " +
-              deposit.reason,
+            JSON.stringify(ref) +
+            " could not be retained: " +
+            deposit.reason,
           );
           continue;
         }

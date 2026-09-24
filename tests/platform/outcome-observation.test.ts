@@ -325,7 +325,7 @@ describe("the Pi execution query port", () => {
     ]);
     expect(piDelivery(manager).executionQuery.lookup(probe())).toEqual({
       kind: "created",
-      execution: { executionId: EXECUTION_ID, taskId: EXECUTION_ID },
+      execution: { executionId: "session." + EXECUTION_ID, taskId: EXECUTION_ID },
     });
   });
 

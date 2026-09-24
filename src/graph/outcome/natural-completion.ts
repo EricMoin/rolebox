@@ -1,65 +1,3 @@
-/**
- * Graph Execution Engine v2 — Natural completion: the attempt's completion
- * fact as a closed delivery envelope (stage D)
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The INPUT half of the natural-completion settlement path
- * (docs/graph-outcome-protocol.md § "State, storage, and effects" and the D6
- * section): the only thing the host's dispatch completion bridge delivers when
- * a dispatched attempt REACHES ITS END, as opposed to a worker CLAIMING an
- * outcome through `graph_submit_outcome`.
- *
- * THE TRIGGER IS THE ATTEMPT'S COMPLETION FACT, NOT A SELF-REPORTED OUTCOME.
- * A delivery names the attempt it is about and presents that attempt's bearer
- * credential. The OUTCOME is never part of the envelope: it is resolved from
- * the plan's pinned natural-completion authorization, so a delivery cannot
- * choose which outcome settles the node. There is deliberately no `data`,
- * `evidenceRefs`, `outcomeId` or any other payload field — a completion fact
- * that could route a result would be a second submission channel wearing a
- * different name, and this module refuses one by construction: the key set is
- * CLOSED and an unknown key is a refusal, never a dropped field.
- *
- * WHAT THE CREDENTIAL PROVES, STATED HONESTLY. The credential is the bearer
- * nonce the runtime minted for the attempt (see `attempt-credential.ts`): it
- * proves POSSESSION of a capability the runtime issued for exactly one attempt,
- * so a guessed, tampered, superseded or other attempt's credential cannot
- * settle anything. It does NOT prove the presenter's identity — the worker and
- * the host bridge hold the same bearer token — and this module claims no more
- * than that. What the natural path protects is the OUTCOME and the PAYLOAD: a
- * delivery cannot pick an outcome the plan did not authorize, and it cannot
- * carry a result the declared acceptance gates would judge.
- *
- * NO HOST-SUPPLIED COMPLETION METADATA IS NEEDED. The envelope is exactly the
- * attempt identity and its proof because everything else is already durable:
- * the graph is the runtime's own `graphId`, the plan revision is the plan's
- * own content address, the dispatch effect id is derived from the attempt id
- * (`dispatch:<attemptId>`), and the outcome is the pinned authorization's.
- * A host that could only report "this attempt completed" therefore needs no
- * field beyond the two identity values and the credential — and this build
- * defines none.
- *
- * PROVENANCE IS A NAMESPACED SUBMISSION KEY. The natural-completion settlement
- * is the SAME logical-submission machinery the ordinary submission path uses
- * (one attempt, one proposal digest, one receipt, one accepted event), but its
- * submission key lives in its own namespace: `natural-completion:<digest>`
- * instead of `submission:<digest>`. The key is derived from the canonical
- * proposal digest, so it is content-addressed and stable across a repeated
- * delivery (which is what makes the ledger REPLAY the first receipt instead of
- * writing a second one), and the ordinary submission ingress — which always
- * derives `submission:<digest>` — can never mint it. The receipt row and the
- * accepted-event row persist that key verbatim, and the acceptance decision
- * carries it as `identity.submissionId`, so "this was a natural-completion
- * settlement, not a worker's claimed submission" is READABLE BACK from the
- * durable record without a second store, a log line or a payload convention.
- *
- * Dependency leaf: the only imports are the proposal shape (for the synthesized
- * submission the runtime feeds the SAME acceptance core) and the pinned policy
- * ref, so the run path, a reader or a test harness may depend on this module
- * without a cycle.
- */
-
 import type { CompletionPolicyRef } from "../policy/completion-policy.ts";
 import type { OutcomeProposal } from "./proposal.ts";
 
@@ -101,9 +39,9 @@ export interface NaturalCompletionDeliveryIssue {
 export type NaturalCompletionDeliveryReading =
   | { readonly kind: "ok"; readonly delivery: NaturalCompletionDelivery }
   | {
-      readonly kind: "malformed";
-      readonly issues: readonly NaturalCompletionDeliveryIssue[];
-    };
+    readonly kind: "malformed";
+    readonly issues: readonly NaturalCompletionDeliveryIssue[];
+  };
 
 /**
  * Read an untrusted value as a {@link NaturalCompletionDelivery}.
@@ -147,10 +85,10 @@ export function readNaturalCompletionDelivery(
         malformed(
           "$." + key,
           "unknown key " +
-            JSON.stringify(key) +
-            " — a natural-completion delivery carries only nodeId, attemptId and the attempt " +
-            "credential, and an unrecognized field is refused rather than dropped: a completion " +
-            "fact is not a submission and has no channel for an outcome, a payload or evidence",
+          JSON.stringify(key) +
+          " — a natural-completion delivery carries only nodeId, attemptId and the attempt " +
+          "credential, and an unrecognized field is refused rather than dropped: a completion " +
+          "fact is not a submission and has no channel for an outcome, a payload or evidence",
         );
       }
     }
@@ -169,8 +107,8 @@ export function readNaturalCompletionDelivery(
       malformed(
         "$.attemptId",
         "attemptId is " +
-          describeValue(record.attemptId) +
-          ", not a non-empty attempt id",
+        describeValue(record.attemptId) +
+        ", not a non-empty attempt id",
       );
     }
     let credential: string | undefined;
@@ -181,8 +119,8 @@ export function readNaturalCompletionDelivery(
         malformed(
           "$.credential",
           "credential is " +
-            describeValue(record.credential) +
-            ", not the non-empty attempt credential the runtime issued",
+          describeValue(record.credential) +
+          ", not the non-empty attempt credential the runtime issued",
         );
       }
     }

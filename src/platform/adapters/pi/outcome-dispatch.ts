@@ -124,10 +124,10 @@ const COMPLETION_STATUSES: ReadonlySet<string> = new Set<string>(["completed"]);
 export type PiOutcomeSettlement =
   | { readonly kind: "completed"; readonly request: OutcomeDispatchRequest }
   | {
-      readonly kind: "failed";
-      readonly request: OutcomeDispatchRequest;
-      readonly reason: string;
-    };
+    readonly kind: "failed";
+    readonly request: OutcomeDispatchRequest;
+    readonly reason: string;
+  };
 
 /**
  * The Pi dispatch port this delivery needs: start one background task and be
@@ -173,6 +173,9 @@ export interface PiOutcomeDispatchPort {
 }
 
 export interface PiOutcomeDeliveryOptions {
+  readonly observeWorker?: HostExecutionObservationPort;
+  readonly confirmWorkerStopped?: (execution: HostExecutionIdentity) => Promise<boolean>;
+  readonly launchWorker?: (input: DispatchInput, context: Parameters<PiOutcomeDispatchPort["launch"]>[1], inputView?: DeliveredInputView) => Promise<DispatchTask>;
   /** The Pi dispatch port that starts and tracks the worker task. */
   readonly manager: PiOutcomeDispatchPort;
   /** Reports one attempt's terminal observation (completion or failure). */
@@ -214,6 +217,14 @@ const NON_COMPLETION_STATUSES: ReadonlySet<string> = new Set<string>([
  */
 export class PiOutcomeDelivery {
   private readonly log;
+  private closed = false;
+  private readonly completionWatches = new Set<ReturnType<typeof setInterval>>();
+  close(): void {
+    this.closed = true;
+    for (const timer of this.completionWatches) clearInterval(timer);
+    this.completionWatches.clear();
+    this.attempts.clear();
+  }
   /** request per launched task id, so a terminal callback can name the attempt. */
   private readonly attempts = new Map<string, OutcomeDispatchRequest>();
 
@@ -232,8 +243,7 @@ export class PiOutcomeDelivery {
    * records are the only place the answer comes from.
    *
    * WHAT IT ANSWERS, AND WHAT IT REFUSES TO. Exactly one task carrying the key
-   * IS the execution: `created`, naming the task id (the dispatch task IS the
-   * execution on Pi, so `executionId` and `taskId` are the same value). Two
+   * IS the execution: `created`, naming the native child session as executionId and the dispatch record as taskId. Two
    * tasks carrying it are AMBIGUOUS; no task — and a manager whose task TTL has
    * already cleaned the record, or whose recovery could not read its store —
    * answers `unknown`. It NEVER answers `absent`: a task the manager does not
@@ -246,7 +256,7 @@ export class PiOutcomeDelivery {
       if (allTasks === undefined) {
         return unknownAnswer(
           "this Pi dispatch port exposes no task listing, so a dispatch task cannot be " +
-            "correlated with the effect that created it",
+          "correlated with the effect that created it",
         );
       }
       const key = dispatchIdempotencyKeyOf(probe.effect);
@@ -256,35 +266,35 @@ export class PiOutcomeDelivery {
       } catch (error) {
         return unknownAnswer(
           "the Pi dispatch manager's task listing failed (" +
-            errorText(error) +
-            "), so whether an execution exists for effect " +
-            JSON.stringify(probe.effect.effectId) +
-            " cannot be established",
+          errorText(error) +
+          "), so whether an execution exists for effect " +
+          JSON.stringify(probe.effect.effectId) +
+          " cannot be established",
         );
       }
       const matches = tasks.filter((task) => task.description === key);
       if (matches.length === 1) {
         const task = matches[0];
-        if (task !== undefined) {
+        if (task?.sessionId) {
           return Object.freeze({
             kind: "created" as const,
-            execution: Object.freeze({ executionId: task.id, taskId: task.id }),
+            execution: Object.freeze({ executionId: task.sessionId, taskId: task.id }),
           });
         }
       }
       if (matches.length > 1) {
         return unknownAnswer(
           "more than one dispatch task carries the stable key " +
-            JSON.stringify(key) +
-            " — an ambiguous correlation cannot say which execution belongs to effect " +
-            JSON.stringify(probe.effect.effectId),
+          JSON.stringify(key) +
+          " — an ambiguous correlation cannot say which execution belongs to effect " +
+          JSON.stringify(probe.effect.effectId),
         );
       }
       return unknownAnswer(
         "the Pi dispatch manager holds no task carrying the stable key " +
-          JSON.stringify(key) +
-          " — a task it already cleaned up after its TTL, or one its recovery could not " +
-          "read, is not evidence of absence, so the effect stays blocked",
+        JSON.stringify(key) +
+        " — a task it already cleaned up after its TTL, or one its recovery could not " +
+        "read, is not evidence of absence, so the effect stays blocked",
       );
     },
   });
@@ -303,6 +313,7 @@ export class PiOutcomeDelivery {
   readonly observeExecution: HostExecutionObservationPort = (
     execution: HostExecutionIdentity,
   ) => {
+    if (this.opts.observeWorker) return this.opts.observeWorker(execution);
     const getTask = this.opts.manager.getTask;
     const taskId = execution.taskId ?? execution.executionId;
     if (getTask === undefined) {
@@ -355,27 +366,13 @@ export class PiOutcomeDelivery {
     });
   };
 
-  /**
-   * THE PLATFORM COMPLETION WATCH PORT (F4).
-   *
-   * `DispatchManager.onTaskTerminated` IS the platform's durable announcement
-   * channel: it is keyed by task id, it fires once, and it fires IMMEDIATELY
-   * (via microtask) for a task that is already terminal — so re-subscribing
-   * after a restart both re-establishes the live notification and delivers the
-   * end that already happened. THE ANNOUNCEMENT IS NOT AN OUTCOME and this port
-   * does not pretend it is: it tells the host to look again, and the host
-   * VERIFIES the end against {@link PiOutcomeDelivery.observeExecution} — the
-   * manager's own task record the announcement was written to — so only a
-   * `completed` read is settled, through the one completion bridge. An
-   * `error`/`cancelled`/`timeout` announcement is reported as an unsettled
-   * attempt, exactly as the sweep's own `failed` branch reports it.
-   *
-   * A task the manager cannot name is NOT watchable — the manager's listener
-   * registration is silently a no-op for an unknown id — so that answers
-   * `"unsupported"` and the host reports the execution as unwatched rather than
-   * waiting on a callback that can never come.
-   */
+  /** Re-observe native worker facts after reload; a manager event alone cannot prove completion. */
   readonly watchCompletion: HostCompletionWatchPort = (entry, onEnded) => {
+    if (this.closed) return "unsupported";
+    if (this.opts.observeWorker) {
+      this.watchNativeCompletion(entry, onEnded);
+      return "watching";
+    }
     const taskId = entry.taskId ?? entry.executionId;
     const getTask = this.opts.manager.getTask;
     if (getTask === undefined) return "unsupported";
@@ -386,9 +383,22 @@ export class PiOutcomeDelivery {
       return "unsupported";
     }
     if (known === undefined) return "unsupported";
-    this.opts.manager.onTaskTerminated(taskId, () => onEnded());
+    this.opts.manager.onTaskTerminated(taskId, () => { if (!this.closed) onEnded(); });
     return "watching";
   };
+
+  private watchNativeCompletion(execution: HostExecutionIdentity, onEnded: () => void): void {
+    const timer = setInterval(() => {
+      if (this.closed) return;
+      const observation = this.observeExecution(execution);
+      if (observation.kind !== "completed" && observation.kind !== "failed") return;
+      clearInterval(timer);
+      this.completionWatches.delete(timer);
+      onEnded();
+    }, 250);
+    timer.unref();
+    this.completionWatches.add(timer);
+  }
 
   /**
    * THE PLATFORM CANCEL PORT (P3).
@@ -448,6 +458,9 @@ export class PiOutcomeDelivery {
         });
       }
       const status = this.dispatchTaskStatusOf(taskId);
+      if (status === "cancelled" && this.opts.confirmWorkerStopped && probe.execution && !await this.opts.confirmWorkerStopped(probe.execution)) {
+        return { kind: "requested", reason: "The Pi cancellation was issued, but native process termination has not been observed" };
+      }
       if (status === "cancelled") {
         return Object.freeze({
           kind: "confirmed" as const,
@@ -490,7 +503,7 @@ export class PiOutcomeDelivery {
           JSON.stringify(taskId) +
           (status === undefined
             ? " and holds no readable record of it (it may have been cleaned up after its TTL, " +
-              "or lost by a failed recovery)"
+            "or lost by a failed recovery)"
             : " (its record still reports status " + JSON.stringify(status) + ")") +
           ", so the cancellation was NOT substantiated — the execution stays visible",
       });
@@ -518,11 +531,11 @@ export class PiOutcomeDelivery {
     if (parentSessionId === undefined || parentSessionId.length === 0) {
       throw new Error(
         "Pi outcome dispatch: no invoking session is in effect for graph " +
-          JSON.stringify(request.graphId) +
-          " — a dispatched attempt needs the session its task is launched under",
+        JSON.stringify(request.graphId) +
+        " — a dispatched attempt needs the session its task is launched under",
       );
     }
-    const launched = this.opts.manager.launch(
+    const launched = (this.opts.launchWorker ?? this.opts.manager.launch.bind(this.opts.manager))(
       {
         subagent: request.agent,
         // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff
@@ -545,6 +558,7 @@ export class PiOutcomeDelivery {
         agent: invocation?.agent ?? "",
         directory: this.opts.directory,
       },
+      inputView,
     );
     void Promise.resolve(launched).then(
       (task) => {
@@ -552,27 +566,32 @@ export class PiOutcomeDelivery {
         // The platform named the task, so the host can record the execution it
         // created; the terminal callback below may then settle against a
         // `created` row instead of an unknown one.
-        this.opts.onStarted?.(request, effect, {
-          executionId: task.id,
-          taskId: task.id,
-        });
-        this.opts.manager.onTaskTerminated(task.id, (taskId, status) => {
-          const observed = this.attempts.get(taskId);
-          this.attempts.delete(taskId);
+        if (task.sessionId) {
+          if (this.closed) return;
+          this.opts.onStarted?.(request, effect, {
+            executionId: task.sessionId,
+            taskId: task.id,
+          });
+        }
+        const execution = { executionId: task.sessionId, taskId: task.id };
+        const settle = (status: string) => {
+          if (this.closed) return;
+          const observed = this.attempts.get(task.id);
           if (observed === undefined) return;
+          const native = this.opts.observeWorker?.(execution);
+          if (native && native.kind !== "completed" && native.kind !== "failed") return;
+          this.attempts.delete(task.id);
           this.opts.onSettled(
-            status === "completed"
+            (native ? native.kind === "completed" : status === "completed")
               ? { kind: "completed", request: observed }
-              : {
-                  kind: "failed",
-                  request: observed,
-                  reason:
-                    "the Pi dispatch task ended with status " +
-                    JSON.stringify(status) +
-                    (NON_COMPLETION_STATUSES.has(status) ? "" : " (not a completion)"),
-                },
+              : { kind: "failed", request: observed,
+                reason: native?.kind === "failed" ? native.reason :
+                  "The Pi dispatch task ended with status " + JSON.stringify(status) +
+                  (NON_COMPLETION_STATUSES.has(status) ? "" : " (not a completion)") },
           );
-        });
+        };
+        this.opts.manager.onTaskTerminated(task.id, (_taskId, status) => settle(status));
+        if (this.opts.observeWorker) this.watchNativeCompletion(execution, () => settle("native-end"));
       },
       (err: unknown) => {
         this.log.warn("Pi outcome dispatch: launch rejected", {
@@ -585,4 +604,3 @@ export class PiOutcomeDelivery {
     );
   };
 }
-

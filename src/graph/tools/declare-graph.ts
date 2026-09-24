@@ -1,53 +1,8 @@
-/**
- * Graph Execution Engine v2 — `graph_declare` (C1 outcome-authoring ingress)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The FIRST PRODUCER of a compiled plan: a full v3 declaration in, a parsed +
- * compiled + persisted plan identity out
- * (docs/graph-outcome-protocol.md § "Implementation order and release gates",
- * step 3's first requirement).
- *
- * What it does, in order:
- * 1. PARSE the authored value through the strict v3 front-end
- *    (`compiler/parse-declaration-v3.ts`) — unknown keys, wrong types and bad
- *    limits are structured refusals, never a throw;
- * 2. COMPILE it (`compileGraph`) with the caller's capability options;
- * 3. REFUSE A DRAFT. A compilation with unresolved acceptance capabilities is
- *    structurally complete but NON-EXECUTABLE, and persisting it as if it were
- *    executable would run gates that were never checked (B9). The refusal names
- *    every unresolved entry;
- * 4. RECORD the plan: the validated declaration, the compiled plan and the
- *    EXECUTION-PROTOCOL identity are written as ONE immutable definition row in
- *    the workspace's unified graph store (`src/graph/store/`, the same
- *    `graph-acceptance-ledger.sqlite` the run's acceptance is committed to).
- *    This module writes NO v2 engine-state container: a new graph's durable
- *    record is the store row, and the container is a retired authority
- *    (`§P1.6`) this build refuses rather than initializes over.
- *
- * THE BOUNDARY, STATED PLAINLY: the outcome protocol has a registered handler
- * and a declared graph runs through the outcome run path
- * (`src/graph/outcome/runtime.ts`) — entry nodes dispatched from THIS plan,
- * submissions accepted through the graph-scoped ingress, and the graph state
- * committed with the acceptance — and restart recovery resumes that SAME saved
- * plan (`src/graph/outcome/recovery.ts`, driven by the startup sweep). Nothing
- * HERE dispatches, reduces or accepts anything: this module only authors,
- * compiles and persists.
- *
- * The in-memory `state` this module hands back is a QUERY-BOUNDARY view (see
- * `persistence/declared-record.ts`): its carrier declaration is deliberately
- * EMPTY — the v3 declaration is not a v2 declaration, so none is fabricated —
- * and the compiled plan is the graph's topology authority, from which the view
- * declares one pending runtime node per compiled node. Nothing durable is
- * derived from it.
- */
-
 import { existsSync, statSync } from "node:fs";
 
 import { errorText } from "../../utils/error-text.ts";
 import { logWarn } from "../log-warn.ts";
-import type { EngineState, PlanBinding } from "../../types.engine-v2.ts";
+import type { PlanBinding } from "../compiler/plan.ts";
 import { contractDigest } from "../contracts/contract-definition.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
 import {
@@ -78,9 +33,8 @@ import {
 } from "../compiler/plan.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
-import { engineStatePath } from "../persistence/engine-persistence.ts";
+import { engineStatePath } from "../persistence/paths.ts";
 import {
-  declaredEngineStateOf,
   describeStoreVerdict,
   readStoredDefinition,
   type StoredDeclaredGraph,
@@ -126,6 +80,14 @@ export interface GraphDeclareArgs {
 
 /** What a successful `graph_declare` reports. */
 export interface GraphDeclareResult {
+  start?: {
+    readonly kind: "saved" | "started" | "resumed" | "refused" | "blocked";
+    readonly phase?: string;
+    readonly reason?: string;
+    readonly dispatched?: readonly { nodeId: string; attemptId: string }[];
+    readonly refusals?: readonly import("../outcome/runtime.ts").OutcomeRuntimeRefusal[];
+    readonly divergences?: readonly import("../outcome/runtime.ts").OutcomeEffectDivergence[];
+  };
   /** The graph id the plan is bound to (the declaration's own name). */
   graph_id: string;
   /** The compiled plan's content-addressed revision. */
@@ -260,7 +222,7 @@ function refuseInvalidDeclaration(
   return new GraphDeclareRefusedError(
     "invalid-declaration",
     "graph_declare refused: the authored value is not a strict v3 declaration:\n" +
-      renderDiagnostics(diagnostics),
+    renderDiagnostics(diagnostics),
     diagnostics,
   );
 }
@@ -277,7 +239,7 @@ function refuseCompileErrors(
   return new GraphDeclareRefusedError(
     "invalid-declaration",
     "graph_declare refused: the v3 declaration does not compile:\n" +
-      renderDiagnostics(diagnostics),
+    renderDiagnostics(diagnostics),
     diagnostics,
   );
 }
@@ -336,10 +298,10 @@ function refuseDraftPlan(
   return new GraphDeclareRefusedError(
     "draft-plan",
     `graph_declare refused: "${graphId}" compiled to a NON-EXECUTABLE DRAFT — ` +
-      `${unresolved.length} acceptance requirement(s) and ${unauthorizedCompletions.length} natural-completion mapping(s) are unresolved, so no plan was persisted:` +
-      `\n${lines.join("\n")}\n` +
-      guidance.join(", and ") +
-      ". A draft is never persisted as executable.",
+    `${unresolved.length} acceptance requirement(s) and ${unauthorizedCompletions.length} natural-completion mapping(s) are unresolved, so no plan was persisted:` +
+    `\n${lines.join("\n")}\n` +
+    guidance.join(", and ") +
+    ". A draft is never persisted as executable.",
     [],
     unresolved,
     unauthorizedCompletions,
@@ -360,12 +322,12 @@ function refuseUnsubstantiatedCapabilities(
   return new GraphDeclareRefusedError(
     "validator-capability-not-installed",
     "graph_declare refused: supported_validators declares " +
-      String(issues.length) +
-      " validator capability(ies) this host did not install, so the declaration was not compiled:" +
-      "\n" +
-      lines.join("\n") +
-      "\nThe installed capability set is the HOST's: a caller may narrow it, and can never add to it. " +
-      "Remove the entry, or have the host install that exact registration (the same registry the run path resolves acceptance against).",
+    String(issues.length) +
+    " validator capability(ies) this host did not install, so the declaration was not compiled:" +
+    "\n" +
+    lines.join("\n") +
+    "\nThe installed capability set is the HOST's: a caller may narrow it, and can never add to it. " +
+    "Remove the entry, or have the host install that exact registration (the same registry the run path resolves acceptance against).",
     issues.map((entry, index) => ({
       code: entry.code,
       message: entry.message,
@@ -447,7 +409,7 @@ export interface DeclaredOutcomeGraph {
   readonly declarationDigest: string;
   /** The immutable, content-addressed compiled plan. */
   readonly plan: CompiledPlan;
-  /** The plan as the durable record `EngineState.compiledPlan` carries. */
+  /** The immutable compiled plan saved with the declaration. */
   readonly record: PersistedCompiledPlan;
   /** The plan binding the run path pins (a plan projection). */
   readonly binding: PlanBinding;
@@ -456,7 +418,7 @@ export interface DeclaredOutcomeGraph {
    * graph in memory for the length of one session (the `graph_status` session
    * scope). Derived, never persisted — see `persistence/declared-record.ts`.
    */
-  readonly state: EngineState;
+  readonly recordedAt: number;
 }
 
 /**
@@ -477,8 +439,8 @@ export function buildDeclaredOutcomeGraph(
     throw new GraphDeclareRefusedError(
       "graph-id-mismatch",
       `graph_declare refused: graph_id "${input.graphId}" does not equal the declaration's ` +
-        `name "${declaration.name}" — the v3 grammar carries no separate graph identifier, ` +
-        "so the name IS the graph id.",
+      `name "${declaration.name}" — the v3 grammar carries no separate graph identifier, ` +
+      "so the name IS the graph id.",
     );
   }
 
@@ -540,7 +502,7 @@ export function buildDeclaredOutcomeGraph(
     throw new GraphDeclareRefusedError(
       "unaddressable-declaration",
       `graph_declare refused: the declaration cannot be content-addressed, so an ` +
-        `unchanged re-declaration could not be told from a changed one: ${errorText(error)}`,
+      `unchanged re-declaration could not be told from a changed one: ${errorText(error)}`,
     );
   }
 
@@ -561,7 +523,7 @@ export function buildDeclaredOutcomeGraph(
     plan,
     record,
     binding,
-    state: declaredEngineStateOf(stored, undefined, stored.recordedAt),
+    recordedAt: stored.recordedAt,
   });
 }
 

@@ -669,7 +669,7 @@ describe("the boundary refuses only a bound worker", () => {
       expect(status.nodes?.map((node) => node.node_id).sort()).toEqual(["alpha", "beta"]);
       // The position is LIVE, not the declaration snapshot: both entry
       // attempts are running (a snapshot would read `pending`).
-      expect(status.nodes?.map((node) => node.status)).toEqual(["running", "running"]);
+      expect(status.nodes?.map((node) => node.status)).toEqual(["dispatched", "dispatched"]);
 
       const audit = JSON.parse(String(await fixture.tools.graph_audit.execute({}, declarer))) as {
         verdict?: string;

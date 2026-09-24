@@ -1,3 +1,5 @@
+import { createApprovalPolicy } from "../../src/graph/policy/approval-policy.ts";
+import { approvalPolicyFor } from "./helpers/approval-policy.ts";
 /**
  * P3 item 3 — THE TRUSTED APPROVAL LIFECYCLE
  * (plan §4 P3 "审批", §5 A12, §8.8).
@@ -168,6 +170,7 @@ async function openFixture(declaration: GraphDeclarationV3): Promise<ApprovalFix
   });
   host = opened;
   const toolset = createGraphToolSet({
+    approvalPolicy: approvalPolicyFor(declaration.name),
     stateDir: dir,
     credentialIsolation: opened.credentialIsolation,
     hostIdentity: opened.workerIdentity,
@@ -271,7 +274,7 @@ function control(
   return JSON.parse(
     JSON.stringify(
       runGraphControlEntry(
-        { storeDirectory: fixture.storeRoot, now },
+        { storeDirectory: fixture.storeRoot, now, approvalPolicy: approvalPolicyFor(fixture.graphId) },
         args,
         sessionID,
         agent,
@@ -1082,5 +1085,53 @@ describe("graph_control — an approval decision commits whole or not at all", (
     } finally {
       fixture.host.close();
     }
+  });
+});
+
+
+describe("trusted approval policy at the control entry", () => {
+  it("rejects arbitrary nomination, self-approval and requests without a host policy", async () => {
+    const fixture = await openFixture(CHAIN);
+    try {
+      const args = { graph_id: fixture.graphId, command: "approval-request" as const, node_id: "work", reason: "review", approver_session_id: APPROVER, expires_at: DEADLINE };
+      const missing = runGraphControlEntry({ storeDirectory: fixture.storeRoot, now: AT }, args, DECLARER, "agent.declarer");
+      expect(missing.kind).toBe("refused");
+      expect(raise(fixture, { approver: "unqualified-session" }).kind).toBe("refused");
+      const qualifiedSelf = createApprovalPolicy({ id: "review", revision: "1", rules: [{ graphId: fixture.graphId, nodeId: "work", approverSessions: [DECLARER] }] });
+      const self = runGraphControlEntry({ storeDirectory: fixture.storeRoot, now: AT, approvalPolicy: qualifiedSelf }, { ...args, approver_session_id: DECLARER }, DECLARER, "agent.declarer");
+      expect(self.kind).toBe("refused");
+      expect(readFacts(fixture).requests).toEqual([]);
+    } finally { fixture.host.close(); }
+  });
+
+  it("pins authority across restart and rejects changed policy content under the same identity", async () => {
+    const fixture = await openFixture(CHAIN);
+    try {
+      expect(raise(fixture).kind).toBe("applied");
+      const pinned = GraphStore.openFile(fixture.storeRoot);
+      const authority = pinned.approvals.readApprovalRequest(fixture.graphId, "work#1")?.authority;
+      pinned.close();
+      expect(authority?.mode).toBe("independent-review");
+      const changed = createApprovalPolicy({ id: "test.approval", revision: "1", rules: [{ graphId: fixture.graphId, nodeId: "work", approverSessions: [APPROVER], mode: "operator-confirmation" }] });
+      const refused = runGraphControlEntry({ storeDirectory: fixture.storeRoot, now: AT, approvalPolicy: changed }, { graph_id: fixture.graphId, command: "approve", node_id: "work", reason: "reviewed" }, APPROVER, "agent.approver");
+      expect(refused.kind).toBe("refused");
+      expect(requestOf(readFacts(fixture)).status).toBe("pending");
+      expect(decide(fixture, "approve").kind).toBe("applied");
+    } finally { fixture.host.close(); }
+  });
+
+  it("records explicitly authorized operator confirmation without calling it independent review", async () => {
+    const fixture = await openFixture(CHAIN);
+    try {
+      const policy = createApprovalPolicy({ id: "confirm", revision: "1", rules: [{ graphId: fixture.graphId, nodeId: "work", approverSessions: [DECLARER], mode: "operator-confirmation" }] });
+      const deps = { storeDirectory: fixture.storeRoot, now: AT, approvalPolicy: policy };
+      const raised = runGraphControlEntry(deps, { graph_id: fixture.graphId, command: "approval-request", node_id: "work", reason: "confirm", approver_session_id: DECLARER, expires_at: DEADLINE }, DECLARER, "agent.declarer");
+      expect(raised.kind).toBe("applied");
+      const approved = runGraphControlEntry(deps, { graph_id: fixture.graphId, command: "approve", node_id: "work", reason: "confirmed" }, DECLARER, "agent.declarer");
+      expect(approved.kind).toBe("applied");
+      const store = GraphStore.openFile(fixture.storeRoot);
+      try { expect(store.approvals.readApprovalRequest(fixture.graphId, "work#1")?.authority.mode).toBe("operator-confirmation"); }
+      finally { store.close(); }
+    } finally { fixture.host.close(); }
   });
 });

@@ -1,92 +1,3 @@
-/**
- * Graph store — the ONE schema of the workspace-scoped authoritative database
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE SCHEMA IS THE UNIFIED SUBSTRATE. Before P1 item 3 the workspace kept
- * THREE durable authorities — the acceptance ledger
- * (`graph-acceptance-ledger.sqlite`: receipts, accepted events, pending effects,
- * run state), the host store (`rolebox-host-store.sqlite`: execution bindings
- * and credential records) and a whole-file JSON record of each graph's declaring
- * invocation (`host-invocation-origins.json`). Two of them committed on their
- * own and each called itself atomic, so no single transaction could make "the
- * acceptance, its effect and the host's bind to that effect" true together.
- * This module declares ONE file, ONE schema and ONE format identity for all
- * three: every table below lives in {@link GRAPH_STORE_FILE}, and
- * `GraphStore` is the one boundary that writes them.
- *
- * WHY THE FILE NAME IS THE LEDGER'S. The file name is durable identity, not
- * presentation: pointing this build at a different name would make every
- * committed receipt, accepted event and effect row an `absent` store, which is
- * exactly the "lost database is not a new graph" failure the plan forbids
- * (`A19`) and could re-dispatch work an earlier process already created. The
- * ledger's file already carries the strictest layout gate and the one
- * transaction boundary the protocol verified, so the converged store keeps that
- * identity and gains the tables it was missing. The retired host-store file is
- * NOT read, NOT converted and NOT treated as absent (see
- * {@link RETIRED_AUTHORITY_FILES} and `format.ts`).
- *
- * THE FORMAT VERSION IS THE LEDGER'S, BUMPED. `LEDGER_FORMAT_VERSION` moved to
- * 2 when the converged layout arrived: a version-1 file holds five of the ten
- * tables and none of the host records, and reading it as this build's store
- * would answer `absent` for every execution binding it never carried. It moved
- * to 3 with the RUN IDENTITY and the TRUSTED CONTROL records (P3 item 1): a
- * version-2 file holds neither, so it could not answer "which run is this, and
- * was it stopped by a trusted command?" — reading it as this build's store
- * would report every controlled run as merely executing. It moves to 4 with the
- * RUN-SCOPED layout (P3 item 2): a version-3 file keys the graph state, the
- * effects and the runs by GRAPH, which is exactly the one-run-per-graph
- * assumption re-execution makes false, so reading it as this build's store would
- * answer a later run's reader with the earlier run's effects and decisions. It
- * moves to 5 with the DURABLE APPROVAL REQUESTS (P3 item 3): a version-4 file
- * holds no `graph_approval_requests` row, so reading it as this build's store
- * would answer "no request" for an attempt a previous process paused — and the
- * acceptance gate, which reads exactly that row, would accept a submission the
- * pause was meant to hold back.
- * It moves to 6 with the DISPATCH BUDGET RESERVATIONS (P3 item 3, the budget):
- * a version-5 file holds no `graph_dispatch_reservations` row, so reading it as
- * this build's store would answer "nothing reserved" for a dispatch a previous
- * process armed — and the NEXT dispatch of that node would be authorized past a
- * ceiling the earlier claim had already spent.
- * Every older version is refused as an older format this build registers no
- * migration for (`unsupported`), never widened in place, never downgraded.
- *
- * EVERY UNIQUENESS THE PROTOCOL NEEDS IS STRUCTURAL, not a code path:
- * - one row per `(graph_id, effect_id)` (primary key of the execution table);
- * - `created` is impossible without a non-empty execution id (the CHECK);
- * - every claim of that row carries a GENERATION (`owner_generation`, minted at 1
- *   and raised by one on each ownership transition), so a superseded claim's
- *   late write is refused by the conditional update rather than applied;
- * - the last write a row refused — a stale confirmation, a divergent execution,
- *   an unproven delivery failure — is recorded on the row with a count, so the
- *   refusal outlives the process that asked;
- * - one credential record per `(graph_id, node_id, attempt_id)` (primary key),
- *   and a `retained` record cannot exist without a value (the CHECK);
- * - one accepted event per `(graph_id, attempt_id)` (primary key) — the same
- *   key carries at most one accepted RESULT;
- * - one receipt per `(graph_id, attempt_id, submission_id)` (primary key) — the
- *   submission idempotency key;
- * - one TRUSTED CONTROL DECISION per `(graph_id, run_id, node_id, attempt_id,
- *   command)` (primary key) — an attempt carries at most one STOPPING fact
- *   (`failure`/`cancel`/`timeout`/`budget-stop`) and at most one successor
- *   command (`retry`), which is what lets the attempt a retry SUPERSEDED keep
- *   the failure that prompted it while the retry itself stays idempotent on
- *   that attempt — and ONE run-level control fact per RUN, claimed by a
- *   conditional update so a racing second command cannot replace the command
- *   that stopped the run first;
- * - one immutable definition per graph, one run STATE per run, one run identity
- *   per `(graph, run)` with a graph-local `run_seq` whose greatest value is the
- *   CURRENT run, one re-execution decision per terminal run, one declaring
- *   invocation per graph, and ONE APPROVAL REQUEST per `(graph, run, node,
- *   attempt)` — an attempt carries at most one approval fact, its decision is a
- *   conditional update of a `pending` row (so a repeated decision replays and a
- *   competing one conflicts), and the acceptance gate reads exactly that row.
- *
- * Dependency leaf: this module imports only the ledger port (for the shared
- * format identity) and two path/utility helpers; no record model and no driver.
- */
-
 import { join } from "node:path";
 
 import { LEDGER_FORMAT_VERSION } from "../ledger/types.ts";
@@ -184,6 +95,8 @@ export const GRAPH_STORE_TABLES = Object.freeze({
   credentials: "host_attempt_credentials",
   /** The declaring invocation of one graph. */
   origins: "graph_invocation_origins",
+  workerChannels: "host_worker_channels",
+  executionObservations: "host_execution_observations",
   /** The runs of one graph, oldest first; the greatest run_seq is current. */
   runs: "graph_runs",
   /** The trusted control decisions and the run's control fact (P3 item 1). */
@@ -218,7 +131,8 @@ export const GRAPH_STORE_LEDGER_TABLES = Object.freeze({
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.meta} (
      id INTEGER PRIMARY KEY CHECK (id = 1),
-     format_version INTEGER NOT NULL
+     format_version INTEGER NOT NULL,
+     store_id TEXT NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.receipts} (
      graph_id TEXT NOT NULL,
@@ -308,6 +222,19 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      updated_at INTEGER NOT NULL,
      PRIMARY KEY (graph_id, node_id, attempt_id),
      CHECK ((retention = 'retained') = (credential IS NOT NULL))
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.executionObservations} (
+     execution_id TEXT NOT NULL PRIMARY KEY,
+     outcome TEXT NOT NULL CHECK (outcome IN ('completed', 'failed')),
+     reason TEXT NOT NULL,
+     observed_at INTEGER NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.workerChannels} (
+     token_digest TEXT NOT NULL PRIMARY KEY,
+     session_id TEXT NOT NULL,
+     agent TEXT NOT NULL,
+     CHECK (length(token_digest) = 64),
+     CHECK (length(session_id) > 0)
    )`,
   `CREATE TABLE IF NOT EXISTS ${GRAPH_STORE_TABLES.origins} (
      graph_id TEXT NOT NULL,
@@ -417,6 +344,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      requested_by_session TEXT,
      requested_by_agent TEXT,
      approver_session_id TEXT NOT NULL,
+     authority TEXT NOT NULL,
      expires_at INTEGER NOT NULL,
      decided_by_session TEXT,
      decided_by_agent TEXT,
@@ -521,6 +449,7 @@ export const GRAPH_STORE_COLUMNS: Readonly<
   meta: [
     { name: "id", affinity: "integer", primaryKey: 1, notNull: false },
     { name: "format_version", affinity: "integer", primaryKey: 0, notNull: true },
+    { name: "store_id", affinity: "text", primaryKey: 0, notNull: true },
   ],
   receipts: [
     { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
@@ -602,6 +531,17 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "credential", affinity: "text", primaryKey: 0, notNull: false },
     { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
   ],
+  executionObservations: [
+    { name: "execution_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "outcome", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "reason", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "observed_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
+  workerChannels: [
+    { name: "token_digest", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "session_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "agent", affinity: "text", primaryKey: 0, notNull: true },
+  ],
   origins: [
     { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
     { name: "session_id", affinity: "text", primaryKey: 0, notNull: true },
@@ -653,6 +593,7 @@ export const GRAPH_STORE_COLUMNS: Readonly<
     { name: "requested_by_session", affinity: "text", primaryKey: 0, notNull: false },
     { name: "requested_by_agent", affinity: "text", primaryKey: 0, notNull: false },
     { name: "approver_session_id", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "authority", affinity: "text", primaryKey: 0, notNull: true },
     { name: "expires_at", affinity: "integer", primaryKey: 0, notNull: true },
     { name: "decided_by_session", affinity: "text", primaryKey: 0, notNull: false },
     { name: "decided_by_agent", affinity: "text", primaryKey: 0, notNull: false },

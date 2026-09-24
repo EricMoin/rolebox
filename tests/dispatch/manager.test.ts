@@ -3874,9 +3874,10 @@ describe("Task 13: completion stability re-confirmation", () => {
     const gcTimer = mgr.sidecarGCTimers.get(task.id);
     expect(gcTimer).toBeDefined();
 
-    // Clean up
-    clearTimeout(gcTimer);
-    mgr.sidecarGCTimers.delete(task.id);
+    await manager.dispose();
+    expect(mgr.sidecarGCTimers.size).toBe(0);
+    expect(mgr.cleanupTimers.size).toBe(0);
+    expect(gcTimer.hasRef()).toBe(false);
     mgr.notifyCompletion = origNotify;
     // Clean up sidecar file
     try { rmSync(taskRef.result!.sidecarPath); } catch {}

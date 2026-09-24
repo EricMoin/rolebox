@@ -31,6 +31,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GraphApplication } from "../../src/graph/application/graph-application.ts";
+import { graphStoreRoot } from "../../src/graph/store/schema.ts";
 import { RoleMode } from "../../src/constants.ts";
 import { DshRoleSwitcher } from "../../src/platform/adapters/dsh/role-switcher.ts";
 import {
@@ -634,60 +636,22 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
     expect(body.sessions.activeRoles).toEqual({});
   });
 
-  it("surfaces engine graphs persisted under the workspace .rolebox/state store", async () => {
-    // The persisted workspace store is the ONLY graph source: the deleted
-    // legacy runtime's live in-memory registry is gone.
+  it("surfaces native graphs from the workspace's user-level host store", async () => {
     const fixture = await createFixture();
     const workspaceDir = mkdtempSync(join(tmpdir(), "dsh-monitor-route-ws-"));
+    const previousDataDir = process.env.ROLEBOX_DATA_DIR;
+    const dataDir = join(workspaceDir, "data");
+    process.env.ROLEBOX_DATA_DIR = dataDir;
+    let application: GraphApplication | undefined;
     try {
-      const engineStateDir = join(workspaceDir, ".rolebox", "state");
-      mkdirSync(engineStateDir, { recursive: true });
-      const now = Date.now();
-      writeFileSync(
-        join(engineStateDir, "engine-persisted.json"),
-        JSON.stringify({
-          version: 2,
-          executionProtocolVersion: 2,
-          graphId: "persisted-graph",
-          // Persisted phase is idle — the RUNNING node below is what promotes
-          // the projected phase to `executing` (see projectEngineGraph).
-          phase: "idle",
-          graphDeclaration: {
-            version: 2,
-            name: "persisted-graph",
-            nodes: [],
-            edges: [],
-          },
-          nodes: {
-            A: {
-              nodeId: "A",
-              agent: "agent-a",
-              prompt: "pA",
-              needsApproval: false,
-              status: "running",
-              signalsObserved: {},
-              upstreamResults: {},
-              tokensConsumed: { inputTokens: 0, outputTokens: 0, cost: 0 },
-              joinStrategy: "all",
-              startedAt: now - 1_000,
-            },
-          },
-          loopGroups: {},
-          signalLedger: {},
-          frontier: [],
-          budget: {
-            sessionsSpawned: 0,
-            totalInputTokens: 0,
-            totalOutputTokens: 0,
-            totalCost: 0,
-          },
-          startedAt: now - 2_000,
-          updatedAt: now,
-          advancingLock: false,
-          pendingCompletions: [],
-        }),
-        "utf-8",
-      );
+      application = GraphApplication.open({
+        workspaceDir, storeRoot: graphStoreRoot(dataDir, workspaceDir), env: {}, deliver() {},
+      });
+      await application.tools.graph_declare_and_start({ declaration: {
+        version: 3, name: "persisted-graph", nodes: [
+          { id: "A", agent: "agent-a", prompt: "pA", outcomes: [{ id: "done" }] },
+        ], edges: [],
+      } }, "parent");
 
       const route = new DshRoleboxMonitorWebRoute(
         fixture.switcher,
@@ -714,6 +678,9 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
       expect(graph!.phase).toBe("executing");
       expect(graph!.nodeStatusCounts.running).toBe(1);
     } finally {
+      application?.close();
+      if (previousDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
+      else process.env.ROLEBOX_DATA_DIR = previousDataDir;
       rmSync(workspaceDir, { recursive: true, force: true });
     }
   });

@@ -42,8 +42,9 @@ export async function withTimeout<T>(
   label: string,
   log: Logger<any>,
 ): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`TIMEOUT:${label}`)), ms);
+    timer = setTimeout(() => reject(new Error(`TIMEOUT:${label}`)), ms);
   });
 
   try {
@@ -56,5 +57,7 @@ export async function withTimeout<T>(
     }
     // Non-timeout error — re-throw so the caller's existing catch handles it
     throw err;
+  } finally {
+    clearTimeout(timer);
   }
 }

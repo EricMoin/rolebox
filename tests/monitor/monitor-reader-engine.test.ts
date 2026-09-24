@@ -1,460 +1,75 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
-
+import { join } from "node:path";
+import { GraphApplication } from "../../src/graph/application/graph-application.ts";
+import { graphStoreRoot, graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import { readEngineGraphs } from "../../src/cli/commands/monitor/monitor-reader-engine.ts";
+import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 
-let tmpDir: string;
-
+let root: string;
+let data: string;
+let before: string | undefined;
+let app: GraphApplication | undefined;
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "monitor-reader-engine-test-"));
+  root = mkdtempSync(join(tmpdir(), "monitor-v3-"));
+  data = join(root, "data"); before = process.env.ROLEBOX_DATA_DIR; process.env.ROLEBOX_DATA_DIR = data;
 });
-
 afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+  app?.close(); app = undefined;
+  if (before === undefined) delete process.env.ROLEBOX_DATA_DIR; else process.env.ROLEBOX_DATA_DIR = before;
+  rmSync(root, { recursive: true, force: true });
 });
-
-function stateDir(): string {
-  return join(tmpDir, ".rolebox", "state");
+const stateDir = () => join(root, ".rolebox", "state");
+function open() {
+  app = GraphApplication.open({ workspaceDir: root, storeRoot: graphStoreRoot(data, root), env: {}, deliver() {} });
+  return app;
 }
+const declaration = (name: string) => ({ version: 3, name, nodes: [{ id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }] }], edges: [] });
 
-/** Write an engine state file directly into the state dir. */
-function writeEngineFile(filename: string, contents: string): string {
-  const path = join(stateDir(), filename);
-  writeFileSync(path, contents, "utf-8");
-  return path;
-}
-
-/**
- * Build a valid, hand-authored engine-`2` persistence file object. Mirrors the
- * serialized shape produced by `serializeEngineState` (see
- * `src/graph/persistence/engine-persistence.ts`) so it round-trips through
- * `loadEngineStateForResume`. The record carries its own
- * `executionProtocolVersion` — the loader resolves no identity on its behalf.
- * `overrides` let tests mutate specific fields.
- *
- * `nodeOverrides` supplies per-node overrides keyed by node id (e.g.
- * `{ n1: { dispatchSessionId: "sess-abc" } }`). When omitted, each node
- * uses its default fixture shape.
- */
-function buildEngineFile(
-  overrides: Record<string, unknown> = {},
-  nodeOverrides?: Record<string, Record<string, unknown>>,
-): Record<string, unknown> {
-  const n1: Record<string, unknown> = {
-    nodeId: "n1",
-    agent: "emperor--jinyiwei--backend",
-    prompt: "build the thing",
-    needsApproval: false,
-    status: "running",
-    signalsObserved: { answer: {} },
-    sessionsSpawned: 1,
-    tokensConsumed: { inputTokens: 100, outputTokens: 50, cost: 0.001 },
-    upstreamResults: {},
-    joinStrategy: "all",
-    joinSatisfied: true,
-    traversalCount: 0,
-    startedAt: 1_700_000_000_000,
-    retryCount: 0,
-  };
-  const n2: Record<string, unknown> = {
-    nodeId: "n2",
-    agent: "emperor--jinyiwei--test",
-    prompt: "verify it",
-    needsApproval: false,
-    status: "completed",
-    signalsObserved: { answer: {}, revise_needed: {} },
-    sessionsSpawned: 2,
-    tokensConsumed: { inputTokens: 200, outputTokens: 100, cost: 0.002 },
-    upstreamResults: {},
-    joinStrategy: "all",
-    joinSatisfied: true,
-    loopGroupId: "lg1",
-    traversalCount: 3,
-    startedAt: 1_690_000_000_000,
-    completedAt: 1_695_000_000_000,
-    retryCount: 1,
-  };
-  if (nodeOverrides) {
-    for (const [id, patch] of Object.entries(nodeOverrides)) {
-      const target = id === "n1" ? n1 : id === "n2" ? n2 : undefined;
-      if (target) Object.assign(target, patch);
-    }
-  }
-  return {
-    version: 2,
-    executionProtocolVersion: 2,
-    graphId: "demo-graph",
-    phase: "executing",
-    graphDeclaration: {
-      version: 2,
-      name: "demo",
-      nodes: [],
-      edges: [],
-    },
-    nodes: { n1, n2 },
-    edges: {},
-    loopGroups: {
-      lg1: {
-        id: "lg1",
-        maxTraversals: 5,
-        traversalCount: 2,
-        startTimeMs: 1_690_000_000_000,
-        consecutiveStale: 0,
-      },
-    },
-    frontier: ["n3"],
-    budget: {
-      sessionsSpawned: 3,
-      totalInputTokens: 300,
-      totalOutputTokens: 150,
-      totalCost: 0.003,
-    },
-    signalLedger: {},
-    startedAt: 1_690_000_000_000,
-    updatedAt: 1_700_000_000_000,
-    advancingLock: false,
-    pendingCompletions: [],
-    checkpoints: { n1: { nodeId: "n1", status: "running", at: 1_700_000_000_000 } },
-    ...overrides,
-  };
-}
-
-describe("readEngineGraphs", () => {
-  it("returns an empty array when no engine files exist", () => {
+describe("native graph monitor", () => {
+  it("does not initialize a missing store or decode retired workspace JSON", () => {
+    expect(readEngineGraphs(stateDir())).toEqual([]);
     mkdirSync(stateDir(), { recursive: true });
+    writeFileSync(join(stateDir(), "engine-old.json"), '{"version":2,"graphId":"old","phase":"executing"}');
     expect(readEngineGraphs(stateDir())).toEqual([]);
   });
-
-  it("returns an empty array when the state dir does not exist", () => {
-    expect(readEngineGraphs(join(tmpDir, "missing", ".rolebox", "state"))).toEqual([]);
+  it("uses the shipped user-level store and shares complete native records with tools and audit", async () => {
+    const application = open();
+    await application.tools.graph_declare_and_start({ declaration: declaration("visible") }, "parent");
+    const snapshots = readEngineGraphs(stateDir());
+    expect(snapshots).toHaveLength(1);
+    const snapshot = snapshots[0]!;
+    const graph = queryGraphs(graphStoreRoot(data, root)).graphs[0]!;
+    expect(snapshot.graph).toEqual(graph);
+    expect(snapshot.phase).toBe("executing");
+    expect(snapshot.nodes[0]?.status).toBe("running");
+    expect(snapshot.budget.sessionsSpawned).toBe(1);
+    expect(snapshot.updatedAt).toBe(new Date(snapshot.updatedAtMs).toISOString());
+    expect((await application.tools.graph_audit()).entries[0]?.graph).toEqual(graph);
   });
-
-  it("projects node-level status, signal, budget, phase, and loop data from a v2 file", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile("engine-demo-graph.json", JSON.stringify(buildEngineFile()));
-
-    const graphs = readEngineGraphs(stateDir());
-    expect(graphs).toHaveLength(1);
-
-    const g = graphs[0];
-    // Graph-level identity / phase / timing
-    expect(g.graphId).toBe("demo-graph");
-    expect(g.phase).toBe("executing");
-    expect(g.nodeCount).toBe(2);
-    expect(g.startedAt).toBe(new Date(1_690_000_000_000).toISOString());
-    expect(g.updatedAt).toBe(new Date(1_700_000_000_000).toISOString());
-
-    // Frontier
-    expect(g.frontier).toEqual(["n3"]);
-
-    // Budget
-    expect(g.budget).toEqual({
-      sessionsSpawned: 3,
-      totalInputTokens: 300,
-      totalOutputTokens: 150,
-      totalCost: 0.003,
-    });
-
-    // Status counts
-    expect(g.nodeStatusCounts).toEqual({ running: 1, completed: 1 });
-
-    // Checkpoints present
-    expect(g.hasCheckpoints).toBe(true);
-
-    // Loop groups
-    expect(g.loopGroups).toEqual([
-      { id: "lg1", traversalCount: 2, maxTraversals: 5 },
-    ]);
-
-    // Nodes
-    expect(g.nodes).toHaveLength(2);
-
-    const n1 = g.nodes.find((n) => n.nodeId === "n1")!;
-    expect(n1.agent).toBe("emperor--jinyiwei--backend");
-    expect(n1.status).toBe("running");
-    expect(n1.signalType).toBe("answer");
-    expect(n1.startedAt).toBe(new Date(1_700_000_000_000).toISOString());
-    expect(n1.completedAt).toBeUndefined();
-    expect(n1.retryCount).toBe(0);
-    expect(n1.loopGroupId).toBeUndefined();
-
-    const n2 = g.nodes.find((n) => n.nodeId === "n2")!;
-    expect(n2.status).toBe("completed");
-    // First observed signal is surfaced (insertion order of signalsObserved)
-    expect(n2.signalType).toBe("answer");
-    expect(n2.completedAt).toBe(new Date(1_695_000_000_000).toISOString());
-    expect(n2.retryCount).toBe(1);
-    expect(n2.loopGroupId).toBe("lg1");
+  it("reports a stop alongside still-dispatched attempts, rather than showing an executing run", async () => {
+    const application = open();
+    await application.tools.graph_declare_and_start({ declaration: declaration("stopped") }, "parent");
+    expect(application.tools.graph_control({ graph_id: "stopped", command: "failure", node_id: "work", reason: "worker failed" }, "parent").kind).toBe("applied");
+    const snapshot = readEngineGraphs(stateDir())[0]!;
+    expect(snapshot.phase).toBe("stopped");
+    expect(snapshot.nodes[0]?.errorReason).toBe("worker failed");
+    expect(snapshot.graph?.current?.control?.command).toBe("failure");
   });
-
-  it("projects a graph whose persisted phase is idle as executing when a node is running", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    // Default fixture has n1 running; force the persisted graph phase to idle.
-    writeEngineFile("engine-running-idle.json", JSON.stringify(buildEngineFile({ phase: "idle" })));
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g.nodeStatusCounts.running).toBe(1);
-    // running > 0 must never surface as idle — derive executing instead.
-    expect(g.phase).toBe("executing");
+  it("reports unreadable authoritative storage rather than an empty healthy monitor", () => {
+    const directory = graphStoreRoot(data, root);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(graphStoreFilePath(directory), "");
+    expect(() => readEngineGraphs(stateDir())).toThrow("corrupt");
   });
-
-  it("keeps the persisted idle phase when no node is running", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile(
-      "engine-idle-noop.json",
-      JSON.stringify(
-        buildEngineFile(
-          { phase: "idle" },
-          { n1: { status: "completed" }, n2: { status: "completed" } },
-        ),
-      ),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g.nodeStatusCounts.running ?? 0).toBe(0);
-    expect(g.phase).toBe("idle");
-  });
-
-  it("flags hasCheckpoints false when the file carries no checkpoints key", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    const file = buildEngineFile();
-    delete file.checkpoints;
-    writeEngineFile("engine-nocp.json", JSON.stringify(file));
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g.hasCheckpoints).toBe(false);
-  });
-
-  it("skips a corrupt file without throwing and keeps valid siblings", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile("engine-good.json", JSON.stringify(buildEngineFile()));
-    writeEngineFile("engine-bad.json", "this is not valid json {{{");
-
-    let graphs: ReturnType<typeof readEngineGraphs> = [];
-    expect(() => {
-      graphs = readEngineGraphs(stateDir());
-    }).not.toThrow();
-
-    expect(graphs).toHaveLength(1);
-    expect(graphs[0].graphId).toBe("demo-graph");
-  });
-
-  it("skips a version-mismatched file without throwing", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile("engine-v1.json", JSON.stringify(buildEngineFile({ version: 1 })));
-
-    let graphs: ReturnType<typeof readEngineGraphs> = [];
-    expect(() => {
-      graphs = readEngineGraphs(stateDir());
-    }).not.toThrow();
-    expect(graphs).toEqual([]);
-  });
-
-  it("projects multiple valid graphs from separate files", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile("engine-a.json", JSON.stringify(buildEngineFile({ graphId: "graph-a" })));
-    writeEngineFile("engine-b.json", JSON.stringify(buildEngineFile({ graphId: "graph-b" })));
-
-    const graphs = readEngineGraphs(stateDir());
-    expect(graphs).toHaveLength(2);
-    expect(graphs.map((g) => g.graphId).sort()).toEqual(["graph-a", "graph-b"]);
-  });
-
-  // ── dispatch id projection ────────────────────────────────────────────
-
-  it("projects dispatchSessionId / dispatchTaskId onto GraphNodeSnapshot when present", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile(
-      "engine-dispatch.json",
-      JSON.stringify(
-        buildEngineFile({}, {
-          n1: { dispatchSessionId: "disp-sess-42", dispatchTaskId: "disp-task-99" },
-        }),
-      ),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    const n1 = g.nodes.find((n) => n.nodeId === "n1")!;
-    expect(n1.dispatchSessionId).toBe("disp-sess-42");
-    expect(n1.dispatchTaskId).toBe("disp-task-99");
-
-    // n2 has NO dispatch ids — keys must be absent.
-    const n2 = g.nodes.find((n) => n.nodeId === "n2")!;
-    expect(Object.keys(n2)).not.toContain("dispatchSessionId");
-    expect(Object.keys(n2)).not.toContain("dispatchTaskId");
-  });
-
-  // ── failure-reason projection (E6) ────────────────────────────────────
-
-  it("projects a node's errorReason onto GraphNodeSnapshot when present", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile(
-      "engine-failed-node.json",
-      JSON.stringify(
-        buildEngineFile({}, {
-          n1: { status: "timeout", errorReason: "dispatch task vanished during restart" },
-        }),
-      ),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    const n1 = g.nodes.find((n) => n.nodeId === "n1")!;
-    expect(n1.errorReason).toBe("dispatch task vanished during restart");
-
-    // n2 recorded no failure — the key must be absent, exactly like the other
-    // optional projections.
-    const n2 = g.nodes.find((n) => n.nodeId === "n2")!;
-    expect(Object.keys(n2)).not.toContain("errorReason");
-  });
-
-  it("omits dispatchSessionId / dispatchTaskId keys from an undispatched node", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    // Default fixture: neither n1 nor n2 carry dispatch ids.
-    writeEngineFile("engine-undispatched.json", JSON.stringify(buildEngineFile()));
-
-    const [g] = readEngineGraphs(stateDir());
-    for (const n of g.nodes) {
-      const node = n as unknown as Record<string, unknown>;
-      expect(node).not.toHaveProperty("dispatchSessionId");
-      expect(node).not.toHaveProperty("dispatchTaskId");
-    }
-  });
-});
-
-// ── Staleness gate (Subtask 2: gate stale persisted engine graphs) ─────────
-
-describe("readEngineGraphs staleness gate", () => {
-  /** Timestamp comfortably older than the 60s terminal-graph staleness window. */
-  const STALE = () => Date.now() - 61_000;
-  /** Timestamp comfortably inside the staleness window. */
-  const FRESH = () => Date.now() - 5_000;
-
-  function allCompleted(): Record<string, Record<string, unknown>> {
-    return { n1: { status: "completed" }, n2: { status: "completed" } };
-  }
-
-  it("excludes a stale terminal (complete) graph with no running/blocked node", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile(
-      "engine-stale-complete.json",
-      JSON.stringify(
-        buildEngineFile(
-          { phase: "complete", updatedAt: STALE() },
-          allCompleted(),
-        ),
-      ),
-    );
-
-    expect(readEngineGraphs(stateDir())).toEqual([]);
-  });
-
-  it("includes a fresh executing graph even when recently idle-updated", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    // Default fixture: phase executing, n1 running — updated within the window.
-    writeEngineFile(
-      "engine-fresh-executing.json",
-      JSON.stringify(buildEngineFile({ updatedAt: FRESH() })),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g).toBeDefined();
-    expect(g.phase).toBe("executing");
-  });
-
-  it("includes a stale terminal graph while any node is running", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    // Persisted phase complete + stale updatedAt, but n1 is still running —
-    // the projected phase derives to executing, so the graph stays live.
-    writeEngineFile(
-      "engine-stale-running.json",
-      JSON.stringify(
-        buildEngineFile(
-          { phase: "complete", updatedAt: STALE() },
-          { n1: { status: "running" } },
-        ),
-      ),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g).toBeDefined();
-    expect(g.nodeStatusCounts.running).toBe(1);
-    expect(g.phase).toBe("executing");
-  });
-
-  it("includes a stale terminal graph while any node is blocked", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    // A blocked (needs_approval) node does not flip the projected phase, so
-    // the explicit blocked exemption is what keeps this graph visible.
-    writeEngineFile(
-      "engine-stale-blocked.json",
-      JSON.stringify(
-        buildEngineFile(
-          { phase: "complete", updatedAt: STALE() },
-          { n1: { status: "blocked" }, n2: { status: "completed" } },
-        ),
-      ),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g).toBeDefined();
-    expect(g.nodeStatusCounts.blocked).toBe(1);
-  });
-
-  it("includes a terminal graph updated within the staleness window", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile(
-      "engine-fresh-complete.json",
-      JSON.stringify(
-        buildEngineFile(
-          { phase: "complete", updatedAt: FRESH() },
-          allCompleted(),
-        ),
-      ),
-    );
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g).toBeDefined();
-    expect(g.phase).toBe("complete");
-  });
-
-  it("projects the raw updatedAtMs alongside the ISO timestamp", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    const updatedAt = FRESH();
-    writeEngineFile("engine-updatedatms.json", JSON.stringify(buildEngineFile({ updatedAt })));
-
-    const [g] = readEngineGraphs(stateDir());
-    expect(g.updatedAtMs).toBe(updatedAt);
-    expect(g.updatedAt).toBe(new Date(updatedAt).toISOString());
-  });
-
-  it("excludes stale terminal graphs while keeping fresh and live siblings", () => {
-    mkdirSync(stateDir(), { recursive: true });
-    writeEngineFile(
-      "engine-stale-complete-a.json",
-      JSON.stringify(
-        buildEngineFile(
-          { graphId: "graph-stale", phase: "complete", updatedAt: STALE() },
-          allCompleted(),
-        ),
-      ),
-    );
-    writeEngineFile(
-      "engine-fresh-executing-b.json",
-      JSON.stringify(buildEngineFile({ graphId: "graph-fresh", updatedAt: FRESH() })),
-    );
-    writeEngineFile(
-      "engine-stale-running-c.json",
-      JSON.stringify(
-        buildEngineFile(
-          { graphId: "graph-running", phase: "complete", updatedAt: STALE() },
-          { n1: { status: "running" } },
-        ),
-      ),
-    );
-
-    const graphs = readEngineGraphs(stateDir());
-    expect(graphs.map((g) => g.graphId).sort()).toEqual(["graph-fresh", "graph-running"]);
+  it("keeps multiple declarations and unstarted plans visible", () => {
+    const application = open();
+    application.tools.graph_declare({ declaration: declaration("one") });
+    application.tools.graph_declare({ declaration: declaration("two") });
+    const snapshots = readEngineGraphs(stateDir());
+    expect(snapshots.map((item) => item.graphId).sort()).toEqual(["one", "two"]);
+    expect(snapshots.every((item) => item.phase === "idle" && item.graph?.phase === "ready")).toBe(true);
+    expect(snapshots.every((item) => item.nodes[0]?.dispatchTaskId === undefined)).toBe(true);
   });
 });

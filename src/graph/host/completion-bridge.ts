@@ -1,76 +1,3 @@
-/**
- * Graph Execution Engine v2 — the host's dispatch completion bridge
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE PROTOCOL-AWARE BRIDGE THE RUN PATH WAS WAITING FOR. `settleNatural`
- * (`src/graph/outcome/runtime.ts`) settles one attempt from its COMPLETION
- * FACT — no outcome, no payload, no evidence list: the outcome is the plan's
- * pinned authorization, and the settlement runs through the SAME acceptance
- * core, the same declared gates, the same reducer and the same atomic
- * receipt/event/state/effects transaction as a worker's own submission. What
- * was missing was the host side that watches a dispatched attempt reach its end
- * and hands that fact over. This is it.
- *
- * WHAT THE BRIDGE DOES, IN ORDER. The host's dispatch adapter
- * (`dispatch-host.ts`) reports every binding it creates; when the platform
- * says the attempt finished, `complete()`
- *
- * 1. resolves the BINDING the host recorded at delivery (graph, node, attempt)
- *    — a completion for an attempt this host never dispatched is REPORTED, not
- *    guessed: the attempt id is never parsed and the node's current attempt is
- *    never substituted;
- * 2. resolves the attempt's credential from {@link HostCredentialVault} — the
- *    one place it exists, since the state body records only its digest. A
- *    credential the vault cannot produce is REPORTED and the attempt is NOT
- *    settled with a fabricated one;
- * 3. calls `settleNatural({ nodeId, attemptId, credential })` and returns its
- *    result VERBATIM. The bridge adds no policy, no retry and no reinterpretation:
- *    an unauthorized node, a declared gate that did not pass and a settlement
- *    that was already committed are the runtime's own answers, and its caller
- *    decides what to do with them.
- *
- * IT BINDS FROM DURABLE FACTS, NOT FROM ITS OWN MEMORY (P2 item 6). The map
- * below is a CACHE of what this process delivered; the host's own record of the
- * delivery — the one store's execution row, keyed by the stable effect id
- * derived from the attempt — is the authority, reached through
- * {@link HostCompletionBindingSource}. A completion observed after the process
- * that dispatched the attempt exited therefore resolves the SAME (graph, node,
- * attempt) binding the delivery recorded instead of reporting UNBOUND, and the
- * attempt id is still never parsed and the node's current attempt is still
- * never substituted.
- *
- * AND IT AUTHENTICATES WITHOUT THE WORKER'S BEARER WHEN IT CAN (P2 items 6/7).
- * §3.3: a host completion fact is authenticated SEPARATELY from a worker
- * submission, and a trusted completion must not depend on re-obtaining the
- * bearer value the worker prompt carried. When the host's durable record names
- * the CONFIRMED execution of the attempt
- * ({@link HostCompletionExecutionSource}), the bridge settles through the
- * runtime's host-completion channel with that fact; the bearer channel
- * (`settleNatural`) remains for an attempt whose credential the vault still
- * holds. A completion that neither proof covers is reported
- * `unauthenticated` — never guessed, and never settled with an invented
- * credential or against an execution the host did not confirm.
- *
- * THE CREDENTIAL IS DELIVERED, NEVER REPORTED. It travels from the vault into
- * the settlement envelope — the same channel the runtime requires — and appears
- * in no field of the report this bridge returns. The report names the attempt.
- *
- * IDEMPOTENT BY THE LEDGER, NOT BY A FLAG HERE. A completion observed twice
- * (a platform that re-announces a terminal event) derives the same
- * content-addressed submission key and the ledger REPLAYS its receipt: no second
- * settlement, no second accepted event, no state advance. The bridge therefore
- * keeps its bindings and answers the replay rather than dropping the second
- * observation.
- *
- * A FAILED ATTEMPT IS NOT A COMPLETION. This bridge settles an attempt that
- * REACHED the outcome its plan authorized. A worker that errored or was
- * cancelled has no pinned completion, and inventing one would fabricate a
- * result the run never produced; the host's failure policy (retry, cancel,
- * report) stays outside the outcome protocol.
- */
-
 import type {
   OutcomeNaturalSettlementResult,
   OutcomeRuntimeRefusal,
@@ -208,34 +135,34 @@ export interface HostCompletionAttempt {
  */
 export type HostCompletionSettlement =
   | {
-      readonly kind: "refused";
-      readonly refusals: readonly OutcomeRuntimeRefusal[];
-    }
+    readonly kind: "refused";
+    readonly refusals: readonly OutcomeRuntimeRefusal[];
+  }
   | {
-      readonly kind: "accepted";
-      readonly completion: NaturalCompletionSettlement;
-      readonly decision: AcceptanceDecision;
-      readonly receipt: ReceiptRecord;
-      readonly state: OutcomeGraphState;
-      readonly replayed: boolean;
-      readonly stop?: OutcomeStop;
-      readonly progress?: readonly ProgressReport[];
-    }
+    readonly kind: "accepted";
+    readonly completion: NaturalCompletionSettlement;
+    readonly decision: AcceptanceDecision;
+    readonly receipt: ReceiptRecord;
+    readonly state: OutcomeGraphState;
+    readonly replayed: boolean;
+    readonly stop?: OutcomeStop;
+    readonly progress?: readonly ProgressReport[];
+  }
   | {
-      readonly kind: "rejected";
-      readonly completion: NaturalCompletionSettlement;
-      readonly decision: AcceptanceDecision;
-      readonly receipt: ReceiptRecord;
-    }
+    readonly kind: "rejected";
+    readonly completion: NaturalCompletionSettlement;
+    readonly decision: AcceptanceDecision;
+    readonly receipt: ReceiptRecord;
+  }
   | {
-      readonly kind: "not-committed";
-      readonly completion: NaturalCompletionSettlement;
-      readonly decision: AcceptanceDecision;
-      readonly verdict: Extract<
-        OutcomeNaturalSettlementResult,
-        { kind: "not-committed" }
-      >["verdict"];
-    };
+    readonly kind: "not-committed";
+    readonly completion: NaturalCompletionSettlement;
+    readonly decision: AcceptanceDecision;
+    readonly verdict: Extract<
+      OutcomeNaturalSettlementResult,
+      { kind: "not-committed" }
+    >["verdict"];
+  };
 
 /**
  * What one completion produced.
@@ -246,34 +173,34 @@ export type HostCompletionSettlement =
  */
 export type HostCompletionReport =
   | {
-      readonly kind: "settled";
-      readonly attemptId: string;
-      readonly nodeId: string;
-      readonly settlement: HostCompletionSettlement;
-    }
+    readonly kind: "settled";
+    readonly attemptId: string;
+    readonly nodeId: string;
+    readonly settlement: HostCompletionSettlement;
+  }
   | {
-      /**
-       * No delivery bound this attempt in this host, so there is no node to
-       * settle and no reason to trust a parsed attempt id. Reported with the
-       * reason; nothing was written.
-       */
-      readonly kind: "unbound";
-      readonly attemptId: string;
-      readonly reason: string;
-    }
+    /**
+     * No delivery bound this attempt in this host, so there is no node to
+     * settle and no reason to trust a parsed attempt id. Reported with the
+     * reason; nothing was written.
+     */
+    readonly kind: "unbound";
+    readonly attemptId: string;
+    readonly reason: string;
+  }
   | {
-      /**
-       * The attempt is bound, but NOTHING authenticates the completion: the
-       * vault cannot produce the credential it was issued (never held, pruned,
-       * or a memory-only vault that restarted) AND the host holds no confirmed
-       * execution for it. Reported with the reason; nothing was written, and no
-       * credential, execution or outcome is invented to make it settle.
-       */
-      readonly kind: "unauthenticated";
-      readonly attemptId: string;
-      readonly nodeId: string;
-      readonly reason: string;
-    };
+    /**
+     * The attempt is bound, but NOTHING authenticates the completion: the
+     * vault cannot produce the credential it was issued (never held, pruned,
+     * or a memory-only vault that restarted) AND the host holds no confirmed
+     * execution for it. Reported with the reason; nothing was written, and no
+     * credential, execution or outcome is invented to make it settle.
+     */
+    readonly kind: "unauthenticated";
+    readonly attemptId: string;
+    readonly nodeId: string;
+    readonly reason: string;
+  };
 
 // ── The bridge ──────────────────────────────────────────────────────────────
 
@@ -460,19 +387,19 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
     runtime: HostCompletionRuntime,
   ):
     | {
-        readonly kind: "host-execution";
-        readonly execution: HostCompletionExecutionRecord;
-        /**
-         * The runtime's host-completion entry, bound to ITS runtime instance.
-         * Binding it here is what lets the caller invoke it without a
-         * non-null assertion: the method needs its own `this`, and a detached
-         * reference would silently lose it.
-         */
-        readonly settle: (
-          fact: unknown,
-          now: number,
-        ) => OutcomeNaturalSettlementResult;
-      }
+      readonly kind: "host-execution";
+      readonly execution: HostCompletionExecutionRecord;
+      /**
+       * The runtime's host-completion entry, bound to ITS runtime instance.
+       * Binding it here is what lets the caller invoke it without a
+       * non-null assertion: the method needs its own `this`, and a detached
+       * reference would silently lose it.
+       */
+      readonly settle: (
+        fact: unknown,
+        now: number,
+      ) => OutcomeNaturalSettlementResult;
+    }
     | { readonly kind: "none"; readonly reason: string } {
     const settleHostCompletion = runtime.settleHostCompletion;
     if (settleHostCompletion === undefined) {

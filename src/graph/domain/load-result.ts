@@ -1,55 +1,8 @@
 /**
- * Graph domain — the load-result vocabulary for authoritative records
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The ONE vocabulary a domain load answers with (P1 item 6): `absent`, `valid`,
- * `corrupt`, `unsupported`, and — only when a REAL conversion capability is
- * registered — `migration-required`. It is the neutral counterpart of the
- * loader's existing `EngineLoadResult`
- * (`src/graph/persistence/engine-persistence.ts`), which keeps its
- * EngineState-specific payloads; the KIND NAMES, the dimension vocabulary and the
- * gate ORDERING are the ones that loader and
- * `src/graph/persistence/storage-format.ts` already define, so the converged
- * store reuses the design rather than inventing a parallel loading scheme.
- *
- * REUSED DESIGN, deliberately:
- * - A verdict CARRIES the capability it matched. A bare format number is never
- *   support, exactly as `storage-format.ts` states it: `migration-required`
- *   names the registered conversion itself, and {@link migrationRequired} is the
- *   only constructor — with the capability parameter at its default (`never`)
- *   the branch is uninhabited, so "this build cannot read the format" can only
- *   be answered as `unsupported`, never as a promised migration.
- * - The gates stay ORDERED: a body that is a well-formed member of a recognized
- *   source format is a MISSING CAPABILITY (`migration-required`, and only after
- *   the migration's own source check), while a body that violates its own format
- *   is `corrupt`. The two never collapse.
- * - `unsupported` is a well-formed discriminator with no installed capability:
- *   it needs compatible code, not a repair, and never an inferred default.
- *
- * ONLY `absent` MAY BE INITIALIZED. `corrupt`, `unsupported` and
- * `migration-required` block; a load never turns any of them into a fresh run
- * (§P1.6). An EXISTING zero-byte authoritative file is a corrupt storage record,
- * never an absent one — this vocabulary has no "new store" verdict for a file
- * that is already there.
- *
- * WHY NO DECODER/MIGRATION SHAPE IS DECLARED HERE. `StorageFormatMigration`
- * already defines the validate-then-convert contract, and declaring a domain twin
- * would be exactly the duplicate definition this work package removes; importing
- * the persistence module into the domain would invert the dependency instead. The
- * capability is therefore a TYPE PARAMETER: the storage layer instantiates
- * `DomainLoadResult<Value, StorageFormatMigration>` (or its own registered
- * capability) and mints the verdict through {@link migrationRequired}.
- *
- * Dependency leaf: this module imports nothing — not even a type.
- */
-
-/**
  * The version axis a non-executable load result is attributed to.
  *
  * The same four names the loader already uses
- * (`EngineLoadDimension`, `src/graph/persistence/engine-persistence.ts`):
+ * (`EngineLoadDimension`, `src/graph/persistence/paths.ts`):
  * `storage` for the on-disk layout, `execution` for the execution-protocol
  * identity, `contract` for a persisted plan binding or compiled-plan record
  * that fails verification, and `capability` for a missing host/acceptance
@@ -87,23 +40,23 @@ export type DomainLoadResult<Value, Migration = never> =
   | { readonly kind: "valid"; readonly value: Value }
   | { readonly kind: "absent" }
   | {
-      readonly kind: "corrupt";
-      readonly dimension: DomainLoadDimension;
-      readonly reason: string;
-    }
+    readonly kind: "corrupt";
+    readonly dimension: DomainLoadDimension;
+    readonly reason: string;
+  }
   | {
-      readonly kind: "unsupported";
-      readonly dimension: DomainLoadDimension;
-      readonly detail: string;
-    }
+    readonly kind: "unsupported";
+    readonly dimension: DomainLoadDimension;
+    readonly detail: string;
+  }
   | {
-      readonly kind: "migration-required";
-      readonly dimension: "storage";
-      readonly from: number;
-      readonly to: number;
-      /** The registered conversion capability — never a bare format number. */
-      readonly migration: Migration;
-    };
+    readonly kind: "migration-required";
+    readonly dimension: "storage";
+    readonly from: number;
+    readonly to: number;
+    /** The registered conversion capability — never a bare format number. */
+    readonly migration: Migration;
+  };
 
 /**
  * The ONE constructor of the `migration-required` verdict.

@@ -1,120 +1,18 @@
-/**
- * Graph Execution Engine v2 — the SHIPPED host assembly for the outcome run path
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * WIRES THE HOST CAPABILITY LAYER (`src/graph/host/**`) INTO ONE OBJECT a
- * shipping host injects into the outcome tool face and the startup recovery
- * sweep:
- *
- * - the protected credential vault (D7) — the only place an attempt credential
- *   exists once it is minted, since the ledger keeps its digest;
- * - the durable execution index plus the dispatch adapter (D8) — create at most
- *   once per stable effect id, and answer `created` / `absent` / `unknown`
- *   about an effect a restart finds in the ledger;
- * - the invocation-identity holder (D9) — the host's own attribution of "which
- *   invocation is running now", moved per tool call and per first execution,
- *   captured on each attempt's binding and re-entered for the duration of that
- *   attempt's completion settlement (see {@link OutcomeHost.complete});
- * - the completion bridge — an attempt the platform reports finished is settled
- *   through the runtime's own completion channels, never through a second
- *   ingress;
- * - the DURABLE completion binding and the platform re-read (P2 item 6) — a
- *   completion that arrives after the process which dispatched the attempt
- *   exited is resolved from the host's own record (the ONE store's execution row
- *   plus the dispatch effect that names the node), and an execution that already
- *   reached its end while nobody was listening is READ from the platform and
- *   applied idempotently instead of waiting for a callback that will never come.
- *   An execution the platform reports STILL RUNNING is not settled and not
- *   forgotten either: the sweep names it (with the platform's own execution id)
- *   in `awaitingCompletion`, the inventory {@link
- *   OutcomeHost.retainAwaitingCompletions} CONSUMES after the sweep —
- *   re-subscribing through the entry's platform watch port where the platform
- *   supports it, re-querying on the same recovery window where it does not, and
- *   reporting every execution it could not keep observing;
- * - THE PLATFORM QUERY PORT (P2 item 5, F2) — the create's outcome may be
- *   unknown, but the platform can be asked about the SAME stable effect id and
- *   can name the execution it created. The host joins that answer with its own
- *   registry, binds the name when this process still owns the claim, keeps it as
- *   a re-derivable reading otherwise, and never turns "I cannot see" into
- *   `absent` — a false `absent` is what would license a second execution;
- * - the host's COMPLETION AUTHORITY (P2 item 7) — the confirmed execution the
- *   host's durable record carries (or the execution the platform named for the
- *   same stable effect id) is what authenticates a completion the worker's
- *   bearer value can no longer vouch for, and the run path refuses a fact it
- *   cannot corroborate.
- *
- * AND THE CACHED RUN PATH IS VALIDATED BEFORE IT IS USED (G14). A graph's
- * runtime is opened once and kept, so the durable definition row is re-read on
- * every acquisition: a row that stopped reading, or that no longer names the
- * same content, refuses the graph BY NAME — which is what keeps the boot sweep,
- * the audit and the status query answering the same thing about the same store.
- * A store the format gate refuses is reported as a BLOCKED sweep, never as an
- * empty one.
- *
- * WHETHER THE HOST DECLARES D9 IS A DECISION, NOT A DEFAULT. The identity
- * capability is an assertion the host must be able to substantiate: the
- * submission that settles an attempt has to be attributed to the same
- * invocation that armed it. {@link OutcomeHostOptions.declareInvocationIdentity}
- * is that decision, and the shipped entries choose NOT to declare it because a
- * dispatched worker is a separate agent session whose own tool calls are
- * attributed to the worker, never to the declaring invocation.
- *
- * WHAT THE SHIPPED HOSTS DECLARE INSTEAD. Declining D9 is not declining to
- * check anything: the same entries inject {@link OutcomeHost.workerIdentity},
- * the binding of an attempt to the CHILD SESSION the platform created for its
- * worker, and the submission ingress refuses a call that arrives from any other
- * session ({@link OutcomeHostOptions.workerSessionOf} says where the session
- * comes from). The two capabilities name two different subjects — the declaring
- * controller and the actual worker — and a host declares the one it can
- * substantiate.
- *
- * AND THE FACE A WORKER'S OWN CALLS ARE JUDGED BY IS BOUND TOO (A21 / §3.3).
- * The worker binding answers "which attempt is this submission for"; the same
- * fact answers the REVERSE question a plain tool call carries — "is this
- * session a dispatched worker?" — and {@link OutcomeHost.bindTools} then
- * refuses every graph tool but the delivery channel
- * ({@link WORKER_GRANTED_GRAPH_TOOLS}) for that session, BEFORE the tool body
- * runs. Declaring or mutating a graph definition, reading the authoritative
- * store and controlling another attempt stay the declaring/operating
- * principal's capabilities, and the refusal is derived from the host's own
- * durable execution row — not from a path, a permission bit or an argument the
- * caller chose. WHAT IT IS NOT: an OS/account/container boundary. A worker on
- * the same account can still open the store FILE, and the shipped dsh entry
- * registers its graph face GLOBALLY (dsh has no rolebox-owned per-worker tool
- * scope), so on that host the boundary is the per-call refusal rather than a
- * narrowed schema — reported, never claimed as more.
- *
- * WHO RUNS THE FIRST DISPATCH. A declared graph is persisted by
- * `graph_declare` and dispatched by nobody in the tool layer. The host calls
- * {@link OutcomeHost.startDeclaredGraph} from its declaration seam: that opens
- * the graph's saved plan, continues (or starts) it through the outcome
- * runtime's own `resume`, and closes the same crash windows a restart sweep
- * closes. {@link OutcomeHost.recoverDeclaredGraphs} is the same operation over
- * every protocol-2 record in the store, for a host's boot path.
- *
- * EVERY DISPATCH WINDOW NAMES THE GRAPH'S DECLARING INVOCATION. A platform can
- * only start a worker under the invocation that owns it, and only ONE of the
- * windows that arm a dispatch is the declaring call: a successor is armed by an
- * acceptance (a worker's submission or an observed completion) and a boot sweep
- * re-arms what a dead process left pending, both with no tool call in effect.
- * The host therefore keeps the declaring invocation PER GRAPH — in memory and,
- * with `durability: "file"`, in its own store root
- * (`invocation-origins.ts`) — and hands it to the delivery seam on every
- * create, so the entry attempt and every successor run under the same parent
- * instead of the window's ambient attribution.
- *
- * WHAT THIS MODULE DELIBERATELY DOES NOT DO. It never builds a legacy engine,
- * never imports one, and never registers a legacy tool: a declared graph has no
- * legacy runtime instance. Its delivery seam is injected by the host
- * ({@link HostDispatchDelivery}) so the platform-specific way to start a worker
- * stays in the platform adapter.
- */
+import { WORKER_GRANTED_GRAPH_TOOLS, bindOutcomeToolInvocation, reportControlContinuation } from "./tool-binding.ts";
+import type { OutcomeWorkerPrincipal } from "./tool-binding.ts";
+import { applyGraphControl, type GraphControlResult } from "../control/application.ts";
+export {
+  WORKER_TOOL_FORBIDDEN_CODE,
+  WORKER_GRANTED_GRAPH_TOOLS,
+  bindOutcomeToolInvocation,
+  withCancelDelivery,
+} from "./tool-binding.ts";
+export type { OutcomeWorkerPrincipal, OutcomeWorkerToolBoundary, OutcomeToolAttribution } from "./tool-binding.ts";
+
 
 import { join } from "node:path";
 
-import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
+import type { CanonicalToolDef } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { logWarn } from "../log-warn.ts";
 import {
@@ -161,10 +59,8 @@ import type {
 } from "./dispatch-host.ts";
 import type { HostDispatchExecution } from "./execution-index.ts";
 import type {
-  OutcomeDispatchEffectKey,
-  OutcomeExecutionIdentity,
-  OutcomeExecutionProbe,
-  OutcomeExecutionQuery,
+  OutcomeDispatchEffectKey, OutcomeExecutionProbe,
+  OutcomeExecutionQuery
 } from "../outcome/dispatch-effects.ts";
 import {
   cancelEffectIdOf,
@@ -202,8 +98,7 @@ import { readStoreDirectory } from "../store/format.ts";
 import {
   HostDispatchCompletionBridge,
   type HostCompletionAttempt,
-  type HostCompletionReport,
-  type HostCompletionRuntime,
+  type HostCompletionReport
 } from "./completion-bridge.ts";
 import {
   createHostInvocationHolder,
@@ -1057,35 +952,7 @@ export class OutcomeHost {
   /**
    * Settle the attempt the host observed finishing, through the graph's own
    * saved plan. The report is the bridge's — see `completion-bridge.ts`.
-   *
-   * THE HOST COMPLETION AUTHORITY HAS ITS OWN SOURCE, AND IT IS NOT THE
-   * DECLARING PRINCIPAL. The completion is observed later, out of band, long
-   * after the declaring call returned; the host settles it as the authority
-   * that created the execution, never by impersonating the invocation that
-   * armed the attempt and never by asking the worker for the bearer value it
-   * was handed. Which of the two modes applies is decided by what the host
-   * DECLARED, exactly as it is on the submission path:
-   *
-   * - WORKER MODE (`declareInvocationIdentity: false`, the shipped hosts): the
-   *   completion is authenticated against the host's OWN DURABLE execution
-   *   record — the row the platform's confirmation wrote, naming the real
-   *   execution id. An attempt with no such row is reported UNBOUND and nothing
-   *   is written, because an in-process delivery observation without a
-   *   confirmed host execution is not a completion fact. The holder is NOT
-   *   touched: the declaring invocation is attribution, and re-entering it
-   *   would make the authority pretend to be a principal it is not.
-   * - D9 MODE (`declareInvocationIdentity: true`): the host declared that the
-   *   dispatch and the settlement share one invocation, so it re-enters the
-   *   identity the delivery captured (or the graph's own declaring invocation)
-   *   for exactly this call and restores the ambient attribution afterwards.
-   *   That window is also what arms the attempt's SUCCESSOR, so the dispatch it
-   *   triggers names the same parent the entry attempt ran under.
-   *
-   * The bearer value is never recovered from anywhere but the host's own vault
-   * (the bridge's contract), and this method adds no second place it could come
-   * from. An attempt this host never dispatched stays unbound and is reported by
-   * the bridge.
-   */
+ */
   async complete(
     graphId: string,
     attemptId: string,
@@ -1295,11 +1162,11 @@ export class OutcomeHost {
     } catch (error) {
       logWarn(
         "outcome-host: continuing graph " +
-          JSON.stringify(graphId) +
-          " after an applied control command threw (" +
-          describeWatchFailure(error) +
-          ") — the durable control fact and effect stay visible, and the next boot " +
-          "sweep is the next window that continues them",
+        JSON.stringify(graphId) +
+        " after an applied control command threw (" +
+        describeWatchFailure(error) +
+        ") — the durable control fact and effect stay visible, and the next boot " +
+        "sweep is the next window that continues them",
       );
     }
   }
@@ -1334,11 +1201,11 @@ export class OutcomeHost {
       invocation.sessionId === undefined || invocation.sessionId.length === 0
         ? undefined
         : Object.freeze({
-            sessionId: invocation.sessionId,
-            ...(invocation.agent === undefined || invocation.agent.length === 0
-              ? {}
-              : { agent: invocation.agent }),
-          });
+          sessionId: invocation.sessionId,
+          ...(invocation.agent === undefined || invocation.agent.length === 0
+            ? {}
+            : { agent: invocation.agent }),
+        });
     const probes: OutcomeExecutionProbe[] = [];
     for (const effect of effects) {
       if (effect.kind !== "dispatch") continue;
@@ -1478,10 +1345,10 @@ export class OutcomeHost {
           // previous run is untouched and still readable by its own id.
           reexecuted.push(
             graphId +
-              ":" +
-              result.reexecuted.fromRunId +
-              "->" +
-              result.reexecuted.runId,
+            ":" +
+            result.reexecuted.fromRunId +
+            "->" +
+            result.reexecuted.runId,
           );
         } else {
           resumed.push(graphId + ":" + result.state.phase);
@@ -1589,30 +1456,12 @@ export class OutcomeHost {
           }
           const observation = this.observeExecutionOf(execution);
           if (observation.kind === "failed") {
-            // THE EXECUTION ENDED WITHOUT REACHING ITS OUTCOME (plan §3.4): a
-            // failed/cancelled/timed-out run is NOT a completion, and settling
-            // one as the plan's pinned outcome would fabricate a result the run
-            // never produced. The durable failure write is P3's command, so the
-            // attempt is reported unsettled instead — never silently stranded,
-            // and never settled on a fabricated success.
-            effectRefusals.push(
-              Object.freeze({
-                graphId,
-                code: "completion-unsettled" as const,
-                path: "$.executionId",
-                message:
-                  "outcome-host: the platform reports host execution " +
-                  JSON.stringify(execution.executionId) +
-                  " of node " +
-                  JSON.stringify(node.nodeId) +
-                  " attempt " +
-                  JSON.stringify(attemptId) +
-                  " ENDED without reaching its authorized outcome (" +
-                  observation.reason +
-                  ") — it is NOT settled as a completion, and the durable failure " +
-                  "decision belongs to the control path",
-              }),
-            );
+            const failure = await this.failObservedExecution(graphId, node.nodeId, attemptId);
+            if (failure?.kind === "applied") controlled.push(graphId + ":failure");
+            else effectRefusals.push({
+              graphId, code: "completion-unsettled", path: "$.executionId",
+              message: "The failed execution has no confirmed binding for a durable failure decision"
+            });
             continue;
           }
           if (observation.kind === "running") {
@@ -1692,9 +1541,9 @@ export class OutcomeHost {
               ? settlement.kind + ": " + settlement.reason
               : settlement.settlement.kind === "refused"
                 ? "the settlement was refused: " +
-                  settlement.settlement.refusals
-                    .map((refusal) => refusal.code)
-                    .join(",")
+                settlement.settlement.refusals
+                  .map((refusal) => refusal.code)
+                  .join(",")
                 : "the settlement did not run";
           effectRefusals.push(
             Object.freeze({
@@ -1721,8 +1570,8 @@ export class OutcomeHost {
     if (inventory.blocked !== undefined) {
       logWarn(
         "outcome-host: declared-graph sweep — the workspace store could not be read (" +
-          inventory.blocked +
-          "), so there was NO inventory to visit; this is a BLOCKED sweep, not an empty one",
+        inventory.blocked +
+        "), so there was NO inventory to visit; this is a BLOCKED sweep, not an empty one",
       );
     }
     if (
@@ -1739,47 +1588,47 @@ export class OutcomeHost {
     ) {
       logWarn(
         "outcome-host: declared-graph sweep — started=[" +
-          started.join(", ") +
-          "] resumed=[" +
-          resumed.join(", ") +
-          "] refused=[" +
-          refused.join(", ") +
-          "] effect-refusals=[" +
-          effectRefusals
-            .map((refusal) => refusal.graphId + ":" + refusal.code)
-            .join(", ") +
-          "] divergences=[" +
-          divergences
-            .map(
-              (divergence) =>
-                divergence.graphId +
-                ":" +
-                divergence.effectId +
-                ":" +
-                divergence.local +
-                "->" +
-                divergence.host,
-            )
-            .join(", ") +
-          "] completed=[" +
-          completed.join(", ") +
-          "] awaiting=[" +
-          awaiting
-            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status)
-            .join(", ") +
-          "] controlled=[" +
-          controlled.join(", ") +
-          "] cancellations=[" +
-          cancellations
-            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
-            .join(", ") +
-          "] cancel-blocked=[" +
-          cancelBlocked.join(", ") +
-          "] unconfirmed=[" +
-          unconfirmed
-            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
-            .join(", ") +
-          "]",
+        started.join(", ") +
+        "] resumed=[" +
+        resumed.join(", ") +
+        "] refused=[" +
+        refused.join(", ") +
+        "] effect-refusals=[" +
+        effectRefusals
+          .map((refusal) => refusal.graphId + ":" + refusal.code)
+          .join(", ") +
+        "] divergences=[" +
+        divergences
+          .map(
+            (divergence) =>
+              divergence.graphId +
+              ":" +
+              divergence.effectId +
+              ":" +
+              divergence.local +
+              "->" +
+              divergence.host,
+          )
+          .join(", ") +
+        "] completed=[" +
+        completed.join(", ") +
+        "] awaiting=[" +
+        awaiting
+          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status)
+          .join(", ") +
+        "] controlled=[" +
+        controlled.join(", ") +
+        "] cancellations=[" +
+        cancellations
+          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
+          .join(", ") +
+        "] cancel-blocked=[" +
+        cancelBlocked.join(", ") +
+        "] unconfirmed=[" +
+        unconfirmed
+          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
+          .join(", ") +
+        "]",
       );
     }
     return Object.freeze({
@@ -1885,17 +1734,17 @@ export class OutcomeHost {
     if (unwatched.length > 0) {
       logWarn(
         "outcome-host: awaiting-completion re-subscribe — " +
-          String(watched.length) +
-          " watched, " +
-          String(settled.length) +
-          " settled from a terminal read, " +
-          String(unwatched.length) +
-          " WITHOUT an established observation ([" +
-          unwatched
-            .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.reason)
-            .join(", ") +
-          "]) — these executions stay named in the sweep's awaiting inventory and the next " +
-          "recovery window is the next time anything looks at them",
+        String(watched.length) +
+        " watched, " +
+        String(settled.length) +
+        " settled from a terminal read, " +
+        String(unwatched.length) +
+        " WITHOUT an established observation ([" +
+        unwatched
+          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.reason)
+          .join(", ") +
+        "]) — these executions stay named in the sweep's awaiting inventory and the next " +
+        "recovery window is the next time anything looks at them",
       );
     }
     return Object.freeze({
@@ -1907,38 +1756,7 @@ export class OutcomeHost {
 
   /**
    * DELIVER THIS RUN'S TRUSTED STOPPING INTENTS TO THE PLATFORM (P3 cancel, P3 budget-stop).
-   *
-   * THE REPLAY HALF OF A STOPPING DECISION. The trusted command is already durable when this runs:
-   * the control application service committed one `"cancel"` — or `"budget-stop"` — decision per
-   * in-flight attempt plus the run's control fact, and the intent therefore outlives the process that
-   * decided it. A budget stop is the same KIND of fact, so it is delivered by this same path and the
-   * run's control fact keeps the command that actually stopped it: a later reader still learns it was
-   * a budget stop rather than an operator cancel. This method
-   * turns those intents into cancel EFFECTS and asks the platform to stop the executions they name,
-   * in this order — and the order is the contract:
-   *
-   * 1. RECORD THE INTENT as a `pending` cancel effect, in its own committed transaction, BEFORE the
-   *    platform is asked anything. A process that dies between the decision and the platform call
-   *    resumes with that row visible, and the next window (a live control command, the boot sweep, a
-   *    later call) hands it over.
-   * 2. MOVE IT TO `started` — the request transition, and the durable-state probe: an already
-   *    `started` row is a request the platform has not confirmed and is asked AGAIN (a cancel is
-   *    idempotent on both shipped platforms); a `done` row is a CONFIRMED cancellation and the
-   *    platform is not asked again; a terminal row this build never writes is reported by name and
-   *    is NOT read as a confirmation.
-   * 3. ASK THE PLATFORM, when this host has a cancel port at all. A port that throws, and a host
-   *    with no port, substantiate nothing.
-   * 4. RECORD `done` ONLY when the platform answered `confirmed`. Every other answer leaves the row
-   *    `started` (or `pending`), so the execution stays in the resume set and stays VISIBLE.
-   *
-   * WHAT THIS METHOD NEVER DOES. It never writes an accepted event, a receipt or an accepted result:
-   * a cancellation is CONTROL (§3.4), not an outcome, and the attempts it names are not settled by
-   * it. It never rewinds an effect. It never reports an unconfirmed cancel as cancelled — the
-   * entry's `state` is `confirmed` only where the platform substantiated it.
-   *
-   * TOTAL: an unreadable run path answers a report with `blocked` instead of throwing, and one
-   * attempt's failure never stops another's delivery.
-   */
+ */
   async deliverCancelIntents(
     graphId: string,
     options: OutcomeCancelDeliveryOptions = {},
@@ -2011,9 +1829,9 @@ export class OutcomeHost {
               execution,
               "unsupported",
               "this host installs no platform cancel port " +
-                "(OutcomeHostOptions.cancelExecution), so the cancel intent was NOT handed to " +
-                "any platform and NO cancel effect was recorded: the execution stays visible " +
-                "and is not reported as cancelled",
+              "(OutcomeHostOptions.cancelExecution), so the cancel intent was NOT handed to " +
+              "any platform and NO cancel effect was recorded: the execution stays visible " +
+              "and is not reported as cancelled",
             ),
           }),
         );
@@ -2043,9 +1861,9 @@ export class OutcomeHost {
               execution,
               "blocked",
               "the durable cancel intent could NOT be recorded, so nothing was handed to the " +
-                "platform for this attempt and no cancellation was substantiated (" +
-                errorText(error) +
-                ")",
+              "platform for this attempt and no cancellation was substantiated (" +
+              errorText(error) +
+              ")",
             ),
           }),
         );
@@ -2068,9 +1886,9 @@ export class OutcomeHost {
               execution,
               "blocked",
               "the cancel intent could not be moved to its request step, so the platform was " +
-                "not asked and nothing was substantiated (" +
-                errorText(error) +
-                ")",
+              "not asked and nothing was substantiated (" +
+              errorText(error) +
+              ")",
             ),
           }),
         );
@@ -2102,15 +1920,15 @@ export class OutcomeHost {
             item.execution,
             "confirmed",
             "the durable cancel effect is done: a previous delivery recorded the platform's " +
-              "confirmation for this attempt, so the platform was not asked again and the fact " +
-              "was not rewound",
+            "confirmation for this attempt, so the platform was not asked again and the fact " +
+            "was not rewound",
           );
         }
         const foreign =
           item.step?.kind === "unexpected-terminal"
             ? " (the durable cancel effect is terminal '" +
-              item.step.status +
-              "', a state this build never writes for a cancel — it is NOT read as a confirmation)"
+            item.step.status +
+            "', a state this build never writes for a cancel — it is NOT read as a confirmation)"
             : "";
         const invocation = this.originOf(graphId);
         const probe: OutcomeExecutionCancelProbe = Object.freeze({
@@ -2142,11 +1960,11 @@ export class OutcomeHost {
             (answer.kind === "requested"
               ? "the platform was handed the cancel and has NOT confirmed it: "
               : "the platform offers no cancellation surface for this execution: ") +
-              answer.reason +
-              foreign +
-              (answer.kind === "requested"
-                ? "; the execution stays visible and unsettled"
-                : ""),
+            answer.reason +
+            foreign +
+            (answer.kind === "requested"
+              ? "; the execution stays visible and unsettled"
+              : ""),
           );
         }
         let durability = "";
@@ -2203,12 +2021,12 @@ export class OutcomeHost {
     } catch (error) {
       logWarn(
         "outcome-host: the platform completion-watch port threw for execution " +
-          JSON.stringify(entry.executionId) +
-          " of graph " +
-          JSON.stringify(entry.graphId) +
-          " — the execution is reported as unwatched rather than treated as covered (" +
-          describeWatchFailure(error) +
-          ")",
+        JSON.stringify(entry.executionId) +
+        " of graph " +
+        JSON.stringify(entry.graphId) +
+        " — the execution is reported as unwatched rather than treated as covered (" +
+        describeWatchFailure(error) +
+        ")",
       );
       return false;
     }
@@ -2242,19 +2060,24 @@ export class OutcomeHost {
         ...(entry.taskId === undefined ? {} : { taskId: entry.taskId }),
       });
       const observation = this.observeExecutionOf(execution);
+      if (observation.kind === "failed") {
+        await this.failObservedExecution(entry.graphId, entry.nodeId, entry.attemptId);
+        options.onSettled?.(entry.graphId, entry.attemptId);
+        return;
+      }
       if (observation.kind !== "completed") {
         logWarn(
           "outcome-host: the platform announced execution " +
-            JSON.stringify(entry.executionId) +
-            " of graph " +
-            JSON.stringify(entry.graphId) +
-            " attempt " +
-            JSON.stringify(entry.attemptId) +
-            " ended, but the host's own read of that execution does not report a " +
-            "completion [completion-unsettled] (" +
-            describeUnconfirmedAnnouncement(observation) +
-            ") — the attempt stays unsettled and is reported rather than settled on the " +
-            "announcement alone",
+          JSON.stringify(entry.executionId) +
+          " of graph " +
+          JSON.stringify(entry.graphId) +
+          " attempt " +
+          JSON.stringify(entry.attemptId) +
+          " ended, but the host's own read of that execution does not report a " +
+          "completion [completion-unsettled] (" +
+          describeUnconfirmedAnnouncement(observation) +
+          ") — the attempt stays unsettled and is reported rather than settled on the " +
+          "announcement alone",
         );
         return;
       }
@@ -2264,26 +2087,26 @@ export class OutcomeHost {
       }
       logWarn(
         "outcome-host: the platform announced execution " +
-          JSON.stringify(entry.executionId) +
-          " of graph " +
-          JSON.stringify(entry.graphId) +
-          " attempt " +
-          JSON.stringify(entry.attemptId) +
-          " ended; the settlement report is " +
-          report.kind +
-          (report.kind === "settled" ? " (" + report.settlement.kind + ")" : ""),
+        JSON.stringify(entry.executionId) +
+        " of graph " +
+        JSON.stringify(entry.graphId) +
+        " attempt " +
+        JSON.stringify(entry.attemptId) +
+        " ended; the settlement report is " +
+        report.kind +
+        (report.kind === "settled" ? " (" + report.settlement.kind + ")" : ""),
       );
     } catch (error) {
       logWarn(
         "outcome-host: the platform announced execution " +
-          JSON.stringify(entry.executionId) +
-          " of graph " +
-          JSON.stringify(entry.graphId) +
-          " attempt " +
-          JSON.stringify(entry.attemptId) +
-          " ended, but the settlement threw (" +
-          describeWatchFailure(error) +
-          ") — the attempt stays unsettled and is reported",
+        JSON.stringify(entry.executionId) +
+        " of graph " +
+        JSON.stringify(entry.graphId) +
+        " attempt " +
+        JSON.stringify(entry.attemptId) +
+        " ended, but the settlement threw (" +
+        describeWatchFailure(error) +
+        ") — the attempt stays unsettled and is reported",
       );
     }
   }
@@ -2325,6 +2148,24 @@ export class OutcomeHost {
    * refusal shape, never thrown; the durable rows the next window reads are
    * unchanged.
    */
+  async failObservedExecution(graphId: string, nodeId: string, attemptId: string): Promise<GraphControlResult | undefined> {
+    this.assertOpen();
+    const execution = this.executionBindingOf({ graphId, attemptId });
+    if (execution === undefined) return undefined;
+    const observation = this.observeExecutionOf(execution);
+    if (observation.kind !== "failed") return undefined;
+    const store = this.sharedStore ?? GraphStore.openFile(this.storeRoot);
+    try {
+      const result = applyGraphControl(store, {
+        graphId, nodeId, attemptId, command: "failure", reason: observation.reason,
+        principal: { sessionId: "host-execution:" + execution.executionId },
+        hostFailure: execution, at: this.clock(),
+      });
+      await this.deliverCancelIntents(graphId);
+      return result;
+    } finally { if (store !== this.sharedStore) store.close(); }
+  }
+
   async recordBudgetUsage(
     graphId: string,
     report: OutcomeBudgetUsageReport,
@@ -2441,13 +2282,13 @@ export class OutcomeHost {
     this.executions.release(effect, this.executions.ownerId);
     logWarn(
       "outcome-host: delivery failed for graph " +
-        JSON.stringify(effect.graphId) +
-        " effect " +
-        JSON.stringify(effect.effectId) +
-        " — no execution can be PROVEN absent, so the create right is KEPT (the row stays " +
-        "'creating', every lookup answers 'unknown', and the effect is reported as unresolved " +
-        "rather than re-dispatched): " +
-        reason,
+      JSON.stringify(effect.graphId) +
+      " effect " +
+      JSON.stringify(effect.effectId) +
+      " — no execution can be PROVEN absent, so the create right is KEPT (the row stays " +
+      "'creating', every lookup answers 'unknown', and the effect is reported as unresolved " +
+      "rather than re-dispatched): " +
+      reason,
     );
   }
 
@@ -2464,7 +2305,7 @@ export class OutcomeHost {
             // Closing an already-closed handle is not a host failure.
           }
         },
-        () => {},
+        () => { },
       );
     }
     this.runtimes.clear();
@@ -2625,7 +2466,7 @@ export class OutcomeHost {
    * value, but the same execution row the completion path authenticates
    * against.
    */
-  private workerPrincipalOf(sessionId: string): OutcomeWorkerPrincipal | undefined {
+  workerPrincipalOf(sessionId: string): OutcomeWorkerPrincipal | undefined {
     const remembered = this.workerPrincipals.get(sessionId);
     if (remembered !== undefined) return remembered;
     return this.dispatchedWorkerPrincipalOf(sessionId);
@@ -2796,13 +2637,13 @@ export class OutcomeHost {
     if (reading.kind !== "ok") {
       throw new Error(
         "outcome-host: the stored definition of graph " +
-          JSON.stringify(graphId) +
-          " is no longer readable in " +
-          this.storeRoot +
-          " (" +
-          describeStoredReading(reading) +
-          ") — the run path this process opened for it is STALE, and nothing is started, " +
-          "resumed or settled from a plan the store no longer corroborates",
+        JSON.stringify(graphId) +
+        " is no longer readable in " +
+        this.storeRoot +
+        " (" +
+        describeStoredReading(reading) +
+        ") — the run path this process opened for it is STALE, and nothing is started, " +
+        "resumed or settled from a plan the store no longer corroborates",
       );
     }
     const declared = reading.declared;
@@ -2812,17 +2653,17 @@ export class OutcomeHost {
     ) {
       throw new Error(
         "outcome-host: the stored definition of graph " +
-          JSON.stringify(graphId) +
-          " changed after this process opened its run path (declaration " +
-          JSON.stringify(entry.declarationDigest) +
-          " -> " +
-          JSON.stringify(declared.declarationDigest) +
-          ", plan revision " +
-          JSON.stringify(entry.planRevision) +
-          " -> " +
-          JSON.stringify(declared.plan.planRevision) +
-          ") — a definition a run may be executing is never replaced in place, so the " +
-          "cached run path is refused rather than used",
+        JSON.stringify(graphId) +
+        " changed after this process opened its run path (declaration " +
+        JSON.stringify(entry.declarationDigest) +
+        " -> " +
+        JSON.stringify(declared.declarationDigest) +
+        ", plan revision " +
+        JSON.stringify(entry.planRevision) +
+        " -> " +
+        JSON.stringify(declared.plan.planRevision) +
+        ") — a definition a run may be executing is never replaced in place, so the " +
+        "cached run path is refused rather than used",
       );
     }
   }
@@ -2832,13 +2673,13 @@ export class OutcomeHost {
     if (reading.kind !== "ok") {
       throw new Error(
         "outcome-host: graph " +
-          JSON.stringify(graphId) +
-          " has no readable stored definition in " +
-          this.storeRoot +
-          " (" +
-          describeStoredReading(reading) +
-          ") — a declared graph is dispatched only from its SAVED plan, and the " +
-          "retired per-graph v2 container is never read as one",
+        JSON.stringify(graphId) +
+        " has no readable stored definition in " +
+        this.storeRoot +
+        " (" +
+        describeStoredReading(reading) +
+        ") — a declared graph is dispatched only from its SAVED plan, and the " +
+        "retired per-graph v2 container is never read as one",
       );
     }
     const plan = reading.declared.plan;
@@ -3045,23 +2886,27 @@ export class OutcomeHost {
    * the port receives the host's own confirmed execution id and nothing else.
    */
   private observeExecutionOf(execution: HostExecutionIdentity): HostExecutionObservation {
-    const observe = this.observeExecution;
-    if (observe === undefined) {
-      return Object.freeze({
-        kind: "unknown" as const,
-        reason:
-          "this host installs no platform execution-observation port, so it cannot tell " +
-          "whether an execution that finished while no process was listening has ended",
-      });
-    }
+    let store: GraphStore | undefined;
     try {
-      return observe(execution);
+      store = this.sharedStore ?? GraphStore.openFile(this.storeRoot);
+      const recorded = store.readExecutionObservation(execution.executionId);
+      if (recorded !== undefined) return recorded.kind === "completed" ? { kind: "completed" } : { kind: "failed", reason: recorded.reason };
+      const observation = this.observeExecution?.(execution) ?? { kind: "unknown" as const, reason: "This host has no execution observation port" };
+      if (observation.kind === "completed" || observation.kind === "failed") {
+        store.rememberExecutionObservation(execution.executionId, {
+          kind: observation.kind, reason: observation.kind === "failed" ? observation.reason : "", observedAt: this.clock(),
+        });
+      }
+      return observation;
     } catch (error) {
-      return Object.freeze({
-        kind: "unknown" as const,
-        reason: "the platform execution-observation port threw (" + errorText(error) + ")",
-      });
-    }
+      return { kind: "unknown", reason: "Execution observation unavailable: " + errorText(error) };
+    } finally { if (store !== this.sharedStore) store?.close(); }
+  }
+
+  recordExecutionObservation(graphId: string, attemptId: string): HostExecutionObservation {
+    this.assertOpen();
+    const execution = this.executionBindingOf({ graphId, attemptId });
+    return execution === undefined ? { kind: "unknown", reason: "Execution is not confirmed" } : this.observeExecutionOf(execution);
   }
 
   private assertOpen(): void {
@@ -3069,397 +2914,6 @@ export class OutcomeHost {
       throw new Error("outcome-host: this host has been closed");
     }
   }
-}
-
-// ── Tool attribution ────────────────────────────────────────────────────────
-
-/**
- * The refusal a BOUND DISPATCHED WORKER gets for every graph tool that is not
- * its delivery channel (plan §3.3 / A21).
- *
- * A worker's job — and the whole purpose of the attempt handoff — is to settle
- * its OWN attempt's outcome. Declaring or mutating a graph definition, reading
- * the authoritative store and controlling another attempt belong to the
- * declaring/operating principal, so the face a worker's call is judged by
- * grants exactly {@link WORKER_GRANTED_GRAPH_TOOLS} and refuses the rest by
- * name. Stable identifier; wording is not API.
- */
-export const WORKER_TOOL_FORBIDDEN_CODE = "worker-tool-forbidden" as const;
-
-/**
- * The ONLY graph-tool names a dispatched worker's face grants.
- *
- * DELIBERATELY AN ALLOW-LIST, NOT A DENY-LIST: a tool this build has not
- * shipped yet (an approval or cancel entry) is refused to a worker without
- * anyone remembering to add it here. A worker that needs more than the
- * delivery channel is a principal the run path does not have.
- */
-export const WORKER_GRANTED_GRAPH_TOOLS: readonly string[] = Object.freeze([
-  "graph_submit_outcome",
-]);
-
-/**
- * What the host bound one SESSION as: the worker of a dispatched attempt.
- *
- * Every field is a host fact — the platform named the execution
- * ({@link OutcomeHost.confirmExecution}) or the durable execution row carries
- * it — and the session is derived from that execution by the platform-specific
- * {@link OutcomeHostOptions.workerSessionOf}. Nothing here comes from the
- * caller of a tool.
- */
-export interface OutcomeWorkerPrincipal {
-  readonly graphId: string;
-  readonly attemptId: string;
-  readonly executionId: string;
-  readonly workerSessionId: string;
-}
-
-/**
- * The worker-principal half of a bound tool face: which names a dispatched
- * worker may call, and what the host bound one arriving session as.
- *
- * This is the boundary §3.3 requires and the one rolebox can enforce without
- * an OS/account/container boundary: it is a per-call authorization against the
- * host's own durable execution binding, not a path check, a permission bit or
- * a boolean capability.
- */
-export interface OutcomeWorkerToolBoundary {
-  /** The granted tool names; every other name in the face refuses a worker. */
-  readonly granted: readonly string[];
-  /** The attempt one session is the confirmed worker of, or `undefined`. */
-  readonly principalOf: (sessionId: string) => OutcomeWorkerPrincipal | undefined;
-}
-
-/**
- * The refusal one bound worker's non-granted tool call receives, or
- * `undefined` when the call may run.
- *
- * TOTAL and synchronous: with no boundary installed, with a granted name, with
- * no session on the call, and with a session the host bound as no worker's, the
- * answer is "run it" — the boundary only ever refuses a call it can attribute
- * to a dispatched worker, so a declarer or an unrelated session is unaffected.
- */
-function workerToolRefusal(
-  toolName: string,
-  boundary: OutcomeWorkerToolBoundary | undefined,
-  sessionId: string | undefined,
-): string | undefined {
-  if (boundary === undefined) return undefined;
-  if (boundary.granted.includes(toolName)) return undefined;
-  if (sessionId === undefined || sessionId.length === 0) return undefined;
-  const principal = boundary.principalOf(sessionId);
-  if (principal === undefined) return undefined;
-  return renderWorkerToolRefusal(toolName, boundary.granted, principal);
-}
-
-/** Render one worker-tool refusal as the machine-readable tool result. */
-function renderWorkerToolRefusal(
-  toolName: string,
-  granted: readonly string[],
-  principal: OutcomeWorkerPrincipal,
-): string {
-  return JSON.stringify(
-    {
-      refused: true,
-      code: WORKER_TOOL_FORBIDDEN_CODE,
-      tool: toolName,
-      graph_id: principal.graphId,
-      attempt_id: principal.attemptId,
-      granted_tools: [...granted],
-      message:
-        toolName +
-        " refused [" +
-        WORKER_TOOL_FORBIDDEN_CODE +
-        "]: this call arrives from the session the host bound as the worker of attempt " +
-        JSON.stringify(principal.attemptId) +
-        " of graph " +
-        JSON.stringify(principal.graphId) +
-        ". A dispatched worker's graph face grants exactly " +
-        granted.join(", ") +
-        " — declaring or mutating a graph definition, reading the authoritative store " +
-        "and controlling another attempt are the declaring/operating principal's " +
-        "capabilities, not the worker's. Settle your own attempt's outcome with " +
-        "graph_submit_outcome.",
-    },
-    null,
-    2,
-  );
-}
-
-/** How the host resolves the acting agent for one tool invocation. */
-export interface OutcomeToolAttribution {
-  /** The host's invocation holder (D9). */
-  readonly holder: HostInvocationHolder;
-  /**
-   * The holder for the session THIS call arrives from — the worker side of the
-   * identity model. Moved with the invocation holder from the same platform
-   * context, and read by {@link OutcomeHost.workerIdentity} SYNCHRONOUSLY: the
-   * submission ingress captures the answer in the call's own prologue (before
-   * its first await) and corroborates it with the session the tool face threads
-   * from the same context. Omitting it leaves the declared worker binding
-   * unable to name the session a submission arrives from, and such a
-   * submission is refused rather than settled on its credential alone.
-   */
-  readonly workerSession?: HostWorkerSessionHolder;
-  /** Platform acting-agent resolver (`context.agent` wins when populated). */
-  readonly getEffectiveAgent?: (sessionID?: string) => string;
-  /**
-   * THE WORKER-PRINCIPAL BOUNDARY (plan §3.3 / A21).
-   *
-   * When installed, a call that arrives from a session this host bound as the
-   * worker of a dispatched attempt is refused unless its tool name is in
-   * `granted`. Omitted → the face grants every name (a host that cannot
-   * substantiate a worker session has no worker principal to judge).
-   */
-  readonly workerBoundary?: OutcomeWorkerToolBoundary;
-}
-
-/**
- * Bind the outcome tool face to the host's invocation holder: every call puts
- * the host's attribution of THIS invocation in effect for the duration of the
- * call and clears it after. The same platform context also moves the worker
- * session holder, which the submission ingress CAPTURES in the call's own
- * synchronous prologue: the check that settles a submission therefore reads a
- * per-call capture, never a holder a concurrent call could have overwritten
- * (the dispatch that arms an attempt still reads the invocation holder inside
- * its own synchronous window).
- */
-export function bindOutcomeToolInvocation(
-  tools: Record<string, CanonicalToolDef>,
-  attribution: OutcomeToolAttribution,
-): Record<string, CanonicalToolDef> {
-  const bound: Record<string, CanonicalToolDef> = {};
-  for (const [name, def] of Object.entries(tools)) {
-    bound[name] = withInvocation(name, def, attribution);
-  }
-  return bound;
-}
-
-/**
- * Report what one control follow-up did, in one log line.
- *
- * A re-execution is named as such — a NEW RUN was minted — because an operator
- * reading "resumed" must be able to tell it from continuing the run that was
- * already there; refusals are counted and named by code so a follow-up that
- * could not launch is visible instead of silently absent.
- */
-function reportControlContinuation(graphId: string, result: OutcomeResumeResult): void {
-  const parts: string[] = [];
-  if (result.kind === "refused") {
-    parts.push("REFUSED (" + result.refusals.map((entry) => entry.code).join(", ") + ")");
-  } else {
-    parts.push(result.kind);
-    if (result.kind === "resumed" && result.reexecuted !== undefined) {
-      parts.push(
-        "re-executed run " +
-          JSON.stringify(result.reexecuted.fromRunId) +
-          " as " +
-          JSON.stringify(result.reexecuted.runId) +
-          " (runSeq " +
-          String(result.reexecuted.runSeq) +
-          ", plan revision " +
-          JSON.stringify(result.reexecuted.planRevision) +
-          ")",
-      );
-    }
-    if (result.dispatched.length > 0) {
-      parts.push(String(result.dispatched.length) + " dispatched");
-    }
-    if (result.refusals.length > 0) {
-      parts.push(String(result.refusals.length) + " effect refusal(s)");
-    }
-  }
-  logWarn(
-    "outcome-host: control follow-up for graph " +
-      JSON.stringify(graphId) +
-      " — " +
-      parts.join(", "),
-  );
-}
-
-/**
- * HAND A GRAPH'S CANCEL INTENTS TO THE PLATFORM AFTER A `graph_control` CALL (P3 cancel).
- *
- * THE LIVE TRIGGER. A trusted cancel command becomes durable inside the tool body (the control
- * application service writes the decisions and the run's control fact); this wrapper is what makes
- * the PLATFORM effects follow in the same call, without the tool face or the control service
- * knowing anything about a platform:
- *
- * - it wraps exactly the `graph_control` tool of the record it is given and returns every other
- *   tool untouched;
- * - it runs the tool body FIRST, so the intent is durable before the host is asked anything;
- * - it then reads the graph id from the body's own APPLIED answer and ASKS the host to deliver
- *   that graph's cancel intents ({@link OutcomeHost.deliverCancelIntents}), awaiting it so the
- *   caller observes the delivered state rather than a race with it. ONLY an applied control
- *   result delivers: a REFUSED command (an unauthorized caller, an unknown graph, an attempt
- *   that already settled) wrote no intent, so asking the platform on its behalf would put an
- *   effect on the control plane that the caller is not authorized to cause — the refusal is a
- *   value in the tool result, and the answer's own `kind` is what the delivery is gated on;
- * - it NEVER changes the tool's result. The control answer already names every unconfirmed
- *   execution; what this adds is the platform half — reported to the host's log and to the next
- *   boot sweep, and recorded in the durable cancel effects.
- *
- * AND IT CONTINUES THE RUN AN APPLIED `retry` ARMED (P3 item 2). A node-scoped retry recorded the
- * successor attempt and its dispatch effect; a run-scoped retry recorded the ORDER to execute a NEW
- * run. Neither has reached the platform yet, and the tool call is the window that hands them over:
- * the wrapper asks the host to continue the graph ({@link OutcomeHost.continueAfterControl}), which
- * resumes the run (launching the retry's pending effect once) or mints the ordered successor run.
- * It runs for `retry` ONLY: a stopping command ends a run, and continuing one after a stop would ask
- * the host to do work the stop forbids.
- *
- * APPLY IT INSIDE {@link OutcomeHost.bindTools}, AS THE SHIPPED ENTRIES DO: the invocation binding
- * installs the worker boundary, so a DISPATCHED WORKER's call is refused before the tool body runs
- * and can therefore never reach this wrapper's delivery at all.
- */
-export function withCancelDelivery(
-  tools: Record<string, CanonicalToolDef>,
-  host: OutcomeHost,
-): Record<string, CanonicalToolDef> {
-  const control = tools["graph_control"];
-  if (control === undefined) return tools;
-  const inner = control.execute;
-  return {
-    ...tools,
-    graph_control: {
-      ...control,
-      async execute(args, context) {
-        const result = await inner(args, context);
-        // ONLY AN APPLIED COMMAND DELIVERS. The answer's own `kind` is the service's
-        // verdict: a refusal (no attribution, a caller that is not the declarer, an
-        // unknown graph, an attempt that already settled) recorded nothing, and a
-        // thrown store failure reached no platform either — neither has an intent to
-        // hand over, and delivering on one would let an unauthorized caller make the
-        // host ask a platform to stop a graph it does not own.
-        const applied = appliedControlAnswerOf(result);
-        if (applied !== undefined) {
-          try {
-            reportCancelDelivery(await host.deliverCancelIntents(applied.graphId));
-            // ONLY A RETRY LEAVES WORK TO HAND OVER: the effects it just wrote (a
-            // superseded attempt's successor) or the order to mint a new run.
-            // `continueAfterControl` is total — it reports a graph it cannot
-            // continue to the host's log and never throws — so an applied
-            // command is never turned into a failed tool result here.
-            if (applied.command === "retry") {
-              await host.continueAfterControl(applied.graphId);
-            }
-          } catch (error) {
-            logWarn(
-              "outcome-host: the control follow-up of graph " +
-                JSON.stringify(applied.graphId) +
-                " threw (" +
-                describeWatchFailure(error) +
-                ") — the durable cancel intent and every unconfirmed execution stay visible, " +
-                "and the next boot sweep is the next window that delivers them",
-            );
-          }
-        }
-        return result;
-      },
-    },
-  };
-}
-
-/**
- * The graph id AND command of an APPLIED `graph_control` answer, or `undefined`.
- *
- * The tool body renders the control service's result as JSON; `kind: "applied"` is the
- * service's own verdict that the command wrote a durable fact, so it is the only answer a
- * platform delivery may follow. A refused answer (or an error string a thrown store failure
- * produced) names no applied command and is answered `undefined`: nothing is delivered.
- *
- * The COMMAND is read too (P3 item 2), because a retry leaves work this call must hand over —
- * the successor attempt's pending effect, or the order to mint a new run — while a stopping
- * command leaves only its cancel intents. A missing or non-string command is treated as an
- * answer this build cannot act on: the graph id alone still delivers cancel intents, and no
- * continuation is attempted.
- */
-function appliedControlAnswerOf(
-  result: unknown,
-): { readonly graphId: string; readonly command: string | undefined } | undefined {
-  if (typeof result !== "string") return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const answer = parsed as Record<string, unknown>;
-  if (answer["kind"] !== "applied") return undefined;
-  const graphId = answer["graphId"];
-  if (typeof graphId !== "string" || graphId.length === 0) return undefined;
-  const command = answer["command"];
-  return Object.freeze({
-    graphId,
-    command: typeof command === "string" && command.length > 0 ? command : undefined,
-  });
-}
-
-/**
- * Report what one cancel delivery established, per attempt.
- *
- * `confirmed` is the platform's own substantiation; every other state leaves the execution
- * visible and unsettled, which is what the log line says rather than rounding it into "cancelled".
- */
-function reportCancelDelivery(report: OutcomeCancelDeliveryReport): void {
-  if (report.entries.length === 0 && report.blocked === undefined) return;
-  logWarn(
-    "outcome-host: cancel delivery for graph " +
-      JSON.stringify(report.graphId) +
-      " — " +
-      (report.blocked === undefined ? "" : "BLOCKED (" + report.blocked + "); ") +
-      report.entries.map((entry) => entry.attemptId + ":" + entry.state).join(", ") +
-      " — 'confirmed' is the platform's own substantiation; every other state leaves the " +
-      "execution visible and unsettled, and no unconfirmed cancel is reported as cancelled",
-  );
-}
-
-
-/** The erased argument type one canonical tool's execute receives. */
-type ToolExecute = CanonicalToolDef["execute"];
-type ToolExecuteArgs = Parameters<ToolExecute>[0];
-
-function withInvocation(
-  name: string,
-  def: CanonicalToolDef,
-  attribution: OutcomeToolAttribution,
-): CanonicalToolDef {
-  const inner = def.execute;
-  return {
-    ...def,
-    async execute(args: unknown, context: CanonicalToolContext) {
-      const agent =
-        context?.agent && context.agent.length > 0
-          ? context.agent
-          : (attribution.getEffectiveAgent?.(context?.sessionID) ?? "");
-      attribution.holder.set(hostInvocationIdentity(context?.sessionID, agent));
-      // THE WORKER SIDE, FROM THE SAME PLATFORM CONTEXT. The session is taken
-      // RAW — the D9 pair needs an agent too, while the worker binding is the
-      // session the platform itself attributes the call to. An empty/absent
-      // session clears the holder, and a submission under no session is refused
-      // by name rather than settled on its credential alone. The ingress
-      // captures this answer in the call's own synchronous prologue; the holder
-      // is never read across an await on the submission path.
-      attribution.workerSession?.set(context?.sessionID);
-      try {
-        // THE WORKER BOUNDARY RUNS BEFORE THE TOOL BODY. A bound worker's call
-        // to anything but its delivery channel is answered here, so no parse,
-        // no compile, no store read and no write happens for it — and the
-        // refusal is derived from the host's own binding of the session, never
-        // from an argument the caller chose.
-        const refused = workerToolRefusal(
-          name,
-          attribution.workerBoundary,
-          context?.sessionID,
-        );
-        if (refused !== undefined) return refused;
-        return await inner(args as ToolExecuteArgs, context);
-      } finally {
-        attribution.holder.clear();
-        attribution.workerSession?.clear();
-      }
-    },
-  };
 }
 
 /**

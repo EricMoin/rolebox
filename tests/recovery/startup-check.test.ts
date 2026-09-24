@@ -377,7 +377,7 @@ describe("StartupChecker", () => {
     expect(result.healthy).toBe(true);
   });
 
-  it("recognizes dispatch-, engine-, budget- prefixes as version-gated", () => {
+  it("quarantines current state files and preserves retired graph files", () => {
     const stateDir = tmpDir();
     // Corrupt (version out of range) files under each real prefix.
     writeStateFile(stateDir, "dispatch-abc.json", { version: 100, tasks: [] });
@@ -388,7 +388,8 @@ describe("StartupChecker", () => {
 
     expect(result.healthy).toBe(false);
     expect(result.quarantined).toContain("dispatch-abc.json");
-    expect(result.quarantined).toContain("engine-g.json");
+    expect(result.quarantined).not.toContain("engine-g.json");
+    expect(existsSync(join(stateDir, "engine-g.json"))).toBe(true);
     expect(result.quarantined).toContain("budget-abc.json");
   });
 

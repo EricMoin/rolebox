@@ -1,97 +1,12 @@
-/**
- * Graph Execution Engine v2 — Compiled Plan
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The immutable, content-addressed result of compiling a v3 declaration: what a
- * runtime, a loader or a receipt store pins when it refers to "the plan" of a
- * graph. This module owns the plan SHAPE, its content-addressed
- * `planRevision`, the deep-freeze discipline that makes both durable, and the
- * ONE plan-level invariant inspector every boundary applies — the compiler over
- * its own output and the load gate over the persisted record
- * (docs/graph-outcome-protocol.md § "Concrete durable representation").
- *
- * - `planRevision` is CONTENT-ADDRESSED: the B4 `contractDigest` of the
- *   normalized plan BODY, which is every field except the revision itself. The
- *   same declaration therefore compiles to the same revision, a content change
- *   anywhere in the body changes it, and no second digest implementation
- *   exists.
- * - The plan is DEEPLY frozen: the outer object, every array, every node,
- *   outcome, edge, loop group and contract snapshot, and the snapshot bodies.
- *   There is NO `Map` anywhere in the plan — a frozen object holding a `Map`
- *   is not deeply immutable — so lookups are readonly arrays plus the frozen
- *   `contractSnapshots` index.
- * - `contractSnapshots` is keyed by CONTRACT DIGEST, not by node, and holds
- *   CONTENT only: the plan records each distinct contract CONTENT once, and a
- *   node's binding is its exact `contractRef`, whose digest is that key. A
- *   load-side verifier can therefore recompute the body digest and require the
- *   key an identity resolves to to equal it, instead of trusting a stored ref.
- * - `contractIdentities` is the IDENTITY side of the same contracts:
- *   `id` → `revision` → content digest. Content is deduplicated by digest
- *   while identity stays an explicit index, so two `(id, revision)` identities
- *   whose bodies are byte-identical share one snapshot entry and both resolve
- *   (B8). A single `ref` on the content entry could not express that: it would
- *   have to name one identity and silently drop the other.
- * - `terminalOutcomes` is the EXPLICIT TERMINAL of the plan: every
- *   (node, outcome) pair whose declaring node has NO outbound edge for it, in
- *   canonical order. A graph expresses its exits by this computed list instead
- *   of by the absence of an edge alone, the list is part of the body (so
- *   `planRevision` covers it), and the inspector requires it to be non-empty
- *   and to agree with the edges (B9).
- * - `executability` separates an EXECUTABLE plan from a DRAFT: an executable
- *   plan pins every acceptance requirement to an exact validator version AND
- *   every natural completion to an authorized policy revision, a draft records
- *   which requirements are unresolved and which natural mappings are
- *   unauthorized. The load gate refuses a persisted draft; this module's
- *   inspector accepts both as well-formed plans (B9, extended by D6).
- * - `completionAuthorizations` PINS natural completion (D6): a mapping the
- *   compiler authorized names the exact policy revision whose rule granted it,
- *   and `completionPolicySnapshots` / `completionPolicyIdentities` carry that
- *   revision's CONTENT and IDENTITY inside the plan body — the same
- *   content/identity split the contracts use — so the authorization travels
- *   with the plan and can be verified from the plan alone. The inspector
- *   requires every natural mapping of an executable plan to be pinned, and
- *   every pinned policy to be corroborated by the content and identity the body
- *   carries.
- *
- * Canonicalization is the COMPILER's responsibility (`compile.ts` sorts nodes,
- * edges, loop groups and outcome ids before calling the builder); the builder
- * hashes exactly the body it is given, so a caller that skips that ordering
- * gets the revision of the body it actually passed, not of a re-ordered one.
- *
- * B5 delivered this module COMPILE-ONLY. B7 adds the DURABLE record
- * (`PersistedCompiledPlan`) and the plan-level topology invariant check a load
- * applies when it has only the compiled body (`inspectCompiledTopology`).
- * B8 splits contracts into CONTENT (deduplicated by digest) and IDENTITY (the
- * `contractIdentities` index inside the plan body), so two identities sharing
- * one body are representable and verify; the record SHAPE changes and, because
- * nothing in production writes one yet, no migration is written or required.
- * B9 makes `inspectCompiledTopology` the SINGLE owner of every plan-level
- * invariant — node outcomes, edge references, loop membership and routes,
- * CONTINUATION PATHS, CYCLE CONTAINMENT, EXPLICIT TERMINALS and acceptance
- * PINNING — and puts the compiler's own output under it, so the writer cannot
- * produce a plan its reader would refuse by convention alone.
- * Nothing PRODUCES a record at graph creation yet and nothing consumes one:
- * recovery still resumes from the retained declaration, and the producer, the
- * recovery switch and adapters/schema compatibility are later slices
- * (docs/graph-outcome-protocol.md § "Version ownership and load contract").
- *
- * Dependencies: `contract-definition.ts` (the ONE `contractDigest` and the
- * contract identities), `../cycle-detection.ts` (the ONE Tarjan SCC shared with
- * the v2 validator) plus a TYPE-ONLY import of the shared `JoinConfig` /
- * `NodeBudgetSpec` vocabulary — the same reuse rule the grammar follows, so the
- * plan cannot drift from the runtime's own join and budget shapes. No engine,
- * parser, protocol or loader module is a dependency.
- */
-
+import type { RunBudgetSpec } from "../domain/budget.ts";
 import {
   contractDigest,
   type ContractContentSnapshot,
   type ContractIdentityIndex,
   type ContractRef,
 } from "../contracts/contract-definition.ts";
-import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
+import type { JoinConfig } from "../domain/join.ts";
+import type { NodeBudgetSpec } from "../domain/budget.ts";
 import {
   isCompletionPolicyRef,
   readCompletionAuthorizationIssueCode,
@@ -389,16 +304,17 @@ export interface CompiledUnauthorizedCompletion {
 export type CompiledPlanExecutability =
   | { readonly kind: "executable" }
   | {
-      readonly kind: "draft";
-      readonly unresolved: readonly CompiledUnresolvedRequirement[];
-      readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
-    };
+    readonly kind: "draft";
+    readonly unresolved: readonly CompiledUnresolvedRequirement[];
+    readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
+  };
 
 /**
  * The plan body: everything `planRevision` addresses. The revision is not part
  * of it, which is what makes the body the content and the revision its name.
  */
 export interface CompiledPlanBody {
+  readonly budget?: RunBudgetSpec;
   /**
    * Graph identity. The v3 grammar carries no separate graph identifier yet,
    * so the compiler uses the declaration name — the same string a graph record
@@ -579,62 +495,6 @@ export function nodeBindingsOf(
 /**
  * The plan-level rules a compiled plan must satisfy, in the compiler's own rule
  * vocabulary.
- *
- * This union is a SUBSET of the compiler's `CompileErrorCode`, not a parallel
- * vocabulary: `compile.ts` composes its error union from this type, so one
- * defect has one code on both sides of the pipeline and a new plan-level rule
- * cannot be named twice. The compiler runs this inspector over the body it
- * built and refuses its own output when the inspector rejects it; the load gate
- * runs the same inspector over the persisted body.
- *
- * Rules, each with its stable code:
- * - `malformed-topology` — a body whose nodes, edges, loop groups,
- *   terminalOutcomes or executability are not the records the rules read, so the
- *   rule set cannot be applied at all;
- * - `duplicate-node-id` / `missing-outcomes` — one node id has exactly one
- *   declaration, and a node declares at least one outcome;
- * - `unknown-edge-endpoint` / `unknown-outcome-reference` — every edge
- *   endpoint is a declared node and every edge outcome is declared by its
- *   source;
- * - `unknown-loop-member` / `unknown-loop-continuation-outcome` /
- *   `unknown-loop-exit-outcome` / `loop-group-missing-limits` — loop
- *   membership and both declared routes are real, with a positive traversal
- *   cap, and a declared progress policy is the record the comparison reads;
- * - `loop-continuation-without-edge` — a declared continuation outcome is
- *   carried by at least one edge that stays INSIDE the group, otherwise the
- *   loop can never continue;
- * - `cycle-not-in-loop-group` — every cycle in the compiled edge set lies
- *   inside a declared loop group (the same Tarjan SCC the v2 validator uses,
- *   from the ONE `../cycle-detection.ts` module);
- * - `missing-terminal-outcome` / `terminal-outcomes-inconsistent` — the
- *   plan states its terminal exits explicitly, the list is non-empty, and it is
- *   exactly the set of (node, outcome) pairs no outbound edge binds;
- * - `unpinned-validator-version` — an EXECUTABLE plan pins every acceptance
- *   requirement to an exact validator version. A draft is not held to this
- *   rule; the load gate refuses a draft outright instead.
- * - `missing-completion-authorization` — an EXECUTABLE plan pins every natural
- *   completion mapping to an authorization. A draft is not held to this rule;
- *   its unauthorized mappings are named by its own executability marker.
- * - `unknown-completion-authorization` — a pinned authorization names a
- *   mapping (node + outcome) the topology does not declare as that node's
- *   natural completion, so the plan claims authority it was never granted.
- * - `inconsistent-completion-policy` — a pinned authorization's policy content
- *   does not match the ref it carries: the body under `policy.digest` is
- *   missing or unreadable, does not hash to that digest, or the identity index
- *   maps the `(id, revision)` elsewhere. A ref is a claim the plan body must
- *   prove, never a label to be trusted.
- *
- * Two codes are defensive for the compiler's own output and are normally
- * reached only from the load side: `malformed-topology` and
- * `terminal-outcomes-inconsistent` cannot be produced by a well-formed
- * declaration, because the compiler assembles the body and derives the terminal
- * list itself.
- *
- * The rules the compiler proves that are NOT re-derived from a body —
- * `duplicate-outcome-id`, `natural-completion-unknown-outcome`,
- * `duplicate-natural-completion` and `loop-continuation-outside-group` — are
- * deliberately outside this set: they need the DECLARATION, and a persisted
- * body is checked for the invariants its own content proves.
  */
 export type CompiledTopologyIssueCode =
   | "malformed-topology"
@@ -1402,4 +1262,11 @@ function freezeDeep(value: unknown): void {
   for (const key of Object.keys(value)) {
     freezeDeep((value as Record<string, unknown>)[key]);
   }
+}
+
+export interface PlanBinding {
+  readonly planRevision: string;
+  readonly contractSnapshots: Readonly<Record<string, ContractContentSnapshot>>;
+  readonly contractIdentities: ContractIdentityIndex;
+  readonly nodeBindings: Readonly<Record<string, ContractRef>>;
 }

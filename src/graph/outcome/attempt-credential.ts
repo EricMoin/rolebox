@@ -1,73 +1,3 @@
-/**
- * Graph Execution Engine v2 — attempt credentials (stage D, decision 1)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The runtime-issued, attempt-scoped bearer credential an outcome-protocol
- * worker presents when it submits an outcome. The credential is MINTED HERE at
- * attempt creation by the runtime that owns the attempt — never supplied by a
- * worker and never derived from the node or attempt identity — and its BINDING
- * TUPLE is `graphId + nodeId + attemptId + planRevision + permission`.
- *
- * WHAT A BEARER CREDENTIAL PROVES, STATED HONESTLY. A high-entropy nonce
- * proves POSSESSION of that nonce: an agent that never received the attempt's
- * credential cannot guess it, and a credential issued for attempt A cannot be
- * re-aimed at attempt B because the runtime holds the binding, not the token
- * alone. It does NOT prove that the presenter is the original worker: anything
- * that can read the dispatch channel — a leaked transcript, a copied payload, a
- * process the worker handed its own state to — can present the same bearer token
- * and be indistinguishable from the worker. Establishing "the original worker
- * said this" needs a host identity or a signature over the submission, which
- * this protocol does not have and does not claim. A trusted host invocation
- * context (the invoking session or agent id) can only ADD a constraint on top:
- * a host that has one MAY require it to agree with the attempt's own dispatch
- * record. This build records no host context on an attempt, so it makes no such
- * claim, and the credential core below depends on no host and works without
- * one — the ENABLEMENT of the run path that uses it is a separate gate, and
- * that one requires a declaring host (`credential-isolation.ts`).
- *
- * WHERE ISSUANCE AND STORAGE LIVE. Minting happens in the runtime process. The
- * nonce itself is ADOPTED BY THE HOST'S STORE the moment it is minted (the
- * version-2 credential-isolation capability,
- * `credential-isolation.ts` + `../host/credential-vault.ts`), and the graph
- * state persists only its DIGEST (`attemptCredentialDigest`, state-body version
- * 8). A process that reads the acceptance ledger — the read-the-ledger theft
- * this module's history records — therefore obtains a verifier it cannot
- * present, which is what closed that defect at the storage layer.
- *
- * WHAT IS STILL THE HOST'S. The credential has to be held somewhere and
- * delivered to exactly one attempt, and the host's store is where: a recovery
- * resolves the credential from it, and a store that cannot produce one leaves
- * the attempt reported rather than re-delivered with a fabricated value. The
- * outcome run path still refuses with `credential-isolation-unavailable`
- * without a readable capability — BEFORE it mints, persists, hands out or
- * settles anything — and a same-account process can still read the host's store
- * FILE unless the platform isolates it; no mode bit or mount option this build
- * could inspect would change that, so that boundary stays the host's and is
- * stated in `credential-isolation.ts`.
- *
- * THE CREDENTIAL NAMES NOTHING. The run path resolves the attempt FROM the
- * persisted binding, refuses a credential that names no recorded attempt, and
- * never falls back to "the node's current attempt" — a caller may present a
- * credential, but cannot move it to another execution.
- *
- * THE CREDENTIAL IS ONE HALF OF A SUBMISSION, NOT THE WHOLE. The digest proves
- * possession of the nonce the attempt was issued; it says nothing about WHO is
- * presenting it. The OTHER half is the worker binding: the child session the
- * platform created for the dispatched worker, recorded by the host when the
- * platform confirmed the execution, and checked against the session the
- * submitting call actually arrives from (see `outcome/host-identity.ts` and
- * `tools/submit-outcome.ts`). The credential's binding tuple cannot carry that
- * session: the tuple is minted with the attempt, BEFORE the platform has created
- * any worker, so the worker half is established by the confirmed create — and a
- * submission whose attempt has no confirmed worker is refused rather than
- * settled on the credential alone.
- *
- * Dependency leaf: the only import is `node:crypto`, so the state reader, the
- * run path and a test harness may depend on it without a cycle.
- */
-
 import { createHash, randomBytes } from "node:crypto";
 
 // ── The scope ───────────────────────────────────────────────────────────────
@@ -177,10 +107,10 @@ export function mintAttemptCredential(
   if (!isAttemptCredential(credential)) {
     throw new Error(
       "attempt-credential: the injected credential source answered " +
-        describeValue(credential) +
-        " for attempt " +
-        JSON.stringify(binding.nodeId) +
-        " — an attempt credential is a non-empty string",
+      describeValue(credential) +
+      " for attempt " +
+      JSON.stringify(binding.nodeId) +
+      " — an attempt credential is a non-empty string",
     );
   }
   return credential;

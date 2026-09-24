@@ -1,3 +1,5 @@
+import { observeDshExecutionEvents } from "./graph-observation.ts";
+import type { DshSessionEventLike } from "./session.ts";
 /**
  * dsh platform — the OUTCOME run path's dispatch delivery
  *
@@ -180,12 +182,16 @@ export type DshOutcomeSubagentRuntime = DshSubagentDispatchRuntime &
 export type DshOutcomeSettlement =
   | { readonly kind: "completed"; readonly request: OutcomeDispatchRequest }
   | {
-      readonly kind: "failed";
-      readonly request: OutcomeDispatchRequest;
-      readonly reason: string;
-    };
+    readonly kind: "failed";
+    readonly request: OutcomeDispatchRequest;
+    readonly reason: string;
+  };
 
 export interface DshOutcomeDeliveryOptions {
+  readonly workerTools?: readonly string[];
+  readonly readExecutionEvents?: (id: string) => Promise<readonly DshSessionEventLike[] | undefined>;
+  readonly beforeStart?: (label: string) => void;
+  readonly subscribeExecutionEvents?: (id: string, listener: (events: readonly DshSessionEventLike[]) => void) => (() => void);
   /** `ctx.subagents` — the dsh subagent runtime. */
   readonly subagents: DshOutcomeSubagentRuntime;
   /**
@@ -288,6 +294,10 @@ export class DshOutcomeDelivery {
    * port says so instead of pretending otherwise. An entry is removed the moment
    * the run's result promise settles.
    */
+  private closed = false;
+  private readonly watchers = new Set<() => void>();
+  close(): void { this.closed = true; for (const stop of this.watchers) stop(); this.watchers.clear(); }
+  private readonly terminalRuns = new Map<string, DshRunObservation>();
   private readonly liveRuns = new Map<string, DshLiveRun>();
 
   constructor(private readonly opts: DshOutcomeDeliveryOptions) {
@@ -319,23 +329,23 @@ export class DshOutcomeDelivery {
       if (listing === undefined) {
         return unknownAnswer(
           "this dsh build exposes no ctx.subagents.listChildren, so a subagent run cannot " +
-            "be correlated with the dispatch effect that created it",
+          "be correlated with the dispatch effect that created it",
         );
       }
       const parentSessionId = probe.invocation?.sessionId;
       if (parentSessionId === undefined || parentSessionId.length === 0) {
         return unknownAnswer(
           "the graph's declaring invocation is not recorded (or names no session), so there " +
-            "is no parent whose children could be listed for effect " +
-            JSON.stringify(probe.effect.effectId),
+          "is no parent whose children could be listed for effect " +
+          JSON.stringify(probe.effect.effectId),
         );
       }
       const children = this.childListings.get(parentSessionId);
       if (children === undefined) {
         return unknownAnswer(
           "no child listing has been read for the declaring invocation in this process — the " +
-            "platform query port is primed by the host's own recovery window before the run " +
-            "path asks, and an unprimed question is never answered on a guess",
+          "platform query port is primed by the host's own recovery window before the run " +
+          "path asks, and an unprimed question is never answered on a guess",
         );
       }
       const label = dispatchIdempotencyKeyOf(probe.effect);
@@ -354,21 +364,21 @@ export class DshOutcomeDelivery {
       if (matches.length > 1) {
         return unknownAnswer(
           "more than one child of session " +
-            JSON.stringify(parentSessionId) +
-            " carries the stable label " +
-            JSON.stringify(label) +
-            " — an ambiguous correlation cannot say which execution belongs to effect " +
-            JSON.stringify(probe.effect.effectId),
+          JSON.stringify(parentSessionId) +
+          " carries the stable label " +
+          JSON.stringify(label) +
+          " — an ambiguous correlation cannot say which execution belongs to effect " +
+          JSON.stringify(probe.effect.effectId),
         );
       }
       return unknownAnswer(
         "no listed child of session " +
-          JSON.stringify(parentSessionId) +
-          " carries the stable label " +
-          JSON.stringify(label) +
-          " — dsh's listing is live-preferred (a child that finished while no process was " +
-          "listening, or one in a profile without session persistence, is not listed), so " +
-          "this is NOT a proof that no execution exists and the effect stays blocked",
+        JSON.stringify(parentSessionId) +
+        " carries the stable label " +
+        JSON.stringify(label) +
+        " — dsh's listing is live-preferred (a child that finished while no process was " +
+        "listening, or one in a profile without session persistence, is not listed), so " +
+        "this is NOT a proof that no execution exists and the effect stays blocked",
       );
     },
     prime: async (probes: readonly OutcomeExecutionProbe[]): Promise<void> => {
@@ -385,6 +395,19 @@ export class DshOutcomeDelivery {
         try {
           const children = await listing.call(this.opts.subagents, parentSessionId);
           this.childListings.set(parentSessionId, Object.freeze([...children]));
+          if (this.opts.readExecutionEvents) {
+            const labels = new Set(probes.filter(probe => probe.invocation?.sessionId === parentSessionId).map(probe => dispatchIdempotencyKeyOf(probe.effect)));
+            for (const child of children) {
+              if (child.kind !== "child" || !child.label || !labels.has(child.label)) continue;
+              try {
+                const events = await this.opts.readExecutionEvents(child.id);
+                if (!events) continue;
+                const observation = observeDshExecutionEvents(events, child.label);
+                if (observation.kind === "completed") this.terminalRuns.set(child.id, { stopReason: "completed" });
+                if (observation.kind === "failed") this.terminalRuns.set(child.id, { failure: observation.reason });
+              } catch { /* An unavailable host log leaves this execution unknown. */ }
+            }
+          }
         } catch (error) {
           // An unreadable listing is NOT an empty one: the parent's reading is
           // dropped, so its probes answer unknown and stay blocked.
@@ -412,17 +435,16 @@ export class DshOutcomeDelivery {
    * observe as an explicit `completion-unsettled` refusal and names it in
    * `awaitingCompletion`, which is the observable block the plan requires.
    */
-  readonly observeExecution: HostExecutionObservationPort = (
-    execution: HostExecutionIdentity,
-  ) =>
-    Object.freeze({
-      kind: "unknown" as const,
-      reason:
-        "the dsh subagent runtime has no durable outcome read for execution " +
-        JSON.stringify(execution.executionId) +
-        " (a run's result lives in the process that started it, and the child listing's " +
-        "activity does not encode an outcome), so whether it has ended cannot be established",
-    });
+  readonly observeExecution: HostExecutionObservationPort = (execution) => {
+    const observed = this.terminalRuns.get(execution.executionId);
+    if (observed !== undefined) {
+      return observed.stopReason === "completed" ? { kind: "completed" } : {
+        kind: "failed", reason: observed.failure ?? "dsh execution ended: " + observed.stopReason,
+      };
+    }
+    if (this.liveRuns.has(execution.executionId)) return { kind: "running" };
+    return { kind: "unknown", reason: "The dsh runtime has no durable outcome read for this execution" };
+  };
 
   /**
    * THE PLATFORM COMPLETION WATCH PORT (F4) — unsupported on dsh.
@@ -434,7 +456,20 @@ export class DshOutcomeDelivery {
    * says so, and the host REPORTS the executions it cannot keep observing
    * instead of pretending they are covered.
    */
-  readonly watchCompletion: HostCompletionWatchPort = () => "unsupported";
+  readonly watchCompletion: HostCompletionWatchPort = (entry, onEnded) => {
+    if (!this.opts.subscribeExecutionEvents) return "unsupported";
+    const label = dispatchIdempotencyKeyOf({ graphId: entry.graphId, attemptId: entry.attemptId, effectId: "dispatch:" + entry.attemptId });
+    const stop = this.opts.subscribeExecutionEvents(entry.executionId, events => {
+      if (this.closed) return;
+      const observation = observeDshExecutionEvents(events, label);
+      if (observation.kind !== "completed" && observation.kind !== "failed") return;
+      this.terminalRuns.set(entry.executionId, observation.kind === "completed" ? { stopReason: "completed" } : { failure: observation.reason });
+      stop(); this.watchers.delete(stop);
+      onEnded();
+    });
+    this.watchers.add(stop);
+    return "watching";
+  };
 
   /**
    * THE PLATFORM CANCEL PORT (P3).
@@ -536,10 +571,10 @@ export class DshOutcomeDelivery {
         });
       }
       try {
-        // The second argument is the contract's `authority`, whose shape no
-        // document in this repository defines: `undefined` is passed as "none",
-        // and a runtime that validates it fails the call into the branch below.
-        interrupt.call(this.opts.subagents, executionId, undefined);
+        // Recovered workers remain scoped to the live declaring ancestor.
+        const parent = probe.invocation?.sessionId === undefined ? undefined : this.opts.parentResolver?.(probe.invocation.sessionId);
+        if (!parent) return { kind: "unsupported", reason: "The owning parent agent is not available to authorize interruption" };
+        interrupt.call(this.opts.subagents, executionId, { kind: "ancestor", agent: parent });
       } catch (error) {
         return Object.freeze({
           kind: "unsupported" as const,
@@ -613,10 +648,10 @@ export class DshOutcomeDelivery {
         const known = this.opts.subagents.list?.() ?? [];
         throw new Error(
           "dsh outcome dispatch: no subagent provider registered for agent " +
-            JSON.stringify(agent) +
-            " (registered: " +
-            (known.length > 0 ? known.join(", ") : "none") +
-            ")",
+          JSON.stringify(agent) +
+          " (registered: " +
+          (known.length > 0 ? known.join(", ") : "none") +
+          ")",
         );
       }
     }
@@ -624,8 +659,8 @@ export class DshOutcomeDelivery {
     if (parentSessionId === undefined || parentSessionId.length === 0) {
       throw new Error(
         "dsh outcome dispatch: no invoking session is in effect for graph " +
-          JSON.stringify(request.graphId) +
-          " — a dispatched attempt needs the live parent its subagent run is composed under",
+        JSON.stringify(request.graphId) +
+        " — a dispatched attempt needs the live parent its subagent run is composed under",
       );
     }
     const parent = this.opts.parentResolver?.(parentSessionId);
@@ -650,11 +685,14 @@ export class DshOutcomeDelivery {
       // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff
       // and the input view the host materialized beside it. The view's file
       // paths are the worker's own copies, verified before this call.
-      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request, inputView) }],
+      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request, inputView) + (this.opts.workerTools ? "\nUse graph_worker_exec for all workspace commands, file reads, edits and tests." : "") }],
       parent,
       signal: controller.signal,
       sessionId: parentSessionId,
+      ...(this.opts.workerTools ? { toolFilter: { allow: [...this.opts.workerTools] } } : {}),
     };
+    this.opts.beforeStart?.(dispatchIdempotencyKeyOf(effect));
+
     // The start itself is a promise; the delivery contract is synchronous. A
     // rejection is reported as a failed start (nothing was observed running).
     void Promise.resolve(this.opts.subagents.start(agent, startRequest)).then(
@@ -674,19 +712,21 @@ export class DshOutcomeDelivery {
         );
         this.liveRuns.set(run.id, { controller, run, observed });
         void observed.then((outcome) => {
+          this.terminalRuns.set(run.id, outcome);
           this.liveRuns.delete(run.id);
+          if (this.closed) return;
           this.opts.onSettled(
             outcome.stopReason === "completed"
               ? { kind: "completed", request }
               : {
-                  kind: "failed",
-                  request,
-                  reason:
-                    outcome.failure === undefined
-                      ? "the dsh subagent run ended with stopReason " +
-                        JSON.stringify(outcome.stopReason)
-                      : "the subagent run result rejected: " + outcome.failure,
-                },
+                kind: "failed",
+                request,
+                reason:
+                  outcome.failure === undefined
+                    ? "the dsh subagent run ended with stopReason " +
+                    JSON.stringify(outcome.stopReason)
+                    : "the subagent run result rejected: " + outcome.failure,
+              },
           );
         });
       },

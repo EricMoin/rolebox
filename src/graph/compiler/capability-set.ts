@@ -1,43 +1,3 @@
-/**
- * Graph Execution Engine v2 — the acceptance capability set compile and run
- * share (P4 item 1)
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * ONE SOURCE OF TRUTH. The capabilities a plan may pin are DERIVED from the
- * host-installed {@link ValidatorRegistry} — the same object the run path looks
- * an implementation up in at acceptance. There is no second capability list:
- * `graph_declare` cannot compile a plan naming a validator the host did not
- * install, because the set it compiles against IS the installed registry.
- *
- * WHAT A CALLER'S `supported_validators` ARGUMENT MAY DO. The model-facing
- * `graph_declare` still accepts the argument, and it is treated as a NARROWING
- * ASSERTION, never as an installation:
- *
- * - every declared entry must be substantiated by an installed registration —
- *   the same validator id at the same EXACT version (or, for an entry that
- *   names no version, exactly one installed version of that id, which it then
- *   pins). An entry the host cannot substantiate is REFUSED
- *   (`validator-capability-not-installed`), never compiled against;
- * - an entry that names no version while the host installs MORE than one
- *   version of that id is refused as ambiguous: picking one would make the
- *   pinned identity depend on registry order;
- * - entries are otherwise an intersection: the effective set is the declared
- *   subset, so a caller can only ever narrow what the host installed;
- * - with NO declaration the effective set is EVERY installed capability, so a
- *   declaration that simply omits the argument is resolved against the host's
- *   real capability set instead of compiling to a draft.
- *
- * WHY THE RUN SIDE IS THE SAME SET. At acceptance the core resolves each pinned
- * requirement through `ValidatorRegistry.lookup` and refuses
- * `validator-not-registered` when the implementation is absent. Because
- * compilation pins nothing but installed keys, a plan this build produced can
- * only carry requirements the SAME registry can substantiate; a host that later
- * removes a registration refuses the submission by name rather than skipping
- * the gate.
- */
-
 import type { SupportedValidatorV3 } from "./compile.ts";
 import {
   validatorKeyText,
@@ -84,15 +44,15 @@ export interface DeclaredCapabilityIssue {
 /** What a caller's declaration resolved to against the installed registry. */
 export type DeclaredCapabilityResolution =
   | {
-      readonly kind: "effective";
-      /** The capabilities the compilation runs against. */
-      readonly capabilities: readonly SupportedValidatorV3[];
-    }
+    readonly kind: "effective";
+    /** The capabilities the compilation runs against. */
+    readonly capabilities: readonly SupportedValidatorV3[];
+  }
   | {
-      readonly kind: "refused";
-      /** Every entry that could not be substantiated, in declared order. */
-      readonly issues: readonly DeclaredCapabilityIssue[];
-    };
+    readonly kind: "refused";
+    /** Every entry that could not be substantiated, in declared order. */
+    readonly issues: readonly DeclaredCapabilityIssue[];
+  };
 
 /**
  * Resolve a caller's declared capabilities against the host-installed registry.

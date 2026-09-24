@@ -1,26 +1,3 @@
-/**
- * Graph Execution Engine v2 — Imperative `graph_*` Tool Registration
- *
- * Version: 3.0
- * Date: 2026-09-23
- *
- * Wraps the {@link GraphToolSet} tool-logic layer (`graph-tools.ts`) with zod
- * `args` schemas and `defineTool` registrations so the imperative `graph_*`
- * tools become platform-agnostic {@link CanonicalToolDef}s consumable by
- * `buildCanonicalTools`.
- *
- * The shipped surface is the OUTCOME run path's tool face —
- * {@link createOutcomeGraphTools}: `graph_declare` (the v3 authoring ingress),
- * `graph_submit_outcome` (the submission ingress), `graph_audit` (the
- * read-only store inventory) and `graph_status`. The legacy construction and
- * execution entries (`graph_create`, `graph_add_node`, `graph_add_edge`,
- * `graph_add_loop`, `graph_run`, `graph_cancel`, `graph_approve`) and the
- * `createGraphTools` factory that registered them were deleted with the legacy
- * runtime; no factory here can build a legacy engine.
- *
- * This module contains **no graph logic** — it only adapts types and error text.
- */
-
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
@@ -29,7 +6,6 @@ import {
   type GraphStatusFormat,
   type GraphToolSet,
 } from "./graph-tools.ts";
-import { NODE_STATUS_VALUES, type NodeStatus } from "../../constants.ts";
 
 /** Render a plain-object tool result as an agent-readable JSON string. */
 function json(input: unknown): string {
@@ -138,9 +114,9 @@ function createGraphControlTool(
         ])
         .describe(
           "The control command. Every member of the closed vocabulary is applied and " +
-            "recorded durably. No command is ever inferred from worker data, and no worker " +
-            "submission — including a payload field named 'approved' — can satisfy an " +
-            "approval request or forge budget usage.",
+          "recorded durably. No command is ever inferred from worker data, and no worker " +
+          "submission — including a payload field named 'approved' — can satisfy an " +
+          "approval request or forge budget usage.",
         ),
       node_id: z
         .string()
@@ -148,7 +124,7 @@ function createGraphControlTool(
         .optional()
         .describe(
           "The node the command names: REQUIRED for 'failure'/'timeout' (they name one " +
-            "attempt) and refused for 'cancel' (which applies to the whole run).",
+          "attempt) and refused for 'cancel' (which applies to the whole run).",
         ),
       attempt_id: z
         .string()
@@ -156,25 +132,25 @@ function createGraphControlTool(
         .optional()
         .describe(
           "The in-flight attempt the command names. Optional: the run's current attempt " +
-            "for the node is used when omitted, and a value that is not the current " +
-            "attempt is refused rather than re-attached.",
+          "for the node is used when omitted, and a value that is not the current " +
+          "attempt is refused rather than re-attached.",
         ),
       reason: z
         .string()
         .min(1)
         .describe(
           "Why the command is applied. Stored verbatim on the durable decision and " +
-            "reported by every later refusal, so it is the human-readable half of the fact.",
+          "reported by every later refusal, so it is the human-readable half of the fact.",
         ),
       approver_session_id: z
         .string()
         .min(1)
         .optional()
         .describe(
-          "REQUIRED for 'approval-request': the ONLY session whose decision resolves the " +
-            "request. The declaring principal names it explicitly, and the request can only " +
-            "be decided by that session — the declarer's own control authority does not imply " +
-            "approval authority. Ignored by every other command.",
+          "REQUIRED for 'approval-request': nominate a session authorized by the host's " +
+          "approval policy. Independent review forbids self-approval. Only an explicit " +
+          "operator-confirmation policy permits it. Session attribution does not prove " +
+          "human approval. Ignored by every other command.",
         ),
       expires_at: z
         .number()
@@ -183,9 +159,9 @@ function createGraphControlTool(
         .optional()
         .describe(
           "REQUIRED for 'approval-request': the epoch-millisecond instant the request stops " +
-            "being answerable at. A request that reaches its deadline is durably EXPIRED and " +
-            "can never be approved afterwards; the deadline is an explicit input, never a " +
-            "clock read by the engine. Ignored by every other command.",
+          "being answerable at. A request that reaches its deadline is durably EXPIRED and " +
+          "can never be approved afterwards; the deadline is an explicit input, never a " +
+          "clock read by the engine. Ignored by every other command.",
         ),
     },
     async execute(args, context) {
@@ -232,15 +208,15 @@ function createGraphDeclareTool(
         .json()
         .describe(
           "The v3 declaration as JSON text or an already-parsed JSON value: " +
-            "{ version: 3, name, nodes[], edges[], loop_groups?[] } with the closed " +
-            "v3 grammar (nodes declare outcomes; every edge binds one).",
+          "{ version: 3, name, nodes[], edges[], loop_groups?[] } with the closed " +
+          "v3 grammar (nodes declare outcomes; every edge binds one).",
         ),
       graph_id: z
         .string()
         .optional()
         .describe(
           "Optional graph id. The v3 grammar carries no separate identifier, so it " +
-            "must equal the declaration's name; a mismatch is refused.",
+          "must equal the declaration's name; a mismatch is refused.",
         ),
       supported_validators: z
         .array(
@@ -252,17 +228,17 @@ function createGraphDeclareTool(
         .optional()
         .describe(
           "Optional NARROWING of the validator capabilities the HOST installed: " +
-            "each entry must name an installed registration at the same exact " +
-            "version (an unversioned entry needs exactly one installed version). " +
-            "This argument never installs a capability — an entry the host did " +
-            "not install refuses the declaration instead. Omitted, every " +
-            "installed capability is in scope.",
+          "each entry must name an installed registration at the same exact " +
+          "version (an unversioned entry needs exactly one installed version). " +
+          "This argument never installs a capability — an entry the host did " +
+          "not install refuses the declaration instead. Omitted, every " +
+          "installed capability is in scope.",
         ),
     },
     async execute(args, context) {
       try {
         return json(
-          toolset.graph_declare(
+          await toolset.graph_declare_and_start(
             args,
             context?.sessionID,
             resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
@@ -326,25 +302,25 @@ function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
         .optional()
         .describe(
           "The attempt credential the outcome runtime issued to you in your " +
-            "dispatch request for this node's in-flight attempt. Pass back exactly " +
-            "the value that request carried: it is a bearer capability bound to " +
-            "one attempt, it is never derived from the node id, and a missing, " +
-            "unknown, tampered or other node's credential is refused rather than " +
-            "re-bound to the node's current attempt.",
+          "dispatch request for this node's in-flight attempt. Pass back exactly " +
+          "the value that request carried: it is a bearer capability bound to " +
+          "one attempt, it is never derived from the node id, and a missing, " +
+          "unknown, tampered or other node's credential is refused rather than " +
+          "re-bound to the node's current attempt.",
         ),
       data: z
         .json()
         .optional()
         .describe(
           "Optional outcome payload (any JSON value). The outcome's own gates " +
-            "decide what it must contain; it is digested into the submission id.",
+          "decide what it must contain; it is digested into the submission id.",
         ),
       evidence_refs: z
         .array(z.string().min(1))
         .optional()
         .describe(
           "Optional artifact references the outcome's acceptance gates validate, " +
-            "each resolving inside the workspace artifact root.",
+          "each resolving inside the workspace artifact root.",
         ),
     },
     async execute(args, context) {
@@ -410,22 +386,13 @@ function createGraphStatusTool(
         .describe("Graph to query (inferred from node_id/loop_id if omitted)."),
       node_id: z.string().optional().describe("Query a specific node's runtime state."),
       loop_id: z.string().optional().describe("Query a loop group's state."),
-      scope: z
-        .enum(["session", "persisted", "all"])
-        .optional()
-        .describe(
-          "Scope of the query. 'session' (default) reads the declared graphs this " +
-            "process holds. 'persisted' reads graphs hydrated from the on-disk " +
-            "engine-state store (a cross-session view). 'all' merges declared + " +
-            "persisted (a declared graph wins on a graphId collision). With " +
-            "persisted/all, the no-target list shows persisted graphs and " +
-            "query/status/agent/from_date/to_date, group_by, and " +
-            "include_budget aggregate across sessions. An empty store yields an explicit " +
-            "honest-empty note — never fabricated rows.",
-        ),
+      run_id: z.string().optional().describe("Read an archived run by its durable id."),
+      scope: z.enum(["session", "persisted", "all"]).optional().describe(
+        "Session lists graphs declared in this process; persisted/all reads the shared graph store.",
+      ),
       format: statusFormatEnum
         .optional()
-        .describe("Output format: summary (table), tree, or json."),
+        .describe("Output format: summary, tree, or json."),
       query: z
         .string()
         .optional()
@@ -433,141 +400,33 @@ function createGraphStatusTool(
           "Filter nodes by case-insensitive substring match on nodeId / prompt / agent.",
         ),
       status: z
-        .enum(NODE_STATUS_VALUES as [NodeStatus, ...NodeStatus[]])
+        .enum(["pending", "dispatched", "settled"])
         .optional()
-        .describe("Filter nodes by exact lifecycle status (pending/ready/running/completed/blocked/timeout/escalate/cancelled/done)."),
+        .describe("Filter nodes by the native attempt state: pending, dispatched, settled."),
       agent: z.string().optional().describe("Filter nodes by exact agent match."),
       from_date: z
         .string()
         .optional()
-        .describe("ISO-8601 lower bound — include nodes with startedAt >= from_date."),
+        .describe("ISO-8601 lower bound — include nodes with dispatchedAt >= from_date."),
       to_date: z
         .string()
         .optional()
-        .describe("ISO-8601 upper bound — include completed nodes with completedAt <= to_date."),
-      group_by: z
-        .enum(["hour", "day", "agent"])
-        .optional()
-        .describe(
-          "Aggregate COMPLETED nodes into buckets by hour / day / agent over their " +
-            "completedAt timestamp, returning the bucket list with counts (uncompleted " +
-            "nodes are excluded honestly). A distinct view mode — takes precedence over " +
-            "the row render.",
-        ),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe(
-          "Cap the number of node rows emitted in summary and json renders. Unset " +
-            "leaves the output unbounded (byte-identical to legacy behavior).",
-        ),
-      depth: z
-        .number()
-        .int()
-        .min(0)
-        .optional()
-        .describe(
-          "Prune the tree render at N levels (0 = roots only). Unset = full depth " +
-            "(byte-identical to legacy tree output).",
-        ),
+        .describe("ISO-8601 upper bound — include settled nodes with settledAt <= to_date."),
+      group_by: z.enum(["hour", "day", "agent"]).optional().describe(
+        "Count settled nodes by settlement hour, day or agent in the selected run. Takes precedence over format.",
+      ),
+      limit: z.number().int().min(1).optional().describe("Limit selected nodes and their attempts before rendering."),
+      depth: z.number().int().min(0).optional().describe("Maximum tree depth; 0 shows roots only."),
       include_output: z
         .boolean()
         .optional()
-        .describe("Include materialized node result in response."),
-      include_progress: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include a node's latest progress signal payload, sourced from the " +
-          "engine signal ledger / signalsObserved progress entry (the latest " +
-          "payload per node, not a timestamped history).",
-        ),
-      include_budget: z
-        .boolean()
-        .optional()
-        .describe("Include budget consumption breakdown."),
-      include_metrics: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include graph-engine runtime metrics. When paired with export_path, " +
-            "writes a metrics JSON snapshot instead of rendering.",
-        ),
-      include_loops: z
-        .boolean()
-        .optional()
-        .describe("Include all loop groups for this graph."),
-      include_checkpoint: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include the node's recorded lifecycle checkpoint snapshot(s) from " +
-            "EngineState.checkpoints[nodeId]. Absent until a checkpoint is recorded; " +
-            "when none exist, an explicit 'no checkpoint recorded' note is shown.",
-        ),
-      include_artifacts: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include the node's recorded artifact file paths from " +
-            "NodeRuntimeState.artifacts[]. Nodes with no artifacts are omitted " +
-            "honestly; a run with none yields an explicit 'no artifacts / evidence " +
-            "recorded' note.",
-        ),
-      include_evidence: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include the node's recorded evidence references from " +
-            "NodeRuntimeState.evidence[]. Honest-empty like include_artifacts.",
-        ),
-      include_liveness: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include each node's recorded liveness state from " +
-            "NodeRuntimeState.liveness (lastActivityAt / heartbeatSource / " +
-            "stallStatus / stallWarnedAt / stallReason). OPTIONAL-ADDITIVE — " +
-            "only nodes WITH recorded liveness get the block; absent liveness " +
-            "renders nothing, never fabricated. Running nodes always render " +
-            "liveness regardless of this flag.",
-        ),
-      include_history: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include each loop group's ordered round history from " +
-            "LoopGroupRuntimeState.rounds[]. Absent rounds yield an explicit 'no " +
-            "loop rounds recorded' note — never invented rows.",
-        ),
-      round: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe(
-          "Filter round history to a single 1-based round index within a loop " +
-            "group (paired with include_history or alone). A round that was not " +
-            "recorded yields an explicit 'round N: not recorded' note.",
-        ),
-      stream: z
-        .boolean()
-        .optional()
-        .describe(
-          "Surface the timestamped per-node signal-event history from " +
-            "SignalLedgerEntry.history ({signal, payload, atMs}). An empty history " +
-            "yields an explicit 'no events recorded' note — never fabricated rows.",
-        ),
-      since: z
-        .string()
-        .optional()
-        .describe(
-          "ISO-8601 lower bound — when stream (or alone) is set, include only " +
-            "signal events at or after this timestamp. Events before since are " +
-            "filtered out; if none remain, an explicit 'no events since <ts>' note.",
-        ),
+        .describe("Include accepted results with their data, artifacts and evidence."),
+      include_progress: z.boolean().optional().describe("Include loop progress projections in summary and tree output."),
+      include_budget: z.boolean().optional().describe("Include reservations, recorded usage and unknown usage in summary and tree output."),
+      include_loops: z.boolean().optional().describe("Include loop definitions, traversal counts and progress in summary and tree output."),
+      include_artifacts: z.boolean().optional().describe("Include accepted result records with immutable artifact versions."),
+      include_evidence: z.boolean().optional().describe("Include accepted result records with their validation evidence."),
+      include_history: z.boolean().optional().describe("Include full run, attempt and control history."),
       max_chars: z
         .number()
         .optional()
@@ -580,16 +439,9 @@ function createGraphStatusTool(
         .boolean()
         .optional()
         .describe("Return the last max_chars characters of output."),
-      export_path: z
-        .string()
-        .optional()
-        .describe(
-          "Atomically write an export to this path and return a confirmation " +
-            "instead of a status render. Mode-dependent: a node_id writes that " +
-            "node's materialized result text, include_metrics writes a metrics " +
-            "JSON snapshot, and neither writes the owning graph's declaration " +
-            "to YAML.",
-        ),
+      export_path: z.string().optional().describe(
+        "Atomically export the selected query rendering to this path. The exported content follows format and filters.",
+      ),
     },
     async execute(args) {
       try {

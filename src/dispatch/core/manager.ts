@@ -283,6 +283,10 @@ export class DispatchManager {
   }
 
   async dispose(): Promise<void> {
+    for (const timers of [this.cleanupTimers, this.sidecarGCTimers, this._deferredIdleTimers]) {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    }
     this.orchestrator.dispose();
     this.progressStore.stopSweeper();
     this.progressStore.dispose();

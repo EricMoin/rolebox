@@ -80,9 +80,7 @@ import {
 } from "../../src/graph/protocol/execution-protocol.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
-import { createEngineState } from "../../src/graph/persistence/declared-state.ts";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
-import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -2523,9 +2521,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           body: { ...body, bodyVersion: OUTCOME_STATE_BODY_V5, nodes: v5Nodes },
           updatedAt: NOW + 10,
         });
-        const seeded = runtime.state();
-        expect(seeded?.bodyVersion).toBe(OUTCOME_STATE_BODY_V5);
-        expect(progressEntry(seeded ?? same.state, "revise-loop").unchanged).toBe(1);
+        expect(() => runtime.state()).toThrow("has no reader");
 
         const before = ledger.readGraphState(graphId);
         const workedAgain = runtime.submit(
@@ -2543,7 +2539,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         expect(workedAgain.kind).toBe("refused");
         if (workedAgain.kind !== "refused") return;
         expect(workedAgain.refusals.map((refusal) => refusal.code)).toEqual([
-          "credential-unknown",
+          "unsupported-state-version",
         ]);
 
         // NOTHING was written: the older body keeps the counter it recorded, so
@@ -2907,7 +2903,7 @@ describe("OutcomeGraphRuntime — a convergence node is armed by its join", () =
       // effect — only the durable arrival record of the branch that did answer.
       expect(nodeOf(first.state, "djoin")).toMatchObject({ status: "pending" });
       expect(nodeOf(first.state, "djoin").attemptId).toBeUndefined();
-      expect(nodeOf(first.state, "djoin").attemptCredential).toBeUndefined();
+      expect(nodeOf(first.state, "djoin")).not.toHaveProperty("attemptCredential");
       expect(nodeOf(first.state, "djoin").arrivals).toEqual([
         { from: "brc", outcome: "done", attemptId: "brc#2" },
       ]);
@@ -3212,7 +3208,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       expect(nodeOf(started.state, "work").attemptCredentialDigest).toBe(
         attemptCredentialDigest(request.credential),
       );
-      expect(nodeOf(started.state, "work").attemptCredential).toBeUndefined();
+      expect(nodeOf(started.state, "work")).not.toHaveProperty("attemptCredential");
 
       const accepted = runtime.submit(
         { nodeId: "work", outcomeId: "done", credential: request.credential },
@@ -3292,7 +3288,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       const current = nodeOf(revised.state, "work").attemptCredentialDigest;
       expect(current).toBeDefined();
       expect(current).not.toBe(attemptCredentialDigest(firstCredential));
-      expect(nodeOf(revised.state, "work").attemptCredential).toBeUndefined();
+      expect(nodeOf(revised.state, "work")).not.toHaveProperty("attemptCredential");
 
       const before = runtime.state();
       const receiptsBefore = await countTable(dir, "ledger_receipts");
@@ -3576,24 +3572,10 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       });
       const before = ledger.readGraphState(graphId);
 
-      // RECOVERY refuses the attempt: it is not armed and not launched, because
-      // no submission could ever settle it and recovery never grants a
-      // credential the attempt was not issued. TWO records name the missing
-      // credential — the node entry (unarmed) and the dispatch effect committed
-      // for that attempt (unresolvable) — and each is reported, because each is
-      // a durable object a reader has to be able to find.
       const resumed = runtime.resume(NOW + 2);
-      expect(resumed.kind).toBe("resumed");
-      if (resumed.kind !== "resumed") return;
-      expect(resumed.armed).toEqual([]);
-      expect(resumed.dispatched).toEqual([]);
-      expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
-        "credential-missing",
-        "credential-missing",
-      ]);
-      const paths = resumed.refusals.map((refusal) => refusal.path);
-      expect(paths).toContain("$.attemptCredentialDigest");
-      expect(paths.some((path) => path?.startsWith("$.nodes[") === true)).toBe(true);
+      expect(resumed.kind).toBe("refused");
+      if (resumed.kind !== "refused") throw new Error("older state resumed");
+      expect(resumed.refusals.map((refusal) => refusal.code)).toEqual(["unsupported-state-version"]);
 
       // SUBMISSION: the credential the worker holds names no recorded attempt,
       // and the credential-less attempt is never settled in its place.
@@ -3604,7 +3586,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       expect(submitted.kind).toBe("refused");
       if (submitted.kind !== "refused") return;
       expect(submitted.refusals.map((refusal) => refusal.code)).toEqual([
-        "credential-unknown",
+        "unsupported-state-version",
       ]);
 
       // The version-1 row was neither rewritten nor downgraded nor advanced.

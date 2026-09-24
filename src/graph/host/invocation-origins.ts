@@ -1,48 +1,3 @@
-/**
- * Graph Execution Engine v2 — a graph's declaring invocation, as a store TABLE
- *
- * Version: 2.0
- * Date: 2026-09-23
- *
- * WHY THIS RECORD EXISTS. Every window that can arm a dispatch — the declaring
- * call's first execution, a worker's own accepted submission, an observed
- * completion settling its successor, and the boot sweep — starts a worker
- * under SOME platform invocation. The platform needs that invocation before it
- * can start a run (dsh composes the subagent under a live parent session, Pi
- * launches the task under a parent session), and the window that arms a
- * SUCCESSOR is not the window that declared the graph: a natural completion is
- * observed later, out of band, when no tool call is in effect. A host that only
- * names the invocation during the declaring call therefore loses it exactly
- * when the second node is armed.
- *
- * So the declaring invocation becomes a HOST FACT, kept per graph — in the
- * workspace's ONE graph store (`src/graph/store/`), table
- * `graph_invocation_origins`, in the SAME database as the run state and the
- * execution bindings it belongs to.
- *
- * WHAT THIS MODULE NO LONGER IS. It used to be a WHOLE-FILE authority: a
- * `host-invocation-origins.json` rewritten in full on every change, beside the
- * acceptance ledger and committing independently of it. P1 item 3 names that
- * file as the bypass authority to eliminate, and it is gone: there is no file
- * to rewrite, no in-process snapshot to lose a concurrent writer's rows, and no
- * second format to gate. The record is a row now, so it is written, read and
- * committed with everything else the graph owns.
- *
- * WHAT IT CONTAINS, AND WHAT IT DOES NOT. A graph id and the
- * `{ sessionId, agent }` attribution the declaring call carried — no
- * credential, no prompt, no outcome. Recording a graph again with the SAME
- * attribution changes nothing, and a DIFFERENT attribution REPLACES it: a
- * re-declaration from a new session is the newer invocation, and a later
- * dispatch must be attributed to the session that is actually running the
- * graph.
- *
- * AN UNREADABLE STORE IS REFUSED, NOT IGNORED. The store's own format gate runs
- * at `open`, so a file this build cannot read throws instead of answering "no
- * origins" — reading an unreadable record as empty would make every declared
- * graph look like one no invocation ever named, and the sweep would report a
- * dispatch failure whose real cause is an unreadable store.
- */
-
 import { GraphStore } from "../store/graph-store.ts";
 
 // ── Options and format ──────────────────────────────────────────────────────
@@ -154,7 +109,7 @@ function assertOrigin(origin: HostInvocationOrigin): void {
   if (typeof origin.sessionId !== "string" || origin.sessionId.length === 0) {
     throw new Error(
       "host-invocation-origins: an origin must name the declaring session — a graph " +
-        "with no session attributed is not a recorded fact",
+      "with no session attributed is not a recorded fact",
     );
   }
   if (

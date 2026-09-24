@@ -32,7 +32,7 @@ import {
 import {
   engineStateDir,
   engineStatePath,
-} from "../../src/graph/persistence/engine-persistence.ts";
+} from "../../src/graph/persistence/paths.ts";
 import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime } from "../../src/graph/outcome/runtime.ts";

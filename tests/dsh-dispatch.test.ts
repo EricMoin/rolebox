@@ -38,8 +38,8 @@ import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
 } from "../src/graph/tools/declare-graph.ts";
-import { engineStateDir } from "../src/graph/persistence/engine-persistence.ts";
-import { scanPersistedStates } from "../src/graph/tools/persisted-state.ts";
+import { engineStateDir } from "../src/graph/persistence/paths.ts";
+import { queryGraphs } from "../src/graph/query/graph-query.ts";
 import { createValidatorRegistry } from "../src/graph/outcome/validators.ts";
 import {
   completionPolicyRefOf,
@@ -514,12 +514,12 @@ describe("outcome dispatch through the dsh subagent seam", () => {
         "origin-1",
       ]);
 
-      const state = scanPersistedStates(engineStateDir(tmpDir)).loaded.find(
+      const state = queryGraphs(engineStateDir(tmpDir)).graphs.find(
         (candidate) => candidate.graphId === "dsh.outcome",
       );
       expect(state?.phase).toBe("complete");
-      expect(state?.nodes.get("work")?.status).toBe("completed");
-      expect(state?.nodes.get("ship")?.status).toBe("completed");
+      expect(state?.nodes.find((node) => node.nodeId === "work")?.status).toBe("settled");
+      expect(state?.nodes.find((node) => node.nodeId === "ship")?.status).toBe("settled");
     } finally {
       host.close();
     }

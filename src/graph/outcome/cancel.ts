@@ -1,62 +1,3 @@
-/**
- * Graph v3 — the platform CANCEL contract and the cancel effect's state rules
- * (P3 cancel)
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * WHAT THIS MODULE OWNS. Plan §4 P3: a cancellation is persisted as an INTENT, stops new dispatch,
- * and emits a cancel effect to every in-flight host execution; requested and confirmed are
- * DIFFERENT facts. The intent itself is P1's `ControlDecision` (one `"cancel"` decision per
- * in-flight attempt plus the run's control fact), written by the control application service before
- * any host is asked. This module owns the second half: the durable CANCEL EFFECT one attempt's
- * platform cancellation is recorded under, the PORT a host adapter implements against its platform,
- * and the state rules that decide what a repeated delivery does.
- *
- * THE DURABLE CANCEL EFFECT. One row in the store's ONE effect ledger, keyed by the attempt:
- *
- * | status  | means                                                                       |
- * | ---     | ---                                                                         |
- * | pending | the cancel INTENT is recorded; nothing was handed to the platform yet.       |
- * | started | the host HANDED the cancel to the platform; the platform has NOT confirmed.  |
- * | done    | the platform CONFIRMED the execution is cancelled.                           |
- *
- * `failed` is deliberately NEVER written for a cancel effect. "The host could not obtain a
- * confirmation" is not a fact about the external execution — the task may still be running — and a
- * terminal row would drop the work out of the resume set, which is exactly the "declare convergence
- * by hiding effects" the plan forbids (§4 P3 acceptance). An unconfirmed cancel stays `started` and
- * therefore VISIBLE: it is listed by `pendingEffects`, it is re-delivered by the next host window, and
- * no path may report it as cancelled.
- *
- * REQUESTED vs CONFIRMED, AND HOW THEY ARE READ BACK. The effect ledger's typed port reads the
- * UNSETTLED rows (pending/started); a terminal row is readable only through a transition verdict.
- * This module therefore reads the durable state with `markCancelRequested`, which is exactly the
- * request transition and a TOTAL probe:
- *
- * - the row is missing         -> this delivery records the intent and asks the platform;
- * - the row is pending         -> it moves to started: the platform is asked NOW;
- * - the row is already started -> asked before, still unconfirmed: it is ASKED AGAIN (a cancel is
- *                                 idempotent on both shipped platforms, and re-asking is how an
- *                                 unconfirmed request is reconciled);
- * - the row is terminal `done` -> CONFIRMED: the platform substantiated it, the platform is NOT asked
- *                                 again, and nothing rewinds the fact;
- * - the row is terminal and anything else -> a terminal row this build never writes. It is NOT read
- *                                 as a confirmation: the platform is still asked, and the verdict
- *                                 is reported by name.
- *
- * A CONFIRMATION IS THE ONLY THING THAT WRITES `done`. An `unsupported` platform, a `requested`
- * answer, a thrown port and a host with no port at all leave the row `started` (or `pending`, when
- * the host could not even hand it over) and every one of them is reported as unconfirmed.
- *
- * CANCELLATION IS CONTROL, NEVER AN OUTCOME (§3.4). Nothing in this module constructs a receipt, an
- * accepted event or an accepted result; it writes ONE effect row per attempt. A run stopped by
- * control cannot be settled by the run path (`control-stopped`), and a platform that reports its
- * execution as cancelled reports an END THAT IS NOT A COMPLETION — never a business success.
- *
- * Dependency leaf: the ledger port's types and the dispatch-effect identity. No runtime import, so
- * the outcome run path, the host layer and both platform adapters may depend on it without a cycle.
- */
-
 import type {
   AcceptanceLedgerTx,
   EffectStatus,
@@ -259,9 +200,9 @@ export function markCancelRequested(
       return verdict.effect.status === "done"
         ? Object.freeze({ kind: "already-confirmed" as const })
         : Object.freeze({
-            kind: "unexpected-terminal" as const,
-            status: verdict.effect.status,
-          });
+          kind: "unexpected-terminal" as const,
+          status: verdict.effect.status,
+        });
     case "missing":
       // The caller records the intent before it asks, so a caller that reached this step without one
       // has a store that lost the row between two statements of the same delivery. Treating it as

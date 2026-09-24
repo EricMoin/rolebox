@@ -50,7 +50,7 @@ import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
 import {
   engineStateDir,
-} from "../../src/graph/persistence/engine-persistence.ts";
+} from "../../src/graph/persistence/paths.ts";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import {
   LEDGER_FILE_NAME,

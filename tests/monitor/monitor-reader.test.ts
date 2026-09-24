@@ -1,3 +1,5 @@
+import { graphStoreRoot } from "../../src/graph/store/schema.ts";
+import { GraphApplication } from "../../src/graph/application/graph-application.ts";
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -6,12 +8,16 @@ import { tmpdir } from "node:os";
 import { readMonitorSnapshot } from "../../src/cli/commands/monitor/monitor-reader.ts";
 
 let tmpDir: string;
+let previousData: string | undefined;
 
 beforeEach(() => {
+  previousData = process.env.ROLEBOX_DATA_DIR;
   tmpDir = mkdtempSync(join(tmpdir(), "monitor-reader-test-"));
+  process.env.ROLEBOX_DATA_DIR = join(tmpDir, "data");
 });
 
 afterEach(() => {
+  if (previousData === undefined) delete process.env.ROLEBOX_DATA_DIR; else process.env.ROLEBOX_DATA_DIR = previousData;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -35,53 +41,12 @@ function writeNDJSONFile(filename: string, lines: unknown[]): string {
 
 // ── Hand-authored state-file builders ─────────────────────────────────
 
-/**
- * Build a valid engine-`2` persistence file (mirrors the serialized shape
- * produced by `serializeEngineState`). The node carries a `dispatchTaskId`
- * whose task will deliberately have NO matching live dispatch sessionId, to
- * prove the graph is surfaced anyway.
- */
-function buildEngineFile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    version: 2,
-    // A record must carry its own execution-protocol identity: the loader
-    // resolves no implicit protocol, so a protocol-1-shaped record without
-    // this key is a malformed discriminator and is skipped.
-    executionProtocolVersion: 2,
-    graphId: "demo-graph",
-    phase: "executing",
-    graphDeclaration: { version: 2, name: "demo", nodes: [], edges: [] },
-    nodes: {
-      n1: {
-        nodeId: "n1",
-        agent: "emperor--jinyiwei--backend",
-        prompt: "build",
-        needsApproval: false,
-        status: "running",
-        signalsObserved: { answer: {} },
-        sessionsSpawned: 1,
-        tokensConsumed: { inputTokens: 100, outputTokens: 50, cost: 0.001 },
-        upstreamResults: {},
-        joinStrategy: "all",
-        joinSatisfied: true,
-        traversalCount: 0,
-        dispatchTaskId: "engine-task-1",
-        dispatchSessionId: "engine-session-1",
-        startedAt: 1_700_000_000_000,
-        retryCount: 0,
-      },
-    },
-    edges: {},
-    loopGroups: {},
-    frontier: [],
-    budget: { sessionsSpawned: 1, totalInputTokens: 100, totalOutputTokens: 50, totalCost: 0.001 },
-    signalLedger: {},
-    startedAt: 1_700_000_000_000,
-    updatedAt: 1_700_000_000_000,
-    advancingLock: false,
-    pendingCompletions: [],
-    ...overrides,
-  };
+async function writeGraph(graphId = "demo-graph") {
+  const app = GraphApplication.open({ workspaceDir: tmpDir, storeRoot: graphStoreRoot(process.env.ROLEBOX_DATA_DIR!, tmpDir), env: {}, deliver: () => {} });
+  try {
+    await app.tools.graph_declare_and_start({ declaration: { version: 3, name: graphId,
+      nodes: [{ id: "n1", agent: "worker", prompt: "build", outcomes: [{ id: "done" }] }], edges: [] } }, "parent");
+  } finally { app.close(); }
 }
 
 /** Build a dispatch file whose live task session does NOT match the graphId. */
@@ -143,9 +108,9 @@ function buildLoopsFile(): Record<string, unknown> {
 }
 
 describe("readMonitorSnapshot — engine graph integration", () => {
-  it("surfaces a persisted engine graph in engineGraphs even when no dispatch task sessionId matches its graphId", () => {
+  it("surfaces a persisted engine graph in engineGraphs even when no dispatch task sessionId matches its graphId", async () => {
     mkdirSync(stateDir(), { recursive: true });
-    writeStateFile("engine-demo.json", JSON.stringify(buildEngineFile()));
+    await writeGraph();
 
     // A live dispatch task whose sessionId differs from the graphId: under the
     // legacy liveSessions filter this graph would be hidden; it must surface.
@@ -166,9 +131,9 @@ describe("readMonitorSnapshot — engine graph integration", () => {
     expect(snap.tasks[0].status).toBe("running");
   });
 
-  it("surfaces an engine graph even when there is no dispatch task file at all", () => {
+  it("surfaces an engine graph even when there is no dispatch task file at all", async () => {
     mkdirSync(stateDir(), { recursive: true });
-    writeStateFile("engine-solo.json", JSON.stringify(buildEngineFile({ graphId: "solo-graph" })));
+    await writeGraph("solo-graph");
 
     const snap = readMonitorSnapshot(tmpDir);
 
@@ -179,9 +144,9 @@ describe("readMonitorSnapshot — engine graph integration", () => {
     expect(snap.dispatchSummary).toEqual({ pending: 0, running: 0, completed: 0, error: 0, cancelled: 0 });
   });
 
-  it("reads durable graph events into graphEvents (chronological, most recent window)", () => {
+  it("reads durable graph events into graphEvents (chronological, most recent window)", async () => {
     mkdirSync(stateDir(), { recursive: true });
-    writeStateFile("engine-demo.json", JSON.stringify(buildEngineFile()));
+    await writeGraph();
     writeNDJSONFile("graph-events-aaa.ndjson", [
       { ts: 100, graphId: "demo-graph", event: "phase_change", status: "executing" },
       { ts: 200, graphId: "demo-graph", nodeId: "n1", event: "node_dispatched", status: "running", agent: "emperor--jinyiwei--backend", startedAt: 150 },
@@ -195,12 +160,12 @@ describe("readMonitorSnapshot — engine graph integration", () => {
 });
 
 describe("readMonitorSnapshot — legacy surfaces unchanged", () => {
-  it("keeps dispatch, activeFunctions, and loops live-filtered behavior", () => {
+  it("keeps dispatch, activeFunctions, and loops live-filtered behavior", async () => {
     mkdirSync(stateDir(), { recursive: true });
     writeStateFile("dispatch-x.json", JSON.stringify(buildDispatchFile()));
     writeStateFile("fnstate-x.json", JSON.stringify(buildFnStateFile()));
     writeStateFile("loops-x.json", JSON.stringify(buildLoopsFile()));
-    writeStateFile("engine-demo.json", JSON.stringify(buildEngineFile()));
+    await writeGraph();
 
     const snap = readMonitorSnapshot(tmpDir);
 
@@ -221,11 +186,11 @@ describe("readMonitorSnapshot — legacy surfaces unchanged", () => {
     expect(snap.engineGraphs[0].graphId).toBe("demo-graph");
   });
 
-  it("filters legacy loops to live sessions while keeping engine graphs", () => {
+  it("filters legacy loops to live sessions while keeping engine graphs", async () => {
     mkdirSync(stateDir(), { recursive: true });
     // Engine graph with a live-ish node, plus a legacy loop file whose
     // session is NOT live (no dispatch task running).
-    writeStateFile("engine-demo.json", JSON.stringify(buildEngineFile()));
+    await writeGraph();
     writeStateFile("loops-x.json", JSON.stringify(buildLoopsFile()));
 
     const snap = readMonitorSnapshot(tmpDir);

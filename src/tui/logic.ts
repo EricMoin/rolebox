@@ -113,9 +113,10 @@ export function computeHealth(params: HealthParams): HealthState | null {
  * `executing` instead of a stale `idle` to avoid false idle flicker.
  */
 export function deriveEnginePhase(graph: {
-  phase: EnginePhase;
+  phase: EnginePhase | "stopped";
   nodeStatusCounts: Record<string, number>;
-}): EnginePhase {
+}): EnginePhase | "stopped" {
+  if (graph.phase === "stopped") return "stopped";
   const running = graph.nodeStatusCounts[NodeStatus.Running] ?? 0;
   if (running > 0) return EnginePhase.Executing;
   return graph.phase;

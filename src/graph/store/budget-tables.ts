@@ -1,68 +1,8 @@
-/**
- * Graph store — the dispatch BUDGET tables (P3 item 3, the budget)
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * WHAT THIS MODULE OWNS. Plan §4 P3: "预算：执行次数、时长、token/费用的预算与使用记录可恢复；
- * 并行派发先预留，再按真实 usage 对账。超限停止新派发…" — a budget a process can record a
- * claim against, recover after a restart, reconcile against real usage, and
- * enforce BEFORE a dispatch exists.
- *
- * THE ENFORCEMENT IS THE CONDITIONAL WRITE, NOT A CHECK BESIDE IT. Every claim
- * is made by ONE `INSERT … SELECT … WHERE` statement whose `WHERE` compares the
- * node's declared ceilings against the rows this store already holds. There is
- * deliberately NO "read the remaining budget" method for a caller to decide
- * from: a read-then-write in application code is exactly the interleaving this
- * project has paid for three times (§8.5 R1, §8.6 R1/R2), and a dispatch that
- * loses the race must write NOTHING rather than be compensated for afterwards.
- * The statement is evaluated against the COMMITTED store inside the caller's
- * transaction (this class joins it through the injected `join`), and the run a
- * row belongs to is resolved inside that same boundary.
- *
- * WHAT A CLAIM IS. One row per ARMED DISPATCH, keyed by the attempt it
- * authorizes. For each dimension the declaration declared a ceiling for, the
- * claim is `ceiling − (recorded usage + outstanding claims)`: the whole
- * remaining budget, because one attempt may consume up to what is left and
- * authorizing two attempts against the same remainder is authorizing twice the
- * ceiling. A dimension with NO declared ceiling claims nothing — the execution
- * count is recorded (one per dispatch) but never ceilinged, because the v3
- * grammar authorizes no count ceiling (see `domain/budget.ts`).
- *
- * WHO TAKES THE WRITE LOCK, AND WHY EVERY MUTATOR DOES IT FIRST. SQLite refuses
- * a shared-to-reserved lock PROMOTION immediately when another connection holds
- * the write lock (it does not wait on `busy_timeout`), so a transaction that
- * reads and then writes can die with `database is locked` where two processes
- * contend. Every mutating method here starts with a no-op write to the budget
- * table, which takes RESERVED before the first read and leaves no trace when the
- * transaction rolls back — the same shape `lockControlWrite` uses for the
- * control path.
- *
- * RECONCILIATION DOES NOT DOUBLE COUNT. A claim becomes `reconciled` exactly
- * once, by a conditional UPDATE of the `reserved`/`released` row, with the
- * REAL usage recorded; a second report for the same attempt is answered the
- * fact that stands (`replayed` / `ignored`) and adds nothing. A dispatch whose
- * attempt ended without any report is `released`: its claim is withdrawn and
- * its consumption is recorded as UNKNOWN (never as a fabricated zero), and a
- * late report still reconciles it — delayed billing becomes a recorded overrun
- * rather than a silent erasure.
- *
- * EVERY NUMBER IS A ROW. The per-node accumulation the runtime and a report read
- * is a SUM over these rows, computed here, so a restart cannot lose a counter
- * that was never kept separately and no two counters can disagree.
- *
- * Store-internal: the driver, the ledger port's record types, the plan's budget
- * vocabulary and this store's own error/format helpers. Nothing from the outcome
- * run path is imported — the enforcement lives in the store, and the store does
- * not depend on who calls it.
- */
-
 import type { DatabaseDriver } from "../../memory/db-driver.ts";
 import {
-  ZERO_BUDGET_USAGE,
   type BudgetLimitKind,
   type BudgetUsageAmounts,
-  type NodeBudgetLimits,
+  type NodeBudgetLimits
 } from "../domain/budget.ts";
 import type {
   BudgetExhaustion,
@@ -171,10 +111,10 @@ function requireIdentifier(value: unknown, field: string): string {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: " +
-        field +
-        " is " +
-        describeValue(value) +
-        ", not a non-empty identifier — the budget row was refused and nothing was written",
+      field +
+      " is " +
+      describeValue(value) +
+      ", not a non-empty identifier — the budget row was refused and nothing was written",
     );
   }
   return value;
@@ -186,10 +126,10 @@ function requireCount(value: unknown, field: string): number {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: " +
-        field +
-        " is " +
-        describeValue(value) +
-        ", not a non-negative safe integer — the budget row was refused and nothing was written",
+      field +
+      " is " +
+      describeValue(value) +
+      ", not a non-negative safe integer — the budget row was refused and nothing was written",
     );
   }
   return value;
@@ -201,10 +141,10 @@ function requireAmount(value: unknown, field: string): number {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: " +
-        field +
-        " is " +
-        describeValue(value) +
-        ", not a finite non-negative number — the budget row was refused and nothing was written",
+      field +
+      " is " +
+      describeValue(value) +
+      ", not a finite non-negative number — the budget row was refused and nothing was written",
     );
   }
   return value;
@@ -375,13 +315,13 @@ export class BudgetTables {
       throw new GraphStoreWriteError(
         "invalid-record",
         "graph-store: run " +
-          JSON.stringify(explicit) +
-          " of graph " +
-          JSON.stringify(graphId) +
-          " is not the graph's CURRENT run (" +
-          JSON.stringify(current ?? null) +
-          ") — a budget row under any other run would be a claim no reader resolves, so " +
-          "it was refused and nothing was written",
+        JSON.stringify(explicit) +
+        " of graph " +
+        JSON.stringify(graphId) +
+        " is not the graph's CURRENT run (" +
+        JSON.stringify(current ?? null) +
+        ") — a budget row under any other run would be a claim no reader resolves, so " +
+        "it was refused and nothing was written",
       );
     }
     return current;
@@ -424,6 +364,9 @@ export class BudgetTables {
     const effectId = requireIdentifier(input.effectId, "budget.effectId");
     const at = requireCount(input.at, "budget.at");
     const limits = this.normalizedLimits(input.limits);
+    const maxExecutions = input.maxExecutions === undefined
+      ? undefined
+      : requireCount(input.maxExecutions, "budget.maxExecutions");
     const table = GRAPH_STORE_TABLES.budgetReservations;
     return this.join(() => {
       this.lockWrite(graphId);
@@ -461,6 +404,7 @@ export class BudgetTables {
         const limit = dimension.limitOf(limits) ?? null;
         params.push(limit, graphId, runId, nodeId, graphId, runId, nodeId, limit);
       }
+      params.push(maxExecutions ?? null, graphId, runId, maxExecutions ?? null);
 
       this.db.run(
         `INSERT INTO ${table} (
@@ -478,7 +422,9 @@ export class BudgetTables {
            SELECT 1 FROM ${table}
            WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
          )
-           AND ${DIMENSIONS.map(headroomOf).join("\n           AND ")}`,
+           AND ${DIMENSIONS.map(headroomOf).join("\n           AND ")}
+           AND (? IS NULL OR (SELECT COUNT(*) FROM ${table}
+             WHERE graph_id = ? AND run_id = ?) < ?)`,
         ...params,
       );
       if (this.changes() === 1) {
@@ -487,9 +433,9 @@ export class BudgetTables {
           throw new GraphStoreWriteError(
             "invalid-record",
             "graph-store: the budget reservation for attempt " +
-              JSON.stringify(attemptId) +
-              " was inserted and could not be read back — refusing to report a claim the " +
-              "store cannot show",
+            JSON.stringify(attemptId) +
+            " was inserted and could not be read back — refusing to report a claim the " +
+            "store cannot show",
           );
         }
         return Object.freeze({ kind: "reserved" as const, reservation });
@@ -504,7 +450,7 @@ export class BudgetTables {
       }
       return Object.freeze({
         kind: "exhausted" as const,
-        exhausted: this.exhaustionOf(graphId, runId, nodeId, limits),
+        exhausted: this.exhaustionOf(graphId, runId, nodeId, limits, maxExecutions),
       });
     });
   }
@@ -522,8 +468,20 @@ export class BudgetTables {
     runId: string,
     nodeId: string,
     limits: NodeBudgetLimits,
+    maxExecutions?: number,
   ): readonly BudgetExhaustion[] {
     const out: BudgetExhaustion[] = [];
+    if (maxExecutions !== undefined) {
+      const row = asRow(this.db.query(
+        `SELECT COUNT(*) AS executions FROM ${GRAPH_STORE_TABLES.budgetReservations}
+         WHERE graph_id = ? AND run_id = ?`,
+      ).get(graphId, runId), this.filePath, GRAPH_STORE_TABLES.budgetReservations);
+      const committed = readAmount(row, "executions", this.filePath, GRAPH_STORE_TABLES.budgetReservations);
+      if (committed >= maxExecutions) out.push(Object.freeze({
+        kind: "executions", limit: maxExecutions, committed,
+        message: `run ${JSON.stringify(runId)} has reserved ${committed} executions against max_executions ${maxExecutions}`,
+      }));
+    }
     for (const dimension of DIMENSIONS) {
       const limit = dimension.limitOf(limits);
       if (limit === undefined) continue;
@@ -660,8 +618,8 @@ export class BudgetTables {
           throw new GraphStoreWriteError(
             "invalid-record",
             "graph-store: the late usage report for attempt " +
-              JSON.stringify(attemptId) +
-              " was appended and could not be read back",
+            JSON.stringify(attemptId) +
+            " was appended and could not be read back",
           );
         }
         return Object.freeze({ kind: "recorded-late" as const, reservation: recorded });
@@ -702,10 +660,10 @@ export class BudgetTables {
         throw new GraphStoreWriteError(
           "invalid-record",
           "graph-store: the budget reservation of attempt " +
-            JSON.stringify(attemptId) +
-            " could not be reconciled although it is not reconciled (status " +
-            JSON.stringify(existing.status) +
-            ") — nothing was reported as settled",
+          JSON.stringify(attemptId) +
+          " could not be reconciled although it is not reconciled (status " +
+          JSON.stringify(existing.status) +
+          ") — nothing was reported as settled",
         );
       }
       const reconciled = this.readReservationIn(graphId, attemptId, existing.runId);
@@ -713,8 +671,8 @@ export class BudgetTables {
         throw new GraphStoreWriteError(
           "invalid-record",
           "graph-store: the reconciled usage of attempt " +
-            JSON.stringify(attemptId) +
-            " could not be read back",
+          JSON.stringify(attemptId) +
+          " could not be read back",
         );
       }
       return Object.freeze({ kind: "reconciled" as const, reservation: reconciled });
@@ -1012,14 +970,14 @@ export class BudgetTables {
       }),
       ...(settled
         ? {
-            used: Object.freeze({
-              executions: readCount(row, "used_executions", this.filePath, table),
-              durationMs: readAmount(row, "used_duration_ms", this.filePath, table),
-              inputTokens: readAmount(row, "used_input_tokens", this.filePath, table),
-              outputTokens: readAmount(row, "used_output_tokens", this.filePath, table),
-              costUsd: readAmount(row, "used_cost_usd", this.filePath, table),
-            }),
-          }
+          used: Object.freeze({
+            executions: readCount(row, "used_executions", this.filePath, table),
+            durationMs: readAmount(row, "used_duration_ms", this.filePath, table),
+            inputTokens: readAmount(row, "used_input_tokens", this.filePath, table),
+            outputTokens: readAmount(row, "used_output_tokens", this.filePath, table),
+            costUsd: readAmount(row, "used_cost_usd", this.filePath, table),
+          }),
+        }
         : {}),
       reservedAt: readCount(row, "reserved_at", this.filePath, table),
       ...(status === "reserved"

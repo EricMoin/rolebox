@@ -1,40 +1,7 @@
-/**
- * Graph store — the format gate of the ONE authoritative store
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE GATE IS THE SAME DISCIPLINE THE LEDGER AND THE HOST STORE ALREADY
- * APPLIED, now over one file: an existing store is opened ONLY when its format
- * version is exactly the one this build writes and every table this format owns
- * declares exactly the columns, affinities, nullability and PRIMARY KEY
- * positions it writes. Everything else is refused BEFORE a row is read or
- * written, and the file is left exactly as it was found.
- *
- * THREE REFUSAL SITUATIONS THAT LOOK ALIKE AND ARE NOT:
- * - A ZERO-BYTE file at the authoritative path is `corrupt`: the file exists and
- *   is not a store, so it is never initialized into a fresh run (`§P1.6`).
- * - A NON-EMPTY RETIRED authority beside the path (`RETIRED_AUTHORITY_FILES`:
- *   the previous whole-file host store and the JSON invocation record) is
- *   `unsupported`: this build registers no conversion for it, and answering
- *   `absent` for the execution bindings it holds is what licenses a second
- *   creation for one effect. The gate names the file instead.
- * - An UNKNOWN, NEWER or OLDER format version is `unsupported`: the file is a
- *   well-formed member of a format this build has no decoder for, and the
- *   honest answer is a refusal that names it, never a downgrade, a widening or
- *   an automatic initialization.
- *
- * The verdict vocabulary is the P1 domain's `DomainLoadResult`
- * (`absent` / `valid` / `corrupt` / `unsupported`, with
- * `migration-required` reserved for a REGISTERED conversion) — see
- * `load.ts` for the mapping from these problems onto it.
- *
- * Dependency leaf in the record model: this module reads the file and its
- * schema, and touches no record type.
- */
-
 import { existsSync, openSync, readdirSync, readSync, closeSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { storeIdentityPath, verifyStoreIdentity } from "./identity.ts";
 
 import type { DatabaseDriver } from "../../memory/db-driver.ts";
 import { errorText } from "../../utils/error-text.ts";
@@ -56,11 +23,11 @@ import {
 /**
  * What the authoritative path holds, decided WITHOUT opening a connection.
  *
- * The three cases are three different facts, and collapsing them is the defect
- * this type exists to prevent: a missing store may be initialized, a retired
- * authority blocks, and a present file must pass the gate.
+ * Only an unbound, absent store can be initialized. A missing bound database
+ * or retired authority blocks recovery; a present file must pass verification.
  */
 export type StoreDirectoryReading =
+  | { readonly kind: "missing-bound-store"; readonly filePath: string }
   /**
    * The authoritative file exists. `empty` is true for a ZERO-BYTE file, which
    * is refused BEFORE any connection exists: opening a zero-byte path with
@@ -72,10 +39,10 @@ export type StoreDirectoryReading =
   | { readonly kind: "absent"; readonly filePath: string }
   /** No authoritative file, but a NON-EMPTY retired authority is present. */
   | {
-      readonly kind: "retired";
-      readonly filePath: string;
-      readonly files: readonly string[];
-    };
+    readonly kind: "retired";
+    readonly filePath: string;
+    readonly files: readonly string[];
+  };
 
 /** Classify the workspace's store directory without creating or changing it. */
 export function readStoreDirectory(root: string): StoreDirectoryReading {
@@ -90,6 +57,7 @@ export function readStoreDirectory(root: string): StoreDirectoryReading {
     }
     return { kind: "store", filePath, empty };
   }
+  if (existsSync(storeIdentityPath(filePath))) return { kind: "missing-bound-store", filePath };
   const retired: string[] = [];
   const note = (name: string): void => {
     const path = join(root, name);
@@ -130,10 +98,10 @@ export function emptyStoreRefusal(filePath: string): GraphStoreFormatError {
     "foreign-store",
     filePath,
     "graph-store: " +
-      filePath +
-      " exists and is ZERO BYTES — it is a damaged authoritative store, not an " +
-      "absent one, and this build neither initializes over it nor treats the " +
-      "graph as new",
+    filePath +
+    " exists and is ZERO BYTES — it is a damaged authoritative store, not an " +
+    "absent one, and this build neither initializes over it nor treats the " +
+    "graph as new",
     undefined,
     GRAPH_STORE_FORMAT_VERSION,
   );
@@ -153,14 +121,14 @@ export function retiredAuthorityRefusal(
     "older-format",
     reading.filePath,
     "graph-store: " +
-      reading.filePath +
-      " does not exist, but this root still holds " +
-      reading.files.join(", ") +
-      " — a retired authority this build neither reads nor converts. It is NOT " +
-      "treated as an empty store: the execution bindings it carries are what " +
-      "keep a recovery from creating a second execution for one effect, so the " +
-      "records must be inventoried and archived before a new store is " +
-      "initialized here",
+    reading.filePath +
+    " does not exist, but this root still holds " +
+    reading.files.join(", ") +
+    " — a retired authority this build neither reads nor converts. It is NOT " +
+    "treated as an empty store: the execution bindings it carries are what " +
+    "keep a recovery from creating a second execution for one effect, so the " +
+    "records must be inventoried and archived before a new store is " +
+    "initialized here",
     reading.files,
     GRAPH_STORE_FORMAT_VERSION,
   );
@@ -171,18 +139,17 @@ export function retiredAuthorityRefusal(
 /**
  * Create every table and the version row in ONE transaction.
  *
- * Called ONLY when the authoritative file holds no user tables. `IF NOT
- * EXISTS` plus `INSERT OR IGNORE` make two processes opening a brand-new root
- * at the same moment safe: the loser no-ops and the file is VERIFIED afterwards
- * either way.
+ * The file opener claims the identity marker before entering this transaction.
+ * Interrupted initialization leaves that marker in place and blocks recovery.
  */
-export function initializeStore(db: DatabaseDriver, filePath: string): void {
+export function initializeStore(db: DatabaseDriver, filePath: string, storeId: string = randomUUID()): void {
   try {
     const create = db.transaction(() => {
       for (const statement of SCHEMA_STATEMENTS) db.exec(statement);
       db.run(
-        `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.meta} (id, format_version) VALUES (1, ?)`,
+        `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.meta} (id, format_version, store_id) VALUES (1, ?, ?)`,
         GRAPH_STORE_FORMAT_VERSION,
+        storeId,
       );
     });
     create();
@@ -191,10 +158,10 @@ export function initializeStore(db: DatabaseDriver, filePath: string): void {
       "incomplete-store",
       filePath,
       "graph-store: " +
-        filePath +
-        " could not be initialized as this build's graph store (" +
-        errorText(error) +
-        ")",
+      filePath +
+      " could not be initialized as this build's graph store (" +
+      errorText(error) +
+      ")",
       undefined,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -206,8 +173,7 @@ export function initializeStore(db: DatabaseDriver, filePath: string): void {
 /**
  * Verify a non-empty existing file — version, tables, columns — or refuse it.
  *
- * The order is deliberate: the meta table's shape first (so its version row is
- * readable at all), then the version identity, then every other table. A file
+ * The version discriminator is read before checking this format's columns. A file
  * whose version says "newer" is refused as NEWER even when its own layout
  * renames or drops the tables this build knows.
  */
@@ -218,19 +184,19 @@ export function verifyStore(db: DatabaseDriver, filePath: string): void {
       "foreign-store",
       filePath,
       "graph-store: " +
-        filePath +
-        " is not this build's graph store — it holds " +
-        (tables.length === 0 ? "no tables" : tables.join(", ")) +
-        " and no " +
-        GRAPH_STORE_TABLES.meta +
-        " table, and refusing is the only honest answer to a file whose contents " +
-        "this build cannot name",
+      filePath +
+      " is not this build's graph store — it holds " +
+      (tables.length === 0 ? "no tables" : tables.join(", ")) +
+      " and no " +
+      GRAPH_STORE_TABLES.meta +
+      " table, and refusing is the only honest answer to a file whose contents " +
+      "this build cannot name",
       tables,
       GRAPH_STORE_FORMAT_VERSION,
     );
   }
-  requireTableShape(db, "meta", filePath);
   requireFormatVersion(db, filePath);
+  requireTableShape(db, "meta", filePath);
   for (const table of TABLE_ORDER) {
     if (table === "meta") continue;
     if (!tables.includes(GRAPH_STORE_TABLES[table])) {
@@ -238,18 +204,19 @@ export function verifyStore(db: DatabaseDriver, filePath: string): void {
         "incomplete-store",
         filePath,
         "graph-store: " +
-          filePath +
-          " carries " +
-          GRAPH_STORE_TABLES.meta +
-          " but is missing " +
-          GRAPH_STORE_TABLES[table] +
-          " — refusing to recreate a store that is not intact",
+        filePath +
+        " carries " +
+        GRAPH_STORE_TABLES.meta +
+        " but is missing " +
+        GRAPH_STORE_TABLES[table] +
+        " — refusing to recreate a store that is not intact",
         GRAPH_STORE_TABLES[table],
         GRAPH_STORE_FORMAT_VERSION,
       );
     }
     requireTableShape(db, table, filePath);
   }
+  verifyStoreIdentity(db, filePath);
 }
 
 /** Every table this format owns, in gate order. */
@@ -271,10 +238,10 @@ export function inspectTables(db: DatabaseDriver, filePath: string): string[] {
       "foreign-store",
       filePath,
       "graph-store: " +
-        filePath +
-        " could not be read as a graph store (" +
-        errorText(error) +
-        ") — refusing to create a store over a file this build cannot recognize",
+      filePath +
+      " could not be read as a graph store (" +
+      errorText(error) +
+      ") — refusing to create a store over a file this build cannot recognize",
       undefined,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -349,12 +316,12 @@ function inspectColumns(
       "incomplete-store",
       filePath,
       "graph-store: " +
-        filePath +
-        " carries " +
-        name +
-        ", but its columns could not be read (" +
-        errorText(error) +
-        ") — refusing to open a store whose layout this build cannot know",
+      filePath +
+      " carries " +
+      name +
+      ", but its columns could not be read (" +
+      errorText(error) +
+      ") — refusing to open a store whose layout this build cannot know",
       undefined,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -376,10 +343,10 @@ function inspectColumns(
         "incomplete-store",
         filePath,
         "graph-store: " +
-          filePath +
-          " carries " +
-          name +
-          ", but a column description of it is unreadable — refusing to open a store whose layout this build cannot know",
+        filePath +
+        " carries " +
+        name +
+        ", but a column description of it is unreadable — refusing to open a store whose layout this build cannot know",
         undefined,
         GRAPH_STORE_FORMAT_VERSION,
       );
@@ -450,14 +417,14 @@ export function requireTableShape(
     "incomplete-store",
     filePath,
     "graph-store: " +
-      filePath +
-      " carries " +
-      GRAPH_STORE_TABLES[table] +
-      " in a shape format " +
-      GRAPH_STORE_FORMAT_VERSION +
-      " does not write (" +
-      problems.join("; ") +
-      ") — refusing to open a store whose layout this build cannot know",
+    filePath +
+    " carries " +
+    GRAPH_STORE_TABLES[table] +
+    " in a shape format " +
+    GRAPH_STORE_FORMAT_VERSION +
+    " does not write (" +
+    problems.join("; ") +
+    ") — refusing to open a store whose layout this build cannot know",
     problems,
     GRAPH_STORE_FORMAT_VERSION,
   );
@@ -482,12 +449,12 @@ export function requireFormatVersion(db: DatabaseDriver, filePath: string): void
       "incomplete-store",
       filePath,
       "graph-store: " +
-        filePath +
-        " carries a " +
-        GRAPH_STORE_TABLES.meta +
-        " table whose version row cannot be read (" +
-        errorText(error) +
-        ") — refusing to open a store this build cannot identify",
+      filePath +
+      " carries a " +
+      GRAPH_STORE_TABLES.meta +
+      " table whose version row cannot be read (" +
+      errorText(error) +
+      ") — refusing to open a store this build cannot identify",
       undefined,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -497,8 +464,8 @@ export function requireFormatVersion(db: DatabaseDriver, filePath: string): void
       "malformed-format",
       filePath,
       "graph-store: " +
-        filePath +
-        " carries no format-version row — a store without its format identity is refused, never recreated",
+      filePath +
+      " carries no format-version row — a store without its format identity is refused, never recreated",
       undefined,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -513,11 +480,11 @@ export function requireFormatVersion(db: DatabaseDriver, filePath: string): void
       "malformed-format",
       filePath,
       "graph-store: " +
-        filePath +
-        " carries format_version " +
-        JSON.stringify(found) +
-        ", which is not a positive safe integer — this build writes " +
-        String(GRAPH_STORE_FORMAT_VERSION),
+      filePath +
+      " carries format_version " +
+      JSON.stringify(found) +
+      ", which is not a positive safe integer — this build writes " +
+      String(GRAPH_STORE_FORMAT_VERSION),
       found,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -527,12 +494,12 @@ export function requireFormatVersion(db: DatabaseDriver, filePath: string): void
       "newer-format",
       filePath,
       "graph-store: " +
-        filePath +
-        " was written with format " +
-        String(found) +
-        ", which is NEWER than the " +
-        String(GRAPH_STORE_FORMAT_VERSION) +
-        " this build writes — refusing to open a store whose layout this build cannot know",
+      filePath +
+      " was written with format " +
+      String(found) +
+      ", which is NEWER than the " +
+      String(GRAPH_STORE_FORMAT_VERSION) +
+      " this build writes — refusing to open a store whose layout this build cannot know",
       found,
       GRAPH_STORE_FORMAT_VERSION,
     );
@@ -542,12 +509,12 @@ export function requireFormatVersion(db: DatabaseDriver, filePath: string): void
       "older-format",
       filePath,
       "graph-store: " +
-        filePath +
-        " was written with format " +
-        String(found) +
-        ", and this build registers no migration to " +
-        String(GRAPH_STORE_FORMAT_VERSION) +
-        " — refusing to downgrade, widen or recreate the store",
+      filePath +
+      " was written with format " +
+      String(found) +
+      ", and this build registers no migration to " +
+      String(GRAPH_STORE_FORMAT_VERSION) +
+      " — refusing to downgrade, widen or recreate the store",
       found,
       GRAPH_STORE_FORMAT_VERSION,
     );

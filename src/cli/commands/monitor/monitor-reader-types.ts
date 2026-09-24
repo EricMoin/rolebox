@@ -218,10 +218,12 @@ export interface EngineLoopGroupSnapshot {
  * the field is reserved for provenance and is left unset by the reader.
  */
 export interface EngineGraphSnapshot {
+  /** Native graph detail shared by tools, CLI and host monitors. */
+  graph?: import("../../../graph/query/graph-query.ts").GraphView;
   /** Graph instance identifier */
   graphId: string;
   /** Engine lifecycle phase */
-  phase: EnginePhase;
+  phase: EnginePhase | "stopped";
   /** Reserved graph-level agent provenance; not derivable from engine state. */
   agentId?: string;
   /** Total number of nodes in the graph */

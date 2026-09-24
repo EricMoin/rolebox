@@ -1,80 +1,3 @@
-/**
- * Graph Execution Engine v2 — Loop progress: projection, comparison, baseline (D5)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The PROGRESS EVALUATOR of the outcome protocol
- * (docs/graph-outcome-protocol.md section "Loop progress"): what a loop compares
- * across completed rounds, what "progressed", "unchanged" and "unknown" mean, and
- * the baseline a comparison is made against.
- *
- * THE PROJECTION IS PRODUCED OUTSIDE THE ACCEPTANCE TRANSACTION. A compiled loop
- * group may declare a progress policy — the comparison SEMANTICS (an evaluator
- * identity and its exact version), the comparison OBJECT (one field of the
- * outcome data) and an explicit stagnation threshold. Before a submission reaches
- * the acceptance transaction, {@link projectProgress} turns the worker payload
- * into a BOUNDED, IMMUTABLE {@link ProgressProjection}: the declared subject is
- * read ONCE, reduced to a token of at most {@link PROGRESS_VALUE_MAX_LENGTH}
- * characters (or to a bounded marker saying why it cannot be compared), and bound
- * to the proposal digest, the attempt, the plan revision and the validation it
- * was produced under. The comparison itself — read the persisted baseline,
- * compare, update the counters — runs INSIDE the transaction against the state
- * the acceptance commits with, so a crash cannot separate the acceptance from the
- * progress it implied.
- *
- * THE RAW PAYLOAD IS NEVER PERSISTED, AND NO DIGEST IS COMPUTED IN THE
- * TRANSACTION. The projection is a value, not a write: nothing here touches a
- * ledger. What is persisted is the BASELINE (the bounded token the run last
- * compared against) and the counters — see {@link OutcomeLoopProgress}. Reading
- * the payload, truncating it and binding it all happen before the transaction
- * opens, which is exactly why a large or unrepresentable payload cannot make the
- * acceptance transaction do file or hashing work.
- *
- * THE THREE-WAY ANSWER, AND WHY UNKNOWN EXISTS. A comparison answers:
- * - PROGRESSED — the token differs from the baseline, so the loop moved (the
- *   baseline is replaced and the unchanged streak resets);
- * - UNCHANGED — the token equals the baseline, so the round produced the same
- *   declared revision (the streak grows; reaching the declared threshold is the
- *   progress-stalled stop, the run stopping policy);
- * - UNKNOWN — the comparison COULD NOT BE MADE: the persisted baseline was
- *   recorded under another evaluator identity or version, or the observation is
- *   truncated or not a comparable token. Unknown is NOT "equal", and it never
- *   triggers the soft stop — but it is also NOT a round in which the run stood
- *   still: it CLEARS the streak. "Consecutive" means consecutive COMPARABLE
- *   observations, so a round nobody could judge breaks the run of repetitions and
- *   the next comparable unchanged token starts counting from zero again. The
- *   BASELINE is kept (it is the last comparable revision the run observed, with
- *   the evaluator identity and version it was recorded under), so the next
- *   comparison still answers against the right token and a restart continues the
- *   same semantics; only the COUNT cannot span a round that was not compared. The
- *   declared HARD limits still apply to the run.
- *
- * WHAT IS COMPARABLE. The declared subject value must be a NON-EMPTY STRING — a
- * revision token, compared for exact equality. A value of any other JSON type (a
- * number, a boolean, null, an object, an array) is legal payload but is NOT
- * comparable, and this evaluator never coerces one into a token: coercion would
- * let two different JSON values look equal and turn an incomparable submission
- * into an invented "unchanged". A value longer than the bound is TRUNCATED for
- * the same reason: a prefix comparison is not a comparison.
- *
- * A MISSING SUBJECT IS REFUSED, NOT UNKNOWN. When a declared policy applies to
- * the submitted outcome, the declared subject is a REQUIRED field: an absent one
- * (or an explicit undefined) is a structured refusal (progress-subject-missing)
- * with nothing written, so the worker can repair the submission. Only a subject
- * that is PRESENT but not comparable is unknown.
- *
- * SUCCESSFUL OUTCOMES NEVER ENTER THIS PATH. A projection is produced only for an
- * outcome a declared policy actually governs — a loop CONTINUATION. The outcome
- * that leaves the loop (or terminates its node) is not compared, has no required
- * subject and cannot be refused for one: the revision-staleness question is about
- * continuing a loop, never about a result the loop accepted as finished.
- *
- * Dependency leaf: this module imports TYPES only (the plan policy shape and the
- * acceptance core validation binding), so a reducer, a runtime or a tool boundary
- * may depend on it without a runtime cycle.
- */
-
 import type { CompiledProgressPolicy } from "../compiler/plan.ts";
 import type { ValidationBinding } from "./acceptance.ts";
 
@@ -148,20 +71,20 @@ export interface OutcomeLoopProgress {
  */
 export type ProgressObservation =
   | {
-      /** A comparable revision token, at most {@link PROGRESS_VALUE_MAX_LENGTH}. */
-      readonly kind: "token";
-      readonly value: string;
-    }
+    /** A comparable revision token, at most {@link PROGRESS_VALUE_MAX_LENGTH}. */
+    readonly kind: "token";
+    readonly value: string;
+  }
   | {
-      /** The value was present but longer than the bound; only its length is kept. */
-      readonly kind: "truncated";
-      readonly length: number;
-    }
+    /** The value was present but longer than the bound; only its length is kept. */
+    readonly kind: "truncated";
+    readonly length: number;
+  }
   | {
-      /** The value was present but is not comparable; only its shape is kept. */
-      readonly kind: "incomparable";
-      readonly received: string;
-    };
+    /** The value was present but is not comparable; only its shape is kept. */
+    readonly kind: "incomparable";
+    readonly received: string;
+  };
 
 /**
  * One bounded, immutable measurement of a submission, bound to the exact
@@ -210,9 +133,9 @@ export interface ProgressProjectionRefusal {
 export type ProgressProjectionReading =
   | { readonly kind: "projected"; readonly projection: ProgressProjection }
   | {
-      readonly kind: "refused";
-      readonly refusals: readonly ProgressProjectionRefusal[];
-    };
+    readonly kind: "refused";
+    readonly refusals: readonly ProgressProjectionRefusal[];
+  };
 
 /** Inputs to {@link projectProgress}. */
 export interface ProgressProjectionInput {

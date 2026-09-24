@@ -1,20 +1,3 @@
-/**
- * Graph domain — the neutral BUDGET vocabulary
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The declared limits and the consumption state, MOVED here from the retired v2
- * type containers: `NodeBudgetSpec` / `GraphBudgetSpec` from the v2 graph
- * declaration module and the consumption state (`GraphBudgetState`, whose
- * canonical name here is `BudgetState`) from the v2 engine-state module.
- * Exactly ONE definition of each concept exists; both retired modules re-export
- * these names instead of declaring them.
- *
- * Dependency leaf: this module imports nothing at all, so every layer may name
- * the budget vocabulary without dragging a retired container in.
- */
-
 // ── Budget specs (declaration content) ──────────────────────────────────────
 
 /**
@@ -38,29 +21,33 @@ export interface NodeBudgetSpec {
   max_cost_usd?: number;
   /** Wall-clock timeout for this node (ms) */
   timeout_ms?: number;
-  /** Automatic retries on escalate */
+  /** Reserved syntax; rejected until automatic retries are implemented. */
   max_retries?: number;
 }
 
-/**
- * Graph-level resource budget (cumulative across all nodes).
- *
- * The orchestrating agent sub-allocates the graph budget to child nodes.
- * Overbooking is allowed (sum of per-node budgets may exceed graph budget),
- * but actual consumption is bounded by the graph budget.
- *
- * Field ownership (P1): declaration content, exactly as {@link NodeBudgetSpec}.
- * Writers: the declaration path only.
- * Replaces: nothing — the same declared vocabulary the RETIRED v2 declaration
- * carried (`GraphDeclaration.budget`), moved with its semantics intact; only
- * its home moved.
- * KNOWN FACT: no live compiler path reads this shape. The v3 grammar
- * (`GraphDeclarationV3`) declares NO graph-level budget, so only
- * {@link NodeBudgetSpec} is consumed today (per-node specs are compiled into the
- * plan). Whether the converged definition keeps a graph-level spec, and which
- * budget object enforces it, is a P3/P4 decision — this move deliberately
- * changes neither.
- */
+/** Immutable limits shared by every attempt in one run. */
+export interface RunBudgetSpec {
+  readonly max_executions?: number;
+}
+
+export function readRunBudget(value: unknown): RunBudgetSpec | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("run budget must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "max_executions") throw new Error(`unsupported run budget field: ${key}`);
+  }
+  const count = record.max_executions;
+  if (count === undefined) return Object.freeze({});
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+    throw new Error("max_executions must be a non-negative safe integer");
+  }
+  return Object.freeze({ max_executions: count });
+}
+
+/** Retired declaration vocabulary. V3 run limits are RunBudgetSpec. */
 export interface GraphBudgetSpec {
   /** Max total input tokens across all nodes */
   max_total_input_tokens?: number;
@@ -72,32 +59,7 @@ export interface GraphBudgetSpec {
 
 // ── Budget state (runtime consumption) ──────────────────────────────────────
 
-/**
- * Cumulative graph-level budget consumption state.
- *
- * The counters an execution actually moved: dispatch sessions spawned and
- * tokens/cost consumed across all nodes of one run.
- *
- * Field ownership (P1)
- * Owns: the graph-level consumption counters of ONE run. It is the only
- * aggregate the store needs for a budget check; per-node mirrors are not a
- * second authority.
- * Writers: NO live writer today — the v2 container's `applyBudgetDelta` writer
- * was deleted with the legacy runtime, and the outcome run-state body carries no
- * budget field at all. The converged store's owner is the outcome reducer,
- * inside the acceptance transaction (the ledger's `runInTransaction` boundary),
- * so consumption advances with the state change that consumed it and never
- * beside it — that wiring is P3's.
- * Replaces: the `GraphBudgetState` field the retired v2 container carried on
- * `EngineState.budget` and the per-node
- * `NodeRuntimeState.tokensConsumed` / `sessionsSpawned` mirror that fed it.
- *
- * SCOPE (P3 budget): this is the RUN-LEVEL AGGREGATE of recorded usage — the
- * counters a report reduces to. It is NOT the enforcement model and it carries
- * NO limit: the durable reservations, the declared ceilings and the reconciliation
- * between them live in the store (one row per armed dispatch) and in the P3
- * vocabulary below, because a counter that is merely summed is not a gate.
- */
+/** Recorded usage totals for display. Limits and reservations are enforced per attempt in the store. */
 export interface BudgetState {
   /** Total dispatch sessions spawned across all nodes */
   sessionsSpawned: number;
@@ -118,35 +80,7 @@ export type GraphBudgetState = BudgetState;
 
 // ── The P3 budget model: authorized limits, usage, and the refusal ──────────
 
-/**
- * The LIMIT dimensions a compiled plan authorizes (P3 budget).
- *
- * A DIMENSION IS AUTHORIZED ONLY IF THE DECLARATION CAN SPELL IT. The v3
- * grammar's closed budget key set is
- * `max_input_tokens | max_output_tokens | max_cost_usd | timeout_ms | max_retries`
- * (`src/graph/compiler/parse-declaration-v3.ts`, `BUDGET_KEYS`); the four
- * dimensions below are exactly the four NUMERIC CEILINGS among them, mapped to
- * the names the runtime, the store and a report use.
- *
- * WHAT IS **NOT** AUTHORIZED, AND WHERE IT IS REFUSED RATHER THAN DEFAULTED:
- *
- * - An EXECUTION-COUNT ceiling. `max_retries` is a RETRY ceiling (its declared
- *   meaning is "automatic retries on escalate"), not a count of executions, and
- *   no other declaration field counts executions. This build therefore RECORDS
- *   the execution count as usage (one fact per armed dispatch) and enforces no
- *   count ceiling at all. A budget spec carrying a key outside the grammar's
- *   five is refused by name ({@link nodeBudgetLimitsOf}) instead of being
- *   silently ignored or defaulted to "unlimited".
- * - A GRAPH/run-level ceiling. {@link GraphBudgetSpec} exists as a vocabulary
- *   type moved from the retired v2 declaration, but the v3 grammar's ROOT_KEYS
- *   carry no `budget` key and NO live path reads that shape — so a run has no
- *   declared total ceiling and none is invented here. The run-level numbers a
- *   report shows are the SUM of the per-node facts, never a second ceiling.
- * - `max_retries` is accepted (the grammar allows it) and deliberately NOT
- *   turned into a budget limit: the v3 retry path is an explicit TRUSTED
- *   command, and a declared automatic-retry ceiling has no consumer in this
- *   build. That is a named gap, not a silently enforced limit.
- */
+/** Per-node resource dimensions; run execution limits use RunBudgetSpec. */
 export type BudgetLimitKind =
   | "duration_ms"
   | "input_tokens"
@@ -181,8 +115,7 @@ export interface NodeBudgetLimits {
 }
 
 /**
- * Recorded usage along every dimension, including the count that has NO
- * authorized ceiling.
+ * Recorded usage along every dimension. Execution count is bounded per run.
  *
  * `executions` is a COUNT OF DISPATCHES, not a sum of anything the host
  * reports: one armed dispatch is one execution, which is why it is a fact even
@@ -266,10 +199,9 @@ const AUTHORIZED_BUDGET_KEYS: ReadonlySet<string> = new Set([
   "max_output_tokens",
   "max_cost_usd",
   "timeout_ms",
-  "max_retries",
 ]);
 
-/** The four keys that ARE ceiling dimensions; `max_retries` is accepted unread. */
+/** Per-node resource ceilings. */
 const LIMIT_KEYS: ReadonlyMap<string, BudgetLimitKind> = new Map([
   ["max_input_tokens", "input_tokens"],
   ["max_output_tokens", "output_tokens"],
@@ -308,15 +240,18 @@ export function nodeBudgetLimitsOf(
   }
   const record = spec as Readonly<Record<string, unknown>>;
   for (const key of Object.keys(record)) {
+    if (key === "max_retries") {
+      return refusedLimit("budget-limit-unauthorized", key, "max_retries is not supported: automatic retries are not implemented");
+    }
     if (!AUTHORIZED_BUDGET_KEYS.has(key)) {
       return refusedLimit(
         "budget-limit-unauthorized",
         key,
         "the v3 grammar authorizes no per-node budget key " +
-          JSON.stringify(key) +
-          " (it declares max_input_tokens / max_output_tokens / max_cost_usd / " +
-          "timeout_ms / max_retries), so this build neither enforces it nor " +
-          "defaults it — nothing was dispatched under a budget it cannot read",
+        JSON.stringify(key) +
+        " (it declares max_input_tokens / max_output_tokens / max_cost_usd / " +
+        "timeout_ms), so this build neither enforces it nor " +
+        "defaults it — nothing was dispatched under a budget it cannot read",
       );
     }
     const dimension = LIMIT_KEYS.get(key);
@@ -328,9 +263,9 @@ export function nodeBudgetLimitsOf(
         "budget-limit-invalid",
         key,
         "the declared ceiling " +
-          JSON.stringify(key) +
-          " is not a finite non-negative number, so no honest comparison against " +
-          "recorded usage exists — nothing was dispatched under it",
+        JSON.stringify(key) +
+        " is not a finite non-negative number, so no honest comparison against " +
+        "recorded usage exists — nothing was dispatched under it",
       );
     }
     if (dimension === "duration_ms") limits.durationMs = value;
@@ -438,6 +373,7 @@ export interface BudgetReport {
   /** The run the facts belong to; absent when the graph has never run. */
   readonly runId?: string;
   readonly planRevision: string;
+  readonly runLimits?: RunBudgetSpec;
   readonly nodes: readonly BudgetReportNode[];
   readonly totals: BudgetUsageAmounts;
   readonly reservedTotals: BudgetUsageAmounts;
@@ -460,6 +396,7 @@ export function buildBudgetReport(input: {
   readonly graphId: string;
   readonly runId?: string;
   readonly planRevision: string;
+  readonly runLimits?: RunBudgetSpec;
   readonly nodes: readonly {
     readonly nodeId: string;
     readonly limits: NodeBudgetLimits;
@@ -513,6 +450,7 @@ export function buildBudgetReport(input: {
     graphId: input.graphId,
     ...(input.runId === undefined ? {} : { runId: input.runId }),
     planRevision: input.planRevision,
+    ...(input.runLimits === undefined ? {} : { runLimits: input.runLimits }),
     nodes: Object.freeze(nodes),
     totals: Object.freeze(totals),
     reservedTotals: Object.freeze(reservedTotals),

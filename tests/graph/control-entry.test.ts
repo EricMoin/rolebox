@@ -1682,10 +1682,10 @@ describe("graph_control — the durable stop reaches the status and audit reader
       expect(readState(fixture).phase).toBe("executing");
 
       const summary = fixture.toolset.graph_status({ graph_id: fixture.graphId });
-      expect(summary).toContain("[phase: executing]");
-      expect(summary).toContain("[control: failure]");
+      expect(summary).toContain("[phase: stopped]");
+      expect(summary).toContain('"command": "failure"');
       expect(summary).toContain(reason);
-      expect(summary).toContain(new Date(decidedAt ?? 0).toISOString());
+      expect(summary).toContain(String(decidedAt));
 
       const snapshot = JSON.parse(
         fixture.toolset.graph_status({ graph_id: fixture.graphId, format: "json" }),
@@ -1694,13 +1694,13 @@ describe("graph_control — the durable stop reaches the status and audit reader
         readonly control?: {
           readonly command: string;
           readonly reason: string;
-          readonly decided_at: number;
+          readonly decidedAt: number;
         };
       };
-      expect(snapshot.phase).toBe("executing");
+      expect(snapshot.phase).toBe("stopped");
       expect(snapshot.control?.command).toBe("failure");
       expect(snapshot.control?.reason).toBe(reason);
-      expect(snapshot.control?.decided_at).toBe(decidedAt);
+      expect(snapshot.control?.decidedAt).toBe(decidedAt);
 
       // The node view says the run is stopped too, so a node still recorded
       // `dispatched` is not read as work that is still moving.
@@ -1708,16 +1708,16 @@ describe("graph_control — the durable stop reaches the status and audit reader
         graph_id: fixture.graphId,
         node_id: "work",
       });
-      expect(nodeView).toContain("status: running");
-      expect(nodeView).toContain("Control: failure");
+      expect(nodeView).toContain("[dispatched]");
+      expect(nodeView).toContain('"command": "failure"');
       expect(nodeView).toContain(reason);
 
       const audit = await fixture.toolset.graph_audit();
       const entry = audit.entries.find(
         (candidate) => candidate.graphId === fixture.graphId,
       );
-      expect(entry?.classification).toBe("in-flight");
-      expect(entry?.phase).toBe("executing");
+      expect(entry?.classification).toBe("terminal");
+      expect(entry?.phase).toBe("stopped");
       expect(entry?.control?.command).toBe("failure");
       expect(entry?.control?.reason).toBe(reason);
       expect(entry?.control?.decidedAt).toBe(decidedAt);

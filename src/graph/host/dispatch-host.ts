@@ -1,128 +1,11 @@
-/**
- * Graph Execution Engine v2 — the host's dispatch-execution adapter
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE HOST IMPLEMENTATION OF THE DISPATCH-EFFECT CONTRACT (D8). The runtime
- * (`src/graph/outcome/runtime.ts`) commits a dispatch effect and the state it
- * belongs to in ONE transaction, then calls this adapter to start the node:
- *
- * - `create(request, effect)` starts one execution, IDEMPOTENTLY per
- *   `(graphId, effectId)`. The registry's unique key and conditional claim are
- *   what make "at most one execution" a property of the STORE: a second create
- *   — from this process or another one — is told the effect is held and delivers
- *   nothing. `confirmStarted(effect, execution)` records the platform's real
- *   execution id once it is known, which is the only way the registry reports
- *   the effect as `created`.
- * - `lookup(effect)` answers whether an execution for that stable id exists —
- *   `created`, `absent` or `unknown` — from the host's own registry joined
- *   with the platform's query port when one is installed, never from a guess.
- *
- * ONE DISPATCH PATH (P2 item 3). Every window that starts a node's execution
- * goes through the ONE `create` below and therefore takes the same steps in the
- * same order — claim (carrying an owner GENERATION), fence, deliver, and release
- * only WITH A PROOF:
- *
- * | window | what the runtime knows before it calls |
- * | --- | --- |
- * | first dispatch | a state and effect it just committed; nothing was created |
- * | successor | an accepted outcome armed the node; the effect is new |
- * | retry (P3) | a new ATTEMPT, hence a new effect id and a new claim |
- * | recovery after a restart | the effect may have been handed over already, so it asks `lookup` first and `create` only on `absent` |
- *
- * The windows differ in what the RUNTIME knows; the host creates the same way,
- * and the store's conditional writes are the only authority either of them has.
- * A create that finds the effect HELD does not guess: it may adopt a stranded
- * `creating` claim only when the PLATFORM PROVES there is no execution for the
- * stable key (the query port, `OutcomeExecutionQuery`), and it refuses otherwise.
- *
- * ONLY A PROOF RELEASES THE CREATE RIGHT (P2 item 4). The SEAM has two failure
- * channels and they are not equivalent:
- *
- * - a SYNCHRONOUS THROW is the delivery's refusal to hand the request over at
- *   all — the contract below makes that the seam's own proof that nothing was
- *   created — so the claim is released and exactly one later create can follow;
- * - an ASYNCHRONOUS failure (a rejected start, a callback that never arrives, a
- *   timeout) proves nothing. It is reported through the host's own failure
- *   report, which this adapter's registry path implements as a proof-less
- *   release: the claim is KEPT, the row stays `creating`, every lookup answers
- *   `unknown`, and the effect is reported as unresolved — never re-dispatched
- *   blindly.
- *
- * `created` IS STILL ONLY EVER WRITTEN WITH A REAL EXECUTION ID. A timeout or a
- * failure cannot reach it, and the store's own CHECK makes the alternative
- * unrepresentable.
- *
- * IDEMPOTENCY AND CORRELATION (P2 item 5). The create call carries the stable
- * effect identity — `(graphId, effectId)` with `effectId = "dispatch:" + attemptId` —
- * which is the key a platform must dedupe and correlate on; a platform that
- * needs one string uses `dispatchIdempotencyKeyOf`, and BOTH shipped adapters
- * carry exactly that string on the create call (the dsh run's durable label, the
- * Pi task's description). The QUERY PORT is the other half: a host that installs
- * one can have a stranded `creating` effect PROVEN absent and released, or its
- * execution NAMED and adopted, and one that does not answers `unknown` and
- * BLOCKS. Both shipped adapters implement the port and both answer `unknown`
- * rather than `absent` when they cannot prove non-existence.
- *
- * THE PLATFORM'S NAME IS BOUND, NOT JUST REPORTED (F2). A `created` answer that
- * names the execution is recorded on this process's `creating` claim through
- * the SAME conditional write a late confirmation uses (so a foreign claim is
- * never rewritten), and the name stays readable through
- * {@link HostOutcomeDispatch.namedExecutionOf} either way. A process that never
- * saw the create confirmation therefore finds the SAME execution the platform
- * created and never creates a second one — and a platform that cannot prove
- * absence leaves the effect BLOCKED rather than re-created.
- *
- * WHERE THE CREDENTIAL GOES. The request this adapter receives is the ONLY
- * carrier of the attempt credential (`OutcomeDispatchRequest`), and it is handed
- * unchanged to the injected `deliver` seam — one attempt, one request, one
- * delivery. The adapter itself keeps no copy, puts none in the execution index
- * (which records effect ids only) and returns nothing that could carry one: a
- * `create` that throws reports the failure, and the runtime sanitizes the text
- * against the request it already holds.
- *
- * THE INVOCATION TRAVELS WITH THE DELIVERY. A platform starts a worker under a
- * parent invocation (dsh composes the subagent under a live parent session, Pi
- * launches the task under one), and the window that arms a dispatch is not
- * always the declaring call: a successor is armed by an acceptance observed
- * later, out of band. The adapter therefore hands the delivery the host's
- * attribution of the graph's declaring invocation
- * ({@link HostOutcomeDispatchOptions.dispatchInvocation}) as a third argument,
- * so every window names the same parent. A host that knows no origin hands
- * none, and the platform reports the absence instead of guessing one.
- *
- * THE INPUT VIEW IS MATERIALIZED HERE, BEFORE ANYTHING IS HANDED OVER (D7). A
- * resolved input names an `artifactId`; a worker with no store cannot turn that
- * into bytes, so this adapter materializes every retained revision into the
- * consumer's own directory — from the content store, digest verified by
- * `input-view.ts`, never from the mutable path the proposal named — and passes
- * the view to the delivery as a fourth argument. Every window that starts an
- * attempt goes through this ONE `create`, so a first dispatch, a successor and a
- * recovery all deliver a real view or none at all.
- *
- * A MATERIALIZATION REFUSAL IS THE SEAM'S OWN THROW. A missing object or a
- * digest that does not verify means the worker would receive a hole where its
- * input should be, so nothing is handed over: the refusal is raised BEFORE
- * `deliver` is called, which releases this claim (the same proof a platform
- * refusal gives) so no execution exists, and leaves the effect row `pending`.
- * Every window reads the same fact: the declaring call receives the refusal
- * itself, and a recovery reports the effect as unsettled work with a
- * `dispatch-failed` refusal — never as a started execution. Materializing again
- * later is safe: the view is content-addressed and published once, so a recovery
- * reuses it instead of duplicating or overwriting it.
- */
-
 import { logWarn } from "../log-warn.ts";
 import type {
   OutcomeDispatchEffectKey,
   OutcomeDispatchHost,
   OutcomeDispatchInvocation,
-  OutcomeDispatchRequest,
-  OutcomeExecutionIdentity,
-  OutcomeExecutionLookup,
+  OutcomeDispatchRequest, OutcomeExecutionLookup,
   OutcomeExecutionProbe,
-  OutcomeExecutionQuery,
+  OutcomeExecutionQuery
 } from "../outcome/dispatch-effects.ts";
 import { dispatchIdempotencyKeyOf } from "../outcome/dispatch-effects.ts";
 import type { HostInvocationIdentity } from "../outcome/host-identity.ts";
@@ -353,12 +236,12 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     if (effect.graphId !== request.graphId || effect.attemptId !== request.attemptId) {
       throw new Error(
         "host-dispatch: refusing to create effect " +
-          JSON.stringify(effect.effectId) +
-          " for a request that names graph " +
-          JSON.stringify(request.graphId) +
-          " attempt " +
-          JSON.stringify(request.attemptId) +
-          " — the effect key and the request must describe the same execution",
+        JSON.stringify(effect.effectId) +
+        " for a request that names graph " +
+        JSON.stringify(request.graphId) +
+        " attempt " +
+        JSON.stringify(request.attemptId) +
+        " — the effect key and the request must describe the same execution",
       );
     }
     let claim = this.executions.claim(effect);
@@ -367,13 +250,13 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
       if (adopted === undefined) {
         throw new Error(
           "host-dispatch: refusing to create effect " +
-            JSON.stringify(effect.effectId) +
-            " for graph " +
-            JSON.stringify(effect.graphId) +
-            " — " +
-            describeHeldClaim(claim) +
-            "; a second execution for one stable effect id is exactly what the create-once " +
-            "rule forbids, so the request was NOT delivered",
+          JSON.stringify(effect.effectId) +
+          " for graph " +
+          JSON.stringify(effect.graphId) +
+          " — " +
+          describeHeldClaim(claim) +
+          "; a second execution for one stable effect id is exactly what the create-once " +
+          "rule forbids, so the request was NOT delivered",
         );
       }
       claim = adopted;
@@ -381,9 +264,9 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     if (!this.executions.markCreating(effect, claim.ownerId)) {
       throw new Error(
         "host-dispatch: the create right for effect " +
-          JSON.stringify(effect.effectId) +
-          " was lost to another host process between the claim and the delivery — nothing " +
-          "was delivered and the effect is reported rather than started a second time",
+        JSON.stringify(effect.effectId) +
+        " was lost to another host process between the claim and the delivery — nothing " +
+        "was delivered and the effect is reported rather than started a second time",
       );
     }
     // The platform invocation is read HERE, inside the runtime's dispatch
@@ -566,11 +449,11 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     } catch (error) {
       logWarn(
         "host-dispatch: priming the platform execution readings for " +
-          String(probes.length) +
-          " effect(s) failed — every reading stays unset, so the next lookup answers " +
-          "'unknown' and the affected effects stay blocked rather than being guessed at (" +
-          describeError(error) +
-          ")",
+        String(probes.length) +
+        " effect(s) failed — every reading stays unset, so the next lookup answers " +
+        "'unknown' and the affected effects stay blocked rather than being guessed at (" +
+        describeError(error) +
+        ")",
       );
     }
   }
@@ -613,7 +496,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     if (answer === undefined || answer.kind !== "absent") return undefined;
     return hostExecutionNotCreated(
       "the platform's execution query reports no execution for " +
-        dispatchIdempotencyKeyOf(effect),
+      dispatchIdempotencyKeyOf(effect),
     );
   }
 
@@ -647,11 +530,11 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     } catch {
       logWarn(
         "host-dispatch: the platform execution query for effect " +
-          JSON.stringify(effect.effectId) +
-          " of graph " +
-          JSON.stringify(effect.graphId) +
-          " threw — reporting the create outcome as UNKNOWN (its message is not quoted: the " +
-          "request carries an attempt credential)",
+        JSON.stringify(effect.effectId) +
+        " of graph " +
+        JSON.stringify(effect.graphId) +
+        " threw — reporting the create outcome as UNKNOWN (its message is not quoted: the " +
+        "request carries an attempt credential)",
       );
       return Object.freeze({
         kind: "unknown" as const,
@@ -724,14 +607,14 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     } catch (error) {
       logWarn(
         "host-dispatch: the platform names execution " +
-          JSON.stringify(execution.executionId) +
-          " for effect " +
-          JSON.stringify(effect.effectId) +
-          " of graph " +
-          JSON.stringify(effect.graphId) +
-          ", but binding it locally failed (" +
-          describeError(error) +
-          ") — the platform's name is kept for the recovery and no second execution is created",
+        JSON.stringify(execution.executionId) +
+        " for effect " +
+        JSON.stringify(effect.effectId) +
+        " of graph " +
+        JSON.stringify(effect.graphId) +
+        ", but binding it locally failed (" +
+        describeError(error) +
+        ") — the platform's name is kept for the recovery and no second execution is created",
       );
       return;
     }
@@ -739,15 +622,15 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     this.unboundReports.add(key);
     logWarn(
       "host-dispatch: the platform names execution " +
-        JSON.stringify(execution.executionId) +
-        " for effect " +
-        JSON.stringify(effect.effectId) +
-        " of graph " +
-        JSON.stringify(effect.graphId) +
-        ", but this process does not hold the claim that recorded the create (" +
-        verdict.kind +
-        ") — the durable row is NOT rewritten, the platform's name is kept for the " +
-        "recovery, and no second execution is created",
+      JSON.stringify(execution.executionId) +
+      " for effect " +
+      JSON.stringify(effect.effectId) +
+      " of graph " +
+      JSON.stringify(effect.graphId) +
+      ", but this process does not hold the claim that recorded the create (" +
+      verdict.kind +
+      ") — the durable row is NOT rewritten, the platform's name is kept for the " +
+      "recovery, and no second execution is created",
     );
   }
 }

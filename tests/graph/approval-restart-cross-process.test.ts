@@ -1,3 +1,4 @@
+import { approvalPolicyFor } from "./helpers/approval-policy.ts";
 /**
  * P3 item 3 — THE APPROVAL RESTART, ACROSS REAL PROCESSES
  * (plan §4 P3 "重启后继续", §5 A12 "可恢复").
@@ -226,6 +227,7 @@ async function openParentFixture(): Promise<{
   });
   host = opened;
   const toolset = createGraphToolSet({
+    approvalPolicy: approvalPolicyFor(APPROVAL_RESTART_GRAPH, APPROVAL_RESTART_APPROVER),
     stateDir: dir,
     credentialIsolation: opened.credentialIsolation,
     hostIdentity: opened.workerIdentity,

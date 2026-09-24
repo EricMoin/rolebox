@@ -24,8 +24,7 @@
  */
 
 import { describe, expect, expectTypeOf, it } from "bun:test";
-import type { JoinConfig } from "../../src/types.graph-v2.ts";
-import type { GraphStatusSnapshot } from "../../src/graph/tools/graph-tools.ts";
+import type { JoinConfig } from "../../src/graph/domain/join.ts";
 
 /**
  * Whether `K` may be omitted from `T` — the exact "optional" bit. A required
@@ -76,45 +75,5 @@ describe("type contract: JoinConfig quorum discriminant (C1/R3)", () => {
     // @ts-expect-error an optional count is not assignable to the required count
     type LegacyPin = AssignableTo<JoinConfig, LegacyQuorum>;
     expect(true).toBe(true);
-  });
-});
-
-describe("type contract: GraphStatusSnapshot key requiredness (Y27)", () => {
-  it("requires the graph-scoped identity keys", () => {
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "graph_id">>().toEqualTypeOf<false>();
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "phase">>().toEqualTypeOf<false>();
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "nodes">>().toEqualTypeOf<false>();
-  });
-
-  it("keeps the conditionally spread JSON keys optional", () => {
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "budget">>().toEqualTypeOf<true>();
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "loops">>().toEqualTypeOf<true>();
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "metrics">>().toEqualTypeOf<true>();
-    // The legacy notification-degraded keys are gone with the deleted graph
-    // notifier; the snapshot no longer declares them at all.
-  });
-
-  it("keeps the C-WIRE flag keys optional", () => {
-    expectTypeOf<
-      IsOptionalKey<GraphStatusSnapshot, "round_history">
-    >().toEqualTypeOf<true>();
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "checkpoints">>().toEqualTypeOf<true>();
-    expectTypeOf<
-      IsOptionalKey<GraphStatusSnapshot, "artifacts_evidence">
-    >().toEqualTypeOf<true>();
-    expectTypeOf<IsOptionalKey<GraphStatusSnapshot, "signal_stream">>().toEqualTypeOf<true>();
-  });
-
-  it("accepts a minimal snapshot and rejects one missing a required key", () => {
-    const minimal: GraphStatusSnapshot = {
-      graph_id: "g-type-pin",
-      phase: "executing",
-      nodes: [],
-    };
-    expect(minimal.graph_id).toBe("g-type-pin");
-
-    // @ts-expect-error graph_id is part of the required JSON contract
-    const missingGraphId: GraphStatusSnapshot = { phase: "executing", nodes: [] };
-    expect(missingGraphId.phase).toBe("executing");
   });
 });

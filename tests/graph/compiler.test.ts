@@ -2122,7 +2122,7 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
     }
 
     // The runtime's documented boundary values stay valid: 0 disables the
-    // staleness watchdog, retries may be 0, and a ceiling may be 0.
+    // staleness watchdog, and a resource ceiling may be 0.
     expect(
       parseOk({
         ...authoredRecord(),
@@ -2137,7 +2137,6 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
               max_output_tokens: 0,
               max_cost_usd: 0,
               timeout_ms: 0,
-              max_retries: 0,
             },
           },
         ],
@@ -2147,7 +2146,6 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
       max_output_tokens: 0,
       max_cost_usd: 0,
       timeout_ms: 0,
-      max_retries: 0,
     });
   });
 

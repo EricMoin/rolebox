@@ -680,7 +680,7 @@ describe("the arm set agrees with the dispatches it produces (G1)", () => {
             status: c.status,
             attemptId: c.attemptId,
             inputs: boundRefs(c),
-            arrivals: c.arrivals.map((arrival) => arrival.from + "@" + arrival.attemptId),
+            arrivals: c.arrivals?.map((arrival) => arrival.from + "@" + arrival.attemptId),
           }),
       );
     });

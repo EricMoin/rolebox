@@ -1,66 +1,4 @@
-/**
- * Graph store — the ONE authoritative, workspace-scoped store
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE CONVERGENCE. P1 item 3 forbids keeping two mutually dependent databases
- * that each commit and each claim atomicity. This class is the single durable
- * authority a workspace gets: one SQLite file
- * ({@link GRAPH_STORE_FILE}), one schema ({@link GRAPH_STORE_TABLES}), one
- * format gate ({@link verifyStore}) and ONE transaction boundary
- * ({@link GraphStore.transaction}) over
- *
- * - the graph definition and its compiled-plan snapshot,
- * - the run state,
- * - receipts, accepted events and accepted results,
- * - the effect ledger,
- * - the host's dispatch-execution bindings,
- * - the per-attempt credential RECORDS,
- * - and each graph's declaring invocation.
- *
- * The last three used to live in `rolebox-host-store.sqlite` and
- * `host-invocation-origins.json`. They are TABLES HERE NOW, and the modules
- * that used to own them (`execution-index.ts`, `credential-vault.ts`,
- * `invocation-origins.ts`) are typed facades over THIS store, so a worker's
- * acceptance, the effect it authorizes and the host binding that effect
- * produces can be written in one transaction instead of two that a crash can
- * separate.
- *
- * ONE TRANSACTION INTERFACE. {@link GraphStore.transaction} takes the whole
- * read/write surface — every table above — and is the only place a caller can
- * obtain it. It refuses a nested call by name (`nested-transaction`) instead of
- * silently becoming a savepoint with a different rollback scope, and it refuses
- * an async callback (`async-transaction`) because the driver's transaction
- * commits synchronously: an async callback would run its writes outside the
- * boundary. A compound operation the store performs on its own (the acceptance
- * commit, a create-right claim, a definition write) goes through
- * {@link GraphStore.joinOrBegin}, which JOINS an open transaction when there is
- * one and opens the single boundary otherwise — the same rule the ledger's
- * `commitAccepted` already applied, now shared by the host records too.
- *
- * NOTHING BLOCKING RUNS INSIDE A TRANSACTION. The store performs SQL only: no
- * file read, no command, no host API call is made from any method here, so the
- * boundary the plan requires (`§3.1`) stays a boundary over durable rows.
- *
- * ONE CONNECTION PER FILE PER PROCESS, REFERENCE COUNTED. Every store opened
- * over one file in one process shares that file's connection, because the run
- * path writes a host record (the attempt credential) INSIDE the acceptance
- * transaction: two connections to a rollback-journal SQLite file cannot overlap
- * that way — the second one's write would wait on a transaction that cannot
- * finish while the same thread is still running the reducer. Sharing the
- * connection puts those writes in ONE transaction; sharing the transaction
- * depth puts a second handle's compound write in that same transaction instead
- * of a second one. Cross-process behaviour is unchanged (a separate process has
- * its own connection and its own REAL transaction), `busy_timeout` is raised so
- * two processes over one file serialize instead of failing with `SQLITE_BUSY`,
- * and WAL is NOT enabled — the driver's default rollback journal is the
- * configuration the ledger already verified. Nothing here is a module-level
- * SINGLETON the caller cannot escape: a store closes its borrow on `close`,
- * and the last one closes the connection.
- */
-
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import {
@@ -122,13 +60,14 @@ import {
   retiredAuthorityRefusal,
   verifyStore,
 } from "./format.ts";
+import { readApprovalGrant } from "../policy/approval-policy.ts";
 import { BudgetTables } from "./budget-tables.ts";
+import { identityRefusal, initializeStoreIdentity, readStoreIdentity } from "./identity.ts";
 import { encodeJsonBody } from "./json.ts";
 import { LedgerTables } from "./ledger-tables.ts";
 import {
   GRAPH_STORE_FORMAT_VERSION,
-  GRAPH_STORE_TABLES,
-  graphStoreFilePath,
+  GRAPH_STORE_TABLES
 } from "./schema.ts";
 import type { HostExecutionRefusal } from "../host/execution-index.ts";
 import type {
@@ -159,7 +98,24 @@ import type {
  * a caller that needs the host records gets them from the same object — one
  * interface, one commit, no second boundary to forget.
  */
+export interface TerminalExecutionObservation {
+  readonly kind: "completed" | "failed";
+  readonly reason: string;
+  readonly observedAt: number;
+}
+
+export interface WorkerChannelRecord {
+  readonly tokenDigest: string;
+  readonly sessionId: string;
+  readonly agent: string;
+}
+
 export interface GraphStoreTx extends AcceptanceLedgerTx {
+  rememberExecutionObservation(executionId: string, observation: TerminalExecutionObservation): void;
+  readExecutionObservation(executionId: string): TerminalExecutionObservation | undefined;
+  rememberWorkerChannel(record: WorkerChannelRecord): void;
+  workerChannels(): readonly WorkerChannelRecord[];
+  forgetWorkerChannels(sessionId: string): void;
   /** The persisted definition of one graph, or `undefined`. */
   readDefinition(graphId: string): GraphDefinitionRecord | undefined;
   /** Write one graph's definition, preserving an unchanged one; see the verdict. */
@@ -259,6 +215,28 @@ interface SharedConnection {
   refs: number;
   /** Transaction nesting depth on THIS connection. */
   depth: number;
+  fileStamp?: string;
+  bindingId?: string;
+}
+
+function verifyConnectionFile(connection: SharedConnection, filePath: string): void {
+  if (filePath === ":memory:") return;
+  let stamp: string;
+  try {
+    const stat = statSync(filePath);
+    stamp = `${stat.dev}:${stat.ino}`;
+  } catch {
+    throw identityRefusal(filePath, "the open database file has disappeared");
+  }
+  if (connection.fileStamp !== undefined && connection.fileStamp !== stamp) {
+    throw identityRefusal(filePath, "the open database file has been replaced; close existing handles before restoring");
+  }
+  const bindingId = readStoreIdentity(filePath);
+  if (connection.bindingId !== undefined && connection.bindingId !== bindingId) {
+    throw identityRefusal(filePath, "the open database identity binding has changed");
+  }
+  connection.fileStamp = stamp;
+  connection.bindingId = bindingId;
 }
 
 /** The open connections of this process, by path and mode. */
@@ -545,6 +523,11 @@ export class GraphStore {
       invocationOriginGraphIds: (): readonly string[] =>
         this.invocationOriginGraphIds(),
       definitionGraphIds: (): readonly string[] => this.definitionGraphIds(),
+      rememberExecutionObservation: (executionId: string, observation: TerminalExecutionObservation) => this.rememberExecutionObservation(executionId, observation),
+      readExecutionObservation: (executionId: string) => this.readExecutionObservation(executionId),
+      rememberWorkerChannel: (record: WorkerChannelRecord) => this.rememberWorkerChannel(record),
+      workerChannels: () => this.workerChannels(),
+      forgetWorkerChannels: (sessionId: string) => this.forgetWorkerChannels(sessionId),
       runs: this.runsView,
       approvals: this.approvalsView,
       budget: this.budgetView,
@@ -594,6 +577,7 @@ export class GraphStore {
     connection.db.exec("PRAGMA busy_timeout = 5000");
     try {
       verifyStore(connection.db, filePath);
+      verifyConnectionFile(connection, filePath);
     } catch (error) {
       // A refused read-only open must not leak the borrowed connection.
       GraphStore.releaseConnection(connection, connectionKey);
@@ -653,8 +637,8 @@ export class GraphStore {
         "incomplete-store",
         ":memory:",
         "graph-store: the in-memory store could not be initialized (" +
-          errorText(error) +
-          ")",
+        errorText(error) +
+        ")",
         undefined,
         GRAPH_STORE_FORMAT_VERSION,
       );
@@ -669,6 +653,9 @@ export class GraphStore {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const reading = readStoreDirectory(root);
     if (reading.kind === "retired") throw retiredAuthorityRefusal(reading);
+    if (reading.kind === "missing-bound-store") {
+      throw identityRefusal(reading.filePath, "the bound database is missing or initialization was interrupted");
+    }
     const filePath = reading.filePath;
     // A ZERO-BYTE authoritative file is refused BEFORE the connection exists:
     // opening it with SQLite writes a fresh database header into it, which
@@ -679,6 +666,7 @@ export class GraphStore {
     // A file that is already there is NEVER initialized, whatever it holds: the
     // gate below refuses a foreign or reshaped store.
     const initialize = reading.kind === "absent";
+    const storeId = initialize ? initializeStoreIdentity(filePath) : undefined;
     const key = "rw\u0000" + resolvePath(filePath);
     if (async) {
       // The existing shared connection is reused even on the async path: the
@@ -687,13 +675,13 @@ export class GraphStore {
       if (existing !== undefined) {
         existing.refs += 1;
         return Promise.resolve(
-          GraphStore.openVerified(existing, key, filePath, initialize),
+          GraphStore.openVerified(existing, key, filePath, initialize, storeId),
         );
       }
       return createDatabase(filePath).then((db) => {
         const connection: SharedConnection = { db, refs: 1, depth: 0 };
         CONNECTIONS.set(key, connection);
-        return GraphStore.openVerified(connection, key, filePath, initialize);
+        return GraphStore.openVerified(connection, key, filePath, initialize, storeId);
       });
     }
     return GraphStore.openVerified(
@@ -701,6 +689,7 @@ export class GraphStore {
       key,
       filePath,
       initialize,
+      storeId,
     );
   }
 
@@ -710,12 +699,14 @@ export class GraphStore {
     connectionKey: string | undefined,
     filePath: string,
     initialize: boolean,
+    storeId?: string,
   ): GraphStore {
     const db = connection.db;
     try {
       db.exec("PRAGMA busy_timeout = 5000");
-      if (initialize) initializeStore(db, filePath);
+      if (initialize) initializeStore(db, filePath, storeId);
       verifyStore(db, filePath);
+      verifyConnectionFile(connection, filePath);
     } catch (error) {
       GraphStore.releaseConnection(connection, connectionKey);
       if (error instanceof GraphStoreFormatError) throw error;
@@ -723,10 +714,10 @@ export class GraphStore {
         "incomplete-store",
         filePath,
         "graph-store: " +
-          filePath +
-          " could not be opened as this build's graph store (" +
-          errorText(error) +
-          ") — refusing to treat a file this build cannot read as a new store",
+        filePath +
+        " could not be opened as this build's graph store (" +
+        errorText(error) +
+        ") — refusing to treat a file this build cannot read as a new store",
         undefined,
         GRAPH_STORE_FORMAT_VERSION,
       );
@@ -1204,8 +1195,8 @@ export class GraphStore {
         throw new GraphStoreWriteError(
           "write-rejected",
           "graph-store: the execution binding for effect " +
-            JSON.stringify(effect.effectId) +
-            " could not be written or read back — refusing to report a claim this store does not hold",
+          JSON.stringify(effect.effectId) +
+          " could not be written or read back — refusing to report a claim this store does not hold",
         );
       }
       if (row.state !== "pending") return heldClaim(row);
@@ -1223,7 +1214,7 @@ export class GraphStore {
         `UPDATE ${GRAPH_STORE_TABLES.executions}
             SET owner_id = ?, owner_generation = owner_generation + 1, claimed_at = ?, updated_at = ?, released_at = NULL
           WHERE graph_id = ? AND effect_id = ? AND state = 'pending' AND owner_id = ? AND owner_generation = ? AND released_at IS ` +
-          (row.releasedAt === undefined ? "NULL" : "NOT NULL"),
+        (row.releasedAt === undefined ? "NULL" : "NOT NULL"),
         ownerId,
         now,
         now,
@@ -1313,10 +1304,10 @@ export class GraphStore {
       throw new GraphStoreWriteError(
         "invalid-record",
         "graph-store: refusing to record effect " +
-          JSON.stringify(effect.effectId) +
-          " as created without a non-empty host execution id — 'created' is the host's " +
-          "confirmed fact, and a state that claims one without naming the execution " +
-          "cannot be reconciled against the platform",
+        JSON.stringify(effect.effectId) +
+        " as created without a non-empty host execution id — 'created' is the host's " +
+        "confirmed fact, and a state that claims one without naming the execution " +
+        "cannot be reconciled against the platform",
       );
     }
     return this.joinOrBegin(() => {
@@ -1493,9 +1484,9 @@ export class GraphStore {
       throw new GraphStoreWriteError(
         "invalid-record",
         "graph-store: refusing to release the create right of effect " +
-          JSON.stringify(effect.effectId) +
-          " without a not-created proof — 'the create failed' and 'no execution exists' are " +
-          "different facts, and only the second one licenses a later create",
+        JSON.stringify(effect.effectId) +
+        " without a not-created proof — 'the create failed' and 'no execution exists' are " +
+        "different facts, and only the second one licenses a later create",
       );
     }
     this.db.run(
@@ -1540,9 +1531,9 @@ export class GraphStore {
     const execution =
       typeof executionId === "string" && executionId.length > 0
         ? Object.freeze({
-            executionId,
-            ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
-          })
+          executionId,
+          ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
+        })
         : undefined;
     const generation = readStoreEpoch(entry, "owner_generation", this.filePath, table);
     if (generation < 1) {
@@ -1705,6 +1696,62 @@ export class GraphStore {
     return Object.freeze(out);
   }
 
+  rememberExecutionObservation(executionId: string, observation: TerminalExecutionObservation): void {
+    this.assertOpen("rememberExecutionObservation");
+    if (!executionId || !["completed", "failed"].includes(observation.kind) || !Number.isSafeInteger(observation.observedAt) || observation.observedAt < 0) {
+      throw new Error("Invalid execution observation");
+    }
+    this.joinOrBegin(() => {
+      const existing = this.readExecutionObservation(executionId);
+      if (existing) {
+        if (existing.kind !== observation.kind) throw new Error("Conflicting terminal execution observation");
+        return;
+      }
+      this.db.run(`INSERT INTO ${GRAPH_STORE_TABLES.executionObservations} (execution_id, outcome, reason, observed_at) VALUES (?, ?, ?, ?)`,
+        executionId, observation.kind, observation.reason, observation.observedAt);
+    });
+  }
+
+  readExecutionObservation(executionId: string): TerminalExecutionObservation | undefined {
+    this.assertOpen("readExecutionObservation");
+    const row = this.db.query(`SELECT outcome, reason, observed_at FROM ${GRAPH_STORE_TABLES.executionObservations} WHERE execution_id = ?`).get(executionId);
+    if (!row) return undefined;
+    const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.executionObservations);
+    if ((entry.outcome !== "completed" && entry.outcome !== "failed") || typeof entry.reason !== "string" || !Number.isSafeInteger(entry.observed_at)) {
+      throw new GraphStoreFormatError("malformed-row", this.filePath, "Invalid persisted execution observation", undefined, GRAPH_STORE_FORMAT_VERSION);
+    }
+    return { kind: entry.outcome, reason: entry.reason, observedAt: entry.observed_at as number };
+  }
+
+  rememberWorkerChannel(record: WorkerChannelRecord): void {
+    this.assertOpen("rememberWorkerChannel");
+    if (!/^[a-f0-9]{64}$/.test(record.tokenDigest) || !/^[a-zA-Z0-9._-]+$/.test(record.sessionId)) {
+      throw new Error("Invalid worker channel identity");
+    }
+    this.joinOrBegin(() => this.db.run(
+      `INSERT INTO ${GRAPH_STORE_TABLES.workerChannels} (token_digest, session_id, agent) VALUES (?, ?, ?)`,
+      record.tokenDigest, record.sessionId, record.agent,
+    ));
+  }
+
+  workerChannels(): readonly WorkerChannelRecord[] {
+    this.assertOpen("workerChannels");
+    return this.db.query(`SELECT token_digest, session_id, agent FROM ${GRAPH_STORE_TABLES.workerChannels}`).all().map(row => {
+      const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.workerChannels);
+      const tokenDigest = readStoreText(entry, "token_digest", this.filePath, GRAPH_STORE_TABLES.workerChannels);
+      const sessionId = readStoreText(entry, "session_id", this.filePath, GRAPH_STORE_TABLES.workerChannels);
+      if (!/^[a-f0-9]{64}$/.test(tokenDigest) || !/^[a-zA-Z0-9._-]+$/.test(sessionId) || typeof entry.agent !== "string") {
+        throw new GraphStoreFormatError("malformed-row", this.filePath, "Invalid persisted worker channel identity", undefined, GRAPH_STORE_FORMAT_VERSION);
+      }
+      return { tokenDigest, sessionId, agent: entry.agent };
+    });
+  }
+
+  forgetWorkerChannels(sessionId: string): void {
+    this.assertOpen("forgetWorkerChannels");
+    this.joinOrBegin(() => this.db.run(`DELETE FROM ${GRAPH_STORE_TABLES.workerChannels} WHERE session_id = ?`, sessionId));
+  }
+
   // ── Declaring invocation ──────────────────────────────────────────────────
 
   /**
@@ -1859,8 +1906,8 @@ export class GraphStore {
         throw new GraphStoreWriteError(
           "invalid-record",
           "graph-store: run identity of graph " +
-            JSON.stringify(record.graphId) +
-            " disappeared between the mint and the read — the run was not recorded",
+          JSON.stringify(record.graphId) +
+          " disappeared between the mint and the read — the run was not recorded",
         );
       }
       return stored;
@@ -2109,21 +2156,21 @@ export class GraphStore {
     const rows =
       scope === undefined
         ? this.db
-            .query(
-              `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+          .query(
+            `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
                       decided_by_session, decided_by_agent, successor_attempt_id
                FROM ${GRAPH_STORE_TABLES.controlDecisions}
                WHERE graph_id = ? ORDER BY decided_at, rowid`,
-            )
-            .all(graphId)
+          )
+          .all(graphId)
         : this.db
-            .query(
-              `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+          .query(
+            `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
                       decided_by_session, decided_by_agent, successor_attempt_id
                FROM ${GRAPH_STORE_TABLES.controlDecisions}
                WHERE graph_id = ? AND run_id = ? ORDER BY decided_at, rowid`,
-            )
-            .all(graphId, scope);
+          )
+          .all(graphId, scope);
     const decisions: ControlDecisionRecord[] = [];
     for (const row of rows) {
       decisions.push(
@@ -2244,15 +2291,15 @@ export class GraphStore {
         return Object.freeze(
           competing === undefined
             ? {
-                kind: "settled" as const,
-                attemptId: key.attemptId,
-                runControl: this.readRunControl(key.graphId),
-              }
+              kind: "settled" as const,
+              attemptId: key.attemptId,
+              runControl: this.readRunControl(key.graphId),
+            }
             : {
-                kind: "conflict" as const,
-                existing: competing,
-                runControl: this.readRunControl(key.graphId),
-              },
+              kind: "conflict" as const,
+              existing: competing,
+              runControl: this.readRunControl(key.graphId),
+            },
         );
       }
       const claimed = write.runControl;
@@ -2280,9 +2327,9 @@ export class GraphStore {
           throw new GraphStoreWriteError(
             "invalid-record",
             "graph-store: control decision for graph " +
-              JSON.stringify(key.graphId) +
-              " was recorded, but the store holds no run control fact for it — the run " +
-              "identity is missing and the decision was rolled back",
+            JSON.stringify(key.graphId) +
+            " was recorded, but the store holds no run control fact for it — the run " +
+            "identity is missing and the decision was rolled back",
           );
         }
         return Object.freeze({
@@ -2453,8 +2500,8 @@ export class GraphStore {
         throw new GraphStoreWriteError(
           "invalid-record",
           "graph-store: the re-execution decision of run " +
-            JSON.stringify(record.runId) +
-            " disappeared between the write and the read — nothing was recorded",
+          JSON.stringify(record.runId) +
+          " disappeared between the write and the read — nothing was recorded",
         );
       }
       return Object.freeze({ kind: "recorded" as const, reexecution: stored });
@@ -2504,7 +2551,7 @@ export class GraphStore {
     const row = this.db
       .query(
         `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
-                requested_by_session, requested_by_agent, approver_session_id, expires_at,
+                requested_by_session, requested_by_agent, approver_session_id, authority, expires_at,
                 decided_by_session, decided_by_agent, decided_at, decision_reason
          FROM ${GRAPH_STORE_TABLES.approvalRequests}
          WHERE graph_id = ? AND attempt_id = ?
@@ -2528,23 +2575,23 @@ export class GraphStore {
     const rows =
       scope === undefined
         ? this.db
-            .query(
-              `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
-                      requested_by_session, requested_by_agent, approver_session_id, expires_at,
+          .query(
+            `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
+                      requested_by_session, requested_by_agent, approver_session_id, authority, expires_at,
                       decided_by_session, decided_by_agent, decided_at, decision_reason
                FROM ${GRAPH_STORE_TABLES.approvalRequests}
                WHERE graph_id = ? ORDER BY requested_at, rowid`,
-            )
-            .all(graphId)
+          )
+          .all(graphId)
         : this.db
-            .query(
-              `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
-                      requested_by_session, requested_by_agent, approver_session_id, expires_at,
+          .query(
+            `SELECT graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
+                      requested_by_session, requested_by_agent, approver_session_id, authority, expires_at,
                       decided_by_session, decided_by_agent, decided_at, decision_reason
                FROM ${GRAPH_STORE_TABLES.approvalRequests}
                WHERE graph_id = ? AND run_id = ? ORDER BY requested_at, rowid`,
-            )
-            .all(graphId, scope);
+          )
+          .all(graphId, scope);
     const requests: ApprovalRequestRecord[] = [];
     for (const row of rows) {
       requests.push(
@@ -2594,8 +2641,8 @@ export class GraphStore {
       this.db.run(
         `INSERT OR IGNORE INTO ${GRAPH_STORE_TABLES.approvalRequests}
            (graph_id, run_id, node_id, attempt_id, status, reason, requested_at,
-            requested_by_session, requested_by_agent, approver_session_id, expires_at)
-         SELECT ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?
+            requested_by_session, requested_by_agent, approver_session_id, authority, expires_at)
+         SELECT ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?
          WHERE NOT EXISTS (
            SELECT 1 FROM ${GRAPH_STORE_TABLES.acceptedEvents}
            WHERE graph_id = ? AND attempt_id = ?
@@ -2609,6 +2656,7 @@ export class GraphStore {
         record.requestedBy?.sessionId ?? null,
         record.requestedBy?.agentId ?? null,
         record.approverSessionId,
+        JSON.stringify(record.authority),
         record.expiresAt,
         record.graphId,
         record.attemptId,
@@ -2654,6 +2702,10 @@ export class GraphStore {
       );
       const existing = this.readApprovalRequest(write.graphId, write.attemptId);
       if (existing === undefined) return Object.freeze({ kind: "absent" as const });
+      if (existing.runId !== write.runId || existing.nodeId !== write.nodeId ||
+        existing.approverSessionId !== write.decidedBy.sessionId) {
+        throw new GraphStoreWriteError("invalid-record", "approval decision does not match the authorized attempt and principal");
+      }
       if (existing.status === status) {
         return Object.freeze({ kind: "replayed" as const, request: existing });
       }
@@ -2679,8 +2731,8 @@ export class GraphStore {
           throw new GraphStoreWriteError(
             "invalid-record",
             "graph-store: the approval request of attempt " +
-              JSON.stringify(write.attemptId) +
-              " disappeared between the expiry and the read — nothing was recorded",
+            JSON.stringify(write.attemptId) +
+            " disappeared between the expiry and the read — nothing was recorded",
           );
         }
         return Object.freeze({ kind: "expired" as const, request: expired });
@@ -2703,10 +2755,10 @@ export class GraphStore {
         throw new GraphStoreWriteError(
           "invalid-record",
           "graph-store: approval decision " +
-            JSON.stringify(write.command) +
-            " for attempt " +
-            JSON.stringify(write.attemptId) +
-            " did not land although the request was pending — nothing was recorded",
+          JSON.stringify(write.command) +
+          " for attempt " +
+          JSON.stringify(write.attemptId) +
+          " did not land although the request was pending — nothing was recorded",
         );
       }
       return Object.freeze({ kind: "decided" as const, request: decided });
@@ -2825,23 +2877,23 @@ export class GraphStore {
     const rows =
       dueAt === undefined
         ? this.db
-            .query(
-              `SELECT attempt_id FROM ${GRAPH_STORE_TABLES.approvalRequests}
+          .query(
+            `SELECT attempt_id FROM ${GRAPH_STORE_TABLES.approvalRequests}
                WHERE graph_id = ? AND status = ?${runId === undefined ? "" : " AND run_id = ?"}
                ORDER BY requested_at, rowid`,
-            )
-            .all(...(runId === undefined ? [graphId, status] : [graphId, status, runId]))
+          )
+          .all(...(runId === undefined ? [graphId, status] : [graphId, status, runId]))
         : this.db
-            .query(
-              `SELECT attempt_id FROM ${GRAPH_STORE_TABLES.approvalRequests}
+          .query(
+            `SELECT attempt_id FROM ${GRAPH_STORE_TABLES.approvalRequests}
                WHERE graph_id = ? AND status = ? AND expires_at <= ?${runId === undefined ? "" : " AND run_id = ?"}
                ORDER BY requested_at, rowid`,
-            )
-            .all(
-              ...(runId === undefined
-                ? [graphId, status, dueAt]
-                : [graphId, status, dueAt, runId]),
-            );
+          )
+          .all(
+            ...(runId === undefined
+              ? [graphId, status, dueAt]
+              : [graphId, status, dueAt, runId]),
+          );
     const requests: ApprovalRequestRecord[] = [];
     for (const row of rows) {
       const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.approvalRequests);
@@ -2857,6 +2909,7 @@ export class GraphStore {
   /** Refuse any use of a closed store with a clear, typed error. */
   private assertOpen(operation: string): void {
     if (this.closed) throw new GraphStoreClosedError(operation);
+    verifyConnectionFile(this.connection, this.filePath);
   }
 
   /**
@@ -3145,6 +3198,14 @@ function readApprovalRow(
     path,
     table,
   );
+  const authority = readStoredApprovalGrant(row, path, table);
+  const approverSessionId = readStoreText(row, "approver_session_id", path, table);
+  if ((authority.mode === "independent-review" &&
+    (!requestedBy.decidedBy || requestedBy.decidedBy.sessionId === approverSessionId)) ||
+    (decidedBy.decidedBy !== undefined && decidedBy.decidedBy.sessionId !== approverSessionId)) {
+    throw new GraphStoreFormatError("malformed-row", path,
+      "approval request or decision violates its recorded authority", undefined, GRAPH_STORE_FORMAT_VERSION);
+  }
   return Object.freeze({
     graphId: readStoreText(row, "graph_id", path, table),
     runId: readStoreText(row, "run_id", path, table),
@@ -3153,7 +3214,8 @@ function readApprovalRow(
     status,
     reason: readStoreText(row, "reason", path, table),
     requestedAt: readStoreEpoch(row, "requested_at", path, table),
-    approverSessionId: readStoreText(row, "approver_session_id", path, table),
+    authority,
+    approverSessionId,
     expiresAt: readStoreEpoch(row, "expires_at", path, table),
     ...(requestedBy.decidedBy === undefined ? {} : { requestedBy: requestedBy.decidedBy }),
     ...(decidedBy.decidedBy === undefined ? {} : { decidedBy: decidedBy.decidedBy }),
@@ -3194,6 +3256,11 @@ export const APPROVAL_DEADLINE_REASON =
 
 /** Refuse an approval request that violates the record model before it is stored. */
 function assertApprovalRequestShape(record: ApprovalRequestRecord): void {
+  readApprovalGrant(record.authority);
+  if (record.authority.mode === "independent-review" &&
+    (!record.requestedBy || record.requestedBy.sessionId === record.approverSessionId)) {
+    throw new GraphStoreWriteError("invalid-record", "independent review requires a distinct requester and approver");
+  }
   requireStoreIdentifier(record.graphId, "approval.graphId");
   requireStoreIdentifier(record.runId, "approval.runId");
   requireStoreIdentifier(record.nodeId, "approval.nodeId");
@@ -3206,8 +3273,8 @@ function assertApprovalRequestShape(record: ApprovalRequestRecord): void {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: an approval request is RAISED as pending; " +
-        JSON.stringify(record.status) +
-        " is a decision and is written by the decision path, never by the raise",
+      JSON.stringify(record.status) +
+      " is a decision and is written by the decision path, never by the raise",
     );
   }
   assertPrincipalShape(record.requestedBy, "approval.requestedBy");
@@ -3225,8 +3292,8 @@ function assertApprovalDecisionShape(write: ApprovalDecisionWrite): void {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: " +
-        JSON.stringify(write.command) +
-        " is not an approval decision command — only approve and reject resolve a request",
+      JSON.stringify(write.command) +
+      " is not an approval decision command — only approve and reject resolve a request",
     );
   }
   assertPrincipalShape(write.decidedBy, "approval.decidedBy");
@@ -3264,9 +3331,9 @@ function readReexecutionRow(
     ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
     ...(hasSuccessor
       ? {
-          successorRunId: successor as string,
-          successorStartedAt: readStoreEpoch(row, "successor_started_at", path, table),
-        }
+        successorRunId: successor as string,
+        successorStartedAt: readStoreEpoch(row, "successor_started_at", path, table),
+      }
       : {}),
   });
 }
@@ -3297,20 +3364,20 @@ function assertControlWriteShape(write: RunControlWrite): void {
       throw new GraphStoreWriteError(
         "invalid-record",
         "graph-store: the control decision names run " +
-          JSON.stringify(decision.graphId + "/" + decision.runId) +
-          " while the run control fact names " +
-          JSON.stringify(control.graphId + "/" + control.runId) +
-          " — the write was not made",
+        JSON.stringify(decision.graphId + "/" + decision.runId) +
+        " while the run control fact names " +
+        JSON.stringify(control.graphId + "/" + control.runId) +
+        " — the write was not made",
       );
     }
     if (decision.command !== control.command) {
       throw new GraphStoreWriteError(
         "invalid-record",
         "graph-store: the control decision records " +
-          JSON.stringify(decision.command) +
-          " while the run control fact records " +
-          JSON.stringify(control.command) +
-          " — one write cannot record two commands, so nothing was written",
+        JSON.stringify(decision.command) +
+        " while the run control fact records " +
+        JSON.stringify(control.command) +
+        " — one write cannot record two commands, so nothing was written",
       );
     }
     requireStoreIdentifier(control.reason, "control.reason");
@@ -3334,10 +3401,10 @@ function assertControlWriteShape(write: RunControlWrite): void {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: the control decision records command " +
-        JSON.stringify(decision.command) +
-        " with successor attempt " +
-        JSON.stringify(decision.successorAttemptId) +
-        " — only a retry mints an attempt, so nothing was written",
+      JSON.stringify(decision.command) +
+      " with successor attempt " +
+      JSON.stringify(decision.successorAttemptId) +
+      " — only a retry mints an attempt, so nothing was written",
     );
   }
 }
@@ -3356,8 +3423,8 @@ function assertReexecutionShape(record: RunReexecutionRecord): void {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: the re-execution decision of run " +
-        JSON.stringify(record.runId) +
-        " carries a successor start time without a successor run — nothing was written",
+      JSON.stringify(record.runId) +
+      " carries a successor start time without a successor run — nothing was written",
     );
   }
 }
@@ -3376,10 +3443,10 @@ function assertPrincipalShape(
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: " +
-        field +
-        ".agentId is " +
-        describeValue(principal.agentId) +
-        ", not a non-empty agent — the record was not written",
+      field +
+      ".agentId is " +
+      describeValue(principal.agentId) +
+      ", not a non-empty agent — the record was not written",
     );
   }
 }
@@ -3581,4 +3648,12 @@ function sameOrigin(
   right: InvocationOriginRecord,
 ): boolean {
   return left.sessionId === right.sessionId && left.agent === right.agent;
+}
+
+function readStoredApprovalGrant(row: Record<string, unknown>, path: string, table: string) {
+  try {
+    return readApprovalGrant(JSON.parse(readStoreText(row, "authority", path, table)));
+  } catch {
+    throw new GraphStoreFormatError("malformed-row", path, "approval authority is malformed", undefined, GRAPH_STORE_FORMAT_VERSION);
+  }
 }

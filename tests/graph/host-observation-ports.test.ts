@@ -505,10 +505,7 @@ describe("F4 — the awaiting inventory is consumed", () => {
     });
     const sweep = await host.recoverDeclaredGraphs();
     expect(sweep.completed).toEqual([]);
-    const refusal = sweep.effectRefusals.find(
-      (candidate) => candidate.code === "completion-unsettled",
-    );
-    expect(refusal?.message).toContain("ENDED without reaching");
+    expect(sweep.controlled).toContain(GRAPH_ID + ":failure");
     expect(await acceptedEvents(storeRoot)).toBe(0);
     expect(deliveries).toEqual([]);
     // A failed end is not put in the listening inventory either: nothing is left
@@ -566,9 +563,7 @@ describe("F4 — the awaiting inventory is consumed", () => {
     const again = await host.recoverDeclaredGraphs();
     expect(again.completed).toEqual([]);
     expect(again.awaitingCompletion).toEqual([]);
-    expect(
-      again.effectRefusals.some((refusal) => refusal.code === "completion-unsettled"),
-    ).toBe(true);
+    expect(again.controlled).toContain(GRAPH_ID + ":failure");
     expect(deliveries).toEqual([]);
     expect(await acceptedEvents(storeRoot)).toBe(0);
   });

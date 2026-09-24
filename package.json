@@ -49,11 +49,12 @@
     "scripts/patch-opentui-native-entry.mjs"
   ],
   "scripts": {
-    "build": "tsc && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client",
+    "build": "bun run build:clean && tsc && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client",
+    "build:clean": "bun run scripts/clean-dist.ts",
     "build:entry-aliases": "bun run scripts/build-entry-aliases.ts",
     "build:tui": "bun run scripts/build-tui.ts",
     "build:dsh-web-client": "NODE_ENV=production bun run scripts/build-dsh-web-client.ts",
-    "prepublishOnly": "tsc && bun run build:entry-aliases",
+    "prepublishOnly": "bun run build",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.tests.json",
     "test": "bun run test:core && bun run test:tui",
@@ -132,7 +133,7 @@
     "crawlee": ">=3.0.0",
     "@mozilla/readability": ">=0.5.0",
     "linkedom": ">=0.18.0",
-    "@earendil-works/pi-coding-agent": ">=0.70.0"
+    "@earendil-works/pi-coding-agent": ">=0.86.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

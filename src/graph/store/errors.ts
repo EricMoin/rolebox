@@ -1,31 +1,8 @@
-/**
- * Graph store — the refusal vocabulary of the ONE authoritative store
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * These are the ledger's own error names, moved to the store that now emits
- * them and re-exported under their previous names by
- * `src/graph/ledger/sqlite-ledger.ts` (the same "move the definition, keep the
- * import path" discipline the P1 domain module used for join/budget). Nothing
- * new is invented: a store that is not this build's is still refused with
- * `GraphStoreFormatError` and the SAME `problem` identifiers, and a write
- * that cannot be persisted is still `GraphStoreWriteError` with the same
- * codes, so every existing test's assertion on `problem` keeps its meaning.
- *
- * WHY THE CLASSES MOVED RATHER THAN BEING DUPLICATED. The unified store is the
- * module that inspects the file, verifies the layout and rejects a row, so it
- * must own the errors it throws; leaving a second copy in the ledger would make
- * `instanceof LedgerFormatError` false for the refusal the ledger's own open
- * produces — a silent compatibility break no test would catch by name.
- *
- * Dependency leaf: this module imports nothing.
- */
-
 // ── Format refusals ─────────────────────────────────────────────────────────
 
 /** Why a store file was refused. Stable identifiers; wording is not API. */
 export type GraphStoreFormatProblem =
+  | "store-identity"
   /** The file's format version is NEWER than this build writes. */
   | "newer-format"
   /**

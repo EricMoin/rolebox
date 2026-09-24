@@ -51,7 +51,7 @@ import {
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { buildDeclaredOutcomeGraph, persistDeclaredGraph } from "../../src/graph/tools/declare-graph.ts";
-import { scanPersistedStates } from "../../src/graph/tools/persisted-state.ts";
+import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import {
   XPROC_GRAPH_ID,
   XPROC_POLICIES,
@@ -232,10 +232,10 @@ describe("G14 — a definition damaged after the runtime was cached", () => {
 
       // SURFACE THREE: the status/scan query SKIPS the graph by name instead of
       // projecting a position for it.
-      const scan = scanPersistedStates(storeRoot);
-      expect(scan.count).toBe(1);
-      expect(scan.loaded).toEqual([]);
-      expect(scan.skippedGraphs).toEqual([XPROC_GRAPH_ID]);
+      const scan = queryGraphs(storeRoot);
+      expect(scan.graphs.length + scan.refused.length).toBe(1);
+      expect(scan.graphs).toEqual([]);
+      expect(scan.refused.map((entry) => entry.graphId)).toEqual([XPROC_GRAPH_ID]);
     } finally {
       host.close();
     }

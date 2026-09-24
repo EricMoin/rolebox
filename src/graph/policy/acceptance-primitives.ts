@@ -1,54 +1,4 @@
-/**
- * Graph Execution Engine v2 — the shipped acceptance primitives (P4 item 2)
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * THE CLOSED SET. Acceptance requirements name a validator from a closed,
- * versioned registry; this module is the set the shipped hosts install, and it
- * is exactly four capabilities, one per declared primitive
- * (docs/graph-outcome-protocol.md § "Acceptance validators"):
- *
- * | primitive | validator | what it actually enforces |
- * | --- | --- | --- |
- * | schema | `schema@1` | the outcome's PLAN-DECLARED data contract resolves to an installed schema implementation and the submission's payload passes it |
- * | artifact | `artifact-reference@1` | every declared evidence reference resolves to a real file inside the artifact root and is digested from the bytes actually read |
- * | command exit | `command-exit@1` | a command the HOST authorized for this exact (graph, node, outcome) ran in the policy's working directory, exited with the expected code, and judged an artifact revision that did not move while it ran — the pass DEPOSITS that re-read revision into the host's content store and names the deposited identity, or the gate is `indeterminate` |
- * | human approval | `human-approval@1` | the trusted approval row recorded for this attempt says an authorized principal approved it |
- *
- * EVERY ONE OF THE FOUR IS CODE, NOT A FLAG. Each factory below returns a
- * {@link ValidatorImplementation} that inspects real inputs (plan content,
- * filesystem bytes, a child process, a durable approval row) and answers
- * `pass`, `fail` or `indeterminate`; none of them can be satisfied by
- * declaring that it exists. An input the implementation cannot obtain is
- * `indeterminate`, which the acceptance core treats exactly like a failure for
- * gate purposes, so a missing capability is a REFUSAL and never a silent pass.
- *
- * WHAT A WORKER CANNOT DO. Nothing in a submission selects what these
- * primitives check:
- * - the schema is the one the COMPILED PLAN declares for the claimed outcome,
- *   read from trusted plan content by the acceptance core (never from
- *   `data` or any proposal field);
- * - the evidence references are read against the host's artifact root, and a
- *   reference that escapes it is a problem rather than a read;
- * - the command comes from the host's {@link TrustedCommandBinding} list, keyed
- *   by the plan's own (graph, node, outcome) identity. There is deliberately NO
- *   field of a {@link ValidatorRequest} a proposal can reach that names a
- *   command, an interpreter or a working directory, so a worker cannot author,
- *   choose or replace the command it is judged by — and a mapping the host did
- *   not authorize is `indeterminate`, never "no check needed";
- * - the approval is the durable row the trusted control entry wrote, read
- *   through the host's own store. A submission cannot raise a request, cannot
- *   decide one, and its own `approved`-shaped data is not read at all (the
- *   proposal reader refuses unknown keys, so such a field never reaches a
- *   requirement).
- *
- * Dependency note: this module imports the validator leaf, the store's
- * read-only load verdict, its content-addressed artifact store and node's
- * child-process API. It imports no runtime, tool or host module, so a host may
- * install these primitives without a cycle.
- */
-
+import { APPROVAL_POLICY_ENV, createApprovalPolicy, type ApprovalPolicy } from "./approval-policy.ts";
 import { spawnSync } from "node:child_process";
 
 import type { ApprovalRequestStatus } from "../ledger/types.ts";
@@ -88,10 +38,10 @@ export const ARTIFACT_VALIDATOR_VERSION = ARTIFACT_REFERENCE_VALIDATOR_VERSION;
 export const COMMAND_EXIT_VALIDATOR_ID = "command-exit";
 /** The command-exit primitive's exact version. */
 export const COMMAND_EXIT_VALIDATOR_VERSION = 1;
-/** The human-approval primitive's validator id. */
-export const HUMAN_APPROVAL_VALIDATOR_ID = "human-approval";
-/** The human-approval primitive's exact version. */
-export const HUMAN_APPROVAL_VALIDATOR_VERSION = 1;
+/** The principal-approval primitive's validator id. */
+export const PRINCIPAL_APPROVAL_VALIDATOR_ID = "principal-approval";
+/** The principal-approval primitive's exact version. */
+export const PRINCIPAL_APPROVAL_VALIDATOR_VERSION = 1;
 
 // ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -186,27 +136,27 @@ export function createSchemaValidator(
     if (!Number.isSafeInteger(registration.version) || registration.version <= 0) {
       throw new Error(
         "schema-validator: schema " +
-          JSON.stringify(registration.schema) +
-          " needs a positive safe-integer version",
+        JSON.stringify(registration.schema) +
+        " needs a positive safe-integer version",
       );
     }
     if (typeof registration.validate !== "function") {
       throw new Error(
         "schema-validator: schema " +
-          JSON.stringify(registration.schema) +
-          "@" +
-          String(registration.version) +
-          " has no validate function — a schema is an implementation, never a name",
+        JSON.stringify(registration.schema) +
+        "@" +
+        String(registration.version) +
+        " has no validate function — a schema is an implementation, never a name",
       );
     }
     const key = schemaKey(registration.schema, registration.version);
     if (installed.has(key)) {
       throw new Error(
         "schema-validator: schema " +
-          JSON.stringify(registration.schema) +
-          "@" +
-          String(registration.version) +
-          " is registered twice",
+        JSON.stringify(registration.schema) +
+        "@" +
+        String(registration.version) +
+        " is registered twice",
       );
     }
     installed.set(key, registration);
@@ -312,10 +262,10 @@ export interface TrustedCommandBinding {
 /** What one command run answered. */
 export type CommandRunResult =
   | {
-      readonly kind: "exited";
-      readonly exitCode: number | null;
-      readonly signal: string | null;
-    }
+    readonly kind: "exited";
+    readonly exitCode: number | null;
+    readonly signal: string | null;
+  }
   /** The command could not be run at all (a missing program, a spawn error). */
   | { readonly kind: "unavailable"; readonly reason: string };
 
@@ -403,8 +353,8 @@ export function createCommandExitValidator(
     if (commands.has(key)) {
       throw new Error(
         "command-exit-validator: mapping " +
-          describeMapping(binding) +
-          " is authorized twice — one mapping has exactly one trusted command",
+        describeMapping(binding) +
+        " is authorized twice — one mapping has exactly one trusted command",
       );
     }
     commands.set(key, binding);
@@ -457,7 +407,7 @@ export function createCommandExitValidator(
         null,
         null,
         "the artifacts this check is bound to could not be read before the command ran: " +
-          before.reason,
+        before.reason,
         onCheck,
       );
     }
@@ -492,7 +442,7 @@ export function createCommandExitValidator(
         result.exitCode,
         result.signal,
         "the artifacts this check is bound to could not be re-read after the command ran: " +
-          after.reason,
+        after.reason,
         onCheck,
       );
     }
@@ -503,8 +453,8 @@ export function createCommandExitValidator(
         result.exitCode,
         result.signal,
         "the artifacts changed while the trusted command ran (" +
-          describeRevisionChange(before.entries, after.entries) +
-          "), so its result describes no fixed artifact revision",
+        describeRevisionChange(before.entries, after.entries) +
+        "), so its result describes no fixed artifact revision",
         onCheck,
       );
     }
@@ -515,8 +465,8 @@ export function createCommandExitValidator(
         result.exitCode,
         result.signal,
         "the trusted command did not exit on its own (signal " +
-          JSON.stringify(result.signal) +
-          ") — a killed or timed-out check never satisfies a required gate",
+        JSON.stringify(result.signal) +
+        ") — a killed or timed-out check never satisfies a required gate",
         onCheck,
       );
     }
@@ -528,9 +478,9 @@ export function createCommandExitValidator(
         result.signal,
         "fail",
         "the trusted command exited with code " +
-          String(result.exitCode) +
-          ", and this mapping requires " +
-          String(binding.expectExitCode),
+        String(result.exitCode) +
+        ", and this mapping requires " +
+        String(binding.expectExitCode),
         onCheck,
       );
     }
@@ -548,10 +498,10 @@ export function createCommandExitValidator(
         result.exitCode,
         result.signal,
         "the trusted command exited with the required code " +
-          String(binding.expectExitCode) +
-          " against a fixed artifact revision, but that revision could not be deposited (" +
-          retained.reason +
-          ") — an acceptance naming it could never produce it, so the gate does not pass",
+        String(binding.expectExitCode) +
+        " against a fixed artifact revision, but that revision could not be deposited (" +
+        retained.reason +
+        ") — an acceptance naming it could never produce it, so the gate does not pass",
         onCheck,
       );
     }
@@ -562,10 +512,10 @@ export function createCommandExitValidator(
       result.signal,
       "pass",
       "the trusted command exited with the required code " +
-        String(binding.expectExitCode) +
-        " in " +
-        JSON.stringify(binding.cwd) +
-        " against the recorded artifact revision, which was deposited as the revision this pass names",
+      String(binding.expectExitCode) +
+      " in " +
+      JSON.stringify(binding.cwd) +
+      " against the recorded artifact revision, which was deposited as the revision this pass names",
       onCheck,
     );
   };
@@ -656,61 +606,61 @@ function assertCommandBinding(binding: TrustedCommandBinding): void {
     if (typeof value !== "string" || value.length === 0) {
       throw new Error(
         "command-exit-validator: a trusted command binding needs a non-empty " +
-          field +
-          " identity",
+        field +
+        " identity",
       );
     }
   }
   if (!Array.isArray(binding.argv) || binding.argv.length === 0) {
     throw new Error(
       "command-exit-validator: " +
-        describeMapping(binding) +
-        " has no argv — a command is a program and its arguments",
+      describeMapping(binding) +
+      " has no argv — a command is a program and its arguments",
     );
   }
   for (const part of binding.argv) {
     if (typeof part !== "string" || part.length === 0) {
       throw new Error(
         "command-exit-validator: " +
-          describeMapping(binding) +
-          " has an empty argv element",
+        describeMapping(binding) +
+        " has an empty argv element",
       );
     }
   }
   if (typeof binding.cwd !== "string" || binding.cwd.length === 0) {
     throw new Error(
       "command-exit-validator: " +
-        describeMapping(binding) +
-        " has no working directory — the command's directory is part of the binding",
+      describeMapping(binding) +
+      " has no working directory — the command's directory is part of the binding",
     );
   }
   if (!Number.isSafeInteger(binding.timeoutMs) || binding.timeoutMs <= 0) {
     throw new Error(
       "command-exit-validator: " +
-        describeMapping(binding) +
-        " needs a positive safe-integer timeout",
+      describeMapping(binding) +
+      " needs a positive safe-integer timeout",
     );
   }
   if (!Number.isSafeInteger(binding.expectExitCode)) {
     throw new Error(
       "command-exit-validator: " +
-        describeMapping(binding) +
-        " needs an integer expected exit code",
+      describeMapping(binding) +
+      " needs an integer expected exit code",
     );
   }
   if (!Array.isArray(binding.artifactRefs) || binding.artifactRefs.length === 0) {
     throw new Error(
       "command-exit-validator: " +
-        describeMapping(binding) +
-        " names no artifact revision — a command gate must be bound to the artifacts it judges",
+      describeMapping(binding) +
+      " names no artifact revision — a command gate must be bound to the artifacts it judges",
     );
   }
   for (const ref of binding.artifactRefs) {
     if (typeof ref !== "string" || ref.length === 0) {
       throw new Error(
         "command-exit-validator: " +
-          describeMapping(binding) +
-          " has an empty artifact reference",
+        describeMapping(binding) +
+        " has an empty artifact reference",
       );
     }
   }
@@ -1048,14 +998,14 @@ export interface ApprovalEvidenceReader {
   read(graphId: string, attemptId: string): ApprovalEvidenceReading;
 }
 
-/** Options for {@link createHumanApprovalValidator}. */
-export interface HumanApprovalValidatorOptions {
+/** Options for {@link createPrincipalApprovalValidator}. */
+export interface PrincipalApprovalValidatorOptions {
   /** The host's approval-evidence port (the durable store, in production). */
   readonly approvals: ApprovalEvidenceReader;
 }
 
 /**
- * The human-approval primitive.
+ * The principal-approval primitive.
  *
  * The gate passes only for an attempt whose durable row was APPROVED by the
  * principal the control entry authorized. Every other fact is its own answer:
@@ -1064,8 +1014,8 @@ export interface HumanApprovalValidatorOptions {
  * and an attempt with no request at all is `fail` — the gate is not satisfied
  * by the absence of a request, and a submission has no path to raise one.
  */
-export function createHumanApprovalValidator(
-  options: HumanApprovalValidatorOptions,
+export function createPrincipalApprovalValidator(
+  options: PrincipalApprovalValidatorOptions,
 ): ValidatorImplementation {
   const approvals = options.approvals;
   return (request: ValidatorRequest): ValidationOutcome => {
@@ -1093,7 +1043,7 @@ export function createHumanApprovalValidator(
         reason:
           "no approval request is recorded for attempt " +
           JSON.stringify(request.identity.attemptId) +
-          ", so a required human-approval gate is not satisfied — a submission cannot raise or decide one",
+          ", so a required principal-approval gate is not satisfied — a submission cannot raise or decide one",
       };
     }
     const evidence = reading.evidence;
@@ -1169,13 +1119,13 @@ export function approvalEvidenceFromStoreRoot(
             ...(record.decidedBy === undefined
               ? {}
               : {
-                  decidedBy: Object.freeze({
-                    sessionId: record.decidedBy.sessionId,
-                    ...(record.decidedBy.agentId === undefined
-                      ? {}
-                      : { agentId: record.decidedBy.agentId }),
-                  }),
+                decidedBy: Object.freeze({
+                  sessionId: record.decidedBy.sessionId,
+                  ...(record.decidedBy.agentId === undefined
+                    ? {}
+                    : { agentId: record.decidedBy.agentId }),
                 }),
+              }),
           }),
         };
       } catch (error) {
@@ -1272,9 +1222,9 @@ export function createShippedAcceptanceValidators(
         "runs the trusted command the host authorized for this exact mapping, in the policy's working directory, against a re-read artifact revision",
     },
     {
-      id: HUMAN_APPROVAL_VALIDATOR_ID,
-      version: HUMAN_APPROVAL_VALIDATOR_VERSION,
-      implementation: createHumanApprovalValidator({
+      id: PRINCIPAL_APPROVAL_VALIDATOR_ID,
+      version: PRINCIPAL_APPROVAL_VALIDATOR_VERSION,
+      implementation: createPrincipalApprovalValidator({
         approvals: options.approvals,
       }),
       description:
@@ -1306,6 +1256,8 @@ export interface HostCapabilityAssemblyOptions {
  * calls this function with the same environment a host would read.
  */
 export interface HostCapabilityAssembly {
+  readonly approvalPolicy?: ApprovalPolicy;
+  readonly approvalPolicyIssues: readonly string[];
   /** The FOUR acceptance primitives, installed for this process. */
   readonly validators: ValidatorRegistry;
   /** The completion policies the operator authorized (possibly none). */
@@ -1352,6 +1304,14 @@ export function assembleHostCapabilities(
   options: HostCapabilityAssemblyOptions,
 ): HostCapabilityAssembly {
   const loaded = loadGraphCompletionPolicies(options.env);
+  let approvalPolicy: ApprovalPolicy | undefined;
+  const approvalPolicyIssues: string[] = [];
+  try {
+    const configured = options.env[APPROVAL_POLICY_ENV];
+    if (configured !== undefined) approvalPolicy = createApprovalPolicy(JSON.parse(configured));
+  } catch {
+    approvalPolicyIssues.push("approval policy configuration is invalid; expected an object with id, revision and unambiguous rules");
+  }
   const commandPolicy = readTrustedCommandPolicy(options.env[TRUSTED_COMMAND_POLICY_ENV]);
   // THE VALUES BOTH SIDES ARE BUILT FROM, computed once. The validator
   // implementations close over exactly these, and the concrete capability set
@@ -1370,8 +1330,11 @@ export function assembleHostCapabilities(
   });
   return Object.freeze({
     validators,
+    approvalPolicy,
+    approvalPolicyIssues: Object.freeze(approvalPolicyIssues),
     capabilities: Object.freeze({
       validators: validators.keys,
+      approvalMappings: approvalPolicy?.mappings ?? Object.freeze([]),
       schemas: Object.freeze(
         schemas.map((registration) =>
           Object.freeze({
@@ -1414,7 +1377,7 @@ export const SHIPPED_VALIDATOR_IDS: readonly string[] = Object.freeze([
   SCHEMA_VALIDATOR_ID,
   ARTIFACT_VALIDATOR_ID,
   COMMAND_EXIT_VALIDATOR_ID,
-  HUMAN_APPROVAL_VALIDATOR_ID,
+  PRINCIPAL_APPROVAL_VALIDATOR_ID,
 ]);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

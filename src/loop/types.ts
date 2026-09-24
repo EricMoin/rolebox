@@ -1,20 +1,6 @@
 import type { Result } from "../utils/result.ts";
 
-/**
- * Session-isolation mode for a loop's rounds.
- *
- * Controls whether a new loop session inherits the parent's conversation
- * history ("inherit") or starts with a clean slate ("fresh").
- *
- * This is the single definition of the union (B28): the graph declaration's
- * `LoopGroupDecl.mode` (`src/types.graph-v2.ts`) re-exports it rather than
- * keeping a second copy. For graph loop groups the outcome run path's rounds
- * re-dispatch members within the SAME graph state (the reducer increments
- * `traversalCount` on the shared node), so rounds are inherently
- * inherit-flavored and `fresh` per-round session isolation is NOT wired — the
- * graph tool path returns a documented-unsupported error for it, never a
- * silent no-op.
- */
+/** Whether a standalone loop round inherits its parent conversation or starts fresh. */
 export type LoopMode = "inherit" | "fresh";
 
 /**

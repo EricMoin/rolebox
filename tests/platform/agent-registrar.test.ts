@@ -128,7 +128,7 @@ class FakeSubagentRuntime implements DshSubagentRuntime {
         agentOptions: false,
         outputSchema: false,
         depthLimit: false,
-        toolFilter: false,
+        toolFilter: true,
         persona: false,
       },
       inheritsParentContext: false,
@@ -210,7 +210,7 @@ describe("DshAgentRegistrar", () => {
       agentOptions: true,
       outputSchema: false,
       depthLimit: false,
-      toolFilter: false,
+      toolFilter: true,
       persona: false,
     });
 
@@ -219,7 +219,7 @@ describe("DshAgentRegistrar", () => {
       agentOptions: true,
       outputSchema: false,
       depthLimit: false,
-      toolFilter: false,
+      toolFilter: true,
       persona: false,
     });
   });

@@ -61,7 +61,7 @@ import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
-import { scanPersistedStates } from "../../src/graph/tools/persisted-state.ts";
+import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { HostDispatchInvocation } from "../../src/graph/host/dispatch-host.ts";
@@ -665,12 +665,12 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
       terminate("task-2", "completed");
       await settleCompletions();
 
-      const state = scanPersistedStates(storeRoot).loaded.find(
+      const state = queryGraphs(storeRoot).graphs.find(
         (candidate) => candidate.graphId === GRAPH_ID,
       );
       expect(state?.phase).toBe("complete");
-      expect(state?.nodes.get("work")?.status).toBe("completed");
-      expect(state?.nodes.get("ship")?.status).toBe("completed");
+      expect(state?.nodes.find(node => node.nodeId === "work")?.status).toBe("settled");
+      expect(state?.nodes.find(node => node.nodeId === "ship")?.status).toBe("settled");
 
       // THE CREDENTIAL CROSSED THE DELIVERY CHANNEL ONLY. Each attempt was
       // issued its own credential, both reached their worker prompt, and

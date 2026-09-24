@@ -1,3 +1,5 @@
+import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
+import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
  *
@@ -52,7 +54,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { z } from "zod";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import type {
@@ -67,7 +68,6 @@ import type {
   DshSubagentProvider,
 } from "../platform/adapters/dsh/agent-registrar.ts";
 import { DshDispatchAdapter } from "../platform/adapters/dsh/dispatch.ts";
-import type { DshSubagentDispatchRuntime } from "../platform/adapters/dsh/dispatch.ts";
 import { DshToolFactory } from "../platform/adapters/dsh/tool-factory.ts";
 import type { DshToolDefinition } from "../platform/adapters/dsh/tool-factory.ts";
 import { DshSessionAdapter } from "../platform/adapters/dsh/session.ts";
@@ -105,18 +105,14 @@ import {
 import { dshCapabilities } from "../platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "../prompt/builder.ts";
 import { ProcessFatalReporter } from "../core/process-fatal-reporter.ts";
-import {
-  createGraphToolSet,
-  createOutcomeGraphTools,
-} from "../graph/tools/index.ts";
-import { OutcomeHost, withCancelDelivery } from "../graph/host/outcome-host.ts";
+import { OutcomeHost } from "../graph/host/outcome-host.ts";
 import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import {
   DshOutcomeDelivery,
   type DshOutcomeSubagentRuntime,
 } from "../platform/adapters/dsh/outcome-dispatch.ts";
-import { assembleHostCapabilities } from "../graph/policy/acceptance-primitives.ts";
+import { GraphApplication } from "../graph/application/graph-application.ts";
 import {
   COMPLETION_POLICY_AUTHORIZATION_ENV,
   describeCompletionPolicyIssue,
@@ -212,7 +208,7 @@ export type DshPluginConfig = z.infer<typeof Config>;
 // ── Structural cordis ctx surface ──────────────────────────────────────────
 
 /** The dsh tool registry seam this plugin consumes (contract §3.1). */
-export interface DshToolsRegistry {
+export interface DshToolsRegistry extends DshGraphWorkerRegistry {
   /**
    * Register a tool definition. Returns the disposer that removes it.
    * @param definition - A compiled tool definition (DshToolDefinition).
@@ -1013,7 +1009,7 @@ export async function apply(
    * route registers, the sink is a no-op — every producer stays unaware of
    * whether a console is even connected.
    */
-  let notifyRoleboxChanged: (reason: "loop" | "graph" | "file") => void = () => {};
+  let notifyRoleboxChanged: (reason: "loop" | "graph" | "file") => void = () => { };
   const webServer = probeWebServer(ctx);
   let webRouteRegistered = false;
   let monitorRouteRegistered = false;
@@ -1169,7 +1165,16 @@ export async function apply(
   // (workers are not handed its path): see `credential-vault.ts` for what that
   // can and cannot isolate on a same-account platform.
   let outcomeHost: OutcomeHost | undefined;
+  let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary>;
   const outcomeDelivery = new DshOutcomeDelivery({
+    subscribeExecutionEvents: (id, listener) => ctx.on("session/event", (...args: unknown[]) => {
+      const session = args[0] as { id: string; events: import("../platform/adapters/dsh/session.ts").DshSessionEventLike[] };
+      const event = args[1] as { type: string };
+      if (session.id === id && event.type === "turn/end") listener(session.events);
+    }) ?? (() => { }),
+    readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
+    beforeStart: (label) => workerBoundary.admit(label),
+    workerTools: DSH_GRAPH_WORKER_TOOLS,
     subagents: ctx.subagents,
     parentResolver: (sid) => agentRegistry?.get(sid),
     onStartFailed: (_request, effect, reason) => {
@@ -1183,7 +1188,10 @@ export async function apply(
     },
     onSettled: (settlement) => {
       const { request } = settlement;
+      outcomeHost?.recordExecutionObservation(request.graphId, request.attemptId);
       if (settlement.kind === "failed") {
+        void outcomeHost?.failObservedExecution(request.graphId, request.nodeId, request.attemptId)
+          .catch((error: unknown) => log.warn("Graph failure settlement failed", { error: error instanceof Error ? error.message : String(error) }));
         log.warn("dsh outcome dispatch: attempt did not complete", {
           graphId: request.graphId,
           nodeId: request.nodeId,
@@ -1244,52 +1252,7 @@ export async function apply(
   // `command-exit` acceptance requirement is judged by; it is host
   // configuration keyed by (graph, node, outcome), so a worker can neither
   // author nor select the command.
-  const capabilities = assembleHostCapabilities({
-    artifactRoot: process.cwd(),
-    storeRoot: outcomeStoreRoot,
-    env: process.env,
-  });
-  for (const issue of capabilities.completionPolicyIssues) {
-    log.warn("dsh outcome graph: completion-policy configuration", {
-      issue: describeCompletionPolicyIssue(issue),
-    });
-  }
-  for (const issue of capabilities.commandPolicyIssues) {
-    log.warn("dsh outcome graph: trusted command policy", {
-      index: issue.index,
-      issue: issue.message,
-    });
-  }
-  log.info("dsh outcome graph capabilities installed", {
-    validators: capabilities.validatorIds.join(","),
-    commandBindings: capabilities.commandBindings,
-    completionPolicies: capabilities.authorizedCompletionPolicies
-      .map((ref) => ref.id + "@" + ref.revision)
-      .join(","),
-    completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
-  });
-  const shippedValidators = capabilities.validators;
-  // TWO DIFFERENT SUBJECTS, TWO DIFFERENT DECISIONS.
-  //
-  // D9 IS NOT DECLARED. The runtime's dispatch-identity capability binds an
-  // attempt to the invocation that ARMED it — the declaring parent. That is
-  // attribution: the dsh platform attributes a dispatched worker's own tool
-  // call to the WORKER's session (the tool context is built for the executing
-  // agent), so a check against the declaring invocation would refuse exactly
-  // the submission the delivery handoff asks the worker to make
-  // (host-identity-mismatch), and a parent session is not the worker's
-  // identity.
-  //
-  // THE WORKER BINDING IS DECLARED, because this host CAN substantiate it: the
-  // dsh type documents that a local subagent run's id IS the published child
-  // session id (`DshSubagentRun.id`), and that is the value `onStarted` hands
-  // `confirmExecution` — and the session the platform attributes the worker's
-  // own tool calls to. The host therefore answers "the worker of attempt X is
-  // child session Y" from its durable execution record, and the submission
-  // ingress refuses a call that arrives from any other session. The bearer
-  // credential still binds the submission to its attempt: the worker binding
-  // is an ADDITIONAL constraint, never a replacement.
-  outcomeHost = OutcomeHost.open({
+  const graphApplication = GraphApplication.open({
     workspaceDir: process.cwd(),
     storeRoot: outcomeStoreRoot,
     deliver: outcomeDelivery.deliver,
@@ -1301,11 +1264,11 @@ export async function apply(
     // command exit and human approval are installed here, each with a real
     // implementation, and the SAME registry is handed to the toolset below so a
     // declaration is compiled against exactly what the run path can check.
-    validators: shippedValidators,
+    env: process.env,
     // Natural completion is authorized by the operator's configuration, and the
     // run path corroborates a plan's pinned revision against the same registry
     // graph_declare compiled with.
-    completionPolicies: capabilities.completionPolicies,
+
     declareInvocationIdentity: false,
     // The platform's own child-session fact, read back from the confirmed
     // execution: for a local dsh run the run id IS the published child session
@@ -1332,90 +1295,42 @@ export async function apply(
     // `interrupt()` returns void and substantiates nothing.
     cancelExecution: outcomeDelivery.cancelExecution,
   });
+  outcomeHost = graphApplication.host;
+  workerBoundary = installDshGraphWorkerBoundary(outcomeHost, ctx.tools, (event, listener) => ctx.on(event, listener));
+  const workerToolDisposers = Object.entries(factory.compileAll(createDshGraphWorkerTools(outcomeHost, process.cwd(), outcomeStoreRoot)))
+    .filter(([name]) => isNamespaceEnabled(name, config.enabledNamespaces)).map(([, definition]) => definition)
+    .map(definition => ctx.tools.register(definition as DshToolDefinition));
+
+  const capabilities = graphApplication.capabilities;
+  for (const issue of capabilities.completionPolicyIssues) {
+    log.warn("dsh outcome graph: completion-policy configuration", {
+      issue: describeCompletionPolicyIssue(issue),
+    });
+  }
+  for (const issue of capabilities.approvalPolicyIssues) {
+    log.warn("graph approval-policy configuration", { issue });
+  }
+  for (const issue of capabilities.commandPolicyIssues) {
+    log.warn("dsh outcome graph: trusted command policy", {
+      index: issue.index,
+      issue: issue.message,
+    });
+  }
+  log.info("dsh outcome graph capabilities installed", {
+    validators: capabilities.validatorIds.join(","),
+    commandBindings: capabilities.commandBindings,
+    completionPolicies: capabilities.authorizedCompletionPolicies
+      .map((ref) => ref.id + "@" + ref.revision)
+      .join(","),
+    completionPolicyEnv: COMPLETION_POLICY_AUTHORIZATION_ENV,
+  });
+
   // The outcome toolset: the four entries that operate on a DECLARED graph.
   // No manager / dispatch seam is injected, so it can never build a legacy
   // engine; the outcome deps are the host layer above.
-  const outcomeToolset = createGraphToolSet({
-    directory: process.cwd(),
-    stateDir: process.cwd(),
-    credentialIsolation: outcomeHost.credentialIsolation,
-    // THE WORKER-IDENTITY CAPABILITY, not the D9 one: the identity option
-    // carries whichever shape the host declared, and this shape names the
-    // child session the platform created for the attempt's worker. Without it
-    // the session a submission arrives from would not be an authentication
-    // factor at all.
-    hostIdentity: outcomeHost.workerIdentity,
-    outcomeDispatch: outcomeHost.dispatch,
-    // THE ONE CAPABILITY SET (P4 item 1): the registry the host installed
-    // above. `graph_declare` derives its compile-time set from this, so a
-    // caller's supported_validators can only narrow what this process can
-    // actually resolve and enforce at acceptance.
-    outcomeValidators: shippedValidators,
-    // THE CONCRETE capability from the SAME assembly (A22): the schemas the
-    // schema primitive registered and the command mappings a trusted policy
-    // authorized. Compilation resolves a requirement's concrete identity
-    // against it, so a plan whose gates this host could never satisfy is a
-    // non-executable draft refused at declaration — not an "executable" plan
-    // that every submission fails.
-    outcomeAcceptanceCapabilities: capabilities.capabilities,
-    // The HOST's completion-policy capability, never a tool argument: the same
-    // registry the run path corroborates against (D6).
-    completionPolicies: capabilities.completionPolicies,
-    outcomeArtifactRoot: process.cwd(),
-    onGraphDeclared: (graphId, invokingSessionId, agent) => {
-      // The declaring invocation is handed to the HOST, which records it for the
-      // graph and re-supplies it on every dispatch window — the entry attempt
-      // here, and every successor a later acceptance arms (a worker's
-      // submission, an observed completion, the boot sweep). The delivery seam
-      // is stateless: nothing names a session "for the duration of" a call, so
-      // there is no window whose end can lose it.
-      void outcomeHost
-        ?.startDeclaredGraph(graphId, { sessionId: invokingSessionId, agent })
-        .then((result) => {
-          notifyRoleboxChanged("graph");
-          if (result.kind === "refused") {
-            log.warn("dsh outcome graph start refused", {
-              graphId,
-              refusals: result.refusals.map((r) => r.code).join(","),
-            });
-            return;
-          }
-          log.info("dsh outcome graph started", {
-            graphId,
-            kind: result.kind,
-            dispatched: result.dispatched.length,
-            // The effects this window could NOT launch (and the rows a host
-            // fact contradicted) are named, never folded into "started".
-            ...(result.refusals.length === 0
-              ? {}
-              : { refusals: result.refusals.map((r) => r.code).join(",") }),
-            ...(result.divergences.length === 0
-              ? {}
-              : { divergences: result.divergences.length }),
-          });
-        })
-        .catch((err: unknown) => {
-          log.warn("dsh outcome graph start failed", {
-            graphId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-    },
-  });
-  const graphTools = outcomeHost.bindTools(
-    // THE CANCEL DELIVERY IS WIRED TO THE CONTROL ENTRY (P3). After a
-    // `graph_control` call returns — the trusted command is durable by then —
-    // the host hands the graph's cancel intents to the platform port above. The
-    // wrapper runs INSIDE `bindTools`, so the worker boundary refuses a
-    // dispatched worker's call before the tool body and before this delivery.
-    withCancelDelivery(
-      createOutcomeGraphTools(outcomeToolset, {
-        getEffectiveAgent: (sessionID?: string) =>
-          sessionID ? activeRole.get(sessionID) ?? "" : "",
-      }),
-      outcomeHost,
-    ),
-    (sessionID?: string) => (sessionID ? activeRole.get(sessionID) ?? "" : ""),
+  const graphTools = graphApplication.createTools(
+    (sessionID) => sessionID ? activeRole.get(sessionID) ?? "" : "",
+    () => notifyRoleboxChanged("graph"),
   );
   // Boot recovery for declared graphs: a graph interrupted by the previous
   // process is continued from its persisted state, and one that was declared
@@ -1686,8 +1601,8 @@ export async function apply(
   };
   const compiled = factory.compileAll(tools);
 
-  const toolDisposers: Array<() => void> = [];
-  let registeredTools = 0;
+  const toolDisposers: Array<() => void> = [...workerToolDisposers, () => workerBoundary.dispose()];
+  let registeredTools = workerToolDisposers.length;
   for (const [key, def] of Object.entries(compiled)) {
     // The role-snapshot tools are registered as their own disposition-managed
     // generation below — never here, or the host's duplicate-name rejection
@@ -1772,6 +1687,8 @@ export async function apply(
 
   // Fiber disposer (cordis convention) + stats for callers/tests.
   const disposer = (() => {
+    outcomeDelivery.close();
+    graphApplication.close();
     // The crash reporter goes first: teardown failures must not be observed as
     // process-fatal events, and no handler may run after the listeners are gone.
     uninstallFatalReporter();

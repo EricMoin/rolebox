@@ -1,50 +1,5 @@
-/**
- * Graph Execution Engine v2 — Authoring Grammar v3 Front-End (C1)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The STRICT ingress from authored data to {@link GraphDeclarationV3}: JSON text
- * or an already-parsed value in, a validated declaration or a list of STRUCTURED
- * issues out. It is the producer-side counterpart of the compiler's structural
- * guard `isGraphDeclarationV3`, and it owns the strictness the guard
- * deliberately does not:
- *
- * - the value must be a JSON object (or JSON text that parses to one);
- * - every key at every level must be a key the v3 grammar declares — an unknown
- *   key is REJECTED, so the grammar cannot drift silently while a typo'd field
- *   is ignored;
- * - every field must have the JSON type the grammar declares, and a value of
- *   the right type that the grammar does not admit (an empty identifier, a
- *   blank graph name, a non-positive or fractional loop cap, a non-finite
- *   number, an out-of-bound per-node budget, a completion policy that is not
- *   exactly one policy object) is REJECTED at its own path;
- * - every failure NAMES ITS PATH (`$.nodes[1].outcomes[0].id`) and carries a
- *   stable code, so a caller branches on the code and shows the path.
- *
- * TOTALITY is part of the contract: this function answers a result for every
- * input and never throws — JSON text that does not parse is `not-json`, and a
- * value that throws while being read (an accessor that raises, a Proxy with a
- * hostile trap) is contained as `unreadable` instead of escaping into the
- * caller.
- *
- * `isGraphDeclarationV3` is still used, as a final agreement check over the
- * value this module BUILT: the front-end's own walker is the authority on
- * strictness, and the shared guard confirms the result is the same
- * `GraphDeclarationV3` the compiler consumes. A disagreement is reported as an
- * `invalid-value` issue rather than a declaration handed onward.
- *
- * The declaration this module returns is a FRESH, deeply frozen value: it never
- * aliases the caller's containers, so a later mutation of the input cannot move
- * a declaration that has already been validated (the same discipline the
- * construction tools follow when they copy their arguments).
- *
- * This module adds no dependency beyond the grammar it validates and the
- * canonical digest used by its caller — it does not compile, persist or execute
- * anything (docs/graph-outcome-protocol.md § "Compiler and runtime boundary").
- */
-
 import { errorText } from "../../utils/error-text.ts";
+import { readRunBudget } from "../domain/budget.ts";
 import {
   isGraphDeclarationV3,
   type AcceptanceRequirementV3,
@@ -60,7 +15,8 @@ import {
   type ProgressPolicyV3,
 } from "./declaration-v3.ts";
 import type { ContractRef } from "../contracts/contract-definition.ts";
-import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
+import type { JoinConfig } from "../domain/join.ts";
+import type { NodeBudgetSpec } from "../domain/budget.ts";
 
 // ── Result shapes ───────────────────────────────────────────────────────────
 
@@ -185,6 +141,7 @@ export function parseGraphDeclarationV3(
  * refusal instead of a silently ignored one.
  */
 const ROOT_KEYS = [
+  "budget",
   "version",
   "name",
   "nodes",
@@ -247,6 +204,12 @@ function readRoot(value: unknown, log: IssueLog): GraphDeclarationV3 | undefined
   const record = readRecord(value, "$", log);
   if (record === undefined) return undefined;
   rejectUnknownKeys(record, ROOT_KEYS, "$", log);
+  let budget;
+  try {
+    budget = readRunBudget(record.budget);
+  } catch (error) {
+    log.issues.push({ code: "invalid-value", path: "$.budget", message: errorText(error) });
+  }
 
   const version = readRootVersion(record.version, log);
   const name = readGraphName(record.name, "$.name", log);
@@ -269,11 +232,11 @@ function readRoot(value: unknown, log: IssueLog): GraphDeclarationV3 | undefined
     record.loop_groups === undefined
       ? undefined
       : readList(
-          record.loop_groups,
-          "$.loop_groups",
-          log,
-          (entry, path) => readLoopGroup(entry, path, log),
-        );
+        record.loop_groups,
+        "$.loop_groups",
+        log,
+        (entry, path) => readLoopGroup(entry, path, log),
+      );
 
   const completionPolicy = readCompletionPolicyRequest(
     record.completion_policy,
@@ -295,6 +258,7 @@ function readRoot(value: unknown, log: IssueLog): GraphDeclarationV3 | undefined
   return {
     version: 3,
     name,
+    ...(budget === undefined ? {} : { budget }),
     nodes,
     edges,
     ...(loopGroups === undefined ? {} : { loop_groups: loopGroups }),
@@ -396,11 +360,11 @@ function readNode(
     record.inputs === undefined
       ? undefined
       : readList(
-          record.inputs,
-          `${path}.inputs`,
-          log,
-          (entry, entryPath) => readInput(entry, entryPath, log),
-        );
+        record.inputs,
+        `${path}.inputs`,
+        log,
+        (entry, entryPath) => readInput(entry, entryPath, log),
+      );
 
   if (
     id === undefined ||
@@ -467,12 +431,12 @@ function readOutcome(
     record.acceptance === undefined
       ? undefined
       : readList(
-          record.acceptance,
-          `${path}.acceptance`,
-          log,
-          (entry, entryPath) =>
-            readAcceptanceRequirement(entry, entryPath, log),
-        );
+        record.acceptance,
+        `${path}.acceptance`,
+        log,
+        (entry, entryPath) =>
+          readAcceptanceRequirement(entry, entryPath, log),
+      );
 
   if (
     id === undefined ||
@@ -680,6 +644,11 @@ function readBudget(
   const budget: NodeBudgetSpec = {};
   let ok = true;
   for (const field of BUDGET_KEYS) {
+    if (field === "max_retries" && Object.hasOwn(record, field)) {
+      log.issues.push({ code: "invalid-value", path: `${path}.${field}`, message: "max_retries is not supported: automatic retries are not implemented" });
+      ok = false;
+      continue;
+    }
     if (record[field] === undefined) continue;
     const parsed =
       field === "max_retries"

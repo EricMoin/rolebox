@@ -1,88 +1,3 @@
-/**
- * Graph Execution Engine v2 — Credential-isolation host capability (D7)
- *
- * Version: 2.0
- * Date: 2026-09-23
- *
- * THE PRODUCTION-ENABLEMENT CONDITION OF THE OUTCOME RUN PATH.
- * (docs/graph-outcome-protocol.md § "D7", and the credential section of
- * § "Submission and acceptance".)
- *
- * WHAT THIS BUILD ENFORCES, AND WHAT IT CANNOT. The acceptance ledger carries
- * no usable credential: an attempt's own state entry records the DIGEST of its
- * credential (state-body version 8, `attempt-credential.ts`), so a process that
- * only READS the ledger file — the reproduced defect this capability was
- * introduced for — cannot present anything that verifies. That protection is
- * the build's own and needs no host. What is left is the STORE and the
- * DELIVERY: the credential has to live somewhere a recovery can reach and reach
- * exactly one attempt over exactly one channel. The honest split, enforced by
- * this module's shape:
- *
- * - version 3 ({@link CredentialIsolationAdapterV3}) is the shape the run path
- *   ENABLES. Its guarantees are the two this build's own code can hold a host
- *   to — the digest-only persisted state and per-attempt delivery — plus
- *   `durableCredentialStore`, an explicit DISCLOSURE of whether a durable
- *   artifact holds the credential VALUE at all. The shipped vault's default is
- *   `"none"`: nothing durable holds a value, so a same-account reader obtains
- *   nothing, and a recovery that needs a lost credential reports the effect as
- *   unsettled instead of inventing one. A host that really has a platform
- *   boundary (a different OS account, a container or mount namespace the worker
- *   is not in) may declare `"platform-isolated"` and keep the value durable so
- *   a crash-window attempt can be re-delivered.
- * - versions 1 and 2 ({@link CredentialIsolationAdapter},
- *   {@link CredentialIsolationAdapterV2}) are READ for diagnosis but REFUSED by
- *   the gate. They asked the host to assert `protectedCredentialStore: true` —
- *   a property of the host platform this build cannot inspect and that a
- *   same-account deployment cannot provide honestly.
- *
- * The outcome run path (`runtime.ts` start/resume/submit), the model-facing
- * ingress (`tools/submit-outcome.ts`) and the startup sweep
- * (`engine/engine-startup.ts`) all consult
- * {@link credentialIsolationRefusal} BEFORE they read or write anything: with
- * no capability, a malformed value, or a legacy version, they refuse with
- * {@link CREDENTIAL_ISOLATION_REFUSAL_CODE} and a diagnostic naming exactly what
- * the host must inject. Nothing is started, resumed or settled under a weaker
- * assumption, and no path "runs anyway".
- *
- * WHAT THE ADAPTER IS, AND WHAT IT IS NOT. It is an ASSERTION by the host, not
- * a proof: this build checks its SHAPE and its presence — never the filesystem,
- * never a path, never a mount option, because none of those is evidence about
- * what another process can read. The shape is deliberately split into two
- * kinds of statement:
- *
- * - the GUARANTEES this build can hold a host to, each literally `true`:
- *   the persisted/report surfaces carry only a digest
- *   (`digestOnlyPersistedState`) and one dispatch channel carries an attempt
- *   only its own credential (`perAttemptDelivery`);
- * - `durableCredentialStore`, a DISCLOSURE of what the durable store holds:
- *   `"none"` means no durable artifact holds a credential value — the
- *   strongest form this build can enforce on a same-account platform — and
- *   `"platform-isolated"` means the host deliberately put the value back on
- *   disk and asserts its platform keeps it from the worker. This build cannot
- *   verify that assertion, so it does not check it; it refuses only the
- *   combination the vault itself rejects.
- *
- * VERSION 1 AND 2 ARE NO LONGER THE ENABLEMENT CONDITION. Both asserted a
- * `protectedCredentialStore` this build cannot provide on a same-account
- * platform; accepting them kept a false statement as the gate. They are still
- * READ (so a stale value is diagnosed by name) but the run path refuses them
- * and names version 3 as the replacement. The adapter's VALUE is therefore the
- * honest enablement statement the deployment owns: no readable version-3
- * adapter, no new execution path.
- *
- * THE CREDENTIAL STILL TRAVELS OVER EXACTLY ONE CHANNEL. The capability does
- * not carry, copy or report a credential: the runtime mints it, ADOPTS it into
- * the host's store (the version-3 `store` half), writes only its digest into
- * the attempt's state entry, and hands the value to the dispatch seam inside
- * `OutcomeDispatchRequest` — the one channel the host's delivery guarantee is
- * about. `credentialStoreRoot` is where the host declares its own store root,
- * and the callers that OPEN the ledger use it; it is never compared against the
- * tree, so it is a routing instruction, not a check.
- *
- * Dependency leaf: no imports at all, so the runtime, the tools, the recovery
- * seam and a host loader may all depend on it without a cycle.
- */
-
 // ── Identity and refusal code ───────────────────────────────────────────────
 
 /**
@@ -461,10 +376,10 @@ function readDurableCredentialStore(raw: unknown): DurableCredentialStore | unde
 /** The fields both versions share, read strictly, or `undefined`. */
 function readSharedDeclaration(raw: Record<string, unknown>):
   | {
-      readonly id: string;
-      readonly credentialStoreRoot: string;
-      readonly guarantees: CredentialIsolationGuarantees;
-    }
+    readonly id: string;
+    readonly credentialStoreRoot: string;
+    readonly guarantees: CredentialIsolationGuarantees;
+  }
   | undefined {
   const id = nonEmptyString(raw.id);
   const credentialStoreRoot = nonEmptyString(raw.credentialStoreRoot);
@@ -511,10 +426,10 @@ export function describeCredentialIsolation(
   const durable =
     adapter.version === CREDENTIAL_ISOLATION_VERSION_V3
       ? ", durable credential store " +
-        JSON.stringify(adapter.durableCredentialStore)
+      JSON.stringify(adapter.durableCredentialStore)
       : ", legacy declaration (version " +
-        adapter.version +
-        ", not an enablement condition)";
+      adapter.version +
+      ", not an enablement condition)";
   return (
     JSON.stringify(adapter.id) +
     " (version " +

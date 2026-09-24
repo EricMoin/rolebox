@@ -247,6 +247,7 @@ function createFakeCtx(
 
   const tools = {
     registeredTools,
+    guard: () => () => {},
     register(definition: DshToolDefinition): () => void {
       registeredTools.push(definition);
       return () => {
@@ -496,12 +497,20 @@ function roleIds(res: { text: string }): string[] {
   return (JSON.parse(res.text) as Array<{ id: string }>).map((role) => role.id);
 }
 
+let tmpDataDir: string;
+let priorDataDir: string | undefined;
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-dsh-plugin-"));
+  tmpDataDir = mkdtempSync(join(tmpdir(), "rolebox-dsh-data-"));
+  priorDataDir = process.env.ROLEBOX_DATA_DIR;
+  process.env.ROLEBOX_DATA_DIR = tmpDataDir;
 });
 
 afterEach(() => {
+  if (priorDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
+  else process.env.ROLEBOX_DATA_DIR = priorDataDir;
   rmSync(tmpDir, { recursive: true, force: true });
+  rmSync(tmpDataDir, { recursive: true, force: true });
 });
 
 // ── Plugin shape ───────────────────────────────────────────────────────────
@@ -720,8 +729,15 @@ describe("dsh plugin apply()", () => {
     // The plugin captures process.cwd() for the graph state store; isolate it.
     const cwd = process.cwd();
     process.chdir(tmpDir);
+    const priorApprovalPolicy = process.env.ROLEBOX_GRAPH_APPROVAL_POLICY;
+    process.env.ROLEBOX_GRAPH_APPROVAL_POLICY = JSON.stringify({
+      id: "plugin-review", revision: "1", rules: [{
+        graphId: "parent-graph", nodeId: "N1", approverSessions: ["reviewer-session", INVOKING_SESSION],
+      }],
+    });
+    let disposer: DshPluginDisposer | undefined;
     try {
-      const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
       const byName = new Map(tools.registeredTools.map((t) => [t.name, t]));
       const exec = {
         signal: new AbortController().signal,
@@ -770,8 +786,23 @@ describe("dsh plugin apply()", () => {
       expect(started[0].request.parent).toBe(parent);
       expect(requested).toContain(INVOKING_SESSION);
 
-      disposer();
+      const approvalArgs = {
+        graph_id: "parent-graph", command: "approval-request", node_id: "N1",
+        reason: "review", expires_at: Date.now() + 60000,
+      };
+      const control = byName.get("graph_control")!;
+      const self = await control.execute({ ...approvalArgs, approver_session_id: INVOKING_SESSION }, exec) as { kind: string };
+      expect(self.kind).toBe("refused");
+      const raised = await control.execute({ ...approvalArgs, approver_session_id: "reviewer-session" }, exec) as { kind: string; approval?: { request: { authority: { policyId: string } } } };
+      expect(raised.kind).toBe("applied");
+      expect(raised.approval?.request.authority.policyId).toBe("plugin-review");
+      const reviewer = { ...exec, agent: { id: "reviewer-session", session: { id: "reviewer-session", header: { cwd: process.cwd() } } } };
+      const approved = await control.execute({ graph_id: "parent-graph", command: "approve", node_id: "N1", reason: "reviewed" }, reviewer) as { kind: string };
+      expect(approved.kind).toBe("applied");
     } finally {
+      disposer?.();
+      if (priorApprovalPolicy === undefined) delete process.env.ROLEBOX_GRAPH_APPROVAL_POLICY;
+      else process.env.ROLEBOX_GRAPH_APPROVAL_POLICY = priorApprovalPolicy;
       process.chdir(cwd);
     }
   });

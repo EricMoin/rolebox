@@ -1,64 +1,6 @@
-/**
- * Graph Execution Engine v2 — `graph_submit_outcome` (C3c submission ingress)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The MODEL-FACING submission ingress of the outcome protocol
- * (docs/graph-outcome-protocol.md § "Submission and acceptance"): the
- * graph-scoped `submit_outcome` capability, adapted to the toolset. It is
- * ADDITIVE — a new key beside the existing `graph_*` tools, whose schemas are
- * unchanged.
- *
- * WHAT THE CALLER MAY SAY, AND NOTHING MORE. The args are exactly what a worker
- * legitimately knows: which graph, which node, which declared outcome, the
- * ATTEMPT CREDENTIAL it was handed when it was dispatched, an optional payload
- * and optional evidence references. Attempt id, submission id and plan revision
- * are NOT args and are never read from anywhere a caller can reach: the plan
- * supplies the graph identity and the plan revision, the STATE resolves the
- * attempt from the credential's persisted binding, and the canonical proposal
- * digest supplies the submission id. `src/graph/outcome/runtime.ts` derives all
- * three, and the test for this tool forges every one of them and shows they
- * cannot move.
- *
- * THE CREDENTIAL IS A BEARER CAPABILITY, NOT A SELECTOR. It names no execution a
- * caller chooses: the runtime looks it up in the state it issued it into and
- * refuses a missing, unknown, tampered, superseded or other node's credential.
- * The ingress never echoes it back — the result carries the submission id (a
- * digest of the canonical proposal, which includes the credential) but not the
- * credential itself, so a tool transcript does not become a second copy of it.
- *
- * THE PLAN IS THE PERSISTED ONE. This module never recompiles a declaration and
- * never accepts a declaration argument: it loads the graph's persisted record,
- * requires it to be bound to the OUTCOME protocol, and resolves the node's
- * contract out of the compiled plan inside it. A record that is not a valid
- * outcome-protocol state is refused by name — interpreting a severity-ranked
- * signal as an accepted outcome is exactly what this protocol forbids.
- *
- * THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE. Nothing here, and
- * nothing in the outcome run path, can settle a node from a dispatch
- * completion: the runtime reads only accepted outcomes committed through this
- * ingress. There is no synthesis step and no severity ranking anywhere on this
- * path.
- *
- * TIME AND EFFECTS. The clock is an explicit protocol input: the toolset may
- * pin it (`outcomeNow`) or the runtime reads it. An accepted outcome's
- * successor dispatch is recorded as a `pending` effect in the SAME transaction
- * that writes the receipt, the accepted event and the graph state, and the
- * effect is then EXECUTED through the host dispatch adapter (D8): the create
- * returns, the row is marked `started`, and a crash inside that window leaves a
- * row a later recovery puts to the host's execution query instead of guessing.
- *
- * NO DISPATCHER, NO SUBMISSION (D8). This ingress refuses with
- * `dispatch-unavailable` BEFORE it opens a ledger when no adapter is injected:
- * a no-op dispatcher would accept the outcome and record a successor dispatch
- * that no host ever created. `src/graph/outcome/dispatch-effects.ts` owns the
- * adapter contract.
- */
-
 import type { CompiledPlan } from "../compiler/plan.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
-import { engineStateDir } from "../persistence/engine-persistence.ts";
+import { engineStateDir } from "../persistence/paths.ts";
 import {
   describeStoredReading,
   readStoredDefinition,
@@ -93,10 +35,8 @@ import {
   readHostIdentityCapability,
   readHostWorkerBindingFor,
   readHostWorkerIdentityCapability,
-  type HostIdentityCapability,
-  type HostIdentityReading,
-  type HostWorkerIdentityCapability,
-  type HostWorkerSessionReading,
+  type HostIdentityCapability, type HostWorkerIdentityCapability,
+  type HostWorkerSessionReading
 } from "../outcome/host-identity.ts";
 import { attemptEntryHoldingCredential } from "../outcome/attempt-credential.ts";
 import {
@@ -194,29 +134,29 @@ export interface GraphSubmitOutcomeResult {
    * this verdict is only ever rendered when a refusal was not the answer).
    */
   readonly verdict?:
-    | "committed"
-    | "replayed"
-    | "conflict"
-    | "settled"
-    | "controlled"
-    // The attempt was SUPERSEDED by a trusted retry (P3 item 2): nothing was
-    // written for it, and the successor attempt carries the node forward. The
-    // run path answers this by name before it reaches this projection; the
-    // verdict is spelled here because the ledger's own verdict vocabulary is
-    // what this field renders.
-    | "superseded"
-    // The attempt belongs to a run a run-scoped retry SUPERSEDED (P3 item 2):
-    // the closed run accepts nothing, so no receipt, accepted event, accepted
-    // result or state advance was written. The run path answers this as the
-    // named `run-superseded` refusal; the verdict is spelled here for the same
-    // reason as the one above.
-    | "run-superseded"
-    // The attempt is PAUSED on a trusted approval request whose status is not
-    // `approved` (P3 item 3): nothing was written. The run path answers this by
-    // name before it reaches this projection (`approval-pending` /
-    // `approval-rejected` / `approval-expired`), and the verdict is spelled here
-    // because the ledger's own vocabulary is what this field renders.
-    | "approval-blocked";
+  | "committed"
+  | "replayed"
+  | "conflict"
+  | "settled"
+  | "controlled"
+  // The attempt was SUPERSEDED by a trusted retry (P3 item 2): nothing was
+  // written for it, and the successor attempt carries the node forward. The
+  // run path answers this by name before it reaches this projection; the
+  // verdict is spelled here because the ledger's own verdict vocabulary is
+  // what this field renders.
+  | "superseded"
+  // The attempt belongs to a run a run-scoped retry SUPERSEDED (P3 item 2):
+  // the closed run accepts nothing, so no receipt, accepted event, accepted
+  // result or state advance was written. The run path answers this as the
+  // named `run-superseded` refusal; the verdict is spelled here for the same
+  // reason as the one above.
+  | "run-superseded"
+  // The attempt is PAUSED on a trusted approval request whose status is not
+  // `approved` (P3 item 3): nothing was written. The run path answers this by
+  // name before it reaches this projection (`approval-pending` /
+  // `approval-rejected` / `approval-expired`), and the verdict is spelled here
+  // because the ledger's own vocabulary is what this field renders.
+  | "approval-blocked";
   /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
   /**
@@ -377,8 +317,8 @@ function resolvePersistedPlan(
       "no-state-directory",
       graphId,
       `graph_submit_outcome refused: no state directory is configured, so graph "${graphId}"` +
-        " has no graph store to hold its compiled plan and no acceptance ledger to" +
-        " commit an outcome into. Construct the toolset with a stateDir.",
+      " has no graph store to hold its compiled plan and no acceptance ledger to" +
+      " commit an outcome into. Construct the toolset with a stateDir.",
     );
   }
   // ONE store read decides every branch: the store's own verdict, the definition
@@ -394,11 +334,11 @@ function resolvePersistedPlan(
       graphId,
       target.declaredInMemory
         ? `graph_submit_outcome refused: graph "${graphId}" is declared in memory but its` +
-          " definition never reached the graph store, so the outcome state has nowhere durable" +
-          " to live. Declare it with a graph store configured and submit again."
+        " definition never reached the graph store, so the outcome state has nowhere durable" +
+        " to live. Declare it with a graph store configured and submit again."
         : `graph_submit_outcome refused: graph "${graphId}" is not a declared` +
-          " (outcome-protocol) graph. This ingress serves declared graphs; call" +
-          " graph_declare first.",
+        " (outcome-protocol) graph. This ingress serves declared graphs; call" +
+        " graph_declare first.",
     );
   }
   if (reading.kind !== "ok") {
@@ -406,8 +346,8 @@ function resolvePersistedPlan(
       "unreadable-plan",
       graphId,
       `graph_submit_outcome refused: the stored record of graph "${graphId}" could not be` +
-        ` read (${describeStoredReading(reading)}). A declared graph is the only kind this` +
-        " ingress accepts, and it is never guessed at or overwritten.",
+      ` read (${describeStoredReading(reading)}). A declared graph is the only kind this` +
+      " ingress accepts, and it is never guessed at or overwritten.",
     );
   }
   return reading.declared.plan;
@@ -536,9 +476,9 @@ export async function submitDeclaredOutcome(
       "credential-isolation-unavailable",
       target.graphId,
       "graph_submit_outcome refused [" +
-        unprotected.code +
-        "]: " +
-        unprotected.message,
+      unprotected.code +
+      "]: " +
+      unprotected.message,
     );
   }
   // THE HOST IDENTITY GATE RUNS BEFORE ANY STORE IS OPENED, exactly like the
@@ -558,9 +498,9 @@ export async function submitDeclaredOutcome(
       "host-identity-unavailable",
       target.graphId,
       "graph_submit_outcome refused [" +
-        unreadableHostIdentity.code +
-        "]: " +
-        unreadableHostIdentity.message,
+      unreadableHostIdentity.code +
+      "]: " +
+      unreadableHostIdentity.message,
     );
   }
   // THE DISPATCH GATE (D8) RUNS BEFORE ANY STORE IS OPENED, for the same
@@ -573,9 +513,9 @@ export async function submitDeclaredOutcome(
       "dispatch-unavailable",
       target.graphId,
       "graph_submit_outcome refused [dispatch-unavailable]: no dispatch adapter is " +
-        "installed for this process — a dispatch intent has to have a host that creates " +
-        "the execution, and a no-op would record a dispatch nobody performed. Nothing " +
-        "was submitted and no ledger was opened.",
+      "installed for this process — a dispatch intent has to have a host that creates " +
+      "the execution, and a no-op would record a dispatch nobody performed. Nothing " +
+      "was submitted and no ledger was opened.",
     );
   }
   // The gate above admitted only an ABSENT or READABLE capability, so this
@@ -611,9 +551,9 @@ export async function submitDeclaredOutcome(
     workerIdentity === undefined
       ? undefined
       : Object.freeze({
-          capability: workerIdentity,
-          session: invokingCallSession(deps.invokingSessionId, workerIdentity),
-        });
+        capability: workerIdentity,
+        session: invokingCallSession(deps.invokingSessionId, workerIdentity),
+      });
   const ledger = await SqliteAcceptanceLedger.create(
     workspaceOf(target, storeDirectory),
   );
@@ -673,37 +613,6 @@ export async function submitDeclaredOutcome(
 /**
  * Authenticate the invocation this submission actually arrives from against
  * what the host confirmed it dispatched the attempt AS.
- *
- * THE ORDER IS THE RULE, AND ONLY THE FIRST STEPS ARE HERE. 1. the session
- * THIS call arrives from, captured synchronously in the call's own prologue
- * (`invokingCallSession`) — never re-read from the host's ambient holder after
- * the ingress awaited; 2. the binding the host recorded for the attempt the
- * presented credential names; 3. only the recorded child session passes. The
- * capability scope (the credential against the persisted digest, bound to
- * graph/node/attempt/plan revision/permission) and the current authorization
- * generation (the attempt is the node's CURRENT one under the PERSISTED plan
- * revision) are the acceptance core's own checks and run after this returns.
- *
- * WHEN THE CHECK APPLIES, AND WHEN IT YIELDS TO A MORE PRECISE REFUSAL. The
- * attempt is located by the SAME rule the acceptance core applies — the
- * presented credential's digest against the persisted verifier — so a missing,
- * unknown, tampered or other-node credential is handed to the core unchanged:
- * `credential-missing`, `credential-unknown` and `credential-node-mismatch`
- * are the core's answers, and this boundary must never mask them with a
- * coarser one. Once the credential DOES name this node's current attempt, the
- * worker binding is the question, and a host that cannot answer it refuses
- * rather than settling on the credential alone.
- *
- * TOTAL: an unreadable state, a graph that never started, a malformed entry
- * and a missing credential all answer `undefined` (the core reports each of
- * them by name). This function never throws and never writes.
- *
- * THE LOCATE IS A READ, AND THE CORE RE-READS. The state this check locates
- * the attempt in is the SAME authoritative snapshot the acceptance core reads
- * again inside its transaction, so a state that moves between the two reads
- * can never turn a refusal into an acceptance: the core resolves the
- * credential itself, and an attempt this check authenticated that the core no
- * longer holds is refused there (`credential-unknown`).
  */
 function workerContextRefusal(
   runtime: OutcomeGraphRuntime,

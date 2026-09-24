@@ -1,29 +1,3 @@
-/**
- * Graph store — the records the unified store owns
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The records this store persists BEYOND the ledger port's own model
- * (`src/graph/ledger/types.ts`, unchanged and reused): the accepted business
- * result, the immutable graph definition with its compiled-plan snapshot, and
- * the host-side records the execution index, the credential vault and the
- * invocation-origin record used to keep in a second database and a JSON file.
- *
- * ONE DEFINITION PER CONCEPT, the P1 rule. Where a domain shape already exists
- * (`AcceptedResult`, `HostInvocationOrigin`, `HostDispatchExecution`,
- * `HostExecutionIdentity`, `CredentialStoreIdentity`) this module ALIASES it —
- * every reference is `import type`, so nothing here restates a shape and
- * nothing here pulls a runtime dependency into the store. The one shape that is
- * genuinely new is the persisted DEFINITION ROW: the domain's
- * `GraphDefinition` holds live objects (a validated declaration and a compiled
- * plan), while a durable row holds their JSON text, so the row is declared as
- * the persisted projection of that domain object rather than as a second
- * definition of it.
- *
- * Dependency leaf at runtime: only `import type` statements.
- */
-
 import type { AcceptedResult, GraphDefinition } from "../domain/model.ts";
 import type {
   HostDispatchExecution,
@@ -188,15 +162,15 @@ export type ExecutionRefusal = HostExecutionRefusal;
  */
 export type ExecutionClaim =
   | {
-      readonly kind: "claimed";
-      readonly ownerId: string;
-      /**
-       * WHICH claim of that owner this is. The store mints it with the row and
-       * moves it on every ownership transition; a caller must present it on
-       * every later write, which is what fences a superseded claim out.
-       */
-      readonly generation: number;
-    }
+    readonly kind: "claimed";
+    readonly ownerId: string;
+    /**
+     * WHICH claim of that owner this is. The store mints it with the row and
+     * moves it on every ownership transition; a caller must present it on
+     * every later write, which is what fences a superseded claim out.
+     */
+    readonly generation: number;
+  }
   | { readonly kind: "held"; readonly row: ExecutionBindingRecord };
 
 /** One attempt's credential record, keyed by the runtime's attempt identity. */

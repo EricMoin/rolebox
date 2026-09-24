@@ -1,27 +1,3 @@
-/**
- * Graph domain — the neutral JOIN vocabulary and its ONE resolver
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The neutral home of the fan-in (join) model. These definitions were MOVED here
- * out of the retired v2 type containers — `JoinConfig` from the v2 graph
- * declaration module, `ResolvedJoinStrategy` from the v2 engine-state module —
- * together with the resolution rules from `src/graph/join-strategy.ts`, which
- * is now only a compatibility re-export of this module. Exactly ONE definition
- * of each name exists in the build, and this module imports NOTHING from either
- * retired container, not even a type (P1 item 2's exit condition).
- *
- * WHY THE DECLARATION SIDE MOVED TOO. `resolveJoinStrategy` is the ONE reader of
- * a declared join, so its input shape (`JoinConfig`) is part of the same generic
- * vocabulary. Leaving that shape in the retired container would have forced
- * either a retired-container import here or a second copy of the declared union
- * under a new name — the duplicate-model defect this work package removes.
- *
- * Dependency leaf: the only import is the `JoinStrategy` constant vocabulary
- * (`src/constants.ts`, itself import-free). No persistence, no runtime, no I/O.
- */
-
 import { JoinStrategy } from "../../constants.ts";
 
 // ── Join Model ──────────────────────────────────────────────────────────────
@@ -47,23 +23,23 @@ import { JoinStrategy } from "../../constants.ts";
  */
 export type JoinConfig =
   | {
-      /** Wait for every upstream to signal `answer`. */
-      strategy: "all";
-    }
+    /** Wait for every upstream to signal `answer`. */
+    strategy: "all";
+  }
   | {
-      /** Proceed as soon as one upstream signals `answer`. */
-      strategy: "any";
-    }
+    /** Proceed as soon as one upstream signals `answer`. */
+    strategy: "any";
+  }
   | {
-      /** Proceed when N upstreams signal `answer`. */
-      strategy: "quorum";
-      /**
-       * Number of required answers (N in `quorum:N`). Must be a positive
-       * integer; the v3 declaration parser enforces that (the deleted v2
-       * validator additionally bounded it by the node's in-degree).
-       */
-      quorum: number;
-    };
+    /** Proceed when N upstreams signal `answer`. */
+    strategy: "quorum";
+    /**
+     * Number of required answers (N in `quorum:N`). Must be a positive
+     * integer; the v3 declaration parser enforces that (the deleted v2
+     * validator additionally bounded it by the node's in-degree).
+     */
+    quorum: number;
+  };
 
 // ── Join Strategy (runtime) ─────────────────────────────────────────────────
 

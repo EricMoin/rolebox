@@ -1,76 +1,3 @@
-/**
- * Graph Execution Engine v2 — Acceptance: proposal -> validation -> decision ->
- * atomic acceptance (C3a)
- *
- * Version: 1.0
- * Date: 2026-09-22
- *
- * The decision core of the outcome protocol's submission path
- * (docs/graph-outcome-protocol.md § "Submission and acceptance" and
- * § "Acceptance validators"). It consumes the committed compiled plan and the
- * committed acceptance ledger and adds nothing of its own: the plan supplies
- * the topology and the pinned gates, the ledger supplies the atomic commit and
- * the idempotency rules, `contractDigest` (through `proposalDigest`) supplies
- * the one digest, and the trusted context supplies provenance.
- *
- * THE SEQUENCE, and why it is shaped this way:
- *
- * 1. REFUSE what cannot be evaluated. A malformed proposal, an unknown node, an
- *    outcome its declaring node does not declare, a plan that is not executable
- *    (a draft), a plan revision that disagrees with the attempt's submitted
- *    binding, a graph identity that disagrees with the plan, a malformed effect
- *    batch or a clock that is not epoch milliseconds all produce STRUCTURED
- *    repair diagnostics and write NOTHING to the ledger.
- * 2. Normalize and digest the proposal. The canonical form and its digest are
- *    the submission's content identity; the receipt, every validation result and
- *    the commit recheck are all bound to it.
- * 3. Run the outcome's acceptance requirements through the registry OUTSIDE the
- *    transaction — reading artifacts must not hold the atomic boundary open —
- *    and bind every result to the proposal digest, the plan revision and the
- *    execution identity. A requirement with no registered implementation is a
- *    REFUSAL before any gate runs, never a silent skip; an implementation that
- *    throws is an `indeterminate` result. The passes are then required to
- *    AGREE: two requirements that name the same artifact reference with
- *    different content identities are refused (`conflicting-artifact-evidence`)
- *    with nothing written, and two that agree retain ONE revision — never a
- *    concatenated artifact list that disagrees with itself.
- * 4. Decide: every required gate passing is `accepted`; ANY `fail` or ANY
- *    `indeterminate` is `rejected`. An indeterminate result never satisfies a
- *    required gate, and the decision carries the per-requirement outcomes for
- *    diagnostics.
- * 5. Commit through the ledger in ONE batch: an accepted decision writes the
- *    receipt, the accepted event and the pending effects together; a rejected
- *    one writes the receipt ONLY — no event, so the attempt stays open. The
- *    commit RECHECKS inside the transaction that the proposal digest, the plan
- *    revision and the execution identity still are the ones validation recorded,
- *    and refuses a superseded validation instead of settling a newer execution
- *    with stale evidence. A caller may JOIN that transaction with the graph
- *    state it reduces from the accepted decision ({@link AcceptanceJoin}): the
- *    state write commits with the batch, and it is skipped for a replay,
- *    conflict or settlement so no state advances twice.
- * 6. Return the decision AND the ledger verdict (`committed` / `replayed` /
- *    `conflict` / `settled`), so a repeated identical submission answers with
- *    the SAME persisted decision rather than a second row. Effects may be
- *    executed only when the verdict is `committed`; a `replayed` verdict
- *    carries the persisted receipt, and `conflict` / `settled` mean this
- *    submission's decision was NOT committed.
- *
- * TWO PHASES, ONE CALL. `validateSubmission` runs steps 1-4 and touches no
- * ledger; `commitSubmission` runs steps 5-6 and rechecks the binding it is
- * given; `submitOutcome` composes them for the ordinary caller. The split is
- * not a test seam — it is the boundary the protocol names: validation is
- * allowed to run outside the serialized commit, and making that explicit is
- * what lets the commit refuse a stale validation instead of trusting it.
- *
- * NO EFFECT RUNS HERE. This module records effects; executing them belongs to
- * the effect executor a later slice delivers, and the outcome run path
- * (`src/graph/outcome/runtime.ts`) is the only consumer that reads them back
- * today. Nothing under `src/graph/tools` or `src/dispatch` imports this
- * module: the outcome protocol has its OWN run path, and the legacy engine that
- * decided completions from severity-ranked signals was deleted with its
- * runtime.
- */
-
 import {
   ACCEPTED_DATA_MAX_BYTES,
   type GraphAcceptanceBatch,
@@ -86,12 +13,11 @@ import {
   type CompiledUnresolvedRequirement,
 } from "../compiler/plan.ts";
 import type {
-  AcceptanceBatch,
   AcceptanceLedger,
   AcceptanceLedgerTx,
   CommitResult,
   PendingEffectRecord,
-  ReceiptRecord,
+  ReceiptRecord
 } from "../ledger/types.ts";
 import {
   normalizeProposal,
@@ -309,32 +235,32 @@ export function bindingsEqual(a: ValidationBinding, b: ValidationBinding): boole
 /** What {@link validateSubmission} answered. */
 export type SubmissionValidation =
   | {
-      readonly kind: "validated";
-      readonly decision: AcceptanceDecision;
-      readonly binding: ValidationBinding;
+    readonly kind: "validated";
+    readonly decision: AcceptanceDecision;
+    readonly binding: ValidationBinding;
+    /**
+     * What the acceptance must RETAIN if it commits (P4 item 5 / A17): the
+     * normalized proposal's payload and the artifact revisions the gates
+     * actually read.
+     *
+     * It is captured at VALIDATION time on purpose. Re-deriving it at commit
+     * time would read the paths again, and a path is exactly what may have
+     * changed in the window between the two — the "validated A, committed B"
+     * defect this record exists to make impossible.
+     *
+     * Present only for an ACCEPTED decision.
+     */
+    readonly retained?: {
       /**
-       * What the acceptance must RETAIN if it commits (P4 item 5 / A17): the
-       * normalized proposal's payload and the artifact revisions the gates
-       * actually read.
-       *
-       * It is captured at VALIDATION time on purpose. Re-deriving it at commit
-       * time would read the paths again, and a path is exactly what may have
-       * changed in the window between the two — the "validated A, committed B"
-       * defect this record exists to make impossible.
-       *
-       * Present only for an ACCEPTED decision.
+       * The accepted data, with its PRESENCE made explicit
+       * ({@link AcceptedData}): `absent` for a submission that carried no
+       * `data` at all, `value` for one that carried `null`, `{}`, `""` or
+       * anything else. The store persists exactly this envelope.
        */
-      readonly retained?: {
-        /**
-         * The accepted data, with its PRESENCE made explicit
-         * ({@link AcceptedData}): `absent` for a submission that carried no
-         * `data` at all, `value` for one that carried `null`, `{}`, `""` or
-         * anything else. The store persists exactly this envelope.
-         */
-        readonly payload: AcceptedData;
-        readonly artifacts: readonly ArtifactEvidence[];
-      };
-    }
+      readonly payload: AcceptedData;
+      readonly artifacts: readonly ArtifactEvidence[];
+    };
+  }
   | { readonly kind: "refused"; readonly refusals: readonly SubmissionRefusal[] };
 
 /** The request {@link commitSubmission} is given: the live inputs, the ledger, the validation. */
@@ -353,10 +279,10 @@ export interface CommitSubmissionRequest extends AcceptanceRequest {
 export type SubmissionResult =
   | { readonly kind: "refused"; readonly refusals: readonly SubmissionRefusal[] }
   | {
-      readonly kind: "submitted";
-      readonly decision: AcceptanceDecision;
-      readonly verdict: CommitResult;
-    };
+    readonly kind: "submitted";
+    readonly decision: AcceptanceDecision;
+    readonly verdict: CommitResult;
+  };
 
 // ── Joining the acceptance transaction ──────────────────────────────────────
 
@@ -409,11 +335,11 @@ export type AcceptanceJoin = (
 /** What reading a request produced: an evaluable submission, or the refusals. */
 type RequestReading =
   | {
-      readonly kind: "ok";
-      readonly proposal: OutcomeProposal;
-      readonly node: CompiledNode;
-      readonly outcome: CompiledOutcome;
-    }
+    readonly kind: "ok";
+    readonly proposal: OutcomeProposal;
+    readonly node: CompiledNode;
+    readonly outcome: CompiledOutcome;
+  }
   | { readonly kind: "refused"; readonly refusals: readonly SubmissionRefusal[] };
 
 /**
@@ -667,13 +593,13 @@ export function validateSubmission(
           ...(outcome.data === undefined
             ? {}
             : {
-                dataContract: {
-                  schema: outcome.data.schema,
-                  ...(outcome.data.version === undefined
-                    ? {}
-                    : { version: outcome.data.version }),
-                },
-              }),
+              dataContract: {
+                schema: outcome.data.schema,
+                ...(outcome.data.version === undefined
+                  ? {}
+                  : { version: outcome.data.version }),
+              },
+            }),
           now: request.now,
         });
       } catch (error) {
@@ -870,39 +796,39 @@ export function commitSubmission(
     const batch: GraphAcceptanceBatch =
       decision.kind === "accepted"
         ? {
-            receipt,
-            acceptedEvent: Object.freeze({
-              graphId: receipt.graphId,
-              attemptId: receipt.attemptId,
-              submissionId: receipt.submissionId,
-              planRevision: receipt.planRevision,
-              outcomeId: decision.outcomeId,
-              acceptedAt: now,
+          receipt,
+          acceptedEvent: Object.freeze({
+            graphId: receipt.graphId,
+            attemptId: receipt.attemptId,
+            submissionId: receipt.submissionId,
+            planRevision: receipt.planRevision,
+            outcomeId: decision.outcomeId,
+            acceptedAt: now,
+          }),
+          // THE BATCH CARRIES THE SUBMISSION'S OWN EFFECTS, and only those: the
+          // store's batch gate refuses an effect whose attempt is not the
+          // receipt's, which is the guarantee that one batch describes one
+          // submission.
+          effects,
+          // THE ACCEPTED RESULT RIDES THE SAME BATCH (P4 item 5 / A17). The
+          // payload and the artifact revisions this acceptance RETAINED commit
+          // with the receipt, the event and the effects, so a result can never
+          // be readable for an attempt whose receipt did not commit — and a
+          // consumer resolves the revision THIS RECORD names, never the path
+          // the reference once pointed at.
+          ...(retained === undefined
+            ? {}
+            : {
+              acceptedResult: {
+                graphId: identity.graphId,
+                attemptId: identity.attemptId,
+                planRevision: receipt.planRevision,
+                payload: retained.payload,
+                artifacts: retained.artifacts,
+                acceptedAt: now,
+              },
             }),
-            // THE BATCH CARRIES THE SUBMISSION'S OWN EFFECTS, and only those: the
-            // store's batch gate refuses an effect whose attempt is not the
-            // receipt's, which is the guarantee that one batch describes one
-            // submission.
-            effects,
-            // THE ACCEPTED RESULT RIDES THE SAME BATCH (P4 item 5 / A17). The
-            // payload and the artifact revisions this acceptance RETAINED commit
-            // with the receipt, the event and the effects, so a result can never
-            // be readable for an attempt whose receipt did not commit — and a
-            // consumer resolves the revision THIS RECORD names, never the path
-            // the reference once pointed at.
-            ...(retained === undefined
-              ? {}
-              : {
-                  acceptedResult: {
-                    graphId: identity.graphId,
-                    attemptId: identity.attemptId,
-                    planRevision: receipt.planRevision,
-                    payload: retained.payload,
-                    artifacts: retained.artifacts,
-                    acceptedAt: now,
-                  },
-                }),
-          }
+        }
         : { receipt };
     const verdict = tx.commitAccepted(batch);
     // The state joins only a batch that actually COMMITTED: a replay, conflict

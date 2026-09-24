@@ -1,44 +1,3 @@
-/**
- * Graph Execution Engine v2 — the SQLite substrate of {@link AcceptanceLedger}
- *
- * Version: 2.0
- * Date: 2026-09-23
- *
- * THE LEDGER IS NOW A FACADE OVER THE WORKSPACE'S ONE GRAPH STORE. P1 item 3
- * converged the three durable substrates — this ledger, `host-store.sqlite` and
- * `host-invocation-origins.json` — into `src/graph/store/**`, one SQLite file
- * with one schema and one transaction boundary. This module keeps everything a
- * caller already imports:
- *
- * - the port implementation {@link SqliteAcceptanceLedger}, with the SAME
- *   `create` / `openReadOnly` / `commitAccepted` / `runInTransaction` surface;
- * - the format identity and the table names (`LEDGER_FORMAT_VERSION`,
- *   `LEDGER_TABLES`, `LEDGER_FILE_NAME`, `ledgerFilePath`);
- * - the refusal types under their existing names and `problem` identifiers
- *   (`LedgerFormatError`, `LedgerWriteError`, `LedgerClosedError`), which are
- *   now the store's own classes re-exported — the SAME objects, so
- *   `instanceof` keeps meaning what it meant.
- *
- * WHAT MOVED, AND WHY IT IS NOT A BEHAVIOUR CHANGE. The record model, the
- * replay/conflict/settled rules, the JSON representability and size gates, the
- * conditional effect transitions and the open-time format gate all live in
- * `src/graph/store/` now, unchanged in substance: this file no longer holds a
- * second copy, so the acceptance rules cannot drift from the store that commits
- * them. The one deliberate difference is that the format it gates is the
- * CONVERGED layout (version 2), so a version-1 file is refused as an older
- * format this build registers no migration for.
- *
- * THE TRANSACTION IS STILL ONE BOUNDARY. `runInTransaction` delegates to
- * `GraphStore.runInTransaction`, so the reducer's read, its conditional check,
- * the receipt/event/result commit and the effect write share one transaction —
- * and a nested call is refused by name rather than becoming a savepoint.
- *
- * RESTART IS A READ. A new instance over the same file sees identical rows, and
- * `pendingEffects` answers what a previous process left `pending` or
- * `started` — that listing IS the resume path. Effects are bookkeeping only:
- * nothing here executes, dispatches or reconciles one.
- */
-
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -149,10 +108,10 @@ export interface AcceptanceLedgerReader {
  */
 export type LedgerReadOpenResult =
   | {
-      readonly kind: "opened";
-      readonly filePath: string;
-      readonly ledger: AcceptanceLedgerReader;
-    }
+    readonly kind: "opened";
+    readonly filePath: string;
+    readonly ledger: AcceptanceLedgerReader;
+  }
   /** No ledger file exists — nothing has ever been committed here. */
   | { readonly kind: "absent"; readonly filePath: string }
   /**
@@ -161,11 +120,11 @@ export type LedgerReadOpenResult =
    * file is left exactly as it was found.
    */
   | {
-      readonly kind: "refused";
-      readonly filePath: string;
-      readonly problem: LedgerFormatProblem;
-      readonly message: string;
-    }
+    readonly kind: "refused";
+    readonly filePath: string;
+    readonly problem: LedgerFormatProblem;
+    readonly message: string;
+  }
   /** The file exists but could not be opened or read (I/O, permissions, …). */
   | { readonly kind: "unreadable"; readonly filePath: string; readonly reason: string };
 

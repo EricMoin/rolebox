@@ -69,6 +69,7 @@ function cancelProbe(attemptId: string, executionId?: string): OutcomeExecutionC
     },
     nodeId: "work",
     reason: "a trusted operator cancelled the graph",
+    invocation: { sessionId: "parent-session", agent: "agent.work" },
     ...(executionId === undefined ? {} : { execution: { executionId } }),
   };
 }
@@ -95,6 +96,7 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
   const starts: DshSubagentStartRequest[] = [];
   const runs: FakeDshRun[] = [];
   const interrupts: string[] = [];
+  const authorities: unknown[] = [];
   const provider: DshSubagentProvider = {
     name: "spawn",
     capabilities: {
@@ -140,8 +142,9 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
     },
     ...(options.interrupt === "present" || options.interrupt === "throwing"
       ? {
-          interrupt: (targetSessionId: string) => {
+          interrupt: (targetSessionId: string, authority: unknown) => {
             interrupts.push(targetSessionId);
+            authorities.push(authority);
             if (options.interrupt === "throwing") {
               throw new Error("this dsh build refused the interrupt");
             }
@@ -149,8 +152,10 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
         }
       : {}),
   };
-  return { runtime, starts, runs, interrupts };
+  return { runtime, starts, runs, interrupts, authorities };
 }
+
+const parentAgent = { id: "parent-session" };
 
 interface DshHarness {
   readonly delivery: DshOutcomeDelivery;
@@ -167,7 +172,7 @@ function makeDshHarness(
   const failures: string[] = [];
   const delivery = new DshOutcomeDelivery({
     subagents: runtime.runtime,
-    parentResolver: () => ({}),
+    parentResolver: id => id === "parent-session" ? parentAgent : undefined,
     onSettled: (settlement) => {
       settled.push(settlement.kind + ":" + (settlement.kind === "failed" ? settlement.reason : ""));
     },
@@ -255,6 +260,18 @@ describe("dsh cancel — a run this process did not start", () => {
     expect(answer.kind).toBe("requested");
     expect(answer.reason).toContain("returns void");
     expect(harness.runtime.interrupts).toEqual(["child-session:work#9"]);
+    expect(harness.runtime.authorities).toEqual([{ kind: "ancestor", agent: parentAgent }]);
+  });
+
+  it("refuses an interrupt without a live declaring parent", async () => {
+    const harness = makeDshHarness({ interrupt: "present" });
+    for (const invocation of [undefined, { sessionId: "missing-parent", agent: "agent.work" }]) {
+      const answer = await harness.delivery.cancelExecution.cancel({
+        ...cancelProbe("work#9", "child-session:work#9"), invocation,
+      });
+      expect(answer.kind).toBe("unsupported");
+      expect(harness.runtime.interrupts).toEqual([]);
+    }
   });
 
   it("answers unsupported when the runtime exposes no interrupt", async () => {
@@ -274,6 +291,7 @@ describe("dsh cancel — a run this process did not start", () => {
     expect(answer.kind).toBe("unsupported");
     expect(answer.reason).toContain("threw");
     expect(harness.runtime.interrupts).toEqual(["child-session:work#9"]);
+    expect(harness.runtime.authorities).toEqual([{ kind: "ancestor", agent: parentAgent }]);
   });
 
   it("answers unsupported when the host can name no execution at all", async () => {

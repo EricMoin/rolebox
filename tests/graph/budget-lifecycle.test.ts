@@ -825,3 +825,79 @@ describe("the dispatch budget — budget-stop through the one control entry", ()
     }
   });
 });
+
+
+describe("run execution ceiling through graph tools", () => {
+  it("refuses a zero run ceiling before persisting attempts or launching workers", async () => {
+    const fixture = await openBudgetFixture({ ...BUDGETED_REVIEW, budget: { max_executions: 0 } }, { start: false });
+    try {
+      const result = await fixture.host.startDeclaredGraph(fixture.graphId, { sessionId: fixture.declarer });
+      expect(result.kind).toBe("refused");
+      if (result.kind !== "refused") throw new Error("expected refusal");
+      expect(result.refusals[0]?.code).toBe("budget-exhausted");
+      expect(result.refusals[0]?.message).toContain("max_executions 0");
+      expect(fixture.dispatched).toHaveLength(0);
+      expect(countOf(fixture, GRAPH_STORE_TABLES.runs)).toBe(0);
+      expect(countOf(fixture, GRAPH_STORE_TABLES.budgetReservations)).toBe(0);
+    } finally { fixture.host.close(); }
+  });
+
+  it("shares a run ceiling across different nodes and reports the pinned limit", async () => {
+    const fixture = await openBudgetFixture({ ...BUDGETED_REVIEW, budget: { max_executions: 1 } });
+    try {
+      const result = await submitOutcome(fixture, { nodeId: "work", outcomeId: "done" });
+      expect(result.refusals?.[0]?.code).toBe("budget-exhausted");
+      expect(fixture.dispatched.map((entry) => entry.nodeId)).toEqual(["work"]);
+      const report = reportOf(await fixture.host.budgetReportOf(fixture.graphId));
+      expect(report.runLimits).toEqual({ max_executions: 1 });
+      expect(report.totals.executions).toBe(1);
+      expect(countOf(fixture, GRAPH_STORE_TABLES.receipts)).toBe(0);
+      expect(countOf(fixture, GRAPH_STORE_TABLES.budgetReservations)).toBe(1);
+    } finally { fixture.host.close(); }
+  });
+
+  it("allows terminal acceptance at the exact ceiling", async () => {
+    const fixture = await openBudgetFixture({ ...BUDGETED_REVIEW, budget: { max_executions: 2 } });
+    try {
+      expect((await submitOutcome(fixture, { nodeId: "work", outcomeId: "done" })).decision).toBe("accepted");
+      expect((await submitOutcome(fixture, { nodeId: "review", outcomeId: "approve" })).decision).toBe("accepted");
+      expect(fixture.dispatched).toHaveLength(2);
+      expect(reportOf(await fixture.host.budgetReportOf(fixture.graphId)).totals.executions).toBe(2);
+    } finally { fixture.host.close(); }
+  });
+});
+
+
+it("cannot bypass the run execution ceiling with a trusted node retry", async () => {
+  const fixture = await openBudgetFixture({
+    ...BUDGETED_REVIEW,
+    nodes: BUDGETED_REVIEW.nodes.map(({ budget, ...node }) => node),
+    budget: { max_executions: 1 },
+  });
+  try {
+    const result = await control(fixture, { graph_id: fixture.graphId, command: "retry", node_id: "work", reason: "try again" });
+    expect(result.kind).toBe("refused");
+    expect(result.refusals?.[0]?.code).toBe("budget-exhausted");
+    expect(fixture.dispatched).toHaveLength(1);
+    expect(countOf(fixture, GRAPH_STORE_TABLES.budgetReservations)).toBe(1);
+    expect(countOf(fixture, GRAPH_STORE_TABLES.controlDecisions)).toBe(0);
+  } finally { fixture.host.close(); }
+});
+
+it("counts a loop's next traversal against the same run ceiling", async () => {
+  const fixture = await openBudgetFixture({
+    version: 3, name: "bounded.loop", budget: { max_executions: 2 },
+    nodes: [
+      { id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }] },
+      { id: "review", agent: "reviewer", prompt: "Review", outcomes: [{ id: "revise" }, { id: "approve" }] },
+    ],
+    edges: [{ from: "work", to: "review", outcome: "done" }, { from: "review", to: "work", outcome: "revise" }],
+    loop_groups: [{ id: "review-loop", nodes: ["work", "review"], max_traversals: 5, continuation_outcome: "revise", exit_outcome: "approve" }],
+  });
+  try {
+    expect((await submitOutcome(fixture, { nodeId: "work", outcomeId: "done" })).decision).toBe("accepted");
+    expect((await submitOutcome(fixture, { nodeId: "review", outcomeId: "revise" })).refusals?.[0]?.code).toBe("budget-exhausted");
+    expect(fixture.dispatched.map((entry) => entry.attemptId)).toEqual(["work#1", "review#2"]);
+    expect(reportOf(await fixture.host.budgetReportOf(fixture.graphId)).totals.executions).toBe(2);
+  } finally { fixture.host.close(); }
+});

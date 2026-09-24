@@ -49,7 +49,7 @@ import type {
 } from "../../src/graph/outcome/dispatch-effects.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
 import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import { OutcomeSubmissionRefusedError } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";

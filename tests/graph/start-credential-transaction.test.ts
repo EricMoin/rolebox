@@ -38,7 +38,7 @@ import {
 } from "../../src/graph/host/outcome-host.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
-import { engineStateDir } from "../../src/graph/persistence/engine-persistence.ts";
+import { engineStateDir } from "../../src/graph/persistence/paths.ts";
 import { GraphStore, GRAPH_STORE_TABLES } from "../../src/graph/store/index.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 

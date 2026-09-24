@@ -1,40 +1,3 @@
-/**
- * Graph store — the acceptance-ledger tables of the unified store
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * The ledger's own record model, its protocol rules and its SQL, moved out of
- * `src/graph/ledger/sqlite-ledger.ts` and onto the ONE connection the converged
- * store owns. Nothing about the rules changed: this is the same replay /
- * conflict / settled evaluation, the same receipt/event/effect/graph-state
- * writes, the same JSON representability and size gates, and the same
- * conditional effect transitions — the module seam moved so a host binding can
- * be written in the SAME transaction as the acceptance that authorizes it.
- *
- * CONTROL IS NOT OUTCOME, AND BOTH DIRECTIONS ARE STRUCTURAL (P3 item 1). The
- * control write is conditional on the attempt having no accepted event; this
- * side's acceptance is conditional on the RUN having no control fact. Both are
- * evaluated against the COMMITTED store inside the committing transaction, so
- * whichever COMMITS first is the fact that stands and the loser writes nothing —
- * one attempt can never carry both an accepted event and a control decision.
- *
- * ATOMICITY IS STILL THE POINT. `commitAccepted` evaluates the rules and then
- * writes the receipt, the accepted event, the accepted result and every pending
- * effect inside ONE transaction that COMMITS before the verdict is returned. A
- * constraint violation, an unrepresentable payload or an oversized state body
- * throws and the transaction ROLLS BACK: nothing from that batch is persisted,
- * and `committed` is never reported for an uncommitted batch.
- *
- * THE TRANSACTION IS THE STORE'S. This class never opens one: it receives a
- * `join` callback that runs work inside the caller's open transaction when
- * there is one and opens the single transaction otherwise. That is what makes
- * "commitAccepted issued inside a caller's `runInTransaction` joins it"
- * structural rather than a convention — opening a second transaction there
- * would either be refused by the driver or, worse, commit the batch before the
- * caller's other writes did.
- */
-
 import type { DatabaseDriver } from "../../memory/db-driver.ts";
 import { errorText } from "../../utils/error-text.ts";
 import {
@@ -238,12 +201,12 @@ function readAcceptedData(
     path,
     table,
     "payload carries keys [" +
-      Object.keys(record)
-        .map((key) => JSON.stringify(key))
-        .join(", ") +
-      "] with kind " +
-      describeValue(kind) +
-      ", not the accepted-data envelope this format writes ({\"kind\":\"absent\"} or {\"kind\":\"value\",\"value\":…})",
+    Object.keys(record)
+      .map((key) => JSON.stringify(key))
+      .join(", ") +
+    "] with kind " +
+    describeValue(kind) +
+    ", not the accepted-data envelope this format writes ({\"kind\":\"absent\"} or {\"kind\":\"value\",\"value\":…})",
   );
 }
 
@@ -338,13 +301,13 @@ function toAcceptedResult(
     ...(row["artifacts"] === null || row["artifacts"] === undefined
       ? {}
       : {
-          artifacts: readJsonBody(
-            row,
-            "artifacts",
-            path,
-            table,
-          ) as AcceptedResultRecord["artifacts"],
-        }),
+        artifacts: readJsonBody(
+          row,
+          "artifacts",
+          path,
+          table,
+        ) as AcceptedResultRecord["artifacts"],
+      }),
     acceptedAt: readEpoch(row, "accepted_at", path, table),
   };
 }
@@ -653,7 +616,7 @@ function supersededRunVerdict(
   const belongs =
     runId === UNMINTED_RUN_ID
       ? "was filed under the reserved pre-run generation (no run identity), which the graph " +
-        "has SUPERSEDED with a later run"
+      "has SUPERSEDED with a later run"
       : `belongs to run ${runId}, which the graph has SUPERSEDED with a later run`;
   return {
     kind: "run-superseded",
@@ -703,7 +666,7 @@ function closedRunEffectRefusal(
   const belongs =
     effect.runId === undefined
       ? "was filed under the reserved pre-run generation (no run identity), which the graph has " +
-        `SUPERSEDED with run ${currentRunId}`
+      `SUPERSEDED with run ${currentRunId}`
       : `belongs to run ${effect.runId}, which the graph has SUPERSEDED with run ${currentRunId}`;
   return {
     kind: "refused",
@@ -831,13 +794,13 @@ export class LedgerTables {
       throw new GraphStoreWriteError(
         "invalid-record",
         "acceptance-ledger: run " +
-          JSON.stringify(explicit) +
-          " of graph " +
-          JSON.stringify(graphId) +
-          " is not the graph's CURRENT run (" +
-          JSON.stringify(current) +
-          ") — a superseded run's state and effects are immutable, so the write was refused " +
-          "and nothing was written",
+        JSON.stringify(explicit) +
+        " of graph " +
+        JSON.stringify(graphId) +
+        " is not the graph's CURRENT run (" +
+        JSON.stringify(current) +
+        ") — a superseded run's state and effects are immutable, so the write was refused " +
+        "and nothing was written",
       );
     }
     return current;
@@ -941,10 +904,10 @@ export class LedgerTables {
         throw new GraphStoreWriteError(
           "invalid-record",
           "acceptance-ledger: the batch write for graph " +
-            JSON.stringify(receipt.graphId) +
-            " was refused by the run-control, supersession, closed-run or approval guard, but the " +
-            "store holds none of those facts for that graph and attempt — the guarded write and the " +
-            "store disagree, so the batch was rolled back and no verdict is reported",
+          JSON.stringify(receipt.graphId) +
+          " was refused by the run-control, supersession, closed-run or approval guard, but the " +
+          "store holds none of those facts for that graph and attempt — the guarded write and the " +
+          "store disagree, so the batch was rolled back and no verdict is reported",
         );
       }
       return { kind: "committed", receipt };
@@ -958,57 +921,7 @@ export class LedgerTables {
   /**
    * Write the receipt, the accepted event, the accepted result and every
    * pending effect — and answer whether the batch actually landed.
-   *
-   * THE FOUR GUARDS ARE THE FIRST STATEMENT (P3 items 1-3, plan §3.4). The
-   * receipt INSERT carries its own `WHERE NOT EXISTS (...)` clauses, so they
-   * decide against the COMMITTED STORE at the moment of the write rather than
-   * against the values the fast path read earlier — the structural twin of the
-   * control write's conditional `INSERT ... WHERE NOT EXISTS (accepted event)`:
-   *
-   * - THE RUN'S CONTROL FACT, read for the graph's CURRENT run only (G3): a
-   *   superseded run's stop must not refuse a later run's acceptance, and a
-   *   later run's acceptance must not be refused by a stop it never carried.
-   *   Whichever of an acceptance and a control command COMMITS first is the fact
-   *   that stands, and the loser writes NOTHING.
-   * - THE ATTEMPT WAS SUPERSEDED BY A `retry` (P3 item 2): an attempt a trusted
-   *   retry replaced accepts nothing, because its result would belong to an
-   *   execution the node no longer holds and the successor attempt carries the
-   *   node forward. A retry and an acceptance therefore cannot both land for one
-   *   attempt, in either order.
-   * - THE ATTEMPT'S RUN IS NO LONGER THE CURRENT ONE (P3 item 2, the
-   *   re-execution): the attempt's own dispatch effect is filed under a run the
-   *   graph has replaced, so the run is CLOSED and its attempts accept nothing.
-   *   The join is on the effect rows this class owns; an attempt that was armed
-   *   always has one, and an attempt with no row anywhere is not attributable to
-   *   a closed run here (see {@link CommitResult}'s `run-superseded`). A row
-   *   filed under the reserved pre-run id counts as replaced wherever the graph
-   *   holds a run identity — `run:unminted` is never that identity — and the
-   *   classifier names the generation rather than leaving the refusal
-   *   unexplained.
-   * - THE ATTEMPT IS PAUSED ON A TRUSTED APPROVAL REQUEST (P3 item 3): a request
-   *   whose status is not `approved` holds the batch, because approval is CONTROL
-   *   and a submitted payload can never satisfy it (§3.4). The row this guard
-   *   reads is written ONLY by the trusted control path, and only a recorded
-   *   decision moves it — so a raising command that commits while a submission is
-   *   being validated still wins, and whichever of the raising command and the
-   *   acceptance COMMITS first is the fact that stands. An attempt with no
-   *   request at all is not gated (`NOT EXISTS` is satisfied by absence).
-   *
-   * BEING FIRST IS ALSO WHAT MAKES THE RACE A WAIT. A write statement takes
-   * SQLite's RESERVED lock immediately, so a racing control writer WAITS on
-   * `busy_timeout` instead of failing the shared-to-reserved lock PROMOTION a
-   * read-then-write shape produces (the "database is locked" failure P3 solved
-   * for the control path). The guard is never evaluated by a separate SELECT:
-   * a read here would take the lock first and reintroduce exactly that failure.
-   *
-   * `false` means the guard matched no row and NOTHING was written — not a
-   * partial batch, because the receipt is the batch's first row. The caller
-   * then classifies the refusal from the committed store; it is never assumed.
-   * Called ONLY from inside a transaction. The catch turns a driver-level
-   * rejection into the typed error the caller sees, and — because the throw
-   * crosses the driver's transaction boundary — into the rollback of every row
-   * this batch already wrote.
-   */
+ */
   private writeBatch(batch: GraphAcceptanceBatch): boolean {
     try {
       const receipt = batch.receipt;
@@ -1272,23 +1185,23 @@ export class LedgerTables {
     const rows =
       scope === undefined
         ? // NO RUN IDENTITY: one implicit run, so every unsettled effect of the
-          // graph belongs to it.
-          this.db
-            .query(
-              `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
+        // graph belongs to it.
+        this.db
+          .query(
+            `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
                FROM ${GRAPH_STORE_TABLES.pendingEffects}
                WHERE graph_id = ? AND status IN ('pending', 'started')
                ORDER BY created_at, effect_id`,
-            )
-            .all(graphId)
+          )
+          .all(graphId)
         : this.db
-            .query(
-              `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
+          .query(
+            `SELECT graph_id, run_id, effect_id, attempt_id, kind, payload, created_at, status
                FROM ${GRAPH_STORE_TABLES.pendingEffects}
                WHERE graph_id = ? AND run_id = ? AND status IN ('pending', 'started')
                ORDER BY created_at, effect_id`,
-            )
-            .all(graphId, scope);
+          )
+          .all(graphId, scope);
     return rows.map((row) =>
       toPendingEffect(
         asRow(row, this.filePath, GRAPH_STORE_TABLES.pendingEffects),
@@ -1310,17 +1223,17 @@ export class LedgerTables {
     const rows =
       scope === undefined
         ? this.db
-            .query(
-              `SELECT DISTINCT attempt_id FROM ${GRAPH_STORE_TABLES.pendingEffects}
+          .query(
+            `SELECT DISTINCT attempt_id FROM ${GRAPH_STORE_TABLES.pendingEffects}
                WHERE graph_id = ? AND kind = 'cancel' AND status = 'done'`,
-            )
-            .all(graphId)
+          )
+          .all(graphId)
         : this.db
-            .query(
-              `SELECT DISTINCT attempt_id FROM ${GRAPH_STORE_TABLES.pendingEffects}
+          .query(
+            `SELECT DISTINCT attempt_id FROM ${GRAPH_STORE_TABLES.pendingEffects}
                WHERE graph_id = ? AND run_id = ? AND kind = 'cancel' AND status = 'done'`,
-            )
-            .all(graphId, scope);
+          )
+          .all(graphId, scope);
     const attempts: string[] = [];
     for (const row of rows) {
       const entry = asRow(row, this.filePath, GRAPH_STORE_TABLES.pendingEffects);
@@ -1415,10 +1328,10 @@ export class LedgerTables {
         record.artifacts === undefined
           ? null
           : encodeJsonBody(
-              record.artifacts,
-              `the retained artifacts of attempt ${record.attemptId}`,
-              "unrepresentable-record",
-            ),
+            record.artifacts,
+            `the retained artifacts of attempt ${record.attemptId}`,
+            "unrepresentable-record",
+          ),
         record.acceptedAt,
       );
     } catch (error) {
@@ -1562,8 +1475,8 @@ export class LedgerTables {
     throw new GraphStoreWriteError(
       "invalid-record",
       `acceptance-ledger: the conditional transition of effect ${effectId} in graph ${graphId} ` +
-        "changed no row although the row is open and its run is the graph's current one — the " +
-        "guarded write and the store disagree, so nothing was written and no verdict is reported",
+      "changed no row although the row is open and its run is the graph's current one — the " +
+      "guarded write and the store disagree, so nothing was written and no verdict is reported",
     );
   }
 

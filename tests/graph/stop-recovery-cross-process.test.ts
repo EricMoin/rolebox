@@ -254,7 +254,8 @@ describe("a stopped run is recovered by a NEW process (G4)", () => {
       expect(oldRun.phase).toBe("stopped");
       expect(oldRun.stopReason).toBe("loop-exhausted");
       const currentRunId = store.readGraphState(STOP_RECOVERY_CAP_GRAPH)?.runId ?? "";
-      expect(currentRunId).toBe(recovered.successorRunId);
+      expect(recovered.successorRunId).toBeDefined();
+      expect(currentRunId).toBe(recovered.successorRunId ?? "");
       const newRun = runBody(store, STOP_RECOVERY_CAP_GRAPH, currentRunId);
       expect(newRun.phase).toBe("executing");
       expect(newRun.hasStop).toBe(false);

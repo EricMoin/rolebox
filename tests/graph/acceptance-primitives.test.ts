@@ -58,14 +58,14 @@ import {
   ARTIFACT_VALIDATOR_VERSION,
   COMMAND_EXIT_VALIDATOR_ID,
   COMMAND_EXIT_VALIDATOR_VERSION,
-  HUMAN_APPROVAL_VALIDATOR_ID,
-  HUMAN_APPROVAL_VALIDATOR_VERSION,
+  PRINCIPAL_APPROVAL_VALIDATOR_ID,
+  PRINCIPAL_APPROVAL_VALIDATOR_VERSION,
   SCHEMA_VALIDATOR_ID,
   SCHEMA_VALIDATOR_VERSION,
   SHIPPED_VALIDATOR_IDS,
   approvalEvidenceFromStoreRoot,
   createCommandExitValidator,
-  createHumanApprovalValidator,
+  createPrincipalApprovalValidator,
   createSchemaValidator,
   createShippedAcceptanceValidators,
   readTrustedCommandPolicy,
@@ -250,7 +250,7 @@ const COMMAND_PLAN = planOf([COMMAND_REQUIREMENT], [COMMAND_REQUIREMENT]);
 // ── The closed set ──────────────────────────────────────────────────────────
 
 describe("the shipped acceptance primitives are a closed, code-backed set", () => {
-  it("installs exactly schema, artifact, command-exit and human-approval", () => {
+  it("installs exactly schema, artifact, command-exit and principal-approval", () => {
     const registry = createShippedAcceptanceValidators({
       artifactRoot: tmpdir(),
       approvals: { read: () => ({ kind: "absent" }) },
@@ -259,7 +259,7 @@ describe("the shipped acceptance primitives are a closed, code-backed set", () =
       SCHEMA_VALIDATOR_ID + "@" + String(SCHEMA_VALIDATOR_VERSION),
       ARTIFACT_VALIDATOR_ID + "@" + String(ARTIFACT_VALIDATOR_VERSION),
       COMMAND_EXIT_VALIDATOR_ID + "@" + String(COMMAND_EXIT_VALIDATOR_VERSION),
-      HUMAN_APPROVAL_VALIDATOR_ID + "@" + String(HUMAN_APPROVAL_VALIDATOR_VERSION),
+      PRINCIPAL_APPROVAL_VALIDATOR_ID + "@" + String(PRINCIPAL_APPROVAL_VALIDATOR_VERSION),
     ]);
     expect(SHIPPED_VALIDATOR_IDS).toHaveLength(4);
     // Every key has a real implementation behind it — not a declaration.
@@ -727,10 +727,10 @@ describe("command-exit — the host's command, the host's directory, one artifac
 
 // ── human approval ──────────────────────────────────────────────────────────
 
-describe("human-approval — the durable row decides, never the submission", () => {
+describe("principal-approval — the durable row decides, never the submission", () => {
   const REQUIREMENT: AcceptanceRequirementV3 = {
-    validator: HUMAN_APPROVAL_VALIDATOR_ID,
-    version: HUMAN_APPROVAL_VALIDATOR_VERSION,
+    validator: PRINCIPAL_APPROVAL_VALIDATOR_ID,
+    version: PRINCIPAL_APPROVAL_VALIDATOR_VERSION,
   };
   const PLAN = planOf([REQUIREMENT], [REQUIREMENT]);
 
@@ -738,9 +738,9 @@ describe("human-approval — the durable row decides, never the submission", () 
     reader: ApprovalEvidenceReader,
   ): ValidatorRegistry {
     return registryOf(
-      HUMAN_APPROVAL_VALIDATOR_ID,
-      HUMAN_APPROVAL_VALIDATOR_VERSION,
-      createHumanApprovalValidator({ approvals: reader }),
+      PRINCIPAL_APPROVAL_VALIDATOR_ID,
+      PRINCIPAL_APPROVAL_VALIDATOR_VERSION,
+      createPrincipalApprovalValidator({ approvals: reader }),
     );
   }
 

@@ -231,6 +231,7 @@ export interface MonitorGraphNodeDto {
  * the panel consumes the display-relevant subset.
  */
 export interface MonitorEngineGraphDto {
+  graph?: import("../../../../graph/query/graph-query.ts").GraphView;
   graphId?: string;
   phase?: string;
   nodeCount?: number;
@@ -1595,6 +1596,12 @@ function renderGraphBlock(
         </span>
       </div>
 
+      {graph.graph?.current && (
+        <details>
+          <summary>Attempts, results, approvals and budget</summary>
+          <pre>{JSON.stringify(graph.graph.runs, null, 2)}</pre>
+        </details>
+      )}
       {nodes.length > 0 && (
         <div className={monitorClass.strip} aria-hidden="true">
           {nodes.map((node, index) => (
