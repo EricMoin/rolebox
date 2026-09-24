@@ -13,7 +13,7 @@
  * | --- | --- | --- |
  * | schema | `schema@1` | the outcome's PLAN-DECLARED data contract resolves to an installed schema implementation and the submission's payload passes it |
  * | artifact | `artifact-reference@1` | every declared evidence reference resolves to a real file inside the artifact root and is digested from the bytes actually read |
- * | command exit | `command-exit@1` | a command the HOST authorized for this exact (graph, node, outcome) ran in the policy's working directory, exited with the expected code, and judged an artifact revision that did not move while it ran |
+ * | command exit | `command-exit@1` | a command the HOST authorized for this exact (graph, node, outcome) ran in the policy's working directory, exited with the expected code, and judged an artifact revision that did not move while it ran — the pass carries the re-read revision it verified |
  * | human approval | `human-approval@1` | the trusted approval row recorded for this attempt says an authorized principal approved it |
  *
  * EVERY ONE OF THE FOUR IS CODE, NOT A FLAG. Each factory below returns a
@@ -362,6 +362,12 @@ export interface CommandExitValidatorOptions {
  * changed (or could not re-read) its own subject is `indeterminate`, because
  * "it passed for revision A while the artifacts are at revision B" is exactly
  * the mutable-artifact defect the protocol forbids.
+ *
+ * A PASS NAMES THE REVISION IT VERIFIED (D5). Its outcome carries the artifact
+ * revisions RE-READ AFTER the command finished — the same reading the pre-run
+ * comparison above accepted — so an acceptance can retain exactly what the
+ * command judged. Dropping that reading left "the version the command verified"
+ * inexpressible, and a command-only gate retained nothing at all.
  */
 export function createCommandExitValidator(
   options: CommandExitValidatorOptions,
@@ -486,9 +492,13 @@ export function createCommandExitValidator(
         onCheck,
       );
     }
+    // THE PASS CARRIES THE POST-RUN READING. The artifacts were re-read after
+    // the command finished and compared with the pre-run reading above; naming
+    // THAT reading is what lets an acceptance retain exactly the revision the
+    // command verified, rather than nothing at all (D5).
     return record(
       binding,
-      before.evidence,
+      after.evidence,
       result.exitCode,
       result.signal,
       "pass",
@@ -567,7 +577,12 @@ function record(
       }),
     );
   }
-  if (verdict === "pass") return { kind: "pass" };
+  if (verdict === "pass") {
+    // The revisions this check re-read after the command finished. A caller that
+    // RETURNS a pass without them loses the only channel by which "the revision
+    // the command verified" reaches the acceptance transaction.
+    return { kind: "pass", evidence: Object.freeze([...revisions]) };
+  }
   if (verdict === "fail") return { kind: "fail", reason };
   return { kind: "indeterminate", reason };
 }

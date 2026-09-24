@@ -29,7 +29,11 @@
  *    and bind every result to the proposal digest, the plan revision and the
  *    execution identity. A requirement with no registered implementation is a
  *    REFUSAL before any gate runs, never a silent skip; an implementation that
- *    throws is an `indeterminate` result.
+ *    throws is an `indeterminate` result. The passes are then required to
+ *    AGREE: two requirements that name the same artifact reference with
+ *    different content identities are refused (`conflicting-artifact-evidence`)
+ *    with nothing written, and two that agree retain ONE revision — never a
+ *    concatenated artifact list that disagrees with itself.
  * 4. Decide: every required gate passing is `accepted`; ANY `fail` or ANY
  *    `indeterminate` is `rejected`. An indeterminate result never satisfies a
  *    required gate, and the decision carries the per-requirement outcomes for
@@ -204,6 +208,13 @@ export type SubmissionRefusalCode =
    * value is never truncated into a smaller one.
    */
   | "oversized-accepted-data"
+  /**
+   * Two requirements' passes named the SAME artifact reference with DIFFERENT
+   * content identities. The gates did not judge one revision, so there is no
+   * single revision an acceptance could honestly retain — refused by name with
+   * nothing written, never concatenated into a self-contradicting artifact list.
+   */
+  | "conflicting-artifact-evidence"
   | "stale-validation";
 
 /**
@@ -690,18 +701,44 @@ export function validateSubmission(
     outcomeId: outcome.id,
     requirements: Object.freeze(requirements),
   });
-  // THE EVIDENCE THE GATES THEMSELVES PRODUCED, in requirement order. It comes
-  // from the pass results rather than from a second read of the paths, so what
-  // is retained is exactly what was judged.
-  const evidence = requirements.flatMap((entry) =>
-    entry.outcome.kind === "pass" ? (entry.outcome.evidence ?? []) : [],
-  );
   if (!accepted) {
     return {
       kind: "validated",
       decision,
       binding: bindingOf(identity, planRevision, digest),
     };
+  }
+
+  // EVERY GATE MUST HAVE JUDGED THE SAME REVISION (D5). The evidence below comes
+  // from the pass results themselves — never from a second read of the paths —
+  // and it is CONFLICT-CHECKED and DEDUPLICATED by reference rather than
+  // concatenated: two passes that digested different bytes for one reference
+  // describe two revisions, and committing both would retain a result whose own
+  // artifact list disagrees with itself. Two passes that agree are ONE retained
+  // revision, not two rows for the same object.
+  const retainedEvidence: ArtifactEvidence[] = [];
+  const byRef = new Map<string, ArtifactEvidence>();
+  const conflicts: SubmissionRefusal[] = [];
+  requirements.forEach((entry, index) => {
+    if (entry.outcome.kind !== "pass") return;
+    for (const evidence of entry.outcome.evidence ?? []) {
+      const previous = byRef.get(evidence.ref);
+      if (previous === undefined) {
+        byRef.set(evidence.ref, evidence);
+        retainedEvidence.push(evidence);
+        continue;
+      }
+      if (previous.artifactId === evidence.artifactId) continue;
+      conflicts.push({
+        code: "conflicting-artifact-evidence",
+        path: `$.outcome.acceptance[${index}]`,
+        message:
+          `acceptance requirement ${index} (${validatorKeyText(entry.requirement)}) read reference ${JSON.stringify(evidence.ref)} as ${evidence.artifactId}, while an earlier gate retained the same reference as ${previous.artifactId} — the gates did not judge one revision, so the acceptance is REFUSED rather than committed with evidence that disagrees with itself, and nothing was written`,
+      });
+    }
+  });
+  if (conflicts.length > 0) {
+    return { kind: "refused", refusals: Object.freeze(conflicts) };
   }
 
   // WHAT AN ACCEPTANCE WOULD RETAIN IS CAPTURED HERE, at validation time, and
@@ -734,7 +771,7 @@ export function validateSubmission(
     binding: bindingOf(identity, planRevision, digest),
     retained: Object.freeze({
       payload,
-      artifacts: Object.freeze(evidence),
+      artifacts: Object.freeze(retainedEvidence),
     }),
   };
 }

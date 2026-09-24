@@ -32,6 +32,7 @@ import {
   compileGraph,
   type SupportedValidatorV3,
 } from "../../src/graph/compiler/compile.ts";
+import { digestOf } from "../../src/graph/store/artifacts.ts";
 import type {
   AcceptanceRequirementV3,
   GraphDeclarationV3,
@@ -479,6 +480,37 @@ describe("command-exit — the host's command, the host's directory, one artifac
       "report.txt",
     ]);
     expect(recorded[0]?.artifactRevisions[0]?.size).toBe("artifact-bytes".length);
+  });
+
+  it("carries the re-read artifact revision on the PASS outcome itself", () => {
+    const dir = makeTmpDir("primitive-command-pass-evidence-");
+    const root = artifactRootWithReport(dir);
+    const registry = registryOf(
+      COMMAND_EXIT_VALIDATOR_ID,
+      COMMAND_EXIT_VALIDATOR_VERSION,
+      createCommandExitValidator({
+        commands: [bindingOf({ cwd: dir })],
+      }),
+    );
+    const validation = validate(
+      COMMAND_PLAN,
+      registry,
+      { nodeId: NODE, outcomeId: "done" },
+      root,
+    );
+    if (validation.kind !== "validated") {
+      throw new Error("fixture: expected a validated submission");
+    }
+    const outcome = validation.decision.requirements[0]?.outcome;
+    expect(outcome?.kind).toBe("pass");
+    if (outcome === undefined || outcome.kind !== "pass") return;
+    // The revision the command was bound to, re-read after it finished — the
+    // reading the acceptance now retains instead of dropping (D5).
+    const evidence = outcome.evidence ?? [];
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.ref).toBe("report.txt");
+    expect(evidence[0]?.digest).toBe(digestOf(Buffer.from("artifact-bytes")));
+    expect(evidence[0]?.size).toBe("artifact-bytes".length);
   });
 
   it("is indeterminate when the bound artifacts move while the command runs", () => {
