@@ -344,21 +344,26 @@ function credentialOf(fixture: RetryFixture, attemptId: string): string {
  * Settle one node through the SHIPPED submission ingress — the BOUND tool, so the
  * platform's own attribution of the calling session is what the attempt's
  * confirmed worker binding is checked against (exactly as a worker's call is).
+ * `data` is optional: a case that does not pass it submits a payload-less
+ * outcome, exactly as the earlier cases did.
  */
 async function settle(
   fixture: RetryFixture,
   nodeId: string,
   attemptId: string,
   outcomeId: string,
+  data?: unknown,
 ): Promise<string> {
+  const args: Record<string, unknown> = {
+    graph_id: fixture.graphId,
+    node_id: nodeId,
+    outcome_id: outcomeId,
+    credential: credentialOf(fixture, attemptId),
+  };
+  if (data !== undefined) args.data = data;
   const raw = String(
     await fixture.tools.graph_submit_outcome.execute(
-      {
-        graph_id: fixture.graphId,
-        node_id: nodeId,
-        outcome_id: outcomeId,
-        credential: credentialOf(fixture, attemptId),
-      },
+      args,
       fixture.contextOf(childSessionOf(attemptId), "agent.work"),
     ),
   );
@@ -1015,6 +1020,40 @@ const BOUND_CHAIN: GraphDeclarationV3 = {
   edges: [{ from: "work", to: "review", outcome: "done" }],
 };
 
+/**
+ * The LOOP the retry case below runs inside: work -> review -> (revise) -> work,
+ * where REVIEW consumes work's accepted result. Every round re-enters work, so a
+ * retry in a later round must carry THAT round's binding — the round-1 binding is
+ * still in the store and must not be re-derived.
+ */
+const LOOP_BOUND: GraphDeclarationV3 = {
+  version: 3,
+  name: "retry.loop-bound",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "review",
+      agent: "agent.review",
+      prompt: "Review the work.",
+      outcomes: [{ id: "revise" }, { id: "approve" }],
+      inputs: [{ from: "work", outcome: "done" }],
+    },
+  ],
+  edges: [
+    { from: "work", to: "review", outcome: "done" },
+    { from: "review", to: "work", outcome: "revise" },
+  ],
+  loop_groups: [
+    {
+      id: "revise-loop",
+      nodes: ["work", "review"],
+      max_traversals: 5,
+      continuation_outcome: "revise",
+      exit_outcome: "approve",
+    },
+  ],
+};
+
 describe("retry — a superseded consumer's binding is CARRIED, never re-derived (D6)", () => {
   it("arms the successor attempt with the SAME bound inputs, in its state entry and in the delivered request", async () => {
     const fixture = await openRetryFixture(BOUND_CHAIN);
@@ -1078,6 +1117,76 @@ describe("retry — a superseded consumer's binding is CARRIED, never re-derived
       } finally {
         store.close();
       }
+    } finally {
+      fixture.host.close();
+    }
+  });
+
+  it("carries the binding of the LOOP ROUND the retry happened in, not the first round's", async () => {
+    const fixture = await openRetryFixture(LOOP_BOUND);
+    try {
+      // ROUND 1 — work#1 opens it and review#2 is bound to work#1.
+      expect(await settle(fixture, "work", "work#1", "done", { report: "W1" })).toBe("accepted");
+      const roundOne = nodeEntry(readBody(fixture), "review");
+      expect(roundOne["attemptId"]).toBe("review#2");
+      const roundOneBound = roundOne["inputs"];
+      if (!Array.isArray(roundOneBound) || roundOneBound.length !== 1) {
+        throw new Error("fixture: review#2 was not armed with a binding");
+      }
+      expect((roundOneBound[0] as Record<string, unknown>)["attemptId"]).toBe("work#1");
+
+      // The continuation re-enters work, so ROUND 2 arms a NEW consumer attempt.
+      expect(await settle(fixture, "review", "review#2", "revise")).toBe("accepted");
+      expect(await settle(fixture, "work", "work#3", "done", { report: "W2" })).toBe("accepted");
+      const roundTwo = nodeEntry(readBody(fixture), "review");
+      expect(roundTwo["attemptId"]).toBe("review#4");
+      const roundTwoBound = roundTwo["inputs"];
+      if (!Array.isArray(roundTwoBound) || roundTwoBound.length !== 1) {
+        throw new Error("fixture: review#4 was not armed with a binding");
+      }
+      expect((roundTwoBound[0] as Record<string, unknown>)["attemptId"]).toBe("work#3");
+      expect((roundTwoBound[0] as Record<string, unknown>)["payload"]).toEqual({
+        kind: "value",
+        value: { report: "W2" },
+      });
+
+      // THE RETRY, INSIDE ROUND 2: the superseded attempt is review#4, and its
+      // successor must carry the round-2 binding VERBATIM — never the round-1
+      // binding (still in the store) and never a fresh read of whatever work
+      // holds now.
+      const answer = await control(
+        fixture,
+        {
+          graph_id: fixture.graphId,
+          command: "retry",
+          node_id: "review",
+          reason: "the round-2 review attempt produced nothing",
+        },
+        fixture.declarer,
+      );
+      expect(answer.kind).toBe("applied");
+      expect(answer.scope).toBe("attempt");
+      expect(answer.minted?.map((attempt) => attempt.attemptId)).toEqual(["review#5"]);
+      expect(answer.decided?.[0]?.attemptId).toBe("review#4");
+
+      const successor = nodeEntry(readBody(fixture), "review");
+      expect(successor["attemptId"]).toBe("review#5");
+      expect(successor["inputs"]).toEqual(roundTwoBound);
+      expect(successor["inputs"]).not.toEqual(roundOneBound);
+      const delivered = fixture.dispatched.find((request) => request.attemptId === "review#5");
+      expect(delivered).toBeDefined();
+      expect(delivered?.inputs).toEqual(roundTwoBound);
+
+      // AND THE LOOP STILL RUNS: the successor's continuation re-enters work.
+      expect(await settle(fixture, "review", "review#5", "revise")).toBe("accepted");
+      expect(fixture.dispatched.map((request) => request.attemptId)).toEqual([
+        "work#1",
+        "review#2",
+        "work#3",
+        "review#4",
+        "review#5",
+        "work#6",
+      ]);
     } finally {
       fixture.host.close();
     }

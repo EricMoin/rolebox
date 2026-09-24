@@ -1,23 +1,40 @@
 /// <reference types="bun-types" />
 
 /**
- * P4.3 (G1) — the arm set agrees with the dispatches it produces (R4).
+ * P4.3 — the arm set agrees with the dispatches it produces, and every JOIN and
+ * LOOP round binds its consumer to the attempt that triggered THAT round (R4).
  *
- * WHY THIS FILE EXISTS. A candidate whose join is satisfied can still be left
+ * WHY THIS FILE EXISTS. The P4.3 gap analysis (.rolebox/evidence/p43-gaps.md)
+ * confirmed one behaviour gap (G1) and one verification gap (G3): the join/loop
+ * suites proved the ARRIVAL rules, but none of them combined a join or a loop
+ * round with declared successor INPUTS, so nothing pinned that a consumer is
+ * bound to the attempt of the round it was armed for. This file drives the REAL
+ * OutcomeGraphRuntime over compiled plans that declare inputs, and asserts, per
+ * round:
+ *
+ * - the consumer's inputs name the producing ATTEMPT of this round, never the
+ *   previous round's attempt and never "the node's latest result";
+ * - the same view reaches the DELIVERED OutcomeDispatchRequest, so a worker is
+ *   handed the revision the arming decision resolved;
+ * - the earlier round's accepted result still EXISTS while this happens (the
+ *   binding moved on; the store did not);
+ * - the persisted ARRIVALS of an armed node are exactly the inputs it was bound
+ *   with, so a restart re-derives the same join decision.
+ *
+ * G1 — THE BEHAVIOUR FIX. A candidate whose join is satisfied can still be left
  * BLOCKED by its own declared input, and a blocked candidate keeps the settled
- * entry it had (the state says so: it is still settled, and its arrival is still
- * recorded). The arm set must therefore not go on suppressing that candidate as
- * if it were in flight: the case below reproduces the divergence the P4.3 gap
- * analysis confirmed (the state's own arrivals satisfied a convergence node's
- * join:all while the node was never armed) and pins the fix. The NEGATIVE
- * CONTROL lives beside it in the run-path suite: when the co-candidate really IS
- * re-entered, its stale arrival must NOT arm the join
- * (outcome-runtime.test.ts, "a loop join is decided per round").
+ * entry it had. The arm set must therefore not go on suppressing that candidate:
+ * the first case below reproduces the divergence (the state's own arrivals
+ * satisfied a convergence node's join:all while the node was never armed) and
+ * pins the fix. The NEGATIVE CONTROL is the join:all round-2 case below: when the
+ * co-candidate really IS re-entered, its stale arrival must NOT arm the join —
+ * the sibling case in outcome-runtime.test.ts ("a loop join is decided per
+ * round") covers the same rule without declared inputs.
  *
- * The case drives the REAL OutcomeGraphRuntime over a compiled plan that
- * declares successor INPUTS, so it also pins what the armed node was bound to:
- * the producing ATTEMPT of this advance, in the state entry AND in the delivered
- * OutcomeDispatchRequest, with the persisted arrivals naming the same attempts.
+ * NOT DECIDED HERE: a join:any/quorum consumer that declares inputs from MORE
+ * feeders than its threshold waits for the last declared producer (O1 in the gap
+ * analysis). The any case below declares its input from exactly the feeder it is
+ * armed on, so the open question is neither pinned nor changed by this file.
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
@@ -495,6 +512,11 @@ function refusalCodes(state: OutcomeGraphState, nodeId: string): string[] {
   return (nodeOf(state, nodeId).inputRefusals ?? []).map((refusal) => refusal.code);
 }
 
+/** The attempts whose accepted results the store holds, for the "nothing moved" check. */
+function acceptedAttempts(harness: Harness): string[] {
+  return harness.ledger.acceptedEvents(harness.graphId).map((event) => event.attemptId);
+}
+
 /** The dispatch the run handed the platform for one attempt, if it was armed. */
 function deliveredTo(harness: Harness, attemptId: string): OutcomeDispatchRequest | undefined {
   return harness.requests.find((request) => request.attemptId === attemptId);
@@ -581,6 +603,289 @@ describe("the arm set agrees with the dispatches it produces (G1)", () => {
             arrivals: c.arrivals.map((arrival) => arrival.from + "@" + arrival.attemptId),
           }),
       );
+    });
+  });
+});
+
+// ── R4a: a loop consumer follows the round ──────────────────────────────────
+
+describe("a loop consumer is bound to the attempt that opened THIS round (R4)", () => {
+  it("re-binds the consumer on every round and keeps the earlier accepted result", async () => {
+    await withHarness(guidedLoopDeclaration(), (harness) => {
+      harness.runtime.start(NOW);
+
+      const opened = accept(harness, "work", "done", "work#1", NOW + 1, { report: "W1" });
+      expect(attemptIds(opened.dispatched)).toEqual(["review#2"]);
+      const first = nodeOf(opened.state, "review");
+      expect(boundRefs(first)).toEqual(["work@work#1"]);
+      expect(boundPayloads(first)).toEqual([{ kind: "value", value: { report: "W1" } }]);
+      expect(deliveredTo(harness, "review#2")?.inputs).toEqual(first.inputs);
+
+      const revised = accept(harness, "review", "revise", "review#2", NOW + 2, {
+        revision: "r1",
+      });
+      expect(attemptIds(revised.dispatched)).toEqual(["work#3"]);
+
+      // ROUND 2 — the same node, a NEW producing attempt. The consumer must be
+      // bound to work#3, never to work#1 (whose accepted result still exists).
+      const second = accept(harness, "work", "done", "work#3", NOW + 3, { report: "W2" });
+      expect(attemptIds(second.dispatched)).toEqual(["review#4"]);
+      const rebound = nodeOf(second.state, "review");
+      expect(rebound.attemptId).toBe("review#4");
+      expect(boundRefs(rebound)).toEqual(["work@work#3"]);
+      expect(boundPayloads(rebound)).toEqual([{ kind: "value", value: { report: "W2" } }]);
+      expect(deliveredTo(harness, "review#4")?.inputs).toEqual(rebound.inputs);
+
+      // The round-1 result is still readable; only the BINDING moved on.
+      expect(acceptedAttempts(harness)).toEqual(["work#1", "review#2", "work#3"]);
+      console.log(
+        "[probe:loop-binding] bound=" +
+          JSON.stringify(
+            harness.requests.map(
+              (request) =>
+                request.attemptId +
+                "<-" +
+                (request.inputs ?? [])
+                  .map((input) => input.from + "@" + input.attemptId)
+                  .join(","),
+            ),
+          ),
+      );
+    });
+  });
+});
+
+// ── R4b: a join across rounds, with inputs on every node ────────────────────
+
+describe("a join binds the attempts of ITS round (R4)", () => {
+  it("waits for both branches each round, and a stale branch never arms the next round", async () => {
+    await withHarness(loopJoinInputsDeclaration(3), (harness) => {
+      harness.runtime.start(NOW);
+
+      const opened = accept(harness, "s", "next", "s#1", NOW + 1, { round: "one" });
+      expect(attemptIds(opened.dispatched)).toEqual(["a#2", "b#3"]);
+      expect(boundRefs(nodeOf(opened.state, "a"))).toEqual(["s@s#1"]);
+      expect(boundRefs(nodeOf(opened.state, "b"))).toEqual(["s@s#1"]);
+      const a1 = accept(harness, "a", "done", "a#2", NOW + 2, { branch: "a1" });
+      expect(attemptIds(a1.dispatched)).toEqual([]);
+      const b1 = accept(harness, "b", "done", "b#3", NOW + 3, { branch: "b1" });
+      expect(attemptIds(b1.dispatched)).toEqual(["j#4"]);
+      const j4 = nodeOf(b1.state, "j");
+      expect(boundRefs(j4)).toEqual(["a@a#2", "b@b#3"]);
+      expect(boundPayloads(j4)).toEqual([
+        { kind: "value", value: { branch: "a1" } },
+        { kind: "value", value: { branch: "b1" } },
+      ]);
+      expect(deliveredTo(harness, "j#4")?.inputs).toEqual(j4.inputs);
+
+      const again = accept(harness, "j", "again", "j#4", NOW + 4, {});
+      expect(attemptIds(again.dispatched)).toEqual(["s#5"]);
+
+      // ROUND 2 — both branches are re-run, and the join is NOT satisfied by
+      // round 1's arrival: a#6 alone leaves it waiting.
+      const s2 = accept(harness, "s", "next", "s#5", NOW + 5, { round: "two" });
+      expect(attemptIds(s2.dispatched)).toEqual(["a#6", "b#7"]);
+      const a2 = accept(harness, "a", "done", "a#6", NOW + 6, { branch: "a2" });
+      expect(attemptIds(a2.dispatched)).toEqual([]);
+      expect(nodeOf(a2.state, "j")).toMatchObject({ status: "settled", attemptId: "j#4" });
+      expect(nodeOf(a2.state, "j").arrivals).toEqual([
+        { from: "a", outcome: "done", attemptId: "a#6" },
+      ]);
+
+      const b2 = accept(harness, "b", "done", "b#7", NOW + 7, { branch: "b2" });
+      expect(attemptIds(b2.dispatched)).toEqual(["j#8"]);
+      const j8 = nodeOf(b2.state, "j");
+      expect(boundRefs(j8)).toEqual(["a@a#6", "b@b#7"]);
+      expect(boundPayloads(j8)).toEqual([
+        { kind: "value", value: { branch: "a2" } },
+        { kind: "value", value: { branch: "b2" } },
+      ]);
+      expect(deliveredTo(harness, "j#8")?.inputs).toEqual(j8.inputs);
+      // The branch attempts are themselves bound to the round's splitter.
+      expect(boundRefs(nodeOf(b2.state, "a"))).toEqual(["s@s#5"]);
+      expect(boundRefs(nodeOf(b2.state, "b"))).toEqual(["s@s#5"]);
+      expect(b2.state.loopTraversals["rounds"]).toBe(1);
+      // Round 1's results are all still in the store.
+      expect(acceptedAttempts(harness)).toEqual([
+        "s#1",
+        "a#2",
+        "b#3",
+        "j#4",
+        "s#5",
+        "a#6",
+        "b#7",
+      ]);
+      console.log(
+        "[probe:loop-join-inputs] bindings=" +
+          JSON.stringify(
+            harness.requests
+              .filter((request) => (request.inputs ?? []).length > 0)
+              .map(
+                (request) =>
+                  request.attemptId +
+                  "<-" +
+                  (request.inputs ?? [])
+                    .map((input) => input.from + "@" + input.attemptId)
+                    .join(","),
+              ),
+          ),
+      );
+    });
+  });
+});
+
+// ── The unselected branch of a join:any ─────────────────────────────────────
+
+describe("an unselected branch leaves the armed consumer alone (R4)", () => {
+  it("arms a join:any on the feeder its input names, and a later arrival neither re-arms nor re-binds it", async () => {
+    await withHarness(diamondAnyDeclaration(), (harness) => {
+      harness.runtime.start(NOW);
+      accept(harness, "arb", "split", "arb#1", NOW + 1, {});
+
+      const first = accept(harness, "brc", "done", "brc#2", NOW + 2, { branch: "B" });
+      expect(attemptIds(first.dispatched)).toEqual(["djoin#4"]);
+      const armed = nodeOf(first.state, "djoin");
+      expect(boundRefs(armed)).toEqual(["brc@brc#2"]);
+      expect(boundPayloads(armed)).toEqual([{ kind: "value", value: { branch: "B" } }]);
+      expect(deliveredTo(harness, "djoin#4")?.inputs).toEqual(armed.inputs);
+
+      const late = accept(harness, "crb", "done", "crb#3", NOW + 3, { branch: "C" });
+      expect(attemptIds(late.dispatched)).toEqual([]);
+      const after = nodeOf(late.state, "djoin");
+      // The consumer keeps ITS attempt and ITS binding ...
+      expect(after.attemptId).toBe("djoin#4");
+      expect(after.inputs).toEqual(armed.inputs);
+      // ... while the arrival itself is recorded (round 1's arrival must not
+      // satisfy a LATER round's join, which is the loop-join case above).
+      expect(after.arrivals).toEqual([
+        { from: "brc", outcome: "done", attemptId: "brc#2" },
+        { from: "crb", outcome: "done", attemptId: "crb#3" },
+      ]);
+      expect(attemptIds(harness.requests)).toEqual(["arb#1", "brc#2", "crb#3", "djoin#4"]);
+    });
+  });
+});
+
+// ── Quorum + successor inputs ───────────────────────────────────────────────
+
+describe("a quorum waits for its threshold and binds exactly its declared producers (R4)", () => {
+  it("arms on the second arrival with both attempts, and ignores the third branch", async () => {
+    await withHarness(quorumInputsDeclaration(), (harness) => {
+      harness.runtime.start(NOW);
+      const split = accept(harness, "arb", "split", "arb#1", NOW + 1, {});
+      expect(attemptIds(split.dispatched)).toEqual(["b1#2", "b2#3", "b3#4"]);
+
+      const one = accept(harness, "b1", "done", "b1#2", NOW + 2, { part: "one" });
+      expect(attemptIds(one.dispatched)).toEqual([]);
+      expect(nodeOf(one.state, "q")).toMatchObject({ status: "pending" });
+
+      const two = accept(harness, "b2", "done", "b2#3", NOW + 3, { part: "two" });
+      expect(attemptIds(two.dispatched)).toEqual(["q#5"]);
+      const armed = nodeOf(two.state, "q");
+      expect(boundRefs(armed)).toEqual(["b1@b1#2", "b2@b2#3"]);
+      expect(boundPayloads(armed)).toEqual([
+        { kind: "value", value: { part: "one" } },
+        { kind: "value", value: { part: "two" } },
+      ]);
+      expect(deliveredTo(harness, "q#5")?.inputs).toEqual(armed.inputs);
+
+      const three = accept(harness, "b3", "done", "b3#4", NOW + 4, { part: "three" });
+      expect(attemptIds(three.dispatched)).toEqual([]);
+      const after = nodeOf(three.state, "q");
+      expect(after.attemptId).toBe("q#5");
+      expect(after.inputs).toEqual(armed.inputs);
+      expect(after.arrivals).toEqual([
+        { from: "b1", outcome: "done", attemptId: "b1#2" },
+        { from: "b2", outcome: "done", attemptId: "b2#3" },
+        { from: "b3", outcome: "done", attemptId: "b3#4" },
+      ]);
+    });
+  });
+});
+
+// ── R4d: shared loop groups ─────────────────────────────────────────────────
+
+describe("shared loop groups carry the round's binding (R4)", () => {
+  it("moves both counters on one continuation and re-binds the consumer each round", async () => {
+    await withHarness(sharedGroupsDeclaration(20), (harness) => {
+      harness.runtime.start(NOW);
+
+      const opened = accept(harness, "work", "done", "work#1", NOW + 1, { report: "W1" });
+      const first = nodeOf(opened.state, "review");
+      expect(boundRefs(first)).toEqual(["work@work#1"]);
+      expect(boundPayloads(first)).toEqual([{ kind: "value", value: { report: "W1" } }]);
+
+      const revised = accept(harness, "review", "revise", "review#2", NOW + 2, {});
+      // One traversal re-enters BOTH declared loops, so both counters move.
+      expect(revised.state.loopTraversals).toEqual({ "a-tight": 1, "b-loose": 1 });
+      expect(attemptIds(revised.dispatched)).toEqual(["work#3"]);
+
+      const second = accept(harness, "work", "done", "work#3", NOW + 3, { report: "W2" });
+      const rebound = nodeOf(second.state, "review");
+      expect(rebound.attemptId).toBe("review#4");
+      expect(boundRefs(rebound)).toEqual(["work@work#3"]);
+      expect(boundPayloads(rebound)).toEqual([{ kind: "value", value: { report: "W2" } }]);
+      expect(deliveredTo(harness, "review#4")?.inputs).toEqual(rebound.inputs);
+
+      const revisedAgain = accept(harness, "review", "revise", "review#4", NOW + 4, {});
+      expect(revisedAgain.state.loopTraversals).toEqual({ "a-tight": 2, "b-loose": 2 });
+      expect(attemptIds(revisedAgain.dispatched)).toEqual(["work#5"]);
+    });
+  });
+});
+
+// ── Overlapping loop groups ─────────────────────────────────────────────────
+
+describe("overlapping loop groups advance the group that declares the continuation (R4)", () => {
+  it("binds every round to its own producer and blocks the round whose outcome the input does not pin", async () => {
+    await withHarness(overlappingGroupsDeclaration(5), (harness) => {
+      harness.runtime.start(NOW);
+
+      // Only work is an entry: the back edge review -> work is b-inner's
+      // continuation, so it does not make work a target.
+      const opened = accept(harness, "work", "done", "work#1", NOW + 1, { report: "W1" });
+      expect(attemptIds(opened.dispatched)).toEqual(["review#2"]);
+      expect(boundRefs(nodeOf(opened.state, "review"))).toEqual(["work@work#1"]);
+
+      const revised = accept(harness, "review", "revise", "review#2", NOW + 2, {});
+      // "revise" is b-inner's continuation, and a-outer is declared FIRST.
+      expect(revised.state.loopTraversals["b-inner"]).toBe(1);
+      expect(revised.state.loopTraversals["a-outer"]).toBeUndefined();
+      expect(attemptIds(revised.dispatched)).toEqual(["work#3"]);
+
+      const second = accept(harness, "work", "done", "work#3", NOW + 3, { report: "W2" });
+      const rebound = nodeOf(second.state, "review");
+      expect(rebound.attemptId).toBe("review#4");
+      expect(boundRefs(rebound)).toEqual(["work@work#3"]);
+      expect(boundPayloads(rebound)).toEqual([{ kind: "value", value: { report: "W2" } }]);
+      expect(deliveredTo(harness, "review#4")?.inputs).toEqual(rebound.inputs);
+      expect(second.state.loopTraversals["a-outer"]).toBeUndefined();
+
+      const revisedAgain = accept(harness, "review", "revise", "review#4", NOW + 4, {});
+      expect(attemptIds(revisedAgain.dispatched)).toEqual(["work#5"]);
+      expect(revisedAgain.state.loopTraversals["b-inner"]).toBe(2);
+
+      // a-outer's own continuation, emitted by work: the round moves a-outer's
+      // counter, and the consumer's declared input pins work/DONE while work#5
+      // settled on REDO — so the consumer is BLOCKED BY NAME, never started
+      // against an outcome its producer did not produce.
+      const redone = accept(harness, "work", "redo", "work#5", NOW + 5, { report: "W3" });
+      expect(redone.state.loopTraversals).toEqual({ "a-outer": 1, "b-inner": 2 });
+      expect(attemptIds(redone.dispatched)).toEqual([]);
+      expect(nodeOf(redone.state, "review")).toMatchObject({
+        status: "settled",
+        attemptId: "review#4",
+      });
+      expect(refusalCodes(redone.state, "review")).toEqual(["input-outcome-mismatch"]);
+      // The binding review#4 was armed with is untouched by the blocked round.
+      expect(boundRefs(nodeOf(redone.state, "review"))).toEqual(["work@work#3"]);
+      expect(acceptedAttempts(harness)).toEqual([
+        "work#1",
+        "review#2",
+        "work#3",
+        "review#4",
+        "work#5",
+      ]);
     });
   });
 });
