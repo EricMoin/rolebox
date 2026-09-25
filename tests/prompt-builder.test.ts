@@ -48,6 +48,17 @@ describe("escapeXml", () => {
 });
 
 describe("buildAgentPrompt", () => {
+  it("does not advertise dispatch when the role cannot declare graphs", () => {
+    const result = buildAgentPrompt(makeRole(), [], {
+      canDelegate: false,
+      subagents: [{ id: "parent--reviewer", name: "Reviewer", description: "Reviews" }],
+      publicAgents: [{ id: "other--worker", name: "Worker", description: "Works" }],
+    });
+    expect(result).not.toContain("available_subagents");
+    expect(result).not.toContain("available_public_agents");
+    expect(result).not.toContain("graph_declare");
+  });
+
   it("returns the raw prompt when no skills are provided (empty array)", () => {
     const role = makeRole({ prompt: "Be concise." });
     const result = buildAgentPrompt(role, []);

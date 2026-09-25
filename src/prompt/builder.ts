@@ -65,6 +65,8 @@ export interface AgentPromptOptions {
   subagents?: Array<{ id: string; name: string; description: string }>;
   publicAgents?: Array<{ id: string; name: string; description: string }>;
   references?: ResolvedReference[];
+  canDelegate?: boolean;
+  resourceTool?: "graph_worker_exec";
 }
 
 export function buildAgentPrompt(
@@ -72,24 +74,24 @@ export function buildAgentPrompt(
   skills: ResolvedSkill[],
   options: AgentPromptOptions = {},
 ): string {
-  const { subagents, publicAgents, references } = options;
+  const { subagents, publicAgents, references, resourceTool } = options;
 
   const parts: string[] = [role.prompt];
 
   if (references && references.length > 0) {
-    parts.push(buildReferenceBlock(references));
+    parts.push(buildReferenceBlock(references, resourceTool));
   }
 
   if (skills.length > 0) {
-    parts.push(buildSkillBlock(skills));
+    parts.push(buildSkillBlock(skills, resourceTool));
   }
 
-  const subagentBlock = buildSubagentBlock(subagents ?? []);
+  const subagentBlock = buildSubagentBlock(options.canDelegate === false ? [] : subagents ?? []);
   if (subagentBlock) {
     parts.push(subagentBlock);
   }
 
-  const publicAgentsBlock = buildPublicAgentsBlock(publicAgents ?? []);
+  const publicAgentsBlock = buildPublicAgentsBlock(options.canDelegate === false ? [] : publicAgents ?? []);
   if (publicAgentsBlock) {
     parts.push(publicAgentsBlock);
   }
@@ -115,10 +117,12 @@ export function buildFunctionBlock(functions: ResolvedFunction[]): string {
   );
 }
 
-export function buildSkillBlock(skills: ResolvedSkill[]): string {
+export function buildSkillBlock(skills: ResolvedSkill[], resourceTool?: "graph_worker_exec"): string {
   return renderSection(
     "available_skills",
-    "Skills provide specialized instructions. Use the skill tool to load when task matches.",
+    resourceTool
+      ? "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory."
+      : "Skills provide specialized instructions. Use the skill tool to load when task matches.",
     skills.map((s) => {
       const children: XmlChild[] = [
         xml("name", [s.name]),
@@ -133,10 +137,12 @@ export function buildSkillBlock(skills: ResolvedSkill[]): string {
   );
 }
 
-export function buildReferenceBlock(references: ResolvedReference[]): string {
+export function buildReferenceBlock(references: ResolvedReference[], resourceTool?: "graph_worker_exec"): string {
   return renderSection(
     "available_references",
-    "Reference documents provide deep knowledge. Use the Read tool to load full content when needed.",
+    resourceTool
+      ? "Reference documents provide deep knowledge. Use graph_worker_exec to read the listed files. Resolve relative references against the document's directory."
+      : "Reference documents provide deep knowledge. Use the Read tool to load full content when needed.",
     references.map((r) => xml("reference", [
       xml("name", [r.name]),
       xml("path", [r.filePath]),

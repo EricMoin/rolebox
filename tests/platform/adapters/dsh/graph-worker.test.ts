@@ -26,6 +26,7 @@ describe("DSH graph worker presentation", () => {
       await Promise.resolve();
       await listeners.get("agent/created")!({ agent: worker });
       expect(worker.modes).toEqual(["native"]);
+      expect(boundary.isWorker({ id: "worker" })).toBe(true);
       expect(guard!({ name: "run_code", agent: worker })).toContain("Graph workers may only");
       expect(guard!({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
       expect(guard!({ name: "graph_submit_outcome", agent: worker })).toBeUndefined();
@@ -47,6 +48,32 @@ describe("DSH graph worker presentation", () => {
     let started = false;
     await expect(boundary.start("attempt", async () => { started = true; })).rejects.toThrow("execution guard");
     expect(started).toBe(false);
+    boundary.dispose();
+  });
+
+  it("isolates prepared prompts between concurrent starts and clears the start scope", async () => {
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: () => () => {},
+    }, () => undefined);
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    let finish!: () => void;
+    const afterStart = new Promise<void>(resolve => { finish = resolve; });
+    let inherited!: Promise<string | undefined>;
+    const first = boundary.start("first", async () => {
+      expect(boundary.prompt()).toBe("first prompt");
+      await ready;
+      expect(boundary.prompt()).toBe("first prompt");
+      inherited = afterStart.then(() => boundary.prompt());
+    }, "first prompt");
+    await boundary.start("second", async () => {
+      expect(boundary.prompt()).toBe("second prompt");
+      release();
+    }, "second prompt");
+    expect(boundary.prompt()).toBeUndefined();
+    await first;
+    finish();
+    expect(await inherited).toBeUndefined();
     boundary.dispose();
   });
 });

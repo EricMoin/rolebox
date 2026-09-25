@@ -123,6 +123,19 @@ describe("Recursive subagent resolution", () => {
     }
   });
 
+  it("keeps nested agents addressable without advertising forbidden delegation", async () => {
+    const { ctx, roleMap, cleanup } = setup();
+    try {
+      const config = roleMap.get("emperor")!;
+      config.subagents![0].tools = { graph_declare: false };
+      const resolved = await resolveAllRoles(roleMap, ctx);
+      const chancellor = resolved[0].subagents[0];
+      expect(chancellor.subagents).toHaveLength(3);
+      expect(chancellor.prompt).not.toContain("available_subagents");
+      expect(chancellor.prompt).not.toContain("You can delegate tasks");
+    } finally { cleanup(); }
+  });
+
   it("registers functions for nested subagent IDs", async () => {
     const { ctx, roleMap, cleanup } = setup();
     try {

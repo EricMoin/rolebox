@@ -45,6 +45,8 @@
  * a web-UI role switch actually reach the spawned agent. No active role (or
  * no sessionId on the request) falls back to the definition's own behavior;
  * spawning the active role's own definition skips the redundant prepend.
+ * Named subagents retain their own role and model. Graph starts instead use
+ * the attempt's prepared worker prompt, including for primary-role targets.
  *
  * ── Spawn-time context injection (the system-transform counterpart) ────────
  * rolebox's `system-transform` hook (`src/hooks/system-transform.ts`) — which
@@ -59,6 +61,8 @@
  * AHEAD of the active role's complete materialized prompt, so the spawned
  * agent's prompt carries BOTH the injected context AND the role prompt.
  * Absent a provider (or active role) the spawn is unchanged — base behavior.
+ * For named subagents the context provider receives the target agent id;
+ * graph worker prompts already contain their own functions and resources.
  *
  * This module does NOT import from any host SDK package — neither the opencode
  * plugin/SDK nor any dsh package. The dsh surface is consumed structurally
@@ -87,6 +91,7 @@ import type { Logger, ILogObj } from "tslog";
 import { splitModel } from "../../model-ref.ts";
 import type { IAgentRegistrar } from "../../ports/agent-registrar.ts";
 import type { AgentDefinition } from "../../types.ts";
+import { RoleMode } from "../../../constants.ts";
 
 /** Module logger — swapped by {@link __setLoggerForTest} in unit tests. */
 let log: Logger<ILogObj> = createSubLogger("dsh-agent-registrar");
@@ -426,9 +431,12 @@ export type DshActiveRoleLookup = {
  * active role's prompt. `undefined` (or an empty array) → no context
  * injection, and the spawn stays unchanged. Wired by the dsh plugin with a
  * real implementation; tests inject a fake double.
+ * An explicit agentId selects a named subagent's own context regardless of
+ * the parent session's active role.
  */
 export type DshSpawnContextProvider = (
   sessionId: string,
+  agentId?: string,
 ) => DshContentBlock[] | undefined;
 
 /**
@@ -673,6 +681,8 @@ export interface DshAgentRegistrarOptions {
    * no context injection (spawn unchanged).
    */
   contextProvider?: DshSpawnContextProvider;
+  /** Prepared prompt for the graph attempt currently being dispatched. */
+  graphWorkerPrompt?: () => string | undefined;
   /**
    * Optional spawn-time probe for the dsh llm service's registered provider
    * routes (`ctx.llm.listProviders()`). When wired, a split definition model
@@ -710,6 +720,7 @@ export class DshAgentRegistrar implements IAgentRegistrar {
   private readonly spawnProviderName?: string;
   private readonly activeRole?: DshActiveRoleLookup;
   private readonly contextProvider?: DshSpawnContextProvider;
+  private readonly graphWorkerPrompt?: () => string | undefined;
   private readonly providerRoutes?: DshProviderRouteProbe;
 
   constructor(options: DshAgentRegistrarOptions) {
@@ -718,6 +729,7 @@ export class DshAgentRegistrar implements IAgentRegistrar {
     this.spawnProviderName = options.spawnProviderName;
     this.activeRole = options.activeRole;
     this.contextProvider = options.contextProvider;
+    this.graphWorkerPrompt = options.graphWorkerPrompt;
     this.providerRoutes = options.providerRoutes;
     if (!this.onSpawn) {
       // ONE-TIME diagnostic at registration time (NOT at first spawn): with no
@@ -902,25 +914,21 @@ export class DshAgentRegistrar implements IAgentRegistrar {
       capabilities,
       inheritsParentContext: false,
       start: async (request: DshResolvedSubagentStartRequest): Promise<DshSubagentRun> => {
-        const prompt = prependSystemPrompt(definition, request.prompt);
+        const workerPrompt = this.graphWorkerPrompt?.();
+        const isolated = workerPrompt !== undefined || definition.mode === RoleMode.Subagent;
+        const prompt = workerPrompt !== undefined
+          ? [{ type: "text", text: workerPrompt }, ...request.prompt]
+          : prependSystemPrompt(definition, request.prompt);
         const agentOptions = mergeAgentOptions(
           definition,
           request.agentOptions,
           this.providerRoutes,
         );
-        // Per-session active-role seam: prepend the active role's prompt and
-        // apply its model override when one is active for the request's
-        // session. `mode` is a catalog-level classification with no
-        // spawn-time dsh mapping (AgentOptions = provider/model/maxTokens),
-        // so it is not applied here.
-        const active = this.resolveActiveOverride(request.sessionId, definition.id);
-        // dsh context injection seam: when the session has an active role,
-        // the rolebox context block (the output the `system-transform` hook
-        // would have produced — a documented no-op on dsh via
-        // hook-provider.ts:178) is prepended AHEAD of the active role's
-        // complete materialized prompt, so the spawned agent's effective
-        // prompt carries BOTH the injected context and the role prompt.
-        const context = this.resolveSpawnContext(request.sessionId);
+        // Session role overrides apply to ordinary session rounds, not workers.
+        const active = isolated ? undefined : this.resolveActiveOverride(request.sessionId, definition.id);
+        const context = workerPrompt !== undefined ? undefined
+          : isolated ? this.contextProvider?.(request.sessionId ?? "", definition.id)
+          : this.resolveSpawnContext(request.sessionId);
         const startRequest: DshResolvedSubagentStartRequest = {
           ...request,
           prompt: composePrompt(context, active, prompt),

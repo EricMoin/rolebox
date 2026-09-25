@@ -113,6 +113,8 @@ export type DshSystemPromptRegistry = {
 
 /** Options for constructing a DshSystemPromptAdapter. */
 export interface DshSystemPromptAdapterOptions {
+  /** Graph workers receive their target role through the dispatch prompt. */
+  isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry holding all resolved agent definitions (roles + subagents). */
   registrar: DshAgentRegistrar;
   /**
@@ -144,6 +146,7 @@ export class DshSystemPromptAdapter {
   private readonly activeRole: ActiveRoleRef;
   private readonly roleFunctionsMap: Map<string, ResolvedFunction[]>;
   private readonly directory: string;
+  private readonly isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry disposers returned by `section()`/`context()` — released by `dispose()`. */
   private readonly disposers: Array<() => void> = [];
   private readonly _log;
@@ -156,6 +159,7 @@ export class DshSystemPromptAdapter {
     this.activeRole = options.activeRole;
     this.roleFunctionsMap = options.roleFunctionsMap;
     this.directory = options.directory;
+    this.isGraphWorker = options.isGraphWorker;
     this._log = createSubLogger("dsh-system-prompt");
   }
 
@@ -183,12 +187,12 @@ export class DshSystemPromptAdapter {
       registry.section({
         name: "rolebox:role",
         order: 50,
-        text: (ctx) => resolveActiveRolePrompt(ctx, this.registrar, this.activeRole),
+        text: (ctx) => this.isGraphWorker?.(ctx) ? "" : resolveActiveRolePrompt(ctx, this.registrar, this.activeRole),
       }),
       registry.context({
         name: "rolebox:context",
         order: 0,
-        text: (ctx) => buildContextBlock(ctx, this.activeRole, this.roleFunctionsMap),
+        text: (ctx) => this.isGraphWorker?.(ctx) ? "" : buildContextBlock(ctx, this.activeRole, this.roleFunctionsMap),
       }),
     );
   }

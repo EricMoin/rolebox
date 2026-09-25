@@ -135,6 +135,7 @@ async function resolveSubagents(
 
       const saPrompt = buildAgentPrompt(saConfig, saSkills, {
         references: saReferences,
+        canDelegate: saConfig.tools?.graph_declare !== false,
         ...(childMetadata.length > 0 ? { subagents: childMetadata } : {}),
       });
 
@@ -290,6 +291,7 @@ export async function resolveAllRoles(
       const prompt = buildAgentPrompt(config, skills, {
         subagents: subagentMetadata,
         references: allReferences,
+        canDelegate: config.tools?.graph_declare !== false,
         ...(publicAgents.length > 0 ? { publicAgents } : {}),
       });
 

@@ -190,7 +190,7 @@ export type DshOutcomeSettlement =
 export interface DshOutcomeDeliveryOptions {
   readonly workerTools?: readonly string[];
   readonly readExecutionEvents?: (id: string) => Promise<readonly DshSessionEventLike[] | undefined>;
-  readonly startWorker?: (label: string, start: () => Promise<DshSubagentRun>) => Promise<DshSubagentRun>;
+  readonly startWorker?: (label: string, start: () => Promise<DshSubagentRun>, request: OutcomeDispatchRequest) => Promise<DshSubagentRun>;
   readonly subscribeExecutionEvents?: (id: string, listener: (events: readonly DshSessionEventLike[]) => void) => (() => void);
   /** `ctx.subagents` — the dsh subagent runtime. */
   readonly subagents: DshOutcomeSubagentRuntime;
@@ -694,7 +694,7 @@ export class DshOutcomeDelivery {
     // The start itself is a promise; the delivery contract is synchronous. A
     // rejection is reported as a failed start (nothing was observed running).
     const start = () => this.opts.subagents.start(agent, startRequest);
-    void Promise.resolve(this.opts.startWorker ? this.opts.startWorker(dispatchIdempotencyKeyOf(effect), start) : start()).then(
+    void Promise.resolve(this.opts.startWorker ? this.opts.startWorker(dispatchIdempotencyKeyOf(effect), start, request) : start()).then(
       (run) => {
         // The platform named the execution, so the host can record the fact it
         // created. Reported before the result is observed: a completion that

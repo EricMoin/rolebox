@@ -46,12 +46,14 @@ export function installDshGraphWorkerBoundary(host: Pick<OutcomeHost, "workerPri
   subscribe: (event: string, listener: (...args: unknown[]) => unknown) => (() => void) | void) {
   const labels = new Set<string>();
   const presentations = new WeakSet<object>();
-  const starting = new AsyncLocalStorage<{ active: boolean }>();
+  const workerSessions = new Set<string>();
+  const starting = new AsyncLocalStorage<{ active: boolean; prompt?: string }>();
   const disposers: (() => void)[] = [];
   const isWorker = (agent?: WorkerAgent) => {
     if (!agent) return false;
     if (presentations.has(agent)) return true;
-    if (host.workerPrincipalOf(agent.session?.id ?? agent.id ?? "")) return true;
+    const sessionId = agent.session?.id ?? agent.id ?? "";
+    if (workerSessions.has(sessionId) || host.workerPrincipalOf(sessionId)) return true;
     return agent.session?.events?.some(event => event.type === "subagent/descriptor" && event.data !== null && typeof event.data === "object" &&
       "label" in event.data && typeof event.data.label === "string" && labels.has(event.data.label)) ?? false;
   };
@@ -64,6 +66,8 @@ export function installDshGraphWorkerBoundary(host: Pick<OutcomeHost, "workerPri
       if (!scoped?.presentAs) throw new Error("Graph workers require native scoped tool presentation");
       disposers.push(scoped.presentAs("native"));
       presentations.add(agent);
+      const sessionId = agent.session?.id ?? agent.id;
+      if (sessionId) workerSessions.add(sessionId);
     }
   };
   // Prompt assembly precedes pre-step, and the child's descriptor is appended
@@ -79,14 +83,16 @@ export function installDshGraphWorkerBoundary(host: Pick<OutcomeHost, "workerPri
   });
   if (stop) disposers.push(stop);
   return {
-    async start<T>(label: string, create: () => Promise<T>): Promise<T> {
+    prompt() { const scope = starting.getStore(); return scope?.active ? scope.prompt : undefined; },
+    isWorker,
+    async start<T>(label: string, create: () => Promise<T>, prompt?: string): Promise<T> {
       if (!guard) throw new Error("This dsh host cannot enforce the graph worker execution guard");
       labels.add(label);
-      const scope = { active: true };
+      const scope = { active: true, prompt };
       try { return await starting.run(scope, create); }
       finally { scope.active = false; }
     },
     prepare,
-    dispose() { for (const dispose of disposers.splice(0).reverse()) dispose(); labels.clear(); starting.disable(); },
+    dispose() { for (const dispose of disposers.splice(0).reverse()) dispose(); labels.clear(); workerSessions.clear(); starting.disable(); },
   };
 }

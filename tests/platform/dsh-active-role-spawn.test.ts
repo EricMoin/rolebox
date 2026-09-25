@@ -200,7 +200,7 @@ function spawnRequest(sessionId?: string): DshSubagentStartRequest {
  */
 async function createFixture(
   agents: AgentDefinition[],
-  opts: { contextProvider?: DshSpawnContextProvider } = {},
+  opts: { contextProvider?: DshSpawnContextProvider; graphWorkerPrompt?: () => string | undefined } = {},
 ) {
   const { ctx, listeners } = createFakeCtx();
   const subagents = createFakeSubagents();
@@ -213,6 +213,7 @@ async function createFixture(
     subagents,
     activeRole,
     contextProvider: opts.contextProvider,
+    graphWorkerPrompt: opts.graphWorkerPrompt,
     onSpawn: async (definition, request) => {
       spawned.push({ definition, request });
       return makeRun();
@@ -258,6 +259,40 @@ function markerContextProvider(): DshSpawnContextProvider {
 // ── Spawn seam: activated role reaches the spawned prompt ───────────────────
 
 describe("dsh active-role spawn seam", () => {
+  it("keeps graph workers on their target prompt and model, including primary targets", async () => {
+    for (const mode of [RoleMode.Primary, RoleMode.Subagent]) {
+      const { switcher, subagents, spawned } = await createFixture([
+        makeAgent("coordinator", { mode: RoleMode.Primary, model: "parent-provider/parent-model" }),
+        makeAgent("planner", { mode, model: "worker-provider/worker-model" }),
+      ], {
+        contextProvider: () => [{ type: "text", text: "parent functions" }],
+        graphWorkerPrompt: () => "Worker planner instructions and own functions",
+      });
+      await switcher.activate("coordinator", "s1");
+      await subagents.start("planner", spawnRequest("s1"));
+      expect(promptText(spawned[0].request.prompt)).toBe("Worker planner instructions and own functions\nuser request");
+      expect(spawned[0].request.agentOptions).toEqual({ provider: "worker-provider", model: "worker-model" });
+    }
+  });
+
+  it("uses a named subagent's own context without inheriting its parent's role", async () => {
+    const contexts: string[] = [];
+    const { switcher, subagents, spawned } = await createFixture([
+      makeAgent("coordinator", { mode: RoleMode.Primary, model: "parent-model" }),
+      makeAgent("planner", { mode: RoleMode.Subagent, model: "worker-model" }),
+    ], {
+      contextProvider: (_session, agentId) => {
+        contexts.push(agentId ?? "parent");
+        return [{ type: "text", text: `${agentId} functions` }];
+      },
+    });
+    await switcher.activate("coordinator", "s1");
+    await subagents.start("planner", spawnRequest("s1"));
+    expect(contexts).toEqual(["planner"]);
+    expect(promptText(spawned[0].request.prompt)).toBe("planner functions\nYou are planner.\nuser request");
+    expect(spawned[0].request.agentOptions?.model).toBe("worker-model");
+  });
+
   it("activate(role) then spawn for that session includes the role's systemPrompt + model", async () => {
     const { switcher, subagents, spawned, activeRole } = await createFixture([
       makeAgent("base", {

@@ -1,6 +1,8 @@
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
+import { prepareDshGraphWorkerPrompt } from "../platform/adapters/dsh/worker-prompt.ts";
+import { INPUT_DELIVERY_DIR, inputConsumerDirectory } from "../graph/host/input-view.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
  *
@@ -56,7 +58,7 @@ import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, type DshGraph
 
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { CanonicalToolContext, CanonicalToolDef } from "../platform/types.ts";
 import { createOutcomeGraphTools } from "../graph/tools/index.ts";
 import { createGraphToolSet } from "../graph/tools/graph-tools.ts";
@@ -908,6 +910,7 @@ export async function apply(
   // best-effort.
   const activeRoleStore = new ActiveRoleStore(process.cwd());
   const activeRole = createActiveRoleRef(activeRoleStore);
+  let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary> | undefined;
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -915,8 +918,8 @@ export async function apply(
   // role's context block at spawn time — the available-functions block first
   // (mirroring src/hooks/system-transform.ts:77-85) — so a spawned agent's
   // effective prompt carries the rolebox context alongside the role prompt.
-  const contextProvider: DshSpawnContextProvider = (sessionId) => {
-    const activeId = activeRole.get(sessionId);
+  const contextProvider: DshSpawnContextProvider = (sessionId, agentId) => {
+    const activeId = agentId ?? activeRole.get(sessionId);
     if (!activeId) return undefined;
     const functions = roleFunctionsMap.get(activeId);
     if (!functions || functions.length === 0) return undefined;
@@ -937,6 +940,7 @@ export async function apply(
     subagents: ctx.subagents,
     activeRole,
     contextProvider,
+    graphWorkerPrompt: () => workerBoundary?.prompt(),
     providerRoutes,
     // Host-supplied spawn seam : when the host passes `onSpawn`, registered
     // providers delegate real spawning to it. Absent → the registrar warns once
@@ -1039,6 +1043,7 @@ export async function apply(
         activeRole,
         roleFunctionsMap,
         directory: dirs.roleboxDir,
+        isGraphWorker: context => workerBoundary?.isWorker(context.agent ?? undefined) ?? false,
       });
       promptAdapter.register(systemPromptRegistry);
       promptDisposers.push(() => promptAdapter.dispose());
@@ -1171,7 +1176,7 @@ export async function apply(
   // (workers are not handed its path): see `credential-vault.ts` for what that
   // can and cannot isolate on a same-account platform.
   const graphRuntimes = new Map<string, ReturnType<typeof openGraphRuntime>>();
-  const workerBoundary = installDshGraphWorkerBoundary({
+  workerBoundary = installDshGraphWorkerBoundary({
     workerPrincipalOf: (sessionId) => {
       for (const runtime of graphRuntimes.values()) {
         const principal = runtime.host.workerPrincipalOf(sessionId);
@@ -1189,7 +1194,11 @@ export async function apply(
         if (session.id === id && event.type === "turn/end") listener(session.events);
       }) ?? (() => { }),
       readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
-      startWorker: (label, start) => workerBoundary.start(label, start),
+      startWorker: async (label, start, request) => {
+        const inputDirectory = inputConsumerDirectory(join(outcomeStoreRoot, INPUT_DELIVERY_DIR), request.graphId, request.attemptId);
+        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory);
+        return workerBoundary!.start(label, start, prompt);
+      },
       workerTools: DSH_GRAPH_WORKER_TOOLS,
       subagents: ctx.subagents,
       parentResolver: (sid) => agentRegistry?.get(sid),

@@ -834,6 +834,82 @@ describe("dsh plugin apply()", () => {
     }
   });
 
+  it("delivers only the graph target's role, functions and readable resources through the real registrar", async () => {
+    writeRoleYaml("coordinator", [
+      "name: Coordinator", "description: Coordinates", "prompt: Coordinator-only prompt",
+      "model: parent-provider/model-name", "functions: [triage]", "disable_functions: [plan, execute, loop]",
+    ].join("\n"));
+    writeRoleYaml("coordinator/subagents/planner", [
+      "name: Planner", "description: Plans", "prompt: Planner-only prompt",
+      "model: worker-provider/model-name", "functions: [plan]", "auto_activate: [plan]",
+      "disable_functions: [execute, loop]", "skills: [research]", "tools:", "  graph_declare: false",
+    ].join("\n"));
+    writeRoleSkill("coordinator/subagents/planner", "research");
+    const roleFiles: Record<string, string> = {
+      "coordinator/functions/triage.md": "---\nname: triage\ndescription: Route work\n---\nParent routing function",
+      "coordinator/subagents/planner/functions/plan.md": "---\nname: plan\ndescription: Plan work\n---\nChild planning function",
+      "coordinator/references/schema.md": "The planning schema",
+    };
+    for (const [file, content] of Object.entries(roleFiles)) {
+      const path = join(tmpDir, file);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, content);
+    }
+    const cwd = process.cwd();
+    process.chdir(tmpDir);
+    let disposer: DshPluginDisposer | undefined;
+    try {
+      new ActiveRoleStore(process.cwd()).saveSync(new Map(["parent", "worker"].map(sessionId =>
+        [sessionId, { sessionId, roleId: "coordinator", updatedAt: Date.now() }])));
+      const parent = { id: "parent", inject: () => undefined };
+      const fixture = createFakeCtx({ agents: { get: () => parent }, systemPrompt: true });
+      const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
+      runtime.start = async (agent, request) => fixture.providers.get(agent)!.start({ ...request, descriptor: {} });
+      const requests: DshSubagentStartRequest[] = [];
+      const workerSections: string[] = [];
+      const workerContexts: string[] = [];
+      disposer = await apply(fixture.ctx, {
+        roleboxDir: tmpDir,
+        onSpawn: async (_definition, request) => {
+          const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: { presentAs: () => () => {} } } };
+          fixture.ctx.emit("agent/created", { agent: worker });
+          requests.push(request);
+          workerSections.push(...fixture.sections.map(section => section.text({ agent: { id: "worker" } })));
+          workerContexts.push(...fixture.contexts.map(context => context.text({ agent: { id: "worker" } })));
+          return { id: "worker", result: Promise.resolve({ stopReason: "completed", output: [] }), dispose: async () => {} };
+        },
+      } as DshPluginConfig);
+      const declare = fixture.tools.registeredTools.find(tool => tool.name === "graph_declare")!;
+      await declare.execute({ declaration: {
+        version: 3, name: "worker-prompt", nodes: [{ id: "plan", agent: "coordinator--planner",
+          prompt: "Produce a strategy.", outcomes: [{ id: "strategy" }] }], edges: [],
+      } }, { signal: new AbortController().signal, callId: "declare-worker-prompt", deferContext: () => {}, concludeTurn: () => {},
+        agent: { id: "parent", session: { id: "parent", header: { cwd: tmpDir } } } });
+      expect(requests).toHaveLength(1);
+      const prompt = requests[0].prompt.map(block => block.text ?? "").join("\n\n");
+      expect(prompt).toContain("Planner-only prompt");
+      expect(prompt).toContain("<active_functions>");
+      expect(prompt).toContain("Child planning function");
+      expect(prompt).toContain("Produce a strategy.");
+      expect(prompt.match(/attempt handoff/g)).toHaveLength(1);
+      expect(prompt).not.toContain("Coordinator-only prompt");
+      expect(prompt).not.toContain("Parent routing function");
+      expect(prompt).not.toContain("Use the Read tool");
+      expect(prompt).not.toContain("Use the skill tool");
+      expect(prompt).not.toContain("available_subagents");
+      expect(requests[0].agentOptions).toEqual({ provider: "worker-provider", model: "model-name" });
+      const reference = prompt.match(/<path>([^<]+)<\/path>/)![1];
+      expect(reference.startsWith(tmpDataDir)).toBe(true);
+      expect(readFileSync(reference, "utf8")).toBe("The planning schema");
+      expect(workerSections).toEqual([""]);
+      expect(workerContexts).toEqual([""]);
+      expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
+    } finally {
+      disposer?.();
+      process.chdir(cwd);
+    }
+  });
+
   it("registers every assembled tool when enabledNamespaces is absent", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();

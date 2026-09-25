@@ -711,6 +711,15 @@ What a worker actually gets depends on the host:
 | pi | `graph_submit_outcome`, delivered through a loopback channel to its owning host process |
 | dsh | `graph_submit_outcome` and `graph_worker_exec`, presented natively to the child |
 
+A dsh graph worker receives its target role's prompt, functions and model. The
+declaring session's active role is not applied to that child. Worker prompts omit
+dispatch catalogs and direct resource reads through `graph_worker_exec`. The host
+copies the target role's reference bundles and skills, including their supporting
+files, into the attempt's input directory before starting it. The listed paths
+point to these copies, which are readable but not writable inside the sandbox.
+Missing resources or links escaping a resource bundle refuse the start; the host
+does not grant access to the original role directory.
+
 The loopback channel's own envelope admits more names than a worker's grant, and
 that is transport plumbing rather than a worker capability: which graph tool a
 bound worker may call is decided by the per-call worker boundary against the

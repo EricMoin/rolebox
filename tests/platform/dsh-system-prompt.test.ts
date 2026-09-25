@@ -135,7 +135,7 @@ function createFakeRegistry() {
  * a DshSystemPromptAdapter wired to all of it. The roleFunctionsMap is
  * returned so tests can populate the active role's functions.
  */
-function createFixture(agents: AgentDefinition[]) {
+function createFixture(agents: AgentDefinition[], isGraphWorker?: (context: DshSystemPromptContext) => boolean) {
   const subagents = createFakeSubagents();
   const registrar = new DshAgentRegistrar({ subagents });
   const roleFunctionsMap = new Map<string, ResolvedFunction[]>();
@@ -154,6 +154,7 @@ function createFixture(agents: AgentDefinition[]) {
           activeRole,
           roleFunctionsMap,
           directory: process.cwd(),
+          isGraphWorker,
         }),
       };
     },
@@ -163,6 +164,21 @@ function createFixture(agents: AgentDefinition[]) {
 // ── register(): registrations ───────────────────────────────────────────────
 
 describe("DshSystemPromptAdapter.register", () => {
+  it("does not inject a restored parent role into a graph worker's system prompt", async () => {
+    const fixture = createFixture([makeAgent("coordinator")], context => context.agent?.id === "worker");
+    fixture.roleFunctionsMap.set("coordinator", [makeFunction("triage", "Route work")]);
+    const { activeRole, adapter } = await fixture.build();
+    const { registry, sections, contexts } = createFakeRegistry();
+    activeRole.set("parent", "coordinator");
+    activeRole.set("worker", "coordinator");
+    adapter.register(registry);
+    expect(sections[0].text({ agent: { id: "worker" } })).toBe("");
+    expect(contexts[0].text({ agent: { id: "worker" } })).toBe("");
+    expect(sections[0].text({ agent: { id: "parent" } })).toBe("You are coordinator.");
+    expect(contexts[0].text({ agent: { id: "parent" } })).toContain("triage");
+    adapter.dispose();
+  });
+
   it("registers a 'rolebox:role' section and a 'rolebox:context' context entry", async () => {
     const fixture = createFixture([makeAgent("tester")]);
     const { activeRole, adapter } = await fixture.build();
