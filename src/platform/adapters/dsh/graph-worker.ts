@@ -15,7 +15,7 @@ export function createDshGraphWorkerTools(resolve: (context: CanonicalToolContex
 }): Record<string, CanonicalToolDef> {
   return {
     graph_worker_exec: {
-      description: "Run a shell command in this graph worker's workspace sandbox. Use this for reading, editing, builds and tests.",
+      description: "Run a shell command in this graph worker's workspace sandbox. Use this for reading, editing, builds, tests and browser automation. Installed applications and Playwright/Puppeteer browser caches are readable; HOME, config and temporary files use a disposable directory. macOS cannot nest Chromium's sandbox inside this OS sandbox: use Playwright's default chromiumSandbox: false or Puppeteer args: ['--no-sandbox'].",
       args: { command: z.string(), timeout_ms: z.number().int().min(1).max(300_000).optional() },
       async execute(args, context) {
         const { host, workspace, storeRoot } = resolve(context);

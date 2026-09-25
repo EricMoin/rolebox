@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { graphWorkerSandbox } from "./graph-worker.ts";
+import { graphWorkerSoftware } from "./software.ts";
 
 export async function executeGraphWorkerCommand(options: {
   command: string;
@@ -14,12 +15,21 @@ export async function executeGraphWorkerCommand(options: {
 }): Promise<{ exitCode: number | null; output: string }> {
   const scratch = mkdtempSync(join(tmpdir(), "graph-worker-command-"));
   try {
+    const home = join(scratch, "home");
+    const config = join(home, ".config");
+    const cache = join(home, ".cache");
+    mkdirSync(config, { recursive: true });
+    mkdirSync(cache, { recursive: true });
+    const software = graphWorkerSoftware(options.workspace);
     const wrapped = graphWorkerSandbox({ executable: "/bin/sh", args: ["-c", options.command],
       workspace: options.workspace, dataDirectory: options.dataDirectory,
-      workspaceReadsOnly: true, scratchDirectory: scratch, inputPaths: options.inputPaths });
+      workspaceReadsOnly: true, scratchDirectory: scratch, inputPaths: options.inputPaths, softwareReadPaths: software.readPaths });
     return await new Promise((resolve, reject) => {
       const child = spawn(wrapped.executable, wrapped.args, { cwd: options.workspace, detached: true,
         env: { PATH: process.env.PATH, LANG: "C.UTF-8", TMPDIR: scratch, xcrun_db: join(scratch, "xcrun_db"),
+          HOME: home, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, ...software.env,
+          // Cocoa and Chromium on macOS do not use HOME/TMPDIR for these paths.
+          CFFIXED_USER_HOME: home, MAC_CHROMIUM_TMPDIR: scratch,
           ...(process.env.DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.DEVELOPER_DIR } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
       const buffers: Buffer[] = [];
       let bytes = 0;

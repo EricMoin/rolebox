@@ -29,6 +29,7 @@ export function graphWorkerSandbox(options: {
   scratchDirectory?: string;
   agentDirectory?: string;
   inputPaths?: readonly string[];
+  softwareReadPaths?: readonly string[];
 }): { executable: string; args: string[] } {
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
     throw new Error("Graph workers require an installed OS sandbox; this platform has no configured adapter");
@@ -48,7 +49,7 @@ export function graphWorkerSandbox(options: {
     "(deny process-info*)", "(allow process-info* (target self))",
   ];
   if (options.workspaceReadsOnly) {
-    const roots = [options.workspace, "/bin", "/sbin", "/usr", "/System", "/Library", "/opt", "/dev", "/private/etc", "/private/var/db", dirname(process.execPath), ...developerReadRoots(), ...(options.scratchDirectory ? [options.scratchDirectory] : []), ...(options.inputPaths ?? [])];
+    const roots = [options.workspace, "/bin", "/sbin", "/usr", "/System", "/Library", "/opt", "/dev", "/private/etc", "/private/var/db", dirname(process.execPath), ...developerReadRoots(), ...(options.softwareReadPaths ?? []), ...(options.scratchDirectory ? [options.scratchDirectory] : []), ...(options.inputPaths ?? [])];
     const writable = [options.workspace, "/dev", ...(options.scratchDirectory ? [options.scratchDirectory] : [])];
     profile.push(`(deny file-write* (require-all ${writable.map(path => `(require-not (subpath ${quoted(path)}))`).join(" ")}))`);
     profile.push(`(deny file-read-data (require-all ${roots.map(path => `(require-not (subpath ${quoted(path)}))`).join(" ")}))`);

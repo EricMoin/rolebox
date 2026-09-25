@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeGraphWorkerCommand } from "../../../src/platform/sandbox/worker-exec.ts";
@@ -31,3 +31,26 @@ it.skipIf(process.platform !== "darwin")("runs system git in the workspace while
   expect(readFileSync(join(dataDirectory, "private"), "utf8")).toBe("host-private-state");
   expect(readFileSync(join(root, "sibling"), "utf8")).toBe("sibling-private-state");
 }, 30_000);
+
+it.skipIf(process.platform !== "darwin")("provides disposable home, config and cache directories to work software", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "graph-worker-software-"));
+  roots.push(workspace);
+  const result = await executeGraphWorkerCommand({ workspace, dataDirectory: join(workspace, ".rolebox"), inputPaths: [],
+    command: 'test -d "$HOME" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && echo configured > "$HOME/settings" && echo cached > "$XDG_CACHE_HOME/cache" && printf "%s" "$HOME"' });
+  expect(result.exitCode, result.output).toBe(0);
+  expect(result.output).not.toBe("");
+  expect(existsSync(result.output)).toBe(false);
+});
+
+const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+it.skipIf(process.platform !== "darwin" || !existsSync(chrome))("renders, screenshots and closes an installed browser inside the command sandbox", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "graph-worker-browser-"));
+  roots.push(workspace);
+  copyFileSync(new URL("./fixtures/browser-probe.ts", import.meta.url), join(workspace, "browser-probe.ts"));
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  const result = await executeGraphWorkerCommand({ workspace, dataDirectory: join(workspace, ".rolebox"), inputPaths: [], timeoutMs: 20_000,
+    command: `${quote(process.execPath)} browser-probe.ts ${quote(chrome)}` });
+  expect(result.exitCode, result.output).toBe(0);
+  expect(result.output).toContain("worker-browser-ok\nbrowser-closed\n");
+  expect(readFileSync(join(workspace, "screenshot.png")).subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+}, 25_000);

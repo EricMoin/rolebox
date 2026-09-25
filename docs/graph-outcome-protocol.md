@@ -727,13 +727,31 @@ is installed — any platform without the sandbox executable — graph worker
 execution **fails closed**: it throws rather than running unsandboxed.
 
 Inside the sandbox, an invocation of `graph_worker_exec` runs each command in its
-own sandbox with a minimal environment (a path, a locale, a scratch directory and
-the selected developer toolchain), a bounded timeout and a bounded output size.
+own sandbox with a minimal environment (a path, a locale, disposable home/config/
+cache directories, browser installation paths and the selected developer
+toolchain), a bounded timeout and a bounded output size.
 Writes stay confined to the workspace and that command scratch directory. The
 worker may read the active developer toolchain selected by `xcode-select`,
 including Xcode's adjacent frameworks, and the toolchain's cache is redirected
 into the scratch directory so system tools can resolve their executables without
 writing to the user's cache.
+
+Installed work software is readable from `/Applications` and `~/Applications`,
+including app frameworks and helper executables. Playwright's
+`~/Library/Caches/ms-playwright` and Puppeteer's `~/.cache/puppeteer` browser
+installations are also readable. Host-configured `PLAYWRIGHT_BROWSERS_PATH`,
+`PUPPETEER_CACHE_DIR` and `PUPPETEER_EXECUTABLE_PATH` are preserved, with relative
+paths resolved against the session workspace; Playwright's `0` value continues
+to select package-local browsers. These grants cover installation resources,
+not write access to installations or access to the user's browser profiles.
+Browser profiles, caches and Chromium's macOS socket directory use the command
+scratch directory, which is removed when the command finishes. Persistent
+automation output should be written to the workspace.
+
+macOS does not support initializing Chromium's own sandbox inside the worker's
+Seatbelt sandbox. Use Playwright's default `chromiumSandbox: false`, or pass
+`args: ["--no-sandbox"]` to Puppeteer's `launch`. Chromium and its children remain
+inside the worker's OS sandbox, including the protected file boundaries below.
 
 A worker cannot read or modify the host state root, another worker's retained
 handoff, or sibling session records in protected directories. Its own declared
