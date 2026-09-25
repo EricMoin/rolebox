@@ -29,12 +29,14 @@ On Codex, rolebox resolves its directories under the Codex home (`$CODEX_HOME` w
 | reference_search | ✓ | ✓ | ✓ |
 | load_role_skill | — (native skill tool) | ✓ | ✓ |
 | session_list / session_read / session_search / session_info / session_diff / session_fork | ✓ | ✓ | — (not over MCP) |
-| graph_declare / graph_submit_outcome / graph_status / graph_audit | ✓ | ✓ | — (not over MCP) |
+| graph_declare / graph_submit_outcome / graph_status / graph_audit / graph_control | — (no host capability layer) | ✓ | — (no host capability layer) |
 | task_search / task_budget / task_graph / task_chronology / task_export (task_retry withheld) | ✓ | ✓ | — (not over MCP) |
 | lsp_* (32 tools) | ✓ | ✓ | — (not over MCP) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
+
+The graph tools ship with the dsh and Pi entries, the two hosts that own the outcome capability layer. dsh additionally registers `graph_worker_exec` for a session it has confirmed as a graph worker; a dispatched worker's granted graph face is `graph_submit_outcome`, plus `graph_worker_exec` on dsh, and a call outside that grant is refused.
 
 Remaining platform-inherent gaps (hot reload, extensions, recovery engine, TUI) are explicit non-goals on Pi and Codex — see [limitations.md](limitations.md).

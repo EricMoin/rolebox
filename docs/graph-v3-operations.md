@@ -1,11 +1,10 @@
-# Graph v3：执行限额、审批与存储恢复
+# Graph engine v3 operations
 
-本页记录当前 v3 操作约定。架构与平台限制见[协议说明](graph-outcome-protocol.md)，
-具体检查证据与尚未覆盖的环境见[执行计划](graph-v3-execution-plan.md)。
+This page is the operator's guide to the shipped Graph engine v3: the run-level execution ceiling, the per-node resource budgets, the host-installed configuration that authorizes approvals, completion and command checks, the identity of the on-disk store with the recovery rules that follow from it, and the repeatable checks that verify an installation. The declaration grammar and the acceptance semantics it produces are documented in [Graph outcome protocol (engine v3)](graph-outcome-protocol.md); the orientation and ownership map is in [Graph engine architecture](graph-engine-architecture.md). The capabilities this page configures are installed by an operator: a graph declaration may request a capability, never install or authorize one.
 
-## 运行级执行次数
+## Run-level execution limit
 
-在 v3 声明根部设置 `budget.max_executions`，值为非负安全整数：
+`budget.max_executions` is declared at the root of a version-3 declaration and must be a non-negative safe integer. It is the one ceiling that belongs to the run as a whole rather than to a single node:
 
 ```json
 {
@@ -24,23 +23,34 @@
 }
 ```
 
-额度属于一个 run，覆盖所有节点、循环轮次和新建的手动重试 attempt。派发效果、
-attempt 与额度预留在同一个 SQLite 事务中提交。同一 attempt 的投递重试和恢复
-不重复计数；结束、取消或对账不会返还已经预留的执行次数。终态图重新执行产生新 run，
-从新 run 的额度开始计数。未声明该字段表示没有次数上限；`0` 阻止首次派发。
+The allowance covers every node of the run, every loop iteration and every newly minted manual retry attempt: each entry dispatch, each successor an acceptance arms, and each attempt the `retry` control mints spends one execution. A re-delivery or a recovery of the *same* attempt spends nothing — that attempt already holds its claim, and the store answers the replay from the committed reservation. The dispatch effect, the attempt and the reservation commit in one SQLite transaction, so a claim that cannot be recorded is a dispatch that was never authorized.
 
-额度不足返回 `budget-exhausted`，不写入新 attempt、凭证或派发效果。如果一次接受
-需要同时启动后继节点，而后继节点不能预留额度，该接受事务整体回滚。已经派发的
-attempt 仍保留其身份；无需启动后继节点的终结结果可以在恰好用完额度时接受。
-预算报告同时列出 `runLimits.max_executions` 和 `totals.executions`。
+A reserved execution is never refunded. Settlement, cancellation and reconciliation all leave it counted; a released claim keeps its row and its place in the run's execution count. The ceiling therefore measures what the run was allowed to start, not what it finished. Re-executing a terminal run starts a new run with a fresh allowance: `retry` on a completed or stopped graph mints the successor run, and only that run's ceiling is read against it.
 
-节点级 `max_retries` 尚未实现自动重试语义。当前解析器、编译器及运行时均明确拒绝
-该字段，包括值 `0`；不能用它代替执行次数上限。
+An absent `budget` field means no execution ceiling. `max_executions: 0` blocks the first dispatch.
 
-## 宿主授予审批权
+When the allowance cannot cover a dispatch, the store refuses the claim and the operation answers `budget-exhausted`, naming the dimension, the committed amount and the declared ceiling; no attempt, credential, state change or dispatch effect is written for it. An acceptance that must arm a successor is refused whole when that successor cannot reserve: the transaction rolls back, so a graph never commits a state whose next node cannot be started. An attempt already in flight is never affected by such a refusal — its own claim stands and it runs to its settlement, which is why a terminal outcome that arms no successor is accepted even when it consumes the last execution.
 
-Pi 与 dsh 均在启动时从 `ROLEBOX_GRAPH_APPROVAL_POLICY` 读取 JSON 策略。
-这是操作者安装的可信配置，不是声明或工具参数：
+The budget report carries both numbers an operator reads a ceiling against: `runLimits.max_executions` is the declared ceiling (absent when the declaration set none) and `totals.executions` counts every authorized dispatch of the run. Usage that was never reported remains its own fact (`unknownUsageAttempts`) and is never folded into the totals as a zero.
+
+## Per-node budgets
+
+A node's `budget` declares resource ceilings for that node's attempts. Four keys are authorized; any other key is refused by name rather than ignored or defaulted away.
+
+| Key | Meaning |
+| --- | --- |
+| `max_input_tokens` | Ceiling on the input tokens recorded for this node. |
+| `max_output_tokens` | Ceiling on the output tokens recorded for this node. |
+| `max_cost_usd` | Ceiling on the cost recorded for this node, in US dollars. |
+| `timeout_ms` | Wall-clock ceiling for this node's attempt. `0` is the documented opt-out that disables the per-node staleness watchdog. |
+
+Every key is optional, and an absent key means the declaration declared no ceiling for that dimension — it does not mean zero, and it is not an unlimited default this build supplied. Recorded usage is compared against the declared ceiling, and an overrun is reported as the actual `used - limit`, never clamped and never rounded away; usage exactly at the ceiling is not an overrun. What the ceiling stops is the next dispatch: a claim is authorized only while recorded usage plus outstanding reservations stays below it. No overrun cancels work that already started — stopping a run for the budget's sake is the explicit `budget-stop` control, whose answer carries the run's budget report.
+
+`max_retries` is reserved syntax this build does not implement: automatic retry has no semantics here, so the parser, the compiler and the runtime all reject the key, including the value `0`. It cannot be used as a substitute for the run-level execution limit.
+
+## Host-granted approval authority
+
+Pi and dsh read a JSON policy from `ROLEBOX_GRAPH_APPROVAL_POLICY` at startup. It is operator-installed trusted configuration, never a declaration field or a tool argument:
 
 ```json
 {
@@ -57,41 +67,128 @@ Pi 与 dsh 均在启动时从 `ROLEBOX_GRAPH_APPROVAL_POLICY` 读取 JSON 策略
 }
 ```
 
-`graph_control` 的 `approval-request` 只能提名策略允许的审批会话，并且仍需指定
-`expires_at`。`independent-review` 是默认模式，即使声明者出现在允许列表中也禁止
-自批。只有显式配置 `operator-confirmation` 才允许确认自己发起的请求；该模式不提供
-独立审查。重复作用于同一 graph/node 的策略规则会被拒绝。
-
-请求保存策略 ID、revision、内容摘要和模式。`approve`/`reject` 必须来自请求记录的
-会话，且宿主仍安装相同的策略内容。同名同 revision 的策略若内容变化，也不能决定
-原来的待审批请求。配置缺失或无效时拒绝创建审批请求，不退回“声明者任选审批人”。
-
-需要审批的 outcome 使用 `principal-approval@1` 验收原语。生产能力预检会在声明阶段
-拒绝缺少对应审批策略的图。旧实验原语 `human-approval` 已移除：平台会话归属只能
-证明主体身份，不能证明操作者是真人。当前配置与验收均不作真人操作来源保证。
-
-## 存储身份与恢复
-
-当前存储格式为 **9**。SQLite 元数据的 `store_id` 与同目录的
-`graph-store.identity` 相互绑定。身份文件只保存版本和随机存储 ID，不保存图、
-attempt、回执、凭证或策略；所有业务状态仍以 SQLite 为唯一权威。
-
-首次初始化先独占创建并同步身份文件，再初始化数据库。只有两者都不存在、且没有
-退役权威记录的目录才可首次初始化。后续行为如下：
-
-| 情况 | 行为 |
+| Field | Meaning |
 | --- | --- |
-| 身份存在，数据库缺失 | 返回存储错误，停止恢复，不重建数据库 |
-| 初始化在身份创建后中断 | 明确阻塞；不把中断当成新工作区继续初始化 |
-| 数据库为空、结构损坏或身份不匹配 | 拒绝读取和执行 |
-| 数据库存在，身份文件缺失或损坏 | 拒绝重新绑定 |
-| 正常备份恢复 | 停止宿主后恢复一致的数据库与匹配身份文件，再启动核对 |
-| 旧存储格式 | 明确不支持，不迁移、不覆盖、不自动执行 |
+| `id` | The policy identity a raised request pins. |
+| `revision` | The exact revision a raised request pins; an opaque identifier, never a "latest" pointer. |
+| `rules[].graphId` | The declared graph name the rule applies to. |
+| `rules[].nodeId` | The node of that graph the rule applies to. |
+| `rules[].approverSessions` | The non-empty list of sessions allowed to decide that node's request. |
+| `rules[].mode` | `independent-review` (the default when omitted) or `operator-confirmation`. |
 
-已经打开的连接也会检查文件是否消失、被替换或身份改变。并发首次初始化只有
-身份创建者可以写入；其他调用遇到初始化尚未完成时明确拒绝，待完整初始化后可重新打开。
-失败初始化留下的记录不能自动删除或改绑。
+Two rules covering the same graph and node are ambiguous, so the whole policy is refused rather than resolved by order. A missing or invalid policy installs nothing, and every approval request is then refused — there is no fallback to "the declarer picks an approver".
 
-数据库与全部外部身份记录若一起丢失，就无法从本地恢复历史。此时新建空存储不含
-任何待恢复图，也不会凭空重新执行历史工作；应先恢复备份或人工核对宿主执行事实。
-这些机制用于防止意外重建和状态改绑，不构成对同账号 worker 的操作系统权限隔离。
+`graph_control` with `approval-request` may only nominate a session the installed policy allows and must also carry `expires_at`. `independent-review` is the default mode and forbids self-approval even when the requester appears in `approverSessions`; only an explicitly configured `operator-confirmation` rule permits confirming a request one raised itself, and that mode claims no independent review. A deadline that has already passed is refused rather than stored.
+
+A raised request pins the policy identity — its id, revision, content digest and mode. `approve` and `reject` must come from the session the request recorded, and only while the host still installs the same policy content: a revision republished under the same identity with different content cannot decide a pending request, and a decision arriving after the deadline is refused as an expiry, after which the request can never be approved.
+
+An outcome that requires host approval declares the `principal-approval@1` acceptance primitive. The capability preflight refuses a declaration whose graph and node have no installed approval rule, before anything is dispatched. The former experimental `human-approval` primitive is gone: platform session attribution proves which principal called, never that a human did, so no configuration or acceptance path claims human provenance.
+
+## Completion policies and command checks
+
+`ROLEBOX_GRAPH_COMPLETION_POLICIES` installs the completion policies a host may resolve a natural-completion request against:
+
+```json
+{
+  "declare": [
+    {
+      "id": "team.completion",
+      "revision": "1",
+      "body": {
+        "version": 1,
+        "default": "deny",
+        "rules": [
+          {
+            "graphId": "review-flow",
+            "nodeId": "work",
+            "outcome": "done",
+            "decision": "allow"
+          }
+        ]
+      }
+    }
+  ],
+  "authorize": ["team.completion@1"]
+}
+```
+
+`declare` offers bodies the operator authored; `authorize` names the exact `id@revision` identities the host installs, and both halves are required — a body that does not hash to the identity it was authorized under is refused, and an offered declaration nobody authorized is not installed. Inside a body, `default` is `deny` (a mapping no rule lists is explicitly forbidden) or `ungranted` (silence: not authorized, and not forbidden either), and one mapping carries at most one rule. With no configuration the registry is empty, and a request for a policy that is not installed is refused. This repository ships declarations under the id `rolebox.graph.completion`, revisions `1` (default `ungranted`) and `2` (default `deny`), neither of which is installed until an operator authorizes it.
+
+A declaration requests a revision with its root-level `completion_policy` field, which names an `id` and a `revision` and nothing else. The request is a request: the installed body decides the mapping, and a declaration cannot carry rules, a body or a digest.
+
+`ROLEBOX_GRAPH_COMMAND_CHECKS` installs the trusted commands a `command-exit` acceptance requirement is judged by. The value is a JSON array of bindings:
+
+```json
+[
+  {
+    "graph": "review-flow",
+    "node": "work",
+    "outcome": "done",
+    "argv": ["bun", "run", "typecheck"],
+    "cwd": "/path/to/project",
+    "timeout_ms": 120000,
+    "expect_exit_code": 0,
+    "artifact_refs": ["reports/typecheck.txt"]
+  }
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `graph` | The declared graph the command is authorized for. |
+| `node` | The node of that graph. |
+| `outcome` | The one outcome of that node. |
+| `argv` | The non-empty argument vector to run. |
+| `cwd` | The working directory the command runs in. |
+| `timeout_ms` | A positive safe integer: the command's time limit. |
+| `expect_exit_code` | The safe integer exit code the command must return. |
+| `artifact_refs` | At least one non-empty artifact the command is bound to. |
+
+One mapping — the exact graph, node and outcome triple — has exactly one trusted command; two configured bindings for the same mapping are ambiguous, so neither installs. A mapping with no configured binding fails closed rather than passing. With an empty configuration no command is authorized, which is the honest shipped default.
+
+None of these environment variables is reachable from a declaration, a worker payload or a tool argument, and a declaration can never install or authorize a capability: a graph may request an exact completion-policy revision, and the optional narrowing a caller states while declaring can only select from the capabilities the host already installed — an entry the host did not install refuses the declaration instead of adding anything to it.
+
+## Store identity and recovery
+
+The current store format is **9**. One workspace owns one authoritative SQLite database and an adjacent identity marker named `graph-store.identity`. The database's metadata row carries a `store_id` that must equal the id in that marker; the marker holds only its own marker-format version — `1`, which is not the store format — and a random store id, never a graph, attempt, receipt, credential or policy. Every business fact stays in the database.
+
+First initialization requires a directory in which the database, the identity marker and any retired authority record are all absent. The opener claims the identity marker first, by exclusive creation synced to disk, and only then creates and verifies the schema and the format-version row in one transaction.
+
+| Situation | Behaviour |
+| --- | --- |
+| Identity marker present, database missing | Refused as a storage error; recovery stops, and the database is never recreated. |
+| Initialization interrupted after the identity marker was created | Explicitly blocked; the interruption is not treated as a fresh workspace to initialize. |
+| Database empty, structurally corrupt, or bound to a different store id | Refused before a record is read: a zero-byte file is a damaged store, not an absent one. |
+| Database present, identity marker missing or malformed | The store is refused; the binding is never re-created over it. |
+| Consistent backup restore | Stop every process holding the store, restore the database together with its matching identity marker, then start the host and let the open gate verify the format version, the tables and the binding. |
+| Any store format other than 9 | Refused: older formats have no registered migration, and newer ones are not read. |
+
+A database whose header declares WAL journal mode is refused by the read-only load path: opening it would attach to and rewrite its shared-memory side file, so the readers refuse it rather than change the store they are reading.
+
+An already-open connection re-checks its file: a database that disappeared, a file that was replaced (a different device and inode), or a changed identity binding is refused while handles are open, so restoring files under a running host cannot silently rebind a live store. Concurrent first initialization is decided by the exclusive creation of the identity marker — only its creator may write; every other caller is refused while initialization is incomplete and may reopen once it has completed. Records a failed initialization left behind are never deleted or rebound automatically.
+
+If the database and every external identity record are lost together, local history cannot be recovered from that machine: the now-absent directory initializes a fresh, empty store, which contains no graph to recover and nothing that re-executes the historical work on its own. Restore a backup, or reconcile the host's execution facts by hand, before declaring new work there. These mechanisms prevent accidental re-creation and silent rebinding; they are not operating-system isolation from a worker on the same account.
+
+## Verifying an installation
+
+Two repeatable real-host checks drive actual SDK agent loops, the host's registered tools and deterministic local model responses, and each ends by starting a fresh process over the same workspace to verify recovery:
+
+| Check | Command |
+| --- | --- |
+| Pi host | `bun run scripts/graph-smoke/pi` |
+| dsh host | `bun run scripts/graph-smoke/dsh` |
+
+Bun resolves each of those entry names without its extension; the two entries are the Pi and dsh smoke scripts in that directory. They call no external model provider, and they do not certify every deployment profile.
+
+The engine's own module slice is the repeatable in-process check:
+
+```sh
+bun test --isolate tests/graph/
+```
+
+`bun run typecheck` checks types without running any test. The full test suite is CI's job, not a local step after a documentation or configuration change.
+
+## See also
+
+- [Graph outcome protocol (engine v3)](graph-outcome-protocol.md) — the declaration grammar, acceptance, controls and storage semantics this guide configures.
+- [Graph engine architecture](graph-engine-architecture.md) — orientation, ownership and platform limits.
