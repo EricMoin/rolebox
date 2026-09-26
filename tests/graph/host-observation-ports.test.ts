@@ -16,7 +16,15 @@
  *     the platform reports as ended WITHOUT reaching its authorized outcome;
  *   - F3: the port is asked with the graph's own recorded invocation, and its
  *     asynchronous `prime` phase runs BEFORE the synchronous run path asks —
- *     the probe is the stable effect key the create carried.
+ *     the probe is the stable effect key the create carried;
+ *   - DEFECT 2: a finished execution is settled by ONE entry, which asks the
+ *     plan's own completion FIRST and then the outcome the WORKER'S OWN LAST
+ *     TURN declared (`derivedOutcomeOf`). A declared reading settles through the
+ *     derived channel; an absent reading, a throwing reader and a host with no
+ *     reader at all leave the attempt unsettled and REPORTED, with no accepted
+ *     event, no receipt and no fabricated outcome. The file also pins that a
+ *     node-scoped `failure` is reported in `failedAttempts`, never in
+ *     `controlled`: a failure ends ONE attempt, not the run.
  *
  * A FALSE `absent` IS THE DANGEROUS ANSWER (plan §8.3 O2): the "platform cannot
  * find it" case below asserts that the stranded claim is NOT released and the
@@ -35,9 +43,15 @@ import { join } from "node:path";
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";
 import type {
   HostCompletionWatchPort,
+  HostDerivedOutcome,
   HostExecutionObservation,
 } from "../../src/graph/host/outcome-host.ts";
-import { HostExecutionIndex } from "../../src/graph/host/execution-index.ts";
+import {
+  HostExecutionIndex,
+  type HostExecutionIdentity,
+} from "../../src/graph/host/execution-index.ts";
+import { GraphStore } from "../../src/graph/store/graph-store.ts";
+import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import {
   dispatchEffectKeyOf,
@@ -59,6 +73,27 @@ import {
 
 const ATTEMPT_ID = "work#1";
 const PLATFORM_EXECUTION_ID = "platform-execution-unconfirmed";
+
+/**
+ * The SAME one-node graph with NO natural completion pinned: the outcome is the
+ * worker's own (`explicit`), so the plan's completion channel cannot settle it
+ * and the derived channel is the only one that can.
+ */
+function submittedNodeDeclaration() {
+  return {
+    version: 3 as const,
+    name: GRAPH_ID,
+    nodes: [
+      {
+        id: "work",
+        agent: "agent.work",
+        prompt: "Do the work.",
+        outcomes: [{ id: "done" }],
+      },
+    ],
+    edges: [],
+  };
+}
 
 /** One node completing naturally — the plan authorizes exactly this mapping. */
 function singleNodeDeclaration() {
@@ -161,6 +196,8 @@ function open(options: {
   readonly state: PlatformDouble;
   readonly installPorts?: boolean;
   readonly watch?: boolean;
+  /** The platform's reading of a finished execution's own last turn (DEFECT 2). */
+  readonly derivedOutcomeOf?: (execution: HostExecutionIdentity) => HostDerivedOutcome;
 }): OutcomeHost {
   const ports = portsFor(options.state);
   const host = OutcomeHost.open({
@@ -178,6 +215,9 @@ function open(options: {
           observeExecution: ports.observeExecution,
           ...(options.watch === true ? { watchCompletion: ports.watchCompletion } : {}),
         }),
+    ...(options.derivedOutcomeOf === undefined
+      ? {}
+      : { derivedOutcomeOf: options.derivedOutcomeOf }),
   });
   openHosts.push(host);
   return host;
@@ -198,12 +238,76 @@ function fixture(prefix: string): { dir: string; storeRoot: string } {
 
 /** The authoritative accepted-event count, from a fresh connection. */
 async function acceptedEvents(storeRoot: string): Promise<number> {
+  return (await acceptedRecords(storeRoot)).length;
+}
+
+/** Every accepted event of the graph, from a fresh connection. */
+async function acceptedRecords(storeRoot: string) {
   const ledger = await SqliteAcceptanceLedger.create(storeRoot);
   try {
-    return ledger.acceptedEvents(GRAPH_ID).length;
+    return ledger.acceptedEvents(GRAPH_ID);
   } finally {
     ledger.close();
   }
+}
+
+/** Every receipt row of the graph's store — the acceptance's own record. */
+function receiptCount(storeRoot: string): number {
+  const store = GraphStore.openFile(storeRoot);
+  try {
+    return store.all("SELECT submission_id FROM " + GRAPH_STORE_TABLES.receipts).length;
+  } finally {
+    store.close();
+  }
+}
+
+/** One explicit-mode fixture: no natural completion is pinned for the node. */
+function submittedFixture(prefix: string): { dir: string; storeRoot: string } {
+  const dir = makeTmpDir(prefix);
+  const storeRoot = join(dir, "host-store");
+  persistDeclaredGraph(
+    buildDeclaredOutcomeGraph({ declaration: submittedNodeDeclaration() }),
+    storeRoot,
+  );
+  return { dir, storeRoot };
+}
+
+/**
+ * One NATURAL-completion fixture whose only attempt is CONFIRMED and still in
+ * flight. The plan pins this node's outcome, so the plan's own completion
+ * channel CAN settle it — which is what makes the ORDER of the one
+ * finished-attempt entry assertable (the pinned channel is asked first, and the
+ * worker's own last turn is never allowed to choose a different outcome).
+ */
+async function naturalAwaiting(
+  prefix: string,
+  derivedOutcomeOf?: (execution: HostExecutionIdentity) => HostDerivedOutcome,
+): Promise<{ host: OutcomeHost; storeRoot: string }> {
+  const { dir, storeRoot } = fixture(prefix);
+  const first = open({
+    dir,
+    storeRoot,
+    deliveries: [],
+    state: makePlatform(),
+    installPorts: false,
+  });
+  await first.startDeclaredGraph(GRAPH_ID, {
+    sessionId: "session.declarer",
+    agent: "agent.declarer",
+  });
+  first.confirmExecution(dispatchEffectKeyOf(GRAPH_ID, ATTEMPT_ID), {
+    executionId: PLATFORM_EXECUTION_ID,
+  });
+  first.close();
+
+  const host = open({
+    dir,
+    storeRoot,
+    deliveries: [],
+    state: makePlatform({ observation: Object.freeze({ kind: "completed" as const }) }),
+    ...(derivedOutcomeOf === undefined ? {} : { derivedOutcomeOf }),
+  });
+  return { host, storeRoot };
 }
 
 /** One dispatch, never confirmed, then the process exits. */
@@ -505,7 +609,14 @@ describe("F4 — the awaiting inventory is consumed", () => {
     });
     const sweep = await host.recoverDeclaredGraphs();
     expect(sweep.completed).toEqual([]);
-    expect(sweep.controlled).toContain(GRAPH_ID + ":failure");
+    // A NODE-SCOPED FAILURE IS NOT A RUN-LEVEL STOP: the run keeps executing, so
+    // the sweep names the ATTEMPT it ended (with the command) and claims no run
+    // control fact. Reporting `graph:failure` in `controlled` would tell every
+    // reader the whole run had stopped.
+    expect(sweep.controlled).toEqual([]);
+    expect(sweep.failedAttempts).toEqual([
+      GRAPH_ID + ":work:" + ATTEMPT_ID + ":failure",
+    ]);
     expect(await acceptedEvents(storeRoot)).toBe(0);
     expect(deliveries).toEqual([]);
     // A failed end is not put in the listening inventory either: nothing is left
@@ -563,7 +674,12 @@ describe("F4 — the awaiting inventory is consumed", () => {
     const again = await host.recoverDeclaredGraphs();
     expect(again.completed).toEqual([]);
     expect(again.awaitingCompletion).toEqual([]);
-    expect(again.controlled).toContain(GRAPH_ID + ":failure");
+    // STILL AN ATTEMPT-SCOPED FACT on the next window (the decision is durable
+    // and replayed), and still NOT a run-level stop.
+    expect(again.controlled).toEqual([]);
+    expect(again.failedAttempts).toEqual([
+      GRAPH_ID + ":work:" + ATTEMPT_ID + ":failure",
+    ]);
     expect(deliveries).toEqual([]);
     expect(await acceptedEvents(storeRoot)).toBe(0);
   });
@@ -630,5 +746,348 @@ describe("F3 — the platform port is primed before the run path asks", () => {
     expect(state.order[0]).toBe("prime");
     expect(state.order).toContain("lookup");
     expect(state.order.indexOf("prime")).toBeLessThan(state.order.indexOf("lookup"));
+  });
+});
+
+// ── DEFECT 2: ONE entry for a finished execution ────────────────────────────
+//
+// THE DEFECT THIS PINS SHUT. Both the sweep and the watch end at "this execution
+// is over", and both used to ask ONLY the plan's pinned completion. An execution
+// that ends WITHOUT one — a worker that answered in prose, a run whose tool call
+// never arrived — had no channel at all, so the attempt stayed in flight
+// forever. The entry now asks the plan FIRST and then the outcome the WORKER'S
+// OWN LAST TURN declared, through the platform's reading port. The outcome is
+// never chosen by the host: a declared reading is settled through the
+// credential-free host-derived channel (the runtime authenticates it against the
+// host's own confirmed execution and the plan decides), and every negative
+// reading leaves the attempt unsettled and REPORTED.
+//
+// The graph here pins NO natural completion (the outcome is the worker's own), so
+// the plan's own channel CANNOT settle it and the derived channel is the only
+// one that can — which is exactly what makes these assertions about the new
+// entry rather than about the old one.
+
+/**
+ * The `completion-unsettled` refusals of one sweep, in report order.
+ *
+ * The OTHER refusal a restarted host reports here is orthogonal to this entry:
+ * the shipped vault keeps no credential VALUE, so the resume of an effect that
+ * was handed to the platform reports `credential-reissue-forbidden` and leaves
+ * it pending. These cases are about what the "the execution ended" entry did, so
+ * they read their own refusal out of the report instead of asserting the whole
+ * list.
+ */
+function completionUnsettled(
+  refusals: readonly { readonly code: string; readonly message: string }[],
+): readonly { readonly code: string; readonly message: string }[] {
+  return refusals.filter((refusal) => refusal.code === "completion-unsettled");
+}
+
+/** The reading a finished worker's last turn published: one declaration. */
+function declaredReading(outcomeId: string, data?: unknown): HostDerivedOutcome {
+  return Object.freeze({
+    kind: "declared" as const,
+    outcomeId,
+    ...(data === undefined ? {} : { data }),
+    derivation: { eventIndex: 4, turnIndex: 6 },
+  });
+}
+
+describe("DEFECT 2 — the worker's own last turn settles a finished execution", () => {
+  /**
+   * One explicit-mode graph whose only attempt is CONFIRMED and still in flight,
+   * handed to a FRESH host that installs the reading port under test.
+   */
+  async function submittedAwaiting(
+    prefix: string,
+    derivedOutcomeOf?: (execution: HostExecutionIdentity) => HostDerivedOutcome,
+    observation: HostExecutionObservation = Object.freeze({ kind: "completed" as const }),
+  ): Promise<{
+    host: OutcomeHost;
+    deliveries: OutcomeDispatchRequest[];
+    state: PlatformDouble;
+    storeRoot: string;
+  }> {
+    const { dir, storeRoot } = submittedFixture(prefix);
+    const deliveriesOne: OutcomeDispatchRequest[] = [];
+    const hostOne = open({
+      dir,
+      storeRoot,
+      deliveries: deliveriesOne,
+      state: makePlatform(),
+      installPorts: false,
+    });
+    await hostOne.startDeclaredGraph(GRAPH_ID, {
+      sessionId: "session.declarer",
+      agent: "agent.declarer",
+    });
+    hostOne.confirmExecution(dispatchEffectKeyOf(GRAPH_ID, ATTEMPT_ID), {
+      executionId: PLATFORM_EXECUTION_ID,
+    });
+    hostOne.close();
+
+    const deliveries: OutcomeDispatchRequest[] = [];
+    const state = makePlatform({ observation });
+    const host = open({
+      dir,
+      storeRoot,
+      deliveries,
+      state,
+      ...(derivedOutcomeOf === undefined ? {} : { derivedOutcomeOf }),
+    });
+    return { host, deliveries, state, storeRoot };
+  }
+
+  it("settles a DECLARED last turn through the derived channel, and writes it once", async () => {
+    const reads: string[] = [];
+    const { host, deliveries, storeRoot } = await submittedAwaiting(
+      "host-derived-declared-",
+      (execution) => {
+        reads.push(execution.executionId);
+        return declaredReading("done", { answer: 42 });
+      },
+    );
+
+    const sweep = await host.recoverDeclaredGraphs();
+    // THE PLAN'S OWN CHANNEL CANNOT SETTLE THIS NODE (no natural completion is
+    // pinned), so the attempt is settled by the outcome the WORKER'S OWN LAST
+    // TURN declared — reported as `derived`, never as `completion`.
+    expect(sweep.completed).toEqual([GRAPH_ID + ":" + ATTEMPT_ID + ":derived"]);
+    // NOTHING was left unsettled: the attempt settled, so the entry reports no
+    // `completion-unsettled` block for it.
+    expect(completionUnsettled(sweep.effectRefusals)).toEqual([]);
+    expect(sweep.awaitingCompletion).toEqual([]);
+    // THE READER WAS ASKED ABOUT THE HOST'S OWN CONFIRMED EXECUTION — the id the
+    // host recorded, never a caller-supplied value.
+    expect(reads).toEqual([PLATFORM_EXECUTION_ID]);
+
+    const accepted = await acceptedRecords(storeRoot);
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]?.attemptId).toBe(ATTEMPT_ID);
+    // THE OUTCOME IS THE WORKER'S OWN DECLARATION, not one the host picked.
+    expect(accepted[0]?.outcomeId).toBe("done");
+    // AND ITS PROVENANCE IS THE DERIVED CHANNEL'S KEY, so a reader can tell the
+    // settlement came from the worker's own turn.
+    expect(accepted[0]?.submissionId.startsWith("host-derived:")).toBe(true);
+
+    // THE DECLARED PAYLOAD TRAVELLED WITH IT, unaltered.
+    const ledger = await SqliteAcceptanceLedger.create(storeRoot);
+    try {
+      expect(ledger.readAcceptedResult(GRAPH_ID, ATTEMPT_ID)?.payload).toEqual({
+        kind: "value",
+        value: { answer: 42 },
+      });
+    } finally {
+      ledger.close();
+    }
+
+    // A REPEATED WINDOW SETTLES NOTHING TWICE: the attempt is already settled.
+    const again = await host.recoverDeclaredGraphs();
+    expect(again.completed).toEqual([]);
+    expect(again.awaitingCompletion).toEqual([]);
+    expect((await acceptedRecords(storeRoot)).length).toBe(1);
+    expect(deliveries).toEqual([]);
+  });
+
+  it("leaves the attempt unsettled and REPORTS an ABSENT last-turn reading", async () => {
+    const { host, storeRoot } = await submittedAwaiting("host-derived-absent-", () =>
+      Object.freeze({
+        kind: "absent" as const,
+        reason: "the final dsh turn carried no fenced json declaration",
+      }),
+    );
+
+    const sweep = await host.recoverDeclaredGraphs();
+    expect(sweep.completed).toEqual([]);
+    expect(sweep.awaitingCompletion).toEqual([]);
+    // REPORTED, not silently stranded: the attempt is named with the reader's
+    // own reason, beside why the plan's own channel did not settle it.
+    const unsettled = completionUnsettled(sweep.effectRefusals);
+    expect(unsettled).toHaveLength(1);
+    const message = unsettled[0]?.message ?? "";
+    expect(message).toContain("ABSENT");
+    expect(message).toContain("no fenced json declaration");
+    expect(message).toContain(ATTEMPT_ID);
+    // NO FABRICATED OUTCOME AND NO RECEIPT: nothing was accepted and nothing was
+    // even decided.
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+    expect(receiptCount(storeRoot)).toBe(0);
+  });
+
+  it("treats a THROWING reading port as unavailable, never as a settlement", async () => {
+    const { host, storeRoot } = await submittedAwaiting("host-derived-throwing-", () => {
+      throw new Error("the child session log could not be read");
+    });
+
+    const sweep = await host.recoverDeclaredGraphs();
+    expect(sweep.completed).toEqual([]);
+    const unsettled = completionUnsettled(sweep.effectRefusals);
+    expect(unsettled).toHaveLength(1);
+    // THE PORT IS TOTAL: a reader that throws has NOT answered, so it is
+    // reported `unavailable` with its own text — never rounded into an outcome.
+    const message = unsettled[0]?.message ?? "";
+    expect(message).toContain("UNAVAILABLE");
+    expect(message).toContain("the child session log could not be read");
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+    expect(receiptCount(storeRoot)).toBe(0);
+  });
+
+  it("reports a host with NO reading port instead of inventing an outcome", async () => {
+    const { host, storeRoot } = await submittedAwaiting("host-derived-noport-");
+
+    const sweep = await host.recoverDeclaredGraphs();
+    expect(sweep.completed).toEqual([]);
+    const unsettled = completionUnsettled(sweep.effectRefusals);
+    expect(unsettled).toHaveLength(1);
+    expect(unsettled[0]?.message).toContain(
+      "installs no last-turn reading port",
+    );
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+    expect(receiptCount(storeRoot)).toBe(0);
+  });
+
+  it("settles a declared last turn from the watch path's terminal RE-QUERY too", async () => {
+    // The execution is still running when the sweep looks, so it is named in the
+    // awaiting inventory; no watch port is installed here, which is exactly the
+    // branch that re-queries the platform once more.
+    const { host, state, storeRoot } = await submittedAwaiting(
+      "host-derived-requery-",
+      () => declaredReading("done"),
+      Object.freeze({ kind: "running" as const }),
+    );
+    const sweep = await host.recoverDeclaredGraphs();
+    expect(sweep.awaitingCompletion.map((entry) => entry.executionId)).toEqual([
+      PLATFORM_EXECUTION_ID,
+    ]);
+    expect(sweep.completed).toEqual([]);
+
+    // The execution finishes; the host's own read now says so.
+    state.observation = Object.freeze({ kind: "completed" as const });
+    const watching = await host.retainAwaitingCompletions(sweep.awaitingCompletion);
+    expect(watching.watched).toEqual([]);
+    expect(watching.settled).toEqual([GRAPH_ID + ":" + ATTEMPT_ID + ":derived"]);
+    expect(await acceptedEvents(storeRoot)).toBe(1);
+  });
+
+  it("REPORTS the derived channel as 'derived' through the public entry, and settles once", async () => {
+    const reads: string[] = [];
+    const { host, storeRoot } = await submittedAwaiting(
+      "host-derived-entry-",
+      (execution) => {
+        reads.push(execution.executionId);
+        return declaredReading("done", { answer: 42 });
+      },
+    );
+
+    const report = await host.settleFinishedAttempt(GRAPH_ID, ATTEMPT_ID);
+    expect(report.kind).toBe("settled");
+    if (report.kind !== "settled") return;
+    // THE CHANNEL IS NAMED. A worker-declared settlement is never reported as
+    // the plan's own pinned completion, and the settlement record carries the
+    // host-derived provenance key the ledger persisted.
+    expect(report.channel).toBe("derived");
+    if (report.channel !== "derived") return;
+    expect(report.nodeId).toBe("work");
+    expect(report.attemptId).toBe(ATTEMPT_ID);
+    expect(report.settlement.source).toBe("host-derived");
+    expect(report.settlement.outcomeId).toBe("done");
+    expect(report.settlement.attemptId).toBe(ATTEMPT_ID);
+    expect(report.settlement.submissionId.startsWith("host-derived:")).toBe(true);
+    // THE READER WAS ASKED ABOUT THE HOST'S OWN CONFIRMED EXECUTION.
+    expect(reads).toEqual([PLATFORM_EXECUTION_ID]);
+
+    // A SECOND ANNOUNCEMENT SETTLES NOTHING: the entry is idempotent and names
+    // the settlement that already stands, writing nothing.
+    const again = await host.settleFinishedAttempt(GRAPH_ID, ATTEMPT_ID);
+    expect(again.kind).toBe("already-settled");
+    if (again.kind !== "already-settled") return;
+    expect(again.attemptId).toBe(ATTEMPT_ID);
+    expect(again.submissionId).toBe(report.settlement.submissionId);
+    expect((await acceptedRecords(storeRoot)).length).toBe(1);
+    expect(reads).toEqual([PLATFORM_EXECUTION_ID]);
+  });
+
+  it("asks the plan's OWN channel first: a pinned completion settles as 'completion' and the last turn is never consulted", async () => {
+    const reads: string[] = [];
+    const { host, storeRoot } = await naturalAwaiting(
+      "host-natural-channel-",
+      (execution) => {
+        reads.push(execution.executionId);
+        return declaredReading("other");
+      },
+    );
+
+    const report = await host.settleFinishedAttempt(GRAPH_ID, ATTEMPT_ID);
+    expect(report.kind).toBe("settled");
+    if (report.kind !== "settled") return;
+    expect(report.channel).toBe("completion");
+    if (report.channel !== "completion") return;
+    // THE SETTLEMENT IS THE PLAN'S OWN PINNED MAPPING — its submission key is
+    // the natural channel's, never the host-derived one.
+    expect(report.settlement.kind).toBe("accepted");
+    if (report.settlement.kind !== "accepted") return;
+    expect(report.settlement.completion.outcomeId).toBe("done");
+    expect(report.settlement.completion.source).toBe("natural-completion");
+    expect(
+      report.settlement.completion.submissionId.startsWith("natural-completion:"),
+    ).toBe(true);
+    // THE WORKER'S OWN TURN WAS NEVER ASKED: the plan pinned this node's outcome
+    // and a declaration must not override it.
+    expect(reads).toEqual([]);
+    const accepted = await acceptedRecords(storeRoot);
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]?.outcomeId).toBe("done");
+    expect(accepted[0]?.submissionId.startsWith("natural-completion:")).toBe(true);
+  });
+
+  it("keeps an outcome the PLAN does not declare unsettled, refused by name", async () => {
+    const { host, storeRoot } = await submittedAwaiting("host-derived-undeclared-", () =>
+      declaredReading("winner"),
+    );
+
+    const report = await host.settleFinishedAttempt(GRAPH_ID, ATTEMPT_ID);
+    expect(report.kind).toBe("unsettled");
+    if (report.kind !== "unsettled") return;
+    expect(report.attemptId).toBe(ATTEMPT_ID);
+    expect(report.nodeId).toBe("work");
+    // THE PLAN DECIDES: the host never chooses an outcome, and one the plan does
+    // not declare is refused by the acceptance core — by name, and before
+    // anything is written.
+    expect(report.refusals.map((refusal) => refusal.code)).toEqual([
+      "undeclared-outcome",
+    ]);
+    // NO RECEIPT AND NO ACCEPTED EVENT: a refusal decides nothing.
+    expect(await acceptedEvents(storeRoot)).toBe(0);
+    expect(receiptCount(storeRoot)).toBe(0);
+  });
+
+  it("reports every other NEGATIVE reading as unsettled, with nothing written", async () => {
+    for (const kind of ["ambiguous", "malformed", "unavailable"] as const) {
+      const { host, storeRoot } = await submittedAwaiting(
+        "host-derived-" + kind + "-",
+        () => Object.freeze({ kind, reason: "the reading is " + kind }),
+      );
+      const report = await host.settleFinishedAttempt(GRAPH_ID, ATTEMPT_ID);
+      expect(report.kind).toBe("unsettled");
+      if (report.kind !== "unsettled") continue;
+      // THE NEGATIVE KIND IS NAMED, with the reader's own reason: the answer is
+      // reported, never repaired into an outcome.
+      expect(report.reason).toContain(kind.toUpperCase());
+      expect(report.reason).toContain("the reading is " + kind);
+      expect(report.refusals).toEqual([]);
+      expect(await acceptedEvents(storeRoot)).toBe(0);
+      expect(receiptCount(storeRoot)).toBe(0);
+    }
+  });
+
+  it("reports an UNOPENABLE graph as unsettled instead of throwing", async () => {
+    const { host } = await submittedAwaiting("host-derived-unopenable-", () =>
+      declaredReading("done"),
+    );
+    const report = await host.settleFinishedAttempt("graph.not-declared-here", ATTEMPT_ID);
+    expect(report.kind).toBe("unsettled");
+    if (report.kind !== "unsettled") return;
+    expect(report.reason).toContain("could not be opened");
+    expect(report.refusals).toEqual([]);
   });
 });

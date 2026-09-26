@@ -10,6 +10,7 @@ import type {
   OutcomeReexecutionResult,
   OutcomeSubmissionResult,
   OutcomeNaturalSettlementResult,
+  OutcomeHostDerivedSettlementResult,
   OutcomeArmedNode,
   OutcomeReconciledReason,
   OutcomeReconciledEffect,
@@ -32,6 +33,7 @@ export type {
   OutcomeReexecutionResult,
   OutcomeSubmissionResult,
   OutcomeNaturalSettlementResult,
+  OutcomeHostDerivedSettlementResult,
   OutcomeArmedNode,
   OutcomeReconciledReason,
   OutcomeReconciledEffect,
@@ -57,9 +59,11 @@ import type {
   AcceptanceLedgerTx,
   AcceptedResultEvidence,
   ApprovalRequestRecord,
+  ControlDecisionRecord,
   GraphStateRecord,
   PendingEffectRecord, RunControlRecord
 } from "../ledger/types.ts";
+import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import type { ExecutionProtocolRegistry } from "../protocol/execution-protocol.ts";
 import {
   bindingOf,
@@ -141,6 +145,12 @@ import {
   naturalCompletionSubmissionId,
   readNaturalCompletionDelivery
 } from "./natural-completion.ts";
+import {
+  hostDerivedProposalOf,
+  hostDerivedSettlementOf,
+  hostDerivedSubmissionId,
+  readHostDerivedCompletionFact
+} from "./host-derived.ts";
 import type { ExecutionIdentity, ValidatorRegistry } from "./validators.ts";
 
 // ── The dispatch seam ───────────────────────────────────────────────────────
@@ -165,12 +175,15 @@ export type {
  *
  * A CLOSED, runtime-owned vocabulary. It is never read from a proposal or a
  * delivery: `submit` is the worker's claimed outcome, `settleNatural` is the
- * attempt's completion fact, and each entry point labels its own settlements.
- * The label reaches the durable record through the submission KEY (the natural
- * channel derives a `natural-completion:` key the ordinary ingress can never
- * mint), so a caller cannot claim the other channel's provenance.
+ * attempt's completion fact, and `settleHostDerivedCompletion` is the outcome
+ * the worker's own LAST TURN declared, read and delivered by the host after the
+ * execution ended without one. Each entry point labels its own settlements, and
+ * the label reaches the durable record through the submission KEY (the natural
+ * channel derives a `natural-completion:` key and the host-derived channel a
+ * `host-derived:` key, neither of which the ordinary ingress can mint), so a
+ * caller cannot claim another channel's provenance.
  */
-type SettlementSource = "submission" | "natural-completion";
+type SettlementSource = "submission" | "natural-completion" | "host-derived";
 
 /**
  * The run was refused because a dispatch could not be CLAIMED (P3 item 3).
@@ -392,8 +405,8 @@ export class OutcomeGraphRuntime {
     const undispatchable = this.dispatchPreconditionRefusal();
     if (undispatchable !== undefined) return refused([undispatchable]);
 
-    // A TRUSTED CONTROL COMMAND OUTRANKS STARTING (P3 item 1). A run that was
-    // cancelled, failed or timed out is never begun again — not by a re-declare
+    // A RUN-WIDE TRUSTED CONTROL COMMAND OUTRANKS STARTING (P3 item 1). A run
+    // that was cancelled or budget-stopped is never begun again — not by a re-declare
     // whose id resolves to a stopped run, and not by a recovery window that
     // found the run row without a snapshot. The check runs before anything is
     // read as this plan's state and before anything is written, so the stop is
@@ -1038,12 +1051,14 @@ export class OutcomeGraphRuntime {
     if (hostIdentity.kind === "refused") return refused([hostIdentity.refusal]);
     const undispatchable = this.dispatchPreconditionRefusal();
     if (undispatchable !== undefined) return refused([undispatchable]);
-    // A TRUSTED CONTROL COMMAND ENDS THE RUN (P3 item 1): a failure, a timeout
-    // or a cancellation is a durable fact about the run, and no submission —
-    // the worker's or the host's — advances a run it stopped. The check runs
-    // BEFORE the state is read and before anything is written, so a late
-    // settlement cannot resurrect an attempt control already ended, and the
-    // refusal names the command, its reason and who decided it.
+    // A RUN-WIDE TRUSTED CONTROL COMMAND ENDS THE RUN (P3 item 1): only a
+    // `cancel` or a `budget-stop` records the run's control fact, and no
+    // submission — the worker's or the host's — advances a run it stopped. A
+    // NODE-SCOPED `failure`/`timeout` does NOT stop the run: it ends one
+    // attempt, so it is checked against the attempt below, after the identity is
+    // resolved. This check runs BEFORE the state is read and before anything is
+    // written, so a late settlement cannot resurrect a run control already
+    // ended, and the refusal names the command, its reason and who decided it.
     //
     // IT IS NOT THE ONLY CHECK. The declared gates, the payload read and the
     // progress projection below all run OUTSIDE the acceptance transaction, so
@@ -1089,6 +1104,32 @@ export class OutcomeGraphRuntime {
       hostCompletion,
     );
     if ("refusal" in identity) return refused([identity.refusal]);
+    // A STOPPED ATTEMPT ACCEPTS NOTHING (P3 item 1). A trusted `failure`,
+    // `timeout`, `cancel` or `budget-stop` that names THIS attempt ended it, so
+    // nothing this submission carries can settle it — the attempt's result would
+    // be a second, contradictory terminal fact about an execution a trusted
+    // principal already declared over. The check runs AFTER the attempt is
+    // resolved (the decision is keyed by attempt) and BEFORE the declared gates
+    // are evaluated, so a stopped attempt costs no validation work.
+    //
+    // THE RUN IS NOT WHAT STOPPED — UNLESS IT IS. A node-scoped stop claims no
+    // run fact (see `applyStopCommand`), so siblings keep executing and still
+    // settle; a run-wide `cancel`/`budget-stop` DOES claim it, and the check
+    // above applies first. THE TWO READS ARE NOT ONE TRANSACTION, though, so
+    // the answer is CLASSIFIED against the run fact as it stands NOW, AFTER the
+    // decision was read (`refusalForStoppingDecision`): a run-wide command that
+    // claimed the run between the check above and this one would otherwise be
+    // answered with the attempt-level code and a message saying the run still
+    // executes — false from the instant that command committed. It is NOT the
+    // guarantee either: validation and the progress projection run outside the
+    // acceptance transaction, so the ledger's own guarded INSERT re-reads the
+    // same decision inside it (verdict `attempt-stopped`, classified the same
+    // way) and whichever of a stopping command and an acceptance commits first
+    // is the fact that stands.
+    const stoppedAttempt = this.stoppingDecisionOf(identity.attemptId);
+    if (stoppedAttempt !== undefined) {
+      return refused([this.refusalForStoppingDecision(stoppedAttempt)]);
+    }
     // AN ATTEMPT PAUSED ON A TRUSTED APPROVAL CANNOT SETTLE (P3 item 3). The
     // durable request row is the ONLY source of this fact — no field of the
     // submission is read, so an `approved` flag inside the payload reaches
@@ -1156,10 +1197,13 @@ export class OutcomeGraphRuntime {
       // THE INVERSE RACE IS CLOSED HERE (P3 item 1, plan §3.4). The check above
       // ran before validation, and validation — the declared gates, the
       // artifact reads, a principal approval — happens OUTSIDE this transaction, so
-      // a `failure`, `timeout` or `cancel` that commits during that window
+      // a `cancel` or a `budget-stop` that commits during that window
       // would otherwise be followed by an accepted event, a receipt, a state
       // advance and the successor's dispatch effect: a business success forged
-      // on top of a run a trusted command stopped. Re-reading the run's control
+      // on top of a run a trusted command stopped. (A node-scoped `failure` or
+      // `timeout` needs no re-read here: `commitAccepted`'s own receipt INSERT
+      // carries the attempt-stop guard, so the batch is refused inside the very
+      // statement that would write it.) Re-reading the run's control
       // fact HERE — on the transaction's own view, through the same ledger port
       // — refuses it before `tx.commitAccepted` and before any successor can be
       // launched. The throw rolls the transaction back, so acceptance and
@@ -1230,6 +1274,20 @@ export class OutcomeGraphRuntime {
     // of the rule the fast path below applies before validation: whichever of the
     // raising command and the acceptance COMMITS first is the fact that stands,
     // and no field of the submission is consulted either way.
+    // A STOPPED ATTEMPT ACCEPTS NOTHING (P3 item 1). The ledger's own guard
+    // refused the batch because a stopping decision for this attempt committed
+    // while the submission was being decided — after the fast path above read
+    // the attempt's decisions — so nothing was written and the attempt is
+    // answered by name. The RUN itself is not stopped: this is deliberately not
+    // `control-stopped`, and the siblings of this attempt keep executing. The
+    // ledger classified those two facts inside the transaction it rolled back,
+    // so the answer is classified again on the facts that stand NOW (see
+    // `refusalForStoppingDecision`): a run-wide command that claimed the run
+    // since then is answered `control-stopped`, never with a message about a
+    // run that is in fact stopped.
+    if (verdict.kind === "attempt-stopped") {
+      return refused([this.refusalForStoppingDecision(verdict.decision)]);
+    }
     if (verdict.kind === "approval-blocked") {
       return refused([approvalBlockRefusal(verdict.request)]);
     }
@@ -1524,6 +1582,201 @@ export class OutcomeGraphRuntime {
   }
 
   /**
+   * Settle one attempt from the outcome the WORKER'S OWN LAST TURN declared —
+   * the HOST-DERIVED completion channel (defect 2).
+   *
+   * WHY IT EXISTS. An execution can end without ever presenting an outcome: a
+   * worker that timed out, a process killed mid-turn, a provider that returned
+   * no final submission. The outcome is NOT invented to fill that gap — the
+   * worker's own final turn declared it and the HOST reads the declaration from
+   * the turn it already holds — and this entry settles it through the SAME
+   * acceptance core as every other channel, so the plan still decides whether
+   * the named outcome exists (an undeclared one is refused by the core) and
+   * whether it passes its declared gates (a failing gate is a REJECTION, and
+   * the attempt stays open).
+   *
+   * CREDENTIAL-FREE BY CONSTRUCTION. The fact's shape has no credential and an
+   * unknown key is refused by name, so nothing can present a bearer here; the
+   * attempt is instead resolved by the SAME credential-free identity path
+   * `settleHostCompletion` uses (persisted state + the delivery's attempt name
+   * + the host's durable execution record), which already refuses a proposal
+   * that carries a credential. No tool binds this entry: a worker cannot reach
+   * it, and the outcome it carries is the worker's own declaration rather than
+   * anything the host chooses.
+   *
+   * THE ORDER OF THE CHECKS IS THE RULE:
+   * 1. the ENVELOPE — a malformed fact is not a fact, so an unknown key (a
+   *    `credential`, an `approved` flag, a second outcome field) is refused by
+   *    name before the plan, the authority or the ledger is consulted;
+   * 2. the CLOCK;
+   * 3. the HOST COMPLETION AUTHORITY — absent means no durable record can
+   *    corroborate the fact, so nothing is settled on the caller's word;
+   * 4. the host's OWN record for THIS attempt — an authority that throws, holds
+   *    no confirmed execution, or names a DIFFERENT execution refuses by name,
+   *    and the fact is never re-bound to whichever execution happens to exist;
+   * 5. the PLAN'S COMPLETION POLICY — a node whose plan pinned a natural
+   *    completion is refused with `derived-completion-natural-node`: the plan
+   *    already chose that node's outcome, and this channel must not choose
+   *    another (an absent or `explicit` policy is allowed);
+   * 6. the ONE settlement path, with the host's execution as the proof.
+   */
+  settleHostDerivedCompletion(
+    delivery: unknown,
+    now?: number,
+  ): OutcomeHostDerivedSettlementResult {
+    // (1) The envelope is read FIRST, exactly as the other channels read their
+    // own: a malformed completion fact is not a completion.
+    const reading = readHostDerivedCompletionFact(delivery);
+    if (reading.kind === "malformed") {
+      return refused(
+        reading.issues.map((issue) => ({
+          code: issue.code,
+          path: issue.path,
+          message: issue.message,
+        })),
+      );
+    }
+    const fact = reading.fact;
+    // (2) Time is an explicit input.
+    const at = readRuntimeClock(this.clock, now);
+    if (typeof at !== "number") return refused([at]);
+    // (3) THE HOST'S DURABLE RECORD, or nothing: this channel has no bearer to
+    // check, so the authority IS its authentication and an absent capability is
+    // a refusal rather than a downgrade.
+    const authority = this.hostCompletions;
+    if (authority === undefined) {
+      return refused([
+        {
+          code: "host-completion-unavailable",
+          path: "$.hostCompletions",
+          message:
+            "outcome-runtime: the outcome the worker's own last turn declared for attempt " +
+            JSON.stringify(fact.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " arrived through the host-derived channel, but this runtime holds no " +
+            "host-completion authority: no durable execution record can corroborate it, and " +
+            "an outcome is never settled on the caller's word (plan §3.3). Nothing was " +
+            "written; the host must inject the authority it can substantiate",
+        },
+      ]);
+    }
+    // (4) THE HOST'S OWN FACT FOR THIS ATTEMPT — asked with the attempt identity
+    // only, never with a credential, and never re-bound: a throw is an
+    // unanswered question, `undefined` is "no confirmed execution", and a
+    // different id is a disagreement. In all three cases the delivery is refused.
+    let execution: HostCompletionExecution | undefined;
+    try {
+      execution = authority.executionFor(
+        Object.freeze({ graphId: this.graphId, attemptId: fact.attemptId }),
+      );
+    } catch (error) {
+      return refused([
+        {
+          code: "host-completion-unauthenticated",
+          path: "$.executionId",
+          message:
+            "outcome-runtime: the host-completion authority threw while asked for the " +
+            "execution of attempt " +
+            JSON.stringify(fact.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            " (" +
+            errorText(error) +
+            ") — an unanswered question is not an authenticated execution, so the " +
+            "host-derived completion was not settled and nothing was written",
+        },
+      ]);
+    }
+    if (execution === undefined) {
+      return refused([
+        {
+          code: "host-completion-unauthenticated",
+          path: "$.executionId",
+          message:
+            "outcome-runtime: the host holds no CONFIRMED execution for attempt " +
+            JSON.stringify(fact.attemptId) +
+            " of graph " +
+            JSON.stringify(this.graphId) +
+            ", so the host-derived completion has no host fact to authenticate against — " +
+            "the worker's last turn alone is not a completion and nothing was written",
+        },
+      ]);
+    }
+    if (execution.executionId !== fact.executionId) {
+      return refused([
+        {
+          code: "host-completion-unauthenticated",
+          path: "$.executionId",
+          message:
+            "outcome-runtime: the derived completion names execution " +
+            JSON.stringify(fact.executionId) +
+            " for attempt " +
+            JSON.stringify(fact.attemptId) +
+            ", but the host's own record names " +
+            JSON.stringify(execution.executionId) +
+            " — a completion is never re-bound to whichever execution happens to exist",
+        },
+      ]);
+    }
+    // (5) THE PLAN'S OWN COMPLETION POLICY DECIDES WHETHER THIS CHANNEL MAY
+    // CHOOSE. A node whose plan pinned a natural completion has exactly ONE
+    // authorized outcome, already decided by the plan: settling it here would let
+    // the worker's last turn pick a different one, so the channel refuses BY NAME
+    // instead. A plan that left the policy absent, or declared it `explicit`,
+    // leaves the outcome to the attempt — which is exactly what this channel
+    // carries — and the declared outcomes and gates decide the rest.
+    const node = this.plan.nodes.find((entry) => entry.id === fact.nodeId);
+    if (node?.completion?.mode === "natural") {
+      return refused([
+        {
+          code: "derived-completion-natural-node",
+          path: "$.nodeId",
+          message:
+            "outcome-runtime: node " +
+            JSON.stringify(fact.nodeId) +
+            " of plan revision " +
+            this.planRevision +
+            " declares a NATURAL completion into outcome " +
+            JSON.stringify(node.completion.outcome) +
+            ", so the plan has already pinned which outcome settles this node — the " +
+            "host-derived channel carries the outcome the worker's own last turn declared " +
+            "and must not choose another, so nothing was settled; the attempt is completed " +
+            "through the completion fact of the execution the host observed finishing",
+        },
+      ]);
+    }
+    // (6) THE ONE SETTLEMENT PATH. The proposal is the fact's own declaration —
+    // node, outcome, payload and evidence, never a credential — and the host's
+    // execution is the proof its identity resolution accepts.
+    const result = this.settleSubmission(
+      hostDerivedProposalOf(fact),
+      at,
+      "host-derived",
+      fact.attemptId,
+      execution,
+    );
+    if (result.kind === "refused") return result;
+    // The provenance record names the very submission key the receipt persists,
+    // derived from the canonical proposal digest the decision was addressed by.
+    const completion = hostDerivedSettlementOf({
+      nodeId: fact.nodeId,
+      attemptId: fact.attemptId,
+      outcomeId: fact.outcomeId,
+      proposalDigest: result.decision.proposalDigest,
+      ...(fact.derivation === undefined ? {} : { derivation: fact.derivation }),
+    });
+    switch (result.kind) {
+      case "accepted":
+        return { ...result, completion };
+      case "rejected":
+        return { ...result, completion };
+      case "not-committed":
+        return { ...result, completion };
+    }
+  }
+
+  /**
    * The natural-completion authorization the plan pinned for one node, or the
    * refusal that says why this node may not be settled by a completion fact.
    *
@@ -1700,15 +1953,20 @@ export class OutcomeGraphRuntime {
       return refused([this.stateRefusal(error)]);
     }
 
-    // A RUN A TRUSTED CONTROL COMMAND STOPPED IS REPORTED, NOT CONTINUED (P3
-    // item 1). It is the same rule as the declared stop below, one level up:
-    // a cancelled, failed or timed-out run launches nothing, arms nothing and
-    // reconciles nothing, so a second resume (and every boot sweep after it)
-    // reports the SAME control fact and clears nothing. The attempts the stop
-    // left in flight are NOT armed — no submission can settle them — and they
-    // are named in `refusals`, with their effects still in `unsettledEffects`:
-    // an external execution whose fate this process cannot confirm stays
-    // VISIBLE instead of being hidden to make the stop look converged.
+    // A RUN A RUN-WIDE TRUSTED CONTROL COMMAND STOPPED IS REPORTED, NOT
+    // CONTINUED (P3 item 1). It is the same rule as the declared stop below,
+    // one level up: a cancelled or budget-stopped RUN launches nothing, arms
+    // nothing and reconciles nothing, so a second resume (and every boot sweep
+    // after it) reports the SAME control fact and clears nothing. A node-scoped
+    // `failure`/`timeout` is NOT this case — it stopped one attempt, so the run
+    // continues and the reconciliation below runs, refusing to (re-)launch the
+    // stopped attempt's effect.
+    //
+    // The attempts a RUN-WIDE stop left in flight are NOT armed — no submission
+    // can settle them — and they are named in `refusals`, with their effects
+    // still in `unsettledEffects`: an external execution whose fate this process
+    // cannot confirm stays VISIBLE instead of being hidden to make the stop look
+    // converged.
     const control = this.runControl();
     if (control !== undefined) {
       const stopped = this.unsettledEffectReading();
@@ -1826,13 +2084,123 @@ export class OutcomeGraphRuntime {
   }
 
   /**
+   * The structured refusal an ATTEMPT a stopping command ended answers with.
+   *
+   * ONE code, `attempt-stopped`, for all four stopping commands, and the
+   * message carries the command, the attempt, the reason and the deciding
+   * principal so the refusal says WHICH trusted command ended it — plus the fact
+   * that matters most for a caller deciding what to do next: the RUN continues,
+   * its siblings still settle, and this attempt is carried forward only by a
+   * node-scoped `retry`. The code is never a business outcome and never a
+   * settlement, and it is deliberately NOT `control-stopped`, which would claim
+   * the run itself had ended.
+   *
+   * IT IS THE ATTEMPT-LEVEL WORDING, NOT THE CLASSIFICATION. A caller reaches it
+   * only once the run fact has been read and found CLEAR as of the decision it
+   * refuses — see {@link refusalForStoppingDecision}, which is the entry point
+   * every refusal site uses. Emitting this text while a run-wide stop stands
+   * would state something false about the run.
+   */
+  private attemptStopRefusal(decision: ControlDecisionRecord): OutcomeRuntimeRefusal {
+    return {
+      code: "attempt-stopped",
+      path: "$.attemptId",
+      message:
+        "outcome-runtime: attempt " +
+        JSON.stringify(decision.attemptId) +
+        " of node " +
+        JSON.stringify(decision.nodeId) +
+        " in graph " +
+        JSON.stringify(this.graphId) +
+        " carries the STOPPING trusted control command " +
+        JSON.stringify(decision.command) +
+        " (reason: " +
+        decision.reason +
+        ", decided at " +
+        String(decision.decidedAt) +
+        (decision.decidedBy === undefined
+          ? ""
+          : ", decided by session " + JSON.stringify(decision.decidedBy.sessionId)) +
+        ") — the ATTEMPT is stopped, so it accepts nothing and is never (re-)launched, " +
+        "while the RUN itself is NOT stopped: its other attempts keep executing and still " +
+        "settle. Only a node-scoped `retry` of the node carries this attempt forward, by " +
+        "minting a successor attempt, and only a run-wide `cancel`/`budget-stop` closes it " +
+        "for good; nothing was written for it",
+    };
+  }
+
+  /**
+   * The refusal for ONE attempt a STOPPING control decision ended, CLASSIFIED
+   * against the run fact as it stands NOW.
+   *
+   * WHY THE RUN FACT IS RE-READ HERE. The run's control fact and the attempt's
+   * stopping decision are read through SEPARATE port calls, with the state read
+   * and the identity resolution between them, and neither the runtime nor the
+   * store reads them in one snapshot. A run-wide `cancel` or `budget-stop`
+   * writes the decision AND the run fact it claims in ONE transaction
+   * (`writeControlDecision`), so a caller that has already read "no run
+   * control" can read a run-wide decision the instant that command commits.
+   * Answering `attempt-stopped` there would report an attempt-scoped stop for a
+   * run that IS stopped — and that refusal's text says the RUN itself is not
+   * stopped and that its other attempts keep executing, which is false from the
+   * moment the command committed. Reading the run fact AFTER the decision closes
+   * the window: the fact read second decides the code, so a run-wide stop can
+   * never be answered with the attempt-level wording.
+   *
+   * A NODE-SCOPED `failure`/`timeout` STILL ANSWERS `attempt-stopped`: it claims
+   * no run fact, so the re-read finds none, the run keeps executing, its
+   * siblings still settle, and the attempt is carried forward only by a
+   * node-scoped `retry`. A read that throws is NOT swallowed (see
+   * {@link runControl}), exactly like the checks that read the same fact first,
+   * so a stop that could not be read never looks like a live run.
+   *
+   * Every refusal site that reports a stopping decision goes through here — the
+   * submission fast path, the ledger verdict that refused the acceptance batch,
+   * and the launch decision — so all three classify the same two facts the same
+   * way.
+   */
+  private refusalForStoppingDecision(
+    decision: ControlDecisionRecord,
+  ): OutcomeRuntimeRefusal {
+    const control = this.runControl();
+    if (control !== undefined) return this.controlStopRefusal(control);
+    return this.attemptStopRefusal(decision);
+  }
+
+  /**
+   * The STOPPING control decision ONE attempt carries, or `undefined`.
+   *
+   * The attempt-level half of the control rule, read through the ledger's own
+   * run-scoped port: `controlDecisions(graphId)` answers the decisions of the
+   * CURRENT run (runId omitted), which is the run an attempt of this runtime
+   * belongs to. One attempt carries at most one stopping decision and a
+   * decision is never cleared, so a value read here cannot go stale into an
+   * acceptance or a launch.
+   *
+   * `STOPPING_CONTROL_COMMANDS` is the single owner of the classification, and
+   * it is membership-identical to the store's own SQL literal — a `retry`
+   * decision recorded BESIDE a stop is deliberately not one of them.
+   */
+  private stoppingDecisionOf(attemptId: string): ControlDecisionRecord | undefined {
+    const runs = this.ledger.runs;
+    if (runs === undefined) return undefined;
+    return runs
+      .controlDecisions(this.graphId)
+      .find(
+        (decision) =>
+          decision.attemptId === attemptId &&
+          STOPPING_CONTROL_COMMANDS.includes(decision.command),
+      );
+  }
+
+  /**
    * The structured refusal every step of a CONTROLLED run answers with.
    *
-   * ONE code, `control-stopped`, for every command: the caller's repair is the
-   * same in all three cases (the run is over; a new run is a new identity), and
-   * the command, the reason and the deciding principal are carried in the
-   * message so the refusal says WHICH trusted command ended it. The code is
-   * never a business outcome and never a settlement.
+   * ONE code, `control-stopped`, for every run-wide command: the caller's repair
+   * is the same in all three cases (the run is over; a new run is a new
+   * identity), and the command, the reason and the deciding principal are
+   * carried in the message so the refusal says WHICH trusted command ended it.
+   * The code is never a business outcome and never a settlement.
    */
   private controlStopRefusal(control: RunControlRecord): OutcomeRuntimeRefusal {
     return {
@@ -2344,6 +2712,27 @@ export class OutcomeGraphRuntime {
         divergences.push(
           this.divergenceOf(effect.effectId, target.attemptId, "pending", "created"),
         );
+        continue;
+      }
+
+      // A STOPPED ATTEMPT IS NEVER (RE-)LAUNCHED (P3 item 1). An attempt-scoped
+      // stop leaves the RUN executing on purpose, so this recovery is reached
+      // for a stopped attempt's unsettled effect — and a substrate whose query
+      // proves ABSENCE would otherwise CREATE the execution again: an execution
+      // for an attempt every acceptance refuses, which no decision could ever
+      // settle and which the platform would run for nothing. The same
+      // classification that guards acceptance
+      // (`STOPPING_CONTROL_COMMANDS`) guards the launch, the effect stays
+      // unsettled and VISIBLE, and the attempt is carried forward only by a
+      // node-scoped `retry` (which mints a successor attempt with its own
+      // effect). The refusal is classified against the run fact as it stands
+      // NOW, exactly like the acceptance path (`refusalForStoppingDecision`):
+      // the resume that reached this sweep read the run fact earlier, so a
+      // run-wide command that claimed the run since then must not be reported
+      // as an attempt-scoped stop of a live run.
+      const stopping = this.stoppingDecisionOf(target.attemptId);
+      if (stopping !== undefined) {
+        refusals.push(this.refusalForStoppingDecision(stopping));
         continue;
       }
 
@@ -4021,10 +4410,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * replays the persisted decision instead of writing a second receipt. The
  * NAMESPACE is the provenance: the ordinary ingress always derives
  * `submission:<digest>`, the natural-completion channel derives
- * `natural-completion:<digest>` (see `natural-completion.ts`), and the
- * persisted receipt and accepted event therefore say which channel committed.
- * The two namespaces cannot collide, and a proposal's content cannot choose
- * one — only the runtime's own `source` can.
+ * `natural-completion:<digest>` (see `natural-completion.ts`) and the
+ * host-derived channel derives `host-derived:<digest>` (see `host-derived.ts`),
+ * so the persisted receipt and accepted event say which channel committed. The
+ * three namespaces cannot collide, and a proposal's content cannot choose one —
+ * only the runtime's own `source` can.
  *
  * A proposal that cannot be digested at all gets a placeholder key: the digest
  * failure is the acceptance core's refusal to report, and nothing is written
@@ -4035,9 +4425,9 @@ function submissionIdOf(proposal: unknown, source: SettlementSource): string {
   if (reading.kind !== "ok") return "unclaimed-submission";
   try {
     const digest = proposalDigest(reading.proposal);
-    return source === "natural-completion"
-      ? naturalCompletionSubmissionId(digest)
-      : "submission:" + digest;
+    if (source === "natural-completion") return naturalCompletionSubmissionId(digest);
+    if (source === "host-derived") return hostDerivedSubmissionId(digest);
+    return "submission:" + digest;
   } catch {
     return "unrepresentable-submission";
   }

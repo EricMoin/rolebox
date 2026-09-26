@@ -20,6 +20,7 @@ import { describeStoreVerdict } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import type {
+  AcceptedEventRecord,
   ControlDecisionRecord,
   PendingEffectRecord,
   RunReexecutionRecord,
@@ -32,8 +33,10 @@ import {
   type OutcomeBudgetReading,
   type OutcomeBudgetUsageOutcome,
   type OutcomeBudgetUsageReport,
+  type OutcomeHostDerivedSettlementResult,
   type OutcomeResumeResult,
 } from "../outcome/runtime.ts";
+import type { HostDerivedSettlement } from "../outcome/host-derived.ts";
 import type {
   CredentialIsolationCapability,
   DurableCredentialStore,
@@ -46,6 +49,7 @@ import type {
 } from "../outcome/host-identity.ts";
 import {
   createValidatorRegistry,
+  validatorKeyText,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
@@ -95,7 +99,8 @@ import { readStoreDirectory } from "../store/format.ts";
 import {
   HostDispatchCompletionBridge,
   type HostCompletionAttempt,
-  type HostCompletionReport
+  type HostCompletionReport,
+  type HostCompletionSettlement,
 } from "./completion-bridge.ts";
 import {
   createHostInvocationHolder,
@@ -232,6 +237,30 @@ export interface OutcomeHostOptions {
    */
   readonly observeExecution?: HostExecutionObservationPort;
   /**
+   * THE PLATFORM'S READING OF A FINISHED EXECUTION'S OWN LAST TURN (DEFECT 2).
+   *
+   * The sweep and the watch path both end at "this execution is over". A
+   * completion settles the attempt through the plan's pinned authorization; an
+   * execution that ended WITHOUT one leaves the attempt in flight unless the
+   * WORKER'S OWN LAST TURN declared an outcome. That declaration is read by the
+   * PLATFORM (it holds the child session's events) and handed over here as a
+   * total, credential-free reading.
+   *
+   * A HOST WITH NO PORT STILL REPORTS: the attempt is answered `unsettled` with
+   * "this host installs no last-turn reading port" and nothing is written, so a
+   * deployment that cannot read the worker's turn says so instead of inventing
+   * an outcome. The host never chooses the outcome: the reading names it, the
+   * plan decides whether it exists and its declared gates decide acceptance, and
+   * the settlement is authenticated against the host's own durable execution
+   * record through the credential-free host-derived channel.
+   *
+   * INSTALLED BY THE SHIPPED dsh ENTRY, which fills it from the points where it
+   * already reads the child's events (the execution-query prime and the
+   * completion watch) and answers `unavailable` for an execution it has not
+   * read — the honest answer, never a guess.
+   */
+  readonly derivedOutcomeOf?: HostDerivedOutcomePort;
+  /**
    * THE PLATFORM'S OWN ANSWER ABOUT ONE DISPATCH EFFECT (P2 item 5).
    *
    * The question the runtime's crash-window reconciliation asks: whether an
@@ -317,6 +346,63 @@ export type HostExecutionObservationPort = (
 ) => HostExecutionObservation;
 
 /**
+ * WHAT THE PLATFORM READ FROM ONE FINISHED EXECUTION'S OWN LAST TURN (DEFECT 2).
+ *
+ * The SECOND question the "the execution ended" entry asks. An execution can
+ * end WITHOUT settling its attempt — a worker that answered in prose, a run
+ * whose tool call never arrived, a process that died between the turn and the
+ * submission — and the run path must not strand it. The outcome such an attempt
+ * settles with is the one the WORKER ITSELF declared in its final turn, read by
+ * the platform's own reader (dsh: the fenced block of the last completed turn);
+ * the host never chooses it, and no announcement or completion fact invents one.
+ *
+ * A CLOSED, TOTAL five-way answer, and only ONE of them may settle anything:
+ *
+ * - `declared` — the last turn carried exactly one well-formed declaration: the
+ *   outcome id the worker named, its optional payload and evidence references,
+ *   and where the reader found them. It is handed to the runtime's host-derived
+ *   channel, which authenticates it against the host's own CONFIRMED execution
+ *   and then lets the PLAN decide: an outcome the plan does not declare is
+ *   refused, and the outcome's declared acceptance gates decide acceptance;
+ * - `absent` — there is no such declaration (no owned execution, no completed
+ *   final turn, no fenced block). REPORTED, never repaired into a guess;
+ * - `ambiguous` — more than one candidate. REPORTED: choosing one would be the
+ *   host picking an outcome the worker did not;
+ * - `malformed` — a candidate that is not a well-formed declaration (an unknown
+ *   key, a missing or non-string outcome id). REPORTED, never repaired;
+ * - `unavailable` — the reading could not be taken at all (no reader is
+ *   installed for this execution in this process, or the reader threw). REPORTED.
+ *
+ * THE PORT IS TOTAL. A port that THROWS has not answered, so it is treated as
+ * `unavailable` carrying the thrown text — never as a settlement — and a
+ * platform that cannot read the worker's turn can never be rounded into an
+ * outcome.
+ */
+export type HostDerivedOutcome =
+  | {
+    readonly kind: "declared";
+    readonly outcomeId: string;
+    readonly data?: unknown;
+    readonly evidenceRefs?: readonly string[];
+    /** Where the reader found it: the message event and the closing turn event. */
+    readonly derivation: { readonly eventIndex: number; readonly turnIndex: number };
+  }
+  | { readonly kind: "absent"; readonly reason: string }
+  | { readonly kind: "ambiguous"; readonly reason: string }
+  | { readonly kind: "malformed"; readonly reason: string }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+/**
+ * How the host asks the platform what ONE confirmed execution's own last turn
+ * declared. It receives the host's own confirmed identity — never a
+ * caller-supplied value, and never a credential — and answers
+ * {@link HostDerivedOutcome}.
+ */
+export type HostDerivedOutcomePort = (
+  execution: HostExecutionIdentity,
+) => HostDerivedOutcome;
+
+/**
  * The platform's own notification channel for one execution the host is still
  * waiting on (F4).
  *
@@ -388,6 +474,58 @@ export interface OutcomeHostWatchOptions {
    */
   readonly onSettled?: (graphId: string, attemptId: string) => void;
 }
+
+/**
+ * WHAT THE ONE "THE EXECUTION ENDED" ENTRY ESTABLISHED (DEFECT 2).
+ *
+ * `already-settled` — an ACCEPTED event already exists for the attempt, so this
+ * call is a no-op that names the settlement the ledger persisted. It writes
+ * nothing, which is what makes the entry idempotent under a repeated
+ * announcement or a second sweep of the same window.
+ *
+ * `settled` — a settlement RAN and the ledger accepted it. `channel` says which
+ * one, and the two records are kept apart so neither can claim the other's
+ * provenance: `completion` is the plan's OWN pinned authorization (the natural
+ * completion the runtime authenticates from the host's confirmed execution),
+ * `derived` is the outcome the WORKER'S OWN LAST TURN declared, carried through
+ * the credential-free host-derived channel. (The report is a union of the two
+ * pairings rather than one variant with a union settlement, so the channel and
+ * the record it carries cannot disagree.)
+ *
+ * `unsettled` — NOTHING was written and the attempt is still open, with the
+ * reason and — when a channel refused BY NAME — the runtime's own refusals. It
+ * is the answer for every negative reading of the worker's last turn, for a
+ * missing confirmed execution or reader, for a rejection by a declared gate and
+ * for a refusal: reported, never fabricated into an outcome.
+ */
+export type HostFinishedAttemptReport =
+  | {
+    readonly kind: "already-settled";
+    readonly attemptId: string;
+    /** The submission key the persisted accepted event carries. */
+    readonly submissionId: string;
+  }
+  | {
+    readonly kind: "settled";
+    readonly attemptId: string;
+    readonly nodeId: string;
+    readonly channel: "completion";
+    readonly settlement: HostCompletionSettlement;
+  }
+  | {
+    readonly kind: "settled";
+    readonly attemptId: string;
+    readonly nodeId: string;
+    readonly channel: "derived";
+    readonly settlement: HostDerivedSettlement;
+  }
+  | {
+    readonly kind: "unsettled";
+    readonly attemptId: string;
+    readonly nodeId?: string;
+    readonly reason: string;
+    readonly refusals: readonly OutcomeRuntimeRefusal[];
+  };
 
 /** One host invocation's attribution, as the declaring tool call saw it. */
 export interface OutcomeHostInvocation {
@@ -593,6 +731,12 @@ export interface OutcomeHostRecoveryReport {
    * position — and this list is what says WHY it will not move: a restart never
    * clears a control stop, and a sweep that reported only "resumed" would let a
    * cancelled graph read as merely quiet.
+   *
+   * ONLY A RUN-WIDE COMMAND STANDS HERE (`cancel`, `budget-stop`), because only
+   * those claim the run's control fact. A node-scoped `failure`/`timeout` ends
+   * ONE ATTEMPT and leaves the run executing, so it is reported in
+   * {@link OutcomeHostRecoveryReport.failedAttempts} instead: reporting it here
+   * would tell every reader the whole run had stopped.
    */
   readonly controlled: readonly string[];
   /**
@@ -602,6 +746,22 @@ export interface OutcomeHostRecoveryReport {
    * hiding it would be exactly the false convergence the plan forbids.
    */
   readonly unconfirmedExecutions: readonly OutcomeHostUnconfirmedExecution[];
+  /**
+   * `graph:node:attempt:command` for every attempt this sweep ENDED through a
+   * NODE-SCOPED stop — a `failure` (and, by the same predicate, a `timeout`) —
+   * that claimed NO run control fact (DEFECT 2).
+   *
+   * WHY IT IS SEPARATE FROM `controlled`. A `failure` ends the attempt it names
+   * and nothing else: the run keeps executing, its siblings stay in flight,
+   * their results still settle and the successors they arm are still dispatched.
+   * A sweep that folded it into `controlled` conflated "one attempt is over"
+   * with "the run is stopped", which is exactly the report the plan forbids. So
+   * the run's own fact is reported in `controlled` **exactly when one stands**
+   * (an earlier run-wide `cancel`/`budget-stop`, which is never replaced), and
+   * an attempt-scoped stop is named HERE — with the node, the attempt and the
+   * command that ended it — so the fact is neither hidden nor promoted.
+   */
+  readonly failedAttempts: readonly string[];
   /**
    * WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3 cancel), one entry per
    * attempt a run's trusted cancel intents name.
@@ -732,6 +892,12 @@ export class OutcomeHost {
   private readonly dispatchAdapter: HostOutcomeDispatch;
   /** The platform port the boot sweep observes a confirmed execution through. */
   private readonly observeExecution: HostExecutionObservationPort | undefined;
+  /**
+   * The platform's reading of a finished execution's OWN LAST TURN (DEFECT 2).
+   * Absent means this host cannot read a worker's turn at all, and the derived
+   * channel reports that instead of inventing an outcome.
+   */
+  private readonly derivedOutcomeOf: HostDerivedOutcomePort | undefined;
   /** The platform's dispatch-effect query port, for the run path's own asks. */
   private readonly query: OutcomeExecutionQuery | undefined;
   /** Where a restarted host re-subscribes to an execution it still awaits (F4). */
@@ -804,6 +970,7 @@ export class OutcomeHost {
     this.workerSessions = createHostWorkerSessionHolder();
     this.workerSessionOf = options.workerSessionOf;
     this.observeExecution = options.observeExecution;
+    this.derivedOutcomeOf = options.derivedOutcomeOf;
     this.query = options.query;
     this.watchCompletion = options.watchCompletion;
     this.cancelExecution = options.cancelExecution;
@@ -981,6 +1148,307 @@ export class OutcomeHost {
       }
     }
     return bridge.complete({ graphId, attemptId });
+  }
+
+  /**
+   * THE ONE ENTRY FOR "THE EXECUTION ENDED" (DEFECT 2).
+   *
+   * Both the boot sweep and the platform's completion watch end at the SAME
+   * fact — an execution the host confirmed is over — and both used to ask only
+   * the plan's pinned completion. An execution that ends WITHOUT its authorized
+   * outcome (a worker that answered in prose, a run whose tool call never
+   * arrived, a process that died between the turn and the submission) then had
+   * no channel at all: this entry adds the SECOND one, and only the second one,
+   * with the outcome coming from the WORKER'S OWN LAST TURN.
+   *
+   * THE ORDER IS THE RULE, and every step is deterministic:
+   *
+   * 1. the host is open and the graph OPENS — an unopenable graph is REPORTED
+   *    `unsettled`, never thrown, because the caller is a boot sweep or an
+   *    announcement and both must survive a store they cannot read;
+   * 2. the attempt is NOT already settled: an ACCEPTED event for it answers
+   *    `already-settled` with that settlement's own submission key and writes
+   *    nothing (idempotent under a repeated announcement);
+   * 3. the PLAN'S OWN CHANNEL: the existing completion bridge is asked, and an
+   *    ACCEPTED completion is reported with `channel: "completion"`;
+   * 4. otherwise the DERIVED CHANNEL: the host's CONFIRMED execution is
+   *    resolved (`executionBindingOf`), the platform's last-turn reading port is
+   *    asked, and a `declared` reading is settled through the runtime's
+   *    credential-free host-derived channel, which authenticates it against
+   *    that execution and lets the plan decide. An execution the host cannot
+   *    name, a host with NO reading port, and every negative reading
+   *    (absent / ambiguous / malformed / unavailable — a throwing port included)
+   *    leaves the attempt UNSETTLED and REPORTED with its reason.
+   *
+   * NOTHING HERE WRITES A RECEIPT OR AN ACCEPTED EVENT EXCEPT THROUGH THE
+   * RUNTIME, and no outcome id is ever chosen by the host: it comes from the
+   * worker's own turn or the plan's pinned authorization, and nowhere else. No
+   * receipt, no accepted event and no credential is ever manufactured to make an
+   * attempt settle.
+   *
+   * THE ATTRIBUTION IS THE ATTEMPT'S OWN (D9). When this host declares the
+   * invocation-identity capability, the whole call runs in the SAME dispatch
+   * identity `complete` re-enters — the binding's recorded identity, or the
+   * graph's declared origin — so the runtime's check sees the invocation the
+   * attempt was ARMED under even though the end is observed out of band with no
+   * declaring call in effect. This is not a second attribution mechanism; it is
+   * that one, entered once for the whole call. A host that declares no identity
+   * (the shipped dsh entry: its attempts carry none) enters nothing and the
+   * check is inert.
+   */
+  async settleFinishedAttempt(
+    graphId: string,
+    attemptId: string,
+  ): Promise<HostFinishedAttemptReport> {
+    this.assertOpen();
+    if (this.declareInvocationIdentity) {
+      const dispatchIdentity =
+        this.bridgeFor(graphId).bindingFor({ graphId, attemptId })?.dispatchIdentity ??
+        this.originIdentityOf(graphId);
+      const previous = this.holder.current();
+      if (dispatchIdentity !== undefined) this.holder.set(dispatchIdentity);
+      try {
+        return await this.settleFinishedAttemptUnder(graphId, attemptId);
+      } finally {
+        if (previous === undefined) {
+          this.holder.clear();
+        } else {
+          this.holder.set(previous);
+        }
+      }
+    }
+    // WORKER MODE: the attempts carry no recorded identity and the D9 check is
+    // inert, so nothing is entered and nothing is fabricated for it.
+    return this.settleFinishedAttemptUnder(graphId, attemptId);
+  }
+
+  /**
+   * {@link OutcomeHost.settleFinishedAttempt} under the attempt's own dispatch
+   * attribution. The order implemented here is the one the public entry
+   * documents; it is private so no caller can run it OUTSIDE that attribution.
+   */
+  private async settleFinishedAttemptUnder(
+    graphId: string,
+    attemptId: string,
+  ): Promise<HostFinishedAttemptReport> {
+    // (1) THE GRAPH MUST OPEN. An unopenable graph is a REPORT, not a throw.
+    let runtime: OutcomeGraphRuntime;
+    let ledger: SqliteAcceptanceLedger;
+    try {
+      const running = await this.runtimeFor(graphId);
+      runtime = running.runtime;
+      ledger = running.ledger;
+    } catch (error) {
+      return unfinishedAttempt(attemptId, {
+        reason:
+          "outcome-host: graph " +
+          JSON.stringify(graphId) +
+          " could not be opened, so the finished attempt " +
+          JSON.stringify(attemptId) +
+          " was not settled (" +
+          errorText(error) +
+          ") — nothing was written and no outcome was fabricated",
+      });
+    }
+    // (2) ALREADY SETTLED, and it WRITES NOTHING. The ledger's own accepted
+    // event is the record of a committed settlement, so a repeated announcement
+    // (or a second sweep over the same window) answers with the settlement that
+    // stands instead of settling a second time.
+    let accepted: AcceptedEventRecord | undefined;
+    try {
+      accepted = ledger
+        .acceptedEvents(graphId)
+        .find((event) => event.attemptId === attemptId);
+    } catch (error) {
+      return unfinishedAttempt(attemptId, {
+        reason:
+          "outcome-host: the accepted events of graph " +
+          JSON.stringify(graphId) +
+          " could not be read (" +
+          errorText(error) +
+          "), so whether attempt " +
+          JSON.stringify(attemptId) +
+          " already settled could not be established — nothing was written",
+      });
+    }
+    if (accepted !== undefined) {
+      return Object.freeze({
+        kind: "already-settled" as const,
+        attemptId,
+        submissionId: accepted.submissionId,
+      });
+    }
+    // (3) THE PLAN'S OWN CHANNEL — the pinned authorization the completion
+    // bridge has always settled through, and the reason it is asked FIRST: a
+    // natural-completion node has exactly ONE authorized outcome and this entry
+    // must not let the worker's last turn pick another.
+    const completion = await this.complete(graphId, attemptId);
+    if (completion.kind === "settled" && completion.settlement.kind === "accepted") {
+      return Object.freeze({
+        kind: "settled" as const,
+        attemptId,
+        nodeId: completion.nodeId,
+        channel: "completion" as const,
+        settlement: completion.settlement,
+      });
+    }
+    // (4) THE DERIVED CHANNEL: the outcome the WORKER'S OWN LAST TURN declared.
+    let execution: HostExecutionIdentity | undefined;
+    try {
+      execution = this.executionBindingOf({ graphId, attemptId });
+    } catch (error) {
+      return unfinishedAttempt(attemptId, {
+        nodeId: boundNodeIdOf(completion),
+        reason:
+          "outcome-host: the plan's own completion channel did not settle attempt " +
+          JSON.stringify(attemptId) +
+          " (" +
+          describeCompletionMiss(completion) +
+          "), and the host's execution record for it could not be read (" +
+          errorText(error) +
+          "), so no confirmed execution could authenticate the worker's own last turn — nothing was written",
+      });
+    }
+    if (execution === undefined) {
+      return unfinishedAttempt(attemptId, {
+        nodeId: boundNodeIdOf(completion),
+        reason:
+          "outcome-host: the plan's own completion channel did not settle attempt " +
+          JSON.stringify(attemptId) +
+          " (" +
+          describeCompletionMiss(completion) +
+          "), and this host holds no CONFIRMED host execution for it, so the worker's own last turn has no execution source to authenticate against — a delivery observation alone is not an outcome and nothing was written",
+      });
+    }
+    const reader = this.derivedOutcomeOf;
+    if (reader === undefined) {
+      return unfinishedAttempt(attemptId, {
+        nodeId: boundNodeIdOf(completion),
+        reason:
+          "outcome-host: the plan's own completion channel did not settle attempt " +
+          JSON.stringify(attemptId) +
+          " (" +
+          describeCompletionMiss(completion) +
+          "), and this host installs no last-turn reading port (OutcomeHostOptions.derivedOutcomeOf), so the outcome the worker's own last turn may have declared cannot be read — nothing was written",
+      });
+    }
+    const derived = readDerivedOutcome(reader, execution);
+    if (derived.kind !== "declared") {
+      return unfinishedAttempt(attemptId, {
+        nodeId: boundNodeIdOf(completion),
+        reason:
+          "outcome-host: the plan's own completion channel did not settle attempt " +
+          JSON.stringify(attemptId) +
+          " (" +
+          describeCompletionMiss(completion) +
+          "), and the platform's reading of the own last turn of execution " +
+          JSON.stringify(execution.executionId) +
+          " is " +
+          derived.kind.toUpperCase() +
+          ": " +
+          derived.reason +
+          " — the attempt stays unsettled and is reported rather than settled on a guess",
+      });
+    }
+    const nodeId = this.bridgeFor(graphId).bindingFor({ graphId, attemptId })?.nodeId;
+    if (nodeId === undefined) {
+      return unfinishedAttempt(attemptId, {
+        reason:
+          "outcome-host: the own last turn of execution " +
+          JSON.stringify(execution.executionId) +
+          " declares outcome " +
+          JSON.stringify(derived.outcomeId) +
+          ", but neither this process nor the host's durable record names the NODE attempt " +
+          JSON.stringify(attemptId) +
+          " executes, so the declaration cannot be attributed to a node of the plan — nothing was written",
+      });
+    }
+    let settlement: OutcomeHostDerivedSettlementResult;
+    try {
+      settlement = runtime.settleHostDerivedCompletion(
+        Object.freeze({
+          nodeId,
+          attemptId,
+          executionId: execution.executionId,
+          outcomeId: derived.outcomeId,
+          ...(derived.data === undefined ? {} : { data: derived.data }),
+          ...(derived.evidenceRefs === undefined
+            ? {}
+            : { evidenceRefs: derived.evidenceRefs }),
+          derivation: derived.derivation,
+        }),
+        this.clock(),
+      );
+    } catch (error) {
+      return unfinishedAttempt(attemptId, {
+        nodeId,
+        reason:
+          "outcome-host: the host-derived settlement of the outcome " +
+          JSON.stringify(derived.outcomeId) +
+          " the worker's own last turn declared for node " +
+          JSON.stringify(nodeId) +
+          " attempt " +
+          JSON.stringify(attemptId) +
+          " threw (" +
+          errorText(error) +
+          ") — nothing was written and the attempt stays unsettled",
+      });
+    }
+    if (settlement.kind === "accepted") {
+      return Object.freeze({
+        kind: "settled" as const,
+        attemptId,
+        nodeId,
+        channel: "derived" as const,
+        settlement: settlement.completion,
+      });
+    }
+    if (settlement.kind === "refused") {
+      return unfinishedAttempt(attemptId, {
+        nodeId,
+        reason:
+          "outcome-host: the host-derived settlement of the outcome " +
+          JSON.stringify(derived.outcomeId) +
+          " the worker's own last turn declared for node " +
+          JSON.stringify(nodeId) +
+          " attempt " +
+          JSON.stringify(attemptId) +
+          " was REFUSED by the runtime before anything was written",
+        refusals: settlement.refusals,
+      });
+    }
+    // REJECTED and NOT-COMMITTED ARE NOT SETTLEMENTS. A rejection means a
+    // declared acceptance gate did not pass, so there is no accepted event and
+    // the attempt stays open for the worker's own submission; `not-committed`
+    // means another submission's settlement stands instead. Neither may be
+    // reported as settled, and neither wrote an accepted event for this
+    // delivery.
+    return unfinishedAttempt(attemptId, {
+      nodeId,
+      reason:
+        settlement.kind === "rejected"
+          ? "outcome-host: the outcome " +
+          JSON.stringify(derived.outcomeId) +
+          " the worker's own last turn declared for node " +
+          JSON.stringify(nodeId) +
+          " attempt " +
+          JSON.stringify(attemptId) +
+          " was REJECTED by the node's declared acceptance gates [" +
+          settlement.decision.requirements
+            .filter((entry) => entry.outcome.kind !== "pass")
+            .map((entry) => validatorKeyText(entry.requirement))
+            .join(",") +
+          "], so no accepted event was written and the attempt stays open"
+          : "outcome-host: the host-derived settlement of the outcome " +
+          JSON.stringify(derived.outcomeId) +
+          " the worker's own last turn declared for node " +
+          JSON.stringify(nodeId) +
+          " attempt " +
+          JSON.stringify(attemptId) +
+          " was NOT COMMITTED (" +
+          settlement.verdict +
+          "): the settlement that stands is another one and this delivery wrote no accepted event",
+    });
   }
 
   /**
@@ -1291,6 +1759,7 @@ export class OutcomeHost {
     const completed: string[] = [];
     const awaiting: OutcomeHostAwaitingCompletion[] = [];
     const controlled: string[] = [];
+    const failedAttempts: string[] = [];
     const unconfirmed: OutcomeHostUnconfirmedExecution[] = [];
     const cancellations: OutcomeCancelDeliveryEntry[] = [];
     const cancelBlocked: string[] = [];
@@ -1429,12 +1898,32 @@ export class OutcomeHost {
           }
           const observation = this.observeExecutionOf(execution);
           if (observation.kind === "failed") {
+            // A FAILED END IS NOT A RUN-LEVEL STOP (P3 item 1 / DEFECT 2). The
+            // durable failure decision is NODE-SCOPED: it ends ONE attempt. What
+            // the RUN's control fact says afterwards is the store's own answer —
+            // `runControl` is read back inside the write and reports whatever
+            // fact STANDS (absent when this command claimed none) — so ONLY a
+            // standing run fact may be reported in `controlled`. Pushing
+            // `graph:failure` unconditionally told every reader the whole run had
+            // stopped, which is the conflation this branch now ends: an
+            // attempt-scoped stop is reported in `failedAttempts`, down to the
+            // command that ended it.
             const failure = await this.failObservedExecution(graphId, node.nodeId, attemptId);
-            if (failure?.kind === "applied") controlled.push(graphId + ":failure");
-            else effectRefusals.push({
-              graphId, code: "completion-unsettled", path: "$.executionId",
-              message: "The failed execution has no confirmed binding for a durable failure decision"
-            });
+            if (failure?.kind === "applied") {
+              const runControl = failure.runControl;
+              if (runControl === undefined) {
+                failedAttempts.push(
+                  graphId + ":" + node.nodeId + ":" + attemptId + ":" + failure.command,
+                );
+              } else {
+                controlled.push(graphId + ":" + runControl.command);
+              }
+            } else {
+              effectRefusals.push({
+                graphId, code: "completion-unsettled", path: "$.executionId",
+                message: "The failed execution has no confirmed binding for a durable failure decision"
+              });
+            }
             continue;
           }
           if (observation.kind === "running") {
@@ -1495,29 +1984,27 @@ export class OutcomeHost {
             );
             continue;
           }
-          const settlement = await this.complete(graphId, attemptId);
-          if (settlement.kind === "settled" && settlement.settlement.kind !== "refused") {
-            // The settlement RAN: accepted (committed or replayed), rejected by
-            // a declared gate, or not-committed because another channel already
-            // settled the attempt. All three are the acceptance core's own
-            // answers, and the first one is why the sweep asked at all.
+          // THE ONE ENTRY FOR "THE EXECUTION ENDED" (DEFECT 2): the plan's own
+          // pinned completion first, then the outcome the WORKER'S OWN LAST TURN
+          // declared. A settlement that RAN and was accepted — through either
+          // channel — names the attempt here; anything else is reported below
+          // with the entry's own reason, which carries BOTH channels' answers (a
+          // refusal, a rejection, a missing reader, a negative last-turn
+          // reading), so the block is diagnosable without re-running the sweep.
+          const settlement = await this.settleFinishedAttempt(graphId, attemptId);
+          if (settlement.kind === "settled") {
             completed.push(
-              graphId + ":" + attemptId + ":" + settlement.settlement.kind,
+              graphId + ":" + attemptId + ":" + describeFinishedAttempt(settlement),
             );
             continue;
           }
-          // WHY IT COULD NOT SETTLE is carried verbatim from the bridge's own
-          // report (or the runtime's own refusal codes), so the block is
-          // diagnosable without re-running the sweep.
-          const why =
-            settlement.kind !== "settled"
-              ? settlement.kind + ": " + settlement.reason
-              : settlement.settlement.kind === "refused"
-                ? "the settlement was refused: " +
-                settlement.settlement.refusals
-                  .map((refusal) => refusal.code)
-                  .join(",")
-                : "the settlement did not run";
+          if (settlement.kind === "already-settled") {
+            // The ledger already holds an accepted event for this attempt: the
+            // attempt IS settled, so this is a settlement the sweep REPLAYED, not
+            // a block. It is named as such instead of being reported unsettled.
+            completed.push(graphId + ":" + attemptId + ":already-settled");
+            continue;
+          }
           effectRefusals.push(
             Object.freeze({
               graphId,
@@ -1531,7 +2018,12 @@ export class OutcomeHost {
                 " attempt " +
                 JSON.stringify(attemptId) +
                 " TERMINAL, but this host could not settle it (" +
-                why +
+                settlement.reason +
+                (settlement.refusals.length === 0
+                  ? ""
+                  : " [refusals: " +
+                  settlement.refusals.map((refusal) => refusal.code).join(",") +
+                  "]") +
                 ") — the attempt stays unsettled and is reported",
             }),
           );
@@ -1556,6 +2048,7 @@ export class OutcomeHost {
       completed.length > 0 ||
       awaiting.length > 0 ||
       controlled.length > 0 ||
+      failedAttempts.length > 0 ||
       cancellations.length > 0 ||
       cancelBlocked.length > 0
     ) {
@@ -1591,6 +2084,8 @@ export class OutcomeHost {
           .join(", ") +
         "] controlled=[" +
         controlled.join(", ") +
+        "] failed-attempts=[" +
+        failedAttempts.join(", ") +
         "] cancellations=[" +
         cancellations
           .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
@@ -1620,6 +2115,10 @@ export class OutcomeHost {
       // work that stop leaves unconfirmed: both are reported, so a restart
       // neither re-starts a cancelled graph nor presents it as quiet.
       controlled: Object.freeze(controlled),
+      // WHAT A NODE-SCOPED STOP ENDED (DEFECT 2): `graph:node:attempt:command`
+      // for every attempt this sweep failed WITHOUT the run being stopped. The
+      // run's own control fact is in `controlled`, exactly when one stands.
+      failedAttempts: Object.freeze(failedAttempts),
       unconfirmedExecutions: Object.freeze(unconfirmed),
       // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3 cancel): confirmed /
       // requested / unsupported / blocked, per attempt. Nothing here is a
@@ -1686,11 +2185,22 @@ export class OutcomeHost {
       });
       const observation = this.observeExecutionOf(execution);
       if (observation.kind === "completed") {
-        const settlement = await this.complete(entry.graphId, entry.attemptId);
+        // THE SAME ONE ENTRY THE SWEEP USES (DEFECT 2). A terminal read that is
+        // not the plan's pinned completion still settles the outcome the
+        // WORKER'S OWN LAST TURN declared, instead of stranding the attempt; a
+        // reading that yielded nothing is reported exactly as the sweep reports
+        // it, with the entry's own reason.
+        const report = await this.settleFinishedAttempt(entry.graphId, entry.attemptId);
         settled.push(
-          entry.graphId + ":" + entry.attemptId + ":" + settlement.kind,
+          entry.graphId +
+          ":" +
+          entry.attemptId +
+          ":" +
+          (report.kind === "settled" ? describeFinishedAttempt(report) : report.kind),
         );
-        if (settlement.kind === "settled") {
+        // A settlement that STANDS — fresh or already recorded — moves the state
+        // the entry's own views render, so the refresh is reported for both.
+        if (report.kind === "settled" || report.kind === "already-settled") {
           options.onSettled?.(entry.graphId, entry.attemptId);
         }
         continue;
@@ -2040,8 +2550,12 @@ export class OutcomeHost {
         );
         return;
       }
-      const report = await this.complete(entry.graphId, entry.attemptId);
-      if (report.kind === "settled") {
+      // THE SAME ONE ENTRY THE SWEEP USES (DEFECT 2): the announcement is
+      // verified against the host's own read (above) and the attempt is then
+      // settled by the plan's pinned completion, or by the outcome the worker's
+      // own last turn declared, or reported unsettled with both answers named.
+      const report = await this.settleFinishedAttempt(entry.graphId, entry.attemptId);
+      if (report.kind === "settled" || report.kind === "already-settled") {
         options.onSettled?.(entry.graphId, entry.attemptId);
       }
       logWarn(
@@ -2053,7 +2567,11 @@ export class OutcomeHost {
         JSON.stringify(entry.attemptId) +
         " ended; the settlement report is " +
         report.kind +
-        (report.kind === "settled" ? " (" + report.settlement.kind + ")" : ""),
+        (report.kind === "settled"
+          ? " (" + describeFinishedAttempt(report) + ")"
+          : report.kind === "unsettled"
+            ? " (" + report.reason + ")"
+            : " (" + report.submissionId + ")"),
       );
     } catch (error) {
       logWarn(
@@ -2848,6 +3366,121 @@ function describeUnconfirmedAnnouncement(
     observation.reason +
     ")"
   );
+}
+
+/**
+ * A NEGATIVE finished-attempt report, shaped so no field is ever invented: the
+ * attempt is named, the reason says what stands in the way, and the refusals
+ * are the runtime's own words when a channel refused BY NAME (never a
+ * synthesized code).
+ */
+function unfinishedAttempt(
+  attemptId: string,
+  input: {
+    readonly nodeId?: string;
+    readonly reason: string;
+    readonly refusals?: readonly OutcomeRuntimeRefusal[];
+  },
+): HostFinishedAttemptReport {
+  return Object.freeze({
+    kind: "unsettled" as const,
+    attemptId,
+    ...(input.nodeId === undefined ? {} : { nodeId: input.nodeId }),
+    reason: input.reason,
+    refusals: Object.freeze([...(input.refusals ?? [])]),
+  });
+}
+
+/**
+ * The node the PLAN'S OWN channel got far enough to name, or `undefined`.
+ *
+ * A completion report names the node exactly when it resolved a binding
+ * (`settled`) or resolved one and could not authenticate it
+ * (`unauthenticated`); `unbound` deliberately names none, because there was no
+ * record to read a node from and parsing one out of an attempt id is exactly
+ * what that report refuses to do.
+ */
+function boundNodeIdOf(report: HostCompletionReport): string | undefined {
+  return report.kind === "settled" || report.kind === "unauthenticated"
+    ? report.nodeId
+    : undefined;
+}
+
+/**
+ * WHY THE PLAN'S OWN COMPLETION CHANNEL DID NOT SETTLE, in that channel's own
+ * words — the reason a derived-channel report carries beside its own answer, so
+ * a reader never sees "no outcome" without seeing why the pinned authorization
+ * did not apply.
+ */
+function describeCompletionMiss(report: HostCompletionReport): string {
+  if (report.kind === "unbound") {
+    return (
+      "the completion channel holds no delivery binding for the attempt: " +
+      report.reason
+    );
+  }
+  if (report.kind === "unauthenticated") {
+    return "the completion could not be authenticated: " + report.reason;
+  }
+  switch (report.settlement.kind) {
+    case "refused":
+      return (
+        "the completion was REFUSED before anything was written [" +
+        report.settlement.refusals.map((refusal) => refusal.code).join(",") +
+        "]"
+      );
+    case "rejected":
+      return (
+        "the completion of the pinned outcome " +
+        JSON.stringify(report.settlement.completion.outcomeId) +
+        " was REJECTED by a declared acceptance gate"
+      );
+    case "not-committed":
+      return (
+        "the completion was NOT COMMITTED (" + report.settlement.verdict + ")"
+      );
+    case "accepted":
+      // Unreachable through the entry that asks (an accepted completion IS the
+      // report), kept total so the wording never falls through.
+      return "the completion was accepted";
+  }
+}
+
+/**
+ * Read the platform's last-turn answer TOTALLY: a port that THROWS has not
+ * answered, so it becomes `unavailable` carrying the thrown text — never a
+ * settlement, and never a repaired reading.
+ */
+function readDerivedOutcome(
+  port: HostDerivedOutcomePort,
+  execution: HostExecutionIdentity,
+): HostDerivedOutcome {
+  try {
+    return port(execution);
+  } catch (error) {
+    return Object.freeze({
+      kind: "unavailable" as const,
+      reason:
+        "the platform's last-turn reading port threw for execution " +
+        JSON.stringify(execution.executionId) +
+        " (" +
+        errorText(error) +
+        ")",
+    });
+  }
+}
+
+/**
+ * WHAT ONE SETTLED "THE EXECUTION ENDED" REPORT ESTABLISHED, as the sweep's own
+ * report word: the plan's completion channel keeps the decision word it always
+ * had (`accepted`, the only completion outcome reported as settled), and the
+ * worker-declared channel is named `derived` so a reader can tell WHICH channel
+ * settled the attempt without reading the receipt.
+ */
+function describeFinishedAttempt(
+  report: Extract<HostFinishedAttemptReport, { kind: "settled" }>,
+): string {
+  return report.channel === "completion" ? report.settlement.kind : "derived";
 }
 
 /**

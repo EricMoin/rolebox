@@ -957,13 +957,16 @@ describe("RoleboxMonitorPanel", () => {
       const scheduled: string[] = [];
       const realSetTimeout = globalThis.setTimeout;
       const realSetInterval = globalThis.setInterval;
-      globalThis.setTimeout = ((...args: unknown[]) => {
+      // Both stubs carry the host timer signature (handler + delay) and
+      // forward every argument to the real timer, so their type overlaps the
+      // global overload set they replace instead of being an unrelated shape.
+      globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
         scheduled.push("timeout");
-        return realSetTimeout(...(args as Parameters<typeof realSetTimeout>));
+        return realSetTimeout(handler, timeout, ...args);
       }) as typeof globalThis.setTimeout;
-      globalThis.setInterval = ((...args: unknown[]) => {
+      globalThis.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
         scheduled.push("interval");
-        return realSetInterval(...(args as Parameters<typeof realSetInterval>));
+        return realSetInterval(handler, timeout, ...args);
       }) as typeof globalThis.setInterval;
 
       try {

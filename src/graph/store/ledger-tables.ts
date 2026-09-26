@@ -571,6 +571,32 @@ function supersededVerdict(decision: ControlDecisionRecord): CommitResult {
 
 
 /**
+ * The `attempt-stopped` verdict for one attempt a trusted STOPPING control
+ * decision ended (P3 item 1).
+ *
+ * ONE owner of the wording, exactly like {@link controlledVerdict} and
+ * {@link supersededVerdict}, so the acceptance fast path and the guarded write
+ * refuse a batch in the same words. The text is explicit that the RUN is not
+ * what stopped: a node-scoped `failure`/`timeout` ends one attempt while its
+ * siblings keep executing, and only a run-wide command or a successor-minting
+ * `retry` moves the attempt on.
+ */
+function attemptStoppedVerdict(decision: ControlDecisionRecord): CommitResult {
+  return {
+    kind: "attempt-stopped",
+    decision,
+    reason:
+      `attempt ${decision.attemptId} of node ${decision.nodeId} in graph ${decision.graphId} was ` +
+      `STOPPED by the trusted control command ${decision.command} decided at ` +
+      `${String(decision.decidedAt)} (${decision.reason}) before this submission committed — a ` +
+      "stopped attempt accepts nothing, and the RUN itself is not stopped: its other attempts " +
+      "keep executing and still settle, while this one is carried forward only by a `retry` of " +
+      "its node or is closed by a run-wide `cancel`/`budget-stop`, so no receipt, accepted " +
+      "event, state advance or successor effect was written for it",
+  };
+}
+
+/**
  * The `approval-blocked` verdict for an attempt paused on a request that is not
  * `approved` (P3 item 3).
  *
@@ -728,6 +754,19 @@ export class LedgerTables {
     attemptId: string,
   ) => ControlDecisionRecord | undefined;
   /**
+   * The STOPPING control decision that ended one attempt, if any (P3 item 1),
+   * read through the store that owns the control table. Injected for the same
+   * reason the fact above is: the acceptance core needs the row inside the
+   * transaction that refuses the batch, and the SQL of
+   * `graph_control_decisions` keeps ONE owner. It names the same commands as
+   * `STOPPING_CONTROL_COMMANDS`, whose membership is exactly the SQL literal
+   * below.
+   */
+  private readonly readStoppingDecision: (
+    graphId: string,
+    attemptId: string,
+  ) => ControlDecisionRecord | undefined;
+  /**
    * The approval request that BLOCKS one attempt's acceptance, if any (P3 item
    * 3), read through the store that owns the approval table. Injected for the
    * same reason the two facts above are: the acceptance core needs the row
@@ -750,6 +789,10 @@ export class LedgerTables {
       graphId: string,
       attemptId: string,
     ) => ControlDecisionRecord | undefined,
+    readStoppingDecision: (
+      graphId: string,
+      attemptId: string,
+    ) => ControlDecisionRecord | undefined,
     readBlockingApproval: (
       graphId: string,
       attemptId: string,
@@ -761,6 +804,7 @@ export class LedgerTables {
     this.readRunControl = readRunControl;
     this.readCurrentRunId = readCurrentRunId;
     this.readSupersedingRetry = readSupersedingRetry;
+    this.readStoppingDecision = readStoppingDecision;
     this.readBlockingApproval = readBlockingApproval;
   }
 
@@ -807,6 +851,40 @@ export class LedgerTables {
   }
 
   // ── Commit ────────────────────────────────────────────────────────────────
+
+  /**
+   * Classify a batch refused because ONE attempt carries a STOPPING control
+   * decision: `controlled` when the RUN stands stopped, `attempt-stopped` when
+   * only the ATTEMPT is.
+   *
+   * WHY THE RUN FACT IS RE-READ AFTER THE DECISION. `commitAccepted` reads the
+   * two facts as two statements, never in one snapshot, and a run-wide
+   * `cancel`/`budget-stop` commits the decision AND the run fact it claims in
+   * ONE transaction (`writeControlDecision`): the attempt's decision can
+   * therefore be visible in the very next statement after a run-control read
+   * that answered "none". Classifying from that stale read would answer
+   * `attempt-stopped` for a stopped RUN — a verdict whose reason says the run's
+   * other attempts keep executing, which is false from the moment the command
+   * committed. Reading the run fact AFTER the decision makes both classification
+   * sites (the fast path and the re-read that classifies a guarded write) agree
+   * with the fact that stands: the fact read second decides the code.
+   *
+   * A NODE-SCOPED `failure`/`timeout` STILL ANSWERS `attempt-stopped`: it claims
+   * no run fact, so the re-read finds none and the attempt keeps the
+   * attempt-level verdict — including for an attempt of a SUPERSEDED run, whose
+   * own stop is reported as the attempt's fact because `readRunControl` answers
+   * the graph's CURRENT run.
+   *
+   * `undefined` means the attempt carries no stopping decision at all, so the
+   * caller falls through to the checks that follow exactly as before.
+   */
+  private stoppingVerdict(graphId: string, attemptId: string): CommitResult | undefined {
+    const stopped = this.readStoppingDecision(graphId, attemptId);
+    if (stopped === undefined) return undefined;
+    const control = this.readRunControl(graphId);
+    if (control !== undefined) return controlledVerdict(control);
+    return attemptStoppedVerdict(stopped);
+  }
 
   /**
    * Commit one acceptance batch atomically.
@@ -863,6 +941,22 @@ export class LedgerTables {
     // EXISTS` of the batch write below.
     const superseded = this.readSupersedingRetry(receipt.graphId, receipt.attemptId);
     if (superseded !== undefined) return supersededVerdict(superseded);
+    // A STOPPED ATTEMPT ACCEPTS NOTHING (P3 item 1). A node-scoped `failure`
+    // or `timeout` ends ONE attempt and a run-wide `cancel`/`budget-stop` ends
+    // the run while recording a decision on each in-flight attempt: in every
+    // case the named attempt accepts nothing afterwards. Same shape as the
+    // checks around it — a stopping decision is never cleared, so a fact read
+    // here cannot go stale, and the authoritative check is the fifth `WHERE NOT
+    // EXISTS` of the batch write below. The run-control check above stays FIRST
+    // on purpose: a run-wide stop answers `controlled`, so `cancel` and
+    // `budget-stop` keep their own named verdict. THE CLASSIFICATION IS
+    // {@link stoppingVerdict}, which reads the run fact again AFTER the
+    // decision: the two reads are not one snapshot, so a run-wide command that
+    // claimed the run between the check above and this line would otherwise be
+    // answered `attempt-stopped` — a verdict whose reason says the run keeps
+    // executing, which stops being true the instant that command commits.
+    const stopped = this.stoppingVerdict(receipt.graphId, receipt.attemptId);
+    if (stopped !== undefined) return stopped;
     // A CLOSED RUN ACCEPTS NOTHING (P3 item 2, the re-execution). An attempt
     // that belongs to a run the graph has SUPERSEDED can never settle: its
     // result would be a new terminal fact about a run whose receipts are already
@@ -875,7 +969,7 @@ export class LedgerTables {
       return supersededRunVerdict(receipt.graphId, receipt.attemptId, closedRun);
     }
     // AN ATTEMPT PAUSED ON A TRUSTED APPROVAL ACCEPTS NOTHING (P3 item 3). Same
-    // shape as the four checks above: the row's status never becomes MORE
+    // shape as the five checks above: the row's status never becomes MORE
     // permissive on its own (only a recorded decision moves it, and a decision is
     // terminal once taken), so a block read here cannot go stale into an
     // acceptance, and the authoritative check is the fourth `WHERE NOT EXISTS` of
@@ -885,16 +979,22 @@ export class LedgerTables {
 
     const write = (): CommitResult => {
       if (!this.writeBatch(batch)) {
-        // THE GUARD REFUSED THE BATCH: the run carried no control fact and the
-        // attempt carried no superseding retry when the fast path read them, and
-        // the guarded write found one — a command committed in that window. The
-        // verdict is classified from the COMMITTED store (the facts this
-        // transaction can see), never assumed from the refusal, and NOTHING of
-        // the batch was written.
+        // THE GUARD REFUSED THE BATCH: the run carried no control fact, the
+        // attempt carried no superseding retry and no stopping decision when the
+        // fast path read them, and the guarded write found one — a command
+        // committed in that window. The verdict is classified from the COMMITTED
+        // store (the facts this transaction can see), never assumed from the
+        // refusal, and NOTHING of the batch was written.
         const raced = this.readRunControl(receipt.graphId);
         if (raced !== undefined) return controlledVerdict(raced);
         const retried = this.readSupersedingRetry(receipt.graphId, receipt.attemptId);
         if (retried !== undefined) return supersededVerdict(retried);
+        // The same classification the fast path uses, so the two sites cannot
+        // disagree about the two facts they read: the run fact is read AFTER
+        // the decision, and a run-wide stop that claimed the run in between is
+        // answered `controlled` here too.
+        const racedStop = this.stoppingVerdict(receipt.graphId, receipt.attemptId);
+        if (racedStop !== undefined) return racedStop;
         const racedRun = this.supersededRunOf(receipt.graphId, receipt.attemptId);
         if (racedRun !== undefined) {
           return supersededRunVerdict(receipt.graphId, receipt.attemptId, racedRun);
@@ -905,9 +1005,10 @@ export class LedgerTables {
           "invalid-record",
           "acceptance-ledger: the batch write for graph " +
           JSON.stringify(receipt.graphId) +
-          " was refused by the run-control, supersession, closed-run or approval guard, but the " +
-          "store holds none of those facts for that graph and attempt — the guarded write and the " +
-          "store disagree, so the batch was rolled back and no verdict is reported",
+          " was refused by the run-control, supersession, attempt-stop, closed-run or approval " +
+          "guard, but the store holds none of those facts for that graph and attempt — the " +
+          "guarded write and the store disagree, so the batch was rolled back and no verdict is " +
+          "reported",
         );
       }
       return { kind: "committed", receipt };
@@ -952,6 +1053,11 @@ export class LedgerTables {
          AND NOT EXISTS (
            SELECT 1 FROM ${GRAPH_STORE_TABLES.approvalRequests}
            WHERE graph_id = ? AND attempt_id = ? AND status <> 'approved'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ${GRAPH_STORE_TABLES.controlDecisions}
+           WHERE graph_id = ? AND attempt_id = ?
+             AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
          )`,
         receipt.graphId,
         receipt.attemptId,
@@ -968,6 +1074,11 @@ export class LedgerTables {
         receipt.attemptId,
         receipt.graphId,
         // The approval guard: the attempt's request, if any.
+        receipt.graphId,
+        receipt.attemptId,
+        // The stopping guard: the attempt's own stopping decision, if any. Its
+        // command list is the store's own literal, and the same membership as
+        // `STOPPING_CONTROL_COMMANDS`.
         receipt.graphId,
         receipt.attemptId,
       );

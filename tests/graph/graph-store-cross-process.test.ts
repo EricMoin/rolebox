@@ -1065,10 +1065,9 @@ async function raceControlRound(
 const CONTROL_RUN = GRAPH + "@1";
 
 describe("trusted control across two real processes", () => {
-  it("lets exactly ONE competing command win an attempt, and the FIRST win the run", async () => {
+  it("lets exactly ONE competing node-scoped command win an attempt, and claims no run fact", async () => {
     const fx = makeFixture("graph-xproc-control-");
     const rounds = 4;
-    const winners: (ControlCommandName | undefined)[] = [];
     for (let round = 0; round < rounds; round++) {
       const attemptId = `work#${round + 1}`;
       const racers = [
@@ -1094,7 +1093,6 @@ describe("trusted control across two real processes", () => {
       ]);
       const winner = reports.find((report) => report.verdict === "recorded");
       expect(winner?.command).toBeDefined();
-      winners.push(winner?.command);
     }
 
     // The parent's OWN connection: one decision per attempt...
@@ -1102,9 +1100,15 @@ describe("trusted control across two real processes", () => {
     expect(
       fx.store.runs.controlDecisions(GRAPH).map((decision) => decision.attemptId).sort(),
     ).toEqual(["work#1", "work#2", "work#3", "work#4"]);
-    // ...and the RUN keeps the command that stopped it FIRST, whatever the later
-    // processes proposed.
-    expect(fx.store.runs.readRunControl(GRAPH)?.command).toBe(winners[0]);
+    // ...and NEITHER command claims the run's control fact. `failure` and
+    // `timeout` are NODE-SCOPED (P3 item 1): each records its decision on the
+    // ATTEMPT it names and writes nothing else, so the run keeps executing and
+    // its fact stays unclaimed — only a run-wide `cancel`/`budget-stop` claims
+    // it. This is the assertion the OLD contract got wrong: it read
+    // `readRunControl(GRAPH)?.command` as the FIRST winner, because a node-scoped
+    // stop used to claim the run. A regression that made those commands claim it
+    // again fails here.
+    expect(fx.store.runs.readRunControl(GRAPH)).toBeUndefined();
   });
 
   it("never lets one attempt carry both an accepted event and a control decision", async () => {
@@ -1136,10 +1140,21 @@ describe("trusted control across two real processes", () => {
       // side decides against the COMMITTED store in the FIRST statement of its
       // own write: the control decision INSERT is conditioned on no accepted
       // event existing for the attempt (`settled`, nothing written), and the
-      // acceptance receipt INSERT is conditioned on the run carrying no control
-      // fact (`controlled`, nothing written). Whichever of the two commits
-      // first is the fact that stands, so the double fact this case used to
-      // accept is unrepresentable through those two writes at any interleaving.
+      // acceptance receipt INSERT is conditioned on the attempt carrying no
+      // STOPPING control decision (`attempt-stopped`, nothing written).
+      // Whichever of the two commits first is the fact that stands, so the
+      // double fact this case used to accept is unrepresentable through those
+      // two writes at any interleaving.
+      //
+      // THE LOSING VERDICT IS ATTEMPT-SCOPED (P3 item 1). `failure` is a
+      // NODE-SCOPED command: it ends THIS attempt and claims no run control
+      // fact, so the refusal the acceptance side receives is `attempt-stopped`,
+      // never `controlled` — `controlled` belongs to a run-wide
+      // `cancel`/`budget-stop`, which this race never issues. The verdict is one
+      // deterministic answer rather than a pair of possibilities because the run
+      // carries no control fact for the acceptance fast path to read: whichever
+      // statement of the two the acceptance side reaches first, the only
+      // stop fact in the store is the attempt's own decision.
       const settled = fx.store
         .acceptedEvents(GRAPH)
         .some((event) => event.attemptId === attemptId);
@@ -1154,7 +1169,7 @@ describe("trusted control across two real processes", () => {
         expect(acceptance?.verdict).toBe("committed");
         expect(control?.verdict).toBe("settled");
       } else {
-        expect(acceptance?.verdict).toBe("controlled");
+        expect(acceptance?.verdict).toBe("attempt-stopped");
         expect(control?.verdict).toBe("recorded");
         expect(decision?.command).toBe("failure");
       }
@@ -1164,12 +1179,19 @@ describe("trusted control across two real processes", () => {
     // process committed first — and the store holds exactly ONE fact per
     // raced attempt.
     for (const answer of answers) {
-      expect(["committed/settled", "controlled/recorded"]).toContain(answer);
+      expect(["committed/settled", "attempt-stopped/recorded"]).toContain(answer);
     }
     expect(
       fx.store.acceptedEvents(GRAPH).length +
         fx.store.runs.controlDecisions(GRAPH).length,
     ).toBe(rounds);
+    // THE RUN IS NEVER WHAT STOPPED. Every round raced a NODE-SCOPED `failure`,
+    // so the run's control fact stays unclaimed throughout: the losing verdict is
+    // `attempt-stopped` rather than `controlled` precisely because no run-wide
+    // command was ever issued. A regression that claimed the run here — the old
+    // "failure => controlled" contract — fails on this line and on the pairs
+    // above.
+    expect(fx.store.runs.readRunControl(GRAPH)).toBeUndefined();
   });
 });
 

@@ -1225,8 +1225,14 @@ export async function apply(
           });
           return;
         }
+        // THE ONE ENTRY FOR "THE EXECUTION ENDED" (DEFECT 2). The run reached its
+        // end; whether that end SETTLES the attempt is the host's decision, and
+        // the outcome may come from the plan's pinned completion OR from the
+        // outcome the WORKER'S OWN LAST TURN declared. `complete` alone could not
+        // do that: an attempt whose worker answered in prose had no channel at
+        // all.
         void outcomeHost
-          ?.complete(request.graphId, request.attemptId)
+          ?.settleFinishedAttempt(request.graphId, request.attemptId)
           .then((report) => {
             // Any settlement moves the graph state the console renders.
             notifyRoleboxChanged("graph");
@@ -1234,6 +1240,12 @@ export async function apply(
               graphId: request.graphId,
               attemptId: request.attemptId,
               kind: report.kind,
+              // WHICH CHANNEL SETTLED IT, when one did: the plan's pinned
+              // completion or the worker-declared outcome. `unsettled` is the
+              // honest third answer, and its reason is logged so a stranded
+              // attempt is diagnosable from the boot log alone.
+              ...(report.kind === "settled" ? { channel: report.channel } : {}),
+              ...(report.kind === "unsettled" ? { reason: report.reason } : {}),
             });
           })
           .catch((err: unknown) => {
@@ -1312,6 +1324,13 @@ export async function apply(
       // rounded into a launch, a settlement or a silent strand.
       query: outcomeDelivery.executionQuery,
       observeExecution: outcomeDelivery.observeExecution,
+      // THE PLATFORM'S READING OF THE WORKER'S OWN LAST TURN (DEFECT 2): the
+      // outcome an execution that ended WITHOUT its pinned completion declared
+      // for itself. The adapter records a reading exactly where it already reads
+      // the child's events (the execution-query prime and the completion watch)
+      // and answers `unavailable` for an execution it has not read — never a
+      // guess, and never a credential.
+      derivedOutcomeOf: outcomeDelivery.derivedOutcomeOf,
       watchCompletion: outcomeDelivery.watchCompletion,
       // THE PLATFORM CANCEL PORT (P3). A trusted cancel command's durable intents
       // are handed to dsh through this: a run THIS process started is aborted
@@ -1372,6 +1391,7 @@ export async function apply(
           // A controlled run is reported in `resumed` too, but it is named here so
           // the gate cannot depend on that staying true (P3 item 1).
           report.controlled.length > 0 ||
+          report.failedAttempts.length > 0 ||
           report.unconfirmedExecutions.length > 0 ||
           report.cancellations.length > 0 ||
           report.cancelBlocked.length > 0
@@ -1395,11 +1415,17 @@ export async function apply(
                 "->" +
                 divergence.host,
             ),
-            // WHAT A TRUSTED CONTROL COMMAND STOPPED (P3 item 1): `graph:command`
-            // for every run a failure / timeout / cancel ended. The values are
-            // computed by the sweep, and logging them here is what keeps a
-            // restart from presenting a stopped run as merely `resumed`.
+            // WHAT A TRUSTED RUN-WIDE CONTROL COMMAND STOPPED (P3 item 1):
+            // `graph:command` for every run a `cancel` / `budget-stop` ended. The
+            // values are computed by the sweep, and logging them here is what
+            // keeps a restart from presenting a stopped run as merely `resumed`.
+            // A NODE-SCOPED `failure` / `timeout` is deliberately NOT here: it
+            // ends one attempt and the run keeps executing.
             controlled: report.controlled,
+            // WHAT A NODE-SCOPED STOP ENDED (DEFECT 2): `graph:node:attempt:command`
+            // for every attempt the sweep failed WITHOUT the run being stopped.
+            // Logged beside `controlled` so the two facts are never conflated.
+            failedAttempts: report.failedAttempts,
             // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
             // requested / unsupported / blocked, per attempt. Only `confirmed`
             // is the platform's own substantiation; everything else leaves the

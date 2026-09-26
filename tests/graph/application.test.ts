@@ -106,9 +106,24 @@ describe("GraphApplication registered tools", () => {
     await call("graph_declare", { declaration: chain("failed") });
     app.host.confirmExecution(sent[0]!.effect, { executionId: "failed-worker" });
     fail();
-    expect((await app.host.failObservedExecution("failed", "work", sent[0]!.request.attemptId))?.kind).toBe("applied");
+    const failed = await app.host.failObservedExecution("failed", "work", sent[0]!.request.attemptId);
+    expect(failed?.kind).toBe("applied");
+    if (failed?.kind !== "applied") throw new Error("fixture: expected an applied stop");
+    // THE HOST'S FAILURE IS AN ATTEMPT-SCOPED STOP (P3 item 1). `failure` records
+    // its decision on the ATTEMPT it names and claims NO run control fact, so the
+    // RUN keeps executing: the phase is the state's own, not the `stopped` a
+    // run-wide `cancel`/`budget-stop` reports, and the run carries no control
+    // fact. This is the expectation the OLD contract got wrong — it read a
+    // node-scoped failure as a run-level stop.
+    expect(failed.runControl).toBeUndefined();
     const graph = queryGraphs(join(root, "store")).graphs[0]!;
-    expect(graph.phase).toBe("stopped");
+    expect(graph.phase).toBe("executing");
+    expect(graph.current?.control).toBeUndefined();
+    // THE DECISION IS STILL DURABLE, and it is the ATTEMPT's own fact: the stop
+    // is recorded rather than dropped, and it names `failure`.
+    expect(
+      graph.current?.decisions.map((decision) => [decision.attemptId, decision.command]),
+    ).toEqual([[sent[0]!.request.attemptId, "failure"]]);
     expect(graph.current?.unsettledEffects).toEqual([]);
     expect(graph.current?.attempts[0]?.accepted).toBeUndefined();
     expect(graph.current?.budget.unknownUsageAttempts).toBe(1);

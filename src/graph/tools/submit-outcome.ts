@@ -99,9 +99,11 @@ export interface SubmitOutcomeDiagnostic {
  *
  * `refusals` is NON-EMPTY exactly when nothing was written. That covers a
  * proposal refused before any decision AND a NOT-COMMITTED verdict, which
- * `verdict` names in the ledger's own vocabulary (`conflict`, `settled` or
- * `controlled`): in both cases the caller can repair one field and submit
- * again, or learn that the record already in the store stands unchanged.
+ * `verdict` names in the ledger's own vocabulary (`conflict`, `settled`,
+ * `controlled` or `attempt-stopped`): in both cases the caller can repair one
+ * field and submit again, or learn that the record already in the store stands
+ * unchanged — and for `attempt-stopped` the run path answers the named
+ * `attempt-stopped` refusal, because the RUN is not what stopped.
  *
  * `decision` is present EXACTLY when a decision was COMMITTED — an accepted or
  * rejected submission. `requirements` carries the gates' own answers: the
@@ -156,7 +158,14 @@ export interface GraphSubmitOutcomeResult {
   // name before it reaches this projection (`approval-pending` /
   // `approval-rejected` / `approval-expired`), and the verdict is spelled here
   // because the ledger's own vocabulary is what this field renders.
-  | "approval-blocked";
+  | "approval-blocked"
+  // The attempt carries a STOPPING trusted control decision (P3 item 1): a
+  // node-scoped `failure`/`timeout` (or the run-wide `cancel`/`budget-stop`)
+  // ended it, so nothing was written for it while the RUN keeps executing. The
+  // run path answers this as the named `attempt-stopped` refusal before it
+  // reaches this projection; the verdict is spelled here for the same reason as
+  // the ones above.
+  | "attempt-stopped";
   /** Why a conflict, settlement or control stop was refused, from the ledger. */
   readonly verdict_reason?: string;
   /**
@@ -876,6 +885,7 @@ function notCommittedReason(verdict: CommitResult): string | undefined {
     case "conflict":
     case "settled":
     case "controlled":
+    case "attempt-stopped":
       return verdict.reason;
     default:
       return undefined;
@@ -891,6 +901,8 @@ function notCommittedCode(verdict: CommitResult["kind"]): string {
       return "submission-settled";
     case "controlled":
       return "submission-controlled";
+    case "attempt-stopped":
+      return "submission-attempt-stopped";
     default:
       return "submission-not-committed";
   }

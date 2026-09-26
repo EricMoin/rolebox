@@ -1,11 +1,27 @@
 import { basename, dirname } from "node:path";
 import { EnginePhase, NodeStatus } from "../../../constants.ts";
+import { STOPPING_CONTROL_COMMANDS } from "../../../graph/ledger/types.ts";
 import { queryGraphs, type GraphView } from "../../../graph/query/graph-query.ts";
 import { graphStoreRoot } from "../../../graph/store/schema.ts";
 import { getDataDir } from "../../paths.ts";
 import type { EngineGraphSnapshot } from "./monitor-reader-types.ts";
 
 const displayStatus = { pending: NodeStatus.Pending, dispatched: NodeStatus.Running, settled: NodeStatus.Completed };
+
+/**
+ * The reason a STOPPING decision recorded for one attempt carries, or nothing.
+ *
+ * A node-scoped `failure`/`timeout` claims no run control fact — the run keeps
+ * executing — so a node whose current attempt was stopped has no run `control`
+ * to read and would otherwise look like a healthy running node. Only a
+ * stopping command counts: a `retry` against the same attempt is a
+ * supersession, not an error, and is not shown as one.
+ */
+function stoppingReason(run: GraphView["runs"][number] | undefined, attemptId: string | undefined): string | undefined {
+  if (run === undefined || attemptId === undefined) return undefined;
+  return run.decisions.find(decision => decision.attemptId === attemptId &&
+    STOPPING_CONTROL_COMMANDS.includes(decision.command))?.reason;
+}
 
 export function projectEngineGraph(graph: GraphView): EngineGraphSnapshot {
   const nodeStatusCounts: Record<string, number> = {};
@@ -20,7 +36,8 @@ export function projectEngineGraph(graph: GraphView): EngineGraphSnapshot {
       completedAt: node.settledAt === undefined ? undefined : new Date(node.settledAt).toISOString(),
       retryCount: Math.max(0, attempts.length - 1),
       dispatchTaskId: current?.execution?.execution?.taskId ?? current?.execution?.execution?.executionId,
-      errorReason: graph.current?.control?.reason ?? graph.current?.stop?.reason,
+      errorReason: graph.current?.control?.reason ?? graph.current?.stop?.reason ??
+        stoppingReason(graph.current, node.attemptId),
     };
   });
   const totals = graph.current?.budget.totals;

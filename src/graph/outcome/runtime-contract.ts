@@ -43,6 +43,9 @@ import {
 import {
   type NaturalCompletionSettlement
 } from "./natural-completion.ts";
+import {
+  type HostDerivedSettlement
+} from "./host-derived.ts";
 import type { ValidatorRegistry } from "./validators.ts";
 
 // ── The create-right fence a credential re-issue runs under ─────────────────
@@ -293,6 +296,18 @@ export type OutcomeRuntimeRefusalCode =
    */
   | "malformed-host-completion"
   /**
+   * A HOST-DERIVED delivery is not the closed record this protocol defines: it
+   * is missing `nodeId`, `attemptId`, `executionId` or `outcomeId`, one of them
+   * is not a non-empty string, `evidenceRefs` is not an array of non-empty
+   * strings, `derivation` is not two non-negative safe integers, or it carries
+   * a key the envelope does not define. The last case is the NO-CREDENTIAL rule
+   * (and the no-second-channel rule with it): a `credential` — or any future
+   * field offering a bearer, an approval or a second outcome — is refused BY
+   * NAME rather than dropped, because this channel is authenticated by the
+   * host's durable execution record alone.
+   */
+  | "malformed-host-derived-completion"
+  /**
    * A completion fact arrived through the HOST-COMPLETION channel
    * ({@link OutcomeGraphRuntime.settleHostCompletion}) but this runtime holds
    * no HOST COMPLETION AUTHORITY, so it cannot check the fact against the
@@ -309,6 +324,26 @@ export type OutcomeRuntimeRefusalCode =
    */
   | "host-completion-unauthenticated"
   /**
+   * A HOST-DERIVED delivery
+   * ({@link OutcomeGraphRuntime.settleHostDerivedCompletion}) names a node whose
+   * compiled plan PINNED a natural completion (`completion.mode === "natural"`
+   * with exactly one authorized outcome). The plan already decided which outcome
+   * that node completes into, so this channel — which carries the outcome the
+   * worker's own last turn declared — must not choose another one, and it is
+   * refused BY NAME rather than settled under whichever of the two it carried.
+   *
+   * The channel is otherwise legal for a node whose completion policy is absent
+   * or `explicit`: there the plan left the outcome to the attempt, and the
+   * declaration is judged by the node's declared outcomes and gates.
+   *
+   * (a) It is reachable ONLY from the host: no tool binds it, so a worker cannot
+   * reach it at all. (b) The outcome it settles comes from the WORKER'S OWN last
+   * turn — never from the host's invention, which is why the outcome id has no
+   * default and an undeclared one is refused by the acceptance core. (c) A
+   * natural-completion node is never settled through it.
+   */
+  | "derived-completion-natural-node"
+  /**
    * A recovered attempt's credential is gone and the runtime refuses to
    * re-issue one, because the restart-authorization conditions of plan §3.3 are
    * not met: the effect is not an UNSTARTED one, or the host did not answer
@@ -318,17 +353,39 @@ export type OutcomeRuntimeRefusalCode =
    */
   | "credential-reissue-forbidden"
   /**
-   * A TRUSTED CONTROL COMMAND stopped this run (P3 item 1): a failure, a
-   * timeout or a cancellation is recorded on the run, so the run takes no
-   * further step — it dispatches nothing, arms nothing and settles nothing.
+   * A TRUSTED RUN-WIDE CONTROL COMMAND stopped this run (P3 item 1): a
+   * `cancel` or a `budget-stop` claims the run's control fact, so the run takes
+   * no further step — it dispatches nothing, arms nothing and settles nothing.
    * The command, its reason and the principal that decided it are the durable
    * record this refusal reports; the attempt entries the stop left in flight
    * are reported, never settled and never dropped. It is deliberately NOT a
    * successful outcome: a stopped run can never be advanced by a submission,
    * and the same code is what a late worker submission and a late completion
-   * fact both meet.
+   * fact both meet. A NODE-SCOPED `failure`/`timeout` is not this case: it
+   * claims no run fact and is answered `attempt-stopped`.
    */
   | "control-stopped"
+  /**
+   * The ATTEMPT carries a STOPPING trusted control decision — a `failure`, a
+   * `timeout`, a `cancel` or a `budget-stop` (P3 item 1) — so it accepts and
+   * dispatches nothing more.
+   *
+   * THE RUN ITSELF CONTINUES. A node-scoped stop names one attempt: its
+   * siblings stay in flight, their submissions still settle and the successors
+   * they arm are still dispatched, so this is deliberately NOT `control-stopped`
+   * — the run holds no control fact and can still make progress. The attempt is
+   * resolved only by a node-scoped `retry` of its node, which mints a SUCCESSOR
+   * attempt (with a new credential), or is closed for good by a run-wide
+   * `cancel`/`budget-stop`, which then answers `control-stopped`.
+   *
+   * THE CODE IS CLASSIFIED, NOT ASSUMED. The run's control fact and the
+   * attempt's stopping decision are two reads, and a run-wide command commits
+   * both in one transaction: whichever fact is read LAST decides, so a
+   * `cancel`/`budget-stop` that claimed the run after the run fact was read is
+   * still answered `control-stopped`, never with this attempt-level code and a
+   * claim about a live run.
+   */
+  | "attempt-stopped"
   /**
    * The attempt was SUPERSEDED by a trusted `retry` (P3 item 2). The retry is a
    * successor command, not a stopping one: the run continues, but the attempt it
@@ -605,6 +662,67 @@ export type OutcomeNaturalSettlementResult =
   | {
     readonly kind: "not-committed";
     readonly completion: NaturalCompletionSettlement;
+    readonly decision: AcceptanceDecision;
+    readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
+  };
+
+
+/**
+ * What {@link OutcomeGraphRuntime.settleHostDerivedCompletion} produced.
+ *
+ * Variant for variant the same answer a completion delivery gives, because a
+ * host-derived settlement IS a settlement through the same acceptance core and
+ * the same atomic transaction — one attempt, the plan's declared outcomes, the
+ * outcome's declared acceptance gates, one receipt, one accepted event, one
+ * state advance and one successor effect. Each non-refused variant adds the
+ * {@link HostDerivedSettlement} record instead of the natural one, because this
+ * channel has no pinned authorization to name: the outcome is the one the
+ * worker's OWN last turn declared, and the plan decides whether it exists and
+ * passes its gates.
+ */
+export type OutcomeHostDerivedSettlementResult =
+  /** The delivery was refused before anything was written. */
+  | {
+    readonly kind: "refused";
+    readonly refusals: readonly OutcomeRuntimeRefusal[];
+  }
+  /**
+   * The host-derived completion settled the attempt through the shared
+   * transaction. Like a submission's replay, a repeated delivery answers with
+   * the PERSISTED receipt's decision: the declaration's gates are re-evaluated
+   * for the record, but they can neither overturn a persisted rejection into an
+   * acceptance nor a persisted acceptance into a rejection.
+   */
+  | {
+    readonly kind: "accepted";
+    readonly completion: HostDerivedSettlement;
+    readonly decision: AcceptanceDecision;
+    readonly receipt: ReceiptRecord;
+    readonly state: OutcomeGraphState;
+    readonly dispatched: readonly OutcomeDispatchRequest[];
+    readonly replayed: boolean;
+    readonly stop?: OutcomeStop;
+    readonly progress?: readonly ProgressReport[];
+  }
+  /**
+   * A declared acceptance gate did not pass, so the attempt is NOT settled: the
+   * receipt records the rejection, no accepted event exists, and the attempt
+   * stays open for the ordinary submission path.
+   */
+  | {
+    readonly kind: "rejected";
+    readonly completion: HostDerivedSettlement;
+    readonly decision: AcceptanceDecision;
+    readonly receipt: ReceiptRecord;
+  }
+  /**
+   * The attempt was already settled by a DIFFERENT logical submission (the
+   * worker's own claimed outcome, for example), so this delivery's decision was
+   * not committed and the original settlement stands.
+   */
+  | {
+    readonly kind: "not-committed";
+    readonly completion: HostDerivedSettlement;
     readonly decision: AcceptanceDecision;
     readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
   };

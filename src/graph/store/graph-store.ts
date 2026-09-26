@@ -315,6 +315,11 @@ export class GraphStore {
       // The inverse acceptance rule (P3 item 2): an attempt a trusted retry
       // SUPERSEDED accepts nothing, checked in the same boundary as the batch.
       (graphId, attemptId) => this.readSupersedingRetry(graphId, attemptId),
+      // The attempt-level stopping rule (P3 item 1): an attempt a trusted
+      // `failure`, `timeout`, `cancel` or `budget-stop` ended accepts nothing
+      // either — the run itself continues — and the check lives in the same
+      // boundary as the batch it refuses.
+      (graphId, attemptId) => this.readStoppingDecision(graphId, attemptId),
       // THE APPROVAL GATE, in the same boundary (P3 item 3): an attempt paused
       // on a request that is not `approved` accepts nothing. The read goes
       // through THIS store, so the gate sees the row a control command wrote in
@@ -365,6 +370,11 @@ export class GraphStore {
         command: ControlCommandName,
       ): ControlDecisionRecord | undefined =>
         this.readControlCommandDecision(graphId, runId, nodeId, attemptId, command),
+      readStoppingDecision: (
+        graphId: string,
+        attemptId: string,
+      ): ControlDecisionRecord | undefined =>
+        this.readStoppingDecision(graphId, attemptId),
       controlDecisions: (
         graphId: string,
         runId?: string,
@@ -2111,6 +2121,38 @@ export class GraphStore {
          FROM ${GRAPH_STORE_TABLES.controlDecisions}
          WHERE graph_id = ? AND attempt_id = ? AND command = 'retry'
          ORDER BY decided_at DESC LIMIT 1`,
+      )
+      .get(graphId, attemptId);
+    if (row === undefined || row === null) return undefined;
+    return readControlDecisionRow(
+      asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.controlDecisions),
+      this.filePath,
+    );
+  }
+
+  /**
+   * The STOPPING control decision ONE attempt carries, or `undefined`.
+   *
+   * An attempt carries at most one stopping decision (`failure`, `timeout`,
+   * `cancel`, `budget-stop`; the store refuses a competing one), and the
+   * decision is never cleared, so this is a single row and the acceptance core
+   * asks it inside the transaction that would otherwise settle the attempt. It
+   * is the attempt-level twin of {@link readSupersedingRetry}: a stopped
+   * attempt accepts nothing, while the RUN it belongs to keeps executing.
+   */
+  readStoppingDecision(
+    graphId: string,
+    attemptId: string,
+  ): ControlDecisionRecord | undefined {
+    this.assertOpen("readStoppingDecision");
+    const row = this.db
+      .query(
+        `SELECT graph_id, run_id, node_id, attempt_id, command, reason, decided_at,
+                decided_by_session, decided_by_agent, successor_attempt_id
+         FROM ${GRAPH_STORE_TABLES.controlDecisions}
+         WHERE graph_id = ? AND attempt_id = ?
+           AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+         ORDER BY decided_at LIMIT 1`,
       )
       .get(graphId, attemptId);
     if (row === undefined || row === null) return undefined;

@@ -5,7 +5,9 @@
  * fact recorded by exactly one entry; the entry has explicit command types and a
  * PERMISSION check against the graph's declaring principal; a worker's payload
  * is never authority; a repeated or racing command has a deterministic outcome;
- * and a failure never becomes a business success.
+ * a node-scoped `failure`/`timeout` stops ONE attempt and claims NO run control
+ * fact, so the run keeps executing and its siblings still settle; and a failure
+ * never becomes a business success.
  *
  * THE ASSEMBLY IS THE SHIPPED ONE: a real `OutcomeHost` (file durability, the
  * workspace's one SQLite store, the shipped `declareInvocationIdentity: false`
@@ -483,15 +485,15 @@ function decisionFor(
 // ── The commands ────────────────────────────────────────────────────────────
 
 describe("graph_control — the trusted commands", () => {
-  it("records a failure on the ATTEMPT and the RUN and writes no business success event", async () => {
-    const fixture = await openControlFixture(CHAIN);
+  it("records a failure on the ATTEMPT while the RUN keeps executing, and still lets a sibling settle", async () => {
+    const fixture = await openControlFixture(FAN_OUT);
     try {
       const answer = await control(
         fixture,
         {
           graph_id: fixture.graphId,
           command: "failure",
-          node_id: "work",
+          node_id: "alpha",
           reason: "the worker process died",
         },
         declarerOf(fixture),
@@ -499,43 +501,79 @@ describe("graph_control — the trusted commands", () => {
 
       expect(answer.kind).toBe("applied");
       expect(answer.command).toBe("failure");
+      // THE STOP IS ATTEMPT-SCOPED: the command ended ONE attempt and claims no
+      // run control fact, so the run keeps executing and a sibling still settles.
+      expect(answer.scope).toBe("attempt");
+      expect(answer.runControl).toBeUndefined();
       // The run identity is the run path's own — minted with the first snapshot —
       // and the decision is recorded against THAT run.
       expect(answer.runId?.startsWith(fixture.graphId + "@")).toBe(true);
-      expect(answer.runControl?.command).toBe("failure");
-      expect(answer.runControl?.reason).toBe("the worker process died");
-      expect(answer.runControl?.decidedBy?.sessionId).toBe(declarerOf(fixture));
-      expect(answer.runControl?.decidedBy?.agentId).toBe("agent.declarer");
       expect(answer.decided).toHaveLength(1);
-      expect(answer.decided?.[0]).toMatchObject({ nodeId: "work", attemptId: "work#1", replayed: false });
+      expect(answer.decided?.[0]).toMatchObject({ nodeId: "alpha", attemptId: "alpha#1", replayed: false });
       expect(answer.decided?.[0]?.decision.command).toBe("failure");
-      // The execution the host DID confirm is not "unconfirmed"; the effect is
-      // still unsettled and therefore reported.
+      expect(answer.decided?.[0]?.decision.reason).toBe("the worker process died");
+      // The attribution lives on the ATTEMPT decision: there is no run fact to
+      // carry it, and the trusted command's principal is recorded where the
+      // decision is.
+      expect(answer.decided?.[0]?.decision.decidedBy?.sessionId).toBe(declarerOf(fixture));
+      expect(answer.decided?.[0]?.decision.decidedBy?.agentId).toBe("agent.declarer");
+      // The executions the host DID confirm are not "unconfirmed"; the effects
+      // are still unsettled and therefore reported — for BOTH attempts.
       expect(answer.unconfirmedExecutions).toEqual([]);
-      expect(answer.unsettledEffects?.map((effect) => effect.status)).toEqual(["started"]);
+      expect(answer.unsettledEffects?.map((effect) => effect.status)).toEqual([
+        "started",
+        "started",
+      ]);
 
       const rows = readControlRows(fixture);
       expect(rows.run?.runId).toBe(answer.runId);
-      expect(rows.control?.command).toBe("failure");
-      expect(rows.control?.reason).toBe("the worker process died");
-      expect(decisionFor(rows, "work#1").reason).toBe("the worker process died");
+      // NO RUN CONTROL FACT WAS CLAIMED: the run row carries none.
+      expect(rows.control).toBeUndefined();
+      expect(rows.decisions.map((decision) => decision.attemptId)).toEqual(["alpha#1"]);
+      expect(decisionFor(rows, "alpha#1").command).toBe("failure");
+      expect(decisionFor(rows, "alpha#1").reason).toBe("the worker process died");
 
-      // NO BUSINESS SUCCESS: no accepted event, no receipt, and the attempt
-      // entry is exactly what the dispatch wrote.
+      // NO BUSINESS SUCCESS: no accepted event, no receipt, and both attempt
+      // entries are exactly what the dispatch wrote.
       expect(rows.events).toEqual([]);
       expect(rows.receipts).toBe(0);
       const state = readState(fixture);
-      expect(nodeEntry(state, "work")).toMatchObject({
+      expect(state.phase).toBe("executing");
+      expect(nodeEntry(state, "alpha")).toMatchObject({
         status: "dispatched",
-        attemptId: "work#1",
+        attemptId: "alpha#1",
       });
-      expect(nodeEntry(state, "review")).toMatchObject({ status: "pending" });
+      expect(nodeEntry(state, "beta")).toMatchObject({ status: "dispatched", attemptId: "beta#2" });
+
+      // AND THE SIBLING STILL SETTLES: the stopped attempt is not the run, so
+      // `beta` settles through the shipped ingress and its success is durable.
+      const settled = JSON.parse(
+        String(
+          await fixture.tools.graph_submit_outcome.execute(
+            {
+              graph_id: fixture.graphId,
+              node_id: "beta",
+              outcome_id: "done",
+              credential: credentialOf(fixture, "beta"),
+            },
+            fixture.contextOf(childSessionOf("beta#2"), "agent.beta"),
+          ),
+        ),
+      ) as { readonly decision?: string };
+      expect(settled.decision).toBe("accepted");
+      const after = readControlRows(fixture);
+      expect(after.events.map((event) => event.attemptId)).toEqual(["beta#2"]);
+      expect(after.receipts).toBe(1);
+      expect(nodeEntry(readState(fixture), "beta")).toMatchObject({
+        status: "settled",
+        outcomeId: "done",
+      });
     } finally {
       fixture.host.close();
     }
   });
 
-  it("records a timeout the same way, keeping its own reason", async () => {
+  it("records a timeout the same way, keeping its own reason and claiming no run fact", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
       const answer = await control(
@@ -550,12 +588,18 @@ describe("graph_control — the trusted commands", () => {
         declarerOf(fixture),
       );
       expect(answer.kind).toBe("applied");
-      expect(answer.runControl?.command).toBe("timeout");
-      expect(answer.runControl?.reason).toBe("the execution exceeded its declared time");
+      // A timeout is node-scoped exactly like a failure: one attempt ends and the
+      // run keeps executing.
+      expect(answer.scope).toBe("attempt");
+      expect(answer.runControl).toBeUndefined();
+      expect(answer.decided?.[0]?.decision.command).toBe("timeout");
+      expect(answer.decided?.[0]?.decision.reason).toBe("the execution exceeded its declared time");
       const rows = readControlRows(fixture);
-      expect(rows.control?.command).toBe("timeout");
+      expect(rows.control).toBeUndefined();
       expect(decisionFor(rows, "work#1").command).toBe("timeout");
+      expect(decisionFor(rows, "work#1").reason).toBe("the execution exceeded its declared time");
       expect(rows.events).toEqual([]);
+      expect(readState(fixture).phase).toBe("executing");
     } finally {
       fixture.host.close();
     }
@@ -828,12 +872,14 @@ describe("graph_control — idempotency and races", () => {
       expect(second.decided?.[0]?.replayed).toBe(true);
       // The PERSISTED decision governs: the replay does not rewrite the reason.
       expect(second.decided?.[0]?.decision.reason).toBe("first reason");
-      expect(second.runControl?.reason).toBe("first reason");
+      // The replay claims no run control fact either: the node-scoped stop never
+      // had one to answer with.
+      expect(second.runControl).toBeUndefined();
 
       const rows = readControlRows(fixture);
       expect(rows.decisions).toHaveLength(1);
       expect(rows.decisions[0]?.reason).toBe("first reason");
-      expect(rows.control?.reason).toBe("first reason");
+      expect(rows.control).toBeUndefined();
       expect(rows.events).toEqual([]);
       expect(rows.receipts).toBe(0);
     } finally {
@@ -861,13 +907,13 @@ describe("graph_control — idempotency and races", () => {
       const rows = readControlRows(fixture);
       expect(rows.decisions).toHaveLength(1);
       expect(rows.decisions[0]?.command).toBe("failure");
-      expect(rows.control?.command).toBe("failure");
+      expect(rows.control).toBeUndefined();
     } finally {
       fixture.host.close();
     }
   });
 
-  it("lets the FIRST command stop the run and still records a later sibling's fact", async () => {
+  it("records each sibling's own fact and claims the run for neither", async () => {
     const fixture = await openControlFixture(FAN_OUT);
     try {
       const first = await control(
@@ -876,7 +922,8 @@ describe("graph_control — idempotency and races", () => {
         declarerOf(fixture),
       );
       expect(first.kind).toBe("applied");
-      expect(first.runControl?.reason).toBe("alpha failed first");
+      expect(first.decided?.[0]?.attemptId).toBe("alpha#1");
+      expect(first.runControl).toBeUndefined();
 
       const second = await control(
         fixture,
@@ -884,24 +931,30 @@ describe("graph_control — idempotency and races", () => {
         declarerOf(fixture),
       );
       expect(second.kind).toBe("applied");
-      // The sibling's fact is recorded...
+      // The sibling's own fact is recorded...
       expect(second.decided?.[0]?.attemptId).toBe("beta#2");
       expect(second.decided?.[0]?.decision.reason).toBe("beta failed later");
-      // ...but the RUN keeps the command that stopped it FIRST.
-      expect(second.runControl?.reason).toBe("alpha failed first");
+      // ...and the RUN is claimed by NEITHER. Both commands are node-scoped, so
+      // there is no "first stopper" to keep: the run keeps executing.
+      expect(second.runControl).toBeUndefined();
 
       const rows = readControlRows(fixture);
-      expect(rows.decisions).toHaveLength(2);
-      expect(rows.control?.reason).toBe("alpha failed first");
+      expect(
+        rows.decisions.map((decision) => decision.attemptId + ":" + decision.command).sort(),
+      ).toEqual(["alpha#1:failure", "beta#2:failure"]);
+      expect(rows.control).toBeUndefined();
+      expect(readState(fixture).phase).toBe("executing");
     } finally {
       fixture.host.close();
     }
   });
 
-  it("cancels the OTHER in-flight attempts after a failure, without re-labelling the failed one", async () => {
+  it("cancels the OTHER in-flight attempt after a failure, and the first RUN-WIDE command claims the run", async () => {
     for (const command of ["failure", "timeout"] as const) {
-      // The failure stops the run but leaves its attempt DISPATCHED (by design),
-      // and both creates are unconfirmed: the run still owes two external tasks.
+      // The failure ends ONE attempt (leaving it DISPATCHED, by design) and
+      // claims NO run control fact, so the later run-wide cancel is the FIRST
+      // run-wide command; both creates are unconfirmed, so the run still owes
+      // two external tasks.
       const fixture = await openControlFixture(FAN_OUT, { confirm: false });
       try {
         const stopped = await control(
@@ -916,6 +969,8 @@ describe("graph_control — idempotency and races", () => {
         );
         expect(stopped.kind).toBe("applied");
         expect(stopped.decided?.map((entry) => entry.attemptId)).toEqual(["alpha#1"]);
+        // The node-scoped stop claims no run fact to keep.
+        expect(stopped.runControl).toBeUndefined();
         // Both unconfirmed external tasks are named by the stop itself.
         expect(
           stopped.unconfirmedExecutions?.map((entry) => entry.attemptId).sort(),
@@ -940,16 +995,18 @@ describe("graph_control — idempotency and races", () => {
           attemptId: "alpha#1",
           code: "control-already-decided",
         });
-        // The run keeps the FIRST stop — the command that actually stopped it.
-        expect(cancelled.runControl?.command).toBe(command);
-        expect(cancelled.runControl?.reason).toBe("alpha's execution ended first");
+        // THE RUN'S ONE CONTROL FACT IS THE CANCEL: the node-scoped stop above
+        // claimed none, so this is the FIRST run-wide command and it stops the
+        // run while the already-decided attempt stays a SKIPPED target.
+        expect(cancelled.runControl?.command).toBe("cancel");
+        expect(cancelled.runControl?.reason).toBe("stop the rest");
         // The external tasks of BOTH attempts are still visible after the cancel.
         expect(
           cancelled.unconfirmedExecutions?.map((entry) => entry.attemptId).sort(),
         ).toEqual(["alpha#1", "beta#2"]);
 
         const rows = readControlRows(fixture);
-        expect(rows.control?.command).toBe(command);
+        expect(rows.control?.command).toBe("cancel");
         expect(
           rows.decisions.map((entry) => entry.attemptId + ":" + entry.command).sort(),
         ).toEqual(["alpha#1:" + command, "beta#2:cancel"]);
@@ -1006,7 +1063,7 @@ describe("graph_control — idempotency and races", () => {
     }
   });
 
-  it("stops a submission that arrives after the failure and never arms the successor", async () => {
+  it("refuses a submission that arrives after the failure on the ATTEMPT's own fact and never arms the successor", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
       const failed = await control(
@@ -1029,11 +1086,15 @@ describe("graph_control — idempotency and races", () => {
         ),
       );
       const refused = JSON.parse(raw) as {
-        readonly refusals?: readonly { readonly code: string }[];
+        readonly refusals?: readonly { readonly code: string; readonly message: string }[];
       };
-      expect(refused.refusals?.[0]?.code).toBe("control-stopped");
+      // THE RUN IS NOT STOPPED: the attempt's OWN stopping decision refuses the
+      // submission, and the refusal still names the command that decided it.
+      expect(refused.refusals?.[0]?.code).toBe("attempt-stopped");
+      expect(refused.refusals?.[0]?.message).toContain("failure");
 
       const rows = readControlRows(fixture);
+      expect(rows.control).toBeUndefined();
       expect(rows.events).toEqual([]);
       expect(rows.receipts).toBe(0);
       expect(fixture.dispatched).toHaveLength(dispatchesBefore);
@@ -1151,12 +1212,17 @@ describe("graph_control — a command commits whole or not at all", () => {
     }
   });
 
-  it("rolls a failure back whole when the RUN control UPDATE fails", async () => {
+  it("rolls a run-wide stop back whole when the RUN control UPDATE fails, leaving the accepted predecessor untouched", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
       await settleWork(fixture);
       const before = readControlRows(fixture);
 
+      // A NODE-SCOPED `failure`/`timeout` WRITES NO RUN CONTROL FACT (P3 item 1),
+      // so the only command whose transaction still updates the run row is a
+      // RUN-WIDE stop. `budget-stop` is the smallest one: it hands nothing to the
+      // platform, and it claims the run in the same transaction as the decision
+      // it records on the attempt in flight.
       const error = withInjectedControlWrite(
         fixture,
         "BEFORE UPDATE OF control_command ON " +
@@ -1166,8 +1232,7 @@ describe("graph_control — a command commits whole or not at all", () => {
           fixture.toolset.graph_control(
             {
               graph_id: fixture.graphId,
-              command: "failure",
-              node_id: "review",
+              command: "budget-stop",
               reason: "injected at the run control UPDATE",
             },
             declarerOf(fixture),
@@ -1391,6 +1456,19 @@ describe("graph_control — a trusted command that commits while a submission's 
       // transaction — and the answer is the SAME named refusal a command that
       // commits before the gate produces. Without the in-transaction re-read,
       // this submission would commit a business success on a stopped run.
+
+      //
+      // WHY control-stopped HERE IS NOT THE OLD RUN-SCOPED failure CLAIM: the
+      // second process runs helpers/graph-store-xproc-worker.ts with --mode
+      // apply-control, which writes through the store layer method
+      // runs.writeControlDecision with an EXPLICIT runControl — the generic
+      // store/ingress contract that control-store.test.ts pins at the store
+      // level (its explicit-runControl cases). graph-store-cross-process.test.ts
+      // pins the COMPLEMENTARY command-scoped shape instead: its race workers
+      // issue only node-scoped failure/timeout and pass NO runControl, so it
+      // asserts the run's fact stays unclaimed. No graph_control command service
+      // runs in that process, so the scope policy P3 item 1 changed (where
+      // failure/timeout claim no run fact) is not what this test measures.
       expect(refused.refusals?.[0]?.code).toBe("control-stopped");
       expect(refused.refusals?.[0]?.message).toContain("failure");
       expect(race.child?.verdict).toBe("recorded");
@@ -1559,7 +1637,7 @@ function recordControlFromAnotherProcess(options: {
 
 describe("graph_control — a failure/timeout survives the recording PROCESS", () => {
   for (const command of ["failure", "timeout"] as const) {
-    it("reports the " + command + " after a real relaunch, keeps the unconfirmed execution visible and settles nothing", async () => {
+    it("reports the " + command + " after a real relaunch, keeps the attempt's stop visible and settles nothing", async () => {
       const dir = makeTmpDir("control-xproc-restart-");
       const storeRoot = join(dir, "host-store");
       mkdirSync(storeRoot, { recursive: true });
@@ -1573,7 +1651,10 @@ describe("graph_control — a failure/timeout survives the recording PROCESS", (
       expect(child.graphId).toBe(graphId);
       expect(child.command).toBe(command);
       expect(child.answer.kind).toBe("applied");
-      expect(child.answer.runControl?.command).toBe(command);
+      // THE COMMAND CLAIMED NO RUN CONTROL FACT, even across the process
+      // boundary: the child's own answer carries none, and the run it belongs to
+      // is still executing.
+      expect(child.answer.runControl).toBeUndefined();
       // The create was handed to the platform and NEVER confirmed, so the
       // execution row is `creating` — an external task that may exist.
       expect(child.executions).toEqual(["work#1=creating"]);
@@ -1595,24 +1676,30 @@ describe("graph_control — a failure/timeout survives the recording PROCESS", (
       });
       try {
         const report = await relaunched.recoverDeclaredGraphs();
-        // THE STOP IS REPORTED: the fact outlives the process that decided it.
-        expect(report.controlled).toEqual([graphId + ":" + command]);
-        // THE UNCONFIRMED EXECUTION STAYS VISIBLE.
-        expect(report.unconfirmedExecutions).toHaveLength(1);
-        expect(report.unconfirmedExecutions[0]).toMatchObject({
-          graphId,
-          nodeId: "work",
-          attemptId: "work#1",
-          state: "creating",
-        });
-        // NOTHING IS DISPATCHED by the relaunch, and the effect the stop left
-        // pending is refused by name instead of being re-created.
+        // THE RUN KEEPS EXECUTING: the stop is an ATTEMPT fact, so the sweep
+        // RESUMES the graph instead of reporting a controlled one.
+        expect(report.controlled).toEqual([]);
+        expect(report.resumed).toEqual([graphId + ":executing"]);
+        // NOTHING IS DISPATCHED by the relaunch, and the effect the stopped
+        // attempt left `started` is neither re-created nor hidden: a create
+        // RETURNED for it, so the credential lost with the process is never
+        // re-issued and the effect is refused BY NAME instead of being started a
+        // second time.
         expect(dispatches).toEqual([]);
-        expect(report.effectRefusals.map((refusal) => refusal.code)).toContain("control-stopped");
+        expect(report.effectRefusals.map((refusal) => refusal.code)).toEqual([
+          "credential-reissue-forbidden",
+        ]);
+        expect(report.effectRefusals[0]?.message).toContain("dispatch:work#1");
+        expect(report.effectRefusals[0]?.message).toContain("work#1");
+        // The sweep's controlled-run branch — the one that lists unconfirmed
+        // executions — is keyed on the RUN's control fact, which this run does
+        // not carry; the refusal above is how the work is reported instead.
+        expect(report.unconfirmedExecutions).toEqual([]);
 
-        // NO SETTLEMENT IS POSSIBLE AFTER THE RESTART. The shipped ingress
-        // refuses the stopped run by name whatever credential a late worker
-        // presents, so the successor can never be armed.
+        // NO SETTLEMENT IS POSSIBLE AFTER THE RESTART. The credential the attempt
+        // was armed with died with the recording process (the durable store keeps
+        // the DIGEST, never the value), so the shipped ingress refuses whatever a
+        // late worker presents by identity, before any attempt fact is read.
         const relaunchedToolset = createGraphToolSet({
           stateDir: dir,
           credentialIsolation: relaunched.credentialIsolation,
@@ -1635,18 +1722,90 @@ describe("graph_control — a failure/timeout survives the recording PROCESS", (
             ),
           ),
         ) as { readonly refusals?: readonly { readonly code: string }[] };
-        expect(refused.refusals?.[0]?.code).toBe("control-stopped");
+        expect(refused.refusals?.[0]?.code).toBe("credential-unknown");
         expect(dispatches).toEqual([]);
 
         const store = GraphStore.openFile(storeRoot);
         try {
-          expect(store.runs.readRunControl(graphId)?.command).toBe(command);
+          // THE STOP OUTLIVES THE PROCESS THAT DECIDED IT, and the RUN WAS NEVER
+          // CLAIMED: the attempt carries the only control fact there is.
+          expect(store.runs.readRunControl(graphId)).toBeUndefined();
           expect(
             store.runs.controlDecisions(graphId).map((decision) => decision.attemptId + ":" + decision.command),
           ).toEqual(["work#1:" + command]);
           expect(store.acceptedEvents(graphId)).toEqual([]);
+
+          // AND THE LEDGER REFUSES THE STOPPED ATTEMPT BY NAME — in THIS process,
+          // against the row the DEAD process committed.
+          const verdict = store.commitAccepted({
+            receipt: {
+              graphId,
+              attemptId: "work#1",
+              submissionId: "submission:after-restart",
+              planRevision: "plan-revision.after-restart",
+              proposalDigest: "digest:after-restart",
+              decision: "accepted",
+              committedAt: Date.now(),
+            },
+            acceptedEvent: {
+              graphId,
+              attemptId: "work#1",
+              submissionId: "submission:after-restart",
+              planRevision: "plan-revision.after-restart",
+              outcomeId: "done",
+              acceptedAt: Date.now(),
+            },
+          });
+          if (verdict.kind !== "attempt-stopped") {
+            throw new Error("fixture: expected attempt-stopped, got " + verdict.kind);
+          }
+          expect(verdict.decision.attemptId).toBe("work#1");
+          expect(verdict.decision.command).toBe(command);
+          expect(verdict.reason).toContain(command);
+          expect(
+            store.lookupReceipt({
+              graphId,
+              attemptId: "work#1",
+              submissionId: "submission:after-restart",
+            }),
+          ).toBeUndefined();
+          expect(store.acceptedEvents(graphId)).toEqual([]);
         } finally {
           store.close();
+        }
+
+        // THE STOP IS ATTEMPT-SCOPED, NOT RUN-SCOPED: a node-scoped retry of the
+        // stopped node is APPLIED after the restart and mints its successor.
+        const retried = JSON.parse(
+          String(
+            await tools.graph_control.execute(
+              {
+                graph_id: graphId,
+                command: "retry",
+                node_id: "work",
+                reason: "mint a successor after the restart",
+              },
+              makeContext("session.declarer", "agent.declarer", dir),
+            ),
+          ),
+        ) as {
+          readonly kind?: string;
+          readonly scope?: string;
+          readonly minted?: readonly { readonly attemptId: string }[];
+        };
+        expect(retried.kind).toBe("applied");
+        expect(retried.scope).toBe("attempt");
+        expect(retried.minted?.map((entry) => entry.attemptId)).toEqual(["work#2"]);
+
+        const afterRetry = GraphStore.openFile(storeRoot);
+        try {
+          expect(
+            afterRetry.runs
+              .controlDecisions(graphId)
+              .map((decision) => decision.attemptId + ":" + decision.command),
+          ).toEqual(["work#1:" + command, "work#1:retry"]);
+        } finally {
+          afterRetry.close();
         }
       } finally {
         relaunched.close();
@@ -1658,7 +1817,7 @@ describe("graph_control — a failure/timeout survives the recording PROCESS", (
 // ── The stop is visible to the readers ──────────────────────────────────────
 
 describe("graph_control — the durable stop reaches the status and audit readers", () => {
-  it("names the command, the reason and the decided instant instead of a permanently executing run", async () => {
+  it("names the stopped ATTEMPT's command, reason and decided instant while the run keeps executing", async () => {
     const fixture = await openControlFixture(CHAIN);
     try {
       const reason = "the worker process died";
@@ -1673,56 +1832,70 @@ describe("graph_control — the durable stop reaches the status and audit reader
         declarerOf(fixture),
       );
       expect(answer.kind).toBe("applied");
-      const decidedAt = answer.runControl?.decidedAt;
+      // The instant belongs to the ATTEMPT decision: there is no run fact.
+      const decidedAt = answer.decided?.[0]?.decision.decidedAt;
       expect(typeof decidedAt).toBe("number");
+      expect(answer.runControl).toBeUndefined();
 
-      // THE RECORDED PHASE IS NOT REWRITTEN: the stop is a SEPARATE durable
-      // fact, so the status face names it BESIDE `executing` rather than
-      // inventing a phase the store does not hold.
+      // THE RECORDED PHASE IS NOT REWRITTEN AND THE RUN IS NOT STOPPED: the stop
+      // is a SEPARATE, ATTEMPT-scoped durable fact, so the status face names it
+      // BESIDE `executing` rather than inventing a phase the store does not hold.
       expect(readState(fixture).phase).toBe("executing");
 
       const summary = fixture.toolset.graph_status({ graph_id: fixture.graphId });
-      expect(summary).toContain("[phase: stopped]");
+      expect(summary).toContain("[phase: executing]");
+      // The compact summary NAMES THE STOPPED ATTEMPT: with no run control fact
+      // the render carries a `decisions` key instead of `control`.
       expect(summary).toContain('"command": "failure"');
+      expect(summary).toContain('"attemptId": "work#1"');
       expect(summary).toContain(reason);
       expect(summary).toContain(String(decidedAt));
+      expect(summary).not.toContain('"control":');
 
       const snapshot = JSON.parse(
         fixture.toolset.graph_status({ graph_id: fixture.graphId, format: "json" }),
       ) as {
         readonly phase: string;
-        readonly control?: {
+        readonly control?: { readonly command: string };
+        readonly decisions: readonly {
+          readonly attemptId: string;
           readonly command: string;
           readonly reason: string;
           readonly decidedAt: number;
-        };
+        }[];
       };
-      expect(snapshot.phase).toBe("stopped");
-      expect(snapshot.control?.command).toBe("failure");
-      expect(snapshot.control?.reason).toBe(reason);
-      expect(snapshot.control?.decidedAt).toBe(decidedAt);
+      expect(snapshot.phase).toBe("executing");
+      expect(snapshot.control).toBeUndefined();
+      expect(snapshot.decisions).toHaveLength(1);
+      expect(snapshot.decisions[0]).toMatchObject({
+        attemptId: "work#1",
+        command: "failure",
+        reason,
+        decidedAt,
+      });
 
-      // The node view says the run is stopped too, so a node still recorded
+      // The node view names the stopped attempt too, so a node still recorded
       // `dispatched` is not read as work that is still moving.
       const nodeView = fixture.toolset.graph_status({
         graph_id: fixture.graphId,
         node_id: "work",
       });
+      expect(nodeView).toContain("[phase: executing]");
       expect(nodeView).toContain("[dispatched]");
       expect(nodeView).toContain('"command": "failure"');
       expect(nodeView).toContain(reason);
 
+      // AND THE AUDIT IS NO LONGER TERMINAL: the run is IN FLIGHT, and the
+      // attempt's own stop is what the entry names — there is no run control
+      // fact to report.
       const audit = await fixture.toolset.graph_audit();
       const entry = audit.entries.find(
         (candidate) => candidate.graphId === fixture.graphId,
       );
-      expect(entry?.classification).toBe("terminal");
-      expect(entry?.phase).toBe("stopped");
-      expect(entry?.control?.command).toBe("failure");
-      expect(entry?.control?.reason).toBe(reason);
-      expect(entry?.control?.decidedAt).toBe(decidedAt);
-      expect(entry?.control?.decidedBySession).toBe(declarerOf(fixture));
-      expect(entry?.control?.decidedByAgent).toBe("agent.declarer");
+      expect(entry?.classification).toBe("in-flight");
+      expect(entry?.phase).toBe("executing");
+      expect(entry?.control).toBeUndefined();
+      expect(entry?.armed?.map((attempt) => attempt.attemptId)).toEqual(["work#1"]);
     } finally {
       fixture.host.close();
     }

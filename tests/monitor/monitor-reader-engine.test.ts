@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EnginePhase } from "../../src/constants.ts";
 import { GraphApplication } from "../../src/graph/application/graph-application.ts";
 import { graphStoreRoot, graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import { readEngineGraphs } from "../../src/cli/commands/monitor/monitor-reader-engine.ts";
@@ -48,14 +49,19 @@ describe("native graph monitor", () => {
     expect(snapshot.updatedAt).toBe(new Date(snapshot.updatedAtMs).toISOString());
     expect((await application.tools.graph_audit()).entries[0]?.graph).toEqual(graph);
   });
-  it("reports a stop alongside still-dispatched attempts, rather than showing an executing run", async () => {
+  it("names a stopped attempt while the run is still executing", async () => {
     const application = open();
     await application.tools.graph_declare_and_start({ declaration: declaration("stopped") }, "parent");
     expect(application.tools.graph_control({ graph_id: "stopped", command: "failure", node_id: "work", reason: "worker failed" }, "parent").kind).toBe("applied");
     const snapshot = readEngineGraphs(stateDir())[0]!;
-    expect(snapshot.phase).toBe("stopped");
+    // A node-scoped failure ends ONE attempt: the run keeps executing and
+    // claims no control fact, so the monitor still names the stopped attempt
+    // through its decision instead of reporting a healthy running run.
+    expect(snapshot.phase).toBe(EnginePhase.Executing);
+    expect(snapshot.graph?.current?.control).toBeUndefined();
+    expect(snapshot.graph?.current?.decisions[0]?.command).toBe("failure");
+    expect(snapshot.nodes[0]?.status).toBe("running");
     expect(snapshot.nodes[0]?.errorReason).toBe("worker failed");
-    expect(snapshot.graph?.current?.control?.command).toBe("failure");
   });
   it("reports unreadable authoritative storage rather than an empty healthy monitor", () => {
     const directory = graphStoreRoot(data, root);

@@ -4,7 +4,7 @@
  * dsh contract probes against the REAL installed `@deepseek-ai/*` dist.
  *
  * These tests import the actual `@deepseek-ai/dsh-session` package from
- * `node_modules` (currently the installed `0.1.5-rc.1`, the version rolebox
+ * `node_modules` (currently the installed `0.1.5-rc.2`, the version rolebox
  * runs) and mount it on a real `@deepseek-ai/cordis` Context — the same way
  * `tests/dsh-cordis-e2e.test.ts:41-42,337,352` mounts a real harness service
  * (`new Context()` then `await ctx.plugin(Service, {})`; mounting is async).
@@ -33,9 +33,11 @@
  *       `dsh-session` `SessionHeader.version`.
  *   (f) an appended event envelope is `{type,seq,time:<number>,data}`.
  *       `dsh-session` `Session.append` return contract.
- *   (g) `todo/write` data is `{todos:TodoItem[]}`; `user/message` data IS the
- *       `UserMessage` (content top-level, no `.message`).
- *       `dsh-session` `SessionEventMap`.
+ *   (g) a log-only payload is stored verbatim (exact key set, exact value);
+ *       `user/message` data IS the `UserMessage` (content top-level, no
+ *       `.message`). `todo/write` is a harness sub-type the INSTALLED map does
+ *       not declare — the vocabulary note below records the measurement.
+ *       `dsh-session` `SessionEventMap`; `KNOWN_SESSION_EVENT_TYPES`.
  *   (h) `KNOWN_SESSION_EVENT_TYPES` excludes `rolebox/active-role`; a custom
  *       append carries no `ignorable`.
  *       `dsh-session` `known-event-types`.
@@ -62,6 +64,22 @@
  * `validateStoredEvents(meta, events, location?)`. The probes call that real
  * function directly, preserving the original contract intent.
  *
+ * VOCABULARY NOTE (`0.1.5-rc.2`, measured against the installed dist): the
+ * installed `SessionEventMap` (`dsh-session/lib/types/types.d.ts`) declares the
+ * CORE sub-types only — `turn/start`, `turn/end`, `step/start`, `step/end`,
+ * `user/message`, `system/message`, `assistant/message`, `assistant/attempt`,
+ * `tool/call`, `tool/result`, `request/header`, `request/context`,
+ * `session/end-seed`. Harness sub-types such as `todo/write` are declared by
+ * service packages that are not installed (the installed client contract even
+ * imports its `TodoItem` from `@deepseek-ai/dsh-tool-todo/client`, which does
+ * not resolve here), so `Session.append`'s
+ * `append<T extends SessionEventType>(type: T, data: SessionEventMap[T])`
+ * cannot type them — the same incompleteness
+ * `src/platform/adapters/dsh/event-bridge.ts` documents, which is why that
+ * table is guarded against the generated runtime catalog instead. The probes
+ * below therefore append a declared core log-only event (`request/context`) and
+ * assert `todo/write` membership in `KNOWN_SESSION_EVENT_TYPES` explicitly.
+ *
  * The `(h)` append and the `(i)/(j)` reload probes are the two halves of:
  * rolebox could write the event but the harness could not read the log back.
  * `(k)` is the executable proof of the remedy — the fixed code path no longer
@@ -79,7 +97,10 @@ import SessionStore, {
   KNOWN_SESSION_EVENT_TYPES,
   SESSION_FORMAT_VERSION,
   SessionForkError,
+  SessionId,
+  SessionSeq,
 } from "@deepseek-ai/dsh-session";
+import type { SessionHeader } from "@deepseek-ai/dsh-session";
 import {
   SessionFormatUnsupportedError,
   validateStoredEvents,
@@ -127,9 +148,30 @@ function userMessage() {
   };
 }
 
-/** A minimal valid `SessionHeader` for the `validateStoredEvents` probes. */
-function storedHeader(id = "s1") {
-  return { id, createdAt: 0, version: SESSION_FORMAT_VERSION, isSeeded: false };
+/**
+ * A minimal valid `request/context` payload: a DECLARED log-only member of the
+ * installed `SessionEventMap`, so the probes below append a type-checked event.
+ */
+function requestContext() {
+  return { provider: "example-provider", model: "example-model" };
+}
+
+/**
+ * A minimal valid `SessionHeader` for the `validateStoredEvents` probes.
+ *
+ * The return annotation is the check, not decoration: `SessionHeader.version`
+ * is the literal `typeof SESSION_FORMAT_VERSION` (the body's unannotated object
+ * literal widens the property to `number`), and `id` carries the package's
+ * `SessionId` brand — `SessionId(...)` is its documented admission constructor
+ * (identity at runtime, like {@link SessionSeq}).
+ */
+function storedHeader(id = "s1"): SessionHeader {
+  return {
+    id: SessionId(id),
+    createdAt: 0,
+    version: SESSION_FORMAT_VERSION,
+    isSeeded: false,
+  };
 }
 
 /**
@@ -201,7 +243,7 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
     });
 
     const session = sessions.create();
-    session.append("todo/write", { todos: [{ content: "x", status: "pending" }] });
+    session.append("request/context", requestContext());
 
     expect(captured).toBeDefined();
     // Exactly two arguments — the emitter passes `[this, event]`.
@@ -212,10 +254,10 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
     expect(arg0.type).toBeUndefined();
     expect(arg0.id).toBe(session.id);
     // arg1 is the appended event.
-    expect(arg1.type).toBe("todo/write");
+    expect(arg1.type).toBe("request/context");
     expect(typeof arg1.seq).toBe("number");
     expect(typeof arg1.time).toBe("number");
-    expect(arg1.data).toEqual({ todos: [{ content: "x", status: "pending" }] });
+    expect(arg1.data).toEqual(requestContext());
   });
 
   it("(b) session/created and session/flush each deliver exactly 1 arg", async () => {
@@ -244,7 +286,7 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
   it("(c) fork boundary is a seq: {messageID} throws INVALID_BOUNDARY, 0 succeeds", async () => {
     const { sessions } = await mountStore();
     const session = sessions.create();
-    session.append("todo/write", { todos: [] });
+    session.append("request/context", requestContext());
 
     let thrown: unknown;
     try {
@@ -255,7 +297,13 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
     expect(thrown).toBeInstanceOf(SessionForkError);
     expect((thrown as SessionForkError).code).toBe("INVALID_BOUNDARY");
 
-    const child = sessions.fork(session, 0);
+    // `fork` takes a branded `SessionSeq`, not a raw number: `SessionSeq(...)`
+    // is the package's admission constructor for the boundary this probe forks
+    // at. It is identity at runtime — asserted, so the "0 succeeds" claim in
+    // this test's name stays literal instead of assumed.
+    const boundary = SessionSeq(0);
+    expect(boundary === 0).toBe(true);
+    const child = sessions.fork(session, boundary);
     expect(child).toBeDefined();
     expect(child.id).not.toBe(session.id);
   });
@@ -285,27 +333,29 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
   it("(f) an appended event envelope is {type,seq,time:number,data}", async () => {
     const { sessions } = await mountStore();
     const session = sessions.create();
-    const event = session.append("todo/write", { todos: [] }) as unknown as Record<
-      string,
-      unknown
-    >;
+    const event = session.append("request/context", requestContext());
     expect(Object.keys(event).sort()).toEqual(["data", "seq", "time", "type"]);
-    expect(event.type).toBe("todo/write");
+    expect(event.type).toBe("request/context");
     expect(typeof event.seq).toBe("number");
     expect(typeof event.time).toBe("number");
-    expect(event.data).toEqual({ todos: [] });
+    expect(event.data).toEqual(requestContext());
   });
 
-  it("(g) todo/write data is {todos}; user/message data IS the UserMessage", async () => {
+  it("(g) a log-only payload is stored verbatim; user/message data IS the UserMessage", async () => {
     const { sessions } = await mountStore();
     const session = sessions.create();
 
-    const todoEvent = session.append("todo/write", {
-      todos: [{ content: "a", status: "pending" }],
-    });
-    expect(Object.keys(todoEvent.data)).toEqual(["todos"]);
-    expect(Array.isArray(todoEvent.data.todos)).toBe(true);
-    expect(todoEvent.data.todos[0]).toEqual({ content: "a", status: "pending" });
+    // `todo/write` is still a real harness session-event sub-type, but the
+    // installed map does not declare it (see the vocabulary note), so
+    // `append<T extends SessionEventType>` cannot express that call. The two
+    // claims that ARE observable from the installed package are asserted
+    // instead: the generated runtime catalog carries the type, and the log
+    // stores a declared event's payload verbatim.
+    expect(KNOWN_SESSION_EVENT_TYPES.has("todo/write")).toBe(true);
+
+    const contextEvent = session.append("request/context", requestContext());
+    expect(Object.keys(contextEvent.data)).toEqual(["provider", "model"]);
+    expect(contextEvent.data).toEqual(requestContext());
 
     const userEvent = session.append("user/message", userMessage() as never, {
       surfaceOp: "append",
@@ -393,7 +443,7 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
     // selection round-trips through the sidecar alone.
     const { ctx, sessions } = await mountStore();
     const session = sessions.create("s1" as never);
-    session.append("todo/write", { todos: [] });
+    session.append("request/context", requestContext());
 
     const tempDir = mkdtempSync(join(tmpdir(), "rc6-active-role-"));
     try {
@@ -424,7 +474,9 @@ describe("rc.6 contract: real @deepseek-ai/dsh-session dist", () => {
       // A genuine activation: validated against the catalog, persisted to the
       // sidecar, and — under the sidecar — never written to the session event log.
       const result = await switcher.activate("alpha", "s1");
-      expect(result).toEqual({ ok: true });
+      // `Result<void, string>`'s success arm carries the unit `value`
+      // (`src/utils/result.ts`), the shape the switcher suite asserts.
+      expect(result).toEqual({ ok: true, value: undefined });
       await Promise.all(writes);
 
       // (1) ZERO custom session events: the exact type the harness refuses.

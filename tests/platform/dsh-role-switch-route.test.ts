@@ -255,8 +255,21 @@ async function invoke(
   return { status: res.statusCode, headers: res.headers, text: res.body };
 }
 
-/** Parse a JSON response body, or fail loudly if it isn't JSON. */
-function json<T = any>(result: { text: string }): T {
+/**
+ * Parse a JSON response body, or fail loudly if it isn't JSON.
+ *
+ * Two signatures on purpose. An UNTYPED `json(res)` yields `unknown` — what
+ * `JSON.parse` really returns — and that signature must not be generic:
+ * bun-test's `Expect` callable declares `(actual?: never, customFailMessage?:
+ * string): Matchers<undefined>` as its FIRST signature, so a generic call whose
+ * type argument is left to inference is contextually typed from that
+ * `never | undefined` parameter, infers `T = undefined`, and every
+ * `expect(json(res)).toEqual({...})` is checked against `Matchers<undefined>`.
+ * A TYPED `json<Body>(res)` states the shape the caller is about to assert on.
+ */
+function json(result: { text: string }): unknown;
+function json<T>(result: { text: string }): T;
+function json<T = unknown>(result: { text: string }): T {
   return JSON.parse(result.text) as T;
 }
 
@@ -730,8 +743,15 @@ describe("DshRoleSwitchWebRoute session resolution", () => {
 
   it("falls back to the most recent session in the store", async () => {
     const fixture = await createFixture();
-    const older = makeSession("old", [{ type: "turn/start", timestamp: 100 }]);
-    const newer = makeSession("new", [{ type: "turn/start", timestamp: 200 }]);
+    // `time` is the required rc.6 envelope stamp (`DshSessionEventLike.time`);
+    // the legacy `timestamp` alias is what production's recency scan reads, so
+    // both carry the same instant and the newer-wins ordering holds either way.
+    const older = makeSession("old", [
+      { type: "turn/start", timestamp: 100, time: 100 },
+    ]);
+    const newer = makeSession("new", [
+      { type: "turn/start", timestamp: 200, time: 200 },
+    ]);
     fixture.store = makeStore([older, newer]) as typeof fixture.store;
     // Rebuild the route against the two-session store.
     const route = new DshRoleSwitchWebRoute(fixture.switcher, fixture.store);

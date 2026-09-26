@@ -1,4 +1,8 @@
-import { observeDshExecutionEvents } from "./graph-observation.ts";
+import {
+  observeDshExecutionEvents,
+  readDshLastTurnDeclaration,
+  type DshTurnDeclarationReading,
+} from "./graph-observation.ts";
 import type { DshSessionEventLike } from "./session.ts";
 /**
  * dsh platform — the OUTCOME run path's dispatch delivery
@@ -114,6 +118,9 @@ import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.t
 import type { HostExecutionIdentity } from "../../../graph/host/execution-index.ts";
 import type {
   HostCompletionWatchPort,
+  HostDerivedOutcome,
+  HostDerivedOutcomePort,
+  HostExecutionObservation,
   HostExecutionObservationPort,
 } from "../../../graph/host/outcome-host.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
@@ -269,6 +276,34 @@ interface DshLiveRun {
  * invocations: the session a run is composed under arrives with each delivery
  * as the host's own attribution of the graph's declaring invocation.
  */
+/**
+ * One total last-turn reading, projected onto the HOST's own port vocabulary
+ * (DEFECT 2).
+ *
+ * The mapping is total and LOSSLESS in both directions: a `declared` reading
+ * carries the outcome id, the payload and the evidence references the WORKER
+ * named — this adapter neither chooses nor completes any of them — and every
+ * negative reading (`absent`, `ambiguous`, `malformed`) carries the reader's own
+ * reason, so the host reports what happened instead of settling. Nothing here
+ * can invent a reading: the input is the pure reader's closed answer.
+ */
+function derivedOutcomeOfReading(reading: DshTurnDeclarationReading): HostDerivedOutcome {
+  if (reading.kind !== "declared") return Object.freeze(reading);
+  const declaration = reading.declaration;
+  return Object.freeze({
+    kind: "declared" as const,
+    outcomeId: declaration.outcomeId,
+    ...(declaration.data === undefined ? {} : { data: declaration.data }),
+    ...(declaration.evidenceRefs === undefined
+      ? {}
+      : { evidenceRefs: declaration.evidenceRefs }),
+    derivation: Object.freeze({
+      eventIndex: declaration.derivation.eventIndex,
+      turnIndex: declaration.derivation.turnIndex,
+    }),
+  });
+}
+
 /** One `unknown` execution answer, with the platform's own reason. */
 function unknownAnswer(reason: string): OutcomeExecutionLookup {
   return Object.freeze({ kind: "unknown" as const, reason });
@@ -287,6 +322,20 @@ export class DshOutcomeDelivery {
    */
   private readonly childListings = new Map<string, readonly DshSubagentChildRow[]>();
   /**
+   * THE OWN LAST-TURN READINGS THIS PROCESS HAS TAKEN (DEFECT 2), keyed by the
+   * platform's own execution id.
+   *
+   * A reading is recorded exactly where the adapter already reads a child's
+   * session events AND the terminal observation is `completed` (the execution
+   * query's prime and the completion watch's `turn/end` listener): a FAILED end
+   * is `failObservedExecution`'s business, and an execution whose events were
+   * never read has no reading here at all — the port says so instead of
+   * guessing. The map holds what the WORKER declared (an outcome id, its
+   * payload, its evidence references and where they were read), never a
+   * credential, and it is dropped with the adapter.
+   */
+  private readonly derivedOutcomes = new Map<string, HostDerivedOutcome>();
+  /**
    * THE RUNS THIS PROCESS STARTED, keyed by the platform's own execution id
    * (P3 cancel). A dsh run is addressable only through the handle its `start()`
    * returned, so this map is exactly the set of executions a cancellation can
@@ -296,7 +345,7 @@ export class DshOutcomeDelivery {
    */
   private closed = false;
   private readonly watchers = new Set<() => void>();
-  close(): void { this.closed = true; for (const stop of this.watchers) stop(); this.watchers.clear(); }
+  close(): void { this.closed = true; for (const stop of this.watchers) stop(); this.watchers.clear(); this.derivedOutcomes.clear(); }
   private readonly terminalRuns = new Map<string, DshRunObservation>();
   private readonly liveRuns = new Map<string, DshLiveRun>();
 
@@ -403,7 +452,18 @@ export class DshOutcomeDelivery {
                 const events = await this.opts.readExecutionEvents(child.id);
                 if (!events) continue;
                 const observation = observeDshExecutionEvents(events, child.label);
-                if (observation.kind === "completed") this.terminalRuns.set(child.id, { stopReason: "completed" });
+                if (observation.kind === "completed") {
+                  this.terminalRuns.set(child.id, { stopReason: "completed" });
+                  // THE OWN LAST TURN IS READ FROM THE SAME EVENTS (DEFECT 2).
+                  // Only a COMPLETED end authorises a declaration reading (a
+                  // failed end belongs to failObservedExecution), and the
+                  // reading is STORED here — never interpreted, repaired or
+                  // settled in this adapter.
+                  this.derivedOutcomes.set(
+                    child.id,
+                    derivedOutcomeOfReading(readDshLastTurnDeclaration(events, child.label)),
+                  );
+                }
                 if (observation.kind === "failed") this.terminalRuns.set(child.id, { failure: observation.reason });
               } catch { /* An unavailable host log leaves this execution unknown. */ }
             }
@@ -447,6 +507,29 @@ export class DshOutcomeDelivery {
   };
 
   /**
+   * THE PLATFORM'S LAST-TURN READING PORT (DEFECT 2).
+   *
+   * The host's second question about a finished execution: what did the
+   * WORKER'S OWN LAST TURN declare? This adapter answers from the readings it
+   * has actually taken ({@link DshOutcomeDelivery.derivedOutcomes}) — the same
+   * events it read to observe the end, run through the pure
+   * `readDshLastTurnDeclaration` reader — and it answers `unavailable` when it
+   * has taken none for that execution in this process. It NEVER fabricates a
+   * reading: no events, no declaration, and no default outcome id exists here.
+   *
+   * The answer is a reading, not a settlement: the host hands a `declared` one
+   * to the runtime, which authenticates it against the host's own confirmed
+   * execution and lets the PLAN decide whether that outcome exists and passes
+   * its declared gates.
+   */
+  readonly derivedOutcomeOf: HostDerivedOutcomePort = (execution) =>
+    this.derivedOutcomes.get(execution.executionId) ?? {
+      kind: "unavailable",
+      reason:
+        "no last-turn reading has been taken for this execution in this process",
+    };
+
+  /**
    * THE PLATFORM COMPLETION WATCH PORT (F4) — unsupported on dsh.
    *
    * A dsh subagent run's terminal announcement is its `result` promise, held by
@@ -461,9 +544,35 @@ export class DshOutcomeDelivery {
     const label = dispatchIdempotencyKeyOf({ graphId: entry.graphId, attemptId: entry.attemptId, effectId: "dispatch:" + entry.attemptId });
     const stop = this.opts.subscribeExecutionEvents(entry.executionId, events => {
       if (this.closed) return;
-      const observation = observeDshExecutionEvents(events, label);
-      if (observation.kind !== "completed" && observation.kind !== "failed") return;
+      // THE WATCH PATH IS FAIL-SAFE, EXACTLY AS THE PRIME PATH IS (Totality 2).
+      // An announced end whose events cannot be READ is not an end this adapter
+      // may act on: the exception is contained HERE, because a subscription
+      // callback is called by the platform and an escaping throw has no catcher
+      // on this path. Nothing is recorded — no terminal run, no reading — so the
+      // host keeps reporting the execution unsettled, and the subscription stays
+      // armed so a later, readable announcement can still be observed.
+      let observation: HostExecutionObservation;
+      let reading: HostDerivedOutcome | undefined;
+      try {
+        observation = observeDshExecutionEvents(events, label);
+        if (observation.kind !== "completed" && observation.kind !== "failed") return;
+        // THE SAME READING, TAKEN FROM THE ANNOUNCED END'S OWN EVENTS (DEFECT 2):
+        // the watch is the other point where this adapter holds the child's
+        // session, and a completed end is what makes a declaration readable.
+        // BOTH reads happen BEFORE any state changes, so a throw can leave no
+        // half-recorded execution behind.
+        reading = observation.kind === "completed"
+          ? derivedOutcomeOfReading(readDshLastTurnDeclaration(events, label))
+          : undefined;
+      } catch (error) {
+        this.log.warn("dsh outcome dispatch: announced execution events unreadable", {
+          executionId: entry.executionId,
+          error: errorText(error),
+        });
+        return;
+      }
       this.terminalRuns.set(entry.executionId, observation.kind === "completed" ? { stopReason: "completed" } : { failure: observation.reason });
+      if (reading !== undefined) this.derivedOutcomes.set(entry.executionId, reading);
       stop(); this.watchers.delete(stop);
       onEnded();
     });

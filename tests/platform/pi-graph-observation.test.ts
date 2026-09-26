@@ -53,7 +53,7 @@ it("keeps observing a launched worker when the task announcement precedes its na
     manager: {
       launch: async () => ({ id: "task", sessionId: "native-worker", parentSessionId: "parent", depth: 1,
         status: "running", agent: "worker", prompt: "Work", startedAt: new Date(),
-        progress: { toolCalls: 0, lastUpdate: new Date() } }),
+        progress: { toolCalls: 0, lastUpdate: new Date() }, priority: 0 }),
       onTaskTerminated: (_id, callback) => { announce = callback; },
     },
     onStartFailed() {}, onSettled: result => { settlements.push(result.kind); },

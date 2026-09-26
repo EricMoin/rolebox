@@ -84,7 +84,10 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
       "You are a graph worker assigned to the role below. Complete only the dispatched task. " +
         "Your tools are graph_worker_exec and graph_submit_outcome. Use graph_worker_exec for all file reads, commands and permitted edits. " +
         "You cannot dispatch agents or inspect/control graph state. Resource paths below are private copies for this attempt. " +
-        "Submit only a declared outcome using the host handoff; an accepted submission settles your attempt. A prose answer does not settle it.",
+        "Submit only a declared outcome using the host handoff; an accepted submission settles your attempt. A prose answer does not settle it. " +
+        "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
+        "{\"outcome_id\": \"<an outcome this node declares>\", \"data\": <the outcome payload>, \"evidence_refs\": [\"<path>\"]} " +
+        "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
       buildAgentPrompt(agent.config, skills, { references, canDelegate: false, resourceTool: "graph_worker_exec" }),
       buildFunctionBlock(active),
       buildAvailableFunctionsBlock(available),

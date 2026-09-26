@@ -893,7 +893,7 @@ describe("graph_control — approval racing a cancel or a completion", () => {
     }
   });
 
-  it("refuses to raise a request on a run a trusted command already stopped", async () => {
+  it("refuses to raise a request on an ATTEMPT a trusted command already stopped, while the run keeps executing", async () => {
     const fixture = await openFixture(FAN_OUT);
     try {
       const stopped = await controlTool(
@@ -903,9 +903,15 @@ describe("graph_control — approval racing a cancel or a completion", () => {
         "agent.declarer",
       );
       expect(stopped.kind).toBe("applied");
+      // THE STOP IS ATTEMPT-SCOPED: the run is not stopped, so a pause on the
+      // ATTEMPT the command ended is the strand the refusal names.
+      expect(readFacts(fixture).control).toBeUndefined();
       const refused = raise(fixture, { nodeId: "alpha" });
       expect(refused.kind).toBe("refused");
-      expect(refused.refusals?.[0]?.code).toBe("run-stopped");
+      expect(refused.refusals?.[0]?.code).toBe("attempt-stopped");
+      // The refusal still names the command that stopped the attempt.
+      expect(refused.refusals?.[0]?.message).toContain("timeout");
+      expect(readFacts(fixture).requests).toEqual([]);
     } finally {
       fixture.host.close();
     }

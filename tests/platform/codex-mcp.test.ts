@@ -27,7 +27,10 @@ import {
   installProtocolStdoutGuard,
   type ProtocolStdoutGuard,
 } from "../../src/platform/adapters/codex/stdout-guard.ts";
-import { CodexMcpToolFactory } from "../../src/platform/adapters/codex/tool-factory.ts";
+import {
+  CodexMcpToolFactory,
+  type McpToolCallResult,
+} from "../../src/platform/adapters/codex/tool-factory.ts";
 
 // Every server in this file runs in-process over PassThrough streams: no
 // subprocess, no real stdin/stdout, nothing written outside the harness. The
@@ -64,14 +67,22 @@ function makeTools(): Record<string, CanonicalToolDef> {
         throw new Error("kaboom");
       },
     }),
-    legacy: defineTool({
-      description: "An old tool.",
+    // `defineTool()`'s input type is `{ description, args, execute }` and does
+    // not accept `deprecated`, while the CanonicalToolDef it returns carries the
+    // field (src/platform/ports/tool-factory.ts vs src/platform/types.ts).
+    // Spread the helper's result and add the canonical field, so the fixture is
+    // built through the type the deprecation path actually reads instead of an
+    // unsupported literal property.
+    legacy: {
+      ...defineTool({
+        description: "An old tool.",
+        args: { text: z.string() },
+        async execute(input) {
+          return input.text;
+        },
+      }),
       deprecated: { since: "1.0.0", message: "Use echo instead." },
-      args: { text: z.string() },
-      async execute(input) {
-        return input.text;
-      },
-    }),
+    },
   };
 }
 
@@ -278,6 +289,20 @@ describe("mcp-protocol", () => {
 
 // ── Tool factory ─────────────────────────────────────────────────────────────
 
+/**
+ * The text of a result's first content block. `McpContentBlock` is a
+ * discriminated union (text | image), so `.text` is reachable only after the
+ * discriminant check: a non-text block fails the test with the block it got
+ * instead of silently reading `undefined`.
+ */
+function firstTextBlock(result: McpToolCallResult): string {
+  const block = result.content[0];
+  if (block?.type !== "text") {
+    throw new Error(`expected a text content block, got ${JSON.stringify(block)}`);
+  }
+  return block.text;
+}
+
 describe("CodexMcpToolFactory", () => {
   it("compile() returns an unnamed descriptor", () => {
     const factory = new CodexMcpToolFactory();
@@ -327,11 +352,11 @@ describe("CodexMcpToolFactory", () => {
 
     const missing = await factory.call("echo", {}, context);
     expect(missing.isError).toBe(true);
-    expect(missing.content[0].text).toContain('missing required property "text"');
+    expect(firstTextBlock(missing)).toContain('missing required property "text"');
 
     const wrongType = await factory.call("echo", { text: 42 }, context);
     expect(wrongType.isError).toBe(true);
-    expect(wrongType.content[0].text).toContain('"text" must be a string');
+    expect(firstTextBlock(wrongType)).toContain('"text" must be a string');
   });
 
   it("call() picks the article for the expected type in a correction", async () => {
@@ -351,13 +376,13 @@ describe("CodexMcpToolFactory", () => {
     const factory = new CodexMcpToolFactory(tools);
 
     const object = await factory.call("shaped", { options: 1, tags: [], count: 1 }, context);
-    expect(object.content[0].text).toContain('"options" must be an object');
+    expect(firstTextBlock(object)).toContain('"options" must be an object');
 
     const array = await factory.call("shaped", { options: {}, tags: "x", count: 1 }, context);
-    expect(array.content[0].text).toContain('"tags" must be an array');
+    expect(firstTextBlock(array)).toContain('"tags" must be an array');
 
     const integer = await factory.call("shaped", { options: {}, tags: [], count: 1.5 }, context);
-    expect(integer.content[0].text).toContain('"count" must be an integer');
+    expect(firstTextBlock(integer)).toContain('"count" must be an integer');
   });
 
   it("call() appends an image block for a data-URI image attachment", async () => {
@@ -428,15 +453,15 @@ describe("CodexMcpToolFactory", () => {
     const factory = new CodexMcpToolFactory(makeTools());
     const result = await factory.call("nope", {}, context);
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("unknown tool");
-    expect(result.content[0].text).toContain("nope");
+    expect(firstTextBlock(result)).toContain("unknown tool");
+    expect(firstTextBlock(result)).toContain("nope");
   });
 
   it("call() converts a thrown tool error into an isError result", async () => {
     const factory = new CodexMcpToolFactory(makeTools());
     const result = await factory.call("exploding", {}, context);
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("kaboom");
+    expect(firstTextBlock(result)).toContain("kaboom");
   });
 });
 

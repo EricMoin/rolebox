@@ -1,6 +1,7 @@
 import { mkdirSync, renameSync, writeFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import type { GraphNodeView, GraphQueryResult, GraphView } from "./graph-query.ts";
 
 export interface GraphStatusArgs {
@@ -79,6 +80,21 @@ function snapshot(graph: GraphView, args: GraphStatusArgs) {
   };
 }
 
+/**
+ * The STOPPING decisions a run still carries on DISPATCHED attempts.
+ *
+ * A node-scoped `failure`/`timeout` claims no run control fact — the run keeps
+ * executing and its siblings still settle — so the compact summary would
+ * otherwise report `control: undefined` and nothing else while an attempt sits
+ * stopped with its dependents unreleased. The stopping-command classification
+ * is the ledger's own set, so this view cannot drift from the guard the
+ * acceptance core applies.
+ */
+function stoppedAttemptDecisions(view: ReturnType<typeof snapshot>) {
+  return view.decisions.filter(decision => STOPPING_CONTROL_COMMANDS.includes(decision.command) &&
+    view.nodes.some(node => node.status === "dispatched" && node.attemptId === decision.attemptId));
+}
+
 function tree(graph: GraphView, args: GraphStatusArgs, view: ReturnType<typeof snapshot>): string {
   const selected = new Map(view.nodes.map((node) => [node.node_id, node]));
   const emitted = new Set<string>();
@@ -131,8 +147,13 @@ export function renderGraphQuery(query: GraphQueryResult, args: GraphStatusArgs,
   } else {
     text = views.map((view, index) => {
       const rows = args.format === "tree" ? tree(graphs[index]!, args, view) : view.nodes.map((node) => `  ${node.node_id} [${node.status}] ${node.agent}`).join("\n");
+      // A run with no control fact names the attempts a node-scoped stop ended;
+      // a run that carries one (and a run with no stopping decision at all)
+      // renders exactly as it did before.
+      const stopped = stoppedAttemptDecisions(view);
       return `Graph ${view.graph_id} [phase: ${view.phase}]\n${rows}\n` + JSON.stringify({
         control: view.control, stop: view.stop,
+        ...(view.control === undefined && stopped.length > 0 ? { decisions: stopped } : {}),
         approvals: view.approvals.length ? view.approvals : undefined,
         unsettled_effects: view.unsettled_effects.length ? view.unsettled_effects : undefined,
         ...(args.include_budget ? { budget: view.budget } : {}),

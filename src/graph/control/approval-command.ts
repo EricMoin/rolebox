@@ -1,3 +1,4 @@
+import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import { approvalSpecProblem, type ApprovalCommandName } from "./approval.ts";
 import { principalOf, refuse, resolveNodeTarget, type ControlCommandContext, type ControlCommandOutcome } from "./command-context.ts";
 import { unconfirmedExecutionsOf } from "./reports.ts";
@@ -80,6 +81,40 @@ export function applyApprovalCommand(ctx: ControlCommandContext<ApprovalCommandN
         "$.graph_id",
         "graph-control refused [run-stopped]: the run ended on a declared stop, " +
         "so an approval request cannot make its remaining attempts settle — nothing was written",
+      );
+    }
+    // A STOPPED ATTEMPT CANNOT BE PAUSED (P3 item 1). A trusted
+    // `failure`/`timeout`/`cancel`/`budget-stop` that names this attempt ends it
+    // even while the RUN keeps executing, so an approval request would pause an
+    // execution that can never settle afterwards: the pause could never be
+    // answered by a submission, and the node would be stranded until its
+    // deadline. The decision is read from the durable control stream of THIS
+    // run, so the refusal names the command that already ended the attempt, and
+    // nothing is written.
+    const stopping = runs
+      .controlDecisions(graphId, run.runId)
+      .find(
+        (decision) =>
+          decision.attemptId === target.attemptId &&
+          STOPPING_CONTROL_COMMANDS.includes(decision.command),
+      );
+    if (stopping !== undefined) {
+      return refuse(
+        graphId,
+        "attempt-stopped",
+        "$.node_id",
+        "graph-control refused [attempt-stopped]: node " +
+        JSON.stringify(target.nodeId) +
+        " attempt " +
+        JSON.stringify(target.attemptId) +
+        " already carries the STOPPING control command " +
+        JSON.stringify(stopping.command) +
+        " (" +
+        stopping.reason +
+        "), so it can never settle again and an approval request would pause an " +
+        "execution that no decision can move — a pause on a stopped attempt is a strand, " +
+        "not a pause; the RUN itself continues, and the node is carried forward by a " +
+        "node-scoped `retry` (which mints a successor attempt). Nothing was written",
       );
     }
     const raised = approvals.raiseApprovalRequest(

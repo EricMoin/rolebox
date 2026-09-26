@@ -272,7 +272,7 @@ describe("DshRoleSwitcher.activate", () => {
 
     const result = await switcher.activate("alpha", "s1");
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, value: undefined });
     expect(switcher.getActive("s1")).toBe("alpha");
     expect(saves).toHaveLength(1);
     expect(saves[0].get("s1")).toMatchObject({ sessionId: "s1", roleId: "alpha" });
@@ -286,6 +286,7 @@ describe("DshRoleSwitcher.activate", () => {
     const result = await switcher.activate("ghost", "s1");
 
     expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the unknown role to be rejected");
     expect(result.error).toContain("Unknown role");
     expect(switcher.getActive("s1")).toBeNull();
     expect(saves).toHaveLength(0);
@@ -299,6 +300,7 @@ describe("DshRoleSwitcher.activate", () => {
     const result = await switcher.activate("gamma", "s1");
 
     expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the non-primary role to be rejected");
     expect(result.error).toContain("not a primary role");
     expect(switcher.getActive("s1")).toBeNull();
     expect(saves).toHaveLength(0);
@@ -311,7 +313,7 @@ describe("DshRoleSwitcher.activate", () => {
 
     const result = await switcher.activate("alpha", "no-such-session");
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, value: undefined });
     expect(switcher.getActive("no-such-session")).toBe("alpha");
     expect(saves.at(-1)?.get("no-such-session")).toMatchObject({
       sessionId: "no-such-session",
@@ -328,7 +330,7 @@ describe("DshRoleSwitcher.activate", () => {
 
     const result = await switcher.activate(null, "s1");
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, value: undefined });
     expect(switcher.getActive("s1")).toBeNull();
     expect(saves.at(-1)?.get("s1")).toMatchObject({ sessionId: "s1", roleId: null });
   });
@@ -400,7 +402,7 @@ describe("DshRoleSwitcher onActiveRoleChanged", () => {
     );
 
     const result = await switcher.activate("alpha", "s1");
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, value: undefined });
     expect(switcher.getActive("s1")).toBe("alpha");
   });
 

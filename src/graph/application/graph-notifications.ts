@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createSubLogger } from "../../logger.ts";
 import { errorText } from "../../utils/error-text.ts";
+import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import { readGraphView, type GraphView } from "../query/graph-query.ts";
-import { GraphStore } from "../store/graph-store.ts";
+import { GraphStore, type TerminalExecutionObservation } from "../store/graph-store.ts";
 import { GRAPH_STORE_TABLES } from "../store/schema.ts";
 import type { OutcomeGraphState } from "../outcome/state-model.ts";
 
@@ -42,7 +43,17 @@ interface Delivery {
 type Run = GraphView["runs"][number];
 type Notice = Omit<GraphNotification, "id" | "graphId" | "runId" | "sessionId" | "agent"> & { key: string };
 
-function notices(run: Run, phase: OutcomeGraphState["phase"] | undefined): Notice[] {
+/** Whether one attempt is still the CURRENT attempt of a DISPATCHED node. */
+function currentDispatchedAttempt(run: Run, attemptId: string | undefined): boolean {
+  return attemptId !== undefined &&
+    run.nodes.some(node => node.status === "dispatched" && node.attemptId === attemptId);
+}
+
+function notices(
+  run: Run,
+  phase: OutcomeGraphState["phase"] | undefined,
+  readObservation: (executionId: string) => TerminalExecutionObservation | undefined,
+): Notice[] {
   // A retry annotates the previous run as stopped without undoing its terminal outcome.
   if (run.control !== undefined && run.control.command !== "retry") {
     return [{ key: "terminal", kind: "stopped", reason: `${run.control.command}: ${run.control.reason}` }];
@@ -66,7 +77,7 @@ function notices(run: Run, phase: OutcomeGraphState["phase"] | undefined): Notic
       kind: "attention", nodeId: node.nodeId, reason: `Required inputs are unavailable: ${reason}` });
   }
   for (const attempt of run.attempts) {
-    if (!run.nodes.some(node => node.status === "dispatched" && node.attemptId === attempt.attemptId)) continue;
+    if (!currentDispatchedAttempt(run, attempt.attemptId)) continue;
     const execution = attempt.execution;
     const failed = execution?.state === "creating" && execution.refused?.kind === "unproven-failure";
     const released = execution?.state === "pending" && execution.releasedAt !== undefined;
@@ -74,6 +85,49 @@ function notices(run: Run, phase: OutcomeGraphState["phase"] | undefined): Notic
     pending.push({ key: `dispatch:${attempt.attemptId}:${execution!.generation}`,
       kind: "attention", nodeId: attempt.nodeId, attemptId: attempt.attemptId,
       reason: failed ? "Worker launch failed without proof that no execution exists; recovery needs attention." : "Worker launch was refused; the dispatch remains pending." });
+  }
+  // ── AN ATTEMPT-SCOPED STOP IS NOT A SILENT ONE ──────────────────────────
+  //
+  // The terminal `stopped` notice above is keyed on the RUN's own control fact,
+  // and a node-scoped stop deliberately claims none: `failure` and `timeout`
+  // end ONE attempt while the run keeps executing and its siblings still
+  // settle. Without the notice below a node-scoped stop would surface nowhere:
+  // the run reads as merely `executing`, the stopped attempt is still the
+  // node's current one, it accepted nothing, and the node's dependents stay
+  // unreleased until a `retry` mints a successor or a run-wide stop closes the
+  // run. ONE notice per stopping decision, keyed by the attempt and the
+  // command, so reflushing and reopening cannot duplicate it.
+  const stoppedAttempts = new Set<string>();
+  for (const decision of run.decisions) {
+    if (!STOPPING_CONTROL_COMMANDS.includes(decision.command)) continue;
+    if (!currentDispatchedAttempt(run, decision.attemptId)) continue;
+    const attempt = run.attempts.find(item => item.attemptId === decision.attemptId);
+    if (attempt === undefined || attempt.accepted !== undefined) continue;
+    stoppedAttempts.add(decision.attemptId);
+    pending.push({
+      key: `stopped:${decision.attemptId}:${decision.command}`,
+      kind: "attention", nodeId: decision.nodeId, attemptId: decision.attemptId,
+      reason: `The trusted command ${decision.command} stopped attempt ${decision.attemptId} of node ${decision.nodeId} (${decision.reason}). The run continues and this node's dependents stay unreleased — retry the node to mint a successor attempt, or cancel the run.`,
+    });
+  }
+  // ── A COMPLETED EXECUTION IS NOT A SETTLED ATTEMPT ──────────────────────
+  //
+  // The worker's execution is durably OVER (the host's own terminal
+  // observation, never an announcement) and yet no outcome was settled for the
+  // attempt: no submission arrived and the host derived none, so nothing will
+  // settle it by itself. It is reported while it is still the current attempt
+  // of a dispatched node and carries no stopping decision — a stopped attempt
+  // is reported by the notice above instead.
+  for (const attempt of run.attempts) {
+    if (attempt.accepted !== undefined || stoppedAttempts.has(attempt.attemptId)) continue;
+    if (!currentDispatchedAttempt(run, attempt.attemptId)) continue;
+    const executionId = attempt.execution?.execution?.executionId;
+    if (executionId === undefined || readObservation(executionId)?.kind !== "completed") continue;
+    pending.push({
+      key: `unsettled-completion:${attempt.attemptId}`,
+      kind: "attention", nodeId: attempt.nodeId, attemptId: attempt.attemptId,
+      reason: "The worker execution ended and reported completion, but no outcome was settled (no submission arrived and the host derived none) — the attempt stays open.",
+    });
   }
   return pending;
 }
@@ -143,7 +197,11 @@ export class GraphNotifications {
       }
       for (const run of graph.runs) {
         const state = this.store.readGraphStateOf(graphId, run.runId)?.body as OutcomeGraphState | undefined;
-        for (const { key, ...notice } of notices(run, state?.phase)) {
+        for (const { key, ...notice } of notices(
+          run,
+          state?.phase,
+          executionId => this.store.readExecutionObservation(executionId),
+        )) {
           const id = notificationId(graphId, run.runId, key);
           const notification: GraphNotification = { id, graphId, runId: run.runId, ...origin, ...notice };
           const delivery: Delivery = { notification, attempts: 0, retryAt: 0 };
@@ -228,7 +286,11 @@ export class GraphNotifications {
     const run = graph.current;
     if (run?.runId !== notification.runId || run.phase === "complete" || run.phase === "stopped") return true;
     const state = this.store.readGraphStateOf(notification.graphId, run.runId)?.body as OutcomeGraphState | undefined;
-    return !notices(run, state?.phase).some(notice => notificationId(notification.graphId, run.runId, notice.key) === notification.id);
+    return !notices(
+      run,
+      state?.phase,
+      executionId => this.store.readExecutionObservation(executionId),
+    ).some(notice => notificationId(notification.graphId, run.runId, notice.key) === notification.id);
   }
 
   close(): void {

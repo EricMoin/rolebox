@@ -134,6 +134,22 @@ function required(name: string): string {
 }
 
 /**
+ * The RUN-WIDE stop commands — this fixture's mirror of the shipped scope
+ * predicate (`src/graph/control/stop-command.ts`, `RUN_WIDE_COMMANDS`).
+ *
+ * WHY THE FIXTURE MUST MIRROR IT (P3 item 1). A `failure` or a `timeout` is
+ * NODE-SCOPED: the shipped stop command records its decision on the ATTEMPT and
+ * claims NO run control fact, so the run keeps executing. Only a `cancel` or a
+ * `budget-stop` ends the RUN and claims that fact. A fixture that claimed the run
+ * for every command would write a shape the shipped entry can no longer produce —
+ * and would pin the OLD "failure => controlled" semantics that this plan
+ * deliberately replaced. The scope rule itself is pinned against the SHIPPED
+ * entry by `attempt-scoped-stop.test.ts`; this fixture only has to write the shape
+ * the shipped entry writes, so the race it drives is the race that can happen.
+ */
+const RUN_WIDE_STOP_COMMANDS: ReadonlySet<string> = new Set(["cancel", "budget-stop"]);
+
+/**
  * The value of `--name` as one of the durable control commands, refused
  * otherwise: the fixture never invents a command the store's CHECK would reject.
  */
@@ -542,6 +558,15 @@ function receipt(store: GraphStore): void {
  * methods the shipped paths use, and both print the verdict they observed, so
  * the parent can assert the outcome per round rather than assume it.
  *
+ * THE RUN CLAIM FOLLOWS THE COMMAND'S SCOPE. A run-wide `cancel`/`budget-stop`
+ * passes the `runControl` claim beside its decision, exactly as the shipped
+ * entry does; a node-scoped `failure`/`timeout` passes NONE (see
+ * {@link RUN_WIDE_STOP_COMMANDS}). Writing the old shape — every command claiming
+ * the run — would pin a state the shipped entry cannot produce and would leave
+ * the losing verdict ambiguous between `controlled` and `attempt-stopped`, which
+ * is the intermittency the parent used to observe. The command's write shape is
+ * therefore part of what this fixture has to get right.
+ *
  * PRIVACY: store roots under the OS temp dir, minted ids and epoch
  * milliseconds only. No credential value is read or printed.
  */
@@ -611,14 +636,23 @@ async function controlRace(store: GraphStore): Promise<void> {
       decidedAt: at,
       decidedBy: { sessionId },
     },
-    runControl: {
-      graphId,
-      runId,
-      command,
-      reason,
-      decidedAt: at,
-      decidedBy: { sessionId },
-    },
+    // ONLY A RUN-WIDE COMMAND CLAIMS THE RUN (P3 item 1), exactly as
+    // `applyStopCommand` decides it: a node-scoped `failure`/`timeout` ends the
+    // ATTEMPT it names, so it writes the decision and NOTHING ELSE — the run keeps
+    // executing and its fact stays unclaimed, which is what makes the outcome of
+    // this race ONE deterministic verdict instead of two possible ones.
+    ...(RUN_WIDE_STOP_COMMANDS.has(command)
+      ? {
+        runControl: {
+          graphId,
+          runId,
+          command,
+          reason,
+          decidedAt: at,
+          decidedBy: { sessionId },
+        },
+      }
+      : {}),
   });
   emit({
     ok: true,

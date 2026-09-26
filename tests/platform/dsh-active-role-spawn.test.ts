@@ -100,7 +100,10 @@ function createFakeSubagents(): DshSubagentDispatchRuntime {
     async start(name: string, request: DshSubagentStartRequest) {
       const provider = providers.get(name);
       if (!provider) throw new Error(`no provider for ${name}`);
-      return provider.start(request);
+      // Like the real SubagentRuntime: the service resolves and stamps the
+      // detached child descriptor BEFORE the provider's start() sees the
+      // request (DshResolvedSubagentStartRequest, agent-registrar.ts).
+      return provider.start({ ...request, descriptor: request.descriptor ?? {} });
     },
   };
 }
@@ -307,7 +310,7 @@ describe("dsh active-role spawn seam", () => {
     ]);
 
     const result = await switcher.activate("alpha", "s1");
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, value: undefined });
     expect(activeRole.get("s1")).toBe("alpha");
 
     await subagents.start("base", spawnRequest("s1"));

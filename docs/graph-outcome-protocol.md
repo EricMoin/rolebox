@@ -356,6 +356,13 @@ rejection returns the per-requirement outcomes that failed and leaves the attemp
 open. A record that is not this build's declared outcome-protocol state is
 refused by name.
 
+A dsh worker that cannot settle through this tool does not have to lose its claim:
+its prompt asks it to end its final turn with the outcome it reached, and the host
+reads that declaration — from the turn it already holds — into the credential-free
+host-derived completion channel. A declaration is not a submission: it settles
+nothing by itself, the plan still decides whether the outcome exists and passes
+its gates, and the attempt stays open when it does not.
+
 ### `graph_control`
 
 | Argument | Required | Meaning |
@@ -470,10 +477,11 @@ means this decision is the persisted one and its effects may run; `replayed`
 means an identical submission found the committed receipt and returns it without
 a second event or successor; `conflict` means another submission already settled
 that logical submission differently; `settled` means the attempt is already
-settled; `controlled` means a trusted control command stopped the run;
-`superseded` means a retry replaced the attempt. At most one accepted result can
-exist per attempt — the accepted-event key is `(graph, attempt)`, so settlement is
-single-shot.
+settled; `controlled` means a trusted run-wide command stopped the run;
+`attempt-stopped` means a trusted stopping command ended that attempt while the
+run keeps executing; `superseded` means a retry replaced the attempt. At most one
+accepted result can exist per attempt — the accepted-event key is
+`(graph, attempt)`, so settlement is single-shot.
 
 **Payload fidelity.** Absence is preserved. `absent` (the submission carried no
 `data` at all) and `value` (it carried `null`, `{}`, `""`, `0` or anything else)
@@ -501,19 +509,70 @@ results and unsettled effects stay queryable.
 
 | Command | Scope | Durable decision it records |
 | --- | --- | --- |
-| `failure` | One attempt | The host reports that the attempt's execution ended without reaching an authorized outcome. A platform-confirmed failure stops the run atomically, marks the attempt's dispatch effect failed, releases the attempt's outstanding budget reservation and creates no accepted business result. The release withdraws the attempt's claim on the node's remaining budget; the dispatch itself stays counted, its unreported consumption stays unknown rather than zero, and a later bill still reconciles it. |
-| `timeout` | One attempt | The attempt exceeded its time. |
+| `failure` | One attempt | The host reports that the attempt's execution ended without reaching an authorized outcome. The decision is recorded on the ATTEMPT and never claims the run's control fact, so the run keeps executing: sibling attempts still settle and the successors they arm are still dispatched. A platform-confirmed failure marks that attempt's dispatch effect failed, releases its outstanding budget reservation and creates no accepted business result. The release withdraws the attempt's claim on the node's remaining budget; the dispatch itself stays counted, its unreported consumption stays unknown rather than zero, and a later bill still reconciles it. The stopped attempt accepts nothing afterwards (a late submission is refused `attempt-stopped`), is never paused by an approval request and is never launched again; its node stays in flight with its dependents unreleased until a node-scoped `retry` mints a successor attempt — bounded by the plan's declared budget, which the successor spends — or a run-wide `cancel`/`budget-stop` ends the run. |
+| `timeout` | One attempt | The attempt exceeded its time. Scoped to the attempt alone, exactly like `failure`: it never claims the run's control fact, so the run keeps executing and sibling attempts settle normally, while this attempt accepts nothing afterwards and its node waits for a node-scoped `retry` or a run-wide stop. |
 | `cancel` | Whole run | A stop plus a cancel intent for every attempt still in flight. Confirmation requires the platform to substantiate termination; an issued request remains visible as unsettled work. |
 | `budget-stop` | Whole run | Claims the run's control fact so no submission settles and no further dispatch is armed, records one decision per in-flight attempt, and reports the run's budget state including any actual overrun. It is not a platform cancellation. |
 | `retry` | One attempt, or one terminal run | Naming a node mints a successor attempt that carries the node forward, and is refused when the run was stopped or ended on a declared stop. Naming no node orders the named terminal run re-executed as a new run, and is refused unless the previous run is terminal and its external effects are accounted for: a run still executing, or one that still owes external work whose fate is unknown, cannot be retried. |
 | `approval-request` | One attempt | A durable pause naming the only session that may decide it and the deadline it expires at. |
 | `approve` / `reject` | One attempt | The decision itself; only the named approver may issue it, a repeat replays, a competing decision is refused, and a decision after the deadline is refused as expired. |
 
-The first command recorded for a run is the run's control fact, so a stopped run
-takes no further step: it dispatches nothing, arms nothing and settles nothing. A
-late worker submission and a late completion fact both meet the same refusal. A
-stop reports every still-unsettled effect and every unconfirmed execution, so a
-stopped graph never hides external work.
+**The first run-wide command recorded for a run is the run's control fact, and an
+attempt-scoped command never claims it.** `cancel` and `budget-stop` claim it to
+stop the run; a run-scoped `retry` claims it to close the run it re-executes as a
+successor. A run that holds one takes no further step: it dispatches nothing,
+arms nothing and settles nothing. A late worker submission and a late completion
+fact both meet the same refusal, and the stop reports every still-unsettled effect
+and every unconfirmed execution, so a stopped graph never hides external work.
+
+**A node-scoped stop claims nothing but its attempt.** `failure` and `timeout`
+are ATTEMPT-scoped: they record their decision on the attempt they name and leave
+the run's control fact — if the run holds one — exactly as it stood, so the run
+keeps executing and is reported as executing, not stopped. The stopped attempt is
+the whole effect: it accepts nothing afterwards (a late submission is refused
+`attempt-stopped`), it is never launched again, and an approval request naming it
+is refused `attempt-stopped` rather than pausing an execution no decision can
+move. Its node stays in flight with its dependents unreleased until a node-scoped
+`retry` mints a successor attempt — spending one execution from the plan's
+declared budget — or a run-wide `cancel`/`budget-stop` closes the run. A run such
+a stop left in flight is therefore *reported*, not settled: the stopped attempt
+stays visible with its decision, with its dispatch effect failed and its
+reservation released when the host reported the failure, and with both left
+exactly as they stood when a principal issued the command.
+
+**A node-scoped stop contains an attempt; it is not a kill switch.** `failure`
+and `timeout` say nothing about the platform's execution, and nothing on their
+path ends it. What they do is record their decision on the attempt they name,
+and that decision is the whole containment: the engine accepts nothing the
+stopped attempt produces, never pauses it and never (re-)launches it, so the
+execution cannot re-enter the run through any of those doors. What they do not
+do is terminate it. Two further effects belong to the host-reported failure
+alone: the attempt's dispatch effect is marked failed and its outstanding
+budget reservation is released only when the host reports the failure —
+`hostFailure`, corroborated against the attempt's durable execution binding and
+the host's own observation that the execution ended `failed` — while a
+principal-issued `failure` or `timeout` does neither, so the effect keeps the
+status it had and the attempt's reservation keeps standing. No platform cancel
+is delivered for either: the host's cancel path forwards the run's stopping
+decisions whose command is `cancel` or `budget-stop` and nothing else, so a
+node-scoped stop hands nothing to the platform, and an execution whose attempt
+was stopped this way may still be running. Such an execution stays visible as
+an unsettled effect, and the run keeps reporting every unconfirmed execution.
+
+**The intended use follows from that asymmetry.** `failure` presupposes that an
+execution has ALREADY ended: the host reports a platform execution that
+finished without reaching an authorized outcome, and a principal records the
+same decision on an attempt whose worker is gone. An operator who must stop a
+LIVE execution uses a run-wide command instead: `cancel` records a cancel
+intent for every attempt still in flight and asks the platform to terminate
+each one, while `budget-stop` stops the run's own ledger so nothing settles and
+no further dispatch is armed. A run-wide `cancel` does not revisit a node-scoped
+decision: an attempt that already carries one is reported as a skipped target
+(`control-already-decided`), and the cancel it delivers names the run's other
+in-flight attempts. Stopping one attempt while its execution runs on is
+therefore containment, not termination — the engine holds that attempt shut
+while the worker keeps running — and this asymmetry is a property of the
+current contract, stated here so that it is not discovered by surprise.
 
 **Budget accounting.** `budget.max_executions` is a run-wide, transactional
 ceiling counted over the run's dispatch reservations. One reservation is written
@@ -562,6 +621,8 @@ it reach the threshold later.
 
 ## Natural completion and approval
 
+### Natural completion
+
 Natural completion lets the host's own execution report settle a node, without a
 worker submission. It requires **both** halves:
 
@@ -591,6 +652,8 @@ nothing, and a policy body must hash to the identity it is authorized under.
 node. Its configuration format belongs to the
 [operations guide](graph-v3-operations.md).
 
+### Approval
+
 Approval is control, not an outcome. A request is raised by the declaring
 principal, which names the only session that may decide it and the deadline it
 expires at; a request with no approver or no future deadline is refused before
@@ -605,6 +668,75 @@ the request it once authorized. An expired request is never approved afterwards.
 Session identity is not evidence of a human action: the protocol records which
 principal a session was attributed to, and makes no claim that a human operated
 it.
+
+### Host-derived completion
+
+A worker execution can end without ever presenting an outcome — a timeout, a
+killed process, a provider that returned no final submission. The outcome is not
+invented to fill that gap: the worker's own **final turn** declared it, and the
+host reads that declaration from the turn it already holds and delivers it to the
+runtime. The delivery envelope is closed and carries exactly
+`{ nodeId, attemptId, executionId, outcomeId, data?, evidenceRefs?, derivation? }`
+— the optional keys are the declaration's payload, its evidence references and
+the host's indication of which turn declared it. Any other key is refused by name
+(`malformed-host-derived-completion`), and `credential` above all: this channel
+presents no bearer value and refuses one offered beside the declaration. It is
+authenticated instead by the attempt's **durable execution record** — the host's
+own record of the execution it created, compared against the `executionId` the
+delivery names and never re-bound to whichever execution happens to exist — which
+is what lets a lost credential be irrelevant here rather than re-issued. An
+authority that does not exist is refused `host-completion-unavailable`, and a
+record that is missing, foreign, or cannot be answered is refused
+`host-completion-unauthenticated`; both write nothing. The channel is reachable
+only from the host — no graph tool binds it, so a worker cannot reach it at all —
+and the fact the runtime reads (`HostDerivedCompletionFact`) has no credential
+field to carry one.
+
+**An announcement is still not an outcome.** What the host delivers is the
+worker's own claim, read from the turn it holds, and the plan decides whether it
+becomes a result. Nothing on this channel chooses an outcome: `outcomeId` is the
+outcome the worker's own last turn declared, carried through verbatim with no
+default, no repair and no synthesis, so the host never decides it. The plan still
+decides what happens next: an undeclared outcome is refused by the acceptance
+core, and the outcome's declared acceptance gates still run, so a payload that
+fails them is a rejection and the attempt stays open. A node whose compiled plan
+pinned a natural completion (`completion.mode === "natural"`) is refused by name
+(`derived-completion-natural-node`), because the plan already decided that node's
+outcome and this channel must not choose another; a node with no completion
+policy, or an `explicit` one, leaves the outcome to the attempt, which is exactly
+what the declaration carries. The settlement then runs through the same atomic
+transaction as every other submission, and the accepted receipt's submission id
+answers which channel settled it: the ordinary ingress derives
+`submission:<digest>`, natural completion derives `natural-completion:<digest>`,
+and this channel derives `host-derived:<digest>`.
+
+**The host's own entry.** An execution the host confirmed is over is settled
+through one entry, `settleFinishedAttempt`: it asks the plan's pinned completion
+channel first — a natural-completion node has exactly one authorized outcome and
+the worker's last turn must not pick another — and only then reads the worker's
+own last turn through the port the host installed (`HostDerivedOutcomePort`) and
+settles a declared outcome through the runtime's `settleHostDerivedCompletion`.
+An attempt that already has an accepted event answers `already-settled` with that
+settlement's own submission key and writes nothing; an attempt the host cannot
+settle — a graph it cannot open, no confirmed execution, no reading port, or a
+reading that is absent, ambiguous, malformed or unavailable — is reported as
+unsettled with its reason, and nothing is fabricated to make it settle.
+
+**What the runtime does not prove.** The runtime cannot independently verify that
+the host's port read the worker's own final turn: the guarantee is the port's
+implementation, the plan-declaration gate and the durable-execution match — the
+same trust level the existing host-completion channel already has. The runtime
+checks the closed envelope, the host's durable execution record and the plan; it
+does not re-read the session transcript, and it never settles on a claim about a
+turn it did not see.
+
+**Two closed envelopes, two jobs.** Natural completion's envelope carries the node
+id, the attempt id and the attempt credential and refuses any other key — the
+no-data-channel rule above — because the plan already named the outcome and no
+payload may cross that boundary. The host-derived envelope is the other way
+round: it carries no credential and does carry the worker's declared outcome,
+payload and evidence, because the plan left the outcome to the attempt. Neither
+envelope can do the other's job.
 
 ## State, storage, and effects
 
@@ -720,6 +852,29 @@ point to these copies, which are readable but not writable inside the sandbox.
 Missing resources or links escaping a resource bundle refuse the start; the host
 does not grant access to the original role directory.
 
+A dsh graph worker's prompt asks it to end its **final message** with exactly one
+fenced `json` block, so an execution that ends without a submission can still
+carry the outcome it reached:
+
+```json
+{
+  "outcome_id": "<an outcome this node declares>",
+  "data": "<optional payload>",
+  "evidence_refs": ["<optional artifact path>"]
+}
+```
+
+`outcome_id` is required and must name an outcome the node declares; `data` and
+`evidence_refs` are optional, and when present they are the payload and the
+artifact references the outcome's acceptance gates judge. The block is read only
+from the worker's own final turn, and only when that turn completed: a failed or
+aborted final turn belongs to the execution observation rather than being a
+declaration source. No block, more than one block, an unknown key, or a missing or
+empty `outcome_id` all mean the host derives nothing and the attempt stays open.
+A declaration is not a submission — it settles nothing by itself — and it is the
+input to the host-derived completion channel described under Natural completion
+and approval.
+
 The loopback channel's own envelope admits more names than a worker's grant, and
 that is transport plumbing rather than a worker capability: which graph tool a
 bound worker may call is decided by the per-call worker boundary against the
@@ -804,6 +959,16 @@ execution.
   they apply, an approval status when the attention is an approval, and a reason.
   It contains no credential and no business payload: it directs the parent to
   `graph_status` for the committed result.
+- **A continuing run is not silent.** An attempt-scoped stop and a completed
+  worker execution with no settled outcome each produce an `attention` notice
+  naming the node, the attempt and the reason, so a run that continues with a
+  stopped or stranded node is never silent. The first names the trusted command
+  that stopped the attempt while the run continues and the node's dependents stay
+  unreleased until a retry or a run-wide stop; the second names the host's own
+  durable observation that the execution ended and reported completion while no
+  outcome was settled, so the attempt stays open. Their event keys are
+  `stopped:<attemptId>:<command>` and `unsettled-completion:<attemptId>`; both
+  are reminders, and neither settles, releases or advances anything.
 - **Delivery failure changes nothing.** A graph's own outcome is decided by
   acceptance, not by whether a message arrived. An unavailable target leaves
   delivery pending, and a failed notification never turns success into failure or

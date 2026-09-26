@@ -36,13 +36,18 @@
 import { describe, expect, it } from "bun:test";
 
 import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
-import { PiOutcomeDelivery } from "../../src/platform/adapters/pi/outcome-dispatch.ts";
+import {
+  PiOutcomeDelivery,
+  type PiOutcomeDispatchPort,
+} from "../../src/platform/adapters/pi/outcome-dispatch.ts";
 import type { DshOutcomeSubagentRuntime } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
 import type {
+  DshSubagentProvider,
   DshSubagentRun,
   DshSubagentStartRequest,
 } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import type { DispatchInput, DispatchTask } from "../../src/dispatch/types.ts";
+import type { HostExecutionObservation } from "../../src/graph/host/outcome-host.ts";
 import {
   dispatchEffectKeyOf,
   dispatchIdempotencyKeyOf,
@@ -86,6 +91,33 @@ interface DshChild {
   readonly mode?: string;
 }
 
+/**
+ * A registered dsh subagent provider, as the delivery's presence probe sees it.
+ *
+ * `DshOutcomeDelivery.deliver` asks `ctx.subagents.getProvider(agent)` only
+ * WHETHER a provider is registered — the run itself is started through the
+ * runtime's own `start` — so the capability flags mirror
+ * `DshAgentRegistrar.buildProvider`, and the provider's own `start` must never
+ * be reached: if the delivery ever routes through it, that assumption fails
+ * loud here instead of passing silently.
+ */
+const DSH_PROVIDER: DshSubagentProvider = {
+  name: "agent.work",
+  capabilities: {
+    agentOptions: true,
+    outputSchema: false,
+    depthLimit: false,
+    toolFilter: true,
+    persona: false,
+  },
+  inheritsParentContext: false,
+  start: () => {
+    throw new Error(
+      "the delivery must start the run through ctx.subagents.start, never the provider",
+    );
+  },
+};
+
 /** A dsh subagent runtime double that starts runs and lists children. */
 function makeDshRuntime(options: {
   readonly children?: readonly DshChild[];
@@ -99,7 +131,11 @@ function makeDshRuntime(options: {
   const starts: Array<{ agent: string; request: DshSubagentStartRequest }> = [];
   const listings: string[] = [];
   const runtime: DshOutcomeSubagentRuntime = {
-    getProvider: () => ({}),
+    // The query/delivery path never registers a provider; the port member is
+    // required by `DshSubagentRuntime` (the dsh `ctx.subagents` service), so the
+    // double answers with the no-op disposer the sibling outcome doubles use.
+    registerProvider: () => () => {},
+    getProvider: () => DSH_PROVIDER,
     list: () => ["agent.work"],
     start: async (agent: string, startRequest: DshSubagentStartRequest) => {
       starts.push({ agent, request: startRequest });
@@ -307,7 +343,13 @@ function makePiManager(tasks: DispatchTask[]): {
   };
 }
 
-function piDelivery(manager: ReturnType<typeof makePiManager>["manager"]): PiOutcomeDelivery {
+/**
+ * Wire a {@link PiOutcomeDelivery} over PRODUCTION's port — not over the
+ * concrete `makePiManager` double — so a manager without the OPTIONAL read
+ * surface (`getTask`/`getAllTasks`) is a legal argument, exactly as it is for
+ * the adapter itself.
+ */
+function piDelivery(manager: PiOutcomeDispatchPort): PiOutcomeDelivery {
   return new PiOutcomeDelivery({
     manager,
     directory: "/workspace/fixture",
@@ -352,7 +394,9 @@ describe("the Pi execution query port", () => {
   });
 
   it("reads the task's status: completed is a completion, error/cancelled/timeout are NOT", () => {
-    const statuses: ReadonlyArray<readonly [DispatchTask["status"], string]> = [
+    const statuses: ReadonlyArray<
+      readonly [DispatchTask["status"], HostExecutionObservation["kind"]]
+    > = [
       ["completed", "completed"],
       ["error", "failed"],
       ["cancelled", "failed"],

@@ -3,8 +3,8 @@ import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
 export type GraphEventType =
   | "node_dispatched"
   | "node_completed"
-  | "node_blocked"
-  | "graph_terminal"
+  | "phase_change"
+  | "budget_update"
   | "notification_degraded";
 import type { EnginePhase, NodeStatus } from "../../../constants.ts";
 

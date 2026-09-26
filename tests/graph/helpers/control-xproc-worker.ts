@@ -5,7 +5,8 @@
  * Date: 2026-09-24
  *
  * WHY THIS FILE EXISTS. The plan's §4 P3 failure clause is "the host's failure
- * fact is written to the attempt and the run, with its reason", and §5 forbids a
+ * fact is written to the ATTEMPT, with its reason" — the stop is ATTEMPT-scoped
+ * and claims no run control fact, so the run keeps executing — and §5 forbids a
  * temporary probe as the sole acceptance evidence. The tracked single-process
  * case reads the durable rows back through a SECOND CONNECTION; it proves the
  * write is durable but not that a process boundary leaves the same fact standing.
@@ -21,9 +22,11 @@
  *       --dir <workspace> --store <root> --graph <id> --command failure|timeout
  *
  * WHAT THE PARENT THEN PINS. A FRESH host over the same store root runs the
- * production boot sweep: the stop is reported, the unconfirmed execution is still
- * named, nothing is dispatched and no settlement is possible. The control fact
- * outlives the process that decided it.
+ * production boot sweep: the run is still EXECUTING (the stop claimed no run
+ * control fact), the effect the stopped attempt left `started` is refused by name
+ * instead of being launched a second time, nothing is dispatched, no settlement
+ * is possible and a node-scoped retry of the stopped node still applies. The
+ * attempt's own stopping decision outlives the process that decided it.
  *
  * PRIVACY: this worker receives only a store root and a workspace directory under
  * the OS temp directory, plus graph ids minted by the test. Its marker carries
@@ -212,9 +215,10 @@ async function main(): Promise<void> {
     throw error;
   }
 
-  // THE TRUSTED COMMAND. Its tool body records the decision on the attempt and
-  // the run's control fact; nothing here confirms the create, so the external
-  // task the stop leaves behind is UNCONFIRMED.
+  // THE TRUSTED COMMAND. Its tool body records the decision on the ATTEMPT and
+  // claims NO run control fact (`failure`/`timeout` are node-scoped); nothing
+  // here confirms the create, so the external task the stop leaves behind is
+  // UNCONFIRMED.
   const raw = String(
     await tools.graph_control.execute(
       {

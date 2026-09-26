@@ -212,6 +212,32 @@ export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freez
 ]);
 
 /**
+ * The control commands that STOP one ATTEMPT — the single owner of the
+ * classification (P3 item 1).
+ *
+ * WHY IT IS A SET AND NOT A SCOPE. A `failure`, a `timeout`, a `cancel` and a
+ * `budget-stop` are the four commands that end the attempt they name: the
+ * attempt accepts nothing afterwards, because its execution was already
+ * declared over. `retry` is deliberately ABSENT — it is a SUCCESSOR command
+ * recorded BESIDE a stopping decision, never a competitor — and so are the
+ * approval commands, which pause and resolve an attempt rather than end it.
+ *
+ * WHY ONE OWNER. The store's own conditional INSERT refuses a second STOPPING
+ * command on one attempt with exactly this set (and so this list is
+ * membership-identical to that SQL literal), the acceptance guard refuses a
+ * batch for an attempt the set names, and the launch decision refuses to
+ * (re-)create a stopped attempt's execution. Three readers of one rule, so the
+ * classification is stated once and cannot drift: an attempt carries at most
+ * one stopping fact, whichever of a command and an acceptance commits first.
+ */
+export const STOPPING_CONTROL_COMMANDS: readonly ControlCommandName[] = Object.freeze([
+  "failure",
+  "timeout",
+  "cancel",
+  "budget-stop",
+]);
+
+/**
  * The trusted invocation that decided, as the host attributed it.
  *
  * `sessionId` is what the permission rule compares (the declaring principal's
@@ -343,6 +369,14 @@ export interface ControlDecisionRecord {
 /**
  * The RUN-level control fact: the FIRST trusted command recorded for a run.
  *
+ * ONLY A RUN-WIDE COMMAND CLAIMS IT. `cancel` and `budget-stop` end the run
+ * itself, so they record the run's control fact; a run-scoped `retry` claims it
+ * too, because closing the run it replaces IS what that command orders. A
+ * NODE-SCOPED command never claims it: a `failure` or a `timeout` ends ONE
+ * attempt — its siblings stay in flight and the run keeps executing — and a
+ * node-scoped `retry` supersedes one attempt, so claiming the run would make
+ * every sibling unsettleable for a stop nobody issued.
+ *
  * It is written with the decision that produced it, in ONE transaction, and it
  * is never replaced — a later command for a DIFFERENT attempt (a second node's
  * failure; a cancel issued after a failure, which records its intent on every
@@ -371,12 +405,13 @@ export interface RunControlWrite {
    * the run still being unclaimed, so a racing second command never replaces
    * the first — it is told which command already stopped the run instead.
    *
-   * ABSENT MEANS "THIS DECISION DOES NOT CLAIM THE RUN". A `retry` is the one
-   * command that does not: it supersedes an attempt, it does not end the run,
-   * so claiming the run's stop fact would make the successor attempt
-   * unsettleable (every settlement path refuses a controlled run). Omitting it
+   * ABSENT MEANS "THIS DECISION DOES NOT CLAIM THE RUN". Only the RUN-WIDE
+   * commands claim it — `cancel` and `budget-stop`, which end the run itself —
+   * and a NODE-SCOPED command never does: a `failure` and a `timeout` end ONE
+   * attempt (their siblings keep running and still settle), and a node-scoped
+   * `retry` supersedes one attempt instead of ending the run. Omitting it
    * records the decision and leaves the run's own control fact exactly as it
-   * stands.
+   * stands, so a node-scoped stop never turns a live run into a controlled one.
    */
   readonly runControl?: RunControlRecord;
 }
@@ -694,6 +729,21 @@ export interface RunControlLedger {
     nodeId: string,
     attemptId: string,
     command: ControlCommandName,
+  ): ControlDecisionRecord | undefined;
+  /**
+   * The STOPPING control decision one attempt carries, or `undefined`.
+   *
+   * The attempt-level half of the acceptance rule, and the symmetric twin of
+   * {@link RunControlLedger.readSupersedingRetry}: an attempt a trusted
+   * `failure`, `timeout`, `cancel` or `budget-stop` ended accepts nothing, so
+   * the acceptance core asks this inside the transaction that would otherwise
+   * settle it. One attempt carries at most one stopping decision (the store
+   * refuses a competing one), and the decision is never cleared, so a value
+   * read here cannot go stale into an acceptance.
+   */
+  readStoppingDecision(
+    graphId: string,
+    attemptId: string,
   ): ControlDecisionRecord | undefined;
   /**
    * The control decisions of ONE run, in decision order.
@@ -1031,6 +1081,35 @@ export type CommitResult =
      */
     readonly kind: "superseded";
     /** The retry decision that superseded this attempt. */
+    readonly decision: ControlDecisionRecord;
+    readonly reason: string;
+  }
+  | {
+    /**
+     * The ATTEMPT carries a STOPPING trusted control decision — a `failure`, a
+     * `timeout`, a `cancel` or a `budget-stop` (P3 item 1): nothing was
+     * written.
+     *
+     * THE STOP ENDS THE ATTEMPT, NOT THE RUN. A node-scoped stopping command
+     * names one attempt, so the run keeps executing: its siblings stay in
+     * flight, their results still settle and the successors they arm are still
+     * dispatched. What ends with the decision is the named attempt alone —
+     * accepting a result for it would report a business success for an
+     * execution a trusted principal already declared over, and the run would
+     * carry two contradictory terminal facts about it. The attempt is carried
+     * forward only by a node-scoped `retry` (which mints a SUCCESSOR attempt) or
+     * closed by a run-wide `cancel`/`budget-stop`.
+     *
+     * The check is part of the FIRST statement of the batch write (a receipt
+     * INSERT conditioned on no {@link STOPPING_CONTROL_COMMANDS} decision
+     * existing for this attempt), so it decides against the COMMITTED store,
+     * not against a value read before the write. Whichever of a stopping
+     * command and an acceptance commits first therefore stands, and the loser
+     * writes NOTHING — the same "whichever commits first stands" rule
+     * {@link CommitResult} states for `superseded` and `controlled`.
+     */
+    readonly kind: "attempt-stopped";
+    /** The stopping decision that ended this attempt. */
     readonly decision: ControlDecisionRecord;
     readonly reason: string;
   }

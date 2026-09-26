@@ -27,7 +27,15 @@
  *   - an asynchronous start rejection is reported with the stable effect key;
  *   - a TWO-NODE graph driven through the real Pi delivery and the real host
  *     layer reaches `complete`, with the successor launched under the invoking
- *     session the delivery was handed.
+ *     session the delivery was handed;
+ *   - the dsh adapter's LAST-TURN READING PORT (DEFECT 2) answers from the
+ *     readings it actually took — at the two points it already reads the child's
+ *     events (the execution-query prime and the completion watch) — records one
+ *     ONLY for a completed end, and answers `unavailable` for an execution it
+ *     has not read; and
+ *   - an announced end whose events cannot be READ is CONTAINED inside the watch
+ *     callback (nothing recorded, nothing settled) and the subscription stays
+ *     armed for the next announcement.
  *
  * STRENGTH: adapter-level. Both delivery seams are the real ones and the input
  * view is the one the host module materializes, but neither platform SDK runs
@@ -42,13 +50,16 @@ import { PiOutcomeDelivery } from "../../src/platform/adapters/pi/outcome-dispat
 import { DshParentUnresolvedError } from "../../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSubagentDispatchRuntime } from "../../src/platform/adapters/dsh/dispatch.ts";
 import type {
+  DshSubagentProvider,
   DshSubagentRun,
   DshSubagentStartRequest,
 } from "../../src/platform/adapters/dsh/agent-registrar.ts";
-import type {
-  OutcomeDispatchEffectKey,
-  OutcomeDispatchRequest,
+import {
+  dispatchIdempotencyKeyOf,
+  type OutcomeDispatchEffectKey,
+  type OutcomeDispatchRequest,
 } from "../../src/graph/outcome/dispatch-effects.ts";
+import type { DshSessionEventLike } from "../../src/platform/adapters/dsh/session.ts";
 import {
   materializeInputView,
   type DeliveredInputView,
@@ -122,6 +133,30 @@ function effect(): OutcomeDispatchEffectKey {
   return { graphId: "graph.delivery", effectId: "dispatch:work#1", attemptId: "work#1" };
 }
 
+/**
+ * Minimal `DshSubagentProvider` double for the runtime's catalog entry.
+ * The dispatch path consults `getProvider` as an existence probe only — a
+ * missing provider throws before any start (outcome-dispatch.ts) — so the
+ * double carries the required provider shape while its own `start()` is never
+ * on a path this fixture takes; calling it fails loud rather than pretending.
+ */
+function makeProviderDouble(name: string): DshSubagentProvider {
+  return {
+    name,
+    capabilities: {
+      agentOptions: false,
+      outputSchema: false,
+      depthLimit: false,
+      toolFilter: false,
+      persona: false,
+    },
+    inheritsParentContext: false,
+    start: async () => {
+      throw new Error("provider double: start() is not part of this fixture");
+    },
+  };
+}
+
 /** A dsh subagent runtime double that starts one run and resolves it. */
 function makeDshRuntime(options: {
   readonly stopReason?: "completed" | "error";
@@ -133,8 +168,14 @@ function makeDshRuntime(options: {
 } {
   const starts: Array<{ agent: string; request: DshSubagentStartRequest }> = [];
   const runtime: DshSubagentDispatchRuntime = {
+    // The delivery path never registers a provider; the port member is required
+    // by `DshSubagentRuntime` (the dsh `ctx.subagents` service), so the double
+    // answers with the no-op disposer the sibling outcome doubles use.
+    registerProvider: () => () => {},
     getProvider: (agent: string) =>
-      options.providerMissing === true || agent !== "agent.work" ? undefined : {},
+      options.providerMissing === true || agent !== "agent.work"
+        ? undefined
+        : makeProviderDouble(agent),
     list: () => ["agent.work"],
     start: async (agent: string, startRequest: DshSubagentStartRequest) => {
       starts.push({ agent, request: startRequest });
@@ -694,5 +735,270 @@ describe("a declared graph runs to completion through the real Pi delivery", () 
     } finally {
       host.close();
     }
+  });
+});
+
+// ── The dsh last-turn reading port (DEFECT 2) ───────────────────────────────
+//
+// THE SECOND QUESTION the host asks about a finished execution: what did the
+// WORKER'S OWN LAST TURN declare? The dsh adapter answers it from the readings
+// it has actually taken — the same events it reads to observe the end, run
+// through the pure `readDshLastTurnDeclaration` reader — and the reading is
+// recorded ONLY for a completed end (a failed end belongs to the control path)
+// and NEVER fabricated for an execution whose events were not read.
+
+describe("the dsh delivery's last-turn reading port (DEFECT 2)", () => {
+  /** The stable label the create carried, which owns the child's session. */
+  const label = dispatchIdempotencyKeyOf(effect());
+  const event = (type: string, data: unknown): DshSessionEventLike => ({
+    type,
+    data,
+    time: 1,
+  });
+  const fenced = (body: string): string => "```json\n" + body + "\n```";
+  /** One owned one-shot child finishing its final turn with these blocks. */
+  const finalTurn = (
+    bodies: readonly string[],
+    endKind = "completed",
+  ): readonly DshSessionEventLike[] => [
+    event("subagent/descriptor", { version: 2, mode: "one-shot", label }),
+    event("turn/start", { turn: 1 }),
+    ...bodies.map((body) =>
+      event("assistant/message", {
+        turn: 1,
+        step: 1,
+        message: { content: [{ type: "text", text: fenced(body) }] },
+        stream: [],
+      }),
+    ),
+    event("turn/end", { reason: { kind: endKind } }),
+  ];
+  /** The probe the host primes with: the effect plus the declaring invocation. */
+  const probe = {
+    effect: effect(),
+    invocation: { sessionId: INVOCATION.sessionId, agent: INVOCATION.agent },
+  };
+
+  function deliveryOver(options: {
+    readonly readExecutionEvents?: (
+      id: string,
+    ) => Promise<readonly DshSessionEventLike[] | undefined>;
+    readonly subscribe?: (
+      id: string,
+      listener: (events: readonly DshSessionEventLike[]) => void,
+    ) => () => void;
+  }): DshOutcomeDelivery {
+    const { runtime } = makeDshRuntime();
+    return new DshOutcomeDelivery({
+      subagents: {
+        ...runtime,
+        listChildren: async () => [{ kind: "child", id: "run-1", label }],
+      },
+      parentResolver: () => ({ id: "parent" }),
+      ...(options.readExecutionEvents === undefined
+        ? {}
+        : { readExecutionEvents: options.readExecutionEvents }),
+      ...(options.subscribe === undefined
+        ? {}
+        : { subscribeExecutionEvents: options.subscribe }),
+      onSettled: () => {},
+      onStartFailed: () => {},
+    });
+  }
+
+  it("answers `unavailable` for an execution no reading has been taken for", () => {
+    const delivery = deliveryOver({});
+    // NO GUESS: an execution this process never read has no reading, and the
+    // honest answer is that none was taken — never a default outcome.
+    expect(delivery.derivedOutcomeOf({ executionId: "run-1" })).toEqual({
+      kind: "unavailable",
+      reason:
+        "no last-turn reading has been taken for this execution in this process",
+    });
+  });
+
+  it("reads the worker's own declaration from the events the prime phase already reads", async () => {
+    const delivery = deliveryOver({
+      readExecutionEvents: async () =>
+        finalTurn([
+          '{"outcome_id": "done", "data": {"answer": 42}, "evidence_refs": ["src/a.ts"]}',
+        ]),
+    });
+    await delivery.executionQuery.prime?.([probe]);
+
+    // THE WORKER'S OWN DECLARATION, unaltered: the outcome id, its payload, its
+    // evidence references and where the reader found them.
+    expect(delivery.derivedOutcomeOf({ executionId: "run-1" })).toEqual({
+      kind: "declared",
+      outcomeId: "done",
+      data: { answer: 42 },
+      evidenceRefs: ["src/a.ts"],
+      derivation: { eventIndex: 2, turnIndex: 3 },
+    });
+    // THE READING IS PER EXECUTION: another one this process did not read is
+    // still answered `unavailable`.
+    expect(delivery.derivedOutcomeOf({ executionId: "run-2" }).kind).toBe(
+      "unavailable",
+    );
+  });
+
+  it("records NOTHING for a failed end and nothing when the events are unavailable", async () => {
+    const failed = deliveryOver({
+      readExecutionEvents: async () => finalTurn(['{"outcome_id": "done"}'], "error"),
+    });
+    await failed.executionQuery.prime?.([probe]);
+    // A FAILED END BELONGS TO THE CONTROL PATH (failObservedExecution): it
+    // authorises no declaration reading, so nothing is recorded here.
+    expect(failed.derivedOutcomeOf({ executionId: "run-1" }).kind).toBe(
+      "unavailable",
+    );
+
+    // AN UNREADABLE HOST LOG IS NOT A READING EITHER.
+    const unreadable = deliveryOver({ readExecutionEvents: async () => undefined });
+    await unreadable.executionQuery.prime?.([probe]);
+    expect(unreadable.derivedOutcomeOf({ executionId: "run-1" }).kind).toBe(
+      "unavailable",
+    );
+  });
+
+  it("reports an AMBIGUOUS and a MALFORMED last turn as such, never as a choice", async () => {
+    const ambiguous = deliveryOver({
+      readExecutionEvents: async () =>
+        finalTurn(['{"outcome_id": "done"}', '{"outcome_id": "other"}']),
+    });
+    await ambiguous.executionQuery.prime?.([probe]);
+    const ambiguousReading = ambiguous.derivedOutcomeOf({ executionId: "run-1" });
+    expect(ambiguousReading.kind).toBe("ambiguous");
+    if (ambiguousReading.kind === "ambiguous") {
+      // TWO candidates are REPORTED: choosing one would be the host picking an
+      // outcome the worker did not.
+      expect(ambiguousReading.reason).toContain("2 declaration blocks");
+    }
+
+    const malformed = deliveryOver({
+      readExecutionEvents: async () => finalTurn(['{"outcome_id": ']),
+    });
+    await malformed.executionQuery.prime?.([probe]);
+    const malformedReading = malformed.derivedOutcomeOf({ executionId: "run-1" });
+    expect(malformedReading.kind).toBe("malformed");
+    if (malformedReading.kind === "malformed") {
+      expect(malformedReading.reason).toContain("not valid JSON");
+    }
+  });
+
+  it("takes the same reading from the completion watch's announced end", () => {
+    let listener: ((events: readonly DshSessionEventLike[]) => void) | undefined;
+    let ended = 0;
+    const delivery = deliveryOver({
+      subscribe: (_id, next) => {
+        listener = next;
+        return () => {};
+      },
+    });
+    // THE WATCH IS THE OTHER POINT THE ADAPTER HOLDS THE CHILD'S SESSION: before
+    // the announced end there is no reading, and it is recorded when the end is
+    // the platform's own completion.
+    expect(
+      delivery.watchCompletion(
+        {
+          graphId: "graph.delivery",
+          nodeId: "work",
+          attemptId: "work#1",
+          executionId: "run-1",
+          status: "running",
+          reason: "the platform reports this execution still running",
+        },
+        () => {
+          ended += 1;
+        },
+      ),
+    ).toBe("watching");
+    expect(delivery.derivedOutcomeOf({ executionId: "run-1" }).kind).toBe(
+      "unavailable",
+    );
+
+    listener?.(finalTurn(['{"outcome_id": "done"}']));
+    expect(ended).toBe(1);
+    expect(delivery.derivedOutcomeOf({ executionId: "run-1" })).toEqual({
+      kind: "declared",
+      outcomeId: "done",
+      derivation: { eventIndex: 2, turnIndex: 3 },
+    });
+  });
+
+  it("contains an unreadable announced end inside the watch callback and keeps the subscription armed", () => {
+    let listener: ((events: readonly DshSessionEventLike[]) => void) | undefined;
+    let stops = 0;
+    let ended = 0;
+    const delivery = deliveryOver({
+      subscribe: (_id, next) => {
+        listener = next;
+        return () => {
+          stops += 1;
+        };
+      },
+    });
+    const entry = {
+      graphId: "graph.delivery",
+      nodeId: "work",
+      attemptId: "work#1",
+      executionId: "run-1",
+      status: "running" as const,
+      reason: "the platform reports this execution still running",
+    };
+    expect(
+      delivery.watchCompletion(entry, () => {
+        ended += 1;
+      }),
+    ).toBe("watching");
+
+    // THE ANNOUNCED END WHOSE EVENTS CANNOT BE READ. The subscription callback
+    // is called BY THE PLATFORM, so an exception escaping it has no catcher on
+    // this path: the prime path wraps its read in try/catch, the watch did not.
+    // Case 1: a READABLE descriptor followed by throwing index accessors — the
+    // ownership is proven, so the owned window's own `slice` re-reads them.
+    const throwingIndexes = new Array<unknown>(4);
+    throwingIndexes[0] = event("subagent/descriptor", { version: 2, mode: "one-shot", label });
+    for (let index = 1; index < 4; index++) {
+      Object.defineProperty(throwingIndexes, index, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          throw new Error("hostile index accessor");
+        },
+      });
+    }
+    // Case 2: a `Proxy` whose `get` trap throws for ANY property of the session.
+    const throwingGet = new Proxy([...finalTurn(['{"outcome_id": "done"}'])], {
+      get(): never {
+        throw new Error("hostile get trap");
+      },
+    });
+    expect(() =>
+      listener?.(throwingIndexes as unknown as readonly DshSessionEventLike[]),
+    ).not.toThrow();
+    expect(() =>
+      listener?.(throwingGet as unknown as readonly DshSessionEventLike[]),
+    ).not.toThrow();
+
+    // DEGRADED TO THE NOT-A-COMPLETION READING, NEVER A HALF-RECORDED END: no
+    // terminal observation, no last-turn reading and no `onEnded`, so the host
+    // keeps reporting this execution unsettled instead of settling on garbage.
+    expect(ended).toBe(0);
+    expect(stops).toBe(0);
+    expect(delivery.observeExecution({ executionId: "run-1" }).kind).toBe("unknown");
+    expect(delivery.derivedOutcomeOf({ executionId: "run-1" }).kind).toBe("unavailable");
+
+    // THE SUBSCRIPTION SURVIVED: the NEXT announcement — a readable completed
+    // end — is still observed, settles the run and records the reading.
+    listener?.(finalTurn(['{"outcome_id": "done"}']));
+    expect(ended).toBe(1);
+    expect(stops).toBe(1);
+    expect(delivery.observeExecution({ executionId: "run-1" })).toEqual({ kind: "completed" });
+    expect(delivery.derivedOutcomeOf({ executionId: "run-1" })).toEqual({
+      kind: "declared",
+      outcomeId: "done",
+      derivation: { eventIndex: 2, turnIndex: 3 },
+    });
   });
 });

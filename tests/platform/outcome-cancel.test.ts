@@ -317,6 +317,7 @@ function makeTask(id: string, status: DispatchTask["status"]): DispatchTask {
     description: "platform.cancel/dispatch:work#1",
     startedAt: new Date(0),
     progress: { toolCalls: 0, lastUpdate: new Date(0) },
+    priority: 0,
   };
 }
 

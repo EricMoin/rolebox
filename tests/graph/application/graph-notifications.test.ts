@@ -98,8 +98,69 @@ describe("durable graph notifications", () => {
     await f.app.host.failObservedExecution("flow", "work", request.attemptId);
     await f.app.notifications!.flush();
     expect(f.received).toHaveLength(1);
-    expect(f.received[0]).toMatchObject({ kind: "stopped" });
+    // ATTENTION, not `stopped`: the failure ended the ATTEMPT, claimed no run
+    // control fact, and the run is still executing — so the notice names the
+    // node and attempt it ended instead of announcing a stopped run.
+    expect(f.received[0]).toMatchObject({ kind: "attention", nodeId: "work", attemptId: request.attemptId });
     expect(f.received[0]!.reason).toContain("failure");
+    expect(f.received[0]!.reason).toContain("The run continues");
+    // ONE notification with a stable id: a second flush and a fresh host add none.
+    const id = f.received[0]!.id;
+    await f.app.notifications!.flush();
+    expect(f.received.map(notification => notification.id)).toEqual([id]);
+    f.app.close();
+    const reopened = new GraphNotifications(f.storeRoot, {
+      clock: f.clock, send: async notification => { f.received.push(notification); return true; } });
+    closers.push(reopened);
+    await reopened.flush();
+    expect(f.received.map(notification => notification.id)).toEqual([id]);
+  });
+
+  it("discards a stopped attempt's pending reminder once a retry mints a successor", async () => {
+    const failed: GraphNotification[] = [];
+    const f = fixture(async notification => { failed.push(notification); return false; });
+    await f.declare();
+    const { request, effect } = f.requests[0]!;
+    f.app.host.confirmExecution(effect, { executionId: "failed-worker" }); f.fail();
+    await f.app.host.failObservedExecution("flow", "work", request.attemptId);
+    await f.app.notifications!.flush();
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ kind: "attention", attemptId: request.attemptId });
+    // The node is carried forward: the successor attempt makes the reminder
+    // OBSOLETE, so it is discarded rather than retried against a live node.
+    expect((await f.call("graph_control", { graph_id: "flow", command: "retry", node_id: "work", reason: "Try again" })).kind).toBe("applied");
+    f.advance();
+    await f.app.notifications!.flush(); await f.app.notifications!.flush();
+    expect(failed).toHaveLength(1);
+  });
+
+  it("reports an attempt-scoped timeout the same way as a failure", async () => {
+    const f = fixture(); await f.declare();
+    const { request } = f.requests[0]!;
+    // The SAME predicate classifies the sibling stop: `timeout` ends one
+    // attempt and claims no run control fact either.
+    expect((await f.call("graph_control", { graph_id: "flow", command: "timeout", node_id: "work", reason: "Stop requested" })).kind).toBe("applied");
+    await f.app.notifications!.flush(); await f.app.notifications!.flush();
+    expect(f.received).toHaveLength(1);
+    expect(f.received[0]).toMatchObject({ kind: "attention", nodeId: "work", attemptId: request.attemptId });
+    expect(f.received[0]!.reason).toContain("timeout");
+  });
+
+  it("reports a completed execution whose attempt was never settled", async () => {
+    const f = fixture(); await f.declare();
+    const { request, effect } = f.requests[0]!;
+    f.app.host.confirmExecution(effect, { executionId: "finished-worker" });
+    // A dispatched attempt is not yet a reportable one: nothing has ended.
+    await f.app.notifications!.flush();
+    expect(f.received).toEqual([]);
+    expect(f.app.host.recordExecutionObservation("flow", request.attemptId).kind).toBe("completed");
+    await f.app.notifications!.flush();
+    expect(f.received).toHaveLength(1);
+    expect(f.received[0]).toMatchObject({ kind: "attention", nodeId: "work", attemptId: request.attemptId });
+    expect(f.received[0]!.reason).toContain("no outcome was settled");
+    expect(f.received[0]!.reason).toContain("the attempt stays open");
+    await f.app.notifications!.flush();
+    expect(f.received).toHaveLength(1);
   });
 
   it("notifies natural completion through the host callback without a worker submission", async () => {
@@ -116,9 +177,9 @@ describe("durable graph notifications", () => {
     expect(f.received[0]!.kind).toBe("complete");
   });
 
-  it.each(["cancel", "timeout", "budget-stop"])("notifies a %s stop once", async command => {
+  it.each(["cancel", "budget-stop"])("notifies a %s stop once", async command => {
     const f = fixture(); await f.declare();
-    expect((await f.call("graph_control", { graph_id: "flow", ...(command === "timeout" ? { node_id: "work" } : {}), command, reason: "Stop requested" })).kind).toBe("applied");
+    expect((await f.call("graph_control", { graph_id: "flow", command, reason: "Stop requested" })).kind).toBe("applied");
     await f.app.notifications!.flush(); await f.app.notifications!.flush();
     expect(f.received).toHaveLength(1);
     expect(f.received[0]).toMatchObject({ kind: "stopped", reason: `${command}: Stop requested` });
@@ -220,7 +281,13 @@ describe("durable graph notifications", () => {
       const notifier = new GraphNotifications(process.argv[1], { clock: () => Number(process.argv[2]), send: async n => { sent.push(n.id); return true; } });
       await notifier.flush(); notifier.close(); console.log(JSON.stringify(sent));`;
     const check = async () => {
-      const child = Bun.spawn([process.execPath, "--eval", script, f.storeRoot, String(f.clock())], { stdout: "pipe", stderr: "pipe" });
+      // The probe names its module and store by absolute path, so its working
+      // directory is irrelevant to what it proves — and running it from the
+      // store directory instead of the checkout keeps an environment-level
+      // `bun` startup notice about an unreadable ancestor directory out of the
+      // stderr this assertion reads. What the child must produce is unchanged.
+      const child = Bun.spawn([process.execPath, "--eval", script, f.storeRoot, String(f.clock())],
+        { cwd: f.storeRoot, stdout: "pipe", stderr: "pipe" });
       const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect({ code, error }).toEqual({ code: 0, error: "" });
       return JSON.parse(output);

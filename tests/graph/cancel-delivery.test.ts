@@ -1136,10 +1136,11 @@ describe("graph_control cancel — deterministic races", () => {
     }
   });
 
-  it("still delivers the cancel for the OTHER in-flight attempt after a failure already stopped the run", async () => {
+  it("still delivers the cancel for the OTHER in-flight attempt after a node-scoped failure ended one attempt", async () => {
     // TWO ENTRY ATTEMPTS, NEITHER CONFIRMED and neither settled. A `failure` on
-    // alpha stops the run but leaves alpha's attempt DISPATCHED (by design), so a
-    // later run-wide cancel must not be refused by the fact alpha already carries:
+    // alpha ends that ATTEMPT — leaving it DISPATCHED, by design — and claims NO
+    // run control fact, so the later run-wide cancel is the FIRST run-wide
+    // command: it must not be refused by the fact alpha already carries, because
     // beta's external execution is the one the plan's cancel clause still owes.
     const fixture = await openCancelFixture(TWO_ENTRIES, { confirm: false });
     try {
@@ -1159,6 +1160,9 @@ describe("graph_control cancel — deterministic races", () => {
         "session.declarer",
       );
       expect(failed["kind"]).toBe("applied");
+      // A NODE-SCOPED FAILURE CLAIMS NO RUN CONTROL FACT: the run keeps
+      // executing, so the cancel below is the run's first run-wide command.
+      expect(failed["runControl"]).toBeUndefined();
       // A failure is NOT a cancel: nothing is handed to the platform.
       expect(fixture.platform.asked).toEqual([]);
 
@@ -1178,18 +1182,19 @@ describe("graph_control cancel — deterministic races", () => {
       expect(
         (cancelled["skipped"] as readonly { readonly attemptId: string; readonly code?: string }[])[0],
       ).toMatchObject({ attemptId: "alpha#1", code: "control-already-decided" });
-      expect((cancelled["runControl"] as { readonly command?: string }).command).toBe("failure");
+      // THE FIRST RUN-WIDE COMMAND CLAIMS THE RUN, and it is this cancel.
+      expect((cancelled["runControl"] as { readonly command?: string }).command).toBe("cancel");
 
       // THE PLATFORM ASK GOES TO BETA — the execution the stop still owes. Alpha
       // is never re-labelled and is never asked about.
       expect(fixture.platform.asked).toHaveLength(1);
       expect(fixture.platform.asked[0]?.effect.attemptId).toBe("beta#2");
       expect(fixture.platform.atAsk).toEqual([
-        { attemptId: "beta#2", effect: "started", runCommand: "failure" },
+        { attemptId: "beta#2", effect: "started", runCommand: "cancel" },
       ]);
 
       const rows = readRows(fixture);
-      expect(rows.control?.command).toBe("failure");
+      expect(rows.control?.command).toBe("cancel");
       expect(
         rows.decisions.map((decision) => decision.attemptId + ":" + decision.command).sort(),
       ).toEqual(["alpha#1:failure", "beta#2:cancel"]);

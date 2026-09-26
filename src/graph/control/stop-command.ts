@@ -1,3 +1,16 @@
+/**
+ * The STOP commands of the trusted control entry.
+ *
+ * TWO SCOPES, ONE PREDICATE (P3 item 1). `RUN_WIDE_COMMANDS` is the scope rule:
+ * `cancel` and `budget-stop` end the RUN — they claim its control fact, so no
+ * submission settles anywhere in it — while `failure` and `timeout` end ONE
+ * ATTEMPT. A node-scoped stop records its decision on the attempt it names and
+ * claims nothing else: the run keeps executing, its siblings stay in flight,
+ * their results still settle and the successors they arm are still dispatched.
+ * Only a run-wide command ends the run; a node-scoped stop ends one attempt,
+ * and that attempt is carried forward by a node-scoped `retry` (which mints a
+ * successor) or closed by a run-wide `cancel`/`budget-stop`.
+ */
 import type { ControlCommandName, RunControlRecord } from "../ledger/types.ts";
 import { dispatchEffectIdOf } from "../outcome/dispatch-effects.ts";
 import { principalOf, refuse, resolveNodeTarget, type ControlCommandContext } from "./command-context.ts";
@@ -10,10 +23,13 @@ const RUN_WIDE_COMMANDS: ReadonlySet<ControlCommandName> = new Set(["cancel", "b
 export function applyStopCommand(ctx: ControlCommandContext<StopCommandName>): GraphControlResult {
   const { tx, runs, graphId, plan, run, state, settled, request, principal, expiredApprovals } = ctx;
   const hostFailure = request.hostFailure;
+  // THE SCOPE PREDICATE, read once: whether this command ends the RUN (and so
+  // claims its control fact) or only the ATTEMPT it names.
+  const claimsRun = RUN_WIDE_COMMANDS.has(request.command);
   const targets: { readonly nodeId: string; readonly attemptId: string }[] = [];
   const skipped: GraphControlSkippedAttempt[] = [];
 
-  if (RUN_WIDE_COMMANDS.has(request.command)) {
+  if (claimsRun) {
     if (request.nodeId !== undefined || request.attemptId !== undefined) {
       return refuse(
         graphId,
@@ -74,14 +90,24 @@ export function applyStopCommand(ctx: ControlCommandContext<StopCommandName>): G
         decidedAt: request.at,
         decidedBy,
       }),
-      runControl: Object.freeze({
-        graphId,
-        runId: run.runId,
-        command: request.command,
-        reason: request.reason,
-        decidedAt: request.at,
-        decidedBy,
-      }),
+      // ONLY A RUN-WIDE COMMAND CLAIMS THE RUN. A `failure` or a `timeout` ends
+      // the ATTEMPT it names and nothing else, exactly as a node-scoped `retry`
+      // supersedes one attempt: claiming the run's control fact here would make
+      // every SIBLING attempt unsettleable for a stop nobody issued. The write
+      // still records the decision, and its answer reports whatever run fact
+      // already stands (an earlier run-wide command, or none).
+      ...(claimsRun
+        ? {
+          runControl: Object.freeze({
+            graphId,
+            runId: run.runId,
+            command: request.command,
+            reason: request.reason,
+            decidedAt: request.at,
+            decidedBy,
+          }),
+        }
+        : {}),
     });
     if (written.kind === "settled") {
       // The entry point rolls back earlier targets and the run fact when any
@@ -103,7 +129,7 @@ export function applyStopCommand(ctx: ControlCommandContext<StopCommandName>): G
     if (written.kind === "conflict") {
       // An existing decision on one attempt must not block cancellation of the
       // rest of a fan-out. Keep that decision and report the attempt as skipped.
-      if (RUN_WIDE_COMMANDS.has(request.command)) {
+      if (claimsRun) {
         skipped.push(
           Object.freeze({
             nodeId: target.nodeId,
@@ -154,8 +180,13 @@ export function applyStopCommand(ctx: ControlCommandContext<StopCommandName>): G
     );
   }
 
-  if (runControl === undefined) {
-    // A run with no eligible attempts still needs a durable stop.
+  if (claimsRun && runControl === undefined) {
+    // A run-wide command with no eligible attempts still needs a durable stop —
+    // there is no attempt to carry the decision, so the run fact IS the whole
+    // decision (a graph whose every entry dispatch was refused is still
+    // stoppable). A NODE-SCOPED stop never reaches this branch: it names one
+    // attempt, and an attempt is not a reason to end the run, so the only
+    // durable fact it writes is the decision itself.
     const claimed = runs.claimRunControl(
       Object.freeze({
         graphId,

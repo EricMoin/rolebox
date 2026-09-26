@@ -354,8 +354,11 @@ async function createFixture() {
     makeAgent("alpha", { mode: RoleMode.Primary }),
     makeAgent("beta", { mode: RoleMode.Primary }),
   ]);
-  const s1 = makeSession("s1", [{ type: "turn/start", timestamp: 1000 }]);
-  const s2 = makeSession("s2", [{ type: "turn/start", timestamp: 2000 }]);
+  // `timestamp` is what the route's recency rule reads
+  // (web-rolebox-monitor-route.ts sessionLastActivity); `time` is the rc.6
+  // event-envelope field DshSessionEventLike requires on every event.
+  const s1 = makeSession("s1", [{ type: "turn/start", timestamp: 1000, time: 1000 }]);
+  const s2 = makeSession("s2", [{ type: "turn/start", timestamp: 2000, time: 2000 }]);
   const store = makeStore([s1, s2]);
   const switcher = new DshRoleSwitcher({ registrar, store, ctx });
   const loopCoordinator = makeLoopCoordinator([

@@ -463,15 +463,17 @@ describe("terminal-graph re-execution — a NEW run", () => {
       expect(runs.map((run) => run.runSeq)).toEqual([1, 2]);
       const secondRunId = runs[1]?.runId ?? "";
 
-      // A decision ON the successor run, so the control read has a fact to scope in
-      // BOTH directions instead of two empty lists.
+      // A RUN-WIDE stop ON the successor run, so the run-level control read has a
+      // fact to scope in BOTH directions instead of two empty lists. A
+      // node-scoped `failure`/`timeout` claims NO run control fact (P3 item 1),
+      // so it could not put one here.
       const stoppedAgain = await control(fixture, {
         graph_id: fixture.graphId,
-        command: "failure",
-        node_id: "work",
-        reason: "the successor's worker died",
+        command: "budget-stop",
+        reason: "the successor's budget is spent",
       });
       expect(stoppedAgain.kind).toBe("applied");
+      expect(stoppedAgain.scope).toBe("run");
 
       withStore(fixture, (store) => {
         // EFFECTS ARE RUN-SCOPED. The old run still holds its unsettled dispatch (a
@@ -492,14 +494,14 @@ describe("terminal-graph re-execution — a NEW run", () => {
         ).toEqual([secondRunId]);
         expect(
           store.runs.controlDecisions(fixture.graphId).map((decision) => decision.command),
-        ).toEqual(["failure"]);
+        ).toEqual(["budget-stop"]);
         expect(
           store.runs
             .controlDecisions(fixture.graphId, firstRunId)
             .map((decision) => decision.command),
         ).toEqual(["cancel"]);
         // THE RUN-LEVEL FACTS ARE RUN-SCOPED TOO, and the state reads follow.
-        expect(store.runs.readRunControl(fixture.graphId)?.command).toBe("failure");
+        expect(store.runs.readRunControl(fixture.graphId)?.command).toBe("budget-stop");
         expect(store.runs.readRunControlOf(fixture.graphId, firstRunId)?.command).toBe("cancel");
         expect(store.readGraphState(fixture.graphId)?.runId).toBe(secondRunId);
         expect(store.readGraphStateOf(fixture.graphId, firstRunId)?.runId).toBe(firstRunId);
@@ -509,12 +511,17 @@ describe("terminal-graph re-execution — a NEW run", () => {
     }
   });
 
-  it("refuses an acceptance and an effect transition for a SUPERSEDED run at the STORE, naming the run", async () => {
+  it("refuses an acceptance for a SUPERSEDED run's stopped attempt at the STORE, and the effect transition by name", async () => {
     const fixture = await openReexecFixture({ cancelling: true });
     try {
       // A run closed by a platform-CONFIRMED cancel: its dispatch effect stays
       // UNSETTLED (a cancel never rewinds one) and the re-execution is allowed,
       // so the closed run holds an effect a late writer could still try to move.
+      // The cancel also left a STOPPING decision on `work#1` — the attempt the
+      // late acceptance below targets — so the store names that attempt-level
+      // fact first; the RUN fence is what refuses the effect transition, and it
+      // has its own cases (the successor-armed chain and the reserved pre-run
+      // generation) where the attempt carries no stopping decision.
       const cancelled = await control(fixture, {
         graph_id: fixture.graphId,
         command: "cancel",
@@ -537,10 +544,11 @@ describe("terminal-graph re-execution — a NEW run", () => {
       );
 
       withStore(fixture, (store) => {
-        // A CLOSED RUN ACCEPTS NOTHING. The attempt's own dispatch effect is
-        // filed under run 1, so the batch write's own guard refuses it — no
-        // receipt, no accepted event, no accepted result — and the verdict NAMES
-        // the run the attempt belongs to.
+        // A CLOSED RUN ACCEPTS NOTHING — and neither does a STOPPED ATTEMPT. The
+        // batch's attempt is work#1, which the closing cancel stopped, so the
+        // store answers with the ATTEMPT's own fact (the verdict carries the
+        // decision, and its runId still names run 1): no receipt, no accepted
+        // event, no accepted result.
         const verdict = store.commitAccepted({
           receipt: {
             graphId: fixture.graphId,
@@ -560,10 +568,13 @@ describe("terminal-graph re-execution — a NEW run", () => {
             acceptedAt: ORDER_AT,
           },
         });
-        expect(verdict.kind).toBe("run-superseded");
-        if (verdict.kind !== "run-superseded") throw new Error("fixture: expected run-superseded");
-        expect(verdict.runId).toBe(firstRunId);
-        expect(verdict.reason).toContain(firstRunId);
+        expect(verdict.kind).toBe("attempt-stopped");
+        if (verdict.kind !== "attempt-stopped") throw new Error("fixture: expected attempt-stopped");
+        expect(verdict.decision.attemptId).toBe("work#1");
+        expect(verdict.decision.command).toBe("cancel");
+        expect(verdict.decision.runId).toBe(firstRunId);
+        expect(verdict.reason).toContain("work#1");
+        expect(verdict.reason).toContain("cancel");
         expect(
           store.lookupReceipt({
             graphId: fixture.graphId,

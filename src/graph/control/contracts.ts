@@ -96,6 +96,15 @@ export type GraphControlRefusalCode =
    */
   | "run-stopped"
   /**
+   * The attempt names a STOPPING control decision (P3 item 1) and the command
+   * would pause an execution that can never settle again: an approval request
+   * on a stopped attempt is a strand, not a pause. The RUN itself is not
+   * stopped — a node-scoped stop ends one attempt while its siblings keep
+   * executing — so the repair is a node-scoped `retry` of that node (which
+   * mints a successor attempt), never a new run.
+   */
+  | "attempt-stopped"
+  /**
    * A RUN-SCOPED retry names a run that is still executing (or has never
    * started). A new run exists to REPLACE a finished one; a run with work in
    * flight is retried with the node-scoped form, which supersedes one attempt.
