@@ -1,4 +1,5 @@
-// Type-check gate for the test suite — tests/graph + tests/utils.
+// Type-check gate for the test suite — tests/graph, tests/utils, tests/platform
+// and tests/monitor.
 //
 // tsconfig.json includes only ["src"] (excluding src/tui), so tests/** never
 // takes part in any tsc program: `bun run typecheck` stays green while the
@@ -7,14 +8,55 @@
 //
 // This config extends the repository compiler options (NodeNext + strict) and
 // adds the covered test directories on top of src: tests/graph (the graph
-// engine suite) and tests/utils (shared helper tests such as error-text), plus
+// engine suite), tests/utils (shared helper tests such as error-text),
 // tests/dsh-dispatch.test.ts — the file the graph migration forgot, whose stale
-// imports no type gate saw. It is a staged tightening: this is the next step,
-// and the include list widens to the rest of tests/** once each directory is
-// clean.
+// imports no type gate saw — and, after the cleanup round that closed the last
+// blind spot, the two directories that used to be compiled by nothing at all:
+// tests/platform and tests/monitor.
+//
+// Widening to tests/platform/** + tests/monitor/** puts 54 further files in
+// the program (tsc --listFiles, with versus without the two includes): 48
+// `*.test.ts` files (45 under tests/platform, 3 under tests/monitor), the
+// fixture tests/platform/sandbox/fixtures/browser-probe.ts, and 5
+// `node_modules` `.d.ts` declarations those tests reach. It was gated on
+// repairing the diagnostics those two directories carried before the
+// widening — the repair round counted 70 across 12 files, 27 of them in
+// tests/platform/dsh-role-switch-route.test.ts alone and 2 in
+// tests/monitor/monitor-reader-graph-events.test.ts, which asserts a
+// `phase_change` event the hand-written `GraphEventType` union had dropped.
+// Every repair was type-level and inside the test or the fixture it builds: a
+// wrong literal, a missing required field, a union member read without
+// narrowing, a double whose shape did not match the port it stands in for.
+// Exactly one diagnostic proved PRODUCTION incomplete instead — the dropped
+// `phase_change` member of `GraphEventType`, widened type-only. The widening
+// excludes no file (the exclude list below is still only src/tui) and neither
+// widened directory carries a suppression directive: `grep -rn '@ts-'
+// tests/platform tests/monitor` finds no match.
+//
+// WHAT IS STILL NOT COVERED: every other test directory — tests/cli,
+// tests/hashline, tests/web, tests/dispatch, tests/loop, tests/hooks,
+// tests/asset, tests/notifications, tests/core, tests/extensions, tests/memory,
+// tests/tui, tests/lsp, tests/recovery, tests/integration, tests/session,
+// tests/prompt, tests/signal, tests/helpers — plus the root-level
+// tests/*.test.ts are still compiled by NO tsc program. On this revision they
+// carry 1284 diagnostics: run the four lines below as one block from the
+// repository root and take the number the last line prints (counting rule —
+// tsc reports each diagnostic on one line carrying `error TS` and continues a
+// longer message on indented lines that do not repeat it, so `grep -c
+// 'error TS'` is the diagnostic count):
+//
+//   P=${TMPDIR:-/tmp}/rolebox-tsconfig-probe; mkdir -p "$P"
+//   ln -sfn "$PWD/node_modules" "$P/node_modules"    # so types: ["bun-types"] resolves
+//   printf '{"extends":"%s/tsconfig.json","compilerOptions":{"noEmit":true},"include":["%s/src","%s/tests/**/*.ts"],"exclude":["%s/src/tui"]}\n' "$PWD" "$PWD" "$PWD" "$PWD" > "$P/tsconfig.json"
+//   bunx tsc -p "$P/tsconfig.json" 2>&1 | grep -c 'error TS'
+//
+// The probe config lives outside the tree: include/exclude resolve against the
+// config file's own directory (hence the absolute paths) and so does the
+// `types: ["bun-types"]` lookup (hence the node_modules link). Do not read this
+// include list as covering tests/** as a whole.
 //
 // `src/tui` stays excluded. Its 127 TS2322 diagnostics are the documented
-// @opentui `fg`-not-on-SpanProps false positives that scripts/build-tui.ts:33-42
+// @opentui `fg`-not-on-SpanProps false positives that scripts/build-tui.ts:35-47
 // already accepts; adding it here would only reproduce a known-bad gate.
 {
   "extends": "./tsconfig.json",
@@ -25,7 +67,9 @@
     "src",
     "tests/graph/**/*.ts",
     "tests/utils/**/*.ts",
-    "tests/dsh-dispatch.test.ts"
+    "tests/dsh-dispatch.test.ts",
+    "tests/platform/**/*.ts",
+    "tests/monitor/**/*.ts"
   ],
   "exclude": ["src/tui"]
 }
