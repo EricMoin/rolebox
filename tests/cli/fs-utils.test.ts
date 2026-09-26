@@ -15,7 +15,7 @@ import {
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as realFs from "node:fs";
-import { moveDir, ensureWritableDir } from "../../src/cli/fs-utils";
+import { moveDir, ensureWritableDir } from "../../src/cli/fs-utils.ts";
 
 describe("moveDir", () => {
   it("moves a directory (recursively) and removes the source", () => {

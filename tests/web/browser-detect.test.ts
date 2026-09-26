@@ -14,7 +14,7 @@ describe("browser-detect", () => {
   let __resetBrowserDetection: () => void;
 
   beforeAll(async () => {
-    const mod = await import("../../src/web/browser-detect");
+    const mod = await import("../../src/web/browser-detect.ts");
     detectBrowserCapabilities = mod.detectBrowserCapabilities;
     getCachedCapabilities = mod.getCachedCapabilities;
     __resetBrowserDetection = mod.__resetBrowserDetection;

@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import { SessionMonitor } from "../../src/dispatch/completion/session-monitor";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import { SessionMonitor } from "../../src/dispatch/completion/session-monitor.ts";
 
 const SESSION_ID = "session-abc";
 

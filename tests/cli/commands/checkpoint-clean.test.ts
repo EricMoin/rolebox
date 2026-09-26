@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DEFAULT_CHECKPOINT_TTL_MS } from "../../../src/dispatch/config";
+import { DEFAULT_CHECKPOINT_TTL_MS } from "../../../src/dispatch/config.ts";
 
 // ── Shared setup ───────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ function captureOutput(
 /** Call checkpoint-clean's run() with citty-compatible args. */
 async function runClean(args: { all?: boolean }): Promise<void> {
   const mod = await import(
-    "../../../src/cli/commands/checkpoint/checkpoint-clean"
+    "../../../src/cli/commands/checkpoint/checkpoint-clean.ts"
   );
   await (mod.cleanCommand.run as any)({ args: { ...args, _: [] } });
 }

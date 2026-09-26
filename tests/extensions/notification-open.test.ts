@@ -2,8 +2,8 @@ import { describe, it, expect } from "bun:test";
 import {
   NOTIFICATION_CHANNEL_KINDS,
   NOTIFICATION_EVENT_TYPES,
-} from "../../src/notifications/types";
-import { registerChannelFactory, createChannel } from "../../src/notifications/channels";
+} from "../../src/notifications/types.ts";
+import { registerChannelFactory, createChannel } from "../../src/notifications/channels.ts";
 
 describe("Notification Channels Open Registry", () => {
   it("built-in channel kinds resolve to correct string values", () => {

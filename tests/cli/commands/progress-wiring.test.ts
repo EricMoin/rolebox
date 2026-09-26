@@ -2,15 +2,15 @@ import { describe, it, expect, mock, beforeEach, afterEach, beforeAll } from "bu
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { RegistryManifest } from "../../../src/cli/types";
-import type { DownloadProgressOptions } from "../../../src/cli/download-progress";
+import type { RegistryManifest } from "../../../src/cli/types.ts";
+import type { DownloadProgressOptions } from "../../../src/cli/download-progress.ts";
 
 const mockFetchManifest = mock();
 const mockDownloadRole = mock();
 const mockResolveVersion = mock();
 const mockComputeIntegrity = mock();
 
-import { DownloadProgress } from "../../../src/cli/download-progress";
+import { DownloadProgress } from "../../../src/cli/download-progress.ts";
 
 // The real registry-client is needed so the beforeEach stub can spread its full
 // export surface while overriding only the install-path functions with the mocks

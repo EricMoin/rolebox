@@ -1,19 +1,20 @@
 import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/core/manager";
-import type { DispatchTask } from "../../src/dispatch/types";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
 import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
-import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification";
+import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createMockClient, parentContext } from "./helpers";
-import { metrics } from "../../src/dispatch/persistence/metrics";
-import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/completion/result-extractor";
-import { MAX_CONSECUTIVE_FETCH_FAILURES } from "../../src/dispatch/config";
-import { TimeoutError } from "../../src/dispatch/core/with-timeout";
+import { createMockClient, makeIdleStatus, makeMessage, makeSessionInfo, parentContext } from "./helpers.ts";
+import type { PromptAsyncSdkCall } from "./helpers.ts";
+import type { Message } from "../../src/session/types.ts";
+import { metrics } from "../../src/dispatch/persistence/metrics.ts";
+import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/completion/result-extractor.ts";
+import { MAX_CONSECUTIVE_FETCH_FAILURES } from "../../src/dispatch/config.ts";
+import { TimeoutError } from "../../src/dispatch/core/with-timeout.ts";
 
 const fastConfig = {
-  staleTimeoutMs: 500,
   taskTtlMs: 100,
 };
 
@@ -386,8 +387,11 @@ describe("DispatchManager", () => {
           sync_timeout_ms: 20,
         },
         parentContext(),
-      ).catch((e: Error) => e);
+      ).catch((e: unknown) => e);
 
+      // executeSync is declared Promise<string>, so a rejected catch yields
+      // `string | Error`; this path must be the Error branch.
+      if (!(err instanceof Error)) throw new Error(`expected Error, got ${typeof err}`);
       const parsed = JSON.parse(err.message);
       expect(parsed.phase).toBe("prompt");
       expect(parsed.timeout_ms).toBe(20);
@@ -407,8 +411,9 @@ describe("DispatchManager", () => {
       const err = await manager.executeSync(
         { subagent: "sync-test", prompt: "hello", run_in_background: false },
         parentContext(),
-      ).catch((e: Error) => e);
+      ).catch((e: unknown) => e);
 
+      if (!(err instanceof Error)) throw new Error(`expected Error, got ${typeof err}`);
       let parsed: any;
       expect(() => { parsed = JSON.parse(err.message); }).not.toThrow();
       expect(parsed.error).toBeDefined();
@@ -433,6 +438,10 @@ describe("DispatchManager", () => {
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
         mode: "sync",
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(syncTask.id, syncTask);
       await store.save(tasks);
@@ -1303,13 +1312,9 @@ describe("DispatchManager", () => {
     watchdog.registerTask(task.id);
 
     client.messages = mock(() =>
-      Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ]),
+      Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
-    client.status = mock(() =>
-      Promise.resolve({ type: "idle" }),
-    );
+    client.status = mock(() => Promise.resolve(makeIdleStatus()));
 
     await manager.handleSessionIdle("mature-session");
 
@@ -1650,11 +1655,10 @@ describe("DispatchManager", () => {
       mgr.sessionToTask.set("idle-session-2", task.id);
       watchdog.registerTask(task.id);
 
-      client.messages = mock(() => Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ]));
-      client.status = mock(() => Promise.resolve({ type: "idle" }));
-
+      client.messages = mock(() =>
+        Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
+      );
+      client.status = mock(() => Promise.resolve(makeIdleStatus()));
       await manager.handleSessionIdle("idle-session-2");
       expect(watchdog.isDebouncing(task.id)).toBe(true);
       expect(t.status).toBe("running");
@@ -1777,7 +1781,7 @@ describe("reopenForContinuation", () => {
 
   it("reopens a completed task: reuses session, no new session.create, re-prompts, poller re-registered", async () => {
     const sessionCreate: any[] = [];
-    const promptAsyncCalls: Array<{ id: string; opts: any }> = [];
+    const promptAsyncCalls: PromptAsyncSdkCall[] = [];
     const msgResult = [
       { info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
       { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
@@ -1788,7 +1792,8 @@ describe("reopenForContinuation", () => {
         sessionCreate.push({});
         return Promise.resolve({ id: "ses_original" });
       },
-      sessionPromptAsync: (args: any) => {
+      sessionPromptAsync: (args) => {
+        // createMockClient forwards the SDK-format call; record it as-is.
         promptAsyncCalls.push(args);
         return Promise.resolve({ id: "prompt-1" });
       },
@@ -1988,6 +1993,10 @@ describe("recover()", () => {
       description: "recovered task",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(runningTask.id, runningTask);
     await store.save(tasks);
@@ -2027,6 +2036,10 @@ describe("recover()", () => {
       prompt: "work",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(runningTask.id, runningTask);
     await store.save(tasks);
@@ -2064,6 +2077,10 @@ describe("recover()", () => {
       prompt: "work",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(runningTask.id, runningTask);
     await store.save(tasks);
@@ -2098,6 +2115,10 @@ describe("recover()", () => {
       description: "my pending work",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(pendingTask.id, pendingTask);
     await store.save(tasks);
@@ -2141,6 +2162,10 @@ describe("recover()", () => {
         description: `pending task ${i}`,
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(pt.id, pt);
     }
@@ -2155,6 +2180,10 @@ describe("recover()", () => {
       description: "other parent pending",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(otherParentTask.id, otherParentTask);
     await store.save(tasks);
@@ -2211,6 +2240,10 @@ describe("recover()", () => {
         prompt: "work",
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(t.id, t);
     }
@@ -2244,6 +2277,10 @@ describe("recover()", () => {
         prompt: "work",
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(t.id, t);
     }
@@ -2267,7 +2304,7 @@ describe("recover()", () => {
     const client = createMockClient({
       sessionGet: (sid: string) => {
         if (sessionData.has(sid)) {
-          return Promise.resolve({ id: sid });
+          return Promise.resolve(makeSessionInfo({ id: sid }));
         }
         return Promise.resolve(null); // dead session returns null
       },
@@ -2285,6 +2322,10 @@ describe("recover()", () => {
         prompt: "work",
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(t.id, t);
     }
@@ -2322,6 +2363,10 @@ describe("recover()", () => {
         prompt: "work",
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(t.id, t);
     }
@@ -2364,7 +2409,7 @@ describe("recover()", () => {
     const client = createMockClient({
       sessionGet: (sid: string) => {
         if (aliveSessions.has(sid)) {
-          return Promise.resolve({ id: sid });
+          return Promise.resolve(makeSessionInfo({ id: sid }));
         }
         return Promise.resolve(null); // dead session returns null
       },
@@ -2390,6 +2435,10 @@ describe("recover()", () => {
         prompt: "work",
         startedAt: new Date(),
         progress: { lastUpdate: new Date(), toolCalls: 0 },
+        // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+        depth: 0,
+        // Required by DispatchTask; 0 = normal priority (production default).
+        priority: 0,
       };
       tasks.set(t.id, t);
     }
@@ -2436,6 +2485,10 @@ describe("recover()", () => {
       description: "session-lost notify test",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(task.id, task);
     await store.save(tasks);
@@ -2484,6 +2537,10 @@ describe("recover()", () => {
       description: "verify-failed notify test",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(task.id, task);
     await store.save(tasks);
@@ -2537,6 +2594,10 @@ describe("recover()", () => {
       startedAt: new Date(Date.now() - 60000),
       completedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(completedTask.id, completedTask);
     await store.save(tasks);
@@ -2585,6 +2646,10 @@ describe("recover()", () => {
       startedAt: new Date(),
       completedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(task.id, task);
     await store.save(tasks, new Set(["bg_outbox"]));
@@ -2739,7 +2804,7 @@ describe("flushPersistSync", () => {
 
     // Immediately create a new store and load — state should NOT be durable yet
     // because leaveRunning no longer calls flushPersistSync (debounced async only)
-    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store.ts");
     const freshStore = new TaskStateStore(dir);
     const loaded = freshStore.load();
     expect(loaded).toBeNull();
@@ -3096,7 +3161,7 @@ describe("T8: Notification outbox", () => {
       expect(result).toBe(true);
 
       const { hasFinalNotifyBeenSent: hfs } =
-        await import("../../src/dispatch/notification");
+        await import("../../src/dispatch/notification.ts");
       expect(hfs(task.id)).toBe(true);
 
       mgr.notifyOutbox.add(task.id);
@@ -3148,7 +3213,7 @@ describe("T8: Notification outbox", () => {
       expect(sweepCb).toBeDefined();
 
       const { hasFinalNotifyBeenSent: hfs } =
-        await import("../../src/dispatch/notification");
+        await import("../../src/dispatch/notification.ts");
 
       // Task A is the last of its cohort → final notification. Simulate that its
       // initial send failed by parking it in the outbox without a recorded delivery.
@@ -3200,6 +3265,10 @@ describe("T8: Notification outbox", () => {
       startedAt: new Date(),
       completedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+      depth: 0,
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
     };
     tasks.set(task.id, task);
     await store.save(tasks, new Set(["bg_test"]));
@@ -3254,13 +3323,9 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // First setup: idle session with 1 assistant message
     client.messages = mock(() =>
-      Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ]),
+      Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
-    client.status = mock(() =>
-      Promise.resolve({ type: "idle" }),
-    );
+    client.status = mock(() => Promise.resolve(makeIdleStatus()));
 
     // First debounce elapse → records pendingConfirm, re-arms
     watchdog.startDebounce(task.id);
@@ -3275,11 +3340,11 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // Change mock: model produced more messages (count grew from 1 → 3)
     client.messages = mock(() =>
-      Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "more" }] },
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "extra" }] },
-        ]),
+      Promise.resolve<Message[]>([
+        makeMessage("assistant", "done"),
+        makeMessage("assistant", "more"),
+        makeMessage("assistant", "extra"),
+      ]),
     );
 
     // Second debounce elapse → pendingConfirm check fails (msgCount 1 → 3)
@@ -3314,13 +3379,9 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // Stable: session idle, 1 assistant message
     client.messages = mock(() =>
-      Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ]),
+      Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
-    client.status = mock(() =>
-      Promise.resolve({ type: "idle" }),
-    );
+    client.status = mock(() => Promise.resolve(makeIdleStatus()));
 
     // First debounce elapse → records pendingConfirm, re-arms
     watchdog.startDebounce(task.id);
@@ -3358,9 +3419,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // Client returns no new messages (session still stable)
     client.messages = mock(() =>
-      Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
-        ]),
+      Promise.resolve<Message[]>([makeMessage("assistant", "hello")]),
     );
     // status() returns null — session gone, not found
     client.status = mock(() => Promise.resolve(null));
@@ -3397,13 +3456,9 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // status() returns data WITHOUT the task's session
     client.messages = mock(() =>
-      Promise.resolve([
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
-        ]),
+      Promise.resolve<Message[]>([makeMessage("assistant", "hello")]),
     );
-    client.status = mock(() =>
-      Promise.resolve({ type: "idle" }),
-    );
+    client.status = mock(() => Promise.resolve(makeIdleStatus()));
 
     // Mock verifyExistence → "exists"
     mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
@@ -3437,12 +3492,10 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.watchdog.registerTask(task.id);
 
     client.messages = mock(() =>
-      Promise.resolve([{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }]),
+      Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
     // Finished child is absent from the status map (server omits idle sessions).
-    client.status = mock(() =>
-      Promise.resolve({ type: "idle" }),
-    );
+    client.status = mock(() => Promise.resolve(makeIdleStatus()));
     mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
 
     await mgr.watchdog.triggerWatchdog(task.id);
@@ -3648,17 +3701,21 @@ describe("Task 13: completion stability re-confirmation", () => {
     );
 
     const mgr = manager as any;
-    let notifySeenResult: boolean | null = null;
+    // Record every notifyCompletion observation. A single `boolean | null`
+    // variable is narrowed to `null` by control-flow analysis after the first
+    // assertion below — TS cannot see that the `any`-typed mgr.notifyCompletion
+    // reassignment mutates it later — so the observation is kept in an array.
+    const notifyObservations: boolean[] = [];
 
     const origNotify = mgr.notifyCompletion.bind(mgr);
     mgr.notifyCompletion = async (t: DispatchTask) => {
-      notifySeenResult = !!t.result;
+      notifyObservations.push(!!t.result);
       await origNotify(t);
     };
 
     mgr.handleTaskCompleted(task.id);
     // At this point, materializeResult is waiting on the deferred messages
-    expect(notifySeenResult).toBeNull();
+    expect(notifyObservations).toHaveLength(0);
 
     // Resolve messages so materializeResult completes → then notifyCompletion fires
     resolveMessages({
@@ -3673,7 +3730,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(notifySeenResult).toBe(true);
+    expect(notifyObservations.at(-1)).toBe(true);
     expect(task.result).toBeDefined();
   });
 

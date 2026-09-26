@@ -3,11 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { createPluginHooks, managerMap, pendingCorrections, userMessagedSessions, autoActivatedSessions, roleAutoActivateMap, roleLockedMap } from "../src/core/composition";
-import { functionSessionState } from "../src/function/session-state";
-import { functionRuntime } from "../src/function/runtime-state";
-import type { ResolvedRole, ResolvedFunction } from "../src/types";
-import { RoleMode } from "../src/constants";
+import { managerMap, pendingCorrections, userMessagedSessions, autoActivatedSessions, roleAutoActivateMap, roleLockedMap } from "../src/core/composition.js";
+import { createHealthyPluginHooks } from "./helpers/plugin-hooks.ts";
+import { OpencodeSessionAdapter } from "../src/platform/adapters/opencode/session.js";
+import { functionSessionState } from "../src/function/session-state.js";
+import { functionRuntime } from "../src/function/runtime-state.js";
+import type { ResolvedRole, ResolvedFunction } from "../src/types.js";
+import { RoleMode } from "../src/constants.js";
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -113,11 +115,10 @@ describe("auto-activate on first message", () => {
         auto_activate: ["triage"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -158,11 +159,10 @@ describe("auto-activate on first message", () => {
         auto_activate: ["triage"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -198,11 +198,10 @@ describe("auto-activate on first message", () => {
 
       const primary = makePrimaryRole();
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -247,11 +246,10 @@ describe("on:message inject dispatch", () => {
         auto_activate: ["classifier"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -292,11 +290,10 @@ describe("on:message inject dispatch", () => {
         auto_activate: ["classifier"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -340,11 +337,10 @@ describe("on:message inject dispatch", () => {
         auto_activate: ["fn1", "fn2"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -389,11 +385,10 @@ describe("on:activate inject dispatch", () => {
         auto_activate: ["greeter"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -437,11 +432,10 @@ describe("on:activate inject dispatch", () => {
         auto_activate: ["both"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -484,11 +478,10 @@ describe("locked protection", () => {
         locked: true,
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 
@@ -527,11 +520,10 @@ describe("locked protection", () => {
         auto_activate: ["plan"],
       });
 
-      const hooks = await createPluginHooks({ platformId: "opencode",
+      const hooks = await createHealthyPluginHooks({ platformId: "opencode",
         resolvedRoles: [primary],
-        client,
+        session: new OpencodeSessionAdapter(client),
         roleFunctionsMap,
-        roleGraphMap: new Map(),
         directory: tmpDir,
       });
 

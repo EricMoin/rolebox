@@ -9,7 +9,7 @@ import {
   VALUE_BUDGET,
   valueBudget,
   labelValue,
-} from "../../src/tui/layout";
+} from "../../src/tui/layout.ts";
 
 describe("narrow-sidebar constants", () => {
   it("defines the expected narrow-sidebar widths", () => {

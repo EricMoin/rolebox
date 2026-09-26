@@ -2,21 +2,27 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { LspService } from "../../src/core/services/lsp-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { __resetForTest } from "../../src/logger.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 function makeContext(overrides?: Partial<PluginContext>): PluginContext {
   return {
-    client: {} as any,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp",
     directory: "/tmp",
     core: undefined as any,
     bus: undefined as any,
-    capabilities: undefined,
     ...overrides,
+    // `session` and `capabilities` are required on PluginContext
+    // (src/core/context.ts:14,40) — an undeclared host resolves to the minimal
+    // capability set before the context is built, never to undefined. They are
+    // restated after the Partial<PluginContext> spread, which would otherwise
+    // redeclare them as possibly undefined.
+    session: overrides?.session ?? makeSessionClient(),
+    capabilities: overrides?.capabilities ?? opencodeCapabilities(),
   };
 }
 

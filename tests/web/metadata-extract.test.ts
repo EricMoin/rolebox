@@ -14,7 +14,7 @@ describe("extractMetadata", () => {
   };
 
   beforeAll(async () => {
-    const mod = await import("../../src/web/metadata-extract");
+    const mod = await import("../../src/web/metadata-extract.ts");
     extractMetadata = mod.extractMetadata;
   });
 

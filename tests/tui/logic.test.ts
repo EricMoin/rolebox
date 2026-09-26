@@ -6,7 +6,7 @@ import {
   getActiveTasks,
   computeFilteredActivity,
   deriveEnginePhase,
-} from "../../src/tui/logic";
+} from "../../src/tui/logic.ts";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
@@ -16,8 +16,8 @@ import type {
   EngineGraphSnapshot,
   DispatchSummary,
   ConcurrencyStatus,
-} from "../../src/cli/commands/monitor/monitor-reader-types";
-import { formatDuration, barSegments, truncate, engineNodeGlyph } from "../../src/tui/helpers";
+} from "../../src/cli/commands/monitor/monitor-reader-types.ts";
+import { formatDuration, barSegments, truncate, engineNodeGlyph } from "../../src/tui/helpers.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -105,6 +105,7 @@ function makeEngineGraph(overrides: Partial<EngineGraphSnapshot>): EngineGraphSn
     loopGroups: [],
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    updatedAtMs: Date.now(),
     hasCheckpoints: false,
     ...overrides,
   };

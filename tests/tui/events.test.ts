@@ -5,8 +5,8 @@ import { mkdirSync, appendFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { GraphEventPoll, foldGraphSignals } from "../../src/tui/events";
-import type { RoleboxEvent } from "../../src/tui/events";
+import { GraphEventPoll, foldGraphSignals } from "../../src/tui/events.ts";
+import type { RoleboxEvent } from "../../src/tui/events.ts";
 
 // ── Test helpers ─────────────────────────────────────────────────────
 

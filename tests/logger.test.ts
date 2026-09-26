@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, statSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { ILogObj, ILogObjMeta, IMeta } from "tslog";
 import {
   parseLogLevel,
   resolveLogFilePath,
@@ -13,10 +13,16 @@ import {
   getRootLogger,
   rootLogger,
   __resetForTest,
-} from "../src/logger";
+} from "../src/logger.js";
 
-function captureTransport(logger: Logger<ILogObj>): ILogObj[] {
-  const entries: ILogObj[] = [];
+// What attachTransport hands the callback: the tslog metadata object plus the
+// positional log arguments. Spelled explicitly because ILogObjMeta's string
+// index signature types every numeric argument slot as IMeta, while at runtime
+// those slots hold the raw arguments.
+type CapturedEntry = ILogObjMeta & { [index: number]: unknown };
+
+function captureTransport(logger: Logger<ILogObj>): CapturedEntry[] {
+  const entries: CapturedEntry[] = [];
   logger.attachTransport((logObj) => {
     entries.push(logObj);
   });

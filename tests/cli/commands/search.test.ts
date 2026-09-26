@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump } from "js-yaml";
-import type { RegistryManifest } from "../../../src/cli/types";
+import type { RegistryManifest } from "../../../src/cli/types.ts";
 
 const mockFetchManifest = mock();
 
@@ -33,7 +33,7 @@ const sampleManifest: RegistryManifest = {
 const searchConfigDir = mkdtempSync(join(tmpdir(), "rolebox-search-mod-config-"));
 process.env.XDG_CONFIG_HOME = searchConfigDir;
 
-import { createPathsMockPayload } from "../../helpers/paths-mock";
+import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
@@ -85,7 +85,7 @@ afterEach(() => {
 });
 
 async function importSearch() {
-  return await import("../../../src/cli/commands/search");
+  return await import("../../../src/cli/commands/search.ts");
 }
 
 function captureOutput(fn: () => Promise<void>): { logs: string[]; warnings: string[]; run: () => Promise<void> } {

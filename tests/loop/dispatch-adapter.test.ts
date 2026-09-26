@@ -1,6 +1,6 @@
 import { describe, it, expect, mock } from "bun:test";
-import { DispatchAdapter, type IDispatchAdapter } from "../../src/loop/dispatch-adapter";
-import type { DispatchInput, DispatchTask } from "../../src/dispatch/types";
+import { DispatchAdapter, type IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+import type { DispatchInput, DispatchTask } from "../../src/dispatch/types.ts";
 
 interface FakeDispatchManager {
   launch: ReturnType<typeof mock>;
@@ -26,6 +26,7 @@ function createFakeDispatchManager(): FakeDispatchManager {
           description: _input.description,
           startedAt: new Date(),
           progress: { lastUpdate: new Date(), toolCalls: 0 },
+          priority: 0,
         }),
     ),
     getResult: mock(
@@ -56,7 +57,7 @@ function createFakeClient(overrides?: {
     info?: { role?: string; id?: string };
     parts?: Array<{ type: string; text?: string }>;
   }>;
-}): import("../../src/platform/ports/session-client").ISessionClient {
+}): import("../../src/platform/ports/session-client.ts").ISessionClient {
   const data = overrides?.messages ?? [];
   return {
     messages: mock(() => Promise.resolve(data)),
@@ -71,12 +72,12 @@ function createFakeClient(overrides?: {
     fork: mock(() => Promise.resolve(null)),
     status: mock(() => Promise.resolve(null)),
     abort: mock(() => Promise.resolve(true)),
-  } as unknown as import("../../src/platform/ports/session-client").ISessionClient;
+  } as unknown as import("../../src/platform/ports/session-client.ts").ISessionClient;
 }
 
 describe("DispatchAdapter", () => {
   let dispatchManager: FakeDispatchManager;
-  let client: import("../../src/platform/ports/session-client").ISessionClient;
+  let client: import("../../src/platform/ports/session-client.ts").ISessionClient;
   let adapter: IDispatchAdapter;
 
   function freshAdapter(clientOverrides?: {
@@ -88,7 +89,7 @@ describe("DispatchAdapter", () => {
     dispatchManager = createFakeDispatchManager();
     client = createFakeClient(clientOverrides);
     adapter = new DispatchAdapter(
-      dispatchManager as unknown as import("../../src/dispatch/core/manager").DispatchManager,
+      dispatchManager as unknown as import("../../src/dispatch/core/manager.ts").DispatchManager,
       client,
     );
   }

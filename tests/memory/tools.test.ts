@@ -11,6 +11,8 @@ import {
   createMemoryUpdateTool,
 } from "../../src/memory/tools.ts";
 import type { ToolContext } from "@opencode-ai/plugin";
+import type { ToolResult } from "../../src/platform/types.ts";
+import { z } from "zod";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -31,10 +33,19 @@ function makeContext(
   };
 }
 
+/**
+ * ToolResult is a union (src/platform/types.ts:42-49): the memory tools return
+ * the plain-string branch, but a caller must handle the `{ output }` branch too.
+ */
+function resultText(result: ToolResult): string {
+  return typeof result === "string" ? result : result.output;
+}
+
 // Try to extract a memory ID from a tool return string like "Memory written. ID: abc123"
-function extractId(result: string): string {
-  const match = result.match(/ID:\s*(\S+)/);
-  if (!match) throw new Error(`Could not extract ID from: ${result}`);
+function extractId(result: ToolResult): string {
+  const text = resultText(result);
+  const match = text.match(/ID:\s*(\S+)/);
+  if (!match) throw new Error(`Could not extract ID from: ${text}`);
   return match[1];
 }
 
@@ -61,7 +72,9 @@ describe("memory tools", () => {
     it("T12.1: writes a memory with minimal fields and returns an ID", async () => {
       const tool = createMemoryWriteTool();
       const result = await tool.execute(
-        { title: "Test Memory", content: "Hello world", scope: "role" },
+        // category/relevance carry their schema defaults: the host parses raw
+        // args before execute() sees them (src/memory/tools.ts:19-37).
+        { title: "Test Memory", content: "Hello world", category: "note", relevance: "medium", scope: "role" },
         makeContext(tempDir),
       );
 
@@ -116,16 +129,19 @@ describe("memory tools", () => {
       const writeTool = createMemoryWriteTool();
 
       await writeTool.execute(
-        { title: "Fox Memory", content: "The quick brown fox jumps over the lazy dog", scope: "role" },
+        { title: "Fox Memory", content: "The quick brown fox jumps over the lazy dog", category: "note", relevance: "medium", scope: "role" },
         ctx,
       );
       await writeTool.execute(
-        { title: "Cat Memory", content: "The cat sat on the mat quietly", scope: "role" },
+        { title: "Cat Memory", content: "The cat sat on the mat quietly", category: "note", relevance: "medium", scope: "role" },
         ctx,
       );
 
       const recallTool = createMemoryRecallTool();
-      const result = await recallTool.execute({ query: "fox" }, ctx);
+      const result = await recallTool.execute(
+        { query: "fox", format: "markdown", scope: "both", limit: 10 },
+        ctx,
+      );
 
       expect(result).toContain("Fox Memory");
       expect(result).not.toContain("Cat Memory");
@@ -134,7 +150,10 @@ describe("memory tools", () => {
     it("T12.4: returns 'No memories found' for a non-matching query", async () => {
       const ctx = makeContext(tempDir);
       const recallTool = createMemoryRecallTool();
-      const result = await recallTool.execute({ query: "nonexistent" }, ctx);
+      const result = await recallTool.execute(
+        { query: "nonexistent", format: "markdown", scope: "both", limit: 10 },
+        ctx,
+      );
 
       expect(result).toContain('No memories found matching');
       expect(result).toContain('nonexistent');
@@ -148,25 +167,25 @@ describe("memory tools", () => {
       const ctx = makeContext(tempDir);
       const writeTool = createMemoryWriteTool();
 
-      await writeTool.execute({ title: "Alpha", content: "First memory", scope: "role" }, ctx);
-      await writeTool.execute({ title: "Beta", content: "Second memory", scope: "role" }, ctx);
-      await writeTool.execute({ title: "Gamma", content: "Third memory", scope: "role" }, ctx);
+      await writeTool.execute({ title: "Alpha", content: "First memory", category: "note", relevance: "medium", scope: "role" }, ctx);
+      await writeTool.execute({ title: "Beta", content: "Second memory", category: "note", relevance: "medium", scope: "role" }, ctx);
+      await writeTool.execute({ title: "Gamma", content: "Third memory", category: "note", relevance: "medium", scope: "role" }, ctx);
 
       const listTool = createMemoryListTool();
-      const result = await listTool.execute({}, ctx);
+      const result = await listTool.execute({ scope: "both", limit: 20, sort: "recent" }, ctx);
 
       expect(result).toContain("Alpha");
       expect(result).toContain("Beta");
       expect(result).toContain("Gamma");
 
-      const lines = result.split("\n").filter((l) => l.trim().length > 0);
+      const lines = resultText(result).split("\n").filter((l) => l.trim().length > 0);
       expect(lines.length).toBe(3);
     });
 
     it("T12.6: returns 'No memories found.' when store is empty", async () => {
       const ctx = makeContext(tempDir);
       const listTool = createMemoryListTool();
-      const result = await listTool.execute({}, ctx);
+      const result = await listTool.execute({ scope: "both", limit: 20, sort: "recent" }, ctx);
 
       expect(result).toBe("No memories found.");
     });
@@ -214,7 +233,7 @@ describe("memory tools", () => {
 
       // Write a real entry so the store is not empty
       await writeTool.execute(
-        { title: "Real Entry", content: "Real content", scope: "role" },
+        { title: "Real Entry", content: "Real content", category: "note", relevance: "medium", scope: "role" },
         ctx,
       );
 
@@ -239,10 +258,15 @@ describe("memory tools", () => {
       );
       const id = extractId(writeResult);
 
+      // execute() is typed with z.infer<...>, i.e. the PARSED argument shape, and
+      // the host rejects out-of-enum values before it calls execute()
+      // (src/platform/adapters/codex/tool-factory.ts:227 safeParse -> parsed.data).
+      // Assert the rejection at the boundary that performs it.
       const updateTool = createMemoryUpdateTool();
-      await expect(
-        updateTool.execute({ id, category: "invalid-category" }, ctx),
-      ).rejects.toThrow();
+      const updateSchema = z.object(updateTool.args);
+      expect(updateSchema.safeParse({ id, category: "invalid-category" }).success).toBe(false);
+      // Positive control: the enum still admits its real members.
+      expect(updateSchema.safeParse({ id, category: "lesson" }).success).toBe(true);
     });
 
     it("T12.10: rejects an invalid relevance value", async () => {
@@ -254,10 +278,13 @@ describe("memory tools", () => {
       );
       const id = extractId(writeResult);
 
+      // Same boundary as T12.9: relevance is a closed enum in the tool schema,
+      // so an out-of-enum value never reaches execute().
       const updateTool = createMemoryUpdateTool();
-      await expect(
-        updateTool.execute({ id, relevance: "urgent" }, ctx),
-      ).rejects.toThrow();
+      const updateSchema = z.object(updateTool.args);
+      expect(updateSchema.safeParse({ id, relevance: "urgent" }).success).toBe(false);
+      // Positive control: the enum still admits its real members.
+      expect(updateSchema.safeParse({ id, relevance: "high" }).success).toBe(true);
     });
   });
 });

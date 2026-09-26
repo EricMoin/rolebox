@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { collectOpenRoles, __setLoggerForTest } from "../src/resolver/open-roles";
-import type { RoleConfig, ResolvedRole, ResolvedSubAgent } from "../src/types";
+import { collectOpenRoles, __setLoggerForTest } from "../src/resolver/open-roles.js";
+import type { RoleConfig, ResolvedRole, ResolvedSubAgent } from "../src/types.js";
 
 const capturedWarns: unknown[][] = [];
 

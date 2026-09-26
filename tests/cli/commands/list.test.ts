@@ -4,14 +4,14 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump } from "js-yaml";
-import type { LockEntry } from "../../../src/cli/types";
+import type { LockEntry } from "../../../src/cli/types.ts";
 
 const listConfigDir = mkdtempSync(join(tmpdir(), "rolebox-list-config-"));
 const listDataDir = mkdtempSync(join(tmpdir(), "rolebox-list-data-"));
 process.env.XDG_CONFIG_HOME = listConfigDir;
 process.env.XDG_DATA_HOME = listDataDir;
 
-import { createPathsMockPayload } from "../../helpers/paths-mock";
+import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
@@ -61,7 +61,7 @@ async function createLockFile(entries: LockEntry[]): Promise<void> {
 }
 
 async function importList() {
-  return await import("../../../src/cli/commands/list");
+  return await import("../../../src/cli/commands/list.ts");
 }
 
 function captureLogs(fn: () => void): { logs: string[]; run: () => void } {

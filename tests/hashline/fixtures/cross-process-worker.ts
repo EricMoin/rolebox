@@ -35,8 +35,9 @@
  */
 
 import { writeFile, access, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHashlineEditTool } from "../../../src/hashline/index.ts";
+import { makeToolContext } from "./tool-context.ts";
 
 const args = process.argv.slice(2);
 function arg(name: string): string | undefined {
@@ -96,7 +97,7 @@ async function main(): Promise<void> {
     await waitForMarker(join(MARKER_DIR, `gate-${gateId}.marker`), deadlineMs);
   }
 
-  const edits = op === "append" ? [{ op: "append" as const, lines: LINE }] : [{ pos: pos!, lines: LINE }];
+  const edits = op === "append" ? [{ op: "append" as const, lines: LINE }] : [{ op: "replace" as const, pos: pos!, lines: LINE }];
 
   const tool = createHashlineEditTool({
     beforeWrite: async () => {
@@ -109,7 +110,7 @@ async function main(): Promise<void> {
     },
   });
 
-  const result = await tool.execute({ files: [{ filePath: TARGET, version: VERSION, edits }] });
+  const result = await tool.execute({ files: [{ filePath: TARGET, version: VERSION, edits }] }, makeToolContext(dirname(TARGET)));
   const text = String(result);
   const payload = { ok: !text.includes("Error:"), result: text, round };
   const json = `${JSON.stringify(payload)}\n`;

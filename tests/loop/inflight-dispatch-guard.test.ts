@@ -1,15 +1,15 @@
 import { describe, it, expect, mock, spyOn, beforeEach, afterEach } from "bun:test";
-import { handleSessionIdle, evaluateAndComplete } from "../../src/dispatch/completion/completion-evaluator";
-import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog";
-import type { TaskLifecycleDeps } from "../../src/dispatch/core/lifecycle-shared";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import type { DispatchTask, TaskEventState } from "../../src/dispatch/types";
+import { handleSessionIdle, evaluateAndComplete } from "../../src/dispatch/completion/completion-evaluator.ts";
+import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog.ts";
+import type { TaskLifecycleDeps } from "../../src/dispatch/core/lifecycle-shared.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { DispatchTask, TaskEventState } from "../../src/dispatch/types.ts";
 import {
   WATCHDOG_INTERVAL_MS,
   GLOBAL_SWEEP_INTERVAL_MS,
   IDLE_DEBOUNCE_MS,
   BACKGROUND_STALE_TIMEOUT_MS,
-} from "../../src/dispatch/config";
+} from "../../src/dispatch/config.ts";
 
 // ── Factory helpers ──────────────────────────────────────────────────────────
 
@@ -24,6 +24,7 @@ function createTask(overrides: Partial<DispatchTask> = {}): DispatchTask {
     prompt: "test prompt",
     startedAt: new Date(0), // long ago — bypass minRuntimeMs check
     progress: { lastUpdate: new Date(), toolCalls: 0 },
+    priority: 0,
     ...overrides,
   };
 }

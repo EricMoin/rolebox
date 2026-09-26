@@ -24,7 +24,7 @@ function stateDir(): string {
 }
 
 async function importReader() {
-  return await import("../../../src/cli/commands/monitor/monitor-reader");
+  return await import("../../../src/cli/commands/monitor/monitor-reader.ts");
 }
 
 describe("readMonitorSnapshot", () => {

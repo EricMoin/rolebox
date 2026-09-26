@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { BLOCK_MARKERS, detectBlockSignal, isJinaErrorBody } from "../../src/web/bot-detection";
+import { BLOCK_MARKERS, detectBlockSignal, isJinaErrorBody } from "../../src/web/bot-detection.ts";
 
 function headers(init: Record<string, string>): Headers {
   return new Headers(init);

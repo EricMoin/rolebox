@@ -4,7 +4,7 @@ describe("convertHtmlToMarkdown", () => {
   let convertHtmlToMarkdown: (html: string, url?: string) => string;
 
   beforeAll(async () => {
-    const mod = await import("../../src/web/html-to-markdown");
+    const mod = await import("../../src/web/html-to-markdown.ts");
     convertHtmlToMarkdown = mod.convertHtmlToMarkdown;
   });
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { registerCondition, evaluateCondition, KNOWN_CONDITIONS, type CondEnv } from "../../src/function/conditions";
-import { functionRuntime } from "../../src/function/runtime-state";
-import { ArtifactStore } from "../../src/function/artifact-store";
+import { registerCondition, evaluateCondition, KNOWN_CONDITIONS, type CondEnv } from "../../src/function/conditions.ts";
+import { functionRuntime } from "../../src/function/runtime-state.ts";
+import { ArtifactStore } from "../../src/function/artifact-store.ts";
 
 function makeEnv(): CondEnv {
   return {
@@ -11,6 +11,7 @@ function makeEnv(): CondEnv {
     artifacts: new ArtifactStore("/tmp"),
     requiredEvidence: [],
     userMessagedThisTurn: false,
+    workspaceDir: "/tmp",
   };
 }
 

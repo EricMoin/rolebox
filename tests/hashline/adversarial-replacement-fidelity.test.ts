@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool, computeLineHash } from "../../src/hashline/index.ts";
+import { makeToolContext, type HashlineEdit } from "./fixtures/tool-context.ts";
 
 // ════════════════════════════════════════════════════════════════════
 // Adversarial replacement-fidelity — what happens to the caller's
@@ -50,7 +51,7 @@ const readTool = createHashlineReadTool();
 const editTool = createHashlineEditTool();
 
 async function readInfo(filePath: string): Promise<{ version: string; hashWidth: number; anchor: (n: number) => string }> {
-  const out = String(await readTool.execute({ filePath }));
+  const out = String(await readTool.execute({ filePath }, makeToolContext(tmpDir)));
   const version = out.match(/^version: (\S+)$/m)?.[1];
   const hashWidth = parseInt(out.match(/^hashWidth: (\d+)$/m)?.[1] ?? "", 10);
   if (!version || !Number.isInteger(hashWidth)) throw new Error(`bad read output:\n${out}`);
@@ -62,8 +63,8 @@ async function readInfo(filePath: string): Promise<{ version: string; hashWidth:
   return { version, hashWidth, anchor: (n) => anchors.get(n) ?? "" };
 }
 
-async function runEdit(filePath: string, version: string, edits: Array<Record<string, unknown>>): Promise<string> {
-  return String(await editTool.execute({ files: [{ filePath, version, edits }] }));
+async function runEdit(filePath: string, version: string, edits: HashlineEdit[]): Promise<string> {
+  return String(await editTool.execute({ files: [{ filePath, version, edits }] }, makeToolContext(tmpDir)));
 }
 
 describe("hashline adversarial replacement fidelity", () => {
@@ -72,7 +73,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "a-crlf-trailing-cr.txt");
     await writeFile(fp, "one\r\ntwo\r\nthree\r\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "x\r" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "x\r" }]);
     expect(r).not.toContain("Error:");
     const disk = await readFile(fp, "utf-8");
     console.log(
@@ -89,7 +90,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "b-crlf-multiline-cr.txt");
     await writeFile(fp, "one\r\ntwo\r\nthree\r\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "x\r\ny" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "x\r\ny" }]);
     expect(r).not.toContain("Error:");
     const disk = await readFile(fp, "utf-8");
     console.log(
@@ -104,7 +105,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "c-lf-trailing-cr.txt");
     await writeFile(fp, "one\ntwo\nthree\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "x\r" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "x\r" }]);
     expect(r).not.toContain("Error:");
     // LF envelope: no \r expansion — the \r stays inside the line content.
     expect(await readFile(fp, "utf-8")).toBe("one\nx\r\nthree\n");
@@ -115,7 +116,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "d-prefix-replace.txt");
     await writeFile(fp, "a\nb\nc\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "12#Ab|data" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "12#Ab|data" }]);
     expect(r).not.toContain("Error:");
     const disk = await readFile(fp, "utf-8");
     console.log(
@@ -168,7 +169,7 @@ describe("hashline adversarial replacement fidelity", () => {
     await writeFile(fp, "cafe\u0301\nb\n", "utf-8"); // NFD: e + combining acute
     const { version, hashWidth } = await readInfo(fp);
     const nfcHash = computeLineHash("caf\u00e9", hashWidth, 1); // NFC: precomposed é
-    const r = await runEdit(fp, version, [{ pos: `1#${nfcHash}`, lines: "X" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: `1#${nfcHash}`, lines: "X" }]);
     // The anchors are byte-fidelity: NFC ≠ NFD, so the edit must fail cleanly
     // (hash mismatch), never silently edit the wrong content.
     expect(r).toContain("Error:");
@@ -180,7 +181,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "i-nfd-replace.txt");
     await writeFile(fp, "a\nb\nc\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "cafe\u0301" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "cafe\u0301" }]);
     expect(r).not.toContain("Error:");
     expect(await readFile(fp, "utf-8")).toBe("a\ncafe\u0301\nc\n");
   });
@@ -190,7 +191,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "j-trailing-ws.txt");
     await writeFile(fp, "a\nb\nc\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "pad   " }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "pad   " }]);
     expect(r).not.toContain("Error:");
     expect(await readFile(fp, "utf-8")).toBe("a\npad   \nc\n");
   });
@@ -210,7 +211,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "l-nul-replace.txt");
     await writeFile(fp, "a\nb\nc\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "n\u0000l" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "n\u0000l" }]);
     expect(r).not.toContain("Error:");
     const buf = await readFile(fp);
     // "a\n" + "n\0l\n" + "c\n"
@@ -222,7 +223,7 @@ describe("hashline adversarial replacement fidelity", () => {
     const fp = join(tmpDir, "m-tab-indent.txt");
     await writeFile(fp, "class A {\n\tmethod() {}\n}\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = await runEdit(fp, version, [{ pos: anchor(2), lines: "newMethod() {}" }]);
+    const r = await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "newMethod() {}" }]);
     expect(r).not.toContain("Error:");
     expect(await readFile(fp, "utf-8")).toBe("class A {\n\tnewMethod() {}\n}\n");
   });

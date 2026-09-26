@@ -26,9 +26,9 @@ import {
   DEFAULT_COPILOT_CONFIG,
   DEFAULT_COPILOT_LLM_CONFIG,
   DEFAULT_COPILOT_TRANSCRIPT_CONFIG,
-} from "../src/copilot/config";
-import { COPILOT_ACTIONS } from "../src/copilot/types";
-import { discoverRoles } from "../src/loader/role-loader";
+} from "../src/copilot/config.js";
+import { COPILOT_ACTIONS } from "../src/copilot/types.js";
+import { discoverRoles } from "../src/loader/role-loader.js";
 
 // ── Action vocabulary ────────────────────────────────────────────────
 

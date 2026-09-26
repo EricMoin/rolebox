@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { functionRuntime } from "../src/function/runtime-state.ts";
 import type { ResolvedFunction } from "../src/types.ts";
 
@@ -16,17 +19,25 @@ function makeFn(overrides: Partial<ResolvedFunction> = {}): ResolvedFunction {
 let runMessageObserve: (opts: {
   sessionID: string;
   activeFns: ResolvedFunction[];
+  workspaceDir: string;
 }) => string[];
 let runActivateObserve: (opts: {
   sessionID: string;
   activeFns: ResolvedFunction[];
 }) => string[];
 
+let workspaceDir: string;
+
 beforeEach(async () => {
   functionRuntime.clearSession("test-sid");
+  workspaceDir = mkdtempSync(join(tmpdir(), "rolebox-observe-events-"));
   const mod = await import("../src/function/observe.ts");
   runMessageObserve = mod.runMessageObserve;
   runActivateObserve = mod.runActivateObserve;
+});
+
+afterEach(() => {
+  rmSync(workspaceDir, { recursive: true, force: true });
 });
 
 describe("runMessageObserve", () => {
@@ -40,6 +51,7 @@ describe("runMessageObserve", () => {
     const result = runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn],
+      workspaceDir,
     });
 
     expect(result).toEqual(["classify: DIRECT|chancellor|jinyiwei"]);
@@ -55,6 +67,7 @@ describe("runMessageObserve", () => {
     runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn],
+      workspaceDir,
     });
 
     const st = functionRuntime.get("test-sid", "evidencer");
@@ -72,6 +85,7 @@ describe("runMessageObserve", () => {
     const result = runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn],
+      workspaceDir,
     });
 
     expect(result).toEqual([]);
@@ -89,6 +103,7 @@ describe("runMessageObserve", () => {
     const result = runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn],
+      workspaceDir,
     });
 
     expect(result).toEqual([]);
@@ -106,6 +121,7 @@ describe("runMessageObserve", () => {
     const result = runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn],
+      workspaceDir,
     });
 
     expect(result).toEqual(["SHOULD_APPEAR"]);
@@ -126,6 +142,7 @@ describe("runMessageObserve", () => {
     const result = runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn1, fn2],
+      workspaceDir,
     });
 
     expect(result).toEqual(["inject-1", "inject-2"]);
@@ -140,6 +157,7 @@ describe("runMessageObserve", () => {
     const result = runMessageObserve({
       sessionID: "test-sid",
       activeFns: [fn],
+      workspaceDir,
     });
 
     expect(result).toEqual([]);

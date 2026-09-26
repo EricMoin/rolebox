@@ -290,7 +290,7 @@ describe("shutdown", () => {
 
   it("cancels pending requests on shutdown", async () => {
     const timeout = setTimeout(() => {}, 10000);
-    const reject = mock(() => {});
+    const reject = mock<(error: Error) => void>(() => {});
     const resolve = mock(() => {});
     mgr.servers.set("typescript", {
       languageId: "typescript",
@@ -304,7 +304,7 @@ describe("shutdown", () => {
     });
 
     await mgr.shutdown("typescript");
-    const errArg = reject.mock.calls[0]![0] as Error;
+    const errArg = reject.mock.calls[0]![0];
     expect(errArg.message).toContain("shutting down");
     clearTimeout(timeout);
   });

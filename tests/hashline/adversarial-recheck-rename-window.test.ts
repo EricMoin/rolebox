@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUBTASK 3 — Recheck→rename window suite (DEPENDS ON SUBTASK 1's probe).
@@ -97,7 +98,7 @@ afterAll(async () => {
 });
 
 async function readVersion(filePath: string): Promise<string> {
-  const out = String(await createHashlineReadTool().execute({ filePath }));
+  const out = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
   const m = out.match(/^version: (\S+)$/m);
   if (!m) throw new Error(`no version in hashline_read output for ${filePath}:\n${out}`);
   return m[1];
@@ -122,7 +123,7 @@ describe("adversarial recheck→rename window (subtask 3)", () => {
           files: [
             { filePath: fp, version, edits: [{ op: "append" as const, lines: "line three" }] },
           ],
-        }),
+        }, makeToolContext(tmpDir)),
       );
 
       // 1. The tool reports SUCCESS — the injected external write was NOT

@@ -273,13 +273,18 @@ describe("canonicalizeFileText + restoreFileText", () => {
       content: "hello\nworld\n",
       hadBom: false,
       lineEnding: "\r\n",
+      // Hand-built envelope with no per-line terminator detail. An empty
+      // lineEols is exactly the "absent" case restoreFileText falls back on
+      // (envelope.lineEols ?? [], src/hashline/hash.ts): every line then takes
+      // the envelope-level CRLF lineEnding asserted below.
+      lineEols: [],
     };
     const restored = restoreFileText("hello\nworld\n", envelope);
     expect(restored).toBe("hello\r\nworld\r\n");
   });
 
   it("re-adds BOM when hadBom is true", () => {
-    const restored = restoreFileText("hello\n", { content: "hello\n", hadBom: true, lineEnding: "\n" });
+    const restored = restoreFileText("hello\n", { content: "hello\n", hadBom: true, lineEnding: "\n", lineEols: [] });
     expect(restored).toBe("\uFEFFhello\n");
   });
 });

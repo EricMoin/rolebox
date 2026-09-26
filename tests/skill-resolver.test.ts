@@ -2,9 +2,9 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveSkills, loadSkillContent } from "../src/resolver/skill-resolver";
-import { parseFrontmatter } from "../src/resolver/frontmatter";
-import { toPosixPath } from "../src/utils/paths";
+import { resolveSkills, loadSkillContent } from "../src/resolver/skill-resolver.js";
+import { parseFrontmatter } from "../src/resolver/frontmatter.js";
+import { toPosixPath } from "../src/utils/paths.js";
 
 let tmpRoots: string[] = [];
 
@@ -408,7 +408,13 @@ nested:
 
     const { metadata, body } = parseFrontmatter(content);
 
-    expect(metadata).toEqual({
+    // `nested` is not a SkillMetadata field: parseFrontmatter returns the skill
+    // schema and passes unknown YAML keys through untouched. View the result as
+    // the plain record it is instead of asking production for a generic type
+    // parameter it does not declare.
+    const parsed: Record<string, unknown> = { ...metadata };
+
+    expect(parsed).toEqual({
       nested: {
         key1: "value1",
         key2: ["item1", "item2"],

@@ -29,7 +29,8 @@ import { tmpdir } from "node:os";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 
 // ── PluginCore & composition ─────────────────────────────────────────────
-import { createPluginHooks, pendingCorrections } from "../../src/core/composition.ts";
+import { pendingCorrections } from "../../src/core/composition.ts";
+import { createHealthyPluginHooks } from "../helpers/plugin-hooks.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { roleFunctionsMap } from "../../src/resolver/registry.ts";
@@ -49,12 +50,13 @@ import { createOpencodeServer, createOpencodeClient } from "@opencode-ai/sdk";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 
 // ── opencode binary availability ─────────────────────────────────────────
-import { hasOpencode } from "../helpers/opencode";
+import { hasOpencode } from "../helpers/opencode.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────
 import type { ResolvedFunction } from "../../src/types.ts";
 import type { Hooks } from "@opencode-ai/plugin";
 import { FunctionSource } from "../../src/constants.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 
 // ══════════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -396,9 +398,9 @@ describe.skipIf(!hasOpencode())("E2E hook pipeline (real server)", () => {
       `name: Helper\ndescription: helper\nmode: subagent\nprompt: |\n  You are a helper.\n`,
     );
 
-    const hooks = await createPluginHooks({ platformId: "opencode",
+    const hooks = await createHealthyPluginHooks({ platformId: "opencode",
       resolvedRoles: [primary],
-      client: realClient,
+      session: new OpencodeSessionAdapter(realClient),
       roleFunctionsMap,
       directory: tmpDir,
       roleboxDir: tmpDir,

@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDispatchManager } from "../../src/dispatch/factory";
-import { DEFAULT_CONFIG } from "../../src/dispatch/config";
-import type { DispatchManagerConfig } from "../../src/dispatch/config";
-import { RoleMode } from "../../src/constants";
-import type { ResolvedRole, ResolvedSubAgent } from "../../src/types";
-import { createMockClient } from "./helpers";
+import { createDispatchManager } from "../../src/dispatch/factory.ts";
+import { DEFAULT_CONFIG } from "../../src/dispatch/config.ts";
+import type { DispatchManagerConfig } from "../../src/dispatch/config.ts";
+import { RoleMode } from "../../src/constants.ts";
+import type { ResolvedRole, ResolvedSubAgent } from "../../src/types.ts";
+import { createMockClient } from "./helpers.ts";
 
 const savedEnv: Record<string, string | undefined> = {};
 

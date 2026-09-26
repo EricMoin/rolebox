@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import type { HookContext, PromptBlock, DispatchSnapshot } from "../../src/hooks/custom/types";
+import type { HookContext, PromptBlock, DispatchSnapshot } from "../../src/hooks/custom/types.ts";
 
 describe("HookContext Middleware Interface", () => {
   it("HookContext has optional middleware methods", () => {
@@ -15,7 +15,11 @@ describe("HookContext Middleware Interface", () => {
     expect(ctx.getBlocks).toBeUndefined();
     expect(ctx.getFunctionState).toBeUndefined();
     expect(ctx.getDispatchState).toBeUndefined();
-    expect(ctx.getGraphState).toBeUndefined();
+    // HookContext declares no getGraphState and nothing under src/ provides or
+    // reads one (src/hooks/custom/registry.ts:enrichContext sets exactly
+    // getFunctionState, getDispatchState and getBlocks), so the member is
+    // asserted absent through `in` rather than read off the type.
+    expect("getGraphState" in ctx).toBe(false);
     expect(ctx.skip).toBeUndefined();
     expect(ctx.retry).toBeUndefined();
   });
@@ -51,7 +55,6 @@ describe("HookContext Middleware Interface", () => {
       removeBlock: () => {},
       getFunctionState: () => undefined,
       getDispatchState: () => undefined,
-      getGraphState: () => undefined,
     };
 
     expect(typeof ctx.skip).toBe("function");

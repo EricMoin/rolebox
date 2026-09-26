@@ -1,8 +1,8 @@
 import { describe, it, expect, mock } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
-import type { LoopState } from "../../src/loop/types";
-import { LOOP_PROGRESS_MARKER, SEED_CHAR_CAP } from "../../src/loop/constants";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+import type { LoopState } from "../../src/loop/types.ts";
+import { LOOP_PROGRESS_MARKER, SEED_CHAR_CAP } from "../../src/loop/constants.ts";
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 
@@ -121,6 +121,11 @@ function createFakeAdapter(
         });
       },
     ),
+
+    getTaskStatus: mock(async (_taskId: string) => {
+      calls.push({ method: "getTaskStatus", args: [_taskId] });
+      return "completed";
+    }),
   };
 
   return { adapter, calls };
@@ -184,8 +189,11 @@ describe("LoopCoordinator", () => {
       const second = c.getLoopState("origin-1")!;
 
       expect(second.total).toBe(first.total);
-      expect(second.iterations).toBeUndefined?.() ??
-        expect(second.total).toBe(3);
+      // `iterations` is a `register()` input, not a LoopState field: a
+      // second register must not leak it into the persisted state, and
+      // cannot change the round count.
+      expect("iterations" in second).toBe(false);
+      expect(second.total).toBe(3);
     });
   });
 
@@ -832,7 +840,7 @@ describe("LoopCoordinator", () => {
 
       // Override readOriginSummary to return incrementing summaries
       const origReadSummary = adapter.readOriginSummary;
-      (adapter as Record<string, unknown>).readOriginSummary = mock(
+      adapter.readOriginSummary = mock(
         async () => {
           summaryCount += 1;
           return `Summary for round ${summaryCount}.`;

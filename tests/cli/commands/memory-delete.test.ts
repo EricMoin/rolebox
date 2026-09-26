@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { MemoryStore } from "../../../src/memory/store";
+import { MemoryStore } from "../../../src/memory/store.ts";
 
 // ── Per-suite setup ───────────────────────────────────────────────────────
 
@@ -60,7 +60,7 @@ async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: st
 }
 
 async function importDelete() {
-  return await import("../../../src/cli/commands/memory/memory-delete");
+  return await import("../../../src/cli/commands/memory/memory-delete.ts");
 }
 
 function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {

@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import type { ResolvedRole } from "../../src/types.ts";
 import { SkillScope } from "../../src/constants.ts";
 import { createSkillComposeTool } from "../../src/asset/skill-compose.ts";
+import { makeToolContext } from "./helpers.ts";
 
 function makeRole(id: string, overrides: Record<string, any> = {}): ResolvedRole {
   return {
@@ -42,7 +43,7 @@ describe("skill-compose", () => {
         ],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }, makeToolContext()) as string;
       // The deduplicated references table should show shared-ref in one row only
       const lines = result.split("\n").filter((l) => l.includes("shared-ref"));
       // One row for the deduplicated table (both skills point to same row)
@@ -58,7 +59,7 @@ describe("skill-compose", () => {
         ],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("ref-one");
       expect(result).toContain("ref-two");
     });
@@ -71,7 +72,7 @@ describe("skill-compose", () => {
         ],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("skill-a");
       expect(result).toContain("skill-b");
     });
@@ -86,7 +87,7 @@ describe("skill-compose", () => {
         ],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("Conflict");
       expect(result).toContain("conflict-ref");
     });
@@ -102,7 +103,7 @@ describe("skill-compose", () => {
         ],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: false }) as any;
+      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: false }, makeToolContext()) as string;
       expect(result).toContain("Skill Composition Analysis");
       expect(typeof result).toBe("string");
     });
@@ -115,7 +116,7 @@ describe("skill-compose", () => {
         ],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["skill-a", "skill-b"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("No conflicts detected");
     });
   });
@@ -126,7 +127,7 @@ describe("skill-compose", () => {
         skills: [buildSkill("existing-skill", [])],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["existing-skill", "missing-skill"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["existing-skill", "missing-skill"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("missing-skill");
       expect(result).toContain("not found");
     });
@@ -136,7 +137,7 @@ describe("skill-compose", () => {
         skills: [buildSkill("real-skill", [])],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["nonexistent-skill"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["nonexistent-skill"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("No matching skills found");
     });
   });
@@ -157,7 +158,7 @@ describe("skill-compose", () => {
         }],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["sub-skill"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["sub-skill"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("sub-skill");
     });
   });
@@ -165,7 +166,7 @@ describe("skill-compose", () => {
   describe("edge cases", () => {
     it("handles empty roles array", async () => {
       const tool = createSkillComposeTool([]);
-      const result: string = await tool.execute({ skill_names: ["anything"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["anything"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toBe("No roles loaded. Cannot analyze skills.");
     });
 
@@ -174,7 +175,7 @@ describe("skill-compose", () => {
         skills: [buildSkill("empty-skill", [])],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["empty-skill"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["empty-skill"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("0 unique references");
       expect(result).toContain("0 conflicts");
     });
@@ -184,7 +185,7 @@ describe("skill-compose", () => {
         skills: [buildSkill("my-skill", [{ name: "r1", path: "/docs/r1.md" }])],
       });
       const tool = createSkillComposeTool([role]);
-      const result: string = await tool.execute({ skill_names: ["my-skill"], check_conflicts: true }) as any;
+      const result: string = await tool.execute({ skill_names: ["my-skill"], check_conflicts: true }, makeToolContext()) as string;
       expect(result).toContain("Summary:");
       expect(result).toContain("1 skills found");
       expect(result).toContain("1 unique references");

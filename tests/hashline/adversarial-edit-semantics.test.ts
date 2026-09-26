@@ -15,6 +15,7 @@ import { createHashlineEditTool } from "../../src/hashline/index.ts";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ════════════════════════════════════════════════════════════════════
 // Adversarial edit-semantics tests — each assertion encodes the CORRECT
@@ -217,7 +218,7 @@ describe("D5 — empty replace content should delete, not leave an empty line", 
         version: meta.version,
         edits: [{ op: "replace", pos: `2#${h(2)}`, lines: [] }],
       }],
-    });
+    }, makeToolContext(tmpDir));
     // Contract: no error, and the line is truly deleted.
     expect(result).not.toContain("Error:");
     const final = await readFile(fp, "utf-8");

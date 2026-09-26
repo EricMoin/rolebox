@@ -26,6 +26,9 @@ async function buildAgentConfig(
   hooks: TestContext["hooks"],
 ): Promise<Record<string, any>> {
   const cfg: Record<string, any> = { agent: {} };
+  // Hooks.config is optional (Hooks, @opencode-ai/plugin); createPluginHooks
+  // always registers it, so its absence means the fixture is broken.
+  if (!hooks.config) throw new Error("config hook was not registered");
   await hooks.config(cfg);
   return cfg;
 }

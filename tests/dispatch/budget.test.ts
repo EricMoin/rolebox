@@ -11,7 +11,7 @@
  * Run: bun test tests/dispatch/budget.test.ts
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification";
+import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification.ts";
 
 afterEach(() => {
   clearSentFinalNotifies();
@@ -22,8 +22,8 @@ afterEach(() => {
 
 describe("T1: budget cap removed — many background launches from one parent all succeed", () => {
   it("10 launches from the same parent all reach running/pending (no budget rejection)", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -50,8 +50,8 @@ describe("T1: budget cap removed — many background launches from one parent al
 
 describe("T2: completing tasks does NOT gate further launches", () => {
   it("after 2 background tasks complete, more launches still succeed", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -97,8 +97,8 @@ describe("T2: completing tasks does NOT gate further launches", () => {
 
 describe("T3: launches succeed after session.deleted of the parent", () => {
   it("handleSessionDeleted(parentSessionId) is a no-op for launch gating", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -130,8 +130,8 @@ describe("T3: launches succeed after session.deleted of the parent", () => {
 
 describe("T4: launches succeed after session.idle", () => {
   it("after handleSessionIdle, further launches still succeed", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -163,8 +163,8 @@ describe("T4: launches succeed after session.idle", () => {
 
 describe("T5: unbounded — 20 launches across parents all succeed", () => {
   it("can launch 20 tasks across 2 parents without any budget rejection", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -199,8 +199,8 @@ describe("T5: unbounded — 20 launches across parents all succeed", () => {
 
 describe("T6: executeSync does not throw on repeated launches", () => {
   it("after background launches, executeSync runs repeatedly without budget errors", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -231,8 +231,8 @@ describe("T6: executeSync does not throw on repeated launches", () => {
 
 describe("T7: reopenForContinuation works with unbounded launches", () => {
   it("reopening a completed task as a continuation succeeds", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -264,8 +264,8 @@ describe("T7: reopenForContinuation works with unbounded launches", () => {
 
 describe("T8: independent parents both launch unbounded", () => {
   it("parent-A and parent-B each launch many tasks without rejection", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {
@@ -296,8 +296,8 @@ describe("T8: independent parents both launch unbounded", () => {
 
 describe("T9: deep (depth-2) tree launches unbounded", () => {
   it("a depth-2 tree of 10+ sessions all launch successfully", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
-    const { createMockClient, parentContext } = await import("./helpers");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager.ts");
+    const { createMockClient, parentContext } = await import("./helpers.ts");
 
     const client = createMockClient();
     const manager = new DispatchManager(client, {

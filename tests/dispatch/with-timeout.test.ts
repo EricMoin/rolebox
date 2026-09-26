@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { withTimeout, TimeoutError } from "../../src/dispatch/core/with-timeout";
+import { withTimeout, TimeoutError } from "../../src/dispatch/core/with-timeout.ts";
 
 describe("withTimeout", () => {
   it("resolves passthrough when inner promise wins", async () => {

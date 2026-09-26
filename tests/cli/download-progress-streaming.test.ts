@@ -11,10 +11,10 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { DownloadRoleProcess } from "../../src/cli/registry-client";
-import type { DownloadProgress } from "../../src/cli/download-progress";
-import { hasTar } from "../helpers/tar";
-import { downloadRole } from "../../src/cli/registry-client";
+import type { DownloadRoleProcess } from "../../src/cli/registry-client.ts";
+import type { DownloadProgress } from "../../src/cli/download-progress.ts";
+import { hasTar } from "../helpers/tar.ts";
+import { downloadRole } from "../../src/cli/registry-client.ts";
 
 // The real downloadRole is imported statically. Under `bun test --isolate` each
 // test file gets its own module registry, so this always resolves to the real
@@ -88,7 +88,7 @@ describe("downloadRole progress streaming", () => {
       const headers = new Headers();
       headers.set("content-length", String(bytes.byteLength));
       const resp = new Response(chunkedBody(bytes, multiChunkSize(bytes)), { status: 200, headers });
-      globalThis.fetch = mock(() => Promise.resolve(resp));
+      globalThis.fetch = Object.assign(mock(() => Promise.resolve(resp)), { preconnect: () => {} });
 
       const { progress, updates, phases } = makeRecorder();
       const resultDir = await downloadRole(
@@ -130,7 +130,7 @@ describe("downloadRole progress streaming", () => {
     try {
       // No content-length header on the response.
       const resp = new Response(chunkedBody(bytes, multiChunkSize(bytes)), { status: 200 });
-      globalThis.fetch = mock(() => Promise.resolve(resp));
+      globalThis.fetch = Object.assign(mock(() => Promise.resolve(resp)), { preconnect: () => {} });
 
       const { progress, updates, phases } = makeRecorder();
       const resultDir = await downloadRole(

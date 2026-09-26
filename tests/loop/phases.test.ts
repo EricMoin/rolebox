@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import type { LoopPhase } from "../../src/loop/types";
+import type { LoopPhase } from "../../src/loop/types.ts";
 
 /**
  * Exhaustive switch test: ensures every `LoopPhase` literal is handled.

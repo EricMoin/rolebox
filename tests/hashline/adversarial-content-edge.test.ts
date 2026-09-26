@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool, computeLineHash } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ── Adversarial content-edge suite ─────────────────────────────────
 //
@@ -39,7 +40,7 @@ const editTool = createHashlineEditTool();
 
 /** Full read; returns the version, declared hashWidth, and raw output. */
 async function readFull(filePath: string): Promise<{ version: string; hashWidth: number; output: string }> {
-  const output = String(await readTool.execute({ filePath }));
+  const output = String(await readTool.execute({ filePath }, makeToolContext(tmpDir)));
   const version = output.match(/^version: (\S+)$/m)?.[1];
   const hashWidth = parseInt(output.match(/^hashWidth: (\d+)$/m)?.[1] ?? "", 10);
   expect(version, "read output should contain a version header").toBeDefined();
@@ -64,8 +65,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 2);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "CHANGED" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "CHANGED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
 
@@ -85,8 +86,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 2);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "TWO" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "TWO" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
 
@@ -110,8 +111,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 1);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "CHANGED" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "CHANGED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     expect(await readFile(filePath, "utf-8")).toBe("CHANGED\nsecond");
@@ -136,8 +137,8 @@ describe("hashline adversarial content-edge", () => {
 
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "EDITED" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "EDITED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     expect((await readFile(filePath, "utf-8")).split("\n")[0]).toBe("EDITED");
@@ -154,8 +155,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 2);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "EDITED2" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "EDITED2" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
 
@@ -186,8 +187,8 @@ describe("hashline adversarial content-edge", () => {
     expect(anchor.split("#")[1]).toBe(computeLineHash(boundaryLine, hashWidth, 1));
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "EDITED" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "EDITED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     expect((await readFile(filePath, "utf-8")).split("\n")[0]).toBe("EDITED");
@@ -205,8 +206,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 2);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "changed" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "changed" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     // NUL byte on the untouched line 1 survives byte-for-byte.
@@ -222,8 +223,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 2);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "changed" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "changed" }] }],
+      }, makeToolContext(tmpDir)),
     );
     // Contract: must never crash — the tool always returns a string result.
     expect(typeof result).toBe("string");
@@ -248,7 +249,7 @@ describe("hashline adversarial content-edge", () => {
     const result = String(
       await editTool.execute({
         files: [{ filePath, version, edits: [{ op: "append" as const, lines: "appended" }] }],
-      }),
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     // Recorded actual: trailing-newline count (0) is preserved, so the appended
@@ -266,7 +267,7 @@ describe("hashline adversarial content-edge", () => {
     const result = String(
       await editTool.execute({
         files: [{ filePath, version, edits: [{ op: "append" as const, lines: "x" }] }],
-      }),
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     expect(await readFile(filePath, "utf-8")).toBe("x\n");
@@ -280,8 +281,8 @@ describe("hashline adversarial content-edge", () => {
     const anchor = anchorAt(output, 1);
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "goodbye" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "goodbye" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
     expect(await readFile(filePath, "utf-8")).toBe("goodbye");
@@ -292,7 +293,7 @@ describe("hashline adversarial content-edge", () => {
     const filePath = join(tmpDir, "h-offset-over.txt");
     await writeFile(filePath, "a\nb\nc\nd\ne\n", "utf-8");
 
-    const output = String(await readTool.execute({ filePath, offset: 10, limit: 4 }));
+    const output = String(await readTool.execute({ filePath, offset: 10, limit: 4 }, makeToolContext(tmpDir)));
     const startLine = parseInt(output.match(/^startLine: (\d+)$/m)?.[1] ?? "", 10);
     const endLine = parseInt(output.match(/^endLine: (\d+)$/m)?.[1] ?? "", 10);
     const dataLines = output.split("\n").filter((l) => /^\d+#/.test(l));
@@ -311,7 +312,7 @@ describe("hashline adversarial content-edge", () => {
     const content = Array.from({ length: 30000 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
     await writeFile(filePath, content, "utf-8");
 
-    const windowOut = String(await readTool.execute({ filePath, offset: 15000, limit: 4 }));
+    const windowOut = String(await readTool.execute({ filePath, offset: 15000, limit: 4 }, makeToolContext(tmpDir)));
     const version = windowOut.match(/^version: (\S+)$/m)?.[1]!;
     const hashWidth = parseInt(windowOut.match(/^hashWidth: (\d+)$/m)?.[1]!, 10);
     expect(hashWidth).toBe(4); // >10000 lines → width 4
@@ -324,8 +325,8 @@ describe("hashline adversarial content-edge", () => {
 
     const result = String(
       await editTool.execute({
-        files: [{ filePath, version, edits: [{ pos: anchor, lines: "EDITED BIG" }] }],
-      }),
+        files: [{ filePath, version, edits: [{ op: "replace", pos: anchor, lines: "EDITED BIG" }] }],
+      }, makeToolContext(tmpDir)),
     );
     expect(result).not.toContain("Error:");
 

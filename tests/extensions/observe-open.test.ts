@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { registerObserveHandler, runCustomObserve } from "../../src/function/observe";
-import { functionRuntime } from "../../src/function/runtime-state";
-import type { ResolvedFunction } from "../../src/types";
+import { registerObserveHandler, runCustomObserve } from "../../src/function/observe.ts";
+import { functionRuntime } from "../../src/function/runtime-state.ts";
+import type { ResolvedFunction } from "../../src/types.ts";
 
 describe("Observe Events Open Registry", () => {
   it("registerObserveHandler registers a custom event handler", () => {

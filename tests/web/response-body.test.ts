@@ -5,7 +5,7 @@ import {
   readBodyCapped,
   sniffCharset,
   toArrayBuffer,
-} from "../../src/web/response-body";
+} from "../../src/web/response-body.ts";
 
 /** Build a Response whose body streams the given chunks. */
 function chunkedResponse(chunks: Uint8Array[], init: ResponseInit = {}): Response {

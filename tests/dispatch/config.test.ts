@@ -16,7 +16,7 @@ import {
   OUTBOX_FIRST_RETRY_MS,
   OUTBOX_MAX_RETRY_MS,
   OUTBOX_SWEEP_INTERVAL_MS,
-} from "../../src/dispatch/config";
+} from "../../src/dispatch/config.ts";
 
 const savedEnv: Record<string, string | undefined> = {};
 

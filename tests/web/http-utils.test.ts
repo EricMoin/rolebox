@@ -11,7 +11,7 @@ import {
   isRetryableStatus,
   parseRetryAfter,
   resolveDefaultUserAgent,
-} from "../../src/web/http-utils";
+} from "../../src/web/http-utils.ts";
 
 // The per-host pacing gate defaults to a 1000 ms gap between request starts to
 // the same origin, so a real process does not look like a burst. This suite is
@@ -19,6 +19,15 @@ import {
 // pacing" describe below re-enables a small interval locally and restores this
 // configuration in afterEach.
 __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
+
+// Bun's `fetch` accepts `string | URL | Request` and carries a `preconnect`
+// helper alongside its call signature (bun-types `declare namespace fetch`), so
+// a double installed on `globalThis.fetch` has to match that port shape.
+function fetchDouble(
+  impl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  return Object.assign(mock(impl), { preconnect: (): void => {} });
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -32,7 +41,7 @@ afterEach(() => {
 
 describe("TokenBucket", () => {
   it("provides tokens up to the rate limit immediately", async () => {
-    const { TokenBucket } = await import("../../src/web/http-utils");
+    const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
     const bucket = new TokenBucket(5); // 5 tokens per minute
     for (let i = 0; i < 5; i++) {
@@ -44,7 +53,7 @@ describe("TokenBucket", () => {
   });
 
   it("exhaustion causes acquire to wait for token refill", async () => {
-    const { TokenBucket } = await import("../../src/web/http-utils");
+    const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
     // Rate = 600/min = 10 per second, capacity = 1
     // After consuming the only token, next acquire waits ~100ms for 1 refill
@@ -64,7 +73,7 @@ describe("TokenBucket", () => {
   });
 
   it("tokens refill gradually over time", async () => {
-    const { TokenBucket } = await import("../../src/web/http-utils");
+    const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
     // Rate = 1200/min = 20 per second
     // Consume initial tokens, then measure refill for 2 tokens
@@ -81,7 +90,7 @@ describe("TokenBucket", () => {
   });
 
   it("serializes concurrent acquires so each respects the refill window", async () => {
-    const { TokenBucket } = await import("../../src/web/http-utils");
+    const { TokenBucket } = await import("../../src/web/http-utils.ts");
 
     // Rate = 600/min = 10/sec: one token refills every ~100 ms, capacity 600.
     const bucket = new TokenBucket(600);
@@ -111,9 +120,9 @@ describe("fetchWithRetry", () => {
   });
 
   it("resolves successfully on first try", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(new Response("ok", { status: 200 })),
     );
 
@@ -124,10 +133,10 @@ describe("fetchWithRetry", () => {
   });
 
   it("retries on 5xx server errors", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
     let attempts = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       if (attempts <= 2) {
         return Promise.resolve(new Response("server error", { status: 500 }));
@@ -148,10 +157,10 @@ describe("fetchWithRetry", () => {
   it("does not retry client errors other than 408/425/429", async () => {
     // A 403/404 will not become a success by repeating the request, and
     // retrying it only amplifies a block, so the error is thrown immediately.
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
     let attempts = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       return Promise.resolve(new Response("not found", { status: 404 }));
     });
@@ -164,10 +173,10 @@ describe("fetchWithRetry", () => {
   });
 
   it("retries 408 and 425 like other transient statuses", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
     let attempts = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       if (attempts === 1) {
         return Promise.resolve(new Response("timeout", { status: 408 }));
@@ -181,10 +190,10 @@ describe("fetchWithRetry", () => {
   });
 
   it("retries on 429 and respects Retry-After header", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
     let attempts = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       if (attempts === 1) {
         return Promise.resolve(
@@ -208,10 +217,10 @@ describe("fetchWithRetry", () => {
   });
 
   it("throws after max retries exhausted on 5xx", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
     let attempts = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       return Promise.resolve(new Response("server error", { status: 500 }));
     });
@@ -224,10 +233,10 @@ describe("fetchWithRetry", () => {
   });
 
   it("retries on network errors", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
     let attempts = 0;
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       if (attempts <= 2) {
         return Promise.reject(new Error("network failure"));
@@ -246,9 +255,9 @@ describe("fetchWithRetry", () => {
   });
 
   it("sleeps between 5xx retries instead of hammering the server", async () => {
-    const { fetchWithRetry } = await import("../../src/web/http-utils");
+    const { fetchWithRetry } = await import("../../src/web/http-utils.ts");
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(new Response("server error", { status: 500 })),
     );
 
@@ -416,7 +425,7 @@ describe("per-host pacing", () => {
 
   it("spaces two sequential same-origin request starts by the interval", async () => {
     __configureHostPacing({ minIntervalMs: 80, jitterMs: 0 });
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     await fetchWithTimeout("https://pacing-a.example.com/one", {}, 5000);
     const start = Date.now();
@@ -428,7 +437,7 @@ describe("per-host pacing", () => {
 
   it("serializes concurrent same-origin callers", async () => {
     __configureHostPacing({ minIntervalMs: 80, jitterMs: 0 });
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     const start = Date.now();
     await Promise.all([
@@ -444,7 +453,7 @@ describe("per-host pacing", () => {
 
   it("does not delay a different origin", async () => {
     __configureHostPacing({ minIntervalMs: 80, jitterMs: 0 });
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     await fetchWithTimeout("https://pacing-c.example.com/one", {}, 5000);
     const start = Date.now();
@@ -455,7 +464,7 @@ describe("per-host pacing", () => {
 
   it("removes the delay when the interval is configured to 0", async () => {
     __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     const start = Date.now();
     await fetchWithTimeout("https://pacing-e.example.com/one", {}, 5000);
@@ -467,7 +476,7 @@ describe("per-host pacing", () => {
   it("honours ROLEBOX_WEB_HOST_MIN_INTERVAL_MS after a reset", async () => {
     process.env.ROLEBOX_WEB_HOST_MIN_INTERVAL_MS = "0";
     __resetHostPacing();
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     const start = Date.now();
     await fetchWithTimeout("https://pacing-f.example.com/one", {}, 5000);
@@ -480,7 +489,7 @@ describe("per-host pacing", () => {
 
   it("keeps later same-origin callers moving when the wait fails", async () => {
     __configureHostPacing({ minIntervalMs: 80, jitterMs: 0 });
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     await fetchWithTimeout("https://pacing-g.example.com/one", {}, 5000);
 
@@ -510,7 +519,7 @@ describe("per-host pacing", () => {
 
   it("skips pacing for malformed and non-http URLs", async () => {
     __configureHostPacing({ minIntervalMs: 5000, jitterMs: 0 });
-    globalThis.fetch = mock(() => Promise.resolve(new Response("ok", { status: 200 })));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
 
     const start = Date.now();
     await fetchWithTimeout("not a url", {}, 5000);
@@ -533,11 +542,11 @@ describe("fetchWithTimeout", () => {
   });
 
   it("resolves normally when fetch completes in time", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(new Response("ok", { status: 200 })),
     );
 
-    const { fetchWithTimeout } = await import("../../src/web/http-utils");
+    const { fetchWithTimeout } = await import("../../src/web/http-utils.ts");
     const response = await fetchWithTimeout("https://example.com", {}, 5000);
     expect(response.status).toBe(200);
   });
@@ -545,12 +554,12 @@ describe("fetchWithTimeout", () => {
   it("passes an AbortSignal to the fetch call", async () => {
     let passedSignal: AbortSignal | undefined;
 
-    globalThis.fetch = mock((url: string, opts: RequestInit = {}) => {
+    globalThis.fetch = fetchDouble((url: string | URL | Request, opts: RequestInit = {}) => {
       passedSignal = opts.signal as AbortSignal;
       return Promise.resolve(new Response("ok", { status: 200 }));
     });
 
-    const { fetchWithTimeout } = await import("../../src/web/http-utils");
+    const { fetchWithTimeout } = await import("../../src/web/http-utils.ts");
     await fetchWithTimeout("https://example.com", {}, 5000);
 
     expect(passedSignal).toBeDefined();
@@ -559,7 +568,7 @@ describe("fetchWithTimeout", () => {
 
   it("defaults the User-Agent only when the caller did not set one", async () => {
     let captured: Record<string, string> | undefined;
-    globalThis.fetch = mock((_url: string, opts: RequestInit = {}) => {
+    globalThis.fetch = fetchDouble((_url: string | URL | Request, opts: RequestInit = {}) => {
       captured = opts.headers as Record<string, string>;
       return Promise.resolve(new Response("ok", { status: 200 }));
     });
@@ -585,7 +594,7 @@ describe("fetchWithCloudflareRetry", () => {
     let attempts = 0;
     let captured: Record<string, string> | undefined;
 
-    globalThis.fetch = mock((_url: string, opts: RequestInit = {}) => {
+    globalThis.fetch = fetchDouble((_url: string | URL | Request, opts: RequestInit = {}) => {
       attempts++;
       captured = opts.headers as Record<string, string>;
       return Promise.resolve(
@@ -604,7 +613,7 @@ describe("fetchWithCloudflareRetry", () => {
   it("lets caller headers win over the browser profile", async () => {
     let captured: Record<string, string> | undefined;
 
-    globalThis.fetch = mock((_url: string, opts: RequestInit = {}) => {
+    globalThis.fetch = fetchDouble((_url: string | URL | Request, opts: RequestInit = {}) => {
       captured = opts.headers as Record<string, string>;
       return Promise.resolve(new Response("ok", { status: 200 }));
     });
@@ -623,7 +632,7 @@ describe("fetchWithCloudflareRetry", () => {
   it("retries exactly once after a short Retry-After on 429", async () => {
     let attempts = 0;
 
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       if (attempts === 1) {
         return Promise.resolve(new Response("slow down", { status: 429, headers: { "Retry-After": "0" } }));
@@ -640,7 +649,7 @@ describe("fetchWithCloudflareRetry", () => {
   it("does not retry when Retry-After exceeds the 5s cap", async () => {
     let attempts = 0;
 
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       attempts++;
       return Promise.resolve(new Response("slow down", { status: 429, headers: { "Retry-After": "30" } }));
     });
@@ -652,7 +661,7 @@ describe("fetchWithCloudflareRetry", () => {
   });
 
   it("returns a network error response instead of throwing", async () => {
-    globalThis.fetch = mock(() => Promise.reject(new Error("socket closed")));
+    globalThis.fetch = fetchDouble(() => Promise.reject(new Error("socket closed")));
 
     const response = await fetchWithCloudflareRetry("https://cf-down.example.com/", {}, 5000);
 

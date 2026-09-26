@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { buildFunctionStateBlock, buildActiveArtifactBlock } from "../src/prompt/builder";
-import type { FnState } from "../src/function/runtime-state";
+import { buildFunctionStateBlock, buildActiveArtifactBlock } from "../src/prompt/builder.js";
+import type { FnState } from "../src/function/runtime-state.js";
 
 describe("prompt builder function blocks", () => {
   it("buildFunctionStateBlock renders XML correctly", () => {

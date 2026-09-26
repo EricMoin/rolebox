@@ -1,9 +1,10 @@
 import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // Regression: anchorless append on a file that ends with a trailing newline
 // must not insert an extra blank line.
@@ -25,7 +26,7 @@ afterAll(async () => {
 
 /** Read the file with the hashline read tool and extract version + last-line anchor. */
 async function readVersionAndLastAnchor(filePath: string): Promise<{ version: string; lastAnchor: string }> {
-  const output: string = String(await createHashlineReadTool().execute({ filePath }));
+  const output: string = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(dirname(filePath))));
   const match = output.match(/^version: (\S+)$/m);
   expect(match, "hashline_read output should contain a version header").not.toBeNull();
   const anchors = output.split("\n").filter((line) => /^\d+#[A-Za-z0-9_-]+\|/.test(line));
@@ -44,7 +45,7 @@ describe("hashline append trailing-newline regression", () => {
     const { version } = await readVersionAndLastAnchor(filePath);
     const result = await createHashlineEditTool().execute({
       files: [{ filePath, version, edits: [{ op: "append" as const, lines: "line three" }] }],
-    });
+    }, makeToolContext(dirname(filePath)));
 
     expect(result).not.toContain("Error:");
     // Fails today: the implementation writes "line one\nline two\n\nline three\n"
@@ -62,7 +63,7 @@ describe("hashline append trailing-newline regression", () => {
     const { version, lastAnchor } = await readVersionAndLastAnchor(filePath);
     const result = await createHashlineEditTool().execute({
       files: [{ filePath, version, edits: [{ op: "append" as const, pos: lastAnchor, lines: "line three" }] }],
-    });
+    }, makeToolContext(dirname(filePath)));
 
     expect(result).not.toContain("Error:");
     // Control case: the anchored path (applyInsertAfter) splices before the

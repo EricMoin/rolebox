@@ -17,22 +17,25 @@ import { DispatchService } from "../../src/core/services/dispatch-service.ts";
 import { LoopService } from "../../src/core/services/loop-service.ts";
 import { RecoveryService } from "../../src/core/services/recovery-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
-import type { PluginCoreLike } from "../../src/core/service.ts";
 import { StartupChecker } from "../../src/recovery/startup-check.ts";
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
-function makeContext(core: PluginCoreLike, dir?: string): PluginContext {
+// Only the concrete PluginCore exposes getBus() (src/core/plugin-core.ts:51);
+// PluginCoreLike deliberately omits it, as src/core/composition.ts:132 assumes
+// when it builds the real context from a concrete core.
+function makeContext(core: PluginCore, dir?: string): PluginContext {
   return {
-    client: {} as OpencodeClient,
+    session: makeSessionClient(),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: dir ?? "/tmp/test-graceful",
     directory: dir ?? "/tmp/test-graceful",
     core,
     bus: core.getBus(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

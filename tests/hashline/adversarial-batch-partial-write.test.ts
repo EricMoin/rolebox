@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUBTASK 4 — Batch partial-write & hardlink-ordering adversarial suite.
@@ -95,7 +96,7 @@ const readTool = createHashlineReadTool();
 const editTool = createHashlineEditTool();
 
 async function readVersion(filePath: string): Promise<string> {
-  const out = String(await readTool.execute({ filePath }));
+  const out = String(await readTool.execute({ filePath }, makeToolContext(tmpDir)));
   const m = out.match(/^version: (\S+)$/m);
   if (!m) throw new Error(`no version in hashline_read output for ${filePath}:\n${out}`);
   return m[1];
@@ -150,7 +151,7 @@ describe("hashline adversarial batch partial-write & hardlink ordering", () => {
           { filePath: f1, version, edits: [{ op: "append" as const, lines: "AAA" }] },
           { filePath: f2, version: "whatever", edits: [{ op: "append" as const, lines: "BBB" }] },
         ],
-      }));
+      }, makeToolContext(tmpDir)));
 
       const f1After = await readFile(f1, "utf-8");
       const f1HardAfter = await readFile(f1Hard, "utf-8");
@@ -190,7 +191,7 @@ describe("hashline adversarial batch partial-write & hardlink ordering", () => {
           { filePath: target, version: await readVersion(target), edits: [{ op: "append" as const, lines: "TAIL-A" }] },
           { filePath: alias, version: await readVersion(alias), edits: [{ op: "append" as const, lines: "TAIL-B" }] },
         ],
-      }));
+      }, makeToolContext(tmpDir)));
 
       const targetContent = await readFile(target, "utf-8");
       const aliasContent = await readFile(alias, "utf-8");
@@ -227,7 +228,7 @@ describe("hashline adversarial batch partial-write & hardlink ordering", () => {
         { filePath: fp, version, edits: [{ op: "append" as const, lines: "CX" }] },
         { filePath: slashAlias, version, edits: [{ op: "append" as const, lines: "CY" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
 
     const after = await readFile(fp, "utf-8");
     console.log(`[CLASSIFY:(c)] tool output:\n${r}`);
@@ -251,7 +252,7 @@ describe("hashline adversarial batch partial-write & hardlink ordering", () => {
     const fp = join(missingDir, "d.txt");
     const r = String(await editTool.execute({
       files: [{ filePath: fp, version: "whatever", edits: [{ op: "append" as const, lines: "D" }] }],
-    }));
+    }, makeToolContext(tmpDir)));
 
     console.log(`[CLASSIFY:(d)] tool output:\n${r}`);
     console.log(
@@ -285,7 +286,7 @@ describe("hashline adversarial batch partial-write & hardlink ordering", () => {
             { filePath: fa, version: va, edits: [{ op: "append" as const, lines: "EA" }] },
             { filePath: fb, version: vb, edits: [{ op: "append" as const, lines: "FB" }] },
           ],
-        }));
+        }, makeToolContext(tmpDir)));
       } finally {
         renameState.intercept = false;
       }

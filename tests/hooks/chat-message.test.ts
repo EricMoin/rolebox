@@ -2,6 +2,7 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { handleChatMessage } from "../../src/hooks/chat-message.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
+import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { GRAPH_COMPLETE_MARKER, GRAPH_BLOCKED_MARKER, isDispatchNotification } from "../../src/dispatch/notification.ts";
@@ -17,6 +18,34 @@ beforeEach(() => {
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// Doubles for the `runHooks` port on `HookDeps.customHooks` / `HookDeps.builtInHooks`.
+// The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
+// in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
+// src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
+// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+function makeCustomRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+    ) => Promise.resolve(),
+  );
+}
+
+function makeBuiltInRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+      _builtinConfig: Record<string, boolean>,
+    ) => Promise.resolve(),
+  );
+}
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
@@ -43,8 +72,8 @@ function makeState(): HookState {
 
 describe("handleChatMessage — before/after hook phases", () => {
   it("calls built-in hooks in before and after phases", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
-    const customRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
+    const customRunHooks = makeCustomRunHooks();
 
     await handleChatMessage(
       { agent: "test-agent", sessionID: "sess-1" },
@@ -63,7 +92,7 @@ describe("handleChatMessage — before/after hook phases", () => {
   });
 
   it("calls custom hooks in before and after phases", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
 
     await handleChatMessage(
       { agent: "test-agent", sessionID: "sess-1" },
@@ -79,7 +108,7 @@ describe("handleChatMessage — before/after hook phases", () => {
   });
 
   it("passes correct event and input to runHooks", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
 
     await handleChatMessage(
       { agent: "test-agent", sessionID: "sess-1" },
@@ -462,7 +491,11 @@ describe("handleChatMessage — wake-event clear for gated functions", () => {
       minimalDeps(),
     );
 
-    expect(st.phase).toBe("active");
+    // Read the phase back through the runtime: after `st.phase = "gated"` above,
+    // TS keeps the property narrowed to that literal across the call, so a direct
+    // `st.phase` read cannot be compared against "active".
+    const afterHitl = functionRuntime.get("sess-1", "plan");
+    expect(afterHitl?.phase).toBe("active");
     expect(st.evidenceObserved["paused"]).toBe(false);
   });
 
@@ -480,7 +513,11 @@ describe("handleChatMessage — wake-event clear for gated functions", () => {
       minimalDeps(),
     );
 
-    expect(st.phase).toBe("active");
+    // Read the phase back through the runtime: after `st.phase = "gated"` above,
+    // TS keeps the property narrowed to that literal across the call, so a direct
+    // `st.phase` read cannot be compared against "active".
+    const afterGraphComplete = functionRuntime.get("sess-1", "plan");
+    expect(afterGraphComplete?.phase).toBe("active");
     expect(st.evidenceObserved["paused"]).toBe(false);
   });
 
@@ -516,7 +553,11 @@ describe("handleChatMessage — wake-event clear for gated functions", () => {
       minimalDeps(),
     );
 
-    expect(st1.phase).toBe("active");
+    // Read the phase back through the runtime: after `st.phase = "gated"` above,
+    // TS keeps the property narrowed to that literal across the call, so a direct
+    // `st.phase` read cannot be compared against "active".
+    const afterGraphComplete = functionRuntime.get("sess-1", "plan");
+    expect(afterGraphComplete?.phase).toBe("active");
     expect(st1.evidenceObserved["paused"]).toBe(false);
 
     // Clean up and test GRAPH_BLOCKED resets
@@ -534,7 +575,11 @@ describe("handleChatMessage — wake-event clear for gated functions", () => {
       minimalDeps(),
     );
 
-    expect(st2.phase).toBe("active");
+    // Read the phase back through the runtime: after `st.phase = "gated"` above,
+    // TS keeps the property narrowed to that literal across the call, so a direct
+    // `st.phase` read cannot be compared against "active".
+    const afterGraphBlocked = functionRuntime.get("sess-2", "execute");
+    expect(afterGraphBlocked?.phase).toBe("active");
     expect(st2.evidenceObserved["paused"]).toBe(false);
 
     // Clean up and verify auto-continue does NOT reset

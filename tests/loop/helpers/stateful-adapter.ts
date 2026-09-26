@@ -41,7 +41,7 @@
  * microtask flush used by coordinator.test.ts).
  */
 
-import type { IDispatchAdapter } from "../../../src/loop/dispatch-adapter";
+import type { IDispatchAdapter } from "../../../src/loop/dispatch-adapter.ts";
 
 /** Adapter methods that can appear in the calls log. */
 export type StatefulAdapterMethod =

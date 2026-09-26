@@ -6,8 +6,8 @@ import {
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
-import type { RegistryManifest } from "../../src/cli/types";
-import { createDirSymlink } from "../helpers/symlink";
+import type { RegistryManifest } from "../../src/cli/types.ts";
+import { createDirSymlink } from "../helpers/symlink.ts";
 // Pre-load the real paths module so the mock spreads its full export surface
 // (including assertSafePathSegment / getRolePath). This file's own mock.module
 // for "../../src/cli/paths" shadows any import of that specifier (bun keys
@@ -150,14 +150,14 @@ describe("CLI E2E", () => {
       expect(lockData.roles).toHaveLength(1);
       expect(lockData.roles[0].role).toBe("test-role");
 
-      const { list } = await import("../../src/cli/commands/list");
+      const { list } = await import("../../src/cli/commands/list.ts");
       const { logs: ll, run: rl } = captureOutput(async () => { list(false); });
       await rl();
       expect(ll.some((l) => l.includes("test-role"))).toBe(true);
       expect(ll.some((l) => l.includes("1.0.0"))).toBe(true);
       expect(ll.some((l) => l.includes("oh-my-role"))).toBe(true);
 
-      const { sync } = await import("../../src/cli/commands/sync");
+      const { sync } = await import("../../src/cli/commands/sync.ts");
       const { logs: sl, run: rs } = captureOutput(async () => { await sync("opencode"); });
       await rs();
       const syncTarget = join(configDir, "opencode", "rolebox", "test-role");
@@ -166,7 +166,7 @@ describe("CLI E2E", () => {
       expect(readlinkSync(syncTarget)).toBe(rolePath);
       expect(sl.some((l) => l.includes("Synced 1 roles"))).toBe(true);
 
-      const { uninstall } = await import("../../src/cli/commands/uninstall");
+      const { uninstall } = await import("../../src/cli/commands/uninstall.ts");
       const { logs: ul, run: ru } = captureOutput(async () => { await uninstall("test-role"); });
       await ru();
       expect(existsSync(rolePath)).toBe(false);
@@ -182,7 +182,7 @@ describe("CLI E2E", () => {
 
   describe("registry management flow", () => {
     it("shows default oh-my-role on list", async () => {
-      const { registryListFn } = await import("../../src/cli/commands/registry");
+      const { registryListFn } = await import("../../src/cli/commands/registry.ts");
       const c = captureOutput(async () => { await registryListFn(); });
       await c.run();
       expect(c.logs.some((l) => l.includes("oh-my-role"))).toBe(true);
@@ -194,7 +194,7 @@ describe("CLI E2E", () => {
         name: "my-repo", description: "Test", url: "https://github.com/my-org/my-repo", roles: {},
       }));
 
-      const { registryAddFn } = await import("../../src/cli/commands/registry");
+      const { registryAddFn } = await import("../../src/cli/commands/registry.ts");
       const c = captureOutput(async () => { await registryAddFn("https://github.com/my-org/my-repo"); });
       await c.run();
       expect(c.logs.some((l) => l.includes("Added"))).toBe(true);
@@ -211,7 +211,7 @@ describe("CLI E2E", () => {
         url: "https://github.com/custom/custom-rolebox", roles: {},
       }));
 
-      const { registryAddFn, registryListFn } = await import("../../src/cli/commands/registry");
+      const { registryAddFn, registryListFn } = await import("../../src/cli/commands/registry.ts");
       await registryAddFn("https://github.com/custom/custom-rolebox");
 
       const lc = captureOutput(async () => { await registryListFn(); });
@@ -230,7 +230,7 @@ describe("CLI E2E", () => {
         ],
       }), "utf-8");
 
-      const { registryRemoveFn } = await import("../../src/cli/commands/registry");
+      const { registryRemoveFn } = await import("../../src/cli/commands/registry.ts");
       const c = captureOutput(async () => { await registryRemoveFn("to-remove"); });
       await c.run();
       expect(c.logs.some((l) => l.includes("Removed"))).toBe(true);
@@ -242,7 +242,7 @@ describe("CLI E2E", () => {
     });
 
     it("refuses to remove the default registry", async () => {
-      const { registryRemoveFn } = await import("../../src/cli/commands/registry");
+      const { registryRemoveFn } = await import("../../src/cli/commands/registry.ts");
       expect(() => registryRemoveFn("oh-my-role")).toThrow(/Cannot remove default registry/);
     });
   });
@@ -251,36 +251,36 @@ describe("CLI E2E", () => {
     it("handles network failure during registry fetch", async () => {
       globalThis.fetch = mockFetchReturning("", 500);
 
-      const { search } = await import("../../src/cli/commands/search");
+      const { search } = await import("../../src/cli/commands/search.ts");
       const c = captureOutput(async () => { await search("anything", false); });
       await c.run();
       expect(c.warns.some((w) => w.includes("Warning"))).toBe(true);
     });
 
     it("produces error for unknown sync target", async () => {
-      const { sync } = await import("../../src/cli/commands/sync");
+      const { sync } = await import("../../src/cli/commands/sync.ts");
       await expect(sync("unknown-target")).rejects.toThrow(/Unknown sync target/);
     });
 
     it("produces error when uninstalling unknown role", async () => {
-      const { uninstall } = await import("../../src/cli/commands/uninstall");
+      const { uninstall } = await import("../../src/cli/commands/uninstall.ts");
       await expect(uninstall("nonexistent-role")).rejects.toThrow(/not installed/);
     });
 
     it("produces error when removing default registry", async () => {
-      const { registryRemoveFn } = await import("../../src/cli/commands/registry");
+      const { registryRemoveFn } = await import("../../src/cli/commands/registry.ts");
       expect(() => registryRemoveFn("oh-my-role")).toThrow(/Cannot remove default registry/);
     });
 
     it("handles registry add with invalid URL", async () => {
-      const { registryAddFn } = await import("../../src/cli/commands/registry");
+      const { registryAddFn } = await import("../../src/cli/commands/registry.ts");
       await expect(registryAddFn("not-a-url")).rejects.toThrow(/Invalid GitHub URL/);
     });
   });
 
   describe("sync edge cases", () => {
     it("sync handles empty lock file gracefully", async () => {
-      const { sync } = await import("../../src/cli/commands/sync");
+      const { sync } = await import("../../src/cli/commands/sync.ts");
       const c = captureOutput(async () => { await sync("opencode"); });
       await c.run();
       expect(c.logs.some((l) => l.includes("Synced 0 roles"))).toBe(true);
@@ -305,7 +305,7 @@ describe("CLI E2E", () => {
         roles: [{ role: "test-role", registry: "oh-my-role", version: "1.0.0", installedAt: "2025-01-01T00:00:00Z", integrity: "sha256-abc" }],
       }), "utf-8");
 
-      const { sync } = await import("../../src/cli/commands/sync");
+      const { sync } = await import("../../src/cli/commands/sync.ts");
       const c1 = captureOutput(async () => { await sync("opencode"); });
       await c1.run();
       expect(c1.logs.some((l) => l.includes("Synced 1 roles"))).toBe(true);
@@ -339,7 +339,7 @@ describe("CLI E2E", () => {
       mkdirSync(join(targetDir, "manual-role"), { recursive: true });
       writeFileSync(join(targetDir, "manual-role", "role.yaml"), "name: Manual\n", "utf-8");
 
-      const { sync } = await import("../../src/cli/commands/sync");
+      const { sync } = await import("../../src/cli/commands/sync.ts");
       const c = captureOutput(async () => { await sync("opencode"); });
       await c.run();
       expect(c.warns.some((w) => w.includes("regular directory"))).toBe(true);
@@ -356,7 +356,7 @@ describe("CLI E2E", () => {
         join(targetDir, "broken-link"),
       );
 
-      const { sync } = await import("../../src/cli/commands/sync");
+      const { sync } = await import("../../src/cli/commands/sync.ts");
       const c = captureOutput(async () => { await sync("opencode"); });
       await c.run();
       expect(existsSync(join(targetDir, "broken-link"))).toBe(false);
@@ -366,7 +366,7 @@ describe("CLI E2E", () => {
 
   describe("list edge cases", () => {
     it("list --json outputs valid JSON when empty", async () => {
-      const { list } = await import("../../src/cli/commands/list");
+      const { list } = await import("../../src/cli/commands/list.ts");
       const { logs, run } = captureOutput(async () => { list(true); });
       await run();
       const parsed = JSON.parse(logs.join(""));
@@ -382,7 +382,7 @@ describe("CLI E2E", () => {
       }), "utf-8");
       mkdirSync(join(dataDir, "rolebox", "roles", "oh-my-role", "test-role@1.0.0"), { recursive: true });
 
-      const { list } = await import("../../src/cli/commands/list");
+      const { list } = await import("../../src/cli/commands/list.ts");
       const { logs, run } = captureOutput(async () => { list(true); });
       await run();
       const parsed = JSON.parse(logs.join(""));
@@ -393,7 +393,7 @@ describe("CLI E2E", () => {
     });
 
     it("list shows empty message when no roles", async () => {
-      const { list } = await import("../../src/cli/commands/list");
+      const { list } = await import("../../src/cli/commands/list.ts");
       const { logs, run } = captureOutput(async () => { list(false); });
       await run();
       expect(logs.some((l) => l.includes("No roles installed"))).toBe(true);
@@ -412,7 +412,7 @@ describe("CLI E2E", () => {
 
       globalThis.fetch = mockFetchReturning(dump(sampleManifest));
 
-      const { search } = await import("../../src/cli/commands/search");
+      const { search } = await import("../../src/cli/commands/search.ts");
       const c = captureOutput(async () => { await search("test-role", false); });
       await c.run();
       expect(c.logs.some((l) => l.includes("test-role"))).toBe(true);
@@ -429,7 +429,7 @@ describe("CLI E2E", () => {
 
       globalThis.fetch = mockFetchReturning(dump(sampleManifest));
 
-      const { search } = await import("../../src/cli/commands/search");
+      const { search } = await import("../../src/cli/commands/search.ts");
       const c = captureOutput(async () => { await search("nonexistent", false); });
       await c.run();
       expect(c.logs.some((l) => l.includes("No roles matching"))).toBe(true);

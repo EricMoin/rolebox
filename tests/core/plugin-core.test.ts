@@ -1,7 +1,9 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { PluginCore, DescriptiveCycleError } from "../../src/core/plugin-core.ts";
-import type { PluginService, PluginCoreLike } from "../../src/core/service.ts";
+import type { PluginService } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
@@ -14,16 +16,20 @@ function makeService(name: string, deps: string[] = []): PluginService {
   };
 }
 
-function makeContext(core: PluginCoreLike): PluginContext {
+// The fixture needs the core's own event bus, which only the concrete
+// PluginCore exposes (getBus(), src/core/plugin-core.ts:51) — PluginCoreLike
+// deliberately omits it, exactly as src/core/composition.ts:132 relies on the
+// concrete class when it builds the real context.
+function makeContext(core: PluginCore): PluginContext {
   return {
-    client: {} as any,
+    session: makeSessionClient(),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp",
     directory: "/tmp",
     core,
     bus: core.getBus(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

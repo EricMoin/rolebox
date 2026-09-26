@@ -64,8 +64,8 @@ import {
   resolveModel,
   __setLoggerForTest,
   __resetForTest,
-} from "../src/resolver/model-resolver";
-import { createSubLogger } from "../src/logger";
+} from "../src/resolver/model-resolver.js";
+import { createSubLogger } from "../src/logger.js";
 
 // ── Mock logger (captures warn + info into separate arrays) ──────────────
 
@@ -708,8 +708,8 @@ describe("initModelResolver platform-aware catalogs", () => {
 // Integration tests (via discoverRoles / bootstrapRoles)
 // ═════════════════════════════════════════════════════════════════════════
 
-import { discoverRoles, __setLoggerForTest as setRoleLoaderLogger } from "../src/loader/role-loader";
-import { bootstrapRoles } from "../src/resolver/bootstrap";
+import { discoverRoles, __setLoggerForTest as setRoleLoaderLogger } from "../src/loader/role-loader.js";
+import { bootstrapRoles } from "../src/resolver/bootstrap.js";
 
 // ── Integration helpers ─────────────────────────────────────────────────
 
@@ -1060,7 +1060,6 @@ describe("integration: bootstrap-level init", () => {
     __setLoggerForTest(mockLogger);
 
     const roleFunctionsMap = new Map();
-    const roleGraphMap = new Map();
 
     const result = await bootstrapRoles({
       roleboxDir: roleDir,
@@ -1068,7 +1067,6 @@ describe("integration: bootstrap-level init", () => {
       configDir,
       builtinDir,
       roleFunctionsMap,
-      roleGraphMap,
     });
 
     expect(result.discovered).toBe(1);

@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FunctionRuntimeManager } from "../src/function/runtime-state";
+import { FunctionRuntimeManager } from "../src/function/runtime-state.js";
 
 describe("FunctionRuntimeManager", () => {
   it("persists to disk and recovers with kv intact", () => {

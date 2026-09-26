@@ -21,21 +21,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import {
-  createPluginHooks,
   activeLoopManager,
   pendingCorrections,
   userMessagedSessions,
   loopManagerMap,
   managerMap,
-} from "../../src/core/composition";
-import { hookState } from "../../src/hooks/state";
-import { functionSessionState } from "../../src/function/session-state";
-import { DispatchAdapter } from "../../src/loop/dispatch-adapter";
-import { DISPATCH_ROUND_TIMEOUT_MS, LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
-import type { DispatchInput, DispatchTask } from "../../src/dispatch/types";
-import type { DispatchManager } from "../../src/dispatch/core/manager";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
+} from "../../src/core/composition.ts";
+import { createHealthyPluginHooks, type PluginHookHandlers } from "../helpers/plugin-hooks.ts";
+import { hookState } from "../../src/hooks/state.ts";
+import { functionSessionState } from "../../src/function/session-state.ts";
+import { DispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+import { DISPATCH_ROUND_TIMEOUT_MS, LOOP_PROGRESS_MARKER } from "../../src/loop/constants.ts";
+import type { DispatchInput, DispatchTask } from "../../src/dispatch/types.ts";
+import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 
 const AGENT = "test-agent";
 
@@ -200,7 +200,7 @@ function createStatefulDispatchMocks(): StatefulDispatchMocks {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("Loop service E2E via chat.message hook", () => {
-  let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+  let hooks: PluginHookHandlers;
   let tmpDir: string;
   let sid: string;
   let mocks: StatefulDispatchMocks;
@@ -214,11 +214,10 @@ describe("Loop service E2E via chat.message hook", () => {
     // Inject the stateful DispatchManager mock — DispatchService.init reuses it
     // from hookState.managerMap instead of building a real manager.
     hookState.managerMap.set(tmpDir, mocks.dispatchManager as unknown as DispatchManager);
-    hooks = await createPluginHooks({ platformId: "opencode",
+    hooks = await createHealthyPluginHooks({ platformId: "opencode",
       resolvedRoles: [],
       session: new OpencodeSessionAdapter(mocks.client),
       roleFunctionsMap: new Map(),
-      roleGraphMap: new Map(),
       directory: tmpDir,
     });
   });

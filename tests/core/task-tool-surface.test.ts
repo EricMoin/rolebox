@@ -7,6 +7,8 @@ import { createTaskTools } from "../../src/dispatch/query/task-tools.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 import { __resetForTest } from "../../src/logger.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
 
 const TASK_KEYS = [
   "task_search",
@@ -20,16 +22,17 @@ const TASK_KEYS = [
 function makeContext(overrides?: Partial<PluginContext>): PluginContext {
   const suffix = Math.random().toString(36).slice(2);
   return {
-    client: {} as any,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp/task-surface-test-" + suffix,
     directory: "/tmp/task-surface-test-" + suffix,
     core: undefined as any,
     bus: undefined as any,
-    capabilities: undefined,
     ...overrides,
+    // Required on PluginContext (src/core/context.ts:14,40), and restated after
+    // the Partial<PluginContext> spread that would redeclare them as optional.
+    session: overrides?.session ?? makeSessionClient(),
+    capabilities: overrides?.capabilities ?? opencodeCapabilities(),
   };
 }
 

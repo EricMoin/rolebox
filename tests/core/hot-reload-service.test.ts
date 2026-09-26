@@ -3,6 +3,10 @@ import { HotReloadService } from "../../src/core/services/hot-reload-service.ts"
 import { clearExtensionModuleCache } from "../../src/extensions/loader.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { HookService } from "../../src/core/services/hook-service.ts";
+import { EventBus } from "../../src/core/event-bus.ts";
+import type { PluginContext } from "../../src/core/context.ts";
+import type { PluginCoreLike } from "../../src/core/service.ts";
+import { makeSessionClient } from "./helpers.ts";
 import { hookState } from "../../src/hooks/state.ts";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -10,24 +14,32 @@ import { tmpdir } from "node:os";
 
 // ── helpers ────────────────────────────────────────────────────────
 
-function makeMockCore() {
+// Typed as the port it stands in for, so the double cannot drift from
+// PluginCoreLike (src/core/service.ts:37-43).
+function makeMockCore(): PluginCoreLike {
   return {
     getService: mock(() => undefined),
     getServices: mock(() => new Map()),
     restartService: mock(() => Promise.resolve()),
+    isDegraded: mock(() => false),
   };
 }
 
-function makeCtx(dir: string, core: any = makeMockCore()) {
+// Annotated with the real contract: without it `resolvedRoles` widened to
+// never[] and every `svc.init(makeCtx(...))` failed on the object shape instead
+// of on the field that was actually wrong.
+function makeCtx(dir: string, core: PluginCoreLike = makeMockCore()): PluginContext {
   return {
-    client: {} as any,
+    session: makeSessionClient(),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: dir,
     directory: dir,
     core,
-    bus: { on: mock(), off: mock(), emit: mock(), clear: mock() },
+    // The declared type is the EventBus class, not a callback bag. HotReload
+    // itself never touches it; HookService, which is init'd with this context
+    // below, does (src/core/services/hook-service.ts:144).
+    bus: new EventBus(),
     // Resolver context fields required for hot reload to proceed
     roleboxDir: dir,
     globalSkillsDir: dir,
@@ -336,6 +348,7 @@ describe("HotReloadService", () => {
         }),
         getServices: mock(() => new Map()),
         restartService: mock(() => Promise.resolve()),
+        isDegraded: mock(() => false),
       };
 
       const ctx = makeCtx(hookTempDir, core);

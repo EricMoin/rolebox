@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { stateRegistry } from "../src/core/state-registry";
-import { FunctionRuntimeManager } from "../src/function/runtime-state";
+import { stateRegistry } from "../src/core/state-registry.js";
+import { FunctionRuntimeManager } from "../src/function/runtime-state.js";
 
 describe("stateRegistry", () => {
   it("exposes functionRuntime as FunctionRuntimeManager", () => {

@@ -1,8 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { KNOWN_CONDITIONS } from "../../src/function/conditions";
-import { GRAPH_TEMPLATE_VALUES } from "../../src/constants";
-import { KNOWN_STRATEGIES } from "../../src/recovery/config";
-import { NOTIFICATION_CHANNEL_KINDS, NOTIFICATION_EVENT_TYPES } from "../../src/notifications/types";
+import { KNOWN_CONDITIONS } from "../../src/function/conditions.ts";
+import { GRAPH_TEMPLATE_VALUES } from "../../src/constants.ts";
+import { KNOWN_STRATEGIES } from "../../src/recovery/config.ts";
+import { NOTIFICATION_CHANNEL_KINDS, NOTIFICATION_EVENT_TYPES } from "../../src/notifications/types.ts";
 
 describe("Backward Compatibility", () => {
   it("KNOWN_CONDITIONS has at least 7 built-in conditions", () => {
@@ -41,7 +41,7 @@ describe("Backward Compatibility", () => {
   });
 
   it("empty extensions config does not crash ExtensionRegistry", async () => {
-    const { ExtensionRegistry } = await import("../../src/extensions/registry");
+    const { ExtensionRegistry } = await import("../../src/extensions/registry.ts");
     const registry = new ExtensionRegistry();
     await registry.loadExtensions(undefined, "/tmp");
     await registry.loadExtensions(null, "/tmp");

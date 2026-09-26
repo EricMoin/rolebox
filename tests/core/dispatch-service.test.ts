@@ -8,22 +8,28 @@ import type { PluginContext } from "../../src/core/context.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 import { __resetForTest } from "../../src/logger.ts";
 import { hookState } from "../../src/hooks/state.ts";
+import { opencodeCapabilities, piCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
+// CanonicalToolContext fixture, shared with the tests/asset tool call sites
+// (same convention as the ../dispatch/helpers.ts import above).
+import { makeToolContext } from "../asset/helpers.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 function makeContext(overrides?: Partial<PluginContext>): PluginContext {
   const suffix = Math.random().toString(36).slice(2);
   return {
-    client: {} as any,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp/dsp-test-" + suffix,
     directory: "/tmp/dsp-test-" + suffix,
     core: undefined as any,
     bus: undefined as any,
-    capabilities: undefined,
     ...overrides,
+    // Required on PluginContext (src/core/context.ts:14,40), and restated after
+    // the Partial<PluginContext> spread that would redeclare them as optional.
+    session: overrides?.session ?? makeSessionClient(),
+    capabilities: overrides?.capabilities ?? opencodeCapabilities(),
   };
 }
 
@@ -43,17 +49,9 @@ describe("DispatchService", () => {
     it("sets degraded=true when hasSessionCreate=false and no sessionClient", async () => {
       const svc = new DispatchService();
       const ctx = makeContext({
-        capabilities: {
-          hasSessionCreate: false,
-          hasBackgroundTasks: true,
-          hasSessionFork: false,
-          hasSessionAbort: true,
-          hasAgentFileSync: false,
-          hasMultiStepTools: true,
-          hasEventStream: true,
-          hasSessionStatus: true,
-          platformId: "pi",
-        },
+        // Exactly the Pi declaration (src/platform/capabilities.ts:76-89); the
+        // hand-copied literal above was piCapabilities() minus hasRoleSwitch.
+        capabilities: piCapabilities(),
       });
       await svc.init(ctx);
 
@@ -78,7 +76,7 @@ describe("DispatchService", () => {
       expect(tools.dispatch_metrics).toBeDefined();
       expect(tools.dispatch_status).toBeDefined();
 
-      const result = await tools.dispatch.execute();
+      const result = await tools.dispatch.execute({}, makeToolContext());
       expect(result).toContain("not available");
     });
 

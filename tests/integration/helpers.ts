@@ -30,6 +30,7 @@ import { createPluginHooks, managerMap, pendingCorrections } from "../../src/cor
 import { roleFunctionsMap } from "../../src/resolver/registry.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../src/types.ts";
 import { RoleMode } from "../../src/constants.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import type { Hooks } from "@opencode-ai/plugin";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -326,7 +327,7 @@ export async function createTestContext(): Promise<TestContext> {
   const client = createMockClient();
   const hooks = await createPluginHooks({ platformId: "opencode",
     resolvedRoles: [role],
-    client,
+    session: new OpencodeSessionAdapter(client),
     roleFunctionsMap,
     directory: tmpDir,
     roleboxDir: tmpDir,

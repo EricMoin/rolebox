@@ -27,52 +27,52 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // ── Types ─────────────────────────────────────────────────────────
-import { NOTIFICATION_EVENT_TYPES, NOTIFICATION_CHANNEL_KINDS } from "../../src/notifications/types";
+import { NOTIFICATION_EVENT_TYPES, NOTIFICATION_CHANNEL_KINDS } from "../../src/notifications/types.ts";
 import type {
   NotificationConfig,
   NotificationMessage,
   NotificationChannelConfig,
   QuietHoursConfig,
   ThrottleConfig,
-} from "../../src/notifications/types";
+} from "../../src/notifications/types.ts";
 
 // ── Config / Validate ─────────────────────────────────────────────
 import {
   DEFAULT_NOTIFICATION_CONFIG,
-} from "../../src/notifications/config";
-import { validateNotificationConfig } from "../../src/notifications/config-validate";
+} from "../../src/notifications/config.ts";
+import { validateNotificationConfig } from "../../src/notifications/config-validate.ts";
 
 // ── Throttle ──────────────────────────────────────────────────────
-import { NotificationThrottle } from "../../src/notifications/throttle";
+import { NotificationThrottle } from "../../src/notifications/throttle.ts";
 
 // ── Quiet Hours ───────────────────────────────────────────────────
-import { QuietHours } from "../../src/notifications/quiet-hours";
+import { QuietHours } from "../../src/notifications/quiet-hours.ts";
 
 // ── Scheduler ─────────────────────────────────────────────────────
-import { NotificationScheduler, createScheduler } from "../../src/notifications/scheduler";
+import { NotificationScheduler, createScheduler } from "../../src/notifications/scheduler.ts";
 
 // ── Content / Formatting ──────────────────────────────────────────
 import {
   renderTemplate,
   buildTemplateVars,
   buildNotificationContent,
-} from "../../src/notifications/content";
+} from "../../src/notifications/content.ts";
 import {
   escapeAppleScriptText,
   escapePowerShellSingleQuotedText,
   escapeBashText,
   truncate,
-} from "../../src/notifications/formatting";
+} from "../../src/notifications/formatting.ts";
 
 // ── Channels ──────────────────────────────────────────────────────
-import { createChannel, createChannels } from "../../src/notifications/channels";
-import type { NotificationChannel } from "../../src/notifications/channels";
+import { createChannel, createChannels } from "../../src/notifications/channels.ts";
+import type { NotificationChannel } from "../../src/notifications/channels.ts";
 
 // ── Channel Resolver ──────────────────────────────────────────────
-import { resolveChannels } from "../../src/notifications/channel-resolver";
+import { resolveChannels } from "../../src/notifications/channel-resolver.ts";
 
 // ── Manager ───────────────────────────────────────────────────────
-import { NotificationManager } from "../../src/notifications/manager";
+import { NotificationManager } from "../../src/notifications/manager.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -941,7 +941,9 @@ describe("Channels – focused", () => {
   });
 
   it("WebhookChannel sets default Content-Type header", async () => {
-    const fetchMock = mock(() => Promise.resolve({ ok: true, status: 200 }));
+    const fetchMock = mock((_url: string, _init: RequestInit) =>
+      Promise.resolve({ ok: true, status: 200 }),
+    );
     global.fetch = fetchMock as unknown as typeof global.fetch;
 
     try {
@@ -963,7 +965,7 @@ describe("Channels – focused", () => {
       await channel!.send(msg);
 
       const callArgs = fetchMock.mock.calls[0]!;
-      const options = callArgs[1] as RequestInit;
+      const options = callArgs[1];
       const headers = options.headers as Record<string, string>;
       expect(headers["Content-Type"]).toBe("application/json");
 
@@ -974,7 +976,9 @@ describe("Channels – focused", () => {
   });
 
   it("WebhookChannel includes custom headers", async () => {
-    const fetchMock = mock(() => Promise.resolve({ ok: true, status: 200 }));
+    const fetchMock = mock((_url: string, _init: RequestInit) =>
+      Promise.resolve({ ok: true, status: 200 }),
+    );
     global.fetch = fetchMock as unknown as typeof global.fetch;
 
     try {
@@ -997,7 +1001,7 @@ describe("Channels – focused", () => {
       await channel!.send(msg);
 
       const callArgs = fetchMock.mock.calls[0]!;
-      const options = callArgs[1] as RequestInit;
+      const options = callArgs[1];
       const headers = options.headers as Record<string, string>;
       expect(headers["X-Custom"]).toBe("test-value");
       expect(headers["Authorization"]).toBe("Bearer token123");

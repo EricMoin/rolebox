@@ -199,7 +199,6 @@ function buildPipeline(opts: BuildOptions) {
     session: opts.client,
     resolvedRoles: opts.roles,
     roleFunctionsMap: opts.roleFunctionsMap,
-    roleGraphMap: new Map(),
     dispatchManager: opts.dispatch,
     loopManager: makeLoopManager(),
     notificationManager: opts.notificationManager as never,

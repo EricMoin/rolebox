@@ -4,18 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import {
-  createPluginHooks,
   userMessagedSessions,
   activeLoopManager,
   pendingCorrections,
   loopManagerMap,
-} from "../../src/core/composition";
-import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL, LOOP_FUNCTION_NAME } from "../../src/loop/constants";
-import { functionRuntime } from "../../src/function/runtime-state";
-import { functionSessionState } from "../../src/function/session-state";
-import { hookState } from "../../src/hooks/state";
-import { parseFunctionActivation as _realParseFn } from "../../src/function/parser";
-import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
+} from "../../src/core/composition.ts";
+import { createHealthyPluginHooks, type PluginHookHandlers } from "../helpers/plugin-hooks.ts";
+import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL, LOOP_FUNCTION_NAME } from "../../src/loop/constants.ts";
+import { functionRuntime } from "../../src/function/runtime-state.ts";
+import { functionSessionState } from "../../src/function/session-state.ts";
+import { hookState } from "../../src/hooks/state.ts";
+import { parseFunctionActivation as _realParseFn } from "../../src/function/parser.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 // Snapshot the real parser implementation at module load time for mock restore
 const realParseFunctionActivation = _realParseFn;
 
@@ -54,7 +54,7 @@ function createMockClient(): OpencodeClient {
 }
 
 describe("loop activation", () => {
-  let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+  let hooks: PluginHookHandlers;
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -62,7 +62,7 @@ describe("loop activation", () => {
     pendingCorrections.clear();
     userMessagedSessions.clear();
     const client = createMockClient();
-    hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+    hooks = await createHealthyPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), directory: tmpDir });
   });
 
   afterEach(() => {

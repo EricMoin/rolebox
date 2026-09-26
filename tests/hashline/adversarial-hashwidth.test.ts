@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
 import { HASH_WIDTH_ENV_VAR } from "../../src/hashline/constants.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ── Environment guard ──────────────────────────────────────────────
 // ROLEBOX_HASHLINE_WIDTH is process-global. Every test that touches it must
@@ -121,7 +122,7 @@ describe("ROLEBOX_HASHLINE_WIDTH ≥ 5 — read anchors must be directly usable 
       process.env[HASH_WIDTH_ENV_VAR] = String(width);
 
       const readTool = createHashlineReadTool();
-      const readOutput = (await readTool.execute({ filePath })) as string;
+      const readOutput = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
       const read = parseReadOutput(readOutput);
 
       // Sanity — read honors the override and emits width-`width` anchors
@@ -136,9 +137,9 @@ describe("ROLEBOX_HASHLINE_WIDTH ≥ 5 — read anchors must be directly usable 
       const editTool = createHashlineEditTool();
       const editResult = (await editTool.execute({
         files: [
-          { filePath, version: read.version, hashWidth: width, edits: [{ pos: anchor, lines: "EDITED 5" }] },
+          { filePath, version: read.version, hashWidth: width, edits: [{ op: "replace", pos: anchor, lines: "EDITED 5" }] },
         ],
-      })) as string;
+      }, makeToolContext(tmpDir))) as string;
 
       // D2 reproduction: parseLineRef matches HASHLINE_REF_PATTERN
       // (src/hashline/constants.ts:18 — {2,4}) and rejects width-5..8 hashes
@@ -162,7 +163,7 @@ describe("width escalation (999 → 1002 lines) — edit reanchor must match a f
     await writeFile(filePath, content, "utf-8");
 
     const readTool = createHashlineReadTool();
-    const readOutput = (await readTool.execute({ filePath })) as string;
+    const readOutput = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
     const read = parseReadOutput(readOutput);
 
     // Sanity — 999 lines stay at width 2. Must pass.
@@ -183,7 +184,7 @@ describe("width escalation (999 → 1002 lines) — edit reanchor must match a f
           ],
         },
       ],
-    })) as string;
+    }, makeToolContext(tmpDir))) as string;
 
     // Precondition — the append itself succeeds (width 2 is still valid for
     // the pre-edit 999-line file). Must pass.
@@ -195,7 +196,7 @@ describe("width escalation (999 → 1002 lines) — edit reanchor must match a f
     expect(newAnchor1000).toBeDefined();
 
     // Fresh read of the post-edit file.
-    const freshOutput = (await readTool.execute({ filePath })) as string;
+    const freshOutput = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
     const fresh = parseReadOutput(freshOutput);
     expect(fresh.totalLines).toBe(1002);
     expect(fresh.hashWidth).toBe(3); // width escalated — must pass
@@ -222,7 +223,7 @@ describe("hashWidth boundary reads — read reports the documented thresholds (c
     await writeFile(filePath, content, "utf-8");
 
     const readTool = createHashlineReadTool();
-    const output = (await readTool.execute({ filePath })) as string;
+    const output = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
     const read = parseReadOutput(output);
 
     expect(read.totalLines).toBe(1000);
@@ -236,7 +237,7 @@ describe("hashWidth boundary reads — read reports the documented thresholds (c
     await writeFile(filePath, content, "utf-8");
 
     const readTool = createHashlineReadTool();
-    const output = (await readTool.execute({ filePath })) as string;
+    const output = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
     const read = parseReadOutput(output);
 
     expect(read.totalLines).toBe(10000);
@@ -250,7 +251,7 @@ describe("hashWidth boundary reads — read reports the documented thresholds (c
     await writeFile(filePath, content, "utf-8");
 
     const readTool = createHashlineReadTool();
-    const output = (await readTool.execute({ filePath })) as string;
+    const output = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
     const read = parseReadOutput(output);
 
     expect(read.totalLines).toBe(10001);

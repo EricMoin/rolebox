@@ -21,13 +21,13 @@
 /// <reference types="bun-types" />
 
 import { describe, it, expect } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants.ts";
 import {
   createStatefulAdapter,
   settle,
   type StatefulAdapterBundle,
-} from "./helpers/stateful-adapter";
+} from "./helpers/stateful-adapter.ts";
 
 const REGISTER_INPUT = {
   originSessionId: "origin-exec",

@@ -1,9 +1,11 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { PluginCore } from "../../src/core/plugin-core.ts";
-import type { PluginService, PluginCoreLike, ServiceHealth } from "../../src/core/service.ts";
+import type { PluginService, ServiceHealth } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { HealthMonitorService } from "../../src/core/services/health-monitor-service.ts";
-import type { ServiceRestartState } from "../../src/core/service-supervisor.ts";
+import { ServiceSupervisor, type ServiceRestartState } from "../../src/core/service-supervisor.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
 import { __resetForTest } from "../../src/logger.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -18,16 +20,19 @@ function makeService(name: string, deps: string[] = [], healthFn?: () => Service
   };
 }
 
-function makeContext(core: PluginCoreLike): PluginContext {
+// Only the concrete PluginCore exposes getBus() (src/core/plugin-core.ts:51);
+// PluginCoreLike deliberately omits it, as src/core/composition.ts:132 assumes
+// when it builds the real context from a concrete core.
+function makeContext(core: PluginCore): PluginContext {
   return {
-    client: {} as any,
+    session: makeSessionClient(),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp",
     directory: "/tmp",
     core,
     bus: core.getBus(),
+    capabilities: opencodeCapabilities(),
   };
 }
 
@@ -311,10 +316,12 @@ describe("HealthMonitorService", () => {
     };
     const mockTryRestart = mock(() => Promise.resolve());
     const mockGetStatus = mock((): ServiceRestartState => backoffState);
-    core.getSupervisor = mock(() => ({
-      tryRestart: mockTryRestart,
-      getStatus: mockGetStatus,
-    }));
+    core.getSupervisor = mock(() => {
+      const supervisor = new ServiceSupervisor(core);
+      supervisor.tryRestart = mockTryRestart;
+      supervisor.getStatus = mockGetStatus;
+      return supervisor;
+    });
 
     const unhealthySvc = makeService("unhealthy-svc", [], () => ({ status: "unhealthy" as const, detail: "down" }));
 
@@ -357,10 +364,12 @@ describe("HealthMonitorService", () => {
       mutableState.attempts = 3;
     });
     const mockGetStatus = mock((): ServiceRestartState => mutableState);
-    core.getSupervisor = mock(() => ({
-      tryRestart: mockTryRestart,
-      getStatus: mockGetStatus,
-    }));
+    core.getSupervisor = mock(() => {
+      const supervisor = new ServiceSupervisor(core);
+      supervisor.tryRestart = mockTryRestart;
+      supervisor.getStatus = mockGetStatus;
+      return supervisor;
+    });
 
     // Listen for the degraded event
     const degradedEvents: Array<{ name: string; diagnostics?: string }> = [];
@@ -399,10 +408,12 @@ describe("HealthMonitorService", () => {
       lastAttemptTime: 0,
       backoffUntil: 0,
     }));
-    core.getSupervisor = mock(() => ({
-      tryRestart: mockTryRestart,
-      getStatus: mockGetStatus,
-    }));
+    core.getSupervisor = mock(() => {
+      const supervisor = new ServiceSupervisor(core);
+      supervisor.tryRestart = mockTryRestart;
+      supervisor.getStatus = mockGetStatus;
+      return supervisor;
+    });
 
     // Track health check calls via a counter on a second service
     let healthyCallCount = 0;

@@ -1,7 +1,7 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import { ADVANCING_LOCK_TIMEOUT_MS } from "../../src/loop/constants";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import { ADVANCING_LOCK_TIMEOUT_MS } from "../../src/loop/constants.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 

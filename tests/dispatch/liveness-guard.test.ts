@@ -13,8 +13,8 @@
  *     preserved and the task transitions to `error`.
  */
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/core/manager";
-import { createMockClient, parentContext } from "./helpers";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import { createMockClient, parentContext } from "./helpers.ts";
 
 describe("completion-evaluator liveness guard", () => {
   const fastConfig = {

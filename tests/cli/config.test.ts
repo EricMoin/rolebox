@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
-import type { RoleboxConfig, LockEntry } from "../../src/cli/types";
+import type { RoleboxConfig, LockEntry } from "../../src/cli/types.ts";
 import type { PromptApi } from "../../src/cli/pick.ts";
 
 let tmpDir: string;
@@ -40,7 +40,7 @@ function lockPath(): string {
 
 // Re-import after env setup so getConfigDir sees our XDG_CONFIG_HOME
 async function importConfig() {
-  return await import("../../src/cli/config");
+  return await import("../../src/cli/config.ts");
 }
 
 describe("loadConfig", () => {
@@ -418,15 +418,29 @@ describe("getLockPath", () => {
 // filesystem access is redirected through the XDG_CONFIG_HOME / DSH_HOME env
 // seams into a tmpdir — the real home is never touched.
 
+/** `SelectOptions` at clack's widest instantiation — what the pickers hand to `select`. */
+type SelectOptionsAny = Parameters<PromptApi["select"]>[0];
+
 function createFakePrompts(picked: string) {
   const CANCEL = Symbol("clack:cancel");
-  const select = mock(async () => picked);
+  // The parameter is declared (prompt options are what the pickers pass, per
+  // pick.ts `PromptApi`) so `mock.calls` is typed against the real call shape.
+  const select = mock(async (_opts: SelectOptionsAny): Promise<string | symbol> => picked);
   const prompts: PromptApi = {
     intro: () => {},
     outro: () => {},
     cancel: () => {},
-    select: select as unknown as PromptApi["select"],
-    confirm: (async () => true) as unknown as PromptApi["confirm"],
+    // clack's `select` is generic over the option value; this scripted double is
+    // not, so the scripted pick is resolved back through the options that were
+    // actually offered — the double can only return an offered value or CANCEL.
+    select: async (opts) => {
+      const chosen = await select(opts);
+      if (typeof chosen === "symbol") return chosen;
+      const offered = opts.options.find((o) => String(o.value) === chosen);
+      if (offered === undefined) throw new Error(`fake select: option "${chosen}" was not offered`);
+      return offered.value;
+    },
+    confirm: async () => true,
     spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
     isCancel: (v: unknown) => v === CANCEL,
     log: { error: () => {} },
@@ -435,7 +449,7 @@ function createFakePrompts(picked: string) {
 }
 
 async function importPaths() {
-  return await import("../../src/cli/paths");
+  return await import("../../src/cli/paths.ts");
 }
 
 async function importConfigCommand() {
@@ -509,9 +523,7 @@ describe("sync-target resolution (platform parity)", () => {
     const role = await configInteractive(prompts, "hint");
 
     expect(role).toBe("opencode-role");
-    const offered = (
-      select.mock.calls[0][0] as { options: { value: string }[] }
-    ).options.map((o) => o.value);
+    const offered = select.mock.calls[0][0].options.map((o) => o.value);
     expect(offered).toEqual(["opencode-role"]);
     expect(offered).not.toContain("dsh-role");
   });
@@ -527,9 +539,7 @@ describe("sync-target resolution (platform parity)", () => {
     const role = await configInteractive(prompts, "hint", "dsh");
 
     expect(role).toBe("dsh-role");
-    const offered = (
-      select.mock.calls[0][0] as { options: { value: string }[] }
-    ).options.map((o) => o.value);
+    const offered = select.mock.calls[0][0].options.map((o) => o.value);
     expect(offered).toEqual(["dsh-role"]);
     expect(offered).not.toContain("opencode-role");
   });

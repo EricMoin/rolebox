@@ -9,6 +9,7 @@ import type { CondEnv } from "../src/function/conditions.ts";
 import type { FnState } from "../src/function/runtime-state.ts";
 
 function mockEnv(overrides: Partial<CondEnv> = {}): CondEnv {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "consume-test-"));
   const base: CondEnv = {
     sessionID: "test-session",
     fnName: "test-fn",
@@ -24,9 +25,10 @@ function mockEnv(overrides: Partial<CondEnv> = {}): CondEnv {
       kv: {},
       schemaVersion: 1,
     } satisfies FnState,
-    artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "consume-test-"))),
+    artifacts: new ArtifactStore(workspaceDir),
     requiredEvidence: [],
     userMessagedThisTurn: false,
+    workspaceDir,
   };
   return { ...base, ...overrides };
 }

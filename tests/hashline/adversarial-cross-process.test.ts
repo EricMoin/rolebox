@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { createHashlineEditTool, createHashlineReadTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // Adversarial CROSS-PROCESS race suite for hashline_edit.
 //
@@ -48,7 +49,7 @@ afterAll(async () => {
 
 /** Read a file with hashline_read and return version + per-line anchors. */
 async function readInfo(filePath: string): Promise<{ version: string; anchors: Record<number, string> }> {
-  const out = String(await createHashlineReadTool().execute({ filePath }));
+  const out = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
   const m = out.match(/^version: (\S+)$/m);
   if (!m) throw new Error(`no version in hashline_read output for ${filePath}:\n${out}`);
   const anchors: Record<number, string> = {};
@@ -169,8 +170,8 @@ describe("hashline_edit adversarial cross-process races", () => {
       // version — a real cross-process change landing while A is paused.
       const parentResult = String(
         await createHashlineEditTool().execute({
-          files: [{ filePath: fp, version, edits: [{ pos: anchors[1], lines: "PARENT-EDIT" }] }],
-        }),
+          files: [{ filePath: fp, version, edits: [{ op: "replace", pos: anchors[1], lines: "PARENT-EDIT" }] }],
+        }, makeToolContext(tmpDir)),
       );
       expect(parentResult).not.toContain("Error:");
       const afterParent = await readFile(fp, "utf-8");

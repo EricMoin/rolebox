@@ -4,17 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import {
-  createPluginHooks,
   activeLoopManager,
   pendingCorrections,
   userMessagedSessions,
   loopManagerMap,
   managerMap,
-} from "../../src/core/composition";
-import { STOP_LOOP_SIGNAL } from "../../src/loop/constants";
-import { LoopService } from "../../src/core/services/loop-service";
-import { hookState } from "../../src/hooks/state";
-import type { LoopState } from "../../src/loop/types";
+} from "../../src/core/composition.ts";
+import { createHealthyPluginHooks, type PluginHookHandlers } from "../helpers/plugin-hooks.ts";
+import { STOP_LOOP_SIGNAL } from "../../src/loop/constants.ts";
+import { LoopService } from "../../src/core/services/loop-service.ts";
+import { hookState } from "../../src/hooks/state.ts";
+import type { LoopState } from "../../src/loop/types.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 
 function pluginMockClient(): OpencodeClient {
@@ -59,7 +59,7 @@ describe("LoopManager integration", () => {
   });
 
   describe("Same-origin loop exclusivity", () => {
-    let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+    let hooks: PluginHookHandlers;
     let tmpDir: string;
 
     beforeEach(async () => {
@@ -67,7 +67,7 @@ describe("LoopManager integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createHealthyPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
@@ -119,7 +119,7 @@ describe("LoopManager integration", () => {
   });
 
   describe("Cancellation via user message", () => {
-    let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+    let hooks: PluginHookHandlers;
     let tmpDir: string;
 
     beforeEach(async () => {
@@ -127,7 +127,7 @@ describe("LoopManager integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createHealthyPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {

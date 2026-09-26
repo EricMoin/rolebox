@@ -23,13 +23,13 @@ import { tmpdir } from "node:os";
 // ── Module imports ─────────────────────────────────────────────────────
 
 // Types
-import { NOTIFICATION_EVENT_TYPES, NOTIFICATION_CHANNEL_KINDS } from "../../src/notifications/types";
+import { NOTIFICATION_EVENT_TYPES, NOTIFICATION_CHANNEL_KINDS } from "../../src/notifications/types.ts";
 import type {
   NotificationConfig,
   NotificationMessage,
   NotificationChannelConfig,
   ThrottleConfig,
-} from "../../src/notifications/types";
+} from "../../src/notifications/types.ts";
 
 // Config
 import {
@@ -38,7 +38,7 @@ import {
   resolveEnvVarsInConfig,
   validateNotificationConfig,
   DEFAULT_NOTIFICATION_CONFIG,
-} from "../../src/notifications/config";
+} from "../../src/notifications/config.ts";
 
 // Content
 import {
@@ -49,16 +49,16 @@ import {
   getLastNonEmptyLine,
   buildNotificationContent,
   readSessionInfo,
-} from "../../src/notifications/content";
+} from "../../src/notifications/content.ts";
 
 // Throttle
-import { NotificationThrottle, DEFAULT_THROTTLE_CONFIG } from "../../src/notifications/throttle";
+import { NotificationThrottle, DEFAULT_THROTTLE_CONFIG } from "../../src/notifications/throttle.ts";
 
 // Quiet Hours
-import { QuietHours } from "../../src/notifications/quiet-hours";
+import { QuietHours } from "../../src/notifications/quiet-hours.ts";
 
 // Scheduler
-import { NotificationScheduler, createScheduler } from "../../src/notifications/scheduler";
+import { NotificationScheduler, createScheduler } from "../../src/notifications/scheduler.ts";
 
 // Formatting
 import {
@@ -69,17 +69,17 @@ import {
   buildWindowsToastScript,
   buildAppleScriptNotification,
   buildNotifySendCommand,
-} from "../../src/notifications/formatting";
+} from "../../src/notifications/formatting.ts";
 
 // Channels
-import { createChannel, createChannels } from "../../src/notifications/channels";
-import type { NotificationChannel } from "../../src/notifications/channels";
+import { createChannel, createChannels } from "../../src/notifications/channels.ts";
+import type { NotificationChannel } from "../../src/notifications/channels.ts";
 
 // Platform
-import { detectPlatform, findCommand, commandExists, preWarmCommandCache } from "../../src/notifications/platform";
+import { detectPlatform, findCommand, commandExists, preWarmCommandCache } from "../../src/notifications/platform.ts";
 
 // Manager
-import { NotificationManager } from "../../src/notifications/manager";
+import { NotificationManager } from "../../src/notifications/manager.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -247,8 +247,11 @@ describe("Notification Config", () => {
       };
 
       const resolved = resolveEnvVarsInConfig(config);
-      expect(resolved.channels[0]!.kind).toBe(NOTIFICATION_CHANNEL_KINDS.Webhook);
-      const webhook = resolved.channels[0]! as NotificationChannelConfig & { kind: NOTIFICATION_CHANNEL_KINDS.Webhook };
+      const webhook = resolved.channels[0]!;
+      expect(webhook.kind).toBe(NOTIFICATION_CHANNEL_KINDS.Webhook);
+      if (webhook.kind !== NOTIFICATION_CHANNEL_KINDS.Webhook) {
+        throw new Error(`expected a webhook channel, got ${webhook.kind}`);
+      }
       expect(webhook.url).toBe("https://hooks.example.com/notify");
     } finally {
       if (original) process.env.NOTIF_TEST_URL = original;
@@ -814,7 +817,7 @@ describe("Channels", () => {
   });
 
   it("WebhookChannel POSTs JSON payload", async () => {
-    const fetchMock = mock(() =>
+    const fetchMock = mock((_url: string, _init: RequestInit) =>
       Promise.resolve({ ok: true, status: 200 }),
     );
     global.fetch = fetchMock as unknown as typeof global.fetch;
@@ -841,7 +844,7 @@ describe("Channels", () => {
       const callArgs = fetchMock.mock.calls[0]!;
       expect(callArgs[0]).toBe("https://example.com/webhook");
 
-      const options = callArgs[1] as RequestInit;
+      const options = callArgs[1];
       expect(options.method).toBe("POST");
       const body = JSON.parse(options.body as string);
       expect(body.title).toBe("Webhook Test");

@@ -45,7 +45,7 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { hasTar } from "../../helpers/tar";
+import { hasTar } from "../../helpers/tar.ts";
 
 // Load the REAL modules via cache-busted query-string specifiers so a prior
 // test file's `mock.module(...)` (keyed to the bare path) cannot shadow them in
@@ -81,7 +81,7 @@ let tmpFixtureDir: string;
  * `roles/{roleId}/role.yaml`. Returns the raw archive bytes once `tar czf`
  * has fully written the file (awaits the child process).
  */
-async function buildFixtureArchive(roleId: string): Promise<Uint8Array> {
+async function buildFixtureArchive(roleId: string): Promise<Uint8Array<ArrayBuffer>> {
   tmpFixtureDir = mkdtempSync(join(tmpdir(), "rolebox-realtime-"));
   const fixtureDir = join(tmpFixtureDir, "fixture");
   const topDir = join(fixtureDir, "example-myrepo-a1b2c3d");
@@ -92,7 +92,10 @@ async function buildFixtureArchive(roleId: string): Promise<Uint8Array> {
   const archivePath = join(tmpFixtureDir, "archive.tar.gz");
   const proc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
   expect(await proc.exited).toBe(0);
-  return readFileSync(archivePath);
+  // Copy into a fresh ArrayBuffer-backed view: `new Response(body)` requires
+  // BufferSource (`ArrayBufferView<ArrayBuffer>`), while readFileSync() returns a
+  // Buffer whose underlying store is typed ArrayBufferLike.
+  return new Uint8Array(readFileSync(archivePath));
 }
 
 beforeEach(() => {
@@ -126,12 +129,13 @@ describe("install with the real download/extraction path", () => {
     async () => {
       const archiveBytes = await buildFixtureArchive("software-architect");
 
-      globalThis.fetch = mock((url: string, _init?: any) => {
+      globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+        const url = input instanceof Request ? input.url : String(input);
         if (url.includes("/tarball/")) {
           return Promise.resolve(new Response(archiveBytes, { status: 200 }));
         }
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-      });
+      }), { preconnect: () => {} });
 
       // Call downloadRole directly from the real module.
       const { spawn, spawnSync } = await import("node:child_process");
@@ -166,12 +170,13 @@ describe("install with the real download/extraction path", () => {
     expect(await tarProc.exited).toBe(0);
     const missingRoleArchive = readFileSync(archivePath);
 
-    globalThis.fetch = mock((url: string, _init?: any) => {
+    globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+      const url = input instanceof Request ? input.url : String(input);
       if (url.includes("/tarball/")) {
         return Promise.resolve(new Response(missingRoleArchive, { status: 200 }));
       }
       return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-    });
+    }), { preconnect: () => {} });
 
     const { spawn, spawnSync } = await import("node:child_process");
     await expect(
@@ -202,12 +207,13 @@ describe("install with the real download/extraction path", () => {
 
       // Phase 1: Download and extract a real tarball → extractedDir.
       const archiveBytes = await buildFixtureArchive("software-architect");
-      globalThis.fetch = mock((url: string, _init?: any) => {
+      globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+        const url = input instanceof Request ? input.url : String(input);
         if (url.includes("/tarball/")) {
           return Promise.resolve(new Response(archiveBytes, { status: 200 }));
         }
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-      });
+      }), { preconnect: () => {} });
       const extractedDir = await realRegistryClient.downloadRole(
         { name: "oh-my-role", url: "https://github.com/example/myrepo" },
         "software-architect",
@@ -265,12 +271,13 @@ describe("install with the real download/extraction path", () => {
       // attempt the atomic swap, but simulate failure BEFORE the final move.
       // The previous version must survive intact.
       const archiveV2 = await buildFixtureArchive("software-architect");
-      globalThis.fetch = mock((url: string, _init?: any) => {
+      globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+        const url = input instanceof Request ? input.url : String(input);
         if (url.includes("/tarball/")) {
           return Promise.resolve(new Response(archiveV2, { status: 200 }));
         }
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-      });
+      }), { preconnect: () => {} });
       const extractedV2 = await realRegistryClient.downloadRole(
         { name: "oh-my-role", url: "https://github.com/example/myrepo" },
         "software-architect",

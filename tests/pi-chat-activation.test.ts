@@ -87,7 +87,6 @@ function makeDeps(
   const deps = {
     session: { messages } as never,
     roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
-    roleGraphMap: new Map(),
     roleMap: new Map<string, ResolvedRole>(),
     dir,
     dispatchManager: {} as never,

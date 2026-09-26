@@ -302,7 +302,6 @@ describe("Pi ↔ opencode tool-surface parity (S11)", () => {
       dispatchManager: makeDispatchManager(),
       taskToolsOverride: buildTaskTools() as never,
       extraTools: buildExtraTools() as never,
-      stateDir: process.cwd(),
     });
     const assembledKeys = Object.keys(assembled).sort();
     const surface = sharedSurface().sort();

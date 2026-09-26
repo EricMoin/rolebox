@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { MemoryStore } from "../../src/memory/store";
-import type { MemoryEntry } from "../../src/types";
+import { MemoryStore } from "../../src/memory/store.ts";
+import type { MemoryEntry } from "../../src/types.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 

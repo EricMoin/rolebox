@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import type { ResolvedFunction } from "../src/types";
+import type { ResolvedFunction } from "../src/types.js";
 
 function makeFn(overrides: Partial<ResolvedFunction> & { name: string }): ResolvedFunction {
   return {

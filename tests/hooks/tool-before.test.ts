@@ -3,6 +3,7 @@ import { z } from "zod";
 import { handleToolBefore, registerToolSchema } from "../../src/hooks/tool-before.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
+import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 
 // ── Reset schema registry between tests ─────────────────────────────────────
 
@@ -14,11 +15,38 @@ beforeEach(() => {
 
 // ── Helper: minimal deps ─────────────────────────────────────────────────────
 
+// Doubles for the `runHooks` port on `HookDeps.customHooks` / `HookDeps.builtInHooks`.
+// The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
+// in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
+// src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
+// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+function makeCustomRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+    ) => Promise.resolve(),
+  );
+}
+
+function makeBuiltInRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+      _builtinConfig: Record<string, boolean>,
+    ) => Promise.resolve(),
+  );
+}
+
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
     session: {} as any,
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {} as any,
@@ -134,7 +162,10 @@ describe("handleToolBefore — parameter validation", () => {
       limit: z.number().default(100),
     });
 
-    const output = { args: { filePath: "/test.txt" } };
+    // `handleToolBefore` replaces `output.args` with the parsed zod result, so the
+    // fixture types it as the open record it becomes (a closed literal type would
+    // reject the `limit` default the schema injects).
+    const output: { args: Record<string, unknown> } = { args: { filePath: "/test.txt" } };
     await handleToolBefore(
       { tool: "read", sessionID: "sess-1", callID: "call-1" },
       output,
@@ -258,8 +289,8 @@ describe("handleToolBefore — dispatch_output guard", () => {
 
 describe("handleToolBefore — hook lifecycle phases", () => {
   it("calls built-in hooks in before phase", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
-    const customRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
+    const customRunHooks = makeCustomRunHooks();
 
     registerToolSchema("bash", { command: z.string() });
 
@@ -281,7 +312,7 @@ describe("handleToolBefore — hook lifecycle phases", () => {
   });
 
   it("calls custom hooks in before and after phases", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
 
     registerToolSchema("bash", { command: z.string() });
 
@@ -314,7 +345,7 @@ describe("handleToolBefore — hook lifecycle phases", () => {
   });
 
   it("passes the correct event type and input to runHooks", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
 
     registerToolSchema("bash", { command: z.string() });
 

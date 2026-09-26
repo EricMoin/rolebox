@@ -19,20 +19,20 @@ import { PluginCore } from "../../src/core/plugin-core.ts";
 import { DispatchService } from "../../src/core/services/dispatch-service.ts";
 import { HealthMonitorService } from "../../src/core/services/health-monitor-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
-import type { PluginCoreLike } from "../../src/core/service.ts";
 import { hookState } from "../../src/hooks/state.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { createMockClient } from "../dispatch/helpers.ts";
 
 function makeContext(core: PluginCore, dir: string): PluginContext {
   return {
-    client: createMockClient() as any,
+    session: createMockClient(),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: dir,
     directory: dir,
-    core: core as unknown as PluginCoreLike,
+    core,
     bus: core.getBus(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

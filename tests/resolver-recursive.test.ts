@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { resolveAllRoles, type ResolveContext } from "../src/resolver/orchestrator.ts";
 import { collectOpenRoles, __setLoggerForTest } from "../src/resolver/open-roles.ts";
-import type { RoleConfig, ResolvedFunction, ResolvedGraph } from "../src/types.ts";
+import type { RoleConfig, ResolvedFunction } from "../src/types.ts";
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -34,7 +34,6 @@ function setup(): { ctx: ResolveContext; roleMap: Map<string, RoleConfig>; clean
     configDir: TEST_DIR,
     builtinDir: TEST_DIR,
     roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
-    roleGraphMap: new Map<string, ResolvedGraph>(),
   };
 
   // Build a role with nested subagents: emperor -> chancellor -> [drafter, reviewer, finalizer]
@@ -185,7 +184,7 @@ describe("Recursive subagent resolution", () => {
     // Run resolution multiple times — results must be identical
     // regardless of Promise.all concurrency ordering
     const runCount = 5;
-    const results: string[][] = [];
+    const results: string[] = [];
 
     for (let i = 0; i < runCount; i++) {
       const { ctx, roleMap, cleanup } = setup();
@@ -229,7 +228,6 @@ describe("Open-role consumer wiring", () => {
       configDir: TEST_DIR,
       builtinDir: TEST_DIR,
       roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
-      roleGraphMap: new Map<string, ResolvedGraph>(),
     };
 
     // Producer: open role exposing a helper subagent via exports.
@@ -392,7 +390,6 @@ describe("Circular open_roles declarations", () => {
       configDir: TEST_DIR,
       builtinDir: TEST_DIR,
       roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
-      roleGraphMap: new Map<string, ResolvedGraph>(),
     };
 
     // alpha declares beta, beta declares alpha — both open producers.
@@ -456,7 +453,6 @@ describe("Open-role exports validation at resolution level", () => {
       configDir: TEST_DIR,
       builtinDir: TEST_DIR,
       roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
-      roleGraphMap: new Map<string, ResolvedGraph>(),
     };
 
     // Producer exports a known subagent plus a name that matches nothing.

@@ -2,10 +2,10 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { shortHash } from "../../src/utils/state-paths";
-import type { DispatchTask } from "../../src/dispatch/types";
+import { shortHash } from "../../src/utils/state-paths.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 
-import { createPathsMockPayload } from "../helpers/paths-mock";
+import { createPathsMockPayload } from "../helpers/paths-mock.ts";
 
 let currentDataDir = "";
 
@@ -13,7 +13,7 @@ mock.module("../../src/cli/paths", () => createPathsMockPayload({
   getDataDir: () => currentDataDir,
 }));
 
-import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
+import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
 
 function makeTask(overrides?: Partial<DispatchTask>): DispatchTask {
   const now = new Date();
@@ -21,12 +21,16 @@ function makeTask(overrides?: Partial<DispatchTask>): DispatchTask {
     id: "bg_test1234",
     sessionId: "ses_test",
     parentSessionId: "ses_parent",
+    // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+    depth: 0,
     status: "running",
     agent: "test-agent",
     prompt: "test prompt",
     description: "test",
     startedAt: now,
     progress: { lastUpdate: now, toolCalls: 0 },
+    // Required by DispatchTask; 0 = normal priority (production default).
+    priority: 0,
     ...overrides,
   };
 }

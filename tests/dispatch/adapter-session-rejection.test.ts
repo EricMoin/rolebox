@@ -17,8 +17,8 @@
  *                                                       — gen/types.gen.d.ts:617
  */
 import { describe, it, expect } from "bun:test";
-import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
-import { SessionCreateRejectedError, isSessionCreateRejected } from "../../src/platform/types";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
+import { SessionCreateRejectedError, isSessionCreateRejected } from "../../src/platform/types.ts";
 
 /**
  * Build an adapter whose underlying SDK `session.create` returns the given

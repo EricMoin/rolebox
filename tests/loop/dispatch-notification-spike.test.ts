@@ -20,6 +20,7 @@ import {
   isDispatchNotification,
   buildNotificationText,
 } from "../../src/dispatch/notification.ts";
+import type { NotificationPayload } from "../../src/dispatch/types.ts";
 
 describe("T1 Spike — Dispatch notification discriminator", () => {
   it("isDispatchNotification returns true for completion marker", () => {
@@ -52,7 +53,7 @@ describe("T1 Spike — Dispatch notification discriminator", () => {
     });
     expect(intermediate).toContain(DISPATCH_COMPLETION_MARKER);
 
-    const finalPayload = {
+    const finalPayload: NotificationPayload = {
       taskId: "task_001", description: "Test", duration: "5s",
       status: "completed", remainingTasks: 0,
     };

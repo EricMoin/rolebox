@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
 import { computeFileVersion, canonicalizeFileText, hashWidthForLineCount } from "../../src/hashline/hash.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 const BASE64_DICT = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 
@@ -56,8 +57,8 @@ describe("hashline integration", () => {
       const { version, lines, hw } = await readFileContent(fp);
       const hash2 = computeLineHashFor(lines[1], hw, 2);
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: `2#${hash2}`, lines: "modified line" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: `2#${hash2}`, lines: "modified line" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       const final = await readFile(fp, "utf-8");
       expect(final).toBe("line one\nmodified line\nline three\n");
@@ -71,8 +72,8 @@ describe("hashline integration", () => {
       const { version } = await readFileContent(fp);
       await writeFile(fp, "externally modified content\n", "utf-8");
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: "1#abc", lines: "won't work" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: "1#abc", lines: "won't work" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).toContain("Error:");
       expect(result).toContain("File version mismatch");
       expect(result).toContain(version);
@@ -99,11 +100,11 @@ describe("hashline integration", () => {
 
       const result = await createHashlineEditTool().execute({
         files: [
-          { filePath: f1, version: c1.version, edits: [{ pos: a1, lines: "f1 mod" }] },
-          { filePath: f2, version: c2.version, edits: [{ pos: a2, lines: "f2 mod" }] },
-          { filePath: f3, version: c3.version, edits: [{ pos: a3, lines: "f3 mod" }] },
+          { filePath: f1, version: c1.version, edits: [{ op: "replace", pos: a1, lines: "f1 mod" }] },
+          { filePath: f2, version: c2.version, edits: [{ op: "replace", pos: a2, lines: "f2 mod" }] },
+          { filePath: f3, version: c3.version, edits: [{ op: "replace", pos: a3, lines: "f3 mod" }] },
         ],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       expect(await readFile(f1, "utf-8")).toContain("f1 mod");
       expect(await readFile(f2, "utf-8")).toContain("f2 mod");
@@ -128,11 +129,11 @@ describe("hashline integration", () => {
 
       const result = await createHashlineEditTool().execute({
         files: [
-          { filePath: f1, version: c1.version, edits: [{ pos: a1, lines: "APPLE" }] },
-          { filePath: f2, version: c2.version, edits: [{ pos: a2, lines: "ELEPHANT" }] },
-          { filePath: f3, version: c3.version, edits: [{ pos: a3, lines: "IGLOO" }] },
+          { filePath: f1, version: c1.version, edits: [{ op: "replace", pos: a1, lines: "APPLE" }] },
+          { filePath: f2, version: c2.version, edits: [{ op: "replace", pos: a2, lines: "ELEPHANT" }] },
+          { filePath: f3, version: c3.version, edits: [{ op: "replace", pos: a3, lines: "IGLOO" }] },
         ],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       expect(await readFile(f1, "utf-8")).toBe("APPLE\nbanana\ncherry\n");
       expect(await readFile(f2, "utf-8")).toBe("dog\nELEPHANT\nfox\n");
@@ -157,10 +158,10 @@ describe("hashline integration", () => {
 
       const result = await createHashlineEditTool().execute({
         files: [
-          { filePath: f1, version: c1.version, edits: [{ pos: a1, lines: "x" }] },
-          { filePath: f2, version: c2.version, edits: [{ pos: a2, lines: "y" }] },
+          { filePath: f1, version: c1.version, edits: [{ op: "replace", pos: a1, lines: "x" }] },
+          { filePath: f2, version: c2.version, edits: [{ op: "replace", pos: a2, lines: "y" }] },
         ],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).toContain("Error:");
       expect(result).toContain("File version mismatch");
       const final1 = await readFile(f1, "utf-8");
@@ -183,12 +184,12 @@ describe("hashline integration", () => {
       const editLines = [100, 250, 400, 550, 700, 900, 1100, 1400, 1700, 1950];
       const edits = editLines.map((ln) => {
         const hash = computeLineHashFor(lines[ln - 1], hw, ln);
-        return { pos: `${ln}#${hash}`, lines: `EDITED ${ln}` };
+        return { op: "replace" as const, pos: `${ln}#${hash}`, lines: `EDITED ${ln}` };
       });
 
       const result = await createHashlineEditTool().execute({
         files: [{ filePath: fp, version, edits }],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
 
       const finalRaw = await readFile(fp, "utf-8");
@@ -208,8 +209,8 @@ describe("hashline integration", () => {
       const c1 = await readFileContent(fp);
       const a1 = `2#${computeLineHashFor(c1.lines[1], c1.hw, 2)}`;
       const r1 = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version: c1.version, edits: [{ pos: a1, lines: ["b1", "b2"] }] }],
-      });
+        files: [{ filePath: fp, version: c1.version, edits: [{ op: "replace", pos: a1, lines: ["b1", "b2"] }] }],
+      }, makeToolContext(tmpDir));
       expect(r1).not.toContain("Error:");
       expect(r1).toContain("reanchored:");
 
@@ -217,8 +218,8 @@ describe("hashline integration", () => {
       expect(c2.lines).toEqual(["a", "b1", "b2", "c"]);
       const a2 = `2#${computeLineHashFor(c2.lines[1], c2.hw, 2)}`;
       const r2 = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version: c2.version, edits: [{ pos: a2, lines: "B1_REVISED" }] }],
-      });
+        files: [{ filePath: fp, version: c2.version, edits: [{ op: "replace", pos: a2, lines: "B1_REVISED" }] }],
+      }, makeToolContext(tmpDir));
       expect(r2).not.toContain("Error:");
 
       const final = await readFile(fp, "utf-8");
@@ -236,8 +237,8 @@ describe("hashline integration", () => {
       const wrongAnchor = `2#${hashLine3}`;
 
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: wrongAnchor, lines: "CHANGED" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: wrongAnchor, lines: "CHANGED" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
 
       const final = await readFile(fp, "utf-8");
@@ -254,8 +255,8 @@ describe("hashline integration", () => {
       const wrongAnchor = `2#${hashLine3}`;
 
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: wrongAnchor, lines: "CHANGED" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: wrongAnchor, lines: "CHANGED" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       expect(result).toContain("corrections_applied:");
     });
@@ -272,11 +273,11 @@ describe("hashline integration", () => {
           filePath: fp,
           version,
           edits: [
-            { pos: "2#XXXX", lines: "changed B" },
-            { pos: "4#YYYY", lines: "changed D" },
+            { op: "replace", pos: "2#XXXX", lines: "changed B" },
+            { op: "replace", pos: "4#YYYY", lines: "changed D" },
           ],
         }],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).toContain("Error:");
       expect(result).toContain("Hashline verification failed");
       expect(result).toContain("Line 2");
@@ -289,7 +290,7 @@ describe("hashline integration", () => {
       const fp = join(tmpDir, "newly-created.txt");
       const result = await createHashlineEditTool().execute({
         files: [{ filePath: fp, version: "whatever", edits: [{ op: "append" as const, lines: "brand new content" }] }],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       expect(await readFile(fp, "utf-8")).toBe("brand new content");
     });
@@ -297,8 +298,8 @@ describe("hashline integration", () => {
     it("anchor-based edit on non-existent file fails with clear error", async () => {
       const fp = join(tmpDir, "never-existed.txt");
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version: "whatever", edits: [{ pos: "1#abc", lines: "no" }] }],
-      });
+        files: [{ filePath: fp, version: "whatever", edits: [{ op: "replace", pos: "1#abc", lines: "no" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).toContain("Error:");
       expect(result).toContain("File not found");
       expect(result).toContain("anchor-based");
@@ -313,8 +314,8 @@ describe("hashline integration", () => {
       const { version, lines, hw } = await readFileContent(fp);
       const hash = computeLineHashFor(lines[1], hw, 2);
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: `2#${hash}`, lines: "" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: `2#${hash}`, lines: "" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       const finalContent = await readFile(fp, "utf-8");
       // D5: replace with empty content deletes the line — no blank line remains
@@ -330,8 +331,8 @@ describe("hashline integration", () => {
       const { version, lines, hw } = await readFileContent(fp);
       const hash = computeLineHashFor(lines[1], hw, 2);
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: `2#${hash}`, lines: "modified" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: `2#${hash}`, lines: "modified" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
 
       const finalRaw = await readFile(fp, "utf-8");
@@ -346,8 +347,8 @@ describe("hashline integration", () => {
       await writeFile(fp, "line A\nline B\nline C\n", "utf-8");
       const { version } = await readFileContent(fp);
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, hashWidth: 999, edits: [{ pos: "1#abc", lines: "x" }] }],
-      });
+        files: [{ filePath: fp, version, hashWidth: 999, edits: [{ op: "replace", pos: "1#abc", lines: "x" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).toContain("Error:");
       expect(result).toContain("hashWidth mismatch");
     });
@@ -361,8 +362,8 @@ describe("hashline integration", () => {
       const { version, lines, hw } = await readFileContent(fp);
       const hash2 = computeLineHashFor(lines[1], hw, 2);
       const result = await createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: `2#${hash2}`, lines: "SECOND" }] }],
-      });
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: `2#${hash2}`, lines: "SECOND" }] }],
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       const final = await readFile(fp, "utf-8");
       expect(final).toBe("first\nSECOND\n\n");
@@ -378,11 +379,11 @@ describe("hashline integration", () => {
       const hash1 = computeLineHashFor(lines[0], hw, 1);
       const result = await createHashlineEditTool().execute({
         files: [{ filePath: fp, version, edits: [
-          { pos: `1#${hash1}`, lines: "MODIFIED A" },
-          { pos: `1#${hash1}`, lines: "MODIFIED A" },
-          { pos: `1#${hash1}`, lines: "MODIFIED A" },
+          { op: "replace", pos: `1#${hash1}`, lines: "MODIFIED A" },
+          { op: "replace", pos: `1#${hash1}`, lines: "MODIFIED A" },
+          { op: "replace", pos: `1#${hash1}`, lines: "MODIFIED A" },
         ] }],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       expect(result).toContain("deduplicated_edits: 2");
     });
@@ -398,10 +399,10 @@ describe("hashline integration", () => {
       // LINE#HASH| form (D4: echo stripping requires the literal prefix) → noop
       const result = await createHashlineEditTool().execute({
         files: [{ filePath: fp, version, edits: [
-          { pos: `1#${hash1}`, lines: "MODIFIED A" },
+          { op: "replace", pos: `1#${hash1}`, lines: "MODIFIED A" },
           { op: "append" as const, pos: `2#${hash2}`, lines: `2#${hash2}|line B` },
         ] }],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).not.toContain("Error:");
       expect(result).toContain("noop_edits: 1");
     });
@@ -415,7 +416,7 @@ describe("hashline integration", () => {
       const { version } = await readFileContent(fp);
       const result = await createHashlineEditTool().execute({
         files: [{ filePath: fp, version, edits: [{ op: "prepend" as const, lines: "" }] }],
-      });
+      }, makeToolContext(tmpDir));
       expect(result).toContain("Error:");
       expect(result).toContain("No changes were made");
     });

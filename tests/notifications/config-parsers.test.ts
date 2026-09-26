@@ -17,12 +17,12 @@ import {
   parseChannelConfig,
   parseEventConfig,
   parseEventConfigs,
-} from "../../src/notifications/config-parsers";
-import { NOTIFICATION_CHANNEL_KINDS, type LogChannelConfig } from "../../src/notifications/types";
+} from "../../src/notifications/config-parsers.ts";
+import { NOTIFICATION_CHANNEL_KINDS, type LogChannelConfig } from "../../src/notifications/types.ts";
 import {
   DEFAULT_NOTIFICATION_THROTTLE_WINDOW_MS,
   DEFAULT_NOTIFICATION_MAX_PER_WINDOW,
-} from "../../src/constants";
+} from "../../src/constants.ts";
 
 // ── asBoolean ───────────────────────────────────────────────────────────
 

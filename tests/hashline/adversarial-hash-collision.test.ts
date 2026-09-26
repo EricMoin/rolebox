@@ -48,6 +48,7 @@ import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool, computeLineHash } from "../../src/hashline/index.ts";
 import { HASH_WIDTH_ENV_VAR } from "../../src/hashline/constants.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ── Environment guard ──────────────────────────────────────────────
 // ROLEBOX_HASHLINE_WIDTH is process-global (same pattern as
@@ -137,7 +138,7 @@ function parseCorrections(out: string): string[] {
 
 /** Read through the real tool; return version + hashWidth + line→content array. */
 async function readState(filePath: string): Promise<{ version: string; hashWidth: number; diskLines: string[] }> {
-  const out = String(await createHashlineReadTool().execute({ filePath }));
+  const out = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
   const version = out.match(/^version: (\S+)$/m)?.[1] ?? "";
   const hashWidth = parseInt(out.match(/^hashWidth: (\d+)$/m)?.[1] ?? "0", 10);
   const diskLines = (await readFile(filePath, "utf-8")).split("\n");
@@ -201,8 +202,8 @@ describe("(a) fuzzy decoy — a colliding line nearer than the true target", () 
 
     const out = String(
       await createHashlineEditTool().execute({
-        files: [{ filePath, version: state.version, edits: [{ pos: staleAnchor, lines: "REPLACED" }] }],
-      }),
+        files: [{ filePath, version: state.version, edits: [{ op: "replace", pos: staleAnchor, lines: "REPLACED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     const corrections = parseCorrections(out);
     console.log(`[a] edit success=${!out.includes("Error:")} corrections_applied=${JSON.stringify(corrections)}`);
@@ -262,14 +263,14 @@ describe("(b) collision inside validateLineRefs — anchors are position+hash (d
     const filePath = join(tmpDir, "b-validate-collision.txt");
     // Caller's V1: line 2 holds `original` (hash h).
     await writeFile(filePath, ["stable-line-1", original, "stable-line-2", "stable-line-3"].join("\n") + "\n", "utf-8");
-    const v1Read = String(await createHashlineReadTool().execute({ filePath }));
+    const v1Read = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
     const v1Hash = v1Read.match(/^2#([A-Za-z0-9_-]+)\|/m)?.[1];
     expect(v1Hash).toBe(h);
 
     // External swap: line 2's content becomes the colliding string. Written
     // BEFORE the read so the caller's edit version matches the file.
     await writeFile(filePath, ["stable-line-1", swapped, "stable-line-2", "stable-line-3"].join("\n") + "\n", "utf-8");
-    const v2Read = String(await createHashlineReadTool().execute({ filePath }));
+    const v2Read = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
     const v2Version = v2Read.match(/^version: (\S+)$/m)?.[1] ?? "";
     const v2Hash = v2Read.match(/^2#([A-Za-z0-9_-]+)\|/m)?.[1];
     console.log(`[b] v1 line-2 hash = ${v1Hash}, v2 line-2 hash = ${v2Hash}, unchanged across swap = ${v1Hash === v2Hash}`);
@@ -277,8 +278,8 @@ describe("(b) collision inside validateLineRefs — anchors are position+hash (d
     // The caller edits with their V1 anchor + the CURRENT version.
     const out = String(
       await createHashlineEditTool().execute({
-        files: [{ filePath, version: v2Version, edits: [{ pos: `2#${v1Hash}`, lines: "REPLACED" }] }],
-      }),
+        files: [{ filePath, version: v2Version, edits: [{ op: "replace", pos: `2#${v1Hash}`, lines: "REPLACED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     console.log(`[b] edit success=${!out.includes("Error:")}`);
     const disk = (await readFile(filePath, "utf-8")).split("\n");
@@ -322,8 +323,8 @@ describe("(c) control — width escalation to 3 defeats the collision (control, 
     const staleAnchor = `2#${h3}`;
     const out = String(
       await createHashlineEditTool().execute({
-        files: [{ filePath, version: state.version, edits: [{ pos: staleAnchor, lines: "REPLACED" }] }],
-      }),
+        files: [{ filePath, version: state.version, edits: [{ op: "replace", pos: staleAnchor, lines: "REPLACED" }] }],
+      }, makeToolContext(tmpDir)),
     );
     const corrections = parseCorrections(out);
     console.log(`[c] stale anchor: ${staleAnchor}; edit success=${!out.includes("Error:")} corrections_applied=${JSON.stringify(corrections)}`);

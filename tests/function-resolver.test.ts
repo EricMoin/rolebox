@@ -2,10 +2,10 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveFunctions, loadFunctionContent, applyParams } from "../src/function/file-resolver";
-import { toPosixPath } from "../src/utils/paths";
-import type { ResolvedFunction } from "../src/types";
-import type { FunctionCall } from "../src/function/parser";
+import { resolveFunctions, loadFunctionContent, applyParams } from "../src/function/file-resolver.js";
+import { toPosixPath } from "../src/utils/paths.js";
+import type { ResolvedFunction } from "../src/types.js";
+import type { FunctionCall } from "../src/function/parser.js";
 
 let tmpRoots: string[] = [];
 

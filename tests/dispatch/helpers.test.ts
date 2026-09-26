@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { makeTask, createMockClient, parentContext } from "./helpers";
+import { makeTask, createMockClient, parentContext, makeSessionInfo } from "./helpers.ts";
 
 describe("makeTask", () => {
   it("returns default values", () => {
@@ -30,15 +30,17 @@ describe("createMockClient", () => {
   it("returns a client with default mocked session.create", async () => {
     const client = createMockClient();
     const result = await client.create({ directory: "/tmp" });
-    expect(result).toEqual({ id: "test-session-1" });
+    // create() is declared Promise<SessionInfo | null> — assert the full shape
+    // the interface requires, not a bare { id } production never returns.
+    expect(result).toEqual(makeSessionInfo());
   });
 
   it("accepts overrides for session methods", async () => {
     const client = createMockClient({
-      sessionCreate: () => Promise.resolve({ id: "custom-id" }),
+      sessionCreate: () => Promise.resolve(makeSessionInfo({ id: "custom-id" })),
     });
     const result = await client.create({ directory: "/tmp" });
-    expect(result).toEqual({ id: "custom-id" });
+    expect(result).toEqual(makeSessionInfo({ id: "custom-id" }));
   });
 });
 

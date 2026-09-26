@@ -6,21 +6,27 @@ import { __resetForTest } from "../../src/logger.ts";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "./helpers.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 function makeContext(overrides?: Partial<PluginContext>): PluginContext {
   return {
-    client: {} as any,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp",
     directory: "/tmp",
     core: undefined as any,
     bus: new EventBus(),
-    capabilities: undefined,
     ...overrides,
+    // `session` and `capabilities` are required on PluginContext
+    // (src/core/context.ts:14,40) — an undeclared host resolves to the minimal
+    // capability set before the context is built, never to undefined. They are
+    // restated after the Partial<PluginContext> spread, which would otherwise
+    // redeclare them as possibly undefined.
+    session: overrides?.session ?? makeSessionClient(),
+    capabilities: overrides?.capabilities ?? opencodeCapabilities(),
   };
 }
 

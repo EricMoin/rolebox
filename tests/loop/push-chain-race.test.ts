@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 
 // ── Race Simulator Adapter ─────────────────────────────────────────────────
 //

@@ -3,7 +3,7 @@ import { describe, it, expect } from "bun:test";
 describe("execute.md kernel function", () => {
   it("resolves with kernel frontmatter fields", async () => {
     const content = await Bun.file("functions/execute.md").text();
-    const { parseFrontmatter } = await import("../src/resolver/frontmatter");
+    const { parseFrontmatter } = await import("../src/resolver/frontmatter.js");
     const { metadata, body } = parseFrontmatter(content);
 
     expect((metadata as any).consumes).toBe("plan");
@@ -20,7 +20,7 @@ describe("execute.md kernel function", () => {
   });
 
   it("extracts body from CRLF content (Windows autocrlf tolerance)", async () => {
-    const { parseFrontmatter } = await import("../src/resolver/frontmatter");
+    const { parseFrontmatter } = await import("../src/resolver/frontmatter.js");
     // Fixture whose newlines are CRLF, as git `core.autocrlf` would check out
     // on Windows. The parser must normalize CRLF to LF and still extract the
     // body (and metadata) correctly.

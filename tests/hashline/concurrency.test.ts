@@ -8,6 +8,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { createHashlineEditTool } from "../../src/hashline/index.ts";
 import { verifyFileUnchanged } from "../../src/hashline/atomic-write.ts";
 import { computeFileVersion, canonicalizeFileText, hashWidthForLineCount } from "../../src/hashline/hash.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 const BASE64_DICT = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 
@@ -64,14 +65,14 @@ describe("hashline_edit concurrency", () => {
         const hash2 = computeLineHashFor(lines[1], hw, 2);
         const hash3 = computeLineHashFor(lines[2], hw, 3);
 
-        const [r1, r2] = await Promise.all([
+        const [r1, r2] = (await Promise.all([
           createHashlineEditTool().execute({
-            files: [{ filePath: fp, version, edits: [{ pos: `2#${hash2}`, lines: "EDITED BY ONE" }] }],
-          }),
+            files: [{ filePath: fp, version, edits: [{ op: "replace", pos: `2#${hash2}`, lines: "EDITED BY ONE" }] }],
+          }, makeToolContext(dir)),
           createHashlineEditTool().execute({
-            files: [{ filePath: fp, version, edits: [{ pos: `3#${hash3}`, lines: "EDITED BY TWO" }] }],
-          }),
-        ]);
+            files: [{ filePath: fp, version, edits: [{ op: "replace", pos: `3#${hash3}`, lines: "EDITED BY TWO" }] }],
+          }, makeToolContext(dir)),
+        ])).map((r) => String(r));
 
         const ok = [r1, r2].filter((r) => !r.includes("Error:"));
         const failed = [r1, r2].filter((r) => r.includes("Error:"));
@@ -112,7 +113,7 @@ describe("hashline_edit concurrency", () => {
         });
         const result = await tool.execute({
           files: [{ filePath: fp, version, edits: [{ op: "append" as const, lines: "appended" }] }],
-        });
+        }, makeToolContext(dir));
 
         expect(result).toContain("Error:");
         expect(result).toContain("File version mismatch");
@@ -133,7 +134,7 @@ describe("hashline_edit concurrency", () => {
         });
         const result = await tool.execute({
           files: [{ filePath: fp, version: "whatever", edits: [{ op: "append" as const, lines: "new content" }] }],
-        });
+        }, makeToolContext(dir));
 
         expect(result).toContain("Error:");
         expect(result).toContain("expected to be created");
@@ -176,20 +177,20 @@ describe("hashline_edit concurrency", () => {
         const ca = await readFileContent(fa);
         const cb = await readFileContent(fb);
 
-        const [r1, r2] = await Promise.all([
+        const [r1, r2] = (await Promise.all([
           createHashlineEditTool().execute({
             files: [
               { filePath: fa, version: ca.version, edits: [{ op: "append" as const, lines: "X" }] },
               { filePath: fb, version: cb.version, edits: [{ op: "append" as const, lines: "Y" }] },
             ],
-          }),
+          }, makeToolContext(dir)),
           createHashlineEditTool().execute({
             files: [
               { filePath: fb, version: cb.version, edits: [{ op: "append" as const, lines: "Z" }] },
               { filePath: fa, version: ca.version, edits: [{ op: "append" as const, lines: "W" }] },
             ],
-          }),
-        ]);
+          }, makeToolContext(dir)),
+        ])).map((r) => String(r));
 
         const ok = [r1, r2].filter((r) => !r.includes("Error:"));
         const conflicted = [r1, r2].filter((r) => r.includes("Error:"));
@@ -230,7 +231,7 @@ describe("hashline_edit concurrency", () => {
         });
         const result = await tool.execute({
           files: [{ filePath: fp, version, edits: [{ op: "append" as const, lines: "x" }] }],
-        });
+        }, makeToolContext(dir));
         expect(result).toContain("Error:");
         expect(result).toContain("simulated pipeline failure");
         // The failed call wrote nothing.
@@ -240,8 +241,8 @@ describe("hashline_edit concurrency", () => {
         const fresh = await readFileContent(fp);
         const hash1 = computeLineHashFor(fresh.lines[0], fresh.hw, 1);
         const retry = await createHashlineEditTool().execute({
-          files: [{ filePath: fp, version: fresh.version, edits: [{ pos: `1#${hash1}`, lines: "CHANGED" }] }],
-        });
+          files: [{ filePath: fp, version: fresh.version, edits: [{ op: "replace", pos: `1#${hash1}`, lines: "CHANGED" }] }],
+        }, makeToolContext(dir));
         expect(retry).not.toContain("Error:");
         expect(await readFile(fp, "utf-8")).toBe("CHANGED\n");
       });
@@ -260,7 +261,7 @@ describe("hashline_edit concurrency", () => {
             { filePath: fp, version, edits: [{ op: "append" as const, lines: "A" }] },
             { filePath: fp, version, edits: [{ op: "append" as const, lines: "B" }] },
           ],
-        });
+        }, makeToolContext(dir));
 
         expect(result).toContain("Error:");
         expect(result).toContain("Duplicate filePath");
@@ -282,7 +283,7 @@ describe("hashline_edit concurrency", () => {
               { filePath: fp, version, edits: [{ op: "append" as const, lines: "A" }] },
               { filePath: fpAlias, version, edits: [{ op: "append" as const, lines: "B" }] },
             ],
-          });
+          }, makeToolContext(dir));
 
           expect(result).toContain("Error:");
           expect(result).toContain("Duplicate filePath");

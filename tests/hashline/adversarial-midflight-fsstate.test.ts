@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // Adversarial mid-flight filesystem-state suite for hashline_edit.
 //
@@ -47,7 +48,7 @@ afterAll(async () => {
 
 /** Read a file with hashline_read and return version + per-line anchors. */
 async function readInfo(filePath: string): Promise<{ version: string; anchors: Record<number, string> }> {
-  const out = String(await createHashlineReadTool().execute({ filePath }));
+  const out = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
   const m = out.match(/^version: (\S+)$/m);
   if (!m) throw new Error(`no version in hashline_read output for ${filePath}:\n${out}`);
   const anchors: Record<number, string> = {};
@@ -83,7 +84,7 @@ describe("hashline adversarial mid-flight filesystem state", () => {
           },
         }).execute({
           files: [{ filePath: fp, version, edits: [{ op: "append" as const, lines: "AX" }] }],
-        }),
+        }, makeToolContext(tmpDir)),
       );
     } catch (err) {
       throw new Error(
@@ -127,7 +128,7 @@ describe("hashline adversarial mid-flight filesystem state", () => {
           },
         }).execute({
           files: [{ filePath: fp, version, edits: [{ op: "append" as const, lines: "BX" }] }],
-        }),
+        }, makeToolContext(tmpDir)),
       );
     } catch (err) {
       throw new Error(
@@ -171,8 +172,8 @@ describe("hashline adversarial mid-flight filesystem state", () => {
           await symlink(other, fp);
         },
       }).execute({
-        files: [{ filePath: fp, version, edits: [{ pos: anchors[1], lines: "EDITED" }] }],
-      }),
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: anchors[1], lines: "EDITED" }] }],
+      }, makeToolContext(tmpDir)),
     );
 
     console.log("[CLASSIFY:(c)] edit result:\n" + r);
@@ -214,7 +215,7 @@ describe("hashline adversarial mid-flight filesystem state", () => {
         },
       }).execute({
         files: [{ filePath: fp, version, edits: [{ op: "append" as const, lines: "DX" }] }],
-      }),
+      }, makeToolContext(tmpDir)),
     );
 
     console.log("[CLASSIFY:(d)] observed result message:\n" + r);

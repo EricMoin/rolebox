@@ -13,11 +13,11 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { createPathsMockPayload } from "../helpers/paths-mock";
+import { createPathsMockPayload } from "../helpers/paths-mock.ts";
 import { tmpdir } from "node:os";
 import { mock } from "bun:test";
-import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification";
-import type { DispatchTask } from "../../src/dispatch/types";
+import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 afterEach(() => {
   clearSentFinalNotifies();
@@ -169,7 +169,7 @@ describe("T5: depth survives serialize→recover", () => {
       getDataDir: () => dir,
     }));
 
-    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store.ts");
 
     const store = new TaskStateStore(dir);
     const task = makeDepthTask({ id: "persist-test", depth: 2, sessionId: "ses_persist" });
@@ -196,7 +196,7 @@ describe("T5: depth survives serialize→recover", () => {
       getDataDir: () => dir,
     }));
 
-    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store.ts");
 
     const store = new TaskStateStore(dir);
     const task = makeDepthTask({ id: "no-depth-task", sessionId: "ses_old" });
@@ -243,6 +243,8 @@ function makeDepthTask(overrides: Partial<DispatchTask> & Record<string, unknown
     prompt: "do something",
     startedAt: new Date(),
     progress: { lastUpdate: new Date(), toolCalls: 0 },
+    // Required by DispatchTask; 0 = normal priority (production default).
+    priority: 0,
     ...overrides,
   };
 }

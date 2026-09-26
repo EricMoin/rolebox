@@ -14,14 +14,12 @@ it("debug researcher subagent prompt", async () => {
   cpSync(path.join(examplesDir, "team-lead"), path.join(roleboxDir, "team-lead"), { recursive: true });
 
   const roleFunctionsMap = new Map();
-  const roleGraphMap = new Map();
   const result = await bootstrapRoles({
     roleboxDir,
     globalSkillsDir: path.join(tmpDir, "skills"),
     configDir: tmpDir,
     builtinDir: path.join(import.meta.dir, "..", "functions"),
     roleFunctionsMap,
-    roleGraphMap,
   });
 
   console.log(`Resolved roles: ${result.resolvedRoles.length}`);

@@ -22,9 +22,9 @@ import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 import type {
   EngineGraphSnapshot,
   GraphNodeSnapshot,
-} from "../../src/cli/commands/monitor/monitor-reader-types";
-import type { ThemeColors } from "../../src/tui/helpers";
-import { G_RUNNING, G_DONE } from "../../src/tui/helpers";
+} from "../../src/cli/commands/monitor/monitor-reader-types.ts";
+import type { ThemeColors } from "../../src/tui/helpers.ts";
+import { G_RUNNING, G_DONE } from "../../src/tui/helpers.ts";
 
 // Same transform the TUI build applies (`scripts/build-tui.ts`).
 Bun.plugin(createSolidTransformPlugin({ moduleName: "@opentui/solid" }));
@@ -38,7 +38,7 @@ type EngineGraphActivityProps = {
 let renderEngineGraphActivity: (props: EngineGraphActivityProps) => unknown;
 
 beforeAll(async () => {
-  const mod = await import("../../src/tui/components/Activity");
+  const mod = await import("../../src/tui/components/Activity.tsx");
   renderEngineGraphActivity = mod.renderEngineGraphActivity;
 });
 

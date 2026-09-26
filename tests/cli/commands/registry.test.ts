@@ -3,14 +3,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
-import type { RegistryManifest } from "../../../src/cli/types";
+import type { RegistryManifest } from "../../../src/cli/types.ts";
 
 const regConfigDir = mkdtempSync(join(tmpdir(), "rolebox-reg-mod-config-"));
 const regDataDir = mkdtempSync(join(tmpdir(), "rolebox-reg-mod-data-"));
 process.env.XDG_CONFIG_HOME = regConfigDir;
 process.env.XDG_DATA_HOME = regDataDir;
 
-import { createPathsMockPayload } from "../../helpers/paths-mock";
+import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
@@ -108,7 +108,7 @@ function configPath(): string {
 
 describe("registry list", () => {
   it("shows the default oh-my-role registry when no config exists", async () => {
-    const { registryListFn } = await import("../../../src/cli/commands/registry");
+    const { registryListFn } = await import("../../../src/cli/commands/registry.ts");
     const c = capture(async () => registryListFn());
     await c.run();
 
@@ -117,7 +117,7 @@ describe("registry list", () => {
   });
 
   it("lists registries without a subcommand (defaults to list)", async () => {
-    const { registryListFn } = await import("../../../src/cli/commands/registry");
+    const { registryListFn } = await import("../../../src/cli/commands/registry.ts");
     const c = capture(async () => registryListFn());
     await c.run();
 
@@ -132,7 +132,7 @@ describe("registry add", () => {
   });
 
   it("adds a new registry and persists to config", async () => {
-    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     const c = capture(async () =>
       registryAddFn("https://github.com/my-org/my-repo"),
     );
@@ -147,12 +147,12 @@ describe("registry add", () => {
   });
 
   it("rejects an invalid GitHub URL", async () => {
-    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await expect(registryAddFn("not-a-url")).rejects.toThrow(/Invalid GitHub URL/);
   });
 
   it("rejects a duplicate registry name", async () => {
-    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await registryAddFn("https://github.com/owner/dup-registry");
     await expect(
       registryAddFn("https://github.com/other/dup-registry"),
@@ -160,12 +160,12 @@ describe("registry add", () => {
   });
 
   it("rejects when no URL provided", async () => {
-    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await expect(registryAddFn("")).rejects.toThrow(/Invalid GitHub URL/);
   });
 
   it("validates the URL by fetching registry.yaml", async () => {
-    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     const c = capture(async () =>
       registryAddFn("https://github.com/validated/reg"),
     );
@@ -179,7 +179,7 @@ describe("registry add", () => {
     mockFetchManifest.mockReset();
     mockFetchManifest.mockRejectedValue(new Error("not found"));
 
-    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await expect(
       registryAddFn("https://github.com/bad/registry"),
     ).rejects.toThrow(/Could not validate registry/);
@@ -207,7 +207,7 @@ describe("registry remove", () => {
       "utf-8",
     );
 
-    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry.ts");
     const c = capture(async () => registryRemoveFn("custom-registry"));
     await c.run();
 
@@ -220,17 +220,17 @@ describe("registry remove", () => {
   });
 
   it("refuses to remove the default registry", async () => {
-    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry.ts");
     expect(() => registryRemoveFn("oh-my-role")).toThrow(/Cannot remove default registry/);
   });
 
   it("rejects removal of non-existent registry", async () => {
-    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry.ts");
     expect(() => registryRemoveFn("nonexistent-registry")).toThrow(/not found/);
   });
 
   it("rejects removal when no name provided", async () => {
-    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry.ts");
     expect(() => registryRemoveFn("")).toThrow(/not found/);
   });
 });

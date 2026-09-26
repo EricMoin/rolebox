@@ -2,9 +2,9 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FunctionRuntimeManager } from "../src/function/runtime-state";
-import { ArtifactStore } from "../src/function/artifact-store";
-import { FunctionContext } from "../src/function/context";
+import { FunctionRuntimeManager } from "../src/function/runtime-state.js";
+import { ArtifactStore } from "../src/function/artifact-store.js";
+import { FunctionContext } from "../src/function/context.js";
 
 describe("FunctionContext", () => {
   function setup(rtDir: string, wsDir: string, lastMsg: string | null = null) {

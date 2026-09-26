@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { load } from "js-yaml";
-import type { RegistryManifest } from "../../../src/cli/types";
+import type { RegistryManifest } from "../../../src/cli/types.ts";
 
 const mockFetchManifest = mock();
 const mockDownloadRole = mock();

@@ -1,16 +1,20 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/resolver/env-resolver";
-import { createSubLogger } from "../src/logger";
+import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/resolver/env-resolver.js";
+import { Logger } from "tslog";
+import type { ILogObj } from "tslog";
+import { createSubLogger } from "../src/logger.js";
 
 const capturedWarnings: unknown[][] = [];
 
 beforeAll(() => {
-  __setLoggerForTest({
-    warn: (...args: unknown[]) => { capturedWarnings.push(args); },
-    debug: () => {},
-    error: () => {},
-    info: (...args: unknown[]) => { capturedWarnings.push(args); },
-  });
+  // A real Logger with its emitting methods replaced, so the double satisfies
+  // the same ILogger surface env-resolver's log seam is declared against.
+  const mockLog = new Logger<ILogObj>({ type: "hidden", name: "env-resolver-test" });
+  mockLog.warn = (...args: unknown[]) => { capturedWarnings.push(args); return undefined; };
+  mockLog.debug = () => undefined;
+  mockLog.error = () => undefined;
+  mockLog.info = (...args: unknown[]) => { capturedWarnings.push(args); return undefined; };
+  __setLoggerForTest(mockLog);
 });
 
 afterAll(() => {
@@ -18,7 +22,7 @@ afterAll(() => {
 });
 
 const ORIGINAL_HOME = process.env.HOME;
-const ORIGINAL_PATH = process.env.PATH;
+const ORIGINAL_PATH = process.env.PATH ?? "";
 const FIXED_HOME = "/home/test";
 
 beforeEach(() => {

@@ -36,6 +36,8 @@ import {
 } from "../../src/recovery/startup-check.ts";
 import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/concurrency/state-lock.ts";
 import { __resetForTest } from "../../src/logger.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { makeSessionClient } from "../core/helpers.ts";
 
 // ── Test lifecycle ──────────────────────────────────────────────────
 
@@ -79,16 +81,16 @@ function makeService(
   };
 }
 
-function makeContext(core: PluginCoreLike): PluginContext {
+function makeContext(core: PluginCore): PluginContext {
   return {
-    client: {} as any,
+    session: makeSessionClient(),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp/test-crash-recovery",
     directory: "/tmp/test-crash-recovery",
     core,
     bus: core.getBus(),
+    capabilities: opencodeCapabilities(),
   };
 }
 
@@ -283,14 +285,14 @@ describe("(c) Combined corruption + stale lock", () => {
     core.registerService(svcA);
 
     const ctx: PluginContext = {
-      client: {} as any,
+      session: makeSessionClient(),
       resolvedRoles: [],
       roleFunctionsMap: new Map(),
-      roleGraphMap: new Map(),
       rawDirectory: dir,
       directory: dir,
-      core: core as any,
+      core,
       bus: core.getBus(),
+      capabilities: opencodeCapabilities(),
     };
     await expect(core.init(ctx)).resolves.toBeUndefined();
   });

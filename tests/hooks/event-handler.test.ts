@@ -2,16 +2,44 @@ import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { handleEvent } from "../../src/hooks/event-handler.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
+import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Doubles for the `runHooks` port on `HookDeps.customHooks` / `HookDeps.builtInHooks`.
+// The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
+// in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
+// src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
+// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+function makeCustomRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+    ) => Promise.resolve(),
+  );
+}
+
+function makeBuiltInRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+      _builtinConfig: Record<string, boolean>,
+    ) => Promise.resolve(),
+  );
+}
+
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
     session: { messages: mock(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {
@@ -44,7 +72,7 @@ function makeEvent(type: string, props?: Record<string, unknown>): any {
 
 describe("handleEvent — hook lifecycle phases", () => {
   it("calls built-in hooks before and after for all event types", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
     const deps = minimalDeps({ builtInHooks: { runHooks: builtInRunHooks } as any });
 
     await handleEvent(
@@ -60,8 +88,8 @@ describe("handleEvent — hook lifecycle phases", () => {
   });
 
   it("calls custom hooks before and after for all event types", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
+    const builtInRunHooks = makeBuiltInRunHooks();
     const deps = minimalDeps({
       customHooks: { runHooks: customRunHooks } as any,
       builtInHooks: { runHooks: builtInRunHooks } as any,
@@ -81,7 +109,7 @@ describe("handleEvent — hook lifecycle phases", () => {
   });
 
   it("passes event type and properties to runHooks", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
     const deps = minimalDeps({ customHooks: { runHooks: customRunHooks } as any });
 
     const props = { sessionID: "sess-1", status: "completed" };
@@ -423,7 +451,7 @@ describe("handleEvent — unhandled event types", () => {
 
 describe("handleEvent — registration/unregister pattern", () => {
   it("calls builtInHooks.runHooks for registration check", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
 
     await handleEvent(
       makeEvent("session.idle", { sessionID: "sess-1" }),

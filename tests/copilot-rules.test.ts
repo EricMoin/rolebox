@@ -20,8 +20,8 @@ import {
   evaluateRules,
   DEFAULT_RULE_REPLIES,
   type RuleDecision,
-} from "../src/copilot/rules";
-import type { CopilotRule } from "../src/copilot/types";
+} from "../src/copilot/rules.js";
+import type { CopilotRule } from "../src/copilot/types.js";
 
 // ── Default replies ─────────────────────────────────────────────────
 

@@ -11,8 +11,8 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
-import { memoryDbPath } from "../../../src/utils/state-paths";
-import { ensureMemorySchema } from "../../../src/memory/schema";
+import { memoryDbPath } from "../../../src/utils/state-paths.ts";
+import { ensureMemorySchema } from "../../../src/memory/schema.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -127,7 +127,7 @@ async function invokeClean(
   args: Record<string, unknown>,
 ): Promise<void> {
   const { cleanCommand } = await import(
-    "../../../src/cli/commands/memory/memory-clean"
+    "../../../src/cli/commands/memory/memory-clean.ts"
   );
   const run = cleanCommand.run as (ctx: Record<string, unknown>) => Promise<void>;
   await run({

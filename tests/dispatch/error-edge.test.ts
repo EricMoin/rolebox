@@ -8,10 +8,10 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractSessionErrorMessage } from "../../src/dispatch/core/error-utils";
-import { withTimeout, TimeoutError } from "../../src/dispatch/core/with-timeout";
-import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
-import type { DispatchTask } from "../../src/dispatch/types";
+import { extractSessionErrorMessage } from "../../src/dispatch/core/error-utils.ts";
+import { withTimeout, TimeoutError } from "../../src/dispatch/core/with-timeout.ts";
+import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 // ─── Unrecoverable session errors ────────────────────────────────────
 
@@ -162,6 +162,8 @@ describe("TaskStateStore — persistence edge cases", () => {
       depth: 1,
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      // Required by DispatchTask; 0 = normal priority (production default).
+      priority: 0,
       ...overrides,
     };
   }

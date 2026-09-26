@@ -2,6 +2,7 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { SessionService } from "../../src/core/services/session-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { __resetForTest } from "../../src/logger.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
@@ -25,16 +26,17 @@ function makeMinimalContext(): PluginContext {
     abort: mock(() => Promise.resolve(false)),
   };
   return {
-    client: undefined as any,
     session: sessionStub as any,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: "/tmp",
     directory: "/tmp",
     core: undefined as any,
     bus: undefined as any,
-    capabilities: undefined,
+    // PluginContext.capabilities is required and always present on a real
+    // context (src/core/context.ts:35-40); an undeclared host resolves to
+    // the minimal set before the context is built, never to undefined.
+    capabilities: opencodeCapabilities(),
   };
 }
 

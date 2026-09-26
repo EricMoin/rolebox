@@ -7,6 +7,7 @@ import {
   createHashlineReadTool,
   createHashlineEditTool,
 } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ---------------------------------------------------------------------------
 // D1 (defect under test): version skew between hashline_edit's returned
@@ -99,15 +100,15 @@ function anchorFor(read: ParsedRead, lineNum: number): string {
 const readTool = createHashlineReadTool();
 
 async function readVersion(fp: string): Promise<string> {
-  return parseReadOutput(await readTool.execute({ filePath: fp })).version;
+  return parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir)))).version;
 }
 
 async function editLineTwo(fp: string, read1: ParsedRead, replacement: string): Promise<string> {
-  return createHashlineEditTool().execute({
+  return String(await createHashlineEditTool().execute({
     files: [
-      { filePath: fp, version: read1.version, edits: [{ pos: anchorFor(read1, 2), lines: replacement }] },
+      { filePath: fp, version: read1.version, edits: [{ op: "replace", pos: anchorFor(read1, 2), lines: replacement }] },
     ],
-  });
+  }, makeToolContext(tmpDir)));
 }
 
 // Anchorless append used for the "second edit" probes: the ONLY gate is the
@@ -115,9 +116,9 @@ async function editLineTwo(fp: string, read1: ParsedRead, replacement: string): 
 // validation at hashline-edit.ts:132-141 runs before anchor validation at
 // :167-168).
 async function appendTail(fp: string, version: string): Promise<string> {
-  return createHashlineEditTool().execute({
+  return String(await createHashlineEditTool().execute({
     files: [{ filePath: fp, version, edits: [{ op: "append", lines: "TAIL" }] }],
-  });
+  }, makeToolContext(tmpDir)));
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +129,7 @@ describe("adversarial version roundtrip (D1: trailing-newline version skew)", ()
       const fp = join(tmpDir, "a-single-trailing-nl.txt");
       await writeFile(fp, "alpha\nbeta\ngamma\n", "utf-8");
 
-      const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+      const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
       const editOut = await editLineTwo(fp, read1, "BETA_EDITED");
 
       // Sanity: the edit itself succeeded and wrote the file.
@@ -151,7 +152,7 @@ describe("adversarial version roundtrip (D1: trailing-newline version skew)", ()
       const fp = join(tmpDir, "b-second-edit.txt");
       await writeFile(fp, "one\ntwo\nthree\n", "utf-8");
 
-      const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+      const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
       const edit1 = await editLineTwo(fp, read1, "TWO_EDITED");
       expect(edit1).not.toContain("Error:");
       const v1 = parseEditVersion(edit1);
@@ -193,7 +194,7 @@ describe("adversarial version roundtrip (D1: trailing-newline version skew)", ()
         const fp = join(tmpDir, `c-${slug}-roundtrip.txt`);
         await writeFile(fp, v.content, "utf-8");
 
-        const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+        const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
         const editOut = await editLineTwo(fp, read1, "BETA_EDITED");
 
         expect(editOut).not.toContain("Error:");
@@ -209,7 +210,7 @@ describe("adversarial version roundtrip (D1: trailing-newline version skew)", ()
         const fp = join(tmpDir, `c-${slug}-second-edit.txt`);
         await writeFile(fp, v.content, "utf-8");
 
-        const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+        const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
         const edit1 = await editLineTwo(fp, read1, "BETA_EDITED");
         expect(edit1).not.toContain("Error:");
         const v1 = parseEditVersion(edit1);
@@ -227,7 +228,7 @@ describe("adversarial version roundtrip (D1: trailing-newline version skew)", ()
       const fp = join(tmpDir, "d-no-trailing-nl-roundtrip.txt");
       await writeFile(fp, "alpha\nbeta\ngamma", "utf-8");
 
-      const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+      const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
       const editOut = await editLineTwo(fp, read1, "BETA_EDITED");
 
       expect(editOut).not.toContain("Error:");
@@ -243,7 +244,7 @@ describe("adversarial version roundtrip (D1: trailing-newline version skew)", ()
       const fp = join(tmpDir, "d-no-trailing-nl-second-edit.txt");
       await writeFile(fp, "one\ntwo\nthree", "utf-8");
 
-      const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+      const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
       const edit1 = await editLineTwo(fp, read1, "TWO_EDITED");
       expect(edit1).not.toContain("Error:");
       const v1 = parseEditVersion(edit1);

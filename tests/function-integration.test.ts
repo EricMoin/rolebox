@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { FunctionSessionState } from "../src/function/session-state";
-import { parseFunctionActivation } from "../src/function/parser";
-import { buildFunctionBlock } from "../src/prompt/builder";
-import type { ResolvedFunction } from "../src/types";
+import { FunctionSessionState } from "../src/function/session-state.js";
+import { parseFunctionActivation } from "../src/function/parser.js";
+import { buildFunctionBlock } from "../src/prompt/builder.js";
+import type { ResolvedFunction } from "../src/types.js";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveFunctions } from "../src/function/file-resolver";
+import { resolveFunctions } from "../src/function/file-resolver.js";
 
 let tmpRoots: string[] = [];
 let state: FunctionSessionState;

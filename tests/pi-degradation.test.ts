@@ -12,7 +12,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -21,6 +21,7 @@ import { LoopService } from "../src/core/services/loop-service.ts";
 import { EventBus } from "../src/core/event-bus.ts";
 import { minimalCapabilities, opencodeCapabilities, piCapabilities } from "../src/platform/capabilities.ts";
 import type { PluginCoreLike } from "../src/core/service.ts";
+import type { CanonicalToolContext } from "../src/platform/types.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ function createMockSessionClient() {
  */
 function createServiceCtx(
   core: PluginCoreLike,
-  capabilities?: ReturnType<typeof piCapabilities>,
+  capabilities: ReturnType<typeof piCapabilities>,
   resolvedRoles?: any[],
 ) {
   const bus = new EventBus();
@@ -79,7 +80,6 @@ function createServiceCtx(
     session: undefined as any,
     resolvedRoles: resolvedRoles ?? [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: dir,
     directory: dir,
     core,
@@ -87,6 +87,18 @@ function createServiceCtx(
     capabilities,
   };
 }
+
+/** Minimal host context for invoking a degraded stub tool. */
+const stubToolContext: CanonicalToolContext = {
+  sessionID: "test",
+  messageID: "",
+  agent: "test",
+  directory: process.cwd(),
+  worktree: process.cwd(),
+  abort: new AbortController().signal,
+  metadata: () => {},
+  ask: async () => {},
+};
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -163,7 +175,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch.execute();
+    const result = await tools.dispatch.execute({}, stubToolContext);
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -176,7 +188,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_output.execute();
+    const result = await tools.dispatch_output.execute({}, stubToolContext);
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -189,7 +201,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_cancel.execute();
+    const result = await tools.dispatch_cancel.execute({}, stubToolContext);
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -202,7 +214,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_metrics.execute();
+    const result = await tools.dispatch_metrics.execute({}, stubToolContext);
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -215,7 +227,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_status.execute();
+    const result = await tools.dispatch_status.execute({}, stubToolContext);
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 

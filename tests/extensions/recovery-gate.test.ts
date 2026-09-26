@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { KNOWN_STRATEGIES, addKnownStrategy } from "../../src/recovery/config";
+import { KNOWN_STRATEGIES, addKnownStrategy } from "../../src/recovery/config.ts";
 
 describe("Recovery Strategies YAML Gate", () => {
   it("built-in strategies exist in KNOWN_STRATEGIES", () => {

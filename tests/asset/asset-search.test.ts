@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import type { ResolvedRole } from "../../src/types.ts";
 import { SkillScope, FunctionSource } from "../../src/constants.ts";
 import { createAssetSearchTool } from "../../src/asset/asset-search.ts";
+import { makeToolContext } from "./helpers.ts";
 
 function makeRole(id: string, overrides: Record<string, any> = {}): ResolvedRole {
   return {
@@ -52,7 +53,7 @@ describe("asset-search", () => {
     it("finds assets by keyword in name", async () => {
       const role = makeRole("test", { functions: [buildFn("deploy-app", "Deploy to production")] });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "deploy", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "deploy", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("deploy-app");
       expect(result).toContain("Found 1 matching asset");
     });
@@ -60,7 +61,7 @@ describe("asset-search", () => {
     it("finds assets by keyword in description", async () => {
       const role = makeRole("test", { functions: [buildFn("build", "Compile and package the app")] });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "compile", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "compile", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("build");
     });
 
@@ -73,7 +74,7 @@ describe("asset-search", () => {
         ],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "deploy application", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "deploy application", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("deploy-app");
       expect(result).not.toContain("build-app");
       expect(result).not.toContain("test-runner");
@@ -82,13 +83,13 @@ describe("asset-search", () => {
     it("returns empty message when no assets match", async () => {
       const role = makeRole("test", { functions: [buildFn("deploy", "Deploy the app")] });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "nonexistent", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "nonexistent", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toBe('No assets matching "nonexistent".');
     });
 
     it("returns empty message for empty role array", async () => {
       const tool = createAssetSearchTool([]);
-      const result: string = await tool.execute({ query: "anything", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "anything", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toBe("No assets found. Make sure roles are properly loaded.");
     });
   });
@@ -102,7 +103,7 @@ describe("asset-search", () => {
         ],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "search", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "search", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       const idxSearch = result.indexOf("search-index");
       const idxNotify = result.indexOf("notify");
       expect(idxSearch).toBeGreaterThan(-1);
@@ -119,7 +120,7 @@ describe("asset-search", () => {
         ],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "build", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "build", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       // Find the first data row with "build" — the exact match should be first
       const buildRowIndex = result.indexOf("| build |");
       const buildImageRowIndex = result.indexOf("| build-image |");
@@ -137,7 +138,7 @@ describe("asset-search", () => {
         ),
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "function", type: "all", limit: 3 }) as any;
+      const result: string = await tool.execute({ query: "function", type: "all", limit: 3, format: "markdown" }, makeToolContext()) as string;
       const matchCount = (result.match(/\| func-/g) || []).length;
       expect(matchCount).toBeLessThanOrEqual(3);
     });
@@ -149,7 +150,7 @@ describe("asset-search", () => {
         ),
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "function", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "function", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).not.toContain("showing first");
     });
 
@@ -160,7 +161,7 @@ describe("asset-search", () => {
         ),
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "function", type: "all", limit: 3 }) as any;
+      const result: string = await tool.execute({ query: "function", type: "all", limit: 3, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("showing first 3");
     });
   });
@@ -173,7 +174,7 @@ describe("asset-search", () => {
         references: [buildRef("my-ref", "A reference")],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "my", type: "function", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "my", type: "function", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("my-fn");
       expect(result).not.toContain("my-skill");
     });
@@ -185,7 +186,7 @@ describe("asset-search", () => {
         references: [buildRef("my-ref", "A reference")],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "my", type: "skill", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "my", type: "skill", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("my-skill");
       expect(result).not.toContain("my-fn");
     });
@@ -197,7 +198,7 @@ describe("asset-search", () => {
         references: [buildRef("my-ref", "A reference")],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "my", type: "reference", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "my", type: "reference", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("my-ref");
       expect(result).not.toContain("my-fn");
     });
@@ -219,7 +220,7 @@ describe("asset-search", () => {
         }],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "child", type: "all", limit: 20 }) as any;
+      const result: string = await tool.execute({ query: "child", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
       expect(result).toContain("child-fn");
       expect(result).toContain("parent/child");
     });

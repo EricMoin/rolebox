@@ -13,9 +13,9 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
-import type { LockEntry } from "../../../src/cli/types";
-import { createPathsMockPayload } from "../../helpers/paths-mock";
-import { createDirSymlink } from "../../helpers/symlink";
+import type { LockEntry } from "../../../src/cli/types.ts";
+import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
+import { createDirSymlink } from "../../helpers/symlink.ts";
 
 let configTmp: string;
 let dataTmp: string;
@@ -119,7 +119,7 @@ function syncTarget(): string {
 }
 
 async function importSync() {
-  return await import("../../../src/cli/commands/sync");
+  return await import("../../../src/cli/commands/sync.ts");
 }
 
 describe("sync", () => {

@@ -3,8 +3,8 @@ import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { discoverRoles, __setLoggerForTest } from "../src/loader/role-loader";
-import { functionSessionState } from "../src/function/session-state";
+import { discoverRoles, __setLoggerForTest } from "../src/loader/role-loader.js";
+import { functionSessionState } from "../src/function/session-state.js";
 
 // ---------------------------------------------------------------------------
 // Mock logger (same pattern as role-loader.test.ts)

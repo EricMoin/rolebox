@@ -2,10 +2,10 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FunctionRuntimeManager } from "../src/function/runtime-state";
-import { ArtifactStore } from "../src/function/artifact-store";
-import { FunctionContext } from "../src/function/context";
-import { loadHandlers, safeCall } from "../src/function/handlers-loader";
+import { FunctionRuntimeManager } from "../src/function/runtime-state.js";
+import { ArtifactStore } from "../src/function/artifact-store.js";
+import { FunctionContext } from "../src/function/context.js";
+import { loadHandlers, safeCall } from "../src/function/handlers-loader.js";
 
 function makeContext(): { ctx: FunctionContext; cleanup: () => void } {
   const rtDir = mkdtempSync(join(tmpdir(), "handler-test-rt-"));

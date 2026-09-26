@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveFunctions } from "../src/function/file-resolver";
+import { resolveFunctions } from "../src/function/file-resolver.js";
 
 let tmpRoots: string[] = [];
 

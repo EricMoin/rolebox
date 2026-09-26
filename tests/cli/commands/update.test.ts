@@ -3,14 +3,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { load, dump } from "js-yaml";
-import type { RegistryManifest } from "../../../src/cli/types";
+import type { RegistryManifest } from "../../../src/cli/types.ts";
 
 const updConfigDir = mkdtempSync(join(tmpdir(), "rolebox-update-mod-config-"));
 const updDataDir = mkdtempSync(join(tmpdir(), "rolebox-update-mod-data-"));
 process.env.XDG_CONFIG_HOME = updConfigDir;
 process.env.XDG_DATA_HOME = updDataDir;
 
-import { createPathsMockPayload } from "../../helpers/paths-mock";
+import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
@@ -30,7 +30,7 @@ afterAll(() => {
   rmSync(updDataDir, { recursive: true, force: true });
 });
 
-import { compareVersions } from "../../../src/cli/commands/update";
+import { compareVersions } from "../../../src/cli/commands/update.ts";
 
 const mockFetchManifest = mock();
 const mockDownloadRole = mock();
@@ -100,7 +100,7 @@ function createMockExtractedDir(roleId: string): string {
 }
 
 async function importUpdate() {
-  return await import("../../../src/cli/commands/update");
+  return await import("../../../src/cli/commands/update.ts");
 }
 
 function setupConfig(registries: Array<{ name: string; url: string; default?: boolean }>) {

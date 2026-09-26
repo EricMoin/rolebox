@@ -1,8 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { stripAnsi } from "../../src/cli/format";
+import { stripAnsi } from "../../src/cli/format.ts";
 import type {
   MonitorSnapshot,
-} from "../../src/cli/commands/monitor/monitor-reader";
+} from "../../src/cli/commands/monitor/monitor-reader.ts";
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -38,6 +38,8 @@ function makeMonitorSnapshot(
     activeFunctions: [],
     loops: [],
     graphSessions: [],
+    engineGraphs: [],
+    graphEvents: [],
     dispatchSummary: {
       pending: 0,
       running: 0,
@@ -51,8 +53,8 @@ function makeMonitorSnapshot(
 }
 
 async function importMonitor() {
-  const renderer = await import("../../src/cli/commands/monitor/monitor-renderer");
-  const helpers = await import("../../src/cli/commands/monitor/monitor-helpers");
+  const renderer = await import("../../src/cli/commands/monitor/monitor-renderer.ts");
+  const helpers = await import("../../src/cli/commands/monitor/monitor-helpers.ts");
   return { ...renderer, ...helpers };
 }
 

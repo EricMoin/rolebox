@@ -5,7 +5,7 @@ import {
   formatBytes,
   formatRate,
   type FailureInfo,
-} from "../../src/cli/download-progress";
+} from "../../src/cli/download-progress.ts";
 
 // ── Helpers ─────────────────────────────────────────────────
 

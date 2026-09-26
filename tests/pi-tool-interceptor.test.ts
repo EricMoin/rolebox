@@ -65,7 +65,6 @@ function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
     session: {} as any,
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {} as any,

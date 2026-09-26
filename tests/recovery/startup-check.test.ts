@@ -16,7 +16,7 @@ import {
   orphanTmpCleanup,
   breakStaleLocks,
   StartupChecker,
-} from "../../src/recovery/startup-check";
+} from "../../src/recovery/startup-check.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

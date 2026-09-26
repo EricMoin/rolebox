@@ -3,23 +3,39 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { load, dump } from "js-yaml";
-import type { RegistryManifest, LockEntry } from "../../../src/cli/types";
+import type { RegistryManifest, LockEntry } from "../../../src/cli/types.ts";
 import type { PromptApi } from "../../../src/cli/pick.ts";
 
 // ── Fake prompts (dependency-injected; no module mocking) ────────
 // The pickers take the prompts API as an injectable parameter (defaulting to
 // real clack). Tests pass a scripted fake, so no mock.module is needed — and
 // no global clack shadowing can leak into sibling test files.
+/** `SelectOptions` at clack's widest instantiation — what the pickers hand to `select`. */
+type SelectOptionsAny = Parameters<PromptApi["select"]>[0];
+
 function createFakePrompts() {
   const CANCEL = Symbol("clack:cancel");
-  const select = mock(async () => "software-architect");
+  // The scripted double resolves to an offered role/registry id, or to CANCEL to
+  // model clack's cancel symbol. The parameter is declared (prompt options are
+  // what the pickers pass, per pick.ts `PromptApi`) so `mockImplementation` and
+  // `mock.calls` are typed against the real call shape.
+  const select = mock(async (_opts: SelectOptionsAny): Promise<string | symbol> => "software-architect");
   const confirm = mock(async () => true);
   const prompts: PromptApi = {
     intro: () => {},
     outro: () => {},
     cancel: () => {},
-    select: select as unknown as PromptApi["select"],
-    confirm: confirm as unknown as PromptApi["confirm"],
+    // clack's `select` is generic over the option value; this scripted double is
+    // not, so the scripted pick is resolved back through the options that were
+    // actually offered — the double can only return an offered value or CANCEL.
+    select: async (opts) => {
+      const picked = await select(opts);
+      if (typeof picked === "symbol") return picked;
+      const offered = opts.options.find((o) => String(o.value) === picked);
+      if (offered === undefined) throw new Error(`fake select: option "${picked}" was not offered`);
+      return offered.value;
+    },
+    confirm,
     spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
     isCancel: (v: unknown) => v === CANCEL,
     log: { error: () => {} },
@@ -181,7 +197,7 @@ describe("pickRegistryAndRole", () => {
     addRegistry("custom-registry", "https://github.com/custom/registry");
 
     const { prompts, select } = createFakePrompts();
-    select.mockImplementation(async (opts: { options: { value: string }[] }) => {
+    select.mockImplementation(async (opts) => {
       const values = opts.options.map((o) => o.value);
       if (values.includes("custom-registry")) return "custom-registry";
       return "code-reviewer";
@@ -198,7 +214,7 @@ describe("pickRegistryAndRole", () => {
     addRegistry("custom-registry", "https://github.com/custom/registry");
 
     const { prompts, select } = createFakePrompts();
-    select.mockImplementation(async (opts: { options: { value: string }[] }) => {
+    select.mockImplementation(async (opts) => {
       const values = opts.options.map((o) => o.value);
       if (values.includes("custom-registry")) return "oh-my-role";
       return "code-reviewer";
@@ -239,7 +255,7 @@ describe("pickInstalledRole", () => {
     const { pickInstalledRole } = await import(cacheBust("../../../src/cli/pick.ts"));
     expect(await pickInstalledRole("Select a role:", prompts)).toBe("code-reviewer");
 
-    const selectOpts = select.mock.calls[0][0] as { options: { value: string; hint: string }[] };
+    const selectOpts = select.mock.calls[0][0];
     expect(selectOpts.options.map((o) => o.value)).toEqual(["software-architect", "code-reviewer"]);
     expect(selectOpts.options[1].hint).toContain("2.0.0");
   });
@@ -271,7 +287,7 @@ describe("pickSyncedRole", () => {
     const result = await pickSyncedRole("opencode", "Select a role:", prompts);
 
     expect(result).toBe("software-architect");
-    const selectOpts = select.mock.calls[0][0] as { options: { value: string }[] };
+    const selectOpts = select.mock.calls[0][0];
     const offered = selectOpts.options.map((o) => o.value);
     expect(offered).toContain("software-architect");
     expect(offered).not.toContain("broken-link");

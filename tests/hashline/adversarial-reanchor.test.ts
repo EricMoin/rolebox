@@ -1,9 +1,10 @@
 import { describe, it, expect, afterAll } from "bun:test";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext, type HashlineEdit } from "./fixtures/tool-context.ts";
 
 // ── Adversarial reanchor-correctness suite ────────────────────────────────
 //
@@ -43,12 +44,7 @@ afterAll(async () => {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-type RawEdit = {
-  op?: "replace" | "append" | "prepend";
-  pos?: string;
-  end?: string;
-  lines?: string | string[] | null;
-};
+
 
 async function newTmp(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -58,7 +54,7 @@ async function newTmp(prefix: string): Promise<string> {
 
 /** Read through the real tool; return version + line→hash map. */
 async function readState(filePath: string): Promise<{ version: string; hashByLine: Map<number, string> }> {
-  const out = String(await createHashlineReadTool().execute({ filePath }));
+  const out = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(dirname(filePath))));
   const version = out.match(/^version: (\S+)$/m)?.[1] ?? "";
   const hashByLine = new Map<number, string>();
   for (const line of out.split("\n")) {
@@ -68,8 +64,8 @@ async function readState(filePath: string): Promise<{ version: string; hashByLin
   return { version, hashByLine };
 }
 
-async function runEdit(filePath: string, version: string, edits: RawEdit[]): Promise<string> {
-  return String(await createHashlineEditTool().execute({ files: [{ filePath, version, edits }] }));
+async function runEdit(filePath: string, version: string, edits: HashlineEdit[]): Promise<string> {
+  return String(await createHashlineEditTool().execute({ files: [{ filePath, version, edits }] }, makeToolContext(dirname(filePath))));
 }
 
 function anchorFor(hashByLine: Map<number, string>, line: number): string {
@@ -129,12 +125,12 @@ describe("(a) content-line insertion — reanchor oldAnchor vs pre-edit read", (
 
     // CONTRACT: the insert entry's oldAnchor is the anchor a pre-edit read
     // produced at that line (the caller's old reference stays valid).
-    expect(ins!.oldAnchor).toBe(pre.hashByLine.get(ins!.line));
+    expect(ins!.oldAnchor).toBe(pre.hashByLine.get(ins!.line)!);
 
     // Consistency cross-check: the newAnchor must equal a post-edit fresh
     // read hash at the same line (holds for content lines — no seeding).
     const post = await readState(filePath);
-    expect(ins!.newAnchor).toBe(post.hashByLine.get(ins!.line));
+    expect(ins!.newAnchor).toBe(post.hashByLine.get(ins!.line)!);
   });
 });
 
@@ -171,12 +167,12 @@ describe("(b) symbol-line insertion — reanchor oldAnchor vs pre-edit read (D6b
     // anchor at the reported line. FAILS today: diff.ts:45 seeds the phantom
     // "" old content with entry.newLine, so for any non-empty old line at the
     // insert position the phantom hash diverges from the real anchor.
-    expect(ins!.oldAnchor).toBe(pre.hashByLine.get(ins!.line));
+    expect(ins!.oldAnchor).toBe(pre.hashByLine.get(ins!.line)!);
 
     // The newAnchor side stays consistent with a fresh read — this isolates
     // the defect to the oldAnchor computation (D6b), not the new side.
     const post = await readState(filePath);
-    expect(ins!.newAnchor).toBe(post.hashByLine.get(ins!.line));
+    expect(ins!.newAnchor).toBe(post.hashByLine.get(ins!.line)!);
   });
 });
 
@@ -193,7 +189,7 @@ describe("(c) deletion — reanchor newAnchor is empty", () => {
 
     const pre = await readState(filePath);
     const out = await runEdit(filePath, pre.version, [
-      { pos: anchorFor(pre.hashByLine, 2), lines: "" },
+      { op: "replace", pos: anchorFor(pre.hashByLine, 2), lines: "" },
     ]);
     expect(out).not.toContain("Error:");
 
@@ -242,7 +238,7 @@ describe("(d) multi-round edits — reanchor map vs fresh read consistency", () 
     const pos = `${ins!.line}#${ins!.newAnchor}`;
     console.log(`[d.a] edit1 map: line ${ins!.line} → ${ins!.newAnchor}; fresh read hash@${ins!.line} = ${fresh.hashByLine.get(ins!.line)}`);
 
-    const edit2 = await runEdit(filePath, fresh.version, [{ pos, lines: "CHANGED" }]);
+    const edit2 = await runEdit(filePath, fresh.version, [{ op: "replace", pos, lines: "CHANGED" }]);
     console.log(`[d.a] edit2 pos=${pos} success=${!edit2.includes("Error:")}`);
     expect(edit2).not.toContain("Error:");
     expect(await readFile(filePath, "utf-8")).toContain("CHANGED");
@@ -265,7 +261,7 @@ describe("(d) multi-round edits — reanchor map vs fresh read consistency", () 
     console.log(`[d.b] edit1 map: line ${ins!.line} → ${ins!.newAnchor}; fresh read hash@${ins!.line} = ${fresh.hashByLine.get(ins!.line)}`);
     console.log(`[d.b] map newAnchor consistent with fresh read (symbol line)? ${ins!.newAnchor === fresh.hashByLine.get(ins!.line)}`);
 
-    const edit2 = await runEdit(filePath, fresh.version, [{ pos, lines: "CHANGED" }]);
+    const edit2 = await runEdit(filePath, fresh.version, [{ op: "replace", pos, lines: "CHANGED" }]);
     console.log(`[d.b] edit2 pos=${pos} success=${!edit2.includes("Error:")}`);
     expect(edit2).not.toContain("Error:");
     expect(await readFile(filePath, "utf-8")).toContain("CHANGED");
@@ -282,7 +278,7 @@ describe("(d) multi-round edits — reanchor map vs fresh read consistency", () 
       { op: "append", pos: anchorFor(preC.hashByLine, 1), lines: "NEWLINE" },
     ]);
     const freshC = await readState(contentFile); // "bb" is now at line 3
-    const edit2C = await runEdit(contentFile, freshC.version, [{ pos: staleAnchor2, lines: "CHANGED" }]);
+    const edit2C = await runEdit(contentFile, freshC.version, [{ op: "replace", pos: staleAnchor2, lines: "CHANGED" }]);
     console.log(`[d.c] content: stale ${staleAnchor2} → success=${!edit2C.includes("Error:")} corrections=${JSON.stringify(parseCorrections(edit2C))}`);
     expect(edit2C).not.toContain("Error:");
     const diskC = (await readFile(contentFile, "utf-8")).split("\n");
@@ -298,7 +294,7 @@ describe("(d) multi-round edits — reanchor map vs fresh read consistency", () 
       { op: "append", pos: anchorFor(preS.hashByLine, 1), lines: "NEWLINE" },
     ]);
     const freshS = await readState(symbolFile); // "}" is now at line 3
-    const edit2S = await runEdit(symbolFile, freshS.version, [{ pos: staleAnchorS, lines: "CHANGED" }]);
+    const edit2S = await runEdit(symbolFile, freshS.version, [{ op: "replace", pos: staleAnchorS, lines: "CHANGED" }]);
     console.log(`[d.c] symbol: stale ${staleAnchorS} → success=${!edit2S.includes("Error:")} corrections=${JSON.stringify(parseCorrections(edit2S))}`);
     console.log(`[d.c] symbol error tail: ${edit2S.split("\n").filter((l) => l.includes("expected hash") || l.includes("not found")).join(" | ")}`);
 
@@ -334,7 +330,7 @@ describe("(e) duplicate content lines + anchor offset +1 — corrected edit must
     console.log(`[e] anchors: ${JSON.stringify([...pre.hashByLine.entries()])}`);
     console.log(`[e] stale anchor: ${staleAnchor} (intended target = first DUP at line 1)`);
 
-    const out = await runEdit(filePath, pre.version, [{ pos: staleAnchor, lines: "REPLACED" }]);
+    const out = await runEdit(filePath, pre.version, [{ op: "replace", pos: staleAnchor, lines: "REPLACED" }]);
     const corrections = parseCorrections(out);
     const disk = (await readFile(filePath, "utf-8")).split("\n");
     const editedLine = disk.indexOf("REPLACED") + 1;
@@ -380,7 +376,7 @@ describe("(f) brace-dense file + uniform anchor offset — detectUniformOffset m
     const out = await runEdit(
       v2Path,
       v2.version,
-      staleAnchors.map((pos) => ({ pos, lines: "R" })),
+      staleAnchors.map((pos) => ({ op: "replace" as const, pos, lines: "R" })),
     );
     const corrections = parseCorrections(out);
     console.log(`[f] corrections_applied: ${JSON.stringify(corrections)}`);
@@ -409,7 +405,7 @@ describe("(f) brace-dense file + uniform anchor offset — detectUniformOffset m
     const out = await runEdit(
       v2Path,
       v2.version,
-      staleAnchors.map((pos) => ({ pos, lines: "R" })),
+      staleAnchors.map((pos) => ({ op: "replace" as const, pos, lines: "R" })),
     );
     const corrections = parseCorrections(out);
     console.log(`[f.control] stale anchors: ${JSON.stringify(staleAnchors)}`);

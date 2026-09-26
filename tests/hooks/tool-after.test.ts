@@ -2,14 +2,42 @@ import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { handleToolAfter } from "../../src/hooks/tool-after.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
+import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// Doubles for the `runHooks` port on `HookDeps.customHooks` / `HookDeps.builtInHooks`.
+// The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
+// in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
+// src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
+// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+function makeCustomRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+    ) => Promise.resolve(),
+  );
+}
+
+function makeBuiltInRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+      _builtinConfig: Record<string, boolean>,
+    ) => Promise.resolve(),
+  );
+}
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
     session: { messages: mock(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {} as any,
@@ -108,9 +136,7 @@ describe("handleToolAfter — dispatch_output still-running detection", () => {
 
 describe("handleToolAfter — isDispatchError", () => {
   it("skips graph advance when output has an error field", async () => {
-    const deps = minimalDeps({
-      roleGraphMap: new Map([["agent-a", {} as any]]),
-    });
+    const deps = minimalDeps();
     const state = makeState();
 
     await handleToolAfter(
@@ -154,7 +180,7 @@ describe("handleToolAfter — isDispatchError", () => {
 
 describe("handleToolAfter — hook lifecycle phases", () => {
   it("calls built-in hook in before phase (no active functions = early return)", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
     const state = makeState();
     state.sessionAgentRegistry.set("sess-1", "agent-a");
 
@@ -175,7 +201,7 @@ describe("handleToolAfter — hook lifecycle phases", () => {
   });
 
   it("calls custom hook in before phase (no active functions = early return)", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
     const state = makeState();
     state.sessionAgentRegistry.set("sess-1", "agent-a");
 
@@ -192,7 +218,7 @@ describe("handleToolAfter — hook lifecycle phases", () => {
   });
 
   it("passes correct event type and context to runHooks", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
     const state = makeState();
     state.sessionAgentRegistry.set("sess-1", "agent-a");
 

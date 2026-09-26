@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { ExtensionRegistry } from "../../src/extensions/registry";
-import { clearExtensionModuleCache } from "../../src/extensions/loader";
+import { ExtensionRegistry } from "../../src/extensions/registry.ts";
+import { clearExtensionModuleCache } from "../../src/extensions/loader.ts";
 
 describe("ExtensionRegistry", () => {
   it("loadExtensions is a no-op with undefined config", async () => {

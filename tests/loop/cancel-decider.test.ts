@@ -1,12 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import { shouldCancelLoop } from "../../src/loop/coordinator";
+import { shouldCancelLoop } from "../../src/loop/coordinator.ts";
 import {
   DISPATCH_COMPLETION_MARKER,
   DISPATCH_ALL_COMPLETE_MARKER,
   DISPATCH_RECOVERY_MARKER,
-} from "../../src/dispatch/notification";
-import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL } from "../../src/loop/constants";
-import type { LoopState } from "../../src/loop/types";
+} from "../../src/dispatch/notification.ts";
+import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL } from "../../src/loop/constants.ts";
+import type { LoopState } from "../../src/loop/types.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 

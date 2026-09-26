@@ -12,23 +12,23 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ArtifactStore } from "../src/function/artifact-store";
+import { ArtifactStore } from "../src/function/artifact-store.js";
 import {
   FunctionRuntimeManager,
   type FnState,
   functionRuntime as singletonRt,
-} from "../src/function/runtime-state";
+} from "../src/function/runtime-state.js";
 import {
   evaluateCondition,
   type CondEnv,
-} from "../src/function/conditions";
-import { evaluateGateAndTransitions } from "../src/function/phase-machine";
-import { decideContinuation } from "../src/function/continuation";
-import { runToolObserve } from "../src/function/observe";
-import { extractResultBlockNamed } from "../src/function/fence";
-import { FunctionSessionState } from "../src/function/session-state";
-import { buildActiveArtifactBlock } from "../src/prompt/builder";
-import type { ResolvedFunction } from "../src/types";
+} from "../src/function/conditions.js";
+import { evaluateGateAndTransitions } from "../src/function/phase-machine.js";
+import { decideContinuation } from "../src/function/continuation.js";
+import { runToolObserve } from "../src/function/observe.js";
+import { extractResultBlockNamed } from "../src/function/fence.js";
+import { FunctionSessionState } from "../src/function/session-state.js";
+import { buildActiveArtifactBlock } from "../src/prompt/builder.js";
+import type { ResolvedFunction } from "../src/types.js";
 
 // ─────── ResolvedFunction definitions matching our builtins ───────
 
@@ -68,6 +68,7 @@ function makeEnv(
   fnName: string,
   state: FnState,
   artifacts: ArtifactStore,
+  workspaceDir: string,
   overrides: Partial<CondEnv> = {},
 ): CondEnv {
   return {
@@ -77,6 +78,7 @@ function makeEnv(
     artifacts,
     requiredEvidence: [],
     userMessagedThisTurn: false,
+    workspaceDir,
     ...overrides,
   };
 }
@@ -172,7 +174,7 @@ The plan is ready for your review.`;
     planSt.currentTurn += 1;  // turn 2
     planSt.continuationCount = 0;  // reset on user message
 
-    const planEnv = makeEnv(SID, "plan", planSt, artifacts, {
+    const planEnv = makeEnv(SID, "plan", planSt, artifacts, tmpDir, {
       userMessagedThisTurn: true,
     });
 
@@ -269,7 +271,7 @@ The plan is ready for your review.`;
     // Advance turn
     execSt.currentTurn += 1;  // turn 3
 
-    const execEnv = makeEnv(SID, "execute", execSt, artifacts, {
+    const execEnv = makeEnv(SID, "execute", execSt, artifacts, tmpDir, {
       requiredEvidence: executeFn.requires_evidence ?? [],
     });
 
@@ -432,7 +434,7 @@ The plan is ready for your review.`;
     const st = singletonRt.init(SID, "plan", 1);
     st.currentTurn = 1;
 
-    const env = makeEnv(SID, "plan", st, artifacts, {
+    const env = makeEnv(SID, "plan", st, artifacts, tmpDir, {
       userMessagedThisTurn: true,  // approved
       // but NO artifact written
     });
@@ -449,7 +451,7 @@ The plan is ready for your review.`;
     const st = singletonRt.init(SID, "plan", 1);
     st.currentTurn = 1;
 
-    const env = makeEnv(SID, "plan", st, artifacts, {
+    const env = makeEnv(SID, "plan", st, artifacts, tmpDir, {
       userMessagedThisTurn: false,  // not approved
     });
 
@@ -471,6 +473,7 @@ The plan is ready for your review.`;
       artifacts,
       requiredEvidence: [],
       userMessagedThisTurn: false,
+      workspaceDir: tmpDir,
     };
     expect(evaluateCondition("plan_todos_complete", env)).toBe(true);
 
@@ -503,6 +506,7 @@ The plan is ready for your review.`;
       artifacts,
       requiredEvidence: ["lsp_diagnostics", "test"],
       userMessagedThisTurn: false,
+      workspaceDir: tmpDir,
     };
 
     expect(evaluateCondition("evidence_met", env)).toBe(false);
@@ -527,6 +531,7 @@ The plan is ready for your review.`;
       artifacts,
       requiredEvidence: ["lsp_diagnostics", "test"],
       userMessagedThisTurn: false,
+      workspaceDir: tmpDir,
     };
 
     // plan_todos_complete true, but evidence not met

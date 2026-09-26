@@ -25,7 +25,7 @@ import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { DEFAULT_CONFIG } from "../../src/dispatch/config.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import { cleanupTestState } from "./helpers.ts";
-import { hasOpencode } from "../helpers/opencode";
+import { hasOpencode } from "../helpers/opencode.ts";
 
 // ── Server-level setup ──────────────────────────────────────────────────────
 

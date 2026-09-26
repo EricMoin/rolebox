@@ -15,13 +15,13 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import {
   createStatefulAdapter,
   settle,
   type StatefulAdapterCall,
-} from "./helpers/stateful-adapter";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
+} from "./helpers/stateful-adapter.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 
 /** workerTaskId of every getRoundResult call, in call order. */
 function getResultTaskIds(calls: StatefulAdapterCall[]): string[] {

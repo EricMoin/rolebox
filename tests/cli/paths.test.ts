@@ -52,8 +52,8 @@ afterEach(() => {
   setPlatformForTest(undefined);
 });
 
-import { ensureWritableDir } from "../../src/cli/fs-utils";
-import { toPosixPath } from "../../src/utils/paths";
+import { ensureWritableDir } from "../../src/cli/fs-utils.ts";
+import { toPosixPath } from "../../src/utils/paths.ts";
 
 describe("paths", () => {
   it.skipIf(process.platform === "win32")("getDataDir returns ~/.local/share/rolebox on macOS/Linux by default", () => {

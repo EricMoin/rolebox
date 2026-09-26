@@ -1,12 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import { parseLoopParams } from "../../src/loop/params";
+import { parseLoopParams } from "../../src/loop/params.ts";
 import {
   SEED_CHAR_CAP,
   DISPATCH_ROUND_TIMEOUT_MS,
   ROUND_TIMEOUT_MS,
   SUMMARY_INPUT_CHAR_CAP,
-} from "../../src/loop/constants";
-import type { FunctionCall } from "../../src/function/parser";
+} from "../../src/loop/constants.ts";
+import type { FunctionCall } from "../../src/function/parser.ts";
 
 function callFromPositional(
   iterations?: string,
@@ -260,7 +260,7 @@ describe("parseLoopParams", () => {
 
   // ── Deprecated constants (removed in T14) ──
   it("SUMMARIZER_TIMEOUT_MS is still exported as deprecated", async () => {
-    const mod = await import("../../src/loop/constants");
+    const mod = await import("../../src/loop/constants.ts");
     expect((mod as Record<string, unknown>).SUMMARIZER_TIMEOUT_MS).toBe(60_000);
     expect((mod as Record<string, unknown>).SPAWN_MAX_RETRIES).toBe(2);
     expect((mod as Record<string, unknown>).SPAWN_RETRY_BASE_DELAY_MS).toBe(2_000);

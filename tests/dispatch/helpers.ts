@@ -1,5 +1,6 @@
 import { mock } from "bun:test";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { Message, MessageInfo, SessionInfo, SessionStatus } from "../../src/session/types.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 /**
@@ -29,6 +30,75 @@ export function makeTask(
   };
 }
 
+/** The options `ISessionClient.prompt(id, options)` accepts. */
+type PromptOptions = Parameters<ISessionClient["prompt"]>[1];
+
+/**
+ * The SDK-format call a `prompt`/`promptAsync` invocation is forwarded to
+ * `sessionPromptAsync` overrides as: `{ path: { id }, body: <options> }`.
+ * Mirrors the object built in the `prompt:` mock below.
+ */
+export interface PromptAsyncSdkCall {
+  path: { id: string };
+  body: PromptOptions;
+}
+
+/**
+ * Creates a complete `SessionInfo` for testing.
+ *
+ * `ISessionClient.create` is declared `Promise<SessionInfo | null>`, so a
+ * default returning only `{ id }` would make this mock violate the interface
+ * it claims to implement — and a test asserting the full object would be
+ * asserting a shape production never returns.
+ */
+export function makeSessionInfo(overrides: Partial<SessionInfo> = {}): SessionInfo {
+  return {
+    id: "test-session-1",
+    projectID: "test-project",
+    directory: "/tmp/test",
+    title: "test session",
+    version: "1.0.0",
+    time: { created: 0, updated: 0 },
+    ...overrides,
+  };
+}
+
+/**
+ * Creates a complete `Message` for testing.
+ *
+ * `ISessionClient.messages` is declared `Promise<Message[]>`, and `Message`
+ * requires a full `MessageInfo` (`id`, `sessionID`, `time`, ...) plus parts
+ * that satisfy `Part`. A bare `{ info: { role }, parts: [{ type, text }] }`
+ * literal does not — which is why the mock could not be typed before.
+ */
+export function makeMessage(
+  role: MessageInfo["role"] = "assistant",
+  text = "done",
+): Message {
+  return {
+    info: {
+      id: "msg_test_1",
+      sessionID: "test-session-1",
+      role,
+      time: { created: 0 },
+    },
+    parts: [
+      {
+        id: "prt_test_1",
+        sessionID: "test-session-1",
+        messageID: "msg_test_1",
+        type: "text",
+        text,
+      },
+    ],
+  };
+}
+
+/** Creates a valid `SessionStatus` (the `idle` variant). */
+export function makeIdleStatus(): SessionStatus {
+  return { type: "idle" };
+}
+
 /**
  * Creates an ISessionClient mock with all methods mocked.
  * Each method returns a sensible default success value unless overridden.
@@ -38,12 +108,12 @@ export function createMockClient(overrides?: {
   /** Override for synchronous prompt (waits for response) */
   sessionPrompt?: () => unknown;
   /** Override for fire-and-forget prompt (notification injection) */
-  sessionPromptAsync?: (call: unknown) => unknown;
+  sessionPromptAsync?: (call: PromptAsyncSdkCall) => unknown;
   sessionPromptSync?: () => unknown;
   sessionMessages?: () => unknown;
   sessionStatus?: () => unknown;
   sessionAbort?: () => unknown;
-  sessionGet?: () => unknown;
+  sessionGet?: (id: string) => unknown;
   sessionList?: () => unknown;
   sessionChildren?: () => unknown;
   sessionTodo?: () => unknown;
@@ -52,8 +122,7 @@ export function createMockClient(overrides?: {
 }): ISessionClient {
   return {
     create: mock(
-      overrides?.sessionCreate ??
-        (() => Promise.resolve({ id: "test-session-1" })),
+      overrides?.sessionCreate ?? (() => Promise.resolve(makeSessionInfo())),
     ),
     prompt: mock(
       overrides?.sessionPromptAsync
@@ -91,8 +160,9 @@ export function createMockClient(overrides?: {
         (() => Promise.resolve(true)),
     ),
     get: mock(
-      overrides?.sessionGet ??
-        (() => Promise.resolve({ id: "test-session-1" })),
+      overrides?.sessionGet
+        ? (id: string) => overrides!.sessionGet!(id)
+        : ((_id: string) => Promise.resolve(makeSessionInfo())),
     ),
     list: mock(
       overrides?.sessionList ??

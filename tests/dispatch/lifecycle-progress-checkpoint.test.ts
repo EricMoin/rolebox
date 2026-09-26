@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 
 import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { createMockClient, parentContext } from "./helpers.ts";
-import { clearEmittedThresholds } from "../../src/dispatch/progress/progress-tools.ts";
+import { clearAllEmittedThresholds } from "../../src/dispatch/progress/progress-tools.ts";
 import type { CheckpointData } from "../../src/dispatch/types.checkpoint.ts";
 import type { ProgressEvent } from "../../src/dispatch/types.progress.ts";
 
@@ -48,7 +48,9 @@ describe("lifecycle progress and checkpoint cleanup", () => {
   let testDir: string;
 
   afterEach(() => {
-    clearEmittedThresholds();
+    // clearEmittedThresholds(taskId) is per-task; the suite teardown wants the
+    // whole module-level map reset (a no-arg call was never a valid signature).
+    clearAllEmittedThresholds();
     if (testDir) {
       try {
         rmSync(testDir, { recursive: true, force: true });
@@ -68,7 +70,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -104,7 +105,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -148,7 +148,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -185,7 +184,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -219,7 +217,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -254,7 +251,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -288,7 +284,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task = await manager.launch(
@@ -349,7 +344,6 @@ describe("lifecycle progress and checkpoint cleanup", () => {
     });
     const manager = new DispatchManager(client, {
       taskTtlMs: 100,
-      maxConcurrent: 5,
     });
 
     const task1 = await manager.launch(

@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
-import { stripAnsi } from "../../../src/cli/format";
+import { stripAnsi } from "../../../src/cli/format.ts";
 import type {
   MonitorSnapshot,
   LoopSnapshot,
   EngineGraphSnapshot,
   GraphEvent,
-} from "../../../src/cli/commands/monitor/monitor-reader";
+} from "../../../src/cli/commands/monitor/monitor-reader.ts";
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -65,6 +65,10 @@ function makeGraph(): EngineGraphSnapshot {
     loopGroups: [],
     startedAt: "2025-01-01T00:00:00.000Z",
     updatedAt: "2025-01-01T00:01:00.000Z",
+    // Epoch-ms of the same instant: the reader keeps both forms of the last
+    // update (updatedAtMs is the staleness-gating source of truth), so the
+    // fixture must carry a consistent pair.
+    updatedAtMs: Date.parse("2025-01-01T00:01:00.000Z"),
     hasCheckpoints: false,
   };
 }
@@ -103,7 +107,7 @@ function makeEvents(): GraphEvent[] {
 
 describe("renderGraphs", () => {
   it("renders graph rows when engineGraphs is populated", async () => {
-    const { renderGraphs } = await import("../../../src/cli/commands/renderer/status-format");
+    const { renderGraphs } = await import("../../../src/cli/commands/renderer/status-format.ts");
 
     const lines = captureStdout(() => {
       renderGraphs(makeMonitorSnapshot({
@@ -146,7 +150,7 @@ describe("renderGraphs", () => {
   });
 
   it("suppresses the section when engineGraphs is empty", async () => {
-    const { renderGraphs } = await import("../../../src/cli/commands/renderer/status-format");
+    const { renderGraphs } = await import("../../../src/cli/commands/renderer/status-format.ts");
 
     const lines = captureStdout(() => {
       renderGraphs(makeMonitorSnapshot());
@@ -156,7 +160,7 @@ describe("renderGraphs", () => {
   });
 
   it("suppresses even when graphEvents exist but no engine graphs", async () => {
-    const { renderGraphs } = await import("../../../src/cli/commands/renderer/status-format");
+    const { renderGraphs } = await import("../../../src/cli/commands/renderer/status-format.ts");
 
     const lines = captureStdout(() => {
       renderGraphs(makeMonitorSnapshot({ graphEvents: makeEvents() }));
@@ -170,7 +174,7 @@ describe("renderGraphs", () => {
 
 describe("renderHuman graph wiring", () => {
   it("emits the Graphs panel after Orchestration when populated", async () => {
-    const { renderHuman } = await import("../../../src/cli/commands/renderer/layout");
+    const { renderHuman } = await import("../../../src/cli/commands/renderer/layout.ts");
 
     // A live loop so the Orchestration panel renders too (it is suppressed
     // when loops + graphSessions are both empty).
@@ -206,7 +210,7 @@ describe("renderHuman graph wiring", () => {
   });
 
   it("omits the Graphs panel when engineGraphs is empty", async () => {
-    const { renderHuman } = await import("../../../src/cli/commands/renderer/layout");
+    const { renderHuman } = await import("../../../src/cli/commands/renderer/layout.ts");
 
     const lines = captureStdout(() => {
       renderHuman(makeMonitorSnapshot(), false, 0);

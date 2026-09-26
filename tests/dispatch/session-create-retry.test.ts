@@ -16,10 +16,10 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DispatchManager } from "../../src/dispatch/core/manager";
-import { createMockClient, parentContext } from "./helpers";
-import { SessionCreateRejectedError } from "../../src/platform/types";
-import type { SessionInfo } from "../../src/session/types";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import { createMockClient, parentContext } from "./helpers.ts";
+import { SessionCreateRejectedError } from "../../src/platform/types.ts";
+import type { SessionInfo } from "../../src/session/types.ts";
 
 // Zero backoff keeps the retry loop fast in tests.
 const retryConfig = {

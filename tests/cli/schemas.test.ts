@@ -6,7 +6,7 @@ import {
   parseRegistryManifestFromYaml,
   parseConfigFromYaml,
   parseLockFileFromYaml,
-} from "../../src/cli/schemas";
+} from "../../src/cli/schemas.ts";
 
 // ── parseRegistryManifest ─────────────────────────────────────────
 

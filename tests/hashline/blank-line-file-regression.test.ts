@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 
 import { createHashlineReadTool, formatReadOutput } from "../../src/hashline/hashline-read.ts";
 import { createHashlineEditTool } from "../../src/hashline/hashline-edit.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────
 //
@@ -62,7 +63,7 @@ describe("blank-line file regression (content exactly '\\n')", () => {
     // blank line is just the terminator, not a line that precedes the append.
     const editOut = await createHashlineEditTool().execute({
       files: [{ filePath, version: version!, edits: [{ op: "append" as const, lines: "x" }] }],
-    });
+    }, makeToolContext(tmpRoot));
     expect(editOut).not.toContain("Error:");
 
     expect(await readFile(filePath, "utf-8")).toBe("x\n");

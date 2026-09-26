@@ -23,10 +23,13 @@ function assertNoDoubleSpacesInData(actual: string): void {
     // inherently have "→ " as prefix) or body content (free form).
     if (lines[i].startsWith("→ ")) continue;
     // Skip lines that appear inside body blocks (free form text)
-    expect(lines[i]).not.toMatch(
-      / {2,}/,
+    // The custom failure message is the second parameter of the expect call
+    // itself (bun-types/test.d.ts:620-625); toMatch takes only the pattern, so
+    // the message was silently ignored where it used to sit.
+    expect(
+      lines[i],
       `line ${i + 1} has consecutive spaces: "${lines[i]}"`,
-    );
+    ).not.toMatch(/ {2,}/);
   }
 }
 

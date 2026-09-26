@@ -11,7 +11,7 @@ describe("validateUrl", () => {
   let validateUrl: (url: string) => Result<void, string>;
 
   beforeAll(async () => {
-    const mod = await import("../../src/web/ssrf-guard");
+    const mod = await import("../../src/web/ssrf-guard.ts");
     validateUrl = mod.validateUrl;
   });
 

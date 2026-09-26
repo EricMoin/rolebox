@@ -28,7 +28,6 @@ import { DispatchService } from "../../src/core/services/dispatch-service.ts";
 import { RecoveryService } from "../../src/core/services/recovery-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import type { PluginService } from "../../src/core/service.ts";
-import type { PluginCoreLike } from "../../src/core/service.ts";
 
 // Dispatch types & helpers
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
@@ -37,6 +36,8 @@ import type { Message, FileDiff, Todo, SessionStatus } from "../../src/platform/
 
 // Test helpers & state management
 import { cleanupTestState, createMockClient } from "./helpers.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 
 // ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
 //  Helper: minimal PluginContext for PluginCore.init()
@@ -44,14 +45,14 @@ import { cleanupTestState, createMockClient } from "./helpers.ts";
 
 function makeContext(core: PluginCore, dir: string): PluginContext {
   return {
-    client: createMockClient() as any,
+    session: new OpencodeSessionAdapter(createMockClient()),
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
-    roleGraphMap: new Map(),
     rawDirectory: dir,
     directory: dir,
-    core: core as unknown as PluginCoreLike,
+    core,
     bus: core.getBus(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

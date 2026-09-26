@@ -1,10 +1,48 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { __configureHostPacing } from "../../src/web/http-utils";
+import { z } from "zod";
+import { __configureHostPacing } from "../../src/web/http-utils.ts";
+import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
 // The per-origin pacing gate defaults to a 1000 ms gap (plus jitter) between
 // request starts to the same origin. This suite is offline and reuses the same
 // mocked origins, so disable the gate; afterEach restores the disabled state.
 __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
+
+// Bun's `fetch` accepts `string | URL | Request` and carries a `preconnect`
+// helper alongside its call signature (bun-types `declare namespace fetch`), so
+// a double installed on `globalThis.fetch` has to match that port shape.
+function fetchDouble(
+  impl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  return Object.assign(mock(impl), { preconnect: (): void => {} });
+}
+
+/**
+ * Build `execute` arguments the way the platform does: every adapter parses raw
+ * tool input through the tool's own zod schema before `execute` sees it
+ * (`z.object(def.args)` in src/platform/adapters/{dsh,codex}/tool-factory.ts),
+ * so `.default()` values are materialized in the object the tool receives.
+ */
+function toolArgs<T extends z.ZodRawShape>(
+  shape: T,
+  input: z.input<z.ZodObject<T>>,
+): z.infer<z.ZodObject<T>> {
+  return z.object(shape).parse(input);
+}
+
+/** Minimal `CanonicalToolContext` double — these tools never read the session. */
+function ctx(): CanonicalToolContext {
+  return {
+    sessionID: "test-session",
+    messageID: "test-message",
+    agent: "test",
+    directory: process.cwd(),
+    worktree: process.cwd(),
+    abort: new AbortController().signal,
+    metadata() {},
+    async ask() {},
+  };
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -40,15 +78,15 @@ describe("DuckDuckGo search", () => {
       </html>
     `;
 
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse(ddgHtml)));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(mockResponse(ddgHtml)));
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "test query",
       source: "duckduckgo",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("Result One");
     expect(result).toContain("Result Two");
@@ -69,15 +107,15 @@ describe("DuckDuckGo search", () => {
       </body></html>
     `;
 
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse(ddgHtml)));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(mockResponse(ddgHtml)));
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "test",
       source: "duckduckgo",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("https://encoded-url.com/path");
     expect(result).not.toContain("uddg");
@@ -99,17 +137,17 @@ describe("Wikipedia search", () => {
       },
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(wikiResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "typescript",
       source: "wikipedia",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("TypeScript");
     expect(result).toContain("JavaScript");
@@ -147,17 +185,17 @@ describe("npm search", () => {
       ],
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(npmResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "web framework",
       source: "npm",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("express@4.18.2");
     expect(result).toContain("koa@2.14.0");
@@ -191,17 +229,17 @@ describe("Hacker News search", () => {
       ],
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(hnResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "hacker news project",
       source: "hackernews",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("Show HN: A new open source project");
     expect(result).toContain("https://example.com/project");
@@ -232,17 +270,17 @@ describe("Auto routing", () => {
       ],
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(npmResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "lodash npm package",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("lodash@4.17.21");
     expect(result).toContain("via npm");
@@ -257,17 +295,17 @@ describe("Auto routing", () => {
       },
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(wikiResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "react wikipedia",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("React");
     expect(result).toContain("via Wikipedia");
@@ -282,17 +320,17 @@ describe("Error handling", () => {
   it('returns "No Results" when all sources fail', async () => {
     // Return error responses instead of throwing (throwing triggers
     // fetchWithRetry backoff which causes test timeouts)
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(new Response("error", { status: 500 })),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "nonexistent",
       source: "jina",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("No Results Found");
     expect(result).toContain("nonexistent");
@@ -316,17 +354,17 @@ URL Source: https://example.org/second
 Markdown Content: Content of the second result.
     `;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(jinaMarkdown)),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "test",
       source: "jina",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("First Result");
     expect(result).toContain("https://example.com/first");
@@ -350,17 +388,17 @@ Markdown Content: Content of the second result.
       ],
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(hnResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "hacker news new framework",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("Show HN: A new project");
     expect(result).toContain("via Hacker News");
@@ -372,17 +410,17 @@ Markdown Content: Content of the second result.
         { title: "HN: TypeScript tips", url: null, objectID: "999", points: 25, num_comments: 8 }],
     };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(hnResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "hn typescript",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("HN: TypeScript tips");
     expect(result).toContain("via Hacker News");
@@ -393,7 +431,8 @@ describe("Result limits and empty results", () => {
   it("passes max_results to Wikipedia API", async () => {
     let capturedUrl = "";
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       capturedUrl = url;
       const wikiResponse = {
         query: {
@@ -406,30 +445,30 @@ describe("Result limits and empty results", () => {
       return Promise.resolve(mockResponse(JSON.stringify(wikiResponse)));
     });
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    await tool.execute({
+    await tool.execute(toolArgs(tool.args, {
       query: "test wikipedia",
       source: "auto",
       max_results: 2,
-    });
+    }), ctx());
 
     expect(capturedUrl).toContain("srlimit=2");
   });
   it('returns "No Results" for empty Wikipedia response', async () => {
     const emptyResponse = { query: { search: [] } };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(emptyResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "nonexistent",
       source: "wikipedia",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("No Results Found");
   });
@@ -437,17 +476,17 @@ describe("Result limits and empty results", () => {
   it('returns "No Results" for empty HN response', async () => {
     const emptyResponse = { hits: [] };
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(JSON.stringify(emptyResponse))),
     );
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "nothing",
       source: "hackernews",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(result).toContain("No Results Found");
   });
@@ -461,7 +500,8 @@ describe("Auto routing precision", () => {
   it("does not query the npm registry for a general multi-word query", async () => {
     const requestedUrls: string[] = [];
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       requestedUrls.push(url);
       return Promise.resolve(mockResponse(`
 Title: Parsing YAML in Python
@@ -470,13 +510,13 @@ Markdown Content: How to parse YAML with PyYAML.
 `));
     });
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "how to parse yaml in python",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     expect(requestedUrls.some((u) => u.includes("registry.npmjs.org"))).toBe(false);
     expect(result).toContain("Parsing YAML in Python");
@@ -500,14 +540,15 @@ Markdown Content: How to parse YAML with PyYAML.
     for (const query of ["lodash", "npm lodash"]) {
       const requestedUrls: string[] = [];
 
-      globalThis.fetch = mock((url: string) => {
+      globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+        const url = String(input);
         requestedUrls.push(url);
         return Promise.resolve(mockResponse(JSON.stringify(npmResponse)));
       });
 
-      const { createWebSearchTool } = await import("../../src/web/web-search");
+      const { createWebSearchTool } = await import("../../src/web/web-search.ts");
       const tool = createWebSearchTool();
-      const result = await tool.execute({ query, source: "auto", max_results: 5 });
+      const result = await tool.execute(toolArgs(tool.args, { query, source: "auto", max_results: 5 }), ctx());
 
       expect(requestedUrls.some((u) => u.includes("registry.npmjs.org"))).toBe(true);
       expect(result).toContain("lodash@4.17.21");
@@ -518,7 +559,8 @@ Markdown Content: How to parse YAML with PyYAML.
   it("keeps a general multi-word package query out of the npm registry", async () => {
     const requestedUrls: string[] = [];
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       requestedUrls.push(url);
       return Promise.resolve(mockResponse(`
 Title: Comparing Python package managers
@@ -527,13 +569,13 @@ Markdown Content: pip, poetry and uv compared.
 `));
     });
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "python package manager comparison",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     // Mentioning "package" must not route the query to the registry...
     expect(requestedUrls.some((u) => u.includes("registry.npmjs.org"))).toBe(false);
@@ -565,14 +607,15 @@ Markdown Content: pip, poetry and uv compared.
     for (const query of ["lodash", "npm lodash", "lodash npm package"]) {
       const requestedUrls: string[] = [];
 
-      globalThis.fetch = mock((url: string) => {
+      globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+        const url = String(input);
         requestedUrls.push(url);
         return Promise.resolve(mockResponse(JSON.stringify(npmResponse)));
       });
 
-      const { createWebSearchTool } = await import("../../src/web/web-search");
+      const { createWebSearchTool } = await import("../../src/web/web-search.ts");
       const tool = createWebSearchTool();
-      const result = await tool.execute({ query, source: "auto", max_results: 5 });
+      const result = await tool.execute(toolArgs(tool.args, { query, source: "auto", max_results: 5 }), ctx());
 
       const npmUrl = requestedUrls.find((u) => u.includes("registry.npmjs.org")) ?? "";
       expect(npmUrl).toContain("text=lodash&");
@@ -599,15 +642,17 @@ URL Source: https://example.com/dup
 Markdown Content: Second copy.
 `;
 
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse(jinaMarkdown)));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(mockResponse(jinaMarkdown)));
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({ query: "duplicate", source: "jina", max_results: 5 });
+    const result = await tool.execute(toolArgs(tool.args, { query: "duplicate", source: "jina", max_results: 5 }), ctx());
 
     expect(result).toContain("Duplicate One");
     expect(result).not.toContain("Duplicate Two");
-    const occurrences = result.split("https://example.com/dup").length - 1;
+    // `execute` returns `ToolResult`; the Jina path returns the text arm.
+    const text = typeof result === "string" ? result : result.output;
+    const occurrences = text.split("https://example.com/dup").length - 1;
     expect(occurrences).toBe(1);
   });
 
@@ -618,11 +663,11 @@ URL Source: https://example.com/array
 Markdown Content: Use arr[0] to read the first item.
 `;
 
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse(jinaMarkdown)));
+    globalThis.fetch = fetchDouble(() => Promise.resolve(mockResponse(jinaMarkdown)));
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({ query: "array access", source: "jina", max_results: 5 });
+    const result = await tool.execute(toolArgs(tool.args, { query: "array access", source: "jina", max_results: 5 }), ctx());
 
     expect(result).toContain("Array \\[index\\] access");
     expect(result).toContain("arr\\[0\\]");
@@ -650,18 +695,19 @@ describe("Query normalization", () => {
     };
     const requestedUrls: string[] = [];
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       requestedUrls.push(url);
       return Promise.resolve(mockResponse(JSON.stringify(npmResponse)));
     });
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "lodash  npm   package",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     const npmUrl = requestedUrls.find((u) => u.includes("registry.npmjs.org")) ?? "";
     expect(npmUrl).toContain("text=lodash&");
@@ -679,18 +725,19 @@ Markdown Content: How to parse YAML with PyYAML.
 `;
     const requestedUrls: string[] = [];
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       requestedUrls.push(url);
       return Promise.resolve(mockResponse(jinaMarkdown));
     });
 
-    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const { createWebSearchTool } = await import("../../src/web/web-search.ts");
     const tool = createWebSearchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       query: "how  to   parse yaml",
       source: "auto",
       max_results: 5,
-    });
+    }), ctx());
 
     const jinaUrl = requestedUrls.find((u) => u.startsWith("https://s.jina.ai/")) ?? "";
     expect(jinaUrl).toContain("how%20to%20parse%20yaml");

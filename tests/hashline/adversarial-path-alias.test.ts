@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ════════════════════════════════════════════════════════════════════
 // Adversarial path-alias semantics — duplicate-path rejection and the
@@ -53,14 +54,14 @@ const readTool = createHashlineReadTool();
 const editTool = createHashlineEditTool();
 
 async function readVersion(filePath: string): Promise<string> {
-  const out = String(await readTool.execute({ filePath }));
+  const out = String(await readTool.execute({ filePath }, makeToolContext(tmpDir)));
   const version = out.match(/^version: (\S+)$/m)?.[1];
   if (!version) throw new Error(`no version in read output:\n${out}`);
   return version;
 }
 
 async function anchorAt(filePath: string, line: number): Promise<string> {
-  const out = String(await readTool.execute({ filePath }));
+  const out = String(await readTool.execute({ filePath }, makeToolContext(tmpDir)));
   const annotated = out.split("\n").find((l) => l.startsWith(`${line}#`));
   if (!annotated) throw new Error(`line ${line} missing from read output:\n${out}`);
   return annotated.split("|")[0];
@@ -80,7 +81,7 @@ describe("hashline adversarial path aliases", () => {
         { filePath: real, version, edits: [{ op: "append" as const, lines: "AAA" }] },
         { filePath: linkPath, version, edits: [{ op: "append" as const, lines: "BBB" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
 
     const stillLink = (await lstat(linkPath)).isSymbolicLink();
     const realContent = await readFile(real, "utf-8");
@@ -109,8 +110,8 @@ describe("hashline adversarial path aliases", () => {
     const version = await readVersion(linkPath);
     const a1 = await anchorAt(linkPath, 1);
     const r = String(await editTool.execute({
-      files: [{ filePath: linkPath, version, edits: [{ pos: a1, lines: "CHANGED" }] }],
-    }));
+      files: [{ filePath: linkPath, version, edits: [{ op: "replace", pos: a1, lines: "CHANGED" }] }],
+    }, makeToolContext(tmpDir)));
     expect(r).not.toContain("Error:");
 
     const stillLink = (await lstat(linkPath)).isSymbolicLink();
@@ -140,8 +141,8 @@ describe("hashline adversarial path aliases", () => {
       const version = await readVersion(hard);
       const a1 = await anchorAt(hard, 1);
       const r = String(await editTool.execute({
-        files: [{ filePath: hard, version, edits: [{ pos: a1, lines: "CHANGED" }] }],
-      }));
+        files: [{ filePath: hard, version, edits: [{ op: "replace", pos: a1, lines: "CHANGED" }] }],
+      }, makeToolContext(tmpDir)));
       expect(r).not.toContain("Error:");
 
       const realContent = await readFile(real, "utf-8");
@@ -170,7 +171,7 @@ describe("hashline adversarial path aliases", () => {
         { filePath: fp, version, edits: [{ op: "append" as const, lines: "X" }] },
         { filePath: alias, version, edits: [{ op: "append" as const, lines: "Y" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
     // resolve() collapses ".." → same normalized key → rejected.
     expect(r).toContain("Error:");
     expect(r).toContain("Duplicate filePath");
@@ -189,7 +190,7 @@ describe("hashline adversarial path aliases", () => {
         { filePath: fp, version, edits: [{ op: "append" as const, lines: "X" }] },
         { filePath: alias, version, edits: [{ op: "append" as const, lines: "Y" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
     expect(r).toContain("Error:");
     expect(r).toContain("Duplicate filePath");
     expect(await readFile(fp, "utf-8")).toBe("e1\ne2\n");
@@ -202,8 +203,8 @@ describe("hashline adversarial path aliases", () => {
     const version = await readVersion(fp);
     const a1 = await anchorAt(fp, 1);
     const r = String(await editTool.execute({
-      files: [{ filePath: fp, version, edits: [{ pos: a1, lines: "CH" }] }],
-    }));
+      files: [{ filePath: fp, version, edits: [{ op: "replace", pos: a1, lines: "CH" }] }],
+    }, makeToolContext(tmpDir)));
     expect(r).not.toContain("Error:");
     expect(await readFile(fp, "utf-8")).toBe("CH\ntwo\n");
   });
@@ -220,7 +221,7 @@ describe("hashline adversarial path aliases", () => {
         { filePath: fa, version: va, edits: [{ op: "append" as const, lines: "AX" }] },
         { filePath: fb, version: vb, edits: [{ op: "append" as const, lines: "BX" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
     expect(r).not.toContain("Error:");
     expect(await readFile(fa, "utf-8")).toBe("a1\na2\nAX\n");
     expect(await readFile(fb, "utf-8")).toBe("b1\nb2\nBX\n");

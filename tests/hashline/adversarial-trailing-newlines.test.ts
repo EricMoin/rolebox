@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext, type HashlineEdit } from "./fixtures/tool-context.ts";
 
 // ════════════════════════════════════════════════════════════════════
 // Adversarial trailing-newline semantics — appends/prepends/replaces on
@@ -49,7 +50,7 @@ const editTool = createHashlineEditTool();
 
 /** Read a file and return its whole-file version + per-line anchors. */
 async function readInfo(filePath: string): Promise<{ version: string; anchor: (n: number) => string }> {
-  const out = String(await readTool.execute({ filePath }));
+  const out = String(await readTool.execute({ filePath }, makeToolContext(tmpDir)));
   const version = out.match(/^version: (\S+)$/m)?.[1];
   if (!version) throw new Error(`no version in read output:\n${out}`);
   const anchors = new Map<number, string>();
@@ -61,8 +62,8 @@ async function readInfo(filePath: string): Promise<{ version: string; anchor: (n
 }
 
 /** Run a single-file edit and return the tool result string. */
-async function runEdit(filePath: string, version: string, edits: Array<Record<string, unknown>>): Promise<string> {
-  return String(await editTool.execute({ files: [{ filePath, version, edits }] }));
+async function runEdit(filePath: string, version: string, edits: HashlineEdit[]): Promise<string> {
+  return String(await editTool.execute({ files: [{ filePath, version, edits }] }, makeToolContext(tmpDir)));
 }
 
 describe("hashline adversarial trailing-newline semantics", () => {
@@ -113,7 +114,7 @@ describe("hashline adversarial trailing-newline semantics", () => {
     const fp = join(tmpDir, "d-replace-final-blank.txt");
     await writeFile(fp, "a\n\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = String(await runEdit(fp, version, [{ pos: anchor(2), lines: "x" }]));
+    const r = String(await runEdit(fp, version, [{ op: "replace", pos: anchor(2), lines: "x" }]));
     expect(r).not.toContain("Error:");
     const disk = await readFile(fp, "utf-8");
     console.log(
@@ -128,7 +129,7 @@ describe("hashline adversarial trailing-newline semantics", () => {
     const fp = join(tmpDir, "e-replace-first.txt");
     await writeFile(fp, "a\n\n", "utf-8");
     const { version, anchor } = await readInfo(fp);
-    const r = String(await runEdit(fp, version, [{ pos: anchor(1), lines: "z" }]));
+    const r = String(await runEdit(fp, version, [{ op: "replace", pos: anchor(1), lines: "z" }]));
     expect(r).not.toContain("Error:");
     expect(await readFile(fp, "utf-8")).toBe("z\n\n");
   });

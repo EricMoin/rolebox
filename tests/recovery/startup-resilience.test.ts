@@ -11,14 +11,14 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { StartupChecker } from "../../src/recovery/startup-check";
-import { acquireStateLock } from "../../src/dispatch/concurrency/state-lock";
-import { shortHash } from "../../src/utils/state-paths";
-import { LoopStore } from "../../src/loop/loop-store";
-import { FunctionRuntimeStore } from "../../src/function/runtime-store";
-import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
-import { BudgetTracker } from "../../src/dispatch/budget/budget-tracker";
-import { DEFAULT_CONFIG } from "../../src/dispatch/config";
+import { StartupChecker } from "../../src/recovery/startup-check.ts";
+import { acquireStateLock } from "../../src/dispatch/concurrency/state-lock.ts";
+import { shortHash } from "../../src/utils/state-paths.ts";
+import { LoopStore } from "../../src/loop/loop-store.ts";
+import { FunctionRuntimeStore } from "../../src/function/runtime-store.ts";
+import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
+import { BudgetTracker } from "../../src/dispatch/budget/budget-tracker.ts";
+import { DEFAULT_CONFIG } from "../../src/dispatch/config.ts";
 
 // ── Temp-dir hygiene (mirrors startup-check.test.ts) ─────────────────────────
 

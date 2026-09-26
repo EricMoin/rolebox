@@ -2,6 +2,7 @@ import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { handleSystemTransform } from "../../src/hooks/system-transform.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
+import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 import type { ResolvedFunction } from "../../src/types.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 
@@ -25,6 +26,34 @@ function makeFn(name: string, overrides?: Partial<ResolvedFunction>): ResolvedFu
   };
 }
 
+// Doubles for the `runHooks` port on `HookDeps.customHooks` / `HookDeps.builtInHooks`.
+// The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
+// in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
+// src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
+// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+function makeCustomRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+    ) => Promise.resolve(),
+  );
+}
+
+function makeBuiltInRunHooks() {
+  return mock(
+    (
+      _event: HookEvent,
+      _phase: "before" | "after",
+      _ctxFactory: () => HookContext,
+      _input: unknown,
+      _builtinConfig: Record<string, boolean>,
+    ) => Promise.resolve(),
+  );
+}
+
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
     session: { messages: mock(() => Promise.resolve([])) } as any,
@@ -46,7 +75,7 @@ function makeState(): HookState {
 
 describe("handleSystemTransform — early exit", () => {
   it("returns early when sessionID is missing", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
     const output = { system: [] as string[] };
 
     await handleSystemTransform(
@@ -64,7 +93,7 @@ describe("handleSystemTransform — early exit", () => {
 
 describe("handleSystemTransform — hook lifecycle phases", () => {
   it("calls built-in hooks before and after", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
     const output = { system: [] as string[] };
 
     await handleSystemTransform(
@@ -83,7 +112,7 @@ describe("handleSystemTransform — hook lifecycle phases", () => {
   });
 
   it("calls custom hooks before and after", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
     const output = { system: [] as string[] };
 
     await handleSystemTransform(
@@ -102,7 +131,7 @@ describe("handleSystemTransform — hook lifecycle phases", () => {
   });
 
   it("passes correct event name and input to runHooks", async () => {
-    const customRunHooks = mock(() => Promise.resolve());
+    const customRunHooks = makeCustomRunHooks();
     const output = { system: ["<existing>content</existing>"] };
 
     await handleSystemTransform(
@@ -268,7 +297,7 @@ describe("handleSystemTransform — function block and graph state", () => {
 
 describe("handleSystemTransform — metadata injection via builtinConfig", () => {
   it("passes builtinConfig through to runHooks", async () => {
-    const builtInRunHooks = mock(() => Promise.resolve());
+    const builtInRunHooks = makeBuiltInRunHooks();
     const builtinConfig = { debugMode: true };
     const output = { system: [] as string[] };
 

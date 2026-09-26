@@ -25,6 +25,17 @@ function makeServerState(overrides: Partial<LspServerState> = {}): LspServerStat
   };
 }
 
+/**
+ * processBuffer() invokes its dispatch callback with the languageId, the server
+ * state and the parsed message (src/lsp/rpc-handler.ts:18-21). Declare the
+ * double with that signature so `mock.calls[0]` is a real tuple, not `[]`.
+ */
+function makeDispatchMock() {
+  return mock<(languageId: string, state: LspServerState, msg: unknown) => void>(
+    () => {},
+  );
+}
+
 // ---------------------------------------------------------------------------
 // writeMessage
 // ---------------------------------------------------------------------------
@@ -97,7 +108,7 @@ describe("writeMessage", () => {
 describe("processBuffer", () => {
   it("does nothing when buffer map has no entry for the language", () => {
     const buffers = new Map();
-    const dispatchMock = mock(() => {});
+    const dispatchMock = makeDispatchMock();
     processBuffer(buffers, "nonexistent", dispatchMock);
     expect(dispatchMock).not.toHaveBeenCalled();
   });
@@ -111,7 +122,7 @@ describe("processBuffer", () => {
     const buffers = new Map();
     buffers.set("typescript", { buffer: raw, state });
 
-    const dispatchMock = mock(() => {});
+    const dispatchMock = makeDispatchMock();
     processBuffer(buffers, "typescript", dispatchMock);
 
     expect(dispatchMock).toHaveBeenCalledTimes(1);
@@ -131,7 +142,7 @@ describe("processBuffer", () => {
     const buffers = new Map();
     buffers.set("typescript", { buffer: Buffer.from(raw), state });
 
-    const dispatchMock = mock(() => {});
+    const dispatchMock = makeDispatchMock();
     processBuffer(buffers, "typescript", dispatchMock);
 
     expect(dispatchMock).toHaveBeenCalledTimes(2);
@@ -149,7 +160,7 @@ describe("processBuffer", () => {
     const buffers = new Map();
     buffers.set("typescript", { buffer: Buffer.from(raw), state });
 
-    const dispatchMock = mock(() => {});
+    const dispatchMock = makeDispatchMock();
     processBuffer(buffers, "typescript", dispatchMock);
     expect(dispatchMock).not.toHaveBeenCalled();
   });
@@ -162,7 +173,7 @@ describe("processBuffer", () => {
     buffers.set("typescript", { buffer: junk, state });
 
     // After trimming, buffer should be empty (0 length)
-    processBuffer(buffers, "typescript", mock(() => {}));
+    processBuffer(buffers, "typescript", makeDispatchMock());
     expect(buffers.get("typescript")!.buffer.length).toBe(0);
   });
 
@@ -173,7 +184,7 @@ describe("processBuffer", () => {
     const buffers = new Map();
     buffers.set("typescript", { buffer: raw, state });
 
-    processBuffer(buffers, "typescript", mock(() => {}));
+    processBuffer(buffers, "typescript", makeDispatchMock());
     // Buffer should be preserved since it's under 1MB
     expect(buffers.get("typescript")!.buffer.length).toBe("no-header-here".length);
   });
@@ -186,7 +197,7 @@ describe("processBuffer", () => {
 describe("dispatchMessage", () => {
   it("resolves pending request on successful response", () => {
     const resolve = mock(() => {});
-    const reject = mock(() => {});
+    const reject = mock<(error: Error) => void>(() => {});
     const timeout = setTimeout(() => {}, 10000);
     const state = makeServerState();
     state.pendingRequests.set(1, { resolve, reject, timeout });
@@ -201,7 +212,7 @@ describe("dispatchMessage", () => {
 
   it("rejects pending request on error response", () => {
     const resolve = mock(() => {});
-    const reject = mock(() => {});
+    const reject = mock<(error: Error) => void>(() => {});
     const timeout = setTimeout(() => {}, 10000);
     const state = makeServerState();
     state.pendingRequests.set(1, { resolve, reject, timeout });
@@ -212,7 +223,7 @@ describe("dispatchMessage", () => {
       error: { code: -32601, message: "Method not found" },
     });
 
-    const errArg = reject.mock.calls[0]![0] as Error;
+    const errArg = reject.mock.calls[0]![0];
     expect(errArg.message).toContain("Method not found");
     expect(resolve).not.toHaveBeenCalled();
     expect(state.pendingRequests.has(1)).toBe(false);

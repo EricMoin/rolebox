@@ -13,7 +13,7 @@ describe("ISessionClient interface (via mock)", () => {
   it("create — returns a new session", async () => {
     const client = createMockClient();
     const result = await client.create({ directory: "/tmp", agent: "test" });
-    expect(result).toEqual({ id: "test-session-1" });
+    expect(result?.id).toBe("test-session-1");
   });
 
   it("create — accepts parentID", async () => {
@@ -21,13 +21,13 @@ describe("ISessionClient interface (via mock)", () => {
       sessionCreate: () => Promise.resolve({ id: "child-session" }),
     });
     const result = await client.create({ directory: "/tmp", parentID: "parent_1" });
-    expect(result).toEqual({ id: "child-session" });
+    expect(result?.id).toBe("child-session");
   });
 
   it("get — retrieves a session by ID", async () => {
     const client = createMockClient();
     const result = await client.get("ses_1", "/tmp");
-    expect(result).toEqual({ id: "test-session-1" });
+    expect(result?.id).toBe("test-session-1");
   });
 
   it("get — returns null when session not found", async () => {

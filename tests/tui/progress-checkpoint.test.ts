@@ -5,12 +5,12 @@ import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { readMonitorSnapshot } from "../../src/cli/commands/monitor/monitor-reader";
+import { readMonitorSnapshot } from "../../src/cli/commands/monitor/monitor-reader.ts";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
   ActiveFunction,
-} from "../../src/cli/commands/monitor/monitor-reader-types";
+} from "../../src/cli/commands/monitor/monitor-reader-types.ts";
 
 // ── Test helpers ─────────────────────────────────────────────────────
 

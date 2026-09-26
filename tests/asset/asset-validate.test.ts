@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import type { ResolvedRole } from "../../src/types.ts";
 import { ReferenceScope, FunctionSource } from "../../src/constants.ts";
 import { createAssetValidateTool } from "../../src/asset/asset-validate.ts";
+import { makeToolContext } from "./helpers.ts";
 
 function makeMinimalRole(overrides: Record<string, any> = {}): ResolvedRole {
   return {
@@ -53,7 +54,7 @@ describe("asset-validate — reference path resilience", () => {
     });
 
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
 
     expect(typeof result).toBe("string");
     expect(result).toContain("unreadable-ref");
@@ -67,7 +68,7 @@ describe("asset-validate — reference path resilience", () => {
   it("returns clean validation for roles with valid references", async () => {
     const role = makeMinimalRole({ references: [] });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("All assets are valid");
   });
 });
@@ -78,7 +79,7 @@ describe("asset-validate — missing dependencies", () => {
       functions: [buildFn("my-fn", { requires: ["missing-dep"] })],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("missing-dep");
     expect(result).toContain("requires nonexistent function");
     expect(result).toContain("error");
@@ -92,7 +93,7 @@ describe("asset-validate — missing dependencies", () => {
       ],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).not.toContain("requires nonexistent function");
   });
 
@@ -101,7 +102,7 @@ describe("asset-validate — missing dependencies", () => {
       functions: [buildFn("standalone-fn")],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("All assets are valid");
   });
 
@@ -110,7 +111,7 @@ describe("asset-validate — missing dependencies", () => {
       functions: [buildFn("my-fn", { requires: ["missing-a", "missing-b", "missing-c"] })],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("missing-a");
     expect(result).toContain("missing-b");
     expect(result).toContain("missing-c");
@@ -131,7 +132,7 @@ describe("asset-validate — missing dependencies", () => {
       }],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("nonexistent-in-parent");
     expect(result).toContain("requires nonexistent function");
   });
@@ -149,7 +150,7 @@ describe("asset-validate — broken reference paths", () => {
       }],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("broken-ref");
     expect(result).toContain("file not found");
     expect(result).toContain("error");
@@ -166,7 +167,7 @@ describe("asset-validate — broken reference paths", () => {
       }],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("All assets are valid");
   });
 });
@@ -179,7 +180,7 @@ describe("asset-validate — unknown transition conditions", () => {
       })],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("unknown condition");
     expect(result).toContain("bogus_condition_xyz");
     expect(result).toContain("warning");
@@ -192,7 +193,7 @@ describe("asset-validate — unknown transition conditions", () => {
       })],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).not.toContain("unknown condition");
   });
 
@@ -201,7 +202,7 @@ describe("asset-validate — unknown transition conditions", () => {
       functions: [buildFn("simple-fn")],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("All assets are valid");
   });
 
@@ -222,7 +223,7 @@ describe("asset-validate — unknown transition conditions", () => {
       }],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("unknown condition");
     expect(result).toContain("not_a_real_condition");
   });
@@ -241,7 +242,7 @@ describe("asset-validate — unknown transition conditions", () => {
       })],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toContain("fake_cond_a");
     expect(result).toContain("fake_cond_b");
   });
@@ -250,7 +251,7 @@ describe("asset-validate — unknown transition conditions", () => {
 describe("asset-validate — empty / edge cases", () => {
   it("handles empty roles array", async () => {
     const tool = createAssetValidateTool([]);
-    const result: string = await tool.execute({ fix: false }) as any;
+    const result: string = await tool.execute({}, makeToolContext()) as string;
     expect(result).toBe("No roles loaded. Cannot validate assets.");
   });
 
@@ -262,7 +263,7 @@ describe("asset-validate — empty / edge cases", () => {
     const roleB = makeMinimalRole({ id: "role-b", functions: [buildFn("fn-b", { requires: ["missing-b"] })] }) as ResolvedRole;
     const tool = createAssetValidateTool([roleA, roleB]);
 
-    const result: string = await tool.execute({ fix: false, role_id: "role-a" }) as any;
+    const result: string = await tool.execute({ role_id: "role-a" }, makeToolContext()) as string;
 
     // role-a's issues are always included
     expect(result).toContain("missing-a");

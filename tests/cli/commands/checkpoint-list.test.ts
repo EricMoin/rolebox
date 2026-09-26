@@ -84,7 +84,7 @@ function captureLogs(
 /** Call checkpoint-list's run() with citty-compatible args. */
 async function runList(args: { task?: string }): Promise<void> {
   const mod = await import(
-    "../../../src/cli/commands/checkpoint/checkpoint-list"
+    "../../../src/cli/commands/checkpoint/checkpoint-list.ts"
   );
   await (mod.listCommand.run as any)({ args: { ...args, _: [] } });
 }

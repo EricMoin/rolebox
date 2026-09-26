@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveProjectRoot, truncate, relevanceLevels } from "../../../src/cli/commands/memory/memory-helpers";
+import { resolveProjectRoot, truncate, relevanceLevels } from "../../../src/cli/commands/memory/memory-helpers.ts";
 
 let tmpDir: string;
 

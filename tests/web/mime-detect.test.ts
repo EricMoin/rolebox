@@ -4,7 +4,7 @@ describe("detectMimeByMagic", () => {
   let detectMimeByMagic: (buffer: Uint8Array) => string | null;
 
   beforeAll(async () => {
-    const mod = await import("../../src/web/mime-detect");
+    const mod = await import("../../src/web/mime-detect.ts");
     detectMimeByMagic = mod.detectMimeByMagic;
   });
 
@@ -91,7 +91,7 @@ describe("detectContentType", () => {
   };
 
   beforeAll(async () => {
-    const mod = await import("../../src/web/mime-detect");
+    const mod = await import("../../src/web/mime-detect.ts");
     detectContentType = mod.detectContentType;
   });
 

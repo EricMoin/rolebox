@@ -11,15 +11,15 @@
  */
 
 import { describe, it, expect, mock } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
-import type { LoopState } from "../../src/loop/types";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+import type { LoopState } from "../../src/loop/types.ts";
 import {
   LOOP_PROGRESS_MARKER,
   MAX_TREE_WORKER_SESSIONS,
   DEFAULT_ITERATIONS,
   MAX_ITERATIONS_HARD_CAP,
-} from "../../src/loop/constants";
+} from "../../src/loop/constants.ts";
 
 // ── Fake Adapter (reused from coordinator.test.ts pattern) ─────────────────
 

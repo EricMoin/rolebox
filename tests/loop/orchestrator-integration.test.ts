@@ -3,25 +3,25 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { LoopCoordinator, shouldCancelLoop } from "../../src/loop/coordinator";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
-import type { LoopState, LoopMode } from "../../src/loop/types";
-import { LoopStore } from "../../src/loop/loop-store";
-import { LOOP_PROGRESS_MARKER, SEED_CHAR_CAP } from "../../src/loop/constants";
+import { LoopCoordinator, shouldCancelLoop } from "../../src/loop/coordinator.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+import type { LoopState, LoopMode } from "../../src/loop/types.ts";
+import { LoopStore } from "../../src/loop/loop-store.ts";
+import { LOOP_PROGRESS_MARKER, SEED_CHAR_CAP } from "../../src/loop/constants.ts";
 import {
   DISPATCH_COMPLETION_MARKER,
   DISPATCH_ALL_COMPLETE_MARKER,
   DISPATCH_RECOVERY_MARKER,
-} from "../../src/dispatch/notification";
+} from "../../src/dispatch/notification.ts";
 import {
   activeLoopManager,
   pendingCorrections,
   userMessagedSessions,
   loopManagerMap,
   managerMap,
-  createPluginHooks,
-} from "../../src/core/composition";
-import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
+} from "../../src/core/composition.ts";
+import { createHealthyPluginHooks, type PluginHookHandlers } from "../helpers/plugin-hooks.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 
@@ -130,6 +130,11 @@ function createFakeAdapter(
         });
       },
     ),
+
+    getTaskStatus: mock(async (_taskId: string) => {
+      calls.push({ method: "getTaskStatus", args: [_taskId] });
+      return "completed";
+    }),
   };
 
   return { adapter, calls };
@@ -278,7 +283,7 @@ describe("Orchestrator Integration", () => {
         "Round 3 summary: all auth work complete.",
       ];
       const origReadSummary = adapter.readOriginSummary;
-      (adapter as Record<string, unknown>).readOriginSummary = mock(
+      adapter.readOriginSummary = mock(
         async () => {
           const s = summaries[summaryCallCount % summaries.length]!;
           summaryCallCount += 1;
@@ -642,7 +647,7 @@ describe("Orchestrator Integration", () => {
   // ── Scenario 7: Same-origin loop exclusivity ─────────────────────────
 
   describe("Scenario 7: Same-origin loop exclusivity", () => {
-    let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+    let hooks: PluginHookHandlers;
     let tmpDir: string;
 
     beforeEach(async () => {
@@ -650,7 +655,7 @@ describe("Orchestrator Integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createHealthyPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {

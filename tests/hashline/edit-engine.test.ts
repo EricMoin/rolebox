@@ -42,6 +42,7 @@ import { createHashlineEditTool } from "../../src/hashline/index.ts";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ════════════════════════════════════════════════════════════════════
 // 1. parseLineRef
@@ -1031,10 +1032,10 @@ describe("batch partial failure", () => {
 
     const result = await createHashlineEditTool().execute({
       files: [
-        { filePath: f1, version: m1.version, edits: [{ pos: validAnchor, lines: "MODIFIED" }] },
-        { filePath: f2, version: m2.version, edits: [{ pos: invalidAnchor, lines: "should fail" }] },
+        { filePath: f1, version: m1.version, edits: [{ op: "replace", pos: validAnchor, lines: "MODIFIED" }] },
+        { filePath: f2, version: m2.version, edits: [{ op: "replace", pos: invalidAnchor, lines: "should fail" }] },
       ],
-    });
+    }, makeToolContext(tmpDir));
 
     // Should report the error prefix
     expect(result).toContain("Error: Edit failed for some files");

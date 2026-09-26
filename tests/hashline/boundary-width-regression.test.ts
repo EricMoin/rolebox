@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // Regression test for the exact-1000-line boundary defect.
 //
@@ -41,7 +42,7 @@ describe("hashline boundary width regression (exactly 1000 lines + trailing newl
 
     // Read the file with hashline_read and parse the envelope.
     const readTool = createHashlineReadTool();
-    const readOutput = (await readTool.execute({ filePath })) as string;
+    const readOutput = (await readTool.execute({ filePath }, makeToolContext(tmpDir))) as string;
     const readLines = readOutput.split("\n");
 
     const version = readLines
@@ -65,8 +66,8 @@ describe("hashline boundary width regression (exactly 1000 lines + trailing newl
     // Edit line 500 with the anchor exactly as returned by hashline_read.
     const editTool = createHashlineEditTool();
     const editResult = (await editTool.execute({
-      files: [{ filePath, version, edits: [{ pos: anchor500, lines: "EDITED 500" }] }],
-    })) as string;
+      files: [{ filePath, version, edits: [{ op: "replace", pos: anchor500, lines: "EDITED 500" }] }],
+    }, makeToolContext(tmpDir))) as string;
 
     // (a) The edit must succeed — no error in the tool result.
     expect(editResult).not.toContain("Error:");

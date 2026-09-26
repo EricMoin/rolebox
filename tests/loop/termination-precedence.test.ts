@@ -25,13 +25,13 @@
  *     "error" with exactly one dispatchRound — no further rounds launch.
  */
 import { describe, it, expect } from "bun:test";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import { STOP_LOOP_SIGNAL } from "../../src/loop/constants";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import { STOP_LOOP_SIGNAL } from "../../src/loop/constants.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 import {
   createStatefulAdapter,
   settle,
-} from "./helpers/stateful-adapter";
+} from "./helpers/stateful-adapter.ts";
 
 const ORIGIN = "origin-1";
 
@@ -44,7 +44,7 @@ function registerLoop(c: LoopCoordinator, iterations: number): void {
     mode: "inherit",
     iterations,
   });
-  expect(result).toEqual({ ok: true });
+  expect(result).toEqual({ ok: true, value: undefined });
 }
 
 describe("loop termination precedence (stateful adapter)", () => {

@@ -42,6 +42,10 @@ function makeEnv(overrides?: Partial<CondEnv>): CondEnv {
     requiredEvidence: ["req1", "req2"],
     userMessagedThisTurn: true,
     ...overrides,
+    // CondEnv.workspaceDir is required; the Partial<CondEnv> spread above would
+    // otherwise re-declare it as optional. Default to this fixture's own
+    // temp workspace, which is what ArtifactStore is already rooted at.
+    workspaceDir: overrides?.workspaceDir ?? tmpDir,
   };
 }
 

@@ -7,6 +7,7 @@ import {
   createHashlineReadTool,
   createHashlineEditTool,
 } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // ---------------------------------------------------------------------------
 // Adversarial version round-trip MATRIX — EXTENDS (does not duplicate)
@@ -115,15 +116,15 @@ function anchorFor(read: ParsedRead, lineNum: number): string {
 const readTool = createHashlineReadTool();
 
 async function readVersion(fp: string): Promise<string> {
-  return parseReadOutput(await readTool.execute({ filePath: fp })).version;
+  return parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir)))).version;
 }
 
 async function editLineTwo(fp: string, read1: ParsedRead, replacement: string): Promise<string> {
-  return createHashlineEditTool().execute({
+  return String(await createHashlineEditTool().execute({
     files: [
-      { filePath: fp, version: read1.version, edits: [{ pos: anchorFor(read1, 2), lines: replacement }] },
+      { filePath: fp, version: read1.version, edits: [{ op: "replace", pos: anchorFor(read1, 2), lines: replacement }] },
     ],
-  });
+  }, makeToolContext(tmpDir)));
 }
 
 // Anchorless append used for the chained second-edit probe: the ONLY gate is
@@ -131,9 +132,9 @@ async function editLineTwo(fp: string, read1: ParsedRead, replacement: string): 
 // (version validation at hashline-edit.ts:132-141 runs before anchor
 // validation at :167-168).
 async function appendTail(fp: string, version: string): Promise<string> {
-  return createHashlineEditTool().execute({
+  return String(await createHashlineEditTool().execute({
     files: [{ filePath: fp, version, edits: [{ op: "append", lines: "TAIL" }] }],
-  });
+  }, makeToolContext(tmpDir)));
 }
 
 /**
@@ -186,7 +187,7 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m1-cr-only.txt");
     await writeFile(fp, "a\rb\rc\r", "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     // Documented normalization: CR-only canonicalizes to LF internally and is
     // restored as uniform CRLF (hash.ts:159-165, 170-172).
     const editOut = await editLineTwo(fp, read1, "B_EDITED");
@@ -203,7 +204,7 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m2-mixed-eol.txt");
     await writeFile(fp, "one\r\ntwo\nthree\r\nfour\n", "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     const editOut = await editLineTwo(fp, read1, "TWO_EDITED");
     await assertVersionRoundtrip(
       "mixed CRLF+LF",
@@ -218,7 +219,7 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m3-bom-crlf.txt");
     await writeFile(fp, "\uFEFFalpha\r\nbeta\r\ngamma\r\n", "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     const editOut = await editLineTwo(fp, read1, "BETA_EDITED");
     await assertVersionRoundtrip(
       "BOM+CRLF",
@@ -233,11 +234,11 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m4-empty-append.txt");
     await writeFile(fp, "", "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     expect(read1.totalLines).toBe(0);
-    const editOut = await createHashlineEditTool().execute({
+    const editOut = String(await createHashlineEditTool().execute({
       files: [{ filePath: fp, version: read1.version, edits: [{ op: "append", lines: "created-content" }] }],
-    });
+    }, makeToolContext(tmpDir)));
     await assertVersionRoundtrip(
       "empty file + anchorless append",
       fp,
@@ -251,9 +252,9 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m5-create-new.txt");
     // Version is not validated for to-be-created files (hashline-edit.ts:113-123,
     // 135-145); a dummy is supplied only to satisfy the schema.
-    const editOut = await createHashlineEditTool().execute({
+    const editOut = String(await createHashlineEditTool().execute({
       files: [{ filePath: fp, version: "0".repeat(64), edits: [{ op: "append", lines: "brand new content" }] }],
-    });
+    }, makeToolContext(tmpDir)));
     await assertVersionRoundtrip(
       "non-existent file creation",
       fp,
@@ -268,24 +269,24 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const content = Array.from({ length: 999 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
     await writeFile(fp, content, "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     expect(read1.totalLines).toBe(999);
     expect(read1.hashWidth).toBe(2);
 
-    const editOut = await createHashlineEditTool().execute({
+    const editOut = String(await createHashlineEditTool().execute({
       files: [{
         filePath: fp,
         version: read1.version,
         edits: [{ op: "append", lines: ["added-1000", "added-1001", "added-1002"] }],
       }],
-    });
+    }, makeToolContext(tmpDir)));
     expect(editOut).not.toContain("Error:");
 
     // The append pushes the file to 1002 lines → a fresh read escalates the
     // width to 3 (hash.ts:47-49). Invariant (1) must still hold: the edit's
     // returned version is computed from the canonicalized restored content
     // (hashline-edit.ts:226-233), independent of the width.
-    const fresh = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const fresh = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     expect(fresh.totalLines).toBe(1002);
     expect(fresh.hashWidth).toBe(3);
     const v1 = parseEditVersion(editOut);
@@ -300,7 +301,7 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     console.log(`[matrix] 999→1002 width-cross — invariant(2): second edit rejected=${edit2.includes("File version mismatch")}`);
     expect(edit2).not.toContain("Error:");
     expect(edit2).not.toContain("File version mismatch");
-    const fresh2 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const fresh2 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     expect(fresh2.totalLines).toBe(1003);
     expect(fresh2.hashWidth).toBe(3);
   });
@@ -309,14 +310,14 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m7-delete-all.txt");
     await writeFile(fp, "keep\nthis\nthat\n", "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
-    const editOut = await createHashlineEditTool().execute({
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
+    const editOut = String(await createHashlineEditTool().execute({
       files: [{
         filePath: fp,
         version: read1.version,
-        edits: [{ pos: anchorFor(read1, 1), end: anchorFor(read1, 3), lines: [] }],
+        edits: [{ op: "replace", pos: anchorFor(read1, 1), end: anchorFor(read1, 3), lines: [] }],
       }],
-    });
+    }, makeToolContext(tmpDir)));
     // Documented: D5 zero-newLines splice deletes the whole range
     // (edit-primitives.ts:116-125) and the original trailing newline is
     // preserved (hashline-edit.ts:214-215) → on-disk result is "\n", a single
@@ -328,11 +329,11 @@ describe("adversarial version roundtrip matrix (D1 fix coverage across shapes)",
     const fp = join(tmpDir, "m8-blank-line.txt");
     await writeFile(fp, "\n", "utf-8");
 
-    const read1 = parseReadOutput(await readTool.execute({ filePath: fp }));
+    const read1 = parseReadOutput(String(await readTool.execute({ filePath: fp }, makeToolContext(tmpDir))));
     expect(read1.totalLines).toBe(1);
-    const editOut = await createHashlineEditTool().execute({
+    const editOut = String(await createHashlineEditTool().execute({
       files: [{ filePath: fp, version: read1.version, edits: [{ op: "append", lines: "x" }] }],
-    });
+    }, makeToolContext(tmpDir)));
     // Documented degenerate-file rule: "\n" + append "x" → "x\n"
     // (applyAppend edit-primitives.ts:226-228).
     await assertVersionRoundtrip("single-blank-line file", fp, editOut, "x\n", "x\nTAIL\n");

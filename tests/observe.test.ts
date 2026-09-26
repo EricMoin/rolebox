@@ -2,10 +2,10 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runToolObserve, runTextCapture } from "../src/function/observe";
-import { functionRuntime } from "../src/function/runtime-state";
-import { ArtifactStore } from "../src/function/artifact-store";
-import type { ResolvedFunction } from "../src/types";
+import { runToolObserve, runTextCapture } from "../src/function/observe.js";
+import { functionRuntime } from "../src/function/runtime-state.js";
+import { ArtifactStore } from "../src/function/artifact-store.js";
+import type { ResolvedFunction } from "../src/types.js";
 
 function makeFn(overrides: Partial<ResolvedFunction> = {}): ResolvedFunction {
   return {

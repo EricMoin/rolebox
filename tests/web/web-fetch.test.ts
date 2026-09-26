@@ -1,11 +1,49 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { __configureHostPacing } from "../../src/web/http-utils";
+import { z } from "zod";
+import { __configureHostPacing } from "../../src/web/http-utils.ts";
+import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
 // The per-origin pacing gate defaults to a 1000 ms gap (plus jitter) between
 // request starts to the same origin. This suite is offline and repeatedly
 // reuses the same mocked origins, so disable the gate; afterEach restores the
 // disabled state in case a test re-enables pacing.
 __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
+
+// Bun's `fetch` accepts `string | URL | Request` and carries a `preconnect`
+// helper alongside its call signature (bun-types `declare namespace fetch`), so
+// a double installed on `globalThis.fetch` has to match that port shape.
+function fetchDouble(
+  impl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  return Object.assign(mock(impl), { preconnect: (): void => {} });
+}
+
+/**
+ * Build `execute` arguments the way the platform does: every adapter parses raw
+ * tool input through the tool's own zod schema before `execute` sees it
+ * (`z.object(def.args)` in src/platform/adapters/{dsh,codex}/tool-factory.ts),
+ * so `.default()` values are materialized in the object the tool receives.
+ */
+function toolArgs<T extends z.ZodRawShape>(
+  shape: T,
+  input: z.input<z.ZodObject<T>>,
+): z.infer<z.ZodObject<T>> {
+  return z.object(shape).parse(input);
+}
+
+/** Minimal `CanonicalToolContext` double — these tools never read the session. */
+function ctx(): CanonicalToolContext {
+  return {
+    sessionID: "test-session",
+    messageID: "test-message",
+    agent: "test",
+    directory: process.cwd(),
+    worktree: process.cwd(),
+    abort: new AbortController().signal,
+    metadata() {},
+    async ask() {},
+  };
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -27,15 +65,15 @@ function mockResponse(body: string, status = 200, contentType?: string) {
 describe("web-fetch SSRF blocking", () => {
   it("blocks localhost URLs and returns error format", async () => {
     // If fetch is called, the guard failed — fail the test
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called for blocked URLs")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "http://localhost:8080/secret",
-    });
+    }), ctx());
 
     expect(typeof result).toBe("string");
     const resultStr = result as string;
@@ -45,15 +83,15 @@ describe("web-fetch SSRF blocking", () => {
   });
 
   it("blocks RFC 1918 10.x.x.x addresses", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "http://10.0.0.1/admin",
-    });
+    }), ctx());
 
     const resultStr = result as string;
     expect(resultStr).toContain("Error Fetching URL");
@@ -61,15 +99,15 @@ describe("web-fetch SSRF blocking", () => {
   });
 
   it("blocks 192.168.x.x addresses", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "http://192.168.1.1/",
-    });
+    }), ctx());
 
     const resultStr = result as string;
     expect(resultStr).toContain("Error Fetching URL");
@@ -77,15 +115,15 @@ describe("web-fetch SSRF blocking", () => {
   });
 
   it("blocks *.local hostnames", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "http://myapp.local/",
-    });
+    }), ctx());
 
     const resultStr = result as string;
     expect(resultStr).toContain("Error Fetching URL");
@@ -93,15 +131,15 @@ describe("web-fetch SSRF blocking", () => {
   });
 
   it("allows public URLs to proceed to fetch", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse("<html><body><p>Hello</p></body></html>", 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
-    });
+    }), ctx());
 
     // Should NOT be an error string — should be a ToolResult object
     expect(typeof result).not.toBe("string");
@@ -109,15 +147,15 @@ describe("web-fetch SSRF blocking", () => {
   });
 
   it("includes recovery suggestions in error format", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "http://localhost/",
-    });
+    }), ctx());
 
     const resultStr = result as string;
     // Recovery suggestions
@@ -135,15 +173,15 @@ describe("web-fetch format conversion", () => {
   it("converts HTML to markdown by default", async () => {
     const html = `<html><body><main><h1>Page Title</h1><p>Paragraph content.</p></main></body></html>`;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(html, 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
-    });
+    }), ctx());
 
     expect(result).not.toBeString;
     const output = (result as { output: string }).output;
@@ -154,16 +192,16 @@ describe("web-fetch format conversion", () => {
   it("extracts plain text with format: text", async () => {
     const html = `<html><body><main><h1>Title</h1><p>Body text</p><script>alert('xss')</script></main></body></html>`;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(html, 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
       format: "text",
-    });
+    }), ctx());
 
     const output = (result as { output: string }).output;
     expect(output).toContain("Title");
@@ -174,16 +212,16 @@ describe("web-fetch format conversion", () => {
   it("returns clean HTML with format: html", async () => {
     const html = `<html><head><script>alert('xss')</script><style>.red{color:red}</style></head><body><p>Clean content</p></body></html>`;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(html, 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
       format: "html",
-    });
+    }), ctx());
 
     const output = (result as { output: string }).output;
     expect(output).toContain("Clean content");
@@ -194,16 +232,16 @@ describe("web-fetch format conversion", () => {
   it("parses JSON with format: json", async () => {
     const jsonData = JSON.stringify({ key: "value", nested: { num: 42 } });
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(jsonData, 200, "application/json")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://api.example.com/data",
       format: "json",
-    });
+    }), ctx());
 
     const output = (result as { output: string }).output;
     expect(output).toContain('"key"');
@@ -214,16 +252,16 @@ describe("web-fetch format conversion", () => {
   it("returns raw content with format: raw", async () => {
     const text = "Just plain text content";
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(text, 200, "text/plain")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/raw",
       format: "raw",
-    });
+    }), ctx());
 
     // With text/plain, raw format should return the raw text
     // ToolResult may be a string or object depending on the pipeline path
@@ -240,16 +278,16 @@ describe("web-fetch format conversion", () => {
     // HTML content → auto → markdown
     const html = `<html><body><main><p>Auto detected as HTML</p></main></body></html>`;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(html, 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
       format: "auto",
-    });
+    }), ctx());
 
     const output = (result as { output: string }).output;
     expect(output).toContain("Auto detected as HTML");
@@ -258,16 +296,16 @@ describe("web-fetch format conversion", () => {
   it("returns a text/plain body as content for format: auto", async () => {
     const text = "hello plain world";
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(text, 200, "text/plain; charset=utf-8")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/plain.txt",
       format: "auto",
-    });
+    }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -278,16 +316,16 @@ describe("web-fetch format conversion", () => {
   it("returns a text/plain body as content for format: raw", async () => {
     const text = "hello plain world";
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(text, 200, "text/plain; charset=utf-8")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/plain.txt",
       format: "raw",
-    });
+    }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -303,15 +341,15 @@ describe("web-fetch format conversion", () => {
 describe("web-fetch error handling", () => {
   it("returns error message when all sources fail with network error", async () => {
     // Reject (network error) so fetchDefault catches and returns statusCode 0
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("Network failure")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/inaccessible",
-    });
+    }), ctx());
 
     expect(typeof result).toBe("string");
     const resultStr = result as string;
@@ -321,30 +359,39 @@ describe("web-fetch error handling", () => {
   });
 
   it("returns error for URL with no protocol", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
+    // `not-a-valid-url` is exactly what this test exercises: the tool has to
+    // reject it itself. Routing it through `toolArgs` would fail the tool's own
+    // `z.string().url()` schema before `execute` ran, so the post-parse argument
+    // shape the platform would have produced is spelled out here instead.
     const result = await tool.execute({
       url: "not-a-valid-url",
-    });
+      format: "auto",
+      engine: "default",
+      timeout: 30,
+      max_size: 51200,
+      include_metadata: false,
+    }, ctx());
 
     const resultStr = result as string;
     expect(resultStr).toContain("Error Fetching URL");
   });
 
   it("includes the blocked URL in the error response", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.reject(new Error("fetch should not be called")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "http://localhost:3000/",
-    });
+    }), ctx());
 
     const resultStr = result as string;
     expect(resultStr).toContain("http://localhost:3000/");
@@ -359,19 +406,19 @@ describe("web-fetch custom headers", () => {
   it("sends custom headers with the request", async () => {
     let capturedHeaders: Record<string, string> | undefined;
 
-    globalThis.fetch = mock((_url: string, opts: RequestInit = {}) => {
+    globalThis.fetch = fetchDouble((_url: string | URL | Request, opts: RequestInit = {}) => {
       capturedHeaders = opts.headers as Record<string, string>;
       return Promise.resolve(
         mockResponse("<html><body><p>OK</p></body></html>", 200, "text/html"),
       );
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    await tool.execute({
+    await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
       headers: { "X-Custom": "test-value" },
-    });
+    }), ctx());
 
     expect(capturedHeaders).toBeDefined();
     expect(capturedHeaders!["X-Custom"]).toBe("test-value");
@@ -380,18 +427,18 @@ describe("web-fetch custom headers", () => {
   it("sends default Accept-Language header", async () => {
     let capturedHeaders: Record<string, string> | undefined;
 
-    globalThis.fetch = mock((_url: string, opts: RequestInit = {}) => {
+    globalThis.fetch = fetchDouble((_url: string | URL | Request, opts: RequestInit = {}) => {
       capturedHeaders = opts.headers as Record<string, string>;
       return Promise.resolve(
         mockResponse("<html><body><p>OK</p></body></html>", 200, "text/html"),
       );
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    await tool.execute({
+    await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
-    });
+    }), ctx());
 
     expect(capturedHeaders).toBeDefined();
     expect(capturedHeaders!["Accept-Language"]).toBe("en-US,en;q=0.9");
@@ -406,15 +453,15 @@ describe("web-fetch source attribution", () => {
   it("includes the source URL in the output", async () => {
     const html = `<html><body><main><p>Test content</p></main></body></html>`;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(html, 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
-    });
+    }), ctx());
 
     const output = (result as { output: string }).output;
     // The source is in the markdown as a blockquote prefix
@@ -424,15 +471,15 @@ describe("web-fetch source attribution", () => {
   it("sets the output title to URL with MIME type", async () => {
     const html = `<html><body><main><p>Test</p></main></body></html>`;
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(html, 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/page",
-    });
+    }), ctx());
 
     const title = (result as { title?: string }).title;
     expect(title).toContain("example.com");
@@ -452,7 +499,8 @@ describe("web-fetch bot-block escalation", () => {
   it("escalates past a Cloudflare challenge to a working fallback engine", async () => {
     const requested: string[] = [];
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       requested.push(url);
       if (url.startsWith("https://r.jina.ai/")) {
         return Promise.resolve(new Response("# Protected Page\n\nReal content from Jina.", {
@@ -466,12 +514,12 @@ describe("web-fetch bot-block escalation", () => {
       }));
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/protected",
       format: "markdown",
-    });
+    }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -482,16 +530,16 @@ describe("web-fetch bot-block escalation", () => {
   });
 
   it("reports blocking and All sources failed when every engine is blocked", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(new Response(challengeBody, {
         status: 403,
         headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
       })),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({ url: "https://example.com/protected" });
+    const result = await tool.execute(toolArgs(tool.args, { url: "https://example.com/protected" }), ctx());
 
     expect(typeof result).toBe("string");
     const resultStr = result as string;
@@ -508,7 +556,7 @@ describe("web-fetch bot-block escalation", () => {
   it("returns an ordinary 404 body as content without escalating", async () => {
     let callCount = 0;
 
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       callCount++;
       return Promise.resolve(new Response(
         "<html><body><main><h1>Not Found Page</h1><p>The requested page does not exist.</p></main></body></html>",
@@ -516,12 +564,12 @@ describe("web-fetch bot-block escalation", () => {
       ));
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/missing",
       format: "markdown",
-    });
+    }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -537,7 +585,8 @@ describe("web-fetch bot-block escalation", () => {
       message: "Invalid API key",
     });
 
-    globalThis.fetch = mock((url: string) => {
+    globalThis.fetch = fetchDouble((input: string | URL | Request) => {
+      const url = String(input);
       requested.push(url);
       return Promise.resolve(
         new Response(errorBody, {
@@ -547,9 +596,9 @@ describe("web-fetch bot-block escalation", () => {
       );
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({ url: "https://api.example.com/data" });
+    const result = await tool.execute(toolArgs(tool.args, { url: "https://api.example.com/data" }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -572,19 +621,19 @@ describe("web-fetch bot-block escalation", () => {
       0x6d, 0x6c, 0x3e,
     ]);
 
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(new Response(bytes, {
         status: 200,
         headers: { "content-type": "text/html; charset=gbk" },
       })),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/cn",
       format: "text",
-    });
+    }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -595,7 +644,7 @@ describe("web-fetch bot-block escalation", () => {
   it("bounds retries on a 429 and still returns a clear error", async () => {
     let callCount = 0;
 
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       callCount++;
       return Promise.resolve(new Response("slow down", {
         status: 429,
@@ -603,9 +652,9 @@ describe("web-fetch bot-block escalation", () => {
       }));
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({ url: "https://example.com/limited" });
+    const result = await tool.execute(toolArgs(tool.args, { url: "https://example.com/limited" }), ctx());
 
     // default: 1 request + 1 Retry-After retry; jina: maxRetries 1 = 2 requests.
     // Any unbounded retry chain would push this higher.
@@ -619,13 +668,13 @@ describe("web-fetch bot-block escalation", () => {
   });
 
   it("falls back to the static fetch with a note when engine browser is unavailable", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse("<html><body><main><p>Static content</p></main></body></html>", 200, "text/html")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({ url: "https://example.com/page", engine: "browser" });
+    const result = await tool.execute(toolArgs(tool.args, { url: "https://example.com/page", engine: "browser" }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -643,17 +692,17 @@ describe("web-fetch bot-block escalation", () => {
       "<p>Some pages ask: verify you are human.</p>" +
       `<p>${"Ordinary article text. ".repeat(2000)}</p></main></body></html>`;
 
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = fetchDouble(() => {
       callCount++;
       return Promise.resolve(mockResponse(article, 200, "text/html"));
     });
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/article",
       format: "markdown",
-    });
+    }), ctx());
 
     expect(typeof result).not.toBe("string");
     const output = (result as { output: string }).output;
@@ -669,17 +718,17 @@ describe("web-fetch bot-block escalation", () => {
 
     // text/markdown keeps the raw path (no HTML conversion) and is not one of
     // the generic MIME types detectContentType maps to application/octet-stream.
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = fetchDouble(() =>
       Promise.resolve(mockResponse(text, 200, "text/markdown")),
     );
 
-    const { createWebFetchTool } = await import("../../src/web/web-fetch");
+    const { createWebFetchTool } = await import("../../src/web/web-fetch.ts");
     const tool = createWebFetchTool();
-    const result = await tool.execute({
+    const result = await tool.execute(toolArgs(tool.args, {
       url: "https://example.com/utf8",
       format: "raw",
       max_size: 1024,
-    });
+    }), ctx());
 
     const output = (result as { output: string }).output;
     expect(output).toContain("... (truncated)");

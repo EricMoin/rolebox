@@ -467,7 +467,7 @@ describe("createSessionSearchTool — 200-session scanning cap", () => {
   it("returns cap message when >200 sessions exist and no match in first 200", async () => {
     const tool = createSessionSearchTool(createMockSearchClient(205));
     const result = await tool.execute(
-      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false, format: "markdown" },
       searchToolContext,
     );
     expect(result).toBe(
@@ -478,7 +478,7 @@ describe("createSessionSearchTool — 200-session scanning cap", () => {
   it("appends footer when >200 sessions exist and match found within first 200", async () => {
     const tool = createSessionSearchTool(createMockSearchClient(205, 42));
     const result = await tool.execute(
-      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false, format: "markdown" },
       searchToolContext,
     );
     expect(result).toContain("needle");
@@ -488,7 +488,7 @@ describe("createSessionSearchTool — 200-session scanning cap", () => {
   it("no footer when sessions <= 200", async () => {
     const tool = createSessionSearchTool(createMockSearchClient(150, 10));
     const result = await tool.execute(
-      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false, format: "markdown" },
       searchToolContext,
     );
     expect(result).toContain("needle");
@@ -498,7 +498,7 @@ describe("createSessionSearchTool — 200-session scanning cap", () => {
   it("standard no-match message when <= 200 and no match found", async () => {
     const tool = createSessionSearchTool(createMockSearchClient(150));
     const result = await tool.execute(
-      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false, format: "markdown" },
       searchToolContext,
     );
     expect(result).toBe("No matches found.");
@@ -507,7 +507,7 @@ describe("createSessionSearchTool — 200-session scanning cap", () => {
   it("session_id bypasses cap", async () => {
     const tool = createSessionSearchTool(createMockSearchClient(205, 199));
     const result = await tool.execute(
-      { query: "needle", session_id: "session-199", case_sensitive: false, limit: 20, include_tool_output: false },
+      { query: "needle", session_id: "session-199", case_sensitive: false, limit: 20, include_tool_output: false, format: "markdown" },
       searchToolContext,
     );
     expect(result).toContain("needle");
@@ -518,7 +518,7 @@ describe("createSessionSearchTool — 200-session scanning cap", () => {
   it("cap-hit with match at last scanned session (index 199) still returns results", async () => {
     const tool = createSessionSearchTool(createMockSearchClient(201, 199));
     const result = await tool.execute(
-      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false, format: "markdown" },
       searchToolContext,
     );
     expect(result).toContain("needle");

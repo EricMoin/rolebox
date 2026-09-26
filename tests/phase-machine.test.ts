@@ -36,13 +36,15 @@ function mockState(overrides: Partial<FnState> = {}): FnState {
 }
 
 function mockEnv(overrides: Partial<CondEnv> = {}): CondEnv {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "phase-test-"));
   const base: CondEnv = {
     sessionID: "test-session",
     fnName: "test-fn",
     state: mockState(),
-    artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "phase-test-"))),
+    artifacts: new ArtifactStore(workspaceDir),
     requiredEvidence: [],
     userMessagedThisTurn: false,
+    workspaceDir,
   };
   return { ...base, ...overrides };
 }

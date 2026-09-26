@@ -2,10 +2,10 @@ import { describe, it, expect, afterEach } from "bun:test";
 import {
   createInteractiveTerminalTool,
   decodeKeystrokeEscapes,
-} from "../src/terminal/interactive-terminal-tool";
-import { __resetForTests } from "../src/terminal/session-registry";
-import { TerminalScreen } from "../src/terminal/screen-buffer";
-import type { CanonicalToolContext } from "../src/platform/types";
+} from "../src/terminal/interactive-terminal-tool.js";
+import { __resetForTests } from "../src/terminal/session-registry.js";
+import { TerminalScreen } from "../src/terminal/screen-buffer.js";
+import type { CanonicalToolContext } from "../src/platform/types.js";
 
 function ctx(sessionID = "test-session"): CanonicalToolContext {
   return {

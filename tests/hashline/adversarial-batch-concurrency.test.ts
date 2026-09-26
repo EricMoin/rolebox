@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+import { makeToolContext } from "./fixtures/tool-context.ts";
 
 // Adversarial batch & concurrency suite for hashline_edit.
 //
@@ -43,7 +44,7 @@ afterAll(async () => {
 
 /** Read a file with hashline_read and return version + per-line anchors. */
 async function readInfo(filePath: string): Promise<{ version: string; anchors: Record<number, string> }> {
-  const out = String(await createHashlineReadTool().execute({ filePath }));
+  const out = String(await createHashlineReadTool().execute({ filePath }, makeToolContext(tmpDir)));
   const m = out.match(/^version: (\S+)$/m);
   if (!m) throw new Error(`no version in hashline_read output for ${filePath}:\n${out}`);
   const anchors: Record<number, string> = {};
@@ -78,7 +79,7 @@ describe("hashline adversarial batch & concurrency", () => {
         { filePath: fp, version, edits: [{ op: "append" as const, lines: "X" }] },
         { filePath: fp, version, edits: [{ op: "append" as const, lines: "Y" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
 
     // Contract: duplicate detection must fire BEFORE any read/write/lock, so
     // the batch reports an error and the file is untouched.
@@ -101,7 +102,7 @@ describe("hashline adversarial batch & concurrency", () => {
           { filePath: fp, version, edits: [{ op: "append" as const, lines: "X" }] },
           { filePath: alias, version, edits: [{ op: "append" as const, lines: "Y" }] },
         ],
-      }));
+      }, makeToolContext(tmpDir)));
 
       // normalizeLockKey lowercases on darwin/win32 (src/hashline/path-lock.ts:27-32),
       // so both spellings collapse to one key and the batch must reject.
@@ -132,7 +133,7 @@ describe("hashline adversarial batch & concurrency", () => {
         { filePath: fb, version: vb, edits: [{ op: "append" as const, lines: "BX" }] },
         { filePath: fc, version: vc, edits: [{ op: "append" as const, lines: "CX" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
 
     // Any per-file validation failure aborts the whole batch BEFORE a single
     // byte is written — zero-write-on-validation-failure semantics.
@@ -162,7 +163,7 @@ describe("hashline adversarial batch & concurrency", () => {
         // To-be-created file: anchorless append, version is not validated.
         { filePath: fb, version: "whatever", edits: [{ op: "append" as const, lines: "new file" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
 
     // Pre-write CAS (verifyFileUnchanged with expectedVersion=null) must catch
     // the newly-appeared file and fail the batch before any write.
@@ -184,7 +185,7 @@ describe("hashline adversarial batch & concurrency", () => {
         { filePath: fOk, version: "whatever", edits: [{ op: "append" as const, lines: "OK" }] },
         { filePath: fMissing, version: "whatever", edits: [{ op: "append" as const, lines: "MISSING" }] },
       ],
-    }));
+    }, makeToolContext(tmpDir)));
 
     // The second temp write fails (ENOENT); atomicWriteBatch must clean the
     // first temp and report a write failure — no partial rename may survive.
@@ -210,11 +211,11 @@ describe("hashline adversarial batch & concurrency", () => {
 
     const [r1, r2] = await Promise.all([
       createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: anchors[2], lines: "WIN-A" }] }],
-      }),
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: anchors[2], lines: "WIN-A" }] }],
+      }, makeToolContext(tmpDir)),
       createHashlineEditTool().execute({
-        files: [{ filePath: fp, version, edits: [{ pos: anchors[3], lines: "WIN-B" }] }],
-      }),
+        files: [{ filePath: fp, version, edits: [{ op: "replace", pos: anchors[3], lines: "WIN-B" }] }],
+      }, makeToolContext(tmpDir)),
     ]);
     const [s1, s2] = [String(r1), String(r2)];
 
@@ -245,7 +246,7 @@ describe("hashline adversarial batch & concurrency", () => {
 
     const r1 = String(await createHashlineEditTool().execute({
       files: [{ filePath: fp, version: v0, edits: [{ op: "append" as const, lines: "line three" }] }],
-    }));
+    }, makeToolContext(tmpDir)));
     // edit1 itself must succeed and write correct content.
     expect(r1).not.toContain("Error:");
     expect(await readFile(fp, "utf-8")).toBe("line one\nline two\nline three\n");
@@ -262,7 +263,7 @@ describe("hashline adversarial batch & concurrency", () => {
     // mismatch and rejects. This assertion is EXPECTED TO FAIL today.
     const r2 = String(await createHashlineEditTool().execute({
       files: [{ filePath: fp, version: v1, edits: [{ op: "append" as const, lines: "line four" }] }],
-    }));
+    }, makeToolContext(tmpDir)));
     expect(r2, `chained edit with returned version failed:\n${r2}`).not.toContain("Error:");
   });
 
@@ -279,7 +280,7 @@ describe("hashline adversarial batch & concurrency", () => {
       },
     }).execute({
       files: [{ filePath: fp, version, edits: [{ op: "append" as const, lines: "HX" }] }],
-    }));
+    }, makeToolContext(tmpDir)));
 
     // verifyFileUnchanged's ENOENT branch (expectedVersion non-null) must
     // report the deletion and abort the batch before any write.

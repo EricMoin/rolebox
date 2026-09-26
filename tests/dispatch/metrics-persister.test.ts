@@ -142,6 +142,8 @@ describe("MetricsPersister", () => {
       expect(() => persister.flushSync()).not.toThrow();
 
       const parsed = readMetricsFile(dir) as {
+        // serializeSnapshot() always writes `version` alongside `metrics`.
+        version: number;
         metrics: { counters: Record<string, { value: number }> };
       };
       expect(parsed).not.toBeNull();

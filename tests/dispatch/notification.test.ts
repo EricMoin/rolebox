@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, afterEach, beforeAll, afterAll } from "bun:test";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import type { DispatchTask, NotificationPayload } from "../../src/dispatch/types";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { DispatchTask, NotificationPayload } from "../../src/dispatch/types.ts";
 import {
   buildNotificationText,
   notifyParent,
@@ -8,8 +8,8 @@ import {
   NOTIFY_MAX_RETRIES,
   clearSentFinalNotifies,
   clearParentQueues,
-} from "../../src/dispatch/notification";
-import { metrics } from "../../src/dispatch/persistence/metrics";
+} from "../../src/dispatch/notification.ts";
+import { metrics } from "../../src/dispatch/persistence/metrics.ts";
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -18,6 +18,8 @@ function createTask(overrides?: Partial<DispatchTask>): DispatchTask {
     id: "bg_test123",
     sessionId: "child-session-1",
     parentSessionId: "parent-session-1",
+    // Required by DispatchTask; 0 = direct dispatch (no sub-dispatch).
+    depth: 0,
     status: "completed",
     agent: "helper",
     prompt: "do work",
@@ -28,6 +30,8 @@ function createTask(overrides?: Partial<DispatchTask>): DispatchTask {
       lastUpdate: new Date(),
       toolCalls: 3,
     },
+    // Required by DispatchTask; 0 = normal priority (production default).
+    priority: 0,
     ...overrides,
   };
 }

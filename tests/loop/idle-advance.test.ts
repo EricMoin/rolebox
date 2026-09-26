@@ -4,14 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import {
-  createPluginHooks,
   activeLoopManager,
   pendingCorrections,
   loopManagerMap,
   managerMap,
-} from "../../src/core/composition";
-import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
-import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
+} from "../../src/core/composition.ts";
+import { createHealthyPluginHooks, type PluginHookHandlers } from "../helpers/plugin-hooks.ts";
+import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants.ts";
+import type { LoopState } from "../../src/loop/types.ts";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 
 function createMockClient(): OpencodeClient {
   return {
@@ -48,14 +49,14 @@ function createMockClient(): OpencodeClient {
 }
 
 describe("idle-advance", () => {
-  let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+  let hooks: PluginHookHandlers;
   let tmpDir: string;
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rolebox-idle-advance-"));
     pendingCorrections.clear();
     const client = createMockClient();
-    hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+    hooks = await createHealthyPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), directory: tmpDir });
   });
 
   afterEach(() => {
@@ -134,9 +135,13 @@ describe("idle-advance", () => {
       } as any,
     });
 
-    expect(loopState.phase).toBe("error");
-    expect(loopState.errorReason).toBe("API rate limit");
-    expect(loopState.updatedAt).toBeGreaterThan(0);
+    // Re-read through the manager: it proves the hook mutated the stored
+    // state (not just the local reference), and a fresh read is not narrowed
+    // by the `phase = "activating"` assignment above.
+    const after = activeLoopManager!.getLoopState(sid)!;
+    expect(after.phase).toBe("error");
+    expect(after.errorReason).toBe("API rate limit");
+    expect(after.updatedAt).toBeGreaterThan(0);
   });
 
   it("does not mutate loop state for non-loop sessions", async () => {
@@ -178,7 +183,9 @@ describe("idle-advance", () => {
     expect(correction!).toContain(LOOP_PROGRESS_MARKER);
     expect(correction!).toContain("loop interrupted by restart");
     expect(correction!).toContain("round 3/5");
-    expect(loopState.phase).toBe("cancelled");
+    // Re-read through the manager: a fresh read is not narrowed by the
+    // `phase = "interrupted"` setup above, and proves the stored state changed.
+    expect(activeLoopManager!.getLoopState(sid)!.phase).toBe("cancelled");
   });
 
   it("does not inject recovery note when loop is still running", async () => {
@@ -215,7 +222,12 @@ describe("idle-advance", () => {
     });
 
     const loopState = activeLoopManager!.getLoopState(sid)!;
-    loopState.status = "interrupted";
+    // A legacy persisted loop state carries a `status` field that predates
+    // `phase`; production still honours it for backward compatibility
+    // (src/hooks/chat-message.ts reads it for the interrupted check).
+    // Declare that legacy shape rather than reaching through `any`.
+    const legacyState: LoopState & { status?: string } = loopState;
+    legacyState.status = "interrupted";
     loopState.current = 2;
     loopState.total = 3;
 
@@ -327,6 +339,7 @@ describe("idle-advance", () => {
       prompt: "do work",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
     });
 
     // Trigger session.idle — the awaiting_worker bypass was removed.

@@ -10,13 +10,13 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { load } from "js-yaml";
-import { validateInitRoleId, deriveRoleId, checkTargetDir } from "../../../src/cli/commands/init/init-utils";
+import { validateInitRoleId, deriveRoleId, checkTargetDir } from "../../../src/cli/commands/init/init-utils.ts";
 import {
   generateRoleYaml,
   generatePromptFile,
   scaffoldRole,
-} from "../../../src/cli/commands/init/init-scaffold";
-import type { InitConfig, TemplateType } from "../../../src/cli/templates/index";
+} from "../../../src/cli/commands/init/init-scaffold.ts";
+import type { InitConfig, TemplateType } from "../../../src/cli/templates/index.ts";
 
 // ===========================================================================
 // Helpers
@@ -458,7 +458,7 @@ describe("init CLI (--yes mode)", () => {
   });
 
   it("creates a role with --yes and name argument", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await init("my-test-role", true, undefined);
 
     const roleDir = join(tmpDir, "my-test-role");
@@ -471,7 +471,7 @@ describe("init CLI (--yes mode)", () => {
   });
 
   it("prints success and sync hint messages", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     const { logs, run } = captureLogs(async () => {
       await init("role-output", true, undefined);
     });
@@ -482,7 +482,7 @@ describe("init CLI (--yes mode)", () => {
   });
 
   it("respects --template flag for minimal template", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await init("bare-role", true, "minimal");
 
     const roleDir = join(tmpDir, "bare-role");
@@ -493,7 +493,7 @@ describe("init CLI (--yes mode)", () => {
   });
 
   it("throws error for invalid role name with --yes", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await expect(init("bad--name", true, undefined)).rejects.toThrow(/--/);
   });
 
@@ -502,14 +502,14 @@ describe("init CLI (--yes mode)", () => {
     mkdirSync(existingDir, { recursive: true });
     writeFileSync(join(existingDir, "role.yaml"), "name: existing", "utf-8");
 
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await expect(init("existing-dir", true, undefined)).rejects.toThrow(
       /already contains a role\.yaml/,
     );
   });
 
   it("--yes without name uses cwd basename as role ID", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await init(undefined, true, undefined);
 
     const roleDir = tmpDir;
@@ -518,7 +518,7 @@ describe("init CLI (--yes mode)", () => {
   });
 
   it("throws error for invalid template type", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await expect(
       init("my-role", true, "nonexistent"),
     ).rejects.toThrow(/Unknown template/);
@@ -581,7 +581,7 @@ describe("init CLI (mocked interactive mode)", () => {
   });
 
   it("scaffolds a role through mocked interactive flow", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
+    const { init } = await import("../../../src/cli/commands/init.ts");
     await init("mock-role", false, undefined);
 
     const roleDir = join(tmpDir, "mock-role");

@@ -50,9 +50,9 @@ function captureLogs(
 }
 
 async function importMonitor() {
-  const command = await import("../../../src/cli/commands/monitor");
-  const renderer = await import("../../../src/cli/commands/monitor/monitor-renderer");
-  const helpers = await import("../../../src/cli/commands/monitor/monitor-helpers");
+  const command = await import("../../../src/cli/commands/monitor.ts");
+  const renderer = await import("../../../src/cli/commands/monitor/monitor-renderer.ts");
+  const helpers = await import("../../../src/cli/commands/monitor/monitor-helpers.ts");
   return { ...command, ...renderer, ...helpers };
 }
 
@@ -272,6 +272,8 @@ function makeMonitorSnapshot(overrides?: Partial<MonitorSnapshot>): MonitorSnaps
     activeFunctions: [],
     loops: [],
     graphSessions: [],
+    engineGraphs: [],
+    graphEvents: [],
     dispatchSummary: { pending: 0, running: 0, completed: 0, error: 0, cancelled: 0 },
     concurrency: { active: 0, limit: 0, queued: 0 },
     ...overrides,
@@ -291,7 +293,7 @@ function makeTaskSnapshot(overrides?: Partial<TaskSnapshot>): TaskSnapshot {
   };
 }
 
-import type { MonitorSnapshot, TaskSnapshot } from "../../../src/cli/commands/monitor/monitor-reader";
+import type { MonitorSnapshot, TaskSnapshot } from "../../../src/cli/commands/monitor/monitor-reader.ts";
 
 // ── (a) Metrics Display Tests ──────────────────────────────────◀
 
@@ -608,11 +610,6 @@ describe("renderRecovery", () => {
       }),
     );
 
-    const { writeDispatch, makeTask } = await importMonitor();
-    // Need to re-import since we're at module level
-    // Actually writeDispatch and makeTask are in the test scope
-    // Let's just use a simpler approach
-    // Write a dispatch file so the snapshot has data
     const { monitor } = await importMonitor();
     const { logs, run } = captureLogs(() => monitor(false, false, true, 2000, 0, { noMetrics: true }));
     await run();

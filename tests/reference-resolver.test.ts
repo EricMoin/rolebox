@@ -7,8 +7,8 @@ import {
   discoverReferences,
   resolveExplicitReferences,
   resolveAllReferences,
-} from "../src/resolver/reference-resolver";
-import { toPosixPath } from "../src/utils/paths";
+} from "../src/resolver/reference-resolver.js";
+import { toPosixPath } from "../src/utils/paths.js";
 
 let tmpDir: string;
 

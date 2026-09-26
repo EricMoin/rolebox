@@ -10,7 +10,7 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { hasTar } from "../helpers/tar";
+import { hasTar } from "../helpers/tar.ts";
 
 function setMockDataDir(dir: string) {
   process.env.XDG_DATA_HOME = dir;
@@ -26,9 +26,9 @@ import {
   fetchRegistryManifest,
   downloadRole,
   computeIntegrity,
-} from "../../src/cli/registry-client";
+} from "../../src/cli/registry-client.ts";
 
-import type { RegistryManifest } from "../../src/cli/types";
+import type { RegistryManifest } from "../../src/cli/types.ts";
 
 const sampleManifest: RegistryManifest = {
   name: "community",
@@ -147,7 +147,7 @@ describe("resolveVersion", () => {
 describe("fetchRegistryManifest", () => {
   it("fetches and parses a valid registry manifest", async () => {
     const mockResponse = new Response(validYaml, { status: 200 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -167,7 +167,7 @@ describe("fetchRegistryManifest", () => {
 
   it("throws 404 error with 'not found' message", async () => {
     const mockResponse = new Response("Not Found", { status: 404 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -183,7 +183,7 @@ describe("fetchRegistryManifest", () => {
 
   it("throws rate limit error for 403", async () => {
     const mockResponse = new Response("Rate limited", { status: 403 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -198,9 +198,9 @@ describe("fetchRegistryManifest", () => {
   });
 
   it("throws network error on connection failure", async () => {
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = Object.assign(mock(() => {
       throw new Error("network connection refused");
-    });
+    }), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -216,7 +216,7 @@ describe("fetchRegistryManifest", () => {
 
   it("throws parse error for invalid YAML", async () => {
     const mockResponse = new Response(": invalid: yaml: [[[]", { status: 200 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -235,10 +235,10 @@ describe("fetchRegistryManifest", () => {
     // Build a fresh Response per fetch call — a Response body can only be
     // consumed once, so a single hoisted Response would fail this test for the
     // wrong reason if the cache ever missed on the second call.
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = Object.assign(mock(() => {
       callCount.value++;
       return Promise.resolve(new Response(validYaml, { status: 200 }));
-    });
+    }), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -259,10 +259,10 @@ describe("fetchRegistryManifest", () => {
 
   it("bypasses cache with noCache option", async () => {
     const callCount = { value: 0 };
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = Object.assign(mock(() => {
       callCount.value++;
       return Promise.resolve(new Response(validYaml, { status: 200 }));
-    });
+    }), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -285,10 +285,10 @@ describe("fetchRegistryManifest", () => {
 
   it("uses custom ref for URL construction", async () => {
     let fetchedUrl = "";
-    globalThis.fetch = mock((url: string) => {
-      fetchedUrl = url;
+    globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+      fetchedUrl = input instanceof Request ? input.url : String(input);
       return Promise.resolve(new Response(validYaml, { status: 200 }));
-    });
+    }), { preconnect: () => {} });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -309,9 +309,9 @@ describe("fetchRegistryManifest", () => {
 
 describe("downloadRole", () => {
   it("throws network error on connection failure during download", async () => {
-    globalThis.fetch = mock(() => {
+    globalThis.fetch = Object.assign(mock(() => {
       throw new Error("connection reset");
-    });
+    }), { preconnect: () => {} });
 
     await expect(
       downloadRole(
@@ -324,7 +324,7 @@ describe("downloadRole", () => {
 
   it("throws not found on 404 response", async () => {
     const mockResponse = new Response("Not Found", { status: 404 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     await expect(
       downloadRole(
@@ -337,7 +337,7 @@ describe("downloadRole", () => {
 
   it("throws on non-ok response", async () => {
     const mockResponse = new Response("Server Error", { status: 500 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     await expect(
       downloadRole(
@@ -366,7 +366,7 @@ describe("downloadRole", () => {
 
     const archiveBytes = require("node:fs").readFileSync(archivePath);
     const mockResponse = new Response(archiveBytes, { status: 200 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     const resultDir = await downloadRole(
       { name: "community", url: "https://github.com/example/myrepo" },
@@ -402,7 +402,7 @@ describe("downloadRole", () => {
 
     const archiveBytes = require("node:fs").readFileSync(archivePath);
     const mockResponse = new Response(archiveBytes, { status: 200 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     // Spy on the spawn dependency passed to downloadRole to capture the tar
     // extraction args while still delegating to the real spawn, so real
@@ -459,7 +459,7 @@ describe("downloadRole", () => {
 
     const archiveBytes = require("node:fs").readFileSync(archivePath);
     const mockResponse = new Response(archiveBytes, { status: 200 });
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     // downloadRole detects a missing tar via spawnSync("tar", ["--version"]).
     // Inject a spawnSync that reports a failure so the tar check throws.
@@ -482,11 +482,11 @@ describe("downloadRole", () => {
 
   it("aborts the download with a timeout error when the fetch stalls", async () => {
     // A fetch that never resolves, but rejects when the AbortController fires.
-    globalThis.fetch = mock((_url: any, init?: any) => {
-      return new Promise((_resolve, reject) => {
+    globalThis.fetch = Object.assign(mock((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       });
-    });
+    }), { preconnect: () => {} });
 
     await expect(
       downloadRole(
@@ -514,7 +514,7 @@ describe("downloadRole", () => {
       headers: { get: (name: string) => (name.toLowerCase() === "content-length" ? "1000" : null) },
       body: stream,
     };
-    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
 
     await expect(
       downloadRole(
@@ -528,7 +528,7 @@ describe("downloadRole", () => {
   it("cleans up the rolebox-out-* temp dir on download failure", async () => {
     const t = tmpdir();
     const before = new Set(readdirSync(t).filter((d) => d.startsWith("rolebox-out-")));
-    globalThis.fetch = mock(() => { throw new Error("connection reset"); });
+    globalThis.fetch = Object.assign(mock(() => { throw new Error("connection reset"); }), { preconnect: () => {} });
 
     await expect(
       downloadRole(
@@ -559,7 +559,7 @@ describe("downloadRole", () => {
     expect(await tarProc.exited).toBe(0);
 
     const archiveBytes = readFileSync(archivePath);
-    globalThis.fetch = mock(() => Promise.resolve(new Response(archiveBytes, { status: 200 })));
+    globalThis.fetch = Object.assign(mock(() => Promise.resolve(new Response(archiveBytes, { status: 200 }))), { preconnect: () => {} });
 
     await expect(
       downloadRole(

@@ -6,7 +6,7 @@
  * to existing tests.
  */
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { shouldCancelLoop, TERMINAL_PHASES, ORIGIN_OWNED_PHASES } from "../../src/loop/cancellation";
+import { shouldCancelLoop, TERMINAL_PHASES, ORIGIN_OWNED_PHASES } from "../../src/loop/cancellation.ts";
 import {
   DEFAULT_ITERATIONS,
   MAX_ITERATIONS_HARD_CAP,
@@ -14,11 +14,11 @@ import {
   INTER_ROUND_DELAY_MS,
   LOOP_PROGRESS_MARKER,
   STOP_LOOP_SIGNAL,
-} from "../../src/loop/constants";
-import { isTerminalPhase } from "../../src/loop/loop-store";
-import { LoopCoordinator } from "../../src/loop/coordinator";
-import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
-import type { LoopState, LoopPhase } from "../../src/loop/types";
+} from "../../src/loop/constants.ts";
+import { isTerminalPhase } from "../../src/loop/loop-store.ts";
+import { LoopCoordinator } from "../../src/loop/coordinator.ts";
+import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+import type { LoopState, LoopPhase } from "../../src/loop/types.ts";
 
 // ─── Helper: fake adapter ───────────────────────────────────────────
 

@@ -3,15 +3,15 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump } from "js-yaml";
-import type { LockEntry } from "../../../src/cli/types";
-import { createDirSymlink } from "../../helpers/symlink";
+import type { LockEntry } from "../../../src/cli/types.ts";
+import { createDirSymlink } from "../../helpers/symlink.ts";
 
 const infoConfigDir = mkdtempSync(join(tmpdir(), "rolebox-info-config-"));
 const infoDataDir = mkdtempSync(join(tmpdir(), "rolebox-info-data-"));
 process.env.XDG_CONFIG_HOME = infoConfigDir;
 process.env.XDG_DATA_HOME = infoDataDir;
 
-import { createPathsMockPayload } from "../../helpers/paths-mock";
+import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
 // Redirect every sync target under XDG_CONFIG_HOME so tests never touch a
 // developer's real ~/.pi/agent, ~/.dsh or ~/.codex directories.
@@ -86,7 +86,7 @@ function createSyncSymlink(roleId: string, target: string): void {
 }
 
 async function importInfo() {
-  return await import("../../../src/cli/commands/info");
+  return await import("../../../src/cli/commands/info.ts");
 }
 
 function captureLogs(fn: () => Promise<void>): { logs: string[]; run: () => Promise<void> } {

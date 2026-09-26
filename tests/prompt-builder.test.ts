@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import type { RoleConfig, ResolvedSkill, ResolvedFunction, ResolvedReference } from "../src/types";
-import { ReferenceScope } from "../src/constants";
-import { buildAgentPrompt, buildFunctionBlock, buildPublicAgentsBlock, buildReferenceBlock, buildSkillBlock, buildSubagentBlock, escapeXml } from "../src/prompt/builder";
+import type { RoleConfig, ResolvedSkill, ResolvedFunction, ResolvedReference } from "../src/types.js";
+import { ReferenceScope } from "../src/constants.js";
+import { buildAgentPrompt, buildFunctionBlock, buildPublicAgentsBlock, buildReferenceBlock, buildSkillBlock, buildSubagentBlock, escapeXml } from "../src/prompt/builder.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

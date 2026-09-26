@@ -2,8 +2,8 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LoopService } from "../../src/core/services/loop-service";
-import { hookState } from "../../src/hooks/state";
+import { LoopService } from "../../src/core/services/loop-service.ts";
+import { hookState } from "../../src/hooks/state.ts";
 
 /**
  * Mock helpers for LoopService testing.

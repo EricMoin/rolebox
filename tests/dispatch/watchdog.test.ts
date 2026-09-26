@@ -1,10 +1,10 @@
 import { describe, it, expect, mock } from "bun:test";
-import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog";
+import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog.ts";
 import {
   WATCHDOG_INTERVAL_MS,
   GLOBAL_SWEEP_INTERVAL_MS,
   IDLE_DEBOUNCE_MS,
-} from "../../src/dispatch/config";
+} from "../../src/dispatch/config.ts";
 
 function noop(): void {}
 

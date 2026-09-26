@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { rmSync, mkdirSync, existsSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createDirSymlink } from "../../helpers/symlink";
+import { createDirSymlink } from "../../helpers/symlink.ts";
 
 async function importUninstall() {
   // Cache-bust so each call re-evaluates the command module against the mocks
@@ -67,7 +67,7 @@ async function installRole(
   version: string,
   createDir = true,
 ): Promise<string> {
-  const { addToLock } = await import("../../../src/cli/config");
+  const { addToLock } = await import("../../../src/cli/config.ts");
   addToLock({
     role: roleId,
     registry,
@@ -76,7 +76,7 @@ async function installRole(
     integrity: "sha256-test",
   });
 
-  const { getRolePath } = await import("../../../src/cli/paths");
+  const { getRolePath } = await import("../../../src/cli/paths.ts");
   const rolePath = getRolePath(registry, roleId, version);
 
   if (createDir) {
@@ -110,7 +110,7 @@ describe("uninstall", () => {
     const { uninstall } = await importUninstall();
     await uninstall("my-role");
 
-    const { findInLock } = await import("../../../src/cli/config");
+    const { findInLock } = await import("../../../src/cli/config.ts");
     expect(findInLock("my-role")).toBeUndefined();
   });
 
@@ -150,7 +150,7 @@ describe("uninstall", () => {
     const { uninstall } = await importUninstall();
     await uninstall("my-role");
 
-    const { findInLock } = await import("../../../src/cli/config");
+    const { findInLock } = await import("../../../src/cli/config.ts");
     expect(findInLock("my-role")).toBeUndefined();
   });
 
@@ -161,7 +161,7 @@ describe("uninstall", () => {
   });
 
   it("rejects a roleId that would escape the roles dir (path traversal) and does not delete", async () => {
-    const { addToLock } = await import("../../../src/cli/config");
+    const { addToLock } = await import("../../../src/cli/config.ts");
     addToLock({
       role: "../evil",
       registry: "oh-my-role",
