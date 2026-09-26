@@ -1,4 +1,6 @@
+import { errorText } from "../../utils/error-text.ts";
 import type { CompiledInputRef } from "../compiler/plan.ts";
+import type { AcceptanceLedgerTx, AcceptedResultEvidence } from "../ledger/types.ts";
 import type { ArtifactObjectRead } from "../store/artifacts.ts";
 import type {
   AcceptedArtifact,
@@ -40,6 +42,22 @@ export type AcceptedResultReading =
   | { readonly kind: "facts"; readonly facts: AcceptedResultFacts }
   | { readonly kind: "none" }
   | { readonly kind: "unreadable"; readonly reason: string };
+
+/**
+ * The accepted result the acceptance transaction is committing RIGHT NOW, which
+ * no read can see yet (D6).
+ *
+ * The successor's input assembly runs inside the same transaction as the
+ * acceptance, BEFORE the batch that writes this result — so the one producer it
+ * cannot read back is the attempt being settled, and the validation's retained
+ * payload and revisions ARE that result. Overlaying them is what makes the
+ * just-accepted result participate in the successor's binding in that same
+ * transaction, instead of a later write filling the gap.
+ */
+export interface JustAcceptedResult {
+  readonly attemptId: string;
+  readonly facts: AcceptedResultFacts;
+}
 
 /**
  * One declared input, resolved to the exact revision the acceptance recorded.
@@ -577,6 +595,81 @@ export function readInputRefusals(
     refusals.push(Object.freeze({ from, outcome, code, message }));
   }
   return { kind: "ok", refusals: Object.freeze(refusals) };
+}
+
+/**
+ * The DURABLE accepted-result read one transaction's input assembly uses (D6).
+ *
+ * WHY IT IS BUILT PER TRANSACTION. The facts a consumer's binding is made of
+ * are read through the SAME boundary that is deciding it — the state and the
+ * accepted results the transaction sees — and the attempt this transaction is
+ * settling is overlaid from the validation because its accepted result is
+ * written by the batch that has not landed yet (see
+ * {@link JustAcceptedResult}). Everything else is read back by ATTEMPT ID:
+ * what a producer accepted is looked up under the attempt the state records as
+ * settled, never under "the node's latest result".
+ *
+ * TOTAL: a substrate without the read, a throwing read and a missing row are
+ * three different answers (`unreadable`, `unreadable`, `none`) and never a
+ * synthesized value. The accepted-event stream is read LAZILY — only when a
+ * declared input actually resolves to an attempt — because the outcome an
+ * attempt settled on is the accepted event's identity, not this record's.
+ */
+export function acceptedResultReaderOf(
+  graphId: string,
+  tx: AcceptanceLedgerTx,
+  justAccepted?: JustAcceptedResult,
+): (attemptId: string) => AcceptedResultReading {
+  let outcomes: ReadonlyMap<string, string> | undefined;
+  return (attemptId: string): AcceptedResultReading => {
+    if (justAccepted !== undefined && justAccepted.attemptId === attemptId) {
+      return Object.freeze({ kind: "facts" as const, facts: justAccepted.facts });
+    }
+    if (tx.readAcceptedResult === undefined) {
+      return Object.freeze({
+        kind: "unreadable" as const,
+        reason:
+          "this substrate exposes no accepted-result read " +
+          "(AcceptanceLedgerTx.readAcceptedResult), so what attempt " +
+          JSON.stringify(attemptId) +
+          " accepted cannot be read back",
+      });
+    }
+    outcomes ??= new Map(
+      tx
+        .acceptedEvents(graphId)
+        .map((event) => [event.attemptId, event.outcomeId] as const),
+    );
+    const outcomeId = outcomes.get(attemptId);
+    if (outcomeId === undefined) {
+      return Object.freeze({ kind: "none" as const });
+    }
+    let record: AcceptedResultEvidence | undefined;
+    try {
+      record = tx.readAcceptedResult(graphId, attemptId);
+    } catch (error) {
+      return Object.freeze({
+        kind: "unreadable" as const,
+        reason:
+          "the accepted result of attempt " +
+          JSON.stringify(attemptId) +
+          " could not be read (" +
+          errorText(error) +
+          ")",
+      });
+    }
+    if (record === undefined) {
+      return Object.freeze({ kind: "none" as const });
+    }
+    return Object.freeze({
+      kind: "facts" as const,
+      facts: Object.freeze({
+        outcomeId,
+        payload: record.payload,
+        artifacts: record.artifacts ?? Object.freeze([]),
+      }),
+    });
+  };
 }
 
 /** Describe a rejected value for a diagnostic without ever throwing. */

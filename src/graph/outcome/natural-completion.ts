@@ -1,5 +1,7 @@
+import type { CompiledPlan } from "../compiler/plan.ts";
 import type { CompletionPolicyRef } from "../policy/completion-policy.ts";
 import type { OutcomeProposal } from "./proposal.ts";
+import type { OutcomeRuntimeRefusal } from "./runtime-contract.ts";
 
 // ── The delivery envelope ───────────────────────────────────────────────────
 
@@ -259,6 +261,93 @@ export function naturalCompletionProposalOf(input: {
     outcomeId: input.outcomeId,
     ...(input.credential === undefined ? {} : { credential: input.credential }),
   });
+}
+
+/**
+ * The natural-completion authorization the plan pinned for one node, or the
+ * refusal that says why this node may not be settled by a completion fact.
+ *
+ * Three answers, one of which is a refusal by NAME — never a fallback:
+ * - the plan declares no such node → `unknown-node`;
+ * - the node is declared but its `completion` policy is not `natural`, or
+ *   the plan pinned no authorization for it at all →
+ *   `natural-completion-unauthorized`;
+ * - the plan pinned an authorization whose outcome disagrees with the node's
+ *   own declared mapping → `natural-completion-unauthorized` too: a plan that
+ *   claims authority for an outcome the topology does not declare is refused
+ *   rather than resolved in either direction.
+ *
+ * The outcome returned is the AUTHORIZATION's, never a caller's, which is what
+ * makes "one attempt maps to exactly one outcome" structural.
+ */
+export function naturalCompletionAuthorityOf(
+  plan: CompiledPlan,
+  planRevision: string,
+  nodeId: string,
+):
+  | { readonly outcome: string; readonly policy: CompletionPolicyRef }
+  | { readonly refusal: OutcomeRuntimeRefusal } {
+  const node = plan.nodes.find((entry) => entry.id === nodeId);
+  if (node === undefined) {
+    return {
+      refusal: {
+        code: "unknown-node",
+        path: "$.nodeId",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(nodeId) +
+          " is not declared by plan revision " +
+          planRevision +
+          " — a natural completion can only settle a node the compiled plan declares",
+      },
+    };
+  }
+  const authorization = (plan.completionAuthorizations ?? []).find(
+    (entry) => entry.nodeId === nodeId,
+  );
+  const declared = node.completion;
+  if (authorization === undefined || declared?.mode !== "natural") {
+    return {
+      refusal: {
+        code: "natural-completion-unauthorized",
+        path: "$.nodeId",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(nodeId) +
+          " declares " +
+          (declared === undefined
+            ? "no completion policy"
+            : declared.mode === "natural"
+              ? "natural completion of outcome " + JSON.stringify(declared.outcome)
+              : "explicit completion") +
+          " and plan revision " +
+          planRevision +
+          " pins no natural-completion authorization for it — a completion fact is never " +
+          "re-interpreted as an explicit submission and the completion policy is never " +
+          "ignored, so nothing was settled",
+      },
+    };
+  }
+  if (declared.outcome !== authorization.outcome) {
+    return {
+      refusal: {
+        code: "natural-completion-unauthorized",
+        path: "$.nodeId",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(nodeId) +
+          " declares natural completion of outcome " +
+          JSON.stringify(declared.outcome) +
+          ", but plan revision " +
+          planRevision +
+          " pins an authorization for outcome " +
+          JSON.stringify(authorization.outcome) +
+          " — the pinned mapping and the topology disagree, and neither is resolved in the " +
+          "other's favour",
+      },
+    };
+  }
+  return { outcome: authorization.outcome, policy: authorization.policy };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
