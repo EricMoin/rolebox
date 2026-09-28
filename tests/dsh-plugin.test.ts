@@ -86,11 +86,14 @@ import type {
 
 // ── Validating fake live-agent registry ────────────────────────────────────
 //
-// graph-notify delivery now sends a full rc.6 UserMessage (message.d.ts:120-133)
-// with a plugin `notice` source (message.d.ts:98-101, 81-84) whose summary is
-// bounded to 120 chars (message.js:15-19). The fakes below VALIDATE that shape
-// instead of accepting anything, so a regression to a malformed message fails
-// the test rather than silently passing.
+// graph-notify delivery sends a full dsh UserMessage (message.d.ts:120-133)
+// whose source is the producer-owned `rolebox` `notice` kind. dsh's V4 session
+// format refuses the released shared `plugin` wrapper with `format v4 message
+// requires a producer-owned source kind` (encode and decode alike), so the
+// fakes below VALIDATE that shape instead of accepting anything: the source
+// kind must be producer-owned, and a `notice` summary must be a nonempty string
+// of at most 120 chars (message.js:15-19). A regression to a malformed message
+// fails the test rather than silently passing.
 
 /** One recorded delivery call on a validating fake agent. */
 interface FakeAgentCall {
@@ -130,7 +133,14 @@ function assertValidUserMessage(message: unknown): void {
     throw new Error("invalid UserMessage: missing source");
   }
   const source = m.source as Record<string, unknown>;
-  if (source.kind === "plugin" && source.form === "notice") {
+  if (
+    typeof source.kind !== "string" ||
+    source.kind.length === 0 ||
+    source.kind === "plugin"
+  ) {
+    throw new Error("invalid UserMessage: source kind must be producer-owned");
+  }
+  if (source.form === "notice") {
     if (typeof source.summary !== "string" || source.summary.length === 0) {
       throw new Error("invalid UserMessage: notice source missing summary");
     }
@@ -2393,15 +2403,17 @@ describe("dsh native tool-presentation surface", () => {
   });
 });
 
-// ── buildAgentPromptInjector — rc.6 delivery contract ──────────────────────
+// ── buildAgentPromptInjector — dsh delivery contract ───────────────────────
 //
 // The injector is the graph-notify delivery seam. These tests drive it
-// directly and assert the rc.6 UserMessage shape (message.d.ts:120-133), the
-// per-message unique id (the inbox dedupes on message.id), and the delivery
-// preference steer → followup → inject (runtime-types.d.ts:115/123/132).
+// directly and assert the dsh UserMessage shape (message.d.ts:120-133) with its
+// producer-owned `rolebox` `notice` source (dsh V4 refuses the released shared
+// `plugin` wrapper at encode and at decode), the per-message unique id (the
+// inbox dedupes on message.id), and the delivery preference
+// steer → followup → inject (runtime-types.d.ts:115/123/132).
 
 describe("buildAgentPromptInjector (rc.6 delivery contract)", () => {
-  it("(a) injects a well-formed rc.6 UserMessage with a plugin notice source", async () => {
+  it("(a) injects a well-formed UserMessage with a producer-owned rolebox notice source", async () => {
     const { agent, calls } = makeValidatingAgent("session-1");
     const injector = buildAgentPromptInjector(makeRegistry(agent));
     expect(injector).toBeDefined();
@@ -2419,7 +2431,7 @@ describe("buildAgentPromptInjector (rc.6 delivery contract)", () => {
       id: string;
       role: string;
       content: Array<{ type: string; text: string }>;
-      source: { kind: string; plugin: string; form: string; summary: string };
+      source: { kind: string; form: string; summary: string };
     };
     expect(typeof message.id).toBe("string");
     expect(message.id.length).toBeGreaterThan(0);
@@ -2427,11 +2439,13 @@ describe("buildAgentPromptInjector (rc.6 delivery contract)", () => {
     expect(message.content).toEqual([
       { type: "text", text: "<system-reminder> node done" },
     ]);
-    expect(message.source.kind).toBe("plugin");
-    expect(message.source.plugin).toBe("rolebox");
+    expect(message.source.kind).toBe("rolebox");
     expect(message.source.form).toBe("notice");
     expect(message.source.summary.length).toBeGreaterThan(0);
     expect(message.source.summary.length).toBeLessThanOrEqual(120);
+    // dsh V4 refuses the released shared `plugin` wrapper at encode and at
+    // decode, so the delivered source must not carry one.
+    expect(Object.hasOwn(message.source, "plugin")).toBe(false);
   });
 
   it("(a2) bounds a notice summary to 120 chars (first line, ellipsized)", async () => {

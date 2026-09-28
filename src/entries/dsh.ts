@@ -422,15 +422,53 @@ export interface DshPluginDisposer {
 // structurally (SDK-free), so a missing / non-conforming `ctx.agents` resolves
 // to "absent" and the plugin degrades cleanly.
 
+/**
+ * Producer-owned `notice` message source for the rolebox dsh entry.
+ *
+ * dsh's V4 session format admits only PRODUCER-OWNED source kinds:
+ * `MessageSourceMap` has "no shared catch-all `plugin` kind"
+ * (`deepseek-harness/packages/llm/llm/src/message.ts:103-115`), and V4
+ * admission (`assertV4RowAdmission` / `assertV4MessageSources`,
+ * `deepseek-harness/packages/session/session-format-v3-to-v4/src/message-sources.ts`)
+ * refuses the released shared wrapper with `format v4 message requires a
+ * producer-owned source kind` — both when encoding the row for persistence and
+ * when decoding it again. `rolebox` is therefore this producer's own kind;
+ * messages migrated out of released V3 logs surface the same producer as
+ * `plugin:rolebox`
+ * (`deepseek-harness/.agents/notes/implemented/architecture/2026-09-09-producer-owned-message-sources.md`).
+ */
+interface DshRoleboxNoticeSource {
+  readonly kind: "rolebox";
+  readonly form: "notice";
+  readonly summary: string;
+}
+
+/**
+ * Minimal structural dsh `UserMessage` carrying a
+ * {@link DshRoleboxNoticeSource} (message.d.ts:120-133). The members are
+ * declared locally — the adapter stays SDK-free — and the signature is what
+ * makes the delivered message statically checked at its single construction
+ * site ({@link buildAgentPromptInjector}).
+ */
+interface DshUserMessageLike {
+  readonly id: string;
+  readonly role: "user";
+  readonly content: ReadonlyArray<{
+    readonly type: "text";
+    readonly text: string;
+  }>;
+  readonly source: DshRoleboxNoticeSource;
+}
+
 /** Minimal structural dsh `Agent` (the live agent backing a session). */
 interface DshAgentLike {
   readonly id: string;
   /** Wake the driver with steering (idle starts a turn). rc.6 runtime-types.d.ts:123. */
-  steer?(message: unknown): unknown | Promise<unknown>;
+  steer?(message: DshUserMessageLike): unknown | Promise<unknown>;
   /** Queue a follow-up turn and wake the driver. rc.6 runtime-types.d.ts:115. */
-  followup?(message: unknown): unknown | Promise<unknown>;
+  followup?(message: DshUserMessageLike): unknown | Promise<unknown>;
   /** Queue context WITHOUT waking an idle driver. rc.6 runtime-types.d.ts:132. */
-  inject?(message: unknown): unknown | Promise<unknown>;
+  inject?(message: DshUserMessageLike): unknown | Promise<unknown>;
 }
 
 /** Minimal structural dsh `AgentRegistry` (`ctx.agents`). */
@@ -498,11 +536,11 @@ function probeAgentRegistry(
 }
 
 /**
- * Bound a `notice` source summary to the rc.6 `CONTEXT_SUMMARY_MAX_CHARS`
- * (120): the first line trimmed, ellipsized when longer
- * (`len <= 120 ? s : s.slice(0, 119) + "…"`). Mirrors `boundContextSummary`
- * (`@deepseek-ai/dsh-llm/lib/types/message.js:15-19`) without importing
- * dsh-llm — the adapter stays SDK-free.
+ * Bound a `notice` source summary to the dsh context-summary cap
+ * `CONTEXT_SUMMARY_MAX_CHARS` (120): the first line trimmed, ellipsized when
+ * longer (`len <= 120 ? s : s.slice(0, 119) + "…"`). Mirrors
+ * `boundContextSummary` (`@deepseek-ai/dsh-llm/lib/types/message.js:15-19`)
+ * without importing dsh-llm — the adapter stays SDK-free.
  */
 function boundNoticeSummary(text: string): string {
   const firstLine = (text.split(/\r?\n/, 1)[0] ?? "").trim();
@@ -562,7 +600,7 @@ export function buildAgentPromptInjector(
       // → legacy waking-preferred-with-inject-fallback. `.bind(agent)` preserves
       // the method receiver.
       const deliver:
-        | ((message: unknown) => unknown | Promise<unknown>)
+        | ((message: DshUserMessageLike) => unknown | Promise<unknown>)
         | undefined =
         options?.noReply === true
           ? typeof agent.inject === "function"
@@ -585,18 +623,18 @@ export function buildAgentPromptInjector(
 
       // The reminder text already carries the graph marker + the resolved
       // agent (buildGraphCompletionText embeds `agent: <id>`), so the agent is
-      // delivered inline in the body. A full rc.6 UserMessage needs id / role
-      // / content / source (message.d.ts:120-133); the plugin `notice` source
-      // (message.d.ts:98-101, 81-84) carries a bounded summary.
+      // delivered inline in the body. A full dsh UserMessage needs id / role /
+      // content / source (message.d.ts:120-133); the source is the
+      // producer-owned `rolebox` `notice` kind declared above, carrying a
+      // summary bounded to the context-summary cap.
       const id = randomUUID();
-      const message = {
+      const message: DshUserMessageLike = {
         id,
-        role: "user" as const,
-        content: [{ type: "text" as const, text }],
+        role: "user",
+        content: [{ type: "text", text }],
         source: {
-          kind: "plugin" as const,
-          plugin: "rolebox",
-          form: "notice" as const,
+          kind: "rolebox",
+          form: "notice",
           summary: boundNoticeSummary(text),
         },
       };
