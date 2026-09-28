@@ -72,6 +72,8 @@ mkdir -p ~/.config/opencode/rolebox && cd ~/.config/opencode/rolebox && rolebox 
 { "plugin": ["rolebox"] }
 ```
 
+opencode 1.x loads the package root (`{ id, server }`); opencode v2 resolves the same installed package through its plugin entrypoint `rolebox/server` (`{ id, setup }`, `src/entries/opencode2.ts`) instead, so no second package or extra install step is needed. What v2 registers — and every surface where it degrades — is listed in [compatibility.md](docs/compatibility.md#opencode-v2).
+
 ### pi
 
 ```bash

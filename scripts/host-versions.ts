@@ -61,8 +61,10 @@ export interface HostPackage {
  * new host devDependency: check and update read nothing else.
  */
 export const HOST_PACKAGES: readonly HostPackage[] = [
-  // opencode host — published to `latest`.
+  // opencode 1.x host — published to `latest`.
   { name: "@opencode-ai/plugin", channel: "latest" },
+  // opencode v2 host — a separate product line, also published to `latest`.
+  { name: "@opencode/plugin", channel: "latest" },
   // cordis — `latest` (4.0.2) is newer than its `next` tag (4.0.1-rc.4).
   { name: "@deepseek-ai/cordis", channel: "latest" },
   // dsh packages — `next` is the current line; `latest` is the older 0.0.1-rc.1.
@@ -84,10 +86,13 @@ export const HOST_PACKAGES: readonly HostPackage[] = [
 
 /**
  * Package scopes that are host packages: every devDependency under one of these
- * scopes must also appear in HOST_PACKAGES.
+ * scopes must also appear in HOST_PACKAGES. A family matches on "<scope>/", so
+ * the sibling scopes "@opencode-ai" (v1) and "@opencode" (v2) never match each
+ * other's packages.
  */
 export const HOST_FAMILIES: readonly string[] = [
   "@opencode-ai",
+  "@opencode",
   "@deepseek-ai",
   "@earendil-works",
 ]

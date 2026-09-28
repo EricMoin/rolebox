@@ -46,6 +46,8 @@ describe("host-version policy table", () => {
     for (const entry of dsh) expect(entry.channel).toBe("next");
     expect(hostChannelFor("@deepseek-ai/cordis")).toBe("latest");
     expect(hostChannelFor("@opencode-ai/plugin")).toBe("latest");
+    // The v2 line is a separate scope with the same channel.
+    expect(hostChannelFor("@opencode/plugin")).toBe("latest");
     expect(hostChannelFor("@earendil-works/pi-coding-agent")).toBe("latest");
     expect(hostChannelFor("typescript")).toBeUndefined();
   });
@@ -55,6 +57,14 @@ describe("host-version policy table", () => {
     expect(findUntrackedHosts(["@deepseek-ai/brand-new-host", "@earendil-works/pi-tui", "zod"])).toEqual([
       "@deepseek-ai/brand-new-host",
       "@earendil-works/pi-tui",
+    ]);
+    // Both opencode scopes are families: a new v1 or v2 host package is a
+    // policy error until it gets a HOST_PACKAGES row of its own, while the
+    // two tracked entries themselves never cross-match.
+    expect(findUntrackedHosts(["@opencode/plugin", "@opencode-ai/plugin"])).toEqual([]);
+    expect(findUntrackedHosts(["@opencode-ai/brand-new-host", "@opencode/brand-new-host"])).toEqual([
+      "@opencode-ai/brand-new-host",
+      "@opencode/brand-new-host",
     ]);
   });
 

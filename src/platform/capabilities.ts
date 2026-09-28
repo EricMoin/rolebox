@@ -123,3 +123,58 @@ export function dshCapabilities(): PlatformCapabilities {
 export function codexCapabilities(): PlatformCapabilities {
   return minimalCapabilities("codex");
 }
+
+/**
+ * Capabilities declared for the opencode **v2** plugin surface
+ * (`@opencode/plugin@2.0.18`, consumed by `src/entries/opencode2.ts`).
+ *
+ * `platformId` stays `"opencode"` on purpose: v2 is the same product family —
+ * the same config directory (`~/.config/opencode`), the same global skills
+ * directory and the same model catalog — so a v2-specific id would silently
+ * change path resolution (`resolveRoleboxDirectories`, src/platform/factory.ts:89)
+ * and model resolution (`initModelResolver`, src/core/services/hot-reload-service.ts:305)
+ * for no benefit. Platform paths and the capability set are resolved
+ * independently, so sharing the id does not claim v1's capabilities: the entry
+ * passes this set explicitly (`createPluginHooks({ capabilities })`).
+ *
+ * Every flag is set from the published 2.0.18 declarations, not from v1:
+ *
+ *  - `hasSessionFork: false` — the v2 plugin session domain is a `Pick` of the
+ *    HTTP client and does not include `fork`; it lists create/get/switchAgent/
+ *    switchModel/prompt/generate/command/synthetic/interrupt/update/move/wait/
+ *    context only (node_modules/@opencode/plugin/dist/promise/session.d.ts:143-145).
+ *  - `hasSessionStatus: false` — the same `Pick` exposes no `status` call, so a
+ *    session's busy/idle state cannot be polled; `session.status` still arrives
+ *    on the event stream (`hasEventStream`).
+ *  - `hasAgentFileSync: false` — v2 agents are registered in-process through
+ *    `ctx.agent.transform` → `AgentEditor.update(id, fn)`, and the editor has no
+ *    `add` (…/promise/agent.d.ts:5-11): there is no agent FILE to write or read
+ *    back, so the v1 file registrar (`OpencodeAgentRegistrar`) is not used.
+ *  - `hasRoleSwitch: false` — v2 exposes no in-session role switcher surface
+ *    (no host routes; `ctx.session.switchAgent` switches the running agent
+ *    programmatically, it does not offer the user a role picker), so rolebox's
+ *    Pi-only role switcher stays off.
+ *
+ * The `true` flags: `hasSessionCreate` (`session.create`, which
+ * DispatchService gates on — src/core/services/dispatch-service.ts:79-86),
+ * `hasSessionAbort` (`session.interrupt`), `hasBackgroundTasks` (dispatch runs
+ * on rolebox's own background tasks over `session.prompt`),
+ * `hasMultiStepTools` (`ctx.tool.transform` registers tools with a promise
+ * `execute` — src/platform/adapters/opencode2/tool-factory.ts:120-169) and
+ * `hasEventStream` (`ctx.event.subscribe()` yields an `AsyncIterable` of v2
+ * events — …/promise/event.d.ts:2-3).
+ */
+export function opencodeV2Capabilities(): PlatformCapabilities {
+  return {
+    platformId: "opencode",
+    hasSessionCreate: true,
+    hasSessionAbort: true,
+    hasBackgroundTasks: true,
+    hasMultiStepTools: true,
+    hasEventStream: true,
+    hasSessionFork: false,
+    hasSessionStatus: false,
+    hasAgentFileSync: false,
+    hasRoleSwitch: false,
+  };
+}
