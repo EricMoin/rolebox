@@ -40,6 +40,7 @@ import { tmpdir } from "node:os";
 import { graphStoreRoot } from "../src/graph/store/schema.ts";
 import { queryGraphs } from "../src/graph/query/graph-query.ts";
 import { getDataDir } from "../src/cli/paths.ts";
+import { getRootLogger } from "../src/logger.ts";
 import { realpathSync } from "node:fs";
 import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
@@ -176,6 +177,11 @@ function makeRegistry(agent: FakeAgentLike | undefined): FakeAgentRegistry {
  * subscriptions, and system-prompt section/context registrations so tests can
  * assert that apply() wired everything.
  *
+ * `tools.get` mirrors the host registry's public lookup, which the plugin
+ * probes before registering a tool name: a name in `takenTools` (or already
+ * registered on this double) resolves to a stand-in definition, every other
+ * name to `undefined`. `noToolsLookup` omits the read entirely.
+ *
  * The optional-service seam (`ctx.get`) resolves `"webServer"` to the
  * `webServer` option when supplied (a fake host-webserver registrar) and
  * `undefined` otherwise — mirroring the dsh host, where the web profile
@@ -196,6 +202,19 @@ function createFakeCtx(
     llm?: { listProviders(): ReadonlyArray<{ id: string }> };
     /** Optional dsh skill-registry double (lazy skill-provider seam). */
     skills?: boolean;
+    /**
+     * Tool names the HOST already owns (the collision probe seam). Each name
+     * is reported taken by `tools.get` under the given name (a `Set`, or a
+     * predicate for a probe that changes state), so `apply()` must fall back
+     * to `rb_<name>` or skip.
+     */
+    takenTools?: ReadonlySet<string> | ((name: string) => boolean);
+    /**
+     * Omit the `tools.get` read entirely — a double (or a host generation)
+     * without the optional lookup, which must degrade to registering the
+     * canonical names unchanged.
+     */
+    noToolsLookup?: boolean;
   } = {},
 ) {
   const registeredTools: DshToolDefinition[] = [];
@@ -249,9 +268,29 @@ function createFakeCtx(
     },
   };
 
+  const taken = (name: string): boolean => {
+    const opt = options.takenTools;
+    if (opt === undefined) return false;
+    return typeof opt === "function" ? opt(name) : opt.has(name);
+  };
+  /** Stand-in definition for a taken name, mirroring the host's `get` shape. */
+  const hostOwnedDefinition = (name: string): DshToolDefinition => ({
+    name,
+    description: `host-owned ${name}`,
+    parameters: {},
+    output: { schema: {}, render: () => [] },
+  });
+  // The collision probe: a name the host owns (statically declared taken, or
+  // already in this registry) resolves to a definition, everything else to
+  // undefined — the documented ToolRuntime.get contract (`scope?` omitted).
+  const lookup = (name: string): unknown =>
+    taken(name) || registeredTools.some((def) => def.name === name)
+      ? hostOwnedDefinition(name)
+      : undefined;
   const tools = {
     registeredTools,
     guard: () => () => {},
+    ...(options.noToolsLookup ? {} : { get: lookup }),
     register(definition: DshToolDefinition): () => void {
       registeredTools.push(definition);
       return () => {
@@ -944,7 +983,508 @@ describe("dsh plugin apply()", () => {
     disposer();
   });
 
+  it("enabledNamespaces composes '*' with a '!web' exclusion", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["*", "!web"],
+    } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // The documented mitigation for the global web_search / web_fetch
+    // collision: keep everything, subtract the colliding namespace. Tools the
+    // profile never enumerated — interactive_terminal included — stay
+    // registered.
+    expect(keys).toContain("hashline_read");
+    expect(keys).toContain("asset_search");
+    expect(keys).toContain("interactive_terminal");
+    expect(keys).not.toContain("web_search");
+    expect(keys).not.toContain("web_read");
+    expect(keys).not.toContain("web_fetch");
+
+    disposer();
+  });
+
+  it("a negatives-only enabledNamespaces list registers everything except the exclusions", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    // Baseline: the same boot with the filter absent — the full compiled set.
+    const unfiltered = createFakeCtx();
+    const unfilteredDisposer = await apply(unfiltered.ctx, {
+      roleboxDir: tmpDir,
+    } as DshPluginConfig);
+    const allKeys = unfiltered.tools.registeredTools.map((t) => t.name);
+
+    const { ctx, tools } = createFakeCtx();
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["!web"],
+    } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // An exclusion can only SUBTRACT from a baseline, and with nothing else
+    // declared that baseline is everything — so `["!web"]` must not register
+    // zero tools.
+    expect(keys).toContain("asset_search");
+    expect(keys).toContain("hashline_read");
+    expect(keys).not.toContain("web_search");
+    expect([...keys].sort()).toEqual(
+      allKeys.filter((key) => !key.startsWith("web_")).sort(),
+    );
+
+    disposer();
+    unfilteredDisposer();
+  });
+
+  it("an exclusion may name a single tool while a positive entry narrows the baseline", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["hashline", "memory", "!hashline_edit"],
+    } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys).toContain("hashline_read");
+    expect(keys).toContain("memory_write");
+    expect(keys).not.toContain("hashline_edit");
+    // The exclusions do not widen the declared allow-list.
+    expect(keys).not.toContain("asset_search");
+
+    disposer();
+  });
+
+  it("an exclusion beats the '*' allow, including the opt-out of a single tool", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["*", "!interactive_terminal"],
+    } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys).not.toContain("interactive_terminal");
+    expect(keys).toContain("asset_search");
+    expect(keys).toContain("hashline_read");
+
+    disposer();
+  });
+
+  it("trims entries and ignores a bare '!' without throwing", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: [" hashline ", "!", "  "],
+    } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // The padded entry matches after trimming, the bare '!' and the blank
+    // entry are ignored (and the declared positive entry still narrows).
+    expect(keys).toContain("hashline_read");
+    expect(keys).toContain("hashline_edit");
+    expect(keys).not.toContain("memory_write");
+    expect(keys).not.toContain("web_search");
+
+    disposer();
+  });
+
+  it("the boot log reports the tool names the namespace filter dropped", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    // Capture on the root logger the entry's sub-logger inherits from.
+    const logLines: string[] = [];
+    getRootLogger().attachTransport((entry) => {
+      try {
+        logLines.push(JSON.stringify(entry));
+      } catch {
+        // A log object this test cannot serialize is not the boot report.
+      }
+    });
+
+    const { ctx } = createFakeCtx();
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["hashline"],
+    } as DshPluginConfig);
+
+    const boot = logLines
+      .filter((line) => line.includes("Plugin initialized"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(boot).toHaveLength(1);
+    // tslog carries the message on "0" and the structured fields on "1":
+    // { "0": "Plugin initialized", "1": { discovered, ..., filteredTools } }.
+    const fields = boot[0]?.["1"] as Record<string, unknown> | undefined;
+    const filteredTools = fields?.filteredTools;
+    expect(Array.isArray(filteredTools)).toBe(true);
+    const dropped = filteredTools as string[];
+    // A narrowed profile is visible instead of silent: the dropped names are
+    // reported, in a stable sorted order.
+    expect(dropped).toContain("web_search");
+    expect(dropped).toContain("interactive_terminal");
+    expect(dropped).not.toContain("hashline_read");
+    expect(dropped).not.toContain("hashline_edit");
+    // BOTH registration paths report: the role-snapshot generation
+    // (`asset_*` / `reference_search`) is registered through its own seam and
+    // filtered there, so an allow-list that drops it must say so too.
+    expect(dropped).toContain("asset_search");
+    expect(dropped).toContain("asset_inspect");
+    expect(dropped).toContain("asset_validate");
+    expect(dropped).toContain("reference_search");
+    expect(dropped).toEqual([...dropped].sort());
+    // Every dropped key appears exactly once.
+    expect(new Set(dropped).size).toBe(dropped.length);
+
+    disposer();
+  });
+
+  it("the boot log's filteredTools is exactly what both registration paths dropped", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const logLines: string[] = [];
+    getRootLogger().attachTransport((entry) => {
+      try {
+        logLines.push(JSON.stringify(entry));
+      } catch {
+        // A log object this test cannot serialize is not the boot report.
+      }
+    });
+
+    // Baseline boot — no filter: the whole compiled face, both paths.
+    const unfiltered = createFakeCtx();
+    const unfilteredDisposer = await apply(unfiltered.ctx, {
+      roleboxDir: tmpDir,
+    } as DshPluginConfig);
+    const allKeys = unfiltered.tools.registeredTools.map((t) => t.name);
+
+    // Filtered boot — the documented wildcard + exclusion shape, with one
+    // exclusion per registration path: `!asset` subtracts the role-snapshot
+    // generation's `asset_*` keys, `!web` the main loop's `web_*` keys. Both
+    // paths must therefore report, and neither may report the other's silence.
+    const filtered = createFakeCtx();
+    const filteredDisposer = await apply(filtered.ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["*", "!asset", "!web"],
+    } as DshPluginConfig);
+    const keptKeys = filtered.tools.registeredTools.map((t) => t.name);
+
+    const boots = logLines
+      .filter((line) => line.includes("Plugin initialized"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(boots).toHaveLength(2);
+    const unfilteredFields = boots[0]?.["1"] as
+      | Record<string, unknown>
+      | undefined;
+    const filteredFields = boots[1]?.["1"] as
+      | Record<string, unknown>
+      | undefined;
+
+    // An unfiltered boot drops nothing, so the field cannot report noise.
+    expect(unfilteredFields?.filteredTools).toEqual([]);
+
+    expect(Array.isArray(filteredFields?.filteredTools)).toBe(true);
+    const dropped = filteredFields?.filteredTools as string[];
+    // The role-snapshot keys come from the second, reload-managed path...
+    expect(dropped).toContain("asset_search");
+    expect(dropped).toContain("asset_inspect");
+    expect(dropped).toContain("asset_validate");
+    // ...and the main-loop keys from the first: EACH path must be represented,
+    // or the `!asset`-only shape would let one of them report nothing and still
+    // satisfy the set-difference check below.
+    expect(dropped).toContain("web_search");
+    expect(dropped).toContain("web_read");
+    expect(dropped).toContain("web_fetch");
+    // The exclusions subtract only those namespaces, so a key outside both
+    // survives from each path (`reference_search` from the snapshot
+    // generation, `hashline_read` from the main loop).
+    expect(dropped).not.toContain("reference_search");
+    expect(keptKeys).toContain("reference_search");
+    expect(dropped).not.toContain("hashline_read");
+    expect(keptKeys).toContain("hashline_read");
+    // WHAT THIS PROVES: `filteredTools` is EXACTLY the set difference between
+    // the two boots' registered names, sorted and duplicate-free — the names
+    // the filtered boot dropped and nothing else. Both registration paths
+    // contribute (asserted above), so neither can silently stop reporting, and
+    // no path can report a key it did not actually drop.
+    expect(dropped).toEqual(
+      allKeys.filter((key) => !keptKeys.includes(key)).sort(),
+    );
+    expect(new Set(dropped).size).toBe(dropped.length);
+
+    filteredDisposer();
+    unfilteredDisposer();
+  });
+
+  // ── Host tool-name collision fallback ────────────────────────────────────
+  //
+  // A host composition can already own a GLOBAL tool name rolebox also wants
+  // (`@deepseek-ai/dsh-tool-web` owns `web_search` / `web_fetch`), and the dsh
+  // registry rejects a duplicate name within one layer, which used to fail the
+  // whole boot. These arms pin the fallback: probe the canonical name, register
+  // `rb_<name>` when only that is free, skip with a warning when both are
+  // taken — and register unchanged when there is nothing to probe.
+
+  /** Root-logger transport capturing every entry as a parsed log object. */
+  const captureLogEntries = (): Array<Record<string, unknown>> => {
+    const entries: Array<Record<string, unknown>> = [];
+    getRootLogger().attachTransport((entry) => {
+      try {
+        entries.push(JSON.parse(JSON.stringify(entry)) as Record<string, unknown>);
+      } catch {
+        // A log object this test cannot serialize is not a boot entry.
+      }
+    });
+    return entries;
+  };
+
+  /** The collision warning for one canonical name, captured from the logger. */
+  const collisionWarnings = (
+    entries: Array<Record<string, unknown>>,
+    name: string,
+  ): Array<Record<string, unknown>> =>
+    entries.filter((entry) => {
+      try {
+        return (
+          JSON.stringify(entry).includes(name) &&
+          String(entry["0"]).includes("Host already provides the tool")
+        );
+      } catch {
+        return false;
+      }
+    });
+
+  /** The boot log's `filteredTools` field from the single recorded boot. */
+  const bootFilteredTools = (
+    entries: Array<Record<string, unknown>>,
+  ): string[] => {
+    const boots = entries.filter((entry) =>
+      String(entry["0"]).includes("Plugin initialized"),
+    );
+    expect(boots).toHaveLength(1);
+    const fields = boots[0]?.["1"] as Record<string, unknown> | undefined;
+    expect(Array.isArray(fields?.filteredTools)).toBe(true);
+    return fields?.filteredTools as string[];
+  };
+
+  it("a free name registers under its canonical name with no rename and no warning", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const entries = captureLogEntries();
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys).toContain("web_search");
+    expect(keys).toContain("asset_search");
+    // The probe is live on this double (it answers for tool names), so an
+    // accidental "taken" reading would have prefixed these.
+    expect(keys).not.toContain("rb_web_search");
+    expect(keys.some((key) => key.startsWith("rb_"))).toBe(false);
+    expect(collisionWarnings(entries, "web_search")).toHaveLength(0);
+    expect(bootFilteredTools(entries)).toEqual([]);
+
+    disposer();
+  });
+
+  it("a taken canonical name registers as rb_<name> with ONE warning naming both", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const entries = captureLogEntries();
+    const { ctx, tools } = createFakeCtx({
+      takenTools: new Set(["web_search"]),
+    });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // The CANONICAL name is left to the host; rolebox registers the prefixed
+    // variant, and only that namespace key is affected.
+    expect(keys).toContain("rb_web_search");
+    expect(keys).not.toContain("web_search");
+    expect(keys).toContain("web_fetch");
+    expect(keys).not.toContain("rb_web_fetch");
+    // Exactly ONE warning, naming the canonical name, the registered name, and
+    // the fact that the host already provides the canonical tool.
+    const warnings = collisionWarnings(entries, "web_search");
+    expect(warnings).toHaveLength(1);
+    expect(String(warnings[0]?.["0"])).toContain('Host already provides the tool "web_search"');
+    expect(String(warnings[0]?.["0"])).toContain('"rb_web_search"');
+
+    disposer();
+  });
+
+  it("the prefixed copy keeps the canonical definition's execute and presentation members", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    // The canonical compile, from a boot with NOTHING taken: this is the
+    // definition the rename must copy verbatim apart from `name`.
+    const { ctx: canonicalCtx, tools: canonicalTools } = createFakeCtx();
+    const canonicalDisposer = await apply(canonicalCtx, {
+      roleboxDir: tmpDir,
+    } as DshPluginConfig);
+    const canonical = canonicalTools.registeredTools.find(
+      (t) => t.name === "web_search",
+    );
+    expect(canonical).toBeDefined();
+
+    const { ctx, tools } = createFakeCtx({
+      takenTools: new Set(["web_search"]),
+    });
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const renamed = tools.registeredTools.find(
+      (t) => t.name === "rb_web_search",
+    );
+
+    expect(renamed).toBeDefined();
+    // Shallow copy, name only: every other member of the canonical definition
+    // survives BY IDENTITY (the presentation callbacks and the output render
+    // are the same function references — they are keyed by the canonical name
+    // at COMPILE time, so the rename cannot change what the host invokes) or
+    // by value (description, parameters).
+    expect(typeof renamed?.execute).toBe("function");
+    expect(renamed?.presentCall).toBe(canonical?.presentCall);
+    expect(renamed?.isConcurrencySafe).toBe(canonical?.isConcurrencySafe);
+    expect(renamed?.output.presentationMeta).toBe(
+      canonical?.output.presentationMeta,
+    );
+    expect(typeof renamed?.output.render).toBe("function");
+    expect(renamed?.description).toBe(canonical?.description);
+    expect(renamed?.parameters).toEqual(canonical?.parameters);
+
+    disposer();
+  });
+
+  it("with both the canonical and prefixed name taken the tool is skipped with a warning", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const entries = captureLogEntries();
+    const { ctx, tools } = createFakeCtx({
+      takenTools: new Set(["web_search", "rb_web_search"]),
+    });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // Skipped — not renamed twice, not registered over the host's name.
+    expect(keys).not.toContain("web_search");
+    expect(keys).not.toContain("rb_web_search");
+    expect(keys).toContain("web_fetch");
+    const warnings = collisionWarnings(entries, "web_search");
+    expect(warnings).toHaveLength(1);
+    expect(String(warnings[0]?.["0"])).toContain('"rb_web_search"');
+    expect(String(warnings[0]?.["0"])).toContain("skipping the rolebox tool");
+    // A collision skip is NOT a namespace-filter drop: `filteredTools` reports
+    // the filter's decisions only, so a profile with no filter reports none.
+    expect(bootFilteredTools(entries)).toEqual([]);
+
+    disposer();
+  });
+
+  it("a probe that throws counts as free and never blocks the boot", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx({
+      takenTools: (name: string) => {
+        if (name === "web_search") throw new Error("scope read failed");
+        return false;
+      },
+    });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys).toContain("web_search");
+    expect(keys).not.toContain("rb_web_search");
+
+    disposer();
+  });
+
+  it("a double without tools.get registers the canonical name (graceful degradation)", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx({ noToolsLookup: true });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys).toContain("web_search");
+    expect(keys).toContain("asset_search");
+    expect(keys.some((key) => key.startsWith("rb_"))).toBe(false);
+
+    disposer();
+  });
+
+  it("the role-snapshot path honors the same collision helper", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const entries = captureLogEntries();
+    const { ctx, tools } = createFakeCtx({
+      takenTools: new Set(["asset_search"]),
+    });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // The reload-managed generation goes through the same helper: the taken
+    // `asset_search` becomes `rb_asset_search`, its siblings are untouched.
+    expect(keys).toContain("rb_asset_search");
+    expect(keys).not.toContain("asset_search");
+    expect(keys).toContain("asset_inspect");
+    expect(keys).toContain("reference_search");
+    expect(collisionWarnings(entries, "asset_search")).toHaveLength(1);
+
+    disposer();
+  });
+
+  it("a graph-worker tool name is never renamed — it is skipped with a warning", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const entries = captureLogEntries();
+    const { ctx, tools } = createFakeCtx({
+      takenTools: new Set(["graph_worker_exec"]),
+    });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // The worker guard matches `execution.name` by literal and the dispatch
+    // request filters on the same list, so a rename would silently break the
+    // worker face — an occupied name is skipped instead.
+    expect(keys).not.toContain("graph_worker_exec");
+    expect(keys).not.toContain("rb_graph_worker_exec");
+    expect(collisionWarnings(entries, "graph_worker_exec")).toHaveLength(1);
+
+    disposer();
+  });
+
+  it("the namespace filter runs first: a denied colliding tool is never probed or renamed", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const entries = captureLogEntries();
+    const probed: string[] = [];
+    const { ctx, tools } = createFakeCtx({
+      takenTools: (name: string) => {
+        probed.push(name);
+        return name === "web_search" || name === "rb_web_search";
+      },
+    });
+
+    const disposer = await apply(ctx, {
+      roleboxDir: tmpDir,
+      enabledNamespaces: ["*", "!web"],
+    } as DshPluginConfig);
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // `!web` subtracts the namespace BEFORE the probe: neither the canonical
+    // nor the prefixed name is registered, and neither was even looked up.
+    expect(keys).not.toContain("web_search");
+    expect(keys).not.toContain("rb_web_search");
+    expect(probed).not.toContain("web_search");
+    expect(probed).not.toContain("rb_web_search");
+    expect(collisionWarnings(entries, "web_search")).toHaveLength(0);
+    // The filter drop is still reported (the namespace filter's own field).
+    expect(bootFilteredTools(entries)).toContain("web_search");
+
+    disposer();
+  });
+
   it("applies defaultRole promotion to the resolved roles", async () => {
+
     writeRoleYaml("alpha", SIMPLE_ROLE.replace("Test Role", "Alpha"));
     writeRoleYaml("beta", SIMPLE_ROLE.replace("Test Role", "Beta"));
     const { ctx } = createFakeCtx();

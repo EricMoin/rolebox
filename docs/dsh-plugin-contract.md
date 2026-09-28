@@ -1747,7 +1747,7 @@ defaults alone (`roleboxDir` / `skillsDir` resolved on top of
 | `roleboxDir` | `string` | `{dsh home}/rolebox` | Directory containing `role.yaml` files |
 | `skillsDir` | `string` | `{dsh home}/skills` | Global skills directory |
 | `defaultRole` | `string` | — | Role id (directory name) promoted to primary mode |
-| `enabledNamespaces` | `string[]` | all | Tool allow-list: exact tool names or namespace prefixes (e.g. `hashline`, `graph`); `"*"` or absent registers every assembled tool |
+| `enabledNamespaces` | `string[]` | all | Composable tool filter: exact tool names or namespace prefixes (e.g. `hashline`, `graph`) allow, a `!` entry (e.g. `!web`) excludes, `"*"` allows everything; absent/empty registers every assembled tool. An exclusion always beats an allow, a negatives-only list means "all except those", and entries match CANONICAL tool names — the filter runs before the collision fallback (§5.4.2). A tool name the host already registered is registered as `rb_<name>` and logged instead of failing registration |
 
 Set them by patching the rolebox row's `config` from the profile's own
 `cordis.patch.yml` (applied after every bundle layer, §5.4):
@@ -1757,7 +1757,11 @@ Set them by patching the rolebox row's `config` from the profile's own
 - id: rolebox
   config:
     roleboxDir: /absolute/path/to/roles
+    # An allow-list registers exactly the listed namespaces:
     enabledNamespaces: ["asset", "graph", "hashline", "loop", "memory", "reference", "session", "signal"]
+    # ...or keep everything and subtract only what collides with the host
+    # (see §5.4.2) — replace the line above with:
+    # enabledNamespaces: ["*", "!web"]
 ```
 
 Because an `id`-targeted patch replaces the row's config wholesale (§5.3), keys
@@ -1767,17 +1771,56 @@ configured example ships at `examples/dsh/cordis.patch.yml`.
 ### 5.4.2 Global `web_search` / `web_fetch` collision (verified at boot)
 
 The dsh base profile already registers a **global** `web_search` / `web_fetch`
-tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects duplicate
-global tool names, so registering rolebox's own `web_search` / `web_fetch` /
-`web_read` on top fails boot with:
+tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects a duplicate
+name WITHIN one layer, so a profile in which that row is live and global fails
+the boot when rolebox registers its own `web_search` / `web_fetch` / `web_read`
+on top:
 
 ```text
 tool "web_search" is already registered
 ```
 
-**Mitigation:** exclude the colliding `web` namespace from rolebox's
-`enabledNamespaces` in the profile patch and let dsh's own web tools serve — or
-choose an allow-list that avoids the overlap (see §5.4.1 for the option itself).
+**Where the collision actually occurs.** In the **preset-based `web` profile**
+it does not occur at all: the `@deepseek-ai/dsh-web-app` layer disables the
+host-plane `tool-web` row (`- id: tool-web` / `disabled: true` in
+`@deepseek-ai/dsh-web-app/cordis.patch.yml`), and each agent preset mounts its
+own `tool-web` in ITS layer instead. A read from a session scope therefore
+resolves the preset's tool and the preset's entry wins outright ("Scoped tools
+shadow globals", the tool-side counterpart of §4.6.5), so rolebox's global
+`web_search` is registered without error and is simply shadowed at session
+level. `enabledNamespaces: ["*"]` boots clean there: the probe reads from
+rolebox's own (global) scope, where that name is free, so nothing is prefixed
+and nothing fails. In a **base-backed profile** (no web-app layer) the
+host-plane `tool-web` row IS live in the global layer, and that is where a
+rolebox `web_search` collides and the boot used to fail.
+
+**Automatic fallback (`rb_` prefix).** rolebox no longer fails that boot. Before
+registering a tool it probes the name through the registry's public lookup —
+`ctx.tools.get(name, scope?)`, the same structural read §3.1 documents (the
+read is OPTIONAL on the registry mirror: a host or double without it means "no
+probing" and exactly the previous direct registration path). A name the host
+already provides is registered by rolebox as `rb_<name>` — a shallow copy
+carrying the new name, with execute and presentation untouched, because those
+callbacks are keyed by the canonical name at compile time — and one warning
+names both. If the prefixed name is taken too, the tool is skipped with a
+warning instead of failing the boot; a probe that throws counts as "free". The
+two graph-worker tool names (`graph_worker_exec`, `graph_submit_outcome`) are
+never renamed: the worker execution guard and the dispatch tool filter match
+them by literal, so an occupied name is warned about and skipped rather than
+silently broken. In the preset-based profile above nothing is prefixed (the read
+is free at rolebox's own scope); where a base-backed row does own the name, the
+`rb_` variant is what a session resolving to the global layer actually sees.
+
+**`enabledNamespaces` remains the explicit narrowing mechanism.** It still
+matches CANONICAL names and runs FIRST — before any probe — so `["*", "!web"]`
+excludes rolebox's `web_*` tools whether or not they would have been prefixed,
+and a renamed tool is always one the filter allowed (a tool the filter dropped
+is never probed and never renamed). `["*", "!web"]` and the automatic fallback
+are independent choices: the exclusion means dsh's own web tools serve instead
+of rolebox's, the fallback means rolebox's serve alongside them under distinct
+names. Enumerating namespaces also avoids the overlap; the boot log's
+`filteredTools` field names every tool a narrowed profile actually left
+unregistered (§5.4.1), so neither choice is silent.
 
 ### 5.5 `dsh plugin add` reconcile behavior
 

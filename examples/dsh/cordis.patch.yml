@@ -26,8 +26,17 @@
         skillsDir: /absolute/path/to/skills
         # Promote this role id (directory name) to primary mode.
         defaultRole: emperor
-        # Tool allow-list: exact tool names or namespace prefixes.
-        # "*" (or an absent/empty option) registers every assembled tool.
+        # Tool filter: exact tool names or namespace prefixes allow, a "!"
+        # entry excludes, and "*" (or an absent/empty option) registers every
+        # assembled tool. An exclusion beats an allow, so ["*", "!web"] keeps
+        # everything except the colliding web namespace (contract §5.4.2).
+        #
+        # `web` is listed on purpose: if the host already registered
+        # `web_search` / `web_fetch` in the same layer, rolebox registers its
+        # own variants as `rb_web_search` / `rb_web_fetch` and logs it — the
+        # automatic fallback needs no config. Excluding the namespace instead
+        # (["*", "!web"], option 2b) leaves dsh's own web tools as the only
+        # ones; entries match canonical names either way.
         enabledNamespaces:
           - hashline
           - web
@@ -46,11 +55,25 @@
 # `<pkg>/dsh/cordis.patch.yml`; a profile patch resolves against the profile
 # directory instead.
 #
-# Option 2 — override just the bundle's default row (same id, no insert):
+# Option 2 — override just the bundle's default row (same id, no insert).
+# Both `enabledNamespaces` shapes are shown; use ONE of them.
+#
+# 2a. Allow-list — exactly the listed namespaces register:
 # - id: rolebox
 #   config:
 #     defaultRole: emperor
 #     enabledNamespaces: ["graph", "loop"]
+#
+# 2b. Wildcard + exclusion — everything registers except the exclusions, so the
+#     explicit form of the dsh global web_search / web_fetch mitigation
+#     (contract §5.4.2) keeps interactive_terminal and every later tool without
+#     listing them. The automatic rb_ fallback needs no config, and this
+#     exclusion runs BEFORE it: rolebox's web tools are never probed, never
+#     renamed, and dsh's own web tools serve alone:
+# - id: rolebox
+#   config:
+#     defaultRole: emperor
+#     enabledNamespaces: ["*", "!web"]
 #
 # NOTE (replace, not merge): an id-targeted override replaces the row's whole
 # `config` object. The bundle's row ships no web config — the role-switch UI

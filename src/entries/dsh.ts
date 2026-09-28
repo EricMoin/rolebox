@@ -158,8 +158,10 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
  *   - `skillsDir`         — override the global skills directory (default:
  *                           `{dsh home}/skills`)
  *   - `defaultRole`       — role id (directory name) promoted to primary
- *   - `enabledNamespaces` — allow-list of tool names / name-space prefixes;
- *                           `"*"` or absent registers every assembled tool
+ *   - `enabledNamespaces` — allow-list of tool names / namespace prefixes,
+ *                           composable with `!` exclusions (e.g.
+ *                           `["*", "!web"]`); `"*"` or absent registers every
+ *                           assembled tool
  *   - `onSpawn`           — programmatic spawn delegate (a host seam, NOT
  *                           representable in YAML); when supplied, registered
  *                           providers delegate to it. When omitted, they fall
@@ -192,7 +194,9 @@ export const Config = z.object({
   enabledNamespaces: z
     .array(z.string())
     .optional()
-    .describe("Tool name / namespace-prefix allow-list; '*' registers all"),
+    .describe(
+      "Tool name / namespace-prefix allow-list with '!' exclusions; '*' registers all",
+    ),
   onSpawn: z
     .custom<DshSpawnDelegate>(
       (value) => typeof value === "function",
@@ -222,6 +226,19 @@ export interface DshToolsRegistry extends DshGraphWorkerRegistry {
    * @param definition - A compiled tool definition (DshToolDefinition).
    */
   register(definition: DshToolDefinition): () => void;
+  /**
+   * OPTIONAL structural read mirroring the host registry's public lookup:
+   * `ToolRuntime.get(name, scope?)` returns the definition the viewing scope
+   * sees, or `undefined` when no layer defines that name (contract §3.1,
+   * dsh `packages/core/tools/src/index.ts`). This is the COLLISION PROBE: the
+   * plugin reads it before registering and falls back to an `rb_`-prefixed
+   * name when a host composition already took the canonical one.
+   *
+   * Optional by design: a host or test double without it means "no probing",
+   * so rolebox keeps registering the canonical names directly — exactly the
+   * pre-collision behavior.
+   */
+  get?(name: string): unknown;
 }
 
 /**
@@ -617,20 +634,140 @@ function resolveDirs(config: DshPluginConfig): RoleboxDirectories {
  * Namespace filter for tool registration.
  *
  * `enabledNamespaces` is a dsh-specific config option: when set and
- * non-empty, only tools whose key matches one of the entries are registered.
- * An entry matches either exactly (the full tool key, e.g. `signal`) or as a
- * namespace prefix (the key's segment before the first `_`, e.g. `hashline`
- * matches `hashline_read` / `hashline_edit`). The wildcard `"*"` disables the
- * filter — as does an absent/empty option (register everything).
+ * non-empty it composes an allow-list with optional EXCLUSIONS. Every entry is
+ * trimmed first, then matched either exactly (the full tool key, e.g.
+ * `signal`) or as a namespace prefix (the key's segment before the first `_`,
+ * e.g. `hashline` matches `hashline_read` / `hashline_edit`).
+ *
+ *   - `"*"` allows every key.
+ *   - A positive entry allows the keys it matches.
+ *   - An exclusion (`!` prefix — `"!web"` or `"!web_search"`) DENIES the keys
+ *     its remainder matches, and an exclusion always beats an allow,
+ *     including `"*"`.
+ *   - An entry whose remainder is empty (a bare `"!"`, or whitespace) is
+ *     ignored.
+ *
+ * The baseline is "everything" unless the list declares a positive entry or
+ * `"*"`, so a negatives-only list means "all except those": `["!web"]`
+ * registers every tool except `web_*`, and an exclusion can only subtract
+ * from a baseline. An absent/empty option registers everything, as before.
  */
 function isNamespaceEnabled(
   key: string,
   enabled: string[] | undefined,
 ): boolean {
   if (!enabled || enabled.length === 0) return true;
-  if (enabled.includes("*")) return true;
   const prefix = key.split("_")[0] ?? key;
-  return enabled.some((ns) => ns === key || ns === prefix);
+  let hasPositive = false;
+  let allowed = false;
+  let denied = false;
+  for (const raw of enabled) {
+    const entry = raw.trim();
+    if (entry.length === 0) continue;
+    if (entry.startsWith("!")) {
+      const excluded = entry.slice(1).trim();
+      if (excluded.length === 0) continue;
+      if (excluded === key || excluded === prefix) denied = true;
+      continue;
+    }
+    hasPositive = true;
+    if (entry === "*" || entry === key || entry === prefix) allowed = true;
+  }
+  if (denied) return false;
+  if (allowed) return true;
+  // Nothing positive was declared, so the baseline is everything.
+  return !hasPositive;
+}
+
+/**
+ * The outcome of one collision probe — see {@link resolveToolForRegistration}.
+ */
+type DshToolRegistrationPlan =
+  | { readonly action: "register"; readonly definition: DshToolDefinition }
+  | {
+      readonly action: "register-prefixed";
+      readonly canonicalName: string;
+      readonly definition: DshToolDefinition;
+    }
+  | { readonly action: "skip"; readonly canonicalName: string };
+
+/** Canonical name a taken tool is re-registered under. */
+const DSH_COLLISION_PREFIX = "rb_";
+
+/**
+ * Detect a tool name a host composition already registered and decide how to
+ * register rolebox's variant anyway — the ONE helper both registration paths
+ * (the main boot loop and the role-snapshot generation) route through, so a
+ * boot never fails on a duplicate name.
+ *
+ * dsh's registry rejects a duplicate name WITHIN one layer (`ctx.tools.register`
+ * → the scope store's `insert` throws `tool "<name>" is already registered`),
+ * and a host row such as `@deepseek-ai/dsh-tool-web` owns the same GLOBAL layer
+ * rolebox registers into. Reserving nothing but `run_code` (refused earlier, at
+ * compile time, by {@link DshToolDefinition} assembly) means every other
+ * canonical name can in principle already be taken.
+ *
+ *   - Name free (or no probe available) → register exactly as before: no
+ *     rename, no warning.
+ *   - Name taken, `rb_` + name free → register a shallow COPY carrying the
+ *     prefixed name. Nothing else in the definition changes: `execute`,
+ *     `presentCall` / `presentResult` / `output.presentationMeta` are
+ *     name-independent (they are keyed by the canonical name only at COMPILE
+ *     time — see `DSH_TOOL_PRESENTATION`, `tool-factory.ts`).
+ *   - Both taken → SKIP the tool with one warning. A collision is never
+ *     worth a failed boot.
+ *   - A probe that THROWS counts as "free", so a broken read can never gate
+ *     registration.
+ *
+ * The two names this adapter matches by literal for graph workers
+ * ({@link DSH_GRAPH_WORKER_TOOLS} — the worker execution guard reads
+ * `execution.name`, and the dispatch request filters on the same literals) are
+ * NEVER renamed: an occupied name is skipped with a warning instead, because a
+ * silent rename would break the worker face rather than degrade it.
+ *
+ * The names are those the NAMESPACE FILTER already allowed, i.e. the canonical
+ * ones — never the prefixed form.
+ */
+function resolveToolForRegistration(
+  key: string,
+  definition: DshToolDefinition,
+  probe: ((name: string) => unknown) | undefined,
+  log: { warn(message: string, fields?: Record<string, unknown>): void },
+): DshToolRegistrationPlan {
+  if (!probe) return { action: "register", definition };
+  // A probe failure means "unknown", and unknown must never block a boot.
+  const isTaken = (name: string): boolean => {
+    try {
+      return probe(name) !== undefined;
+    } catch {
+      return false;
+    }
+  };
+  if (!isTaken(key)) return { action: "register", definition };
+  if (DSH_GRAPH_WORKER_TOOLS.includes(key)) {
+    log.warn(
+      `Host already provides the tool "${key}"; the name is matched by literal for ` +
+        `graph workers, so the rolebox tool is skipped instead of renamed`,
+    );
+    return { action: "skip", canonicalName: key };
+  }
+  const prefixedName = DSH_COLLISION_PREFIX + key;
+  if (isTaken(prefixedName)) {
+    log.warn(
+      `Host already provides the tool "${key}" and its fallback name "${prefixedName}" ` +
+        `is taken too; skipping the rolebox tool`,
+    );
+    return { action: "skip", canonicalName: key };
+  }
+  log.warn(
+    `Host already provides the tool "${key}"; registering the rolebox variant ` +
+      `as "${prefixedName}"`,
+  );
+  return {
+    action: "register-prefixed",
+    canonicalName: key,
+    definition: { ...definition, name: prefixedName },
+  };
 }
 
 /**
@@ -1551,6 +1688,15 @@ export async function apply(
   });
   const loopTools = createLoopTools(loopCoordinator, sessionAdapter);
 
+  // Optional collision probe: the host registry's public lookup, bound once
+  // (the host resolves `get` through its scope machinery, so it is read from
+  // the registry, never detached from it). Absent on a double that does not
+  // expose it — "no probing", i.e. the old direct registration path.
+  const probeToolName: ((toolName: string) => unknown) | undefined =
+    typeof ctx.tools.get === "function"
+      ? (toolName: string) => ctx.tools.get?.(toolName)
+      : undefined;
+
   // Role-snapshot registration seam (in-process role reload). The four tools
   // whose behavior is bound to the resolved-role snapshot are registered as
   // ONE disposable generation: a reload disposes the previous generation and
@@ -1562,6 +1708,11 @@ export async function apply(
   // that insert's undo SYNCHRONOUSLY, so each name is free before the new
   // definition is registered.
   const roleSnapshotDisposers: Array<() => void> = [];
+  // Compiled keys the namespace filter dropped — recorded by BOTH registration
+  // paths below (this role-snapshot generation and the main boot loop), so the
+  // boot log's `filteredTools` reports every tool a narrowed profile actually
+  // left unregistered instead of only the main-loop ones.
+  const filteredTools = new Set<string>();
   const registerRoleSnapshotTools = (roles: ResolvedRole[]): number => {
     for (const dispose of roleSnapshotDisposers.splice(0)) {
       try {
@@ -1575,8 +1726,25 @@ export async function apply(
     const compiled = factory.compileAll(buildRoleSnapshotTools(roles));
     let registered = 0;
     for (const [key, def] of Object.entries(compiled)) {
-      if (!isNamespaceEnabled(key, config.enabledNamespaces)) continue;
-      const dispose = ctx.tools.register(def as DshToolDefinition);
+      // Order: the namespace filter (CANONICAL names) first, then the
+      // collision probe — a filtered tool is never probed and never renamed.
+      if (!isNamespaceEnabled(key, config.enabledNamespaces)) {
+        filteredTools.add(key);
+        continue;
+      }
+      // compileAll() is typed `Record<string, unknown>` (the IToolFactory port
+      // contract); the compiled objects are structurally DshToolDefinition.
+      const plan = resolveToolForRegistration(
+        key,
+        def as DshToolDefinition,
+        probeToolName,
+        log,
+      );
+      // A tool the host already owns under BOTH names is skipped, never a
+      // boot failure — and never counted as a FILTER drop: `filteredTools`
+      // reports the namespace filter's decisions only.
+      if (plan.action === "skip") continue;
+      const dispose = ctx.tools.register(plan.definition);
       roleSnapshotDisposers.push(dispose);
       registered++;
     }
@@ -1683,10 +1851,25 @@ export async function apply(
     // generation below — never here, or the host's duplicate-name rejection
     // would throw on boot.
     if (key in ROLE_SNAPSHOT_TOOL_KEYS) continue;
-    if (!isNamespaceEnabled(key, config.enabledNamespaces)) continue;
+    // Order: the namespace filter (CANONICAL names) first, then the collision
+    // probe — a filtered tool is never probed and never renamed.
+    if (!isNamespaceEnabled(key, config.enabledNamespaces)) {
+      filteredTools.add(key);
+      continue;
+    }
     // compileAll() is typed `Record<string, unknown>` (the IToolFactory port
     // contract); the compiled objects are structurally DshToolDefinition.
-    const dispose = ctx.tools.register(def as DshToolDefinition);
+    const plan = resolveToolForRegistration(
+      key,
+      def as DshToolDefinition,
+      probeToolName,
+      log,
+    );
+    // Same skip rule as the role-snapshot path: a name the host owns under
+    // both the canonical and the prefixed form is left unregistered, and the
+    // skip is NOT a namespace-filter drop.
+    if (plan.action === "skip") continue;
+    const dispose = ctx.tools.register(plan.definition);
     toolDisposers.push(dispose);
     registeredTools++;
   }
@@ -1729,6 +1912,7 @@ export async function apply(
     skipped,
     registeredTools,
     registeredAgents,
+    filteredTools: [...filteredTools].sort(),
   });
   if (discovered === 0) {
     log.info("No roles found in rolebox directory");
