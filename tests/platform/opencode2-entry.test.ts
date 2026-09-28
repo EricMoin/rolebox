@@ -43,6 +43,10 @@ import {
   type Opencode2EntryDeps,
 } from "../../src/entries/opencode2.ts";
 import entryDefault from "../../src/entries/opencode2.ts";
+import type {
+  Opencode2CreateInput,
+  Opencode2SessionAdapter,
+} from "../../src/platform/adapters/opencode2/session.ts";
 import { FunctionSource, PLUGIN_ID, SkillScope } from "../../src/constants.ts";
 import { hookState, HookState } from "../../src/hooks/state.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
@@ -162,6 +166,8 @@ interface FakeContext {
   sessionAgent?: string;
   /** Every sessionID passed to `ctx.session.get`. */
   sessionGetCalls: string[];
+  /** Every input `ctx.session.create` was called with. */
+  sessionCreateCalls: Opencode2CreateInput[];
   toolBefore?: (event: ToolBeforeEvent) => Promise<void> | void;
   toolAfter?: (event: ToolAfterEvent) => Promise<void> | void;
   prompt?: (event: PromptEvent) => Promise<void> | void;
@@ -203,6 +209,7 @@ function makeContext(options: { failToolTransform?: boolean; failEventSubscribe?
     commands: [],
     agents: [],
     sessionGetCalls: [],
+    sessionCreateCalls: [],
     disposed: 0,
     pushEvent: () => {},
   };
@@ -321,6 +328,19 @@ function makeContext(options: { failToolTransform?: boolean; failEventSubscribe?
         fake.sessionGetCalls.push(input.sessionID);
         return { id: input.sessionID, agent: fake.sessionAgent };
       },
+      // `SessionCreateInput` as `SessionDomain.create` reaches it
+      // (…/promise/session.d.ts:143-145 + the client's generated types): what a
+      // dispatched session is created with, recorded so the wiring case can pin
+      // the model the adapter forwards.
+      create: async (input?: Opencode2CreateInput) => {
+        fake.sessionCreateCalls.push(input ?? {});
+        return {
+          id: "ses_created",
+          projectID: "proj_1",
+          time: { created: 1_700_000_000_000, updated: 1_700_000_001_000 },
+          location: input?.location ?? { directory: "/tmp/project" },
+        };
+      },
     },
     event: { subscribe },
   } as unknown as Opencode2Plugin.Context;
@@ -337,10 +357,13 @@ function makeContext(options: { failToolTransform?: boolean; failEventSubscribe?
  * through the real `loadSkillContent`, so the skill file below is written to
  * disk (inside the temp dir) instead of stubbing the reader.
  */
-function makeRole(skillFilePath: string): ResolvedRole {
+function makeRole(
+  skillFilePath: string,
+  config: Partial<ResolvedRole["config"]> = {},
+): ResolvedRole {
   return {
     id: "emperor",
-    config: { name: "Emperor", description: "The ruler", prompt: "You are the emperor." },
+    config: { name: "Emperor", description: "The ruler", prompt: "You are the emperor.", ...config },
     prompt: "You are the emperor.",
     skills: [
       {
@@ -459,6 +482,8 @@ let tmpDir: string;
 let originalXdg: string | undefined;
 let originalDataDir: string | undefined;
 let role: ResolvedRole;
+/** The role skill's file, so a case can rebuild the role with its own config. */
+let skillFilePath: string;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(osTmpdir(), "rolebox-oc2-entry-"));
@@ -479,6 +504,7 @@ beforeEach(() => {
   mkdirSync(skillDir, { recursive: true });
   const skillFile = path.join(skillDir, "SKILL.md");
   writeFileSync(skillFile, "---\nname: emperor\n---\n\n# Emperor skill\n", "utf-8");
+  skillFilePath = skillFile;
   role = makeRole(skillFile);
 });
 
@@ -1279,6 +1305,50 @@ describe("opencode v2 entry — setup wiring", () => {
     await cleanup();
     expect(fake.disposed).toBe(9);
     expect(calls).toContain("handlers.dispose");
+  });
+
+  it("hands the resolved role model to the session adapter, so a created session runs it", async () => {
+    const modelRole = makeRole(skillFilePath, { model: "provider-1/model-1", variant: "fast" });
+    const handlers = makeHandlers([], []);
+    let session: Opencode2SessionAdapter | undefined;
+    const deps: Opencode2EntryDeps = {
+      // Captures the ISessionClient the entry builds for the service graph.
+      createHooks: (async (options: { session: Opencode2SessionAdapter }) => {
+        session = options.session;
+        return handlers;
+      }) as unknown as Opencode2EntryDeps["createHooks"],
+      initializeRuntime: (async () => ({
+        resolvedRoles: [modelRole],
+        discovered: 1,
+        resolved: 1,
+        skipped: 0,
+      })) as unknown as Opencode2EntryDeps["initializeRuntime"],
+    };
+    const { ctx, fake } = makeContextInTmp();
+    const plugin = createOpencode2Plugin(deps);
+
+    const cleanup = await runSetup(plugin.setup, ctx);
+
+    // The role registers WITH the role's model...
+    expect(fake.agents).toContain("emperor");
+    if (session === undefined) {
+      throw new Error("the entry never handed the composition a session adapter");
+    }
+
+    // ... and the SAME model travels on the session rolebox creates for that
+    // role's agent: a v2 session does not inherit it from the agent.
+    const created = await session.create({ directory: tmpDir, agent: "emperor" });
+
+    expect(created?.id).toBe("ses_created");
+    expect(fake.sessionCreateCalls).toEqual([
+      {
+        location: { directory: tmpDir },
+        agent: "emperor",
+        model: { id: "model-1", providerID: "provider-1", variant: "fast" },
+      },
+    ]);
+
+    await cleanup();
   });
 });
 

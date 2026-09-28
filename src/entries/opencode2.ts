@@ -42,6 +42,7 @@ import type { Plugin as Opencode2Plugin } from "@opencode/plugin";
 import {
   Opencode2SessionAdapter,
   Opencode2ToolFactory,
+  collectOpencode2AgentModels,
   collectOpencode2Skills,
   normalizeOpencode2Event,
   openOpencode2GraphHost,
@@ -493,7 +494,17 @@ export function createOpencode2Plugin(
       // 2. The session adapter, built ONCE and shared by the service graph and
       //    the declared-graph host: one adapter per plugin context, like the v1
       //    entry (src/entries/opencode.ts).
-      const sessionAdapter = new Opencode2SessionAdapter(ctx.session);
+      //
+      //    The resolved role models travel WITH it. A v2 session does NOT
+      //    inherit the agent's model — `SessionCreateInput.model` is what the
+      //    created session runs (src/platform/adapters/opencode2/session.ts) —
+      //    so a session rolebox creates for a role agent must select that
+      //    role's model explicitly or it runs the host's default model. The map
+      //    is derived from the SAME registrations the agent transform writes,
+      //    so the model a worker runs cannot drift from the model its agent
+      //    carries, and a role with no `model:` stays absent (host default).
+      const agentModels = collectOpencode2AgentModels(resolvedRoles);
+      const sessionAdapter = new Opencode2SessionAdapter(ctx.session, { agentModels });
 
       // 2b. The declared-graph host capability layer (the OUTCOME run path).
       //     Built BEFORE the composition so the five `graph_*` tools it binds

@@ -381,7 +381,9 @@ describe("Opencode2SessionAdapter.prompt", () => {
     expect(calls.prompt[0]?.text).toBe("first\n\nsecond");
   });
 
-  it("selects the agent/model on the SESSION before prompting (v2 has no per-prompt field)", async () => {
+  it("selects the agent on the SESSION before prompting (v2 has no per-prompt field)", async () => {
+    // The default fake `get` answers without an agent — a host that knows none
+    // for the session — so the selection falls back to the unconditional switch.
     const { host, calls } = makeHost();
     const adapter = new Opencode2SessionAdapter(host);
 
@@ -392,11 +394,71 @@ describe("Opencode2SessionAdapter.prompt", () => {
     });
 
     expect(calls.switchAgent).toEqual([{ sessionID: "ses_1", agent: "rolebox--worker" }]);
-    expect(calls.switchModel).toEqual([
-      { sessionID: "ses_1", model: { id: "model-2", providerID: "provider-1" } },
-    ]);
-    expect(calls.order).toEqual(["switchAgent", "switchModel", "prompt"]);
+    // The MODEL is deliberately not switched here: this path also prompts the
+    // USER's own session (graph notifications, copilot continuations), whose
+    // model and variant rolebox must not overwrite. On v2 a session's model is
+    // selected where the session is CREATED (see the `create` cases below).
+    expect(calls.switchModel).toEqual([]);
+    expect(calls.order).toEqual(["switchAgent", "prompt"]);
     expect(calls.prompt).toEqual([{ sessionID: "ses_1", text: "go" }]);
+  });
+
+  it("skips switchAgent when the session already runs the requested agent", async () => {
+    const { host, calls } = makeHost({
+      async get(input) {
+        // SessionInfo.agent is the session's acting agent
+        // (…/client/dist/promise/generated/types.d.ts:2788-2814).
+        return sessionInfo({ id: input.sessionID, agent: "rolebox--worker" });
+      },
+    });
+    const adapter = new Opencode2SessionAdapter(host);
+
+    const result = await adapter.prompt("ses_1", {
+      parts: [{ type: "text", text: "go" }],
+      agent: "rolebox--worker",
+    });
+
+    // No redundant switch — the host appends an `agent-switched` message even
+    // when the agent does not change — and the prompt still happened.
+    expect(calls.switchAgent).toEqual([]);
+    expect(calls.prompt).toEqual([{ sessionID: "ses_1", text: "go" }]);
+    expect(result).toEqual({ id: "msg_inbox_1" });
+  });
+
+  it("still switches when the session runs a different agent", async () => {
+    const { host, calls } = makeHost({
+      async get(input) {
+        return sessionInfo({ id: input.sessionID, agent: "chancellor" });
+      },
+    });
+    const adapter = new Opencode2SessionAdapter(host);
+
+    await adapter.prompt("ses_1", {
+      parts: [{ type: "text", text: "go" }],
+      agent: "rolebox--worker",
+    });
+
+    expect(calls.switchAgent).toEqual([{ sessionID: "ses_1", agent: "rolebox--worker" }]);
+    expect(calls.order).toEqual(["switchAgent", "prompt"]);
+  });
+
+  it("falls back to switching when the session read fails", async () => {
+    const { host, calls } = makeHost({
+      async get() {
+        throw new FakeClientError("Transport", { cause: new TypeError("fetch failed") });
+      },
+    });
+    const adapter = new Opencode2SessionAdapter(host);
+
+    const result = await adapter.prompt("ses_1", {
+      parts: [{ type: "text", text: "go" }],
+      agent: "rolebox--worker",
+    });
+
+    // The check is contained: an unreadable current agent is not "already
+    // selected", and the dispatch still succeeds.
+    expect(calls.switchAgent).toEqual([{ sessionID: "ses_1", agent: "rolebox--worker" }]);
+    expect(result).toEqual({ id: "msg_inbox_1" });
   });
 
   it("maps noReply onto v2's resume flag and leaves resume unset otherwise", async () => {
@@ -506,6 +568,46 @@ describe("Opencode2SessionAdapter.promptSync", () => {
     expect(signals).toEqual([controller.signal, controller.signal, controller.signal]);
   });
 
+  it("skips the agent switch on the synchronous path too when it already matches", async () => {
+    const { host, calls } = makeHost({
+      async get(input) {
+        return sessionInfo({ id: input.sessionID, agent: "emperor" });
+      },
+    });
+    const adapter = new Opencode2SessionAdapter(host);
+
+    const result = await adapter.promptSync("ses_1", {
+      parts: [{ type: "text", text: "question" }],
+      agent: "emperor",
+    });
+
+    expect(calls.switchAgent).toEqual([]);
+    expect(calls.prompt).toEqual([{ sessionID: "ses_1", text: "question" }]);
+    expect(result).toEqual({
+      parts: [
+        { type: "reasoning", text: "thinking" },
+        { type: "text", text: "the answer" },
+        { type: "tool" },
+      ],
+    });
+  });
+
+  it("switches on the synchronous path when the session runs another agent", async () => {
+    const { host, calls } = makeHost({
+      async get(input) {
+        return sessionInfo({ id: input.sessionID, agent: "chancellor" });
+      },
+    });
+    const adapter = new Opencode2SessionAdapter(host);
+
+    await adapter.promptSync("ses_1", {
+      parts: [{ type: "text", text: "question" }],
+      agent: "emperor",
+    });
+
+    expect(calls.switchAgent).toEqual([{ sessionID: "ses_1", agent: "emperor" }]);
+  });
+
   it("returns null when the session produced no assistant message", async () => {
     const { host } = makeHost({
       async context() {
@@ -554,6 +656,73 @@ describe("Opencode2SessionAdapter.create", () => {
     const sent = calls.create[0];
     expect(sent).toEqual({ location: { directory: "/tmp/other" } });
     expect(sent !== undefined && "parentID" in sent).toBe(false);
+  });
+
+  it("forwards the resolved role model — a v2 session does not inherit its agent's model", async () => {
+    const { host, calls } = makeHost();
+    const adapter = new Opencode2SessionAdapter(host, {
+      agentModels: new Map([
+        ["emperor", { id: "model-1", providerID: "provider-1", variant: "fast" }],
+      ]),
+    });
+
+    const info = await adapter.create({ directory: "/tmp/other", agent: "emperor" });
+
+    // `SessionCreateInput.model`
+    // (…/client/dist/promise/generated/types.d.ts:3705-3740): id + providerID +
+    // the role's own variant.
+    expect(calls.create).toEqual([
+      {
+        location: { directory: "/tmp/other" },
+        agent: "emperor",
+        model: { id: "model-1", providerID: "provider-1", variant: "fast" },
+      },
+    ]);
+    expect(info?.id).toBe("ses_created");
+  });
+
+  it("omits the variant key when the role resolved none", async () => {
+    const { host, calls } = makeHost();
+    const adapter = new Opencode2SessionAdapter(host, {
+      agentModels: new Map([["emperor", { id: "model-1", providerID: "provider-1" }]]),
+    });
+
+    await adapter.create({ directory: "/tmp/other", agent: "emperor" });
+
+    const model = calls.create[0]?.model;
+    expect(model).toEqual({ id: "model-1", providerID: "provider-1" });
+    expect(model !== undefined && "variant" in model).toBe(false);
+  });
+
+  it("never invents a model — an agent the map does not know, or no map at all, keeps the host default", async () => {
+    const known = new Map([["emperor", { id: "model-1", providerID: "provider-1" }]]);
+
+    // (a) An agent id the map does not know.
+    const unknown = makeHost();
+    await new Opencode2SessionAdapter(unknown.host, { agentModels: known }).create({
+      directory: "/tmp/other",
+      agent: "scribe",
+    });
+    expect(unknown.calls.create).toEqual([
+      { location: { directory: "/tmp/other" }, agent: "scribe" },
+    ]);
+
+    // (b) No map at all — the behavior before the option existed, exactly.
+    const absent = makeHost();
+    await new Opencode2SessionAdapter(absent.host).create({
+      directory: "/tmp/other",
+      agent: "emperor",
+    });
+    expect(absent.calls.create).toEqual([
+      { location: { directory: "/tmp/other" }, agent: "emperor" },
+    ]);
+
+    // (c) No agent on the create input — no model either.
+    const agentless = makeHost();
+    await new Opencode2SessionAdapter(agentless.host, { agentModels: known }).create({
+      directory: "/tmp/other",
+    });
+    expect(agentless.calls.create).toEqual([{ location: { directory: "/tmp/other" } }]);
   });
 
   it("raises SessionCreateRejectedError for an undeclared HTTP status", async () => {

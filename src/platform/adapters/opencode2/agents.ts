@@ -402,6 +402,35 @@ export function collectOpencode2AgentRegistrations(
   return registrations;
 }
 
+/**
+ * The model each registered agent runs, keyed by agent id — every role and
+ * every recursively nested sub-agent, from the same registration assembly the
+ * agent transform writes.
+ *
+ * WHY IT EXISTS: opencode v2 does NOT inherit an agent's model into a session
+ * it creates. `SessionCreateInput.model` is what the created session runs
+ * (node_modules/@opencode/client/dist/promise/generated/types.d.ts:3705-3740);
+ * a session created without one falls back to the host's default model, so a
+ * dispatch that creates a session for a role agent has to name that role's
+ * model itself (src/platform/adapters/opencode2/session.ts, `create()`). Taking
+ * the values from {@link collectOpencode2AgentRegistrations} keeps the model a
+ * session runs identical to the model its agent carries.
+ *
+ * A role (or sub-agent) whose config resolves NO model is ABSENT from the map
+ * rather than present with an undefined value: a session created for it must
+ * keep the host's default instead of being given a model rolebox never
+ * resolved.
+ */
+export function collectOpencode2AgentModels(
+  roles: readonly ResolvedRole[],
+): Map<string, Opencode2AgentModelRef> {
+  const models = new Map<string, Opencode2AgentModelRef>();
+  for (const { id, patch } of collectOpencode2AgentRegistrations(roles)) {
+    if (patch.model !== undefined) models.set(id, patch.model);
+  }
+  return models;
+}
+
 // ── Registration ───────────────────────────────────────────────────────────
 
 /**

@@ -36,7 +36,7 @@
  *     not), so a main agent that declared a graph is
  *     woken with the shipped `[GRAPH COMPLETE] / [GRAPH BLOCKED]` push instead of
  *     polling `graph_status`. The v2 adapter's `prompt` maps `noReply: false`
- *     onto `resume: true` (src/platform/adapters/opencode2/session.ts:572-581),
+ *     onto `resume: true` (src/platform/adapters/opencode2/session.ts:640-645),
  *     which is what resumes the declaring agent's loop, and its `prompt`
  *     DEGRADES to `null` when the session domain cannot carry one — a rejected
  *     send leaves the notification pending and retried, never thrown. No second
@@ -106,7 +106,7 @@ export function openOpencode2GraphHost(options: {
    * THE SESSION'S OWN TERMINAL OUTCOME, built by the entry over the RAW
    * `ctx.session.get` — v2's plugin domain is the only place that value is
    * readable, because the canonical `SessionInfo` this factory's `client`
-   * projects it onto drops it (src/platform/adapters/opencode2/session.ts:468-477).
+   * projects it onto drops it (src/platform/adapters/opencode2/session.ts:220-230).
    * Absent, the host reads the adapter's canonical status instead, which names
    * no outcome, and says so in its platformNotes.
    */

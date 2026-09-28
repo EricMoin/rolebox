@@ -10,6 +10,7 @@ export type {
   Opencode2InboxUser,
   Opencode2PromptInput,
   Opencode2RequestOptions,
+  Opencode2SessionAdapterOptions,
   Opencode2SessionApi,
   Opencode2SessionInfo,
 } from "./session.ts";
@@ -21,6 +22,7 @@ export type {
 export {
   applyOpencode2AgentPatch,
   applyOpencode2Agents,
+  collectOpencode2AgentModels,
   collectOpencode2AgentRegistrations,
   mapPermissionRuleset,
   mapResolvedRoleToAgent,

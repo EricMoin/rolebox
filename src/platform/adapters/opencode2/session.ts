@@ -24,6 +24,7 @@
 
 import type { Plugin as Opencode2Plugin } from "@opencode/plugin";
 import type { ISessionClient } from "../../ports/session-client.ts";
+import type { Opencode2AgentModelRef } from "./agents.ts";
 import { SessionCreateRejectedError } from "../../types.ts";
 import type {
   FileDiff,
@@ -117,9 +118,22 @@ export interface Opencode2PromptInput {
   readonly resume?: boolean;
 }
 
-/** `SessionCreateInput` (…/effect/api/api.d.ts:231-239) — projected. */
+/**
+ * `SessionCreateInput` (…/effect/api/api.d.ts:231-239) — projected.
+ *
+ * `model` is `SessionCreateInput.model`
+ * (node_modules/@opencode/client/dist/promise/generated/types.d.ts:3705-3740):
+ * the model the created session runs. It is not decoration — a v2 session does
+ * NOT inherit the model of the agent it is created for, so this field is the
+ * only way rolebox can select a role's model for a new session (see `create()`).
+ */
 export interface Opencode2CreateInput {
   readonly agent?: string;
+  readonly model?: {
+    readonly id: string;
+    readonly providerID: string;
+    readonly variant?: string;
+  };
   readonly location?: { readonly directory: string };
 }
 
@@ -442,6 +456,21 @@ function classifyCreateFailure(error: unknown): { reason: string; code?: string 
 // ── Adapter ────────────────────────────────────────────────────────────────
 
 /**
+ * Optional adapter wiring.
+ *
+ * `agentModels` is the model each agent runs, as
+ * `collectOpencode2AgentModels` derives it from the role registrations
+ * (src/platform/adapters/opencode2/agents.ts). It exists because opencode v2
+ * does NOT inherit an agent's model into a session it creates: `create()` has
+ * to name the model itself, and this map is where the model comes from.
+ * Omitted, the adapter behaves exactly as it did before — every created session
+ * keeps the host's default model.
+ */
+export interface Opencode2SessionAdapterOptions {
+  readonly agentModels?: ReadonlyMap<string, Opencode2AgentModelRef>;
+}
+
+/**
  * ISessionClient adapter for the opencode v2 plugin session domain.
  *
  * Every read path returns the empty value on failure (never throws); only
@@ -451,9 +480,12 @@ function classifyCreateFailure(error: unknown): { reason: string; code?: string 
  */
 export class Opencode2SessionAdapter implements ISessionClient {
   readonly #session: Opencode2SessionApi;
+  /** Empty when the caller passed none — then no created session gets a model. */
+  readonly #agentModels: ReadonlyMap<string, Opencode2AgentModelRef>;
 
-  constructor(session: Opencode2SessionApi) {
+  constructor(session: Opencode2SessionApi, options?: Opencode2SessionAdapterOptions) {
     this.#session = session;
+    this.#agentModels = options?.agentModels ?? new Map();
   }
 
   /**
@@ -543,6 +575,40 @@ export class Opencode2SessionAdapter implements ISessionClient {
     return null;
   }
 
+  /**
+   * Select the agent the session runs, unless it already runs it.
+   *
+   * v2 has no per-prompt agent field (SessionPromptInput,
+   * …/effect/api/api.d.ts:307-319): the agent is a property of the SESSION, set
+   * with `switchAgent` (…/effect/api/api.d.ts:280-289). Switching a session
+   * that ALREADY runs the requested agent is not free — the host appends an
+   * `agent-switched` message whose `previous` equals the new agent (verified
+   * against a running 2.0.18 host) — so the current agent is read first and the
+   * redundant switch is skipped. Shared by `prompt()` and `promptSync()`; the
+   * two differ only in whether they carry a request signal.
+   *
+   * THE READ IS CONTAINED: a host whose `get` is missing or rejects the call,
+   * and a session the host answers without an agent, all fall back to the
+   * unconditional `switchAgent` performed before this check existed. The check
+   * can therefore only ever REMOVE a redundant call — never turn a working
+   * dispatch into a failure.
+   */
+  async #selectAgent(
+    id: string,
+    agent: string,
+    request?: Opencode2RequestOptions,
+  ): Promise<void> {
+    let current: string | undefined;
+    try {
+      current = (await this.#session.get({ sessionID: id }, request)).agent;
+    } catch {
+      // Unknown is not "already selected": fall through to the switch below.
+      current = undefined;
+    }
+    if (current === agent) return;
+    await this.#session.switchAgent({ sessionID: id, agent }, request);
+  }
+
   async prompt(
     id: string,
     options: {
@@ -555,20 +621,19 @@ export class Opencode2SessionAdapter implements ISessionClient {
     },
   ): Promise<{ id: string } | null> {
     try {
-      // v2 selects the agent/model ON THE SESSION, not per message: the prompt
-      // input carries no agent/model field (SessionPromptInput,
-      // …/effect/api/api.d.ts:307-319) — `switchAgent`/`switchModel` are the v2
-      // API for it (…/effect/api/api.d.ts:280-289). Both are part of the
-      // reduced plugin domain (…/promise/session.d.ts:143-145).
+      // v2 selects the agent ON THE SESSION, not per message: the prompt input
+      // carries no agent field (SessionPromptInput,
+      // …/effect/api/api.d.ts:307-319) — `switchAgent` is the v2 API for it
+      // (…/effect/api/api.d.ts:280-289), and it is part of the reduced plugin
+      // domain (…/promise/session.d.ts:143-145).
       if (options.agent !== undefined && options.agent !== "") {
-        await this.#session.switchAgent({ sessionID: id, agent: options.agent });
+        await this.#selectAgent(id, options.agent);
       }
-      if (options.model !== undefined) {
-        await this.#session.switchModel({
-          sessionID: id,
-          model: { id: options.model.modelID, providerID: options.model.providerID },
-        });
-      }
+      // `options.model` is deliberately NOT applied. This path also prompts the
+      // USER's own session — graph notifications and copilot continuations run
+      // through this same adapter — whose model and variant rolebox must never
+      // overwrite. On v2 a session's model is selected where the session is
+      // CREATED (create(), over the adapter's `agentModels` map).
       const inbox = await this.#session.prompt({
         sessionID: id,
         text: joinPromptParts(options.parts),
@@ -606,7 +671,7 @@ export class Opencode2SessionAdapter implements ISessionClient {
       // (…/promise/client.d.ts:53). The reply is read back
       // from the session context afterwards.
       if (options.agent !== undefined && options.agent !== "") {
-        await this.#session.switchAgent({ sessionID: id, agent: options.agent }, request);
+        await this.#selectAgent(id, options.agent, request);
       }
       const inbox = await this.#session.prompt(
         { sessionID: id, text: joinPromptParts(options.parts) },
@@ -640,9 +705,27 @@ export class Opencode2SessionAdapter implements ISessionClient {
       // (…/effect/api/api.d.ts:231-239), so a v2 session cannot be created as a
       // child of another one. The requested directory travels as
       // `location.directory` (Location.PublicRef, …/generated/types.d.ts:27).
+      const agent =
+        options.agent !== undefined && options.agent !== "" ? options.agent : undefined;
+      // A v2 session does NOT inherit the model of the agent it is created for
+      // (the 1.x host resolves the agent's model itself), so a dispatch would
+      // otherwise run on the host's DEFAULT model. The resolved role model —
+      // the same value the agent registration carries — is named here instead,
+      // variant included. An agent the map does not know, or whose role
+      // resolves no model, keeps the host default: rolebox never invents one.
+      const model = agent === undefined ? undefined : this.#agentModels.get(agent);
       const info = await this.#session.create({
         location: { directory: options.directory },
-        ...(options.agent !== undefined && options.agent !== "" ? { agent: options.agent } : {}),
+        ...(agent !== undefined ? { agent } : {}),
+        ...(model !== undefined
+          ? {
+              model: {
+                id: model.id,
+                providerID: model.providerID,
+                ...(model.variant !== undefined ? { variant: model.variant } : {}),
+              },
+            }
+          : {}),
       });
       return toSessionInfo(info);
     } catch (err) {

@@ -18,6 +18,7 @@ import { describe, it, expect } from "bun:test";
 import {
   applyOpencode2AgentPatch,
   applyOpencode2Agents,
+  collectOpencode2AgentModels,
   collectOpencode2AgentRegistrations,
   mapPermissionRuleset,
   mapResolvedRoleToAgent,
@@ -395,6 +396,62 @@ describe("opencode2 agent mapping — ResolvedSubAgent → Agent.Info patch", ()
       "chancellor",
       "herald",
     ]);
+  });
+});
+
+// ── Collected agent models ────────────────────────────────────────────────
+
+/**
+ * The map a v2 session is created from (src/platform/adapters/opencode2/session.ts
+ * `create()`): a v2 session does not inherit its agent's model, so the entry
+ * hands the adapter the model of every registered agent.
+ */
+describe("opencode2 agent models", () => {
+  it("keys roles and recursively nested sub-agents by their agent ids", () => {
+    const nested = subAgentFixture("herald", { model: "provider-2/model-2" });
+    const sub = subAgentFixture("chancellor", { model: "provider-1/model-1", variant: "fast" }, [
+      nested,
+    ]);
+    const role = roleFixture({ model: "provider-0/model-0" }, { subagents: [sub] });
+
+    const models = collectOpencode2AgentModels([role]);
+
+    // Same order and same ids the registrations carry.
+    expect([...models.keys()]).toEqual(["emperor", "chancellor", "herald"]);
+    expect(models.get("emperor")).toEqual({ providerID: "provider-0", id: "model-0" });
+    // The role's own variant rides along.
+    expect(models.get("chancellor")).toEqual({
+      providerID: "provider-1",
+      id: "model-1",
+      variant: "fast",
+    });
+    expect(models.get("herald")).toEqual({ providerID: "provider-2", id: "model-2" });
+  });
+
+  it("agrees with the patch the same registrations produce", () => {
+    const role = roleFixture({ model: "provider-1/model-1", variant: "mini" });
+
+    const models = collectOpencode2AgentModels([role]);
+
+    expect(models.get(role.id)).toEqual(mapResolvedRoleToAgent(role).patch.model);
+  });
+
+  it("omits a config with no resolvable model instead of storing an undefined value", () => {
+    const withoutModel = subAgentFixture("chancellor");
+    const unresolvable = roleFixture({ model: "default" }, { id: "regent" });
+    const mapped = roleFixture({ model: "provider-1/model-1" }, { subagents: [withoutModel] });
+
+    const models = collectOpencode2AgentModels([mapped, unresolvable]);
+
+    expect([...models.keys()]).toEqual(["emperor"]);
+    expect(models.get("emperor")).toEqual({ providerID: "provider-1", id: "model-1" });
+    // ABSENT, not present-with-undefined: `has` is the contract a create() reads.
+    expect(models.has("chancellor")).toBe(false);
+    expect(models.has("regent")).toBe(false);
+  });
+
+  it("is empty for no roles at all", () => {
+    expect(collectOpencode2AgentModels([]).size).toBe(0);
   });
 });
 
