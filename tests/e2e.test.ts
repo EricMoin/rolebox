@@ -277,7 +277,14 @@ describe("End-to-end", () => {
       mkdirSync(roleboxDir, { recursive: true });
 
       const originalXdg = process.env.XDG_CONFIG_HOME;
+      const originalDataDir = process.env.ROLEBOX_DATA_DIR;
       process.env.XDG_CONFIG_HOME = tmpDir;
+      // DATA-DIR REDIRECT: `RoleboxPlugin` opens the declared-graph host during
+      // setup, and opening it CREATES `<getDataDir()>/host/<workspaceHash>`
+      // (src/graph/store/schema.ts:58-60). `getDataDir()` resolves
+      // ROLEBOX_DATA_DIR first (src/cli/paths.ts:61-86), so without this the
+      // boot below writes into the developer's real data directory.
+      process.env.ROLEBOX_DATA_DIR = path.join(tmpDir, "data");
 
       try {
         cpSync(
@@ -319,7 +326,10 @@ describe("End-to-end", () => {
         expect("model" in tw).toBe(false);
         expect("color" in tw).toBe(false);
       } finally {
-        process.env.XDG_CONFIG_HOME = originalXdg;
+        if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = originalXdg;
+        if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
+        else process.env.ROLEBOX_DATA_DIR = originalDataDir;
         rmSync(tmpDir, { recursive: true, force: true });
       }
     });
@@ -330,7 +340,9 @@ describe("End-to-end", () => {
       mkdirSync(roleboxDir, { recursive: true });
 
       const originalXdg = process.env.XDG_CONFIG_HOME;
+      const originalDataDir = process.env.ROLEBOX_DATA_DIR;
       process.env.XDG_CONFIG_HOME = tmpDir;
+      process.env.ROLEBOX_DATA_DIR = path.join(tmpDir, "data");
 
       try {
         cpSync(
@@ -377,7 +389,10 @@ describe("End-to-end", () => {
         expect(impl.prompt).not.toContain("<available_subagents>");
         expect(res.prompt).not.toContain("<available_subagents>");
       } finally {
-        process.env.XDG_CONFIG_HOME = originalXdg;
+        if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = originalXdg;
+        if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
+        else process.env.ROLEBOX_DATA_DIR = originalDataDir;
         rmSync(tmpDir, { recursive: true, force: true });
       }
     });

@@ -2,6 +2,7 @@ import type { Hooks } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction } from "../types.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { PlatformCapabilities } from "../platform/capabilities.ts";
+import type { CanonicalToolDef } from "../platform/types.ts";
 import { resolvePlatformCapabilities } from "../platform/registry.ts";
 import { hookState } from "../hooks/state.ts";
 import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
@@ -98,10 +99,16 @@ export interface CreatePluginHooksConfig {
    * never to opencode's.
    */
   platformId?: string;
+  /**
+   * Declared-graph tool face assembled by the host's own outcome capability
+   * layer. Forwarded to the context so the tool service registers `graph_*`
+   * tools; absent means the host has no such layer and registers none.
+   */
+  outcomeGraphTools?: Record<string, CanonicalToolDef>;
 }
 
 export async function createPluginHooks(config: CreatePluginHooksConfig) {
-  const { resolvedRoles, session, roleFunctionsMap, directory, roleboxDir, globalSkillsDir, configDir, builtinDir } = config;
+  const { resolvedRoles, session, roleFunctionsMap, directory, roleboxDir, globalSkillsDir, configDir, builtinDir, outcomeGraphTools } = config;
   const rawDir = directory ?? process.cwd();
   const dir = normalizeWorkspaceDir(rawDir);
   const capabilities =
@@ -129,7 +136,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
 
-  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
+  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, outcomeGraphTools, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget). The
   // flush is hoisted out of the guard so the observation-only fatal reporter

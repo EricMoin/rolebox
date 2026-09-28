@@ -11,7 +11,7 @@
 
 ## Pi (plugin platform) parity
 
-Tool-surface parity with the opencode plugin is enforced by `tests/pi-parity.test.ts`: the shared opencode tool surface — hashline/memory/web/signal/asset/reference/session/task_* plus memory_update/lsp_*/function_graph/skill_compose/context_assemble — is registered by `PiLightweightServiceStack` on Pi. The graph tools are not part of that shared surface: opencode registers none, and on Pi the host capability layer supplies `graph_declare` / `graph_submit_outcome` / `graph_status` / `graph_audit` / `graph_control` to the stack. See [compatibility.md](compatibility.md) for the parity matrix.
+Tool-surface parity with the opencode plugin is enforced by `tests/pi-parity.test.ts`: the shared opencode tool surface — hashline/memory/web/signal/asset/reference/session/task_* plus memory_update/lsp_*/function_graph/skill_compose/context_assemble — is registered by `PiLightweightServiceStack` on Pi. The graph tools are not part of that shared surface: they come from each host's own outcome capability layer instead — on Pi that layer supplies `graph_declare` / `graph_submit_outcome` / `graph_status` / `graph_audit` / `graph_control` to the stack, and both opencode entries register the same five tools through the composition seam. See [compatibility.md](compatibility.md) for the parity matrix.
 
 - `dispatch_*` / `loop_*` / `task_retry` are intentionally withheld on both platforms: orchestration is graph-only, and bare dispatch/loop calls would bypass the graph engine's budget accounting, approval gates, and loop caps.
 - `asset_hot_reload` is opencode-only and is deliberately not forwarded to Pi.

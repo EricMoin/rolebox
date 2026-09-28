@@ -51,15 +51,16 @@ export class ToolService implements PluginService {
     if (!hotReloadService) throw new Error("hot-reload-service not found");
     const sessionClient = sessionService.getSessionClient();
 
-    // 3.7. The graph orchestration surface is NOT assembled on opencode.
+    // 3.7. The graph orchestration surface is NOT constructed here.
     //
-    // The legacy in-memory graph engine that used to back the opencode
-    // `graph_*` tools is retired: the outcome run path requires a host
-    // capability layer (a protected credential store, a per-attempt dispatch
-    // adapter and a completion bridge) that this entry does not construct, so
-    // registering the legacy construction entries here would offer a second
-    // execution path the outcome protocol does not serve. The two hosts that
-    // do ship the outcome run path are the dsh and Pi entries.
+    // The legacy in-memory graph engine that used to back the `graph_*` tools
+    // is retired: the outcome run path needs a host capability layer (a
+    // protected credential store, a per-attempt dispatch adapter and a
+    // completion bridge), which this service never builds. The entry that owns
+    // such a layer assembles the declared-graph tool face and hands it in
+    // through `ctx.outcomeGraphTools` — dsh and Pi assemble their own, and the
+    // opencode entries pass theirs through this same seam. An entry that hands
+    // in nothing registers no `graph_*` tool at all.
 
 
     // 4. Assemble shared canonical tools + OpenCode-only extras
@@ -85,6 +86,9 @@ export class ToolService implements PluginService {
         const { task_retry: _omitted, ...taskTools } = createTaskTools(dispatchManager, ctx.directory);
         return taskTools;
       })(),
+      // Declared-graph tool face from the host's outcome capability layer
+      // (undefined for a host without one: then no graph_* tool registers).
+      outcomeGraphTools: ctx.outcomeGraphTools,
       extraTools: {
         // OpenCode-only memory update (write/recall/list are in the shared set)
         memory_update: createMemoryUpdateTool(),

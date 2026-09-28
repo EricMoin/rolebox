@@ -3,6 +3,7 @@ import type { PluginCoreLike } from "./service.ts";
 import type { EventBus } from "./event-bus.ts";
 import type { PlatformCapabilities } from "../platform/capabilities.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
+import type { CanonicalToolDef } from "../platform/types.ts";
 
 /**
  * Context passed to every PluginService's init() method.
@@ -32,6 +33,12 @@ export interface PluginContext {
   configDir?: string;
   /** Builtin functions directory path (for resolver context). */
   builtinDir?: string;
+  /**
+   * The declared-graph tool face the owning host assembled from its own
+   * outcome capability layer. Absent means the host has no such layer, so no
+   * `graph_*` tool is registered (src/platform/tool-assembly.ts:62-74).
+   */
+  outcomeGraphTools?: Record<string, CanonicalToolDef>;
   /** Platform capabilities for feature detection and graceful degradation.
    * Always present: the composition layer resolves the entry's explicit
    * declaration (or its platformId) BEFORE constructing the context, so an
