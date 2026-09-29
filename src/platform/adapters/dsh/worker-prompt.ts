@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathS
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { buildAgentPrompt, buildAvailableFunctionsBlock, buildFunctionBlock } from "../../../prompt/builder.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../types.ts";
+import type { DshWorkerCommandBoundary } from "./graph-worker.ts";
 
 type WorkerRole = ResolvedRole | ResolvedSubAgent;
 
@@ -46,8 +47,34 @@ function referenceRoot(filePath: string): string {
   return filePath;
 }
 
+/**
+ * State the boundary the host resolves for THIS attempt. rolebox owns no OS
+ * profile any more, so the prompt cannot promise a fixed writable set: a
+ * confined mode names the host's mode and workspace root, an unconfined
+ * session says so plainly, and an unavailable host service says the command will
+ * be refused instead of implying a boundary that would not be applied.
+ */
+function boundaryBlock(boundary: DshWorkerCommandBoundary): string {
+  const shell = "The shell is /bin/sh, not bash: process substitution <(...) is a syntax error, while brace expansion and arrays work.";
+  const disposable = "HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME and TMPDIR are disposable per-command directories without credentials, so a command needing real credentials or host state (git push, gh, npm publish, authenticated API calls) cannot succeed.";
+  const reported = "Every command result reports the effective mode and the enforcement the host achieved, and names the backend's denial signatures when that enforcement is partial, so a boundary denial is distinguishable from a command failure.";
+  if (boundary.kind === "confined") {
+    return `Worker command boundary: the host's session sandbox policy resolves this attempt to the '${boundary.mode}' mode with workspace root ${boundary.workspaceRoot}, ` +
+      "and the host's confinement service applies that policy to every graph_worker_exec command. rolebox adds no profile of its own and cannot confine this attempt more narrowly than the session's mode. " +
+      "A path the host's confinement denies is a boundary denial, not a failed task: work inside the paths the mode allows, or report the denial. " +
+      `${reported} ${disposable} ${shell}`;
+  }
+  if (boundary.kind === "unconfined") {
+    return "Worker command boundary: the host's session sandbox policy resolves this attempt to 'danger-full-access', so graph_worker_exec runs commands UNCONFINED — " +
+      "no OS restriction beyond what the host session already authorizes, and rolebox does not narrow the mode the session granted. " +
+      `${reported} ${disposable} ${shell}`;
+  }
+  return "Worker command boundary: no host sandbox policy service is available to this attempt " +
+    `(${boundary.reason}), so every graph_worker_exec command is refused rather than run without the boundary the session authorized. ${shell}`;
+}
+
 /** Copy only this role's resource bundles into its attempt's sandbox-readable input directory. */
-export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string): string {
+export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, boundary: DshWorkerCommandBoundary): string {
   const agent = findAgent(roles, agentId);
   if (!agent) throw new Error(`Graph worker agent is not resolved: ${agentId}`);
   mkdirSync(inputDirectory, { recursive: true, mode: 0o700 });
@@ -88,11 +115,7 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
         "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
         "{\"outcome_id\": \"<an outcome this node declares>\", \"data\": <the outcome payload>, \"evidence_refs\": [\"<path>\"]} " +
         "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
-      "Worker command boundary (source of truth: src/platform/sandbox/boundary.md): " +
-        "HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME and TMPDIR are disposable per-command directories without credentials, " +
-        "so commands needing real credentials or host state (git push, gh, npm publish, authenticated API calls) cannot succeed. " +
-        "A path denied with 'Operation not permitted' — including /tmp and /private/tmp, which are the same vnode — is a boundary denial, not a failed task. " +
-        "The shell is /bin/sh, not bash: process substitution <(...) is a syntax error; brace expansion and arrays work.",
+      boundaryBlock(boundary),
 
       buildAgentPrompt(agent.config, skills, { references, canDelegate: false, resourceTool: "graph_worker_exec" }),
       buildFunctionBlock(active),

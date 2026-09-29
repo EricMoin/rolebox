@@ -1,6 +1,4 @@
 import type { HostExecutionObservation } from "../../../graph/host/outcome-host.ts";
-import { graphWorkerSandbox } from "../../sandbox/graph-worker.ts";
-import { getDataDir } from "../../../cli/paths.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { WorkerChannelGrant } from "../../../graph/application/worker-channel.ts";
 import { childSessionFile } from "./child-session.ts";
@@ -398,9 +396,13 @@ export class PiProcessSessionAdapter implements ISessionClient {
     this.eventBridge = bridge;
   }
 
-  private readonly graphDispatch = new AsyncLocalStorage<readonly string[]>();
+  // Marker scope for "this launch is a graph worker": the ONLY thing it selects
+  // now is the worker delivery grant below. The read-root list it used to carry
+  // died with rolebox's own OS profile (docs/graph-outcome-protocol.md,
+  // "Worker execution boundary").
+  private readonly graphDispatch = new AsyncLocalStorage<true>();
 
-  runGraphWorker<T>(launch: () => T, inputPaths: readonly string[] = []): T { return this.graphDispatch.run(inputPaths, launch); }
+  runGraphWorker<T>(launch: () => T): T { return this.graphDispatch.run(true, launch); }
 
   private graphWorkerChannel?: (sessionId: string, agent?: string) => WorkerChannelGrant;
 
@@ -1076,15 +1078,17 @@ export class PiProcessSessionAdapter implements ISessionClient {
       childEnv.ROLEBOX_ACTIVE_AGENT = agentId;
     }
 
-    let command = { executable: this._resolvePiBinary(), args };
+    const command = { executable: this._resolvePiBinary(), args };
     if (this.graphWorkerChannel && this.graphDispatch.getStore()) {
       const grant = this.graphWorkerChannel(id, agentId);
       childEnv.ROLEBOX_GRAPH_WORKER_ENDPOINT = grant.endpoint;
       childEnv.ROLEBOX_GRAPH_WORKER_TOKEN = grant.token;
       if (grant.routeFile) childEnv.ROLEBOX_GRAPH_WORKER_ROUTE = grant.routeFile;
-      command = graphWorkerSandbox({ executable: command.executable, args, workspace: process.cwd(),
-        dataDirectory: getDataDir(), sessionFile: nativeSessionFile, routeFile: grant.routeFile,
-        agentDirectory: childEnv.PI_CODING_AGENT_DIR, inputPaths: this.graphDispatch.getStore() });
+      // NO OS PROFILE IS APPLIED HERE. This path has no host sandbox service to
+      // resolve the session's policy, so rolebox no longer wraps the child in a
+      // boundary of its own: it spawns the resolved pi binary directly and the
+      // child's boundary is whatever the host session gives that process. See
+      // docs/graph-outcome-protocol.md, "Worker execution boundary".
     }
 
     const proc = spawn(command.executable, command.args, {

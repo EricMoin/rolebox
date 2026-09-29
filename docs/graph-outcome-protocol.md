@@ -848,7 +848,8 @@ declaring session's active role is not applied to that child. Worker prompts omi
 dispatch catalogs and direct resource reads through `graph_worker_exec`. The host
 copies the target role's reference bundles and skills, including their supporting
 files, into the attempt's input directory before starting it. The listed paths
-point to these copies, which are readable but not writable inside the sandbox.
+point to these copies; whether a command may write them follows the host's
+session policy like any other path.
 Missing resources or links escaping a resource bundle refuse the start; the host
 does not grant access to the original role directory.
 
@@ -885,80 +886,71 @@ of the host that serves it, so a surviving child finds a replacement host after
 the original host process is gone; it is the pi loopback channel that keeps the
 file, and it carries no credential.
 
-The OS sandbox adapter supports **macOS Seatbelt**, applied through the platform's
-sandbox wrapper to the worker and to every subprocess it starts. Where no adapter
-is installed — any platform without the sandbox executable — graph worker
-execution **fails closed**: it throws rather than running unsandboxed.
+A dsh worker's command boundary is the **host session's resolved sandbox policy**,
+not a profile of rolebox's own. For every `graph_worker_exec` call, rolebox asks
+the host's policy resolver (`@deepseek-ai/dsh-sandbox-policy`) for the worker
+session's policy and hands the command to the host's confinement service
+(`@deepseek-ai/dsh-sandbox`); both are consumed structurally, and rolebox neither
+builds an OS profile nor widens or narrows the resolved mode. The policy
+vocabulary carries a mode, a workspace root and an optional session identity:
 
-Inside the sandbox, an invocation of `graph_worker_exec` runs each command in its
-own sandbox with a minimal environment (a path, a locale, disposable home/config/
-cache directories, browser installation paths and the selected developer
-toolchain), a bounded timeout and a bounded output size.
-Writes stay confined to the workspace and that command scratch directory. The
-worker may read the active developer toolchain selected by `xcode-select`,
-including Xcode's adjacent frameworks, and the toolchain's cache is redirected
-into the scratch directory so system tools can resolve their executables without
-writing to the user's cache.
+| Resolved mode | How the worker command runs |
+| --- | --- |
+| `read-only` | Confined by the host, which denies the session's writes. |
+| `workspace-write` | Confined by the host, which confines writes to the session's workspace root. |
+| `danger-full-access` | **Unconfined**, with no OS restriction beyond what the host session already authorizes. |
 
-The command boundary itself is stated once, for engineers and for prompt
-injection, in `src/platform/sandbox/boundary.md`. A worker session holds exactly
-two tools — `graph_submit_outcome` and `graph_worker_exec`; the
-Write/Edit/Bash/Read-style native tools are not presented, and every file read,
-edit, check and command goes through `graph_worker_exec`. Writes are confined to
-the session workspace, `/dev`, the per-command scratch directory and `/tmp`, whose
-two spellings `/tmp` and `/private/tmp` are one vnode. Each command
-gets its own `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR` — disposable
-directories removed with the command, carrying no credentials and no host caches —
-so work that needs real credentials or host state, such as a `git push`, `gh`,
-`npm publish` or an authenticated API call, cannot succeed; network egress is
-reachable but unauthenticated by construction. A command runs under a 60-second
-default timeout that the caller may raise to at most 300 seconds, so a long build
-is split across commands rather than run as one. The shell is `/bin/sh`, not bash:
-process substitution `<(...)` is a syntax error, while brace expansion and arrays
-work; `perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are available,
-and `git`, `bun` and `node` run inside the workspace with disposable caches. The
-boundary is macOS-only: it requires an installed OS sandbox and refuses to start
-elsewhere.
+The resolver's precedence is the host's own: an explicitly approved mode, else the
+session's last `sandbox/mode` event, else the deployment default. A worker
+therefore **cannot be confined more narrowly than its session's mode**: a
+`danger-full-access` session runs a worker unconfined, and rolebox has no
+independent boundary to add. Confinement is **fail closed**: a missing resolver, a
+missing confinement service, a rejected `confine` call or a malformed spawn argv
+refuses the command with an error naming the service rather than falling back to
+an unconfined run. Only `danger-full-access` spawns a command unconfined.
 
-The read filter is built from `require-not` clauses over the allow-listed roots
-rather than being a filesystem-wide read allow-list, so a path already outside
-those roots is not forced through the deny rule. The allow-list exists to force
-read access on those roots and to keep the private paths denied. A literal `/tmp`
-path is an ordinary command input and works like any other command input: `/tmp`
-and `/private/tmp` are the same vnode, and a write there is a write to a shared,
-world-writable directory rather than to the per-command scratch root. A path that
-answers `Operation not permitted` — a `/var/tmp` write, an attempt to read another
-user's home, or the protected workspace private paths — is reporting a boundary
-denial rather than a failed task.
+What a command actually got is reported as data rather than inferred: the
+`graph_worker_exec` result carries the effective `mode`, the `enforcement`
+(`full`, `partial` or `unconfined`) and — when enforcement is `partial` — the
+`denialSignatures` the backend produced, so a boundary denial is distinguishable
+from a command failure.
 
-Installed work software is readable from `/Applications` and `~/Applications`,
-including app frameworks and helper executables. Playwright's
-`~/Library/Caches/ms-playwright` and Puppeteer's `~/.cache/puppeteer` browser
-installations are also readable. Host-configured `PLAYWRIGHT_BROWSERS_PATH`,
-`PUPPETEER_CACHE_DIR` and `PUPPETEER_EXECUTABLE_PATH` are preserved, with relative
-paths resolved against the session workspace; Playwright's `0` value continues
-to select package-local browsers. These grants cover installation resources,
-not write access to installations or access to the user's browser profiles.
-Browser profiles, caches and Chromium's macOS socket directory use the command
-scratch directory, which is removed when the command finishes. Persistent
-automation output should be written to the workspace.
+**Known cost.** The host policy vocabulary carries a mode and a workspace root
+only, so rolebox can no longer deny a worker access to rolebox's own state. Under
+`workspace-write` and `danger-full-access` the graph store, the rolebox data
+directory, the workspace's `.rolebox` and `.dsh` directories and agent session
+files are reachable — reads always, and writes under `workspace-write` wherever
+those paths sit inside the workspace root. That protection existed only while
+rolebox applied its own macOS Seatbelt profile; it is gone by design, because a
+second, platform-specific boundary is not the session policy the user authorized.
+A host that needs that isolation must express it in the session policy itself.
 
-macOS does not support initializing Chromium's own sandbox inside the worker's
-Seatbelt sandbox. Use Playwright's default `chromiumSandbox: false`, or pass
-`args: ["--no-sandbox"]` to Puppeteer's `launch`. Chromium and its children remain
-inside the worker's OS sandbox, including the protected file boundaries below.
+Each command still runs with a minimal environment: a path, a locale, disposable
+home/config/cache directories and `TMPDIR` (removed with the command, carrying no
+credentials and no host caches), browser discovery variables and the selected
+developer toolchain. Work that needs real credentials or host state — `git push`,
+`gh`, `npm publish`, an authenticated API call — cannot succeed, and network
+egress is reachable but unauthenticated by construction. A command runs under a
+60-second default timeout that the caller may raise to at most 300 seconds, so a
+long build is split across commands rather than run as one. The shell is `/bin/sh`,
+not bash: process substitution `<(...)` is a syntax error, while brace expansion
+and arrays work; `perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are
+available, and `git`, `bun` and `node` run inside the workspace with disposable
+caches. The runner applies no OS profile and is platform-neutral: whether and how
+a host confines a command is that host's own adapter decision.
 
-A worker cannot read or modify the host state root, another worker's retained
-handoff, or sibling session records in protected directories. Its own declared
-input materialization is readable; the artifacts it was given are the revisions
-the acceptance named, not mutable paths. Permissions are enforced on subprocesses
-and verified against symlink and hardlink access rather than inferred from
-directory modes.
+`PLAYWRIGHT_BROWSERS_PATH`, `PUPPETEER_CACHE_DIR` and `PUPPETEER_EXECUTABLE_PATH`
+keep installed browser caches discoverable under the disposable home, with
+relative paths resolved against the session workspace and Playwright's `0` value
+still selecting package-local browsers. Whether those paths may be read is the
+host policy's decision, not a grant rolebox makes. Browser profiles, caches and
+Chromium's macOS socket directory use the command scratch directory, which is
+removed when the command finishes; persistent automation output belongs in the
+workspace.
 
-Host session persistence therefore has to stay outside the writable workspace or
-inside the workspace's protected `.dsh` and `.rolebox` directories; a host that
-exposes a separate transcript directory as ordinary workspace files is outside
-this supported isolation configuration.
+Where a confinement is in effect, macOS does not support initializing Chromium's
+own sandbox inside it. Use Playwright's default `chromiumSandbox: false`, or pass
+`args: ["--no-sandbox"]` to Puppeteer's `launch`.
 
 Worker execution is scoped to the **invoking session's workspace**. Each dsh
 session's graph application, store, artifact root and worker command directory are

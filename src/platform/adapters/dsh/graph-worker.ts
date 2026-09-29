@@ -1,30 +1,191 @@
 import { z } from "zod";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { join } from "node:path";
-import { getDataDir } from "../../../cli/paths.ts";
-import { INPUT_DELIVERY_DIR, inputConsumerDirectory } from "../../../graph/host/input-view.ts";
 import type { OutcomeHost } from "../../../graph/host/outcome-host.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../types.ts";
 import { executeGraphWorkerCommand } from "../../sandbox/worker-exec.ts";
 
 export const DSH_GRAPH_WORKER_TOOLS = ["graph_submit_outcome", "graph_worker_exec"];
 
-/** The host's tool registry authenticates the caller; its shell runs in a separate OS sandbox. */
-export function createDshGraphWorkerTools(resolve: (context: CanonicalToolContext) => {
-  host: OutcomeHost; workspace: string; storeRoot: string;
-}): Record<string, CanonicalToolDef> {
+/**
+ * The host's process-confinement seam (`@deepseek-ai/dsh-sandbox`), consumed
+ * structurally so rolebox never imports the package. `confine` carries the
+ * policy PER CALL and answers the argv to spawn, the enforcement the host
+ * achieved, and — for a partial enforcement — the denial signatures its backend
+ * produces.
+ */
+export interface DshSandboxService {
+  confine(
+    argv: readonly string[],
+    policy: { mode: "read-only" | "workspace-write"; workspaceRoot: string; sessionId?: string },
+    signal?: AbortSignal,
+  ): Promise<{ argv: string[]; enforcement: "full" | "partial"; denialSignatures: readonly string[] }>;
+}
+
+/**
+ * The host's policy resolver (`@deepseek-ai/dsh-sandbox-policy`), consumed
+ * structurally. It is synchronous because the host answers it from in-memory
+ * session state, with the precedence: an explicitly approved mode, else the
+ * session's last `sandbox/mode` event, else the deployment default.
+ * `danger-full-access` is NOT a confined mode: it carries no profile to apply,
+ * and rolebox must not silently narrow it.
+ */
+export interface DshSandboxPolicyService {
+  resolve(request?: { session?: unknown }): {
+    mode: "read-only" | "workspace-write" | "danger-full-access";
+    workspaceRoot: string;
+    sessionId?: string;
+  };
+}
+
+export type DshWorkerCommandMode = "read-only" | "workspace-write" | "danger-full-access";
+
+/** `unconfined` is the `danger-full-access` outcome; the host never confines it. */
+export type DshWorkerCommandEnforcement = "full" | "partial" | "unconfined";
+
+/** What a `graph_worker_exec` call reports besides the command's own result. */
+export interface DshWorkerCommandResult {
+  exitCode: number | null;
+  output: string;
+  mode: DshWorkerCommandMode;
+  enforcement: DshWorkerCommandEnforcement;
+  denialSignatures: readonly string[];
+}
+
+/**
+ * The boundary an attempt runs under, as prompt material — resolved WITHOUT
+ * running a command, while each command's own result states what that command
+ * actually got.
+ */
+export type DshWorkerCommandBoundary =
+  | { readonly kind: "confined"; readonly mode: "read-only" | "workspace-write"; readonly workspaceRoot: string }
+  | { readonly kind: "unconfined"; readonly mode: "danger-full-access" }
+  | { readonly kind: "refused"; readonly reason: string };
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The three modes the host's policy vocabulary defines; anything else is refused. */
+function resolvedMode(value: unknown): DshWorkerCommandMode | undefined {
+  return value === "read-only" || value === "workspace-write" || value === "danger-full-access" ? value : undefined;
+}
+
+/** Describe the mode the host resolves for an attempt so the worker prompt can state it. */
+export function resolveDshWorkerCommandBoundary(
+  sandboxPolicy: DshSandboxPolicyService | undefined,
+  sandbox: DshSandboxService | undefined,
+  session?: unknown,
+): DshWorkerCommandBoundary {
+  if (!sandboxPolicy) {
+    return { kind: "refused", reason: "this host exposes no sandbox policy service" };
+  }
+  let resolved: ReturnType<DshSandboxPolicyService["resolve"]>;
+  try {
+    resolved = sandboxPolicy.resolve({ session });
+  } catch (error) {
+    return { kind: "refused", reason: `sandbox policy resolution failed: ${message(error)}` };
+  }
+  const mode = resolvedMode(resolved?.mode);
+  if (!mode) return { kind: "refused", reason: "the sandbox policy service resolved no recognized mode" };
+  if (mode === "danger-full-access") return { kind: "unconfined", mode };
+  if (!sandbox) return { kind: "refused", reason: "this host exposes no confinement service" };
+  if (typeof resolved.workspaceRoot !== "string" || resolved.workspaceRoot.length === 0) {
+    return { kind: "refused", reason: "the sandbox policy service resolved no workspace root" };
+  }
+  return { kind: "confined", mode, workspaceRoot: resolved.workspaceRoot };
+}
+
+/**
+ * Confine one worker command through the host's services, then run it.
+ *
+ * FAIL CLOSED: a missing resolver, a missing confinement service, a rejected
+ * `confine` call, an unrecognized enforcement or a malformed argv refuses the
+ * command with an error naming the service. rolebox never falls back to an
+ * unconfined spawn for a confined mode; only `danger-full-access` — the mode the
+ * user actually authorized — spawns the command unconfined.
+ */
+export async function executeDshWorkerCommand(options: {
+  command: string;
+  workspace: string;
+  sandbox?: DshSandboxService;
+  sandboxPolicy?: DshSandboxPolicyService;
+  session?: unknown;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<DshWorkerCommandResult> {
+  const { sandbox, sandboxPolicy } = options;
+  if (!sandboxPolicy) {
+    throw new Error("Graph worker commands require the host's sandbox policy service (@deepseek-ai/dsh-sandbox-policy); rolebox does not confine worker commands itself and refuses to run one unconfined.");
+  }
+  let resolved: ReturnType<DshSandboxPolicyService["resolve"]>;
+  try {
+    resolved = sandboxPolicy.resolve({ session: options.session });
+  } catch (error) {
+    throw new Error(`The host sandbox policy service failed to resolve this session's mode: ${message(error)}`);
+  }
+  const mode = resolvedMode(resolved?.mode);
+  if (!mode) {
+    throw new Error("The host sandbox policy service resolved no recognized mode; refusing to run the command.");
+  }
+  const argv = ["/bin/sh", "-c", options.command];
+  if (mode === "danger-full-access") {
+    const result = await executeGraphWorkerCommand({ argv, workspace: options.workspace,
+      signal: options.signal, timeoutMs: options.timeoutMs });
+    return { ...result, mode, enforcement: "unconfined", denialSignatures: [] };
+  }
+  if (!sandbox) {
+    throw new Error(`Graph worker commands require the host's confinement service (@deepseek-ai/dsh-sandbox) for a ${mode} session; refusing to run the command unconfined.`);
+  }
+  if (typeof resolved.workspaceRoot !== "string" || resolved.workspaceRoot.length === 0) {
+    throw new Error(`The host sandbox policy service resolved a ${mode} session without a workspace root; refusing to run the command.`);
+  }
+  let confined: Awaited<ReturnType<DshSandboxService["confine"]>>;
+  try {
+    confined = await sandbox.confine(argv, { mode, workspaceRoot: resolved.workspaceRoot,
+      ...(resolved.sessionId === undefined ? {} : { sessionId: resolved.sessionId }) }, options.signal);
+  } catch (error) {
+    throw new Error(`The host confinement service failed to confine a ${mode} command: ${message(error)}`);
+  }
+  if (!Array.isArray(confined?.argv) || confined.argv.length === 0 ||
+      confined.argv.some(part => typeof part !== "string" || part.length === 0)) {
+    throw new Error(`The host confinement service returned no usable spawn argv for a ${mode} command; refusing to run it.`);
+  }
+  if (confined.enforcement !== "full" && confined.enforcement !== "partial") {
+    throw new Error("The host confinement service reported an unknown enforcement level; refusing to run the command.");
+  }
+  const result = await executeGraphWorkerCommand({ argv: confined.argv, workspace: options.workspace,
+    signal: options.signal, timeoutMs: options.timeoutMs });
+  return { ...result, mode, enforcement: confined.enforcement,
+    denialSignatures: confined.enforcement === "partial" && Array.isArray(confined.denialSignatures)
+      ? [...confined.denialSignatures] : [] };
+}
+
+/** The graph runtime a worker session's tools are bound to. */
+export interface DshGraphWorkerRuntime {
+  host: OutcomeHost;
+  workspace: string;
+  storeRoot: string;
+  /** The host's confinement seam, when this host exposes it. */
+  sandbox?: DshSandboxService;
+  /** The host's policy resolver, when this host exposes it. */
+  sandboxPolicy?: DshSandboxPolicyService;
+  /** The live session a command runs for: the resolver reads its `sandbox/mode` events. */
+  sessionOf?(sessionId: string): unknown;
+}
+
+/** The host's tool registry authenticates the caller; each command runs under the host's resolved session policy. */
+export function createDshGraphWorkerTools(resolve: (context: CanonicalToolContext) => DshGraphWorkerRuntime): Record<string, CanonicalToolDef> {
   return {
     graph_worker_exec: {
-      description: "Run a shell command in this graph worker's workspace sandbox. Use this for reading, editing, builds, tests and browser automation. Writes are confined to the workspace, /dev, one per-command scratch directory and /tmp; HOME, XDG_* and TMPDIR are disposable directories without credentials, so a command needing real credentials or host state cannot succeed. A path that answers 'Operation not permitted' is a boundary denial: write to a workspace or scratch path instead. The shell is /bin/sh, not bash. Installed applications and Playwright/Puppeteer browser caches are readable. macOS cannot nest Chromium's sandbox inside this OS sandbox: use Playwright's default chromiumSandbox: false or Puppeteer args: ['--no-sandbox'].",
+      description: "Run a shell command in this graph worker's workspace sandbox. Use this for reading, editing, builds, tests and browser automation. The host applies this session's resolved sandbox policy to every command and rolebox adds no boundary of its own: a 'read-only' or 'workspace-write' session is confined by the host's confinement service, while a 'danger-full-access' session runs commands unconfined because rolebox never narrows the authorized mode. Each result reports the effective mode, the enforcement ('full', 'partial' or 'unconfined') and, when enforcement is 'partial', the denial signatures the backend produced, so a boundary denial is distinguishable from a command failure. HOME, XDG_* and TMPDIR are disposable per-command directories without credentials, so a command needing real credentials or host state cannot succeed. The shell is /bin/sh, not bash. Installed applications and Playwright/Puppeteer browser caches stay discoverable, subject to the host policy. Where a confinement is in effect, macOS cannot nest Chromium's own sandbox inside it: use Playwright's default chromiumSandbox: false or Puppeteer args: ['--no-sandbox'].",
       args: { command: z.string(), timeout_ms: z.number().int().min(1).max(300_000).optional() },
       async execute(args, context) {
-        const { host, workspace, storeRoot } = resolve(context);
+        const { host, workspace, sandbox, sandboxPolicy, sessionOf } = resolve(context);
         const worker = host.workerPrincipalOf(context?.sessionID ?? "");
         if (!worker) throw new Error("This tool requires a confirmed graph worker session");
-        const inputRoot = inputConsumerDirectory(join(storeRoot, INPUT_DELIVERY_DIR), worker.graphId, worker.attemptId);
-        const result = await executeGraphWorkerCommand({ command: args.command as string, workspace,
-          dataDirectory: getDataDir(), inputPaths: [inputRoot], signal: context?.abort,
-          timeoutMs: args.timeout_ms as number | undefined });
+        const result = await executeDshWorkerCommand({ command: args.command as string, workspace,
+          sandbox, sandboxPolicy, session: sessionOf?.(context?.sessionID ?? ""),
+          signal: context?.abort, timeoutMs: args.timeout_ms as number | undefined });
         return JSON.stringify(result);
       },
     },

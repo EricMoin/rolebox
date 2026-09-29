@@ -1,6 +1,6 @@
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
-import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
+import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, resolveDshWorkerCommandBoundary, type DshGraphWorkerRegistry, type DshSandboxPolicyService, type DshSandboxService, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
 import { prepareDshGraphWorkerPrompt } from "../platform/adapters/dsh/worker-prompt.ts";
 import { INPUT_DELIVERY_DIR, inputConsumerDirectory } from "../graph/host/input-view.ts";
 /**
@@ -306,6 +306,28 @@ export interface DshPluginContext {
    * an optional service must not gate plugin activation.
    */
   skills?: unknown;
+  /**
+   * The host's process-confinement seam (`@deepseek-ai/dsh-sandbox`, structural
+   * subset — see {@link DshSandboxService}). `confine` carries the session
+   * policy PER CALL and answers the argv to spawn together with the enforcement
+   * the host achieved and the denial signatures its backend produces. Present in
+   * full profiles; a host or test double without it makes a confined
+   * `graph_worker_exec` command FAIL CLOSED (the missing service refuses the
+   * command) rather than running it unconfined. Never injected via the `inject`
+   * roster — an optional service must not gate plugin activation.
+   */
+  sandbox?: DshSandboxService;
+  /**
+   * The host's session-policy resolver (`@deepseek-ai/dsh-sandbox-policy`,
+   * structural subset — see {@link DshSandboxPolicyService}). It is synchronous,
+   * because the host answers it from in-memory session state, and resolves
+   * `{mode, workspaceRoot, sessionId?}` with the precedence: an explicitly
+   * approved mode, else the session's last `sandbox/mode` event, else the
+   * deployment default. `danger-full-access` is NOT a confined mode: such a
+   * worker command runs unconfined instead of being narrowed. Never injected via
+   * the `inject` roster — an optional service must not gate plugin activation.
+   */
+  sandboxPolicy?: DshSandboxPolicyService;
   /**
    * Resolve a cordis service by name (optional-service seam). The dsh host
    * context resolves any registered service; this plugin probes for
@@ -1371,7 +1393,11 @@ export async function apply(
       readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
       startWorker: async (label, start, request) => {
         const inputDirectory = inputConsumerDirectory(join(outcomeStoreRoot, INPUT_DELIVERY_DIR), request.graphId, request.attemptId);
-        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory);
+        // The worker's own session does not exist at prompt-assembly time, so this
+        // states the mode the host resolves for the request (its deployment default);
+        // each command's own result carries the authoritative mode and enforcement.
+        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory,
+          resolveDshWorkerCommandBoundary(ctx.sandboxPolicy, ctx.sandbox));
         return workerBoundary!.start(label, start, prompt);
       },
       workerTools: DSH_GRAPH_WORKER_TOOLS,
@@ -1656,7 +1682,9 @@ export async function apply(
       });
 
     return { host: outcomeHost, application: graphApplication, delivery: outcomeDelivery,
-      tools: runtimeTools, workspace, storeRoot: outcomeStoreRoot };
+      tools: runtimeTools, workspace, storeRoot: outcomeStoreRoot,
+      sandbox: ctx.sandbox, sandboxPolicy: ctx.sandboxPolicy,
+      sessionOf: (sessionId: string) => ctx.sessions.get(sessionId) };
   }
   function graphRuntime(directory: string) {
     if (!isAbsolute(directory)) throw new Error("Graph tools require an absolute session workspace");

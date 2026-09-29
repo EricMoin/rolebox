@@ -811,8 +811,8 @@ export default async function(pi: any): Promise<void> {
       observeWorker: execution => sessionAdapter.observeGraphWorker(execution.executionId),
       confirmWorkerStopped: execution => sessionAdapter.confirmGraphWorkerStopped(execution.executionId),
       manager: dispatchManager,
-      launchWorker: (args, context, inputView) => sessionAdapter.runGraphWorker(
-        () => dispatchManager.launch(args, context), inputView ? [inputView.directory] : []),
+      launchWorker: (args, context) => sessionAdapter.runGraphWorker(
+        () => dispatchManager.launch(args, context)),
       directory: process.cwd(),
       onStartFailed: (_request, effect, reason) => {
         outcomeHost?.reportDeliveryFailure(effect, reason);

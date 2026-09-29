@@ -10,3 +10,6 @@ state/
 
 # Runtime storage state (auto-generated during tests)
 .storages/
+
+# Local mirror used while editing a sibling role registry
+/vendor/

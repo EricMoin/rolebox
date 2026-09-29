@@ -1,18 +1,54 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { graphWorkerSandbox } from "./graph-worker.ts";
-import { graphWorkerSoftware } from "./software.ts";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
+/**
+ * Keep installed browsers discoverable while a command runs with a disposable
+ * HOME. The defaults below are the caches an installed Playwright/Puppeteer
+ * leaves under the real home, which that HOME would otherwise hide; host-set
+ * values win, with relative paths resolved against the workspace and
+ * Playwright's `0` still selecting package-local browsers. Whether the host
+ * policy then permits reading them is the host's decision, not this runner's.
+ */
+export function browserDiscoveryEnvironment(
+  workspace: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): Record<string, string> {
+  const playwright = env.PLAYWRIGHT_BROWSERS_PATH || join(home, "Library", "Caches", "ms-playwright");
+  const puppeteer = resolve(workspace, env.PUPPETEER_CACHE_DIR || join(home, ".cache", "puppeteer"));
+  const environment: Record<string, string> = {
+    PLAYWRIGHT_BROWSERS_PATH: playwright === "0" ? "0" : resolve(workspace, playwright),
+    PUPPETEER_CACHE_DIR: puppeteer,
+  };
+  if (env.PUPPETEER_EXECUTABLE_PATH) {
+    environment.PUPPETEER_EXECUTABLE_PATH = resolve(workspace, env.PUPPETEER_EXECUTABLE_PATH);
+  }
+  return environment;
+}
+
+/**
+ * Run one graph worker command as an already-decided spawn vector.
+ *
+ * The CALLER owns the boundary: `argv` is what the host's confinement service
+ * returned for the session's resolved policy (or the plain command vector for a
+ * `danger-full-access` session). This runner applies no OS profile of its own —
+ * it only provides the per-command scratch environment, the process-group
+ * cancellation, the timeout and the output cap.
+ */
 export async function executeGraphWorkerCommand(options: {
-  command: string;
+  /** Complete spawn vector: `[executable, ...args]`, validated non-empty before anything is spawned. */
+  argv: readonly string[];
   workspace: string;
-  dataDirectory: string;
-  inputPaths: readonly string[];
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<{ exitCode: number | null; output: string }> {
+  const executable = options.argv[0];
+  if (typeof executable !== "string" || executable.length === 0 ||
+      options.argv.some(part => typeof part !== "string" || part.length === 0)) {
+    throw new Error("A graph worker command needs a non-empty spawn argv");
+  }
   const scratch = mkdtempSync(join(tmpdir(), "graph-worker-command-"));
   try {
     const home = join(scratch, "home");
@@ -20,14 +56,10 @@ export async function executeGraphWorkerCommand(options: {
     const cache = join(home, ".cache");
     mkdirSync(config, { recursive: true });
     mkdirSync(cache, { recursive: true });
-    const software = graphWorkerSoftware(options.workspace);
-    const wrapped = graphWorkerSandbox({ executable: "/bin/sh", args: ["-c", options.command],
-      workspace: options.workspace, dataDirectory: options.dataDirectory,
-      workspaceReadsOnly: true, scratchDirectory: scratch, inputPaths: options.inputPaths, softwareReadPaths: software.readPaths });
-    return await new Promise((resolve, reject) => {
-      const child = spawn(wrapped.executable, wrapped.args, { cwd: options.workspace, detached: true,
+    return await new Promise((finish, fail) => {
+      const child = spawn(executable, options.argv.slice(1), { cwd: options.workspace, detached: true,
         env: { PATH: process.env.PATH, LANG: "C.UTF-8", TMPDIR: scratch, xcrun_db: join(scratch, "xcrun_db"),
-          HOME: home, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, ...software.env,
+          HOME: home, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, ...browserDiscoveryEnvironment(options.workspace),
           // Cocoa and Chromium on macOS do not use HOME/TMPDIR for these paths.
           CFFIXED_USER_HOME: home, MAC_CHROMIUM_TMPDIR: scratch,
           ...(process.env.DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.DEVELOPER_DIR } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
@@ -48,10 +80,10 @@ export async function executeGraphWorkerCommand(options: {
       options.signal?.addEventListener("abort", stop, { once: true });
       if (options.signal?.aborted) stop();
       const cleanup = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", stop); };
-      child.on("error", error => { cleanup(); reject(error); });
+      child.on("error", error => { cleanup(); fail(error); });
       child.on("close", code => {
         cleanup();
-        resolve({ exitCode: code, output: Buffer.concat(buffers).toString("utf8") + (terminated ? "\nCommand stopped by cancellation, timeout or output limit." : "") });
+        finish({ exitCode: code, output: Buffer.concat(buffers).toString("utf8") + (terminated ? "\nCommand stopped by cancellation, timeout or output limit." : "") });
       });
     });
   } finally { rmSync(scratch, { recursive: true, force: true }); }

@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { FunctionSource, ReferenceScope } from "../../../../src/constants.ts";
 import { prepareDshGraphWorkerPrompt } from "../../../../src/platform/adapters/dsh/worker-prompt.ts";
-import { executeGraphWorkerCommand } from "../../../../src/platform/sandbox/worker-exec.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../../src/types.ts";
+
+/** The host resolves a session policy per attempt; these tests state one explicitly. */
+const CONFINED = { kind: "confined", mode: "workspace-write", workspaceRoot: "/workspace/example" } as const;
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -53,7 +55,7 @@ describe("DSH graph worker prompt", () => {
   it("uses only the target role and functions, with readable copies of its resources", () => {
     const f = fixture();
     f.planner.references.push({ ...f.planner.references[0] });
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory);
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED);
     expect(prompt).toContain("You are the planner.");
     expect(prompt).toContain("<active_functions>");
     expect(prompt).toContain("Return a Strategy.");
@@ -74,19 +76,19 @@ describe("DSH graph worker prompt", () => {
 
   it("gives separate attempts independent resource copies", () => {
     const f = fixture();
-    const first = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory));
+    const first = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED));
     const secondRoot = join(f.directory, "data", "inputs", "another-attempt");
-    const second = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, secondRoot));
+    const second = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, secondRoot, CONFINED));
     expect(first.reference).not.toBe(second.reference);
     expect(second.reference.startsWith(secondRoot)).toBe(true);
   });
 
   it("fails before dispatch for missing agents or resources and removes partial copies", () => {
     const f = fixture();
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, "missing", f.inputDirectory)).toThrow("not resolved");
+    expect(() => prepareDshGraphWorkerPrompt(f.roles, "missing", f.inputDirectory, CONFINED)).toThrow("not resolved");
     expect(existsSync(f.inputDirectory)).toBe(false);
     rmSync(join(f.refs, "schema.md"));
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory)).toThrow();
+    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED)).toThrow();
     expect(readdirSync(f.inputDirectory)).toEqual([]);
   });
 
@@ -95,25 +97,29 @@ describe("DSH graph worker prompt", () => {
     const privateFile = join(f.directory, "private.txt");
     writeFileSync(privateFile, "unrelated file");
     symlinkSync(privateFile, join(f.skill, "escape.txt"));
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory)).toThrow("escaping or cyclic");
+    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED)).toThrow("escaping or cyclic");
     expect(readdirSync(f.inputDirectory)).toEqual([]);
   });
 
-  it.skipIf(process.platform !== "darwin")("allows sandbox reads of delivered resources while denying writes and neighboring inputs", async () => {
+  it("states the boundary the host resolved for this attempt, not a fixed writable set", () => {
     const f = fixture();
-    const paths = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory));
-    const neighbor = join(f.directory, "data", "inputs", "neighbor.txt");
-    writeFileSync(neighbor, "another attempt");
-    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-    const run = (command: string) => executeGraphWorkerCommand({ command, workspace: f.workspace,
-      dataDirectory: join(f.directory, "data"), inputPaths: [f.inputDirectory], timeoutMs: 10_000 });
-    const read = await run(`cat ${quote(paths.reference)} ${quote(paths.skill)}`);
-    expect(read.exitCode).toBe(0);
-    expect(read.output).toContain("Strategy schema");
-    expect(read.output).toContain("scripts/check.sh");
-    expect((await run(`printf changed > ${quote(paths.reference)}`)).exitCode).not.toBe(0);
-    expect((await run(`cat ${quote(neighbor)}`)).exitCode).not.toBe(0);
-    expect((await run(`cat ${quote(join(f.refs, "schema.md"))}`)).exitCode).not.toBe(0);
-    expect(readFileSync(paths.reference, "utf8")).toContain("Strategy schema");
+    const confined = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory,
+      { kind: "confined", mode: "workspace-write", workspaceRoot: "/workspace/example" });
+    expect(confined).toContain("'workspace-write' mode with workspace root /workspace/example");
+    expect(confined).toContain("cannot confine this attempt more narrowly than the session's mode");
+    const unconfined = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory,
+      { kind: "unconfined", mode: "danger-full-access" });
+    expect(unconfined).toContain("'danger-full-access'");
+    expect(unconfined).toContain("UNCONFINED");
+    const refused = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory,
+      { kind: "refused", reason: "this host exposes no sandbox policy service" });
+    expect(refused).toContain("no host sandbox policy service is available to this attempt");
+    expect(refused).toContain("is refused rather than run without the boundary the session authorized");
+    for (const prompt of [confined, unconfined, refused]) {
+      // The fenced-json fallback and the tool face survive every boundary state.
+      expect(prompt).toContain("```json");
+      expect(prompt).toContain("graph_submit_outcome");
+      expect(prompt).not.toContain("boundary.md");
+    }
   });
 });
