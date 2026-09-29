@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { buildAgentPrompt, buildAvailableFunctionsBlock, buildFunctionBlock } from "../../../prompt/builder.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../types.ts";
 import type { DshWorkerCommandBoundary } from "./graph-worker.ts";
+import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
 
 type WorkerRole = ResolvedRole | ResolvedSubAgent;
 
@@ -55,8 +56,12 @@ function referenceRoot(filePath: string): string {
  * be refused instead of implying a boundary that would not be applied.
  */
 function boundaryBlock(boundary: DshWorkerCommandBoundary): string {
-  const shell = "The shell is /bin/sh, not bash: process substitution <(...) is a syntax error, while brace expansion and arrays work.";
-  const disposable = "HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME and TMPDIR are disposable per-command directories without credentials, so a command needing real credentials or host state (git push, gh, npm publish, authenticated API calls) cannot succeed.";
+  // Both facts are read from the detected system descriptor (src/platform/system/)
+  // rather than written out here, so the prompt cannot promise one OS's shell or
+  // variable names on a host where the runner applies another's.
+  const system = getSystem();
+  const shell = system.shellHint;
+  const disposable = `${disposableEnvironmentHint(system)} are disposable per-command directories without credentials, so a command needing real credentials or host state (git push, gh, npm publish, authenticated API calls) cannot succeed.`;
   const reported = "Every command result reports the effective mode and the enforcement the host achieved, and names the backend's denial signatures when that enforcement is partial, so a boundary denial is distinguishable from a command failure.";
   if (boundary.kind === "confined") {
     return `Worker command boundary: the host's session sandbox policy resolves this attempt to the '${boundary.mode}' mode with workspace root ${boundary.workspaceRoot}, ` +

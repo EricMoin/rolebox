@@ -926,27 +926,42 @@ second, platform-specific boundary is not the session policy the user authorized
 A host that needs that isolation must express it in the session policy itself.
 
 Each command still runs with a minimal environment: a path, a locale, disposable
-home/config/cache directories and `TMPDIR` (removed with the command, carrying no
-credentials and no host caches), browser discovery variables and the selected
-developer toolchain. Work that needs real credentials or host state — `git push`,
-`gh`, `npm publish`, an authenticated API call — cannot succeed, and network
-egress is reachable but unauthenticated by construction. A command runs under a
-60-second default timeout that the caller may raise to at most 300 seconds, so a
-long build is split across commands rather than run as one. The shell is `/bin/sh`,
-not bash: process substitution `<(...)` is a syntax error, while brace expansion
-and arrays work; `perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are
-available, and `git`, `bun` and `node` run inside the workspace with disposable
-caches. The runner applies no OS profile and is platform-neutral: whether and how
-a host confines a command is that host's own adapter decision.
+home/config/cache directories and a temporary directory (removed with the command,
+carrying no credentials and no host caches), browser discovery variables and the
+selected developer toolchain. The variable names are the detected system's,
+declared once in `src/platform/system/`: `HOME`, `XDG_CONFIG_HOME`,
+`XDG_CACHE_HOME` and `TMPDIR` on every platform, plus `CFFIXED_USER_HOME`,
+`MAC_CHROMIUM_TMPDIR` and `xcrun_db` on macOS and `USERPROFILE`, `LOCALAPPDATA`,
+`APPDATA`, `TEMP` and `TMP` on Windows (where `HOME` and the `XDG_*` names stay
+set, so an XDG-isolated run works there too). Work that needs real credentials or
+host state — `git push`, `gh`, `npm publish`, an authenticated API call — cannot
+succeed, and network egress is reachable but unauthenticated by construction. A
+command runs under a 60-second default timeout that the caller may raise to at most
+300 seconds, so a long build is split across commands rather than run as one.
+
+The shell is the detected system's too. macOS and Linux run `/bin/sh -c`: on macOS
+that is bash in POSIX mode, where brace expansion and arrays work and process
+substitution `<(...)` is a syntax error, while on Debian/Ubuntu it is dash, where
+brace expansion, arrays and process substitution are all unavailable — write
+portable POSIX sh. Windows runs `cmd.exe /d /s /c` (the host's `COMSPEC` when it is
+set), where POSIX idioms — single-quoted strings, `$(...)`, `<(...)`, brace
+expansion, arrays, `VAR=x cmd` — are unavailable; use `set VAR=...` and `%VAR%`.
+`perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are available, and
+`git`, `bun` and `node` run inside the workspace with disposable caches. The runner
+applies no OS profile of its own and is platform-neutral: whether and how a host
+confines a command is that host's own adapter decision.
 
 `PLAYWRIGHT_BROWSERS_PATH`, `PUPPETEER_CACHE_DIR` and `PUPPETEER_EXECUTABLE_PATH`
 keep installed browser caches discoverable under the disposable home, with
 relative paths resolved against the session workspace and Playwright's `0` value
-still selecting package-local browsers. Whether those paths may be read is the
-host policy's decision, not a grant rolebox makes. Browser profiles, caches and
-Chromium's macOS socket directory use the command scratch directory, which is
-removed when the command finishes; persistent automation output belongs in the
-workspace.
+still selecting package-local browsers. The defaults are the detected system's own
+cache locations: Playwright's `~/Library/Caches/ms-playwright` on macOS,
+`~/.cache/ms-playwright` on Linux and `%USERPROFILE%\AppData\Local\ms-playwright`
+on Windows; Puppeteer's `~/.cache/puppeteer` on all three. Whether those paths may
+be read is the host policy's decision, not a grant rolebox makes. Browser profiles,
+caches and Chromium's macOS socket directory use the command scratch directory,
+which is removed when the command finishes; persistent automation output belongs in
+the workspace.
 
 Where a confinement is in effect, macOS does not support initializing Chromium's
 own sandbox inside it. Use Playwright's default `chromiumSandbox: false`, or pass

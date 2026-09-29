@@ -2,22 +2,25 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { getSystem } from "../system/index.ts";
 
 /**
  * Keep installed browsers discoverable while a command runs with a disposable
- * HOME. The defaults below are the caches an installed Playwright/Puppeteer
- * leaves under the real home, which that HOME would otherwise hide; host-set
- * values win, with relative paths resolved against the workspace and
- * Playwright's `0` still selecting package-local browsers. Whether the host
- * policy then permits reading them is the host's decision, not this runner's.
+ * HOME. The defaults are the caches an installed Playwright/Puppeteer leaves
+ * under the real home OF THE DETECTED SYSTEM (src/platform/system/), which that
+ * HOME would otherwise hide; host-set values win, with relative paths resolved
+ * against the workspace and Playwright's `0` still selecting package-local
+ * browsers. Whether the host policy then permits reading them is the host's
+ * decision, not this runner's.
  */
 export function browserDiscoveryEnvironment(
   workspace: string,
   env: NodeJS.ProcessEnv = process.env,
   home = homedir(),
 ): Record<string, string> {
-  const playwright = env.PLAYWRIGHT_BROWSERS_PATH || join(home, "Library", "Caches", "ms-playwright");
-  const puppeteer = resolve(workspace, env.PUPPETEER_CACHE_DIR || join(home, ".cache", "puppeteer"));
+  const cached = getSystem().browserCaches(home);
+  const playwright = env.PLAYWRIGHT_BROWSERS_PATH || cached.playwright;
+  const puppeteer = resolve(workspace, env.PUPPETEER_CACHE_DIR || cached.puppeteer);
   const environment: Record<string, string> = {
     PLAYWRIGHT_BROWSERS_PATH: playwright === "0" ? "0" : resolve(workspace, playwright),
     PUPPETEER_CACHE_DIR: puppeteer,
@@ -58,11 +61,12 @@ export async function executeGraphWorkerCommand(options: {
     mkdirSync(cache, { recursive: true });
     return await new Promise((finish, fail) => {
       const child = spawn(executable, options.argv.slice(1), { cwd: options.workspace, detached: true,
-        env: { PATH: process.env.PATH, LANG: "C.UTF-8", TMPDIR: scratch, xcrun_db: join(scratch, "xcrun_db"),
-          HOME: home, XDG_CONFIG_HOME: config, XDG_CACHE_HOME: cache, ...browserDiscoveryEnvironment(options.workspace),
-          // Cocoa and Chromium on macOS do not use HOME/TMPDIR for these paths.
-          CFFIXED_USER_HOME: home, MAC_CHROMIUM_TMPDIR: scratch,
-          ...(process.env.DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.DEVELOPER_DIR } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
+        env: { PATH: process.env.PATH, LANG: "C.UTF-8",
+          // Which variables make these directories disposable is an OS fact, so
+          // it comes from the detected system's descriptor instead of hardcoded
+          // macOS/POSIX variable names.
+          ...getSystem().disposableEnvironment({ home, config, cache, temp: scratch, env: process.env }),
+          ...browserDiscoveryEnvironment(options.workspace) }, stdio: ["ignore", "pipe", "pipe"] });
       const buffers: Buffer[] = [];
       let bytes = 0;
       let terminated = false;

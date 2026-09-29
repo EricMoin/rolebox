@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { OutcomeHost } from "../../../graph/host/outcome-host.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../types.ts";
 import { executeGraphWorkerCommand } from "../../sandbox/worker-exec.ts";
+import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
 
 export const DSH_GRAPH_WORKER_TOOLS = ["graph_submit_outcome", "graph_worker_exec"];
 
@@ -127,7 +128,9 @@ export async function executeDshWorkerCommand(options: {
   if (!mode) {
     throw new Error("The host sandbox policy service resolved no recognized mode; refusing to run the command.");
   }
-  const argv = ["/bin/sh", "-c", options.command];
+  // The command shell is a per-OS fact: /bin/sh -c on the POSIX family,
+  // cmd.exe /d /s /c on Windows.
+  const argv = getSystem().commandShell(options.command, process.env);
   if (mode === "danger-full-access") {
     const result = await executeGraphWorkerCommand({ argv, workspace: options.workspace,
       signal: options.signal, timeoutMs: options.timeoutMs });
@@ -175,9 +178,13 @@ export interface DshGraphWorkerRuntime {
 
 /** The host's tool registry authenticates the caller; each command runs under the host's resolved session policy. */
 export function createDshGraphWorkerTools(resolve: (context: CanonicalToolContext) => DshGraphWorkerRuntime): Record<string, CanonicalToolDef> {
+  // The shell and the disposable variable names are derived from the detected
+  // system descriptor, so this description cannot drift from what the runner
+  // actually applies.
+  const system = getSystem();
   return {
     graph_worker_exec: {
-      description: "Run a shell command in this graph worker's workspace sandbox. Use this for reading, editing, builds, tests and browser automation. The host applies this session's resolved sandbox policy to every command and rolebox adds no boundary of its own: a 'read-only' or 'workspace-write' session is confined by the host's confinement service, while a 'danger-full-access' session runs commands unconfined because rolebox never narrows the authorized mode. Each result reports the effective mode, the enforcement ('full', 'partial' or 'unconfined') and, when enforcement is 'partial', the denial signatures the backend produced, so a boundary denial is distinguishable from a command failure. HOME, XDG_* and TMPDIR are disposable per-command directories without credentials, so a command needing real credentials or host state cannot succeed. The shell is /bin/sh, not bash. Installed applications and Playwright/Puppeteer browser caches stay discoverable, subject to the host policy. Where a confinement is in effect, macOS cannot nest Chromium's own sandbox inside it: use Playwright's default chromiumSandbox: false or Puppeteer args: ['--no-sandbox'].",
+      description: `Run a shell command in this graph worker's workspace sandbox. Use this for reading, editing, builds, tests and browser automation. The host applies this session's resolved sandbox policy to every command and rolebox adds no boundary of its own: a 'read-only' or 'workspace-write' session is confined by the host's confinement service, while a 'danger-full-access' session runs commands unconfined because rolebox never narrows the authorized mode. Each result reports the effective mode, the enforcement ('full', 'partial' or 'unconfined') and, when enforcement is 'partial', the denial signatures the backend produced, so a boundary denial is distinguishable from a command failure. ${disposableEnvironmentHint(system)} are disposable per-command directories without credentials, so a command needing real credentials or host state cannot succeed. ${system.shellHint} Installed applications and Playwright/Puppeteer browser caches stay discoverable, subject to the host policy. Where a confinement is in effect, macOS cannot nest Chromium's own sandbox inside it: use Playwright's default chromiumSandbox: false or Puppeteer args: ['--no-sandbox'].`,
       args: { command: z.string(), timeout_ms: z.number().int().min(1).max(300_000).optional() },
       async execute(args, context) {
         const { host, workspace, sandbox, sandboxPolicy, sessionOf } = resolve(context);

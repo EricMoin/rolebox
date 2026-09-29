@@ -1,11 +1,15 @@
 import { afterEach, expect, it } from "bun:test";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { browserDiscoveryEnvironment, executeGraphWorkerCommand } from "../../../src/platform/sandbox/worker-exec.ts";
+import { setPlatformForTest } from "../../../src/platform/system/index.ts";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  setPlatformForTest(undefined);
+});
 
 function workspace(prefix: string): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -46,13 +50,74 @@ it("provides disposable home, config and cache directories to work software", as
   expect(existsSync(result.output)).toBe(false);
 });
 
+// The disposable variable NAMES are per-OS facts (src/platform/system/): Windows
+// software and Node's os.homedir() read USERPROFILE, and the macOS-only Cocoa and
+// Chromium names must not be set on another system. These are environment
+// assertions on a simulated system — the argv is still this host's /bin/sh probe,
+// so nothing here claims a Windows or Linux execution.
+const PROBE_VARIABLES = ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "CFFIXED_USER_HOME",
+  "MAC_CHROMIUM_TMPDIR", "xcrun_db", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP"] as const;
+
+/** Read those variables back out of a real command run on the simulated system. */
+async function probeEnvironment(root: string, platform: string): Promise<Record<string, string>> {
+  setPlatformForTest(platform);
+  const command = `printf '%s\\n' ${PROBE_VARIABLES.map(name => `"$${name}"`).join(" ")}`;
+  const result = await executeGraphWorkerCommand({ workspace: root, argv: shell(command) });
+  expect(result.exitCode, result.output).toBe(0);
+  const values = result.output.split("\n");
+  const environment: Record<string, string> = {};
+  PROBE_VARIABLES.forEach((name, index) => { environment[name] = values[index] ?? ""; });
+  return environment;
+}
+
+it("gives a command the disposable variables of the detected system, and macOS-only names nowhere else", async () => {
+  const root = workspace("graph-worker-system-");
+
+  const linux = await probeEnvironment(root, "linux");
+  for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR"]) {
+    expect(linux[name], name).not.toBe("");
+  }
+  for (const name of ["CFFIXED_USER_HOME", "MAC_CHROMIUM_TMPDIR", "xcrun_db", "USERPROFILE"]) {
+    expect(linux[name], name).toBe("");
+  }
+
+  const darwin = await probeEnvironment(root, "darwin");
+  expect(darwin.CFFIXED_USER_HOME).toBe(darwin.HOME);
+  expect(darwin.MAC_CHROMIUM_TMPDIR).toBe(darwin.TMPDIR);
+  expect(darwin.xcrun_db).toBe(`${darwin.TMPDIR}/xcrun_db`);
+  expect(darwin.USERPROFILE).toBe("");
+
+  const windows = await probeEnvironment(root, "win32");
+  expect(windows.USERPROFILE).toBe(windows.HOME);
+  expect(windows.LOCALAPPDATA.endsWith("AppData\\Local")).toBe(true);
+  expect(windows.APPDATA.endsWith("AppData\\Roaming")).toBe(true);
+  expect(windows.TEMP).toBe(windows.TMPDIR);
+  expect(windows.TMP).toBe(windows.TMPDIR);
+  // HOME and the XDG_* names stay set on Windows (src/cli/paths.ts honours XDG there).
+  expect(windows.HOME).not.toBe("");
+  expect(windows.XDG_CONFIG_HOME).not.toBe("");
+  expect(windows.CFFIXED_USER_HOME).toBe("");
+});
+
 // Installed browsers live under the real home, which the disposable command HOME
 // hides; the runner names those caches explicitly and lets host configuration win.
+// The DEFAULT cache location is a per-OS fact, so each system is asserted with its
+// own documented location, passed through the host's resolve() like any default.
+const BROWSER_CACHES: ReadonlyArray<{ platform: string; home: string; playwright: string; puppeteer: string }> = [
+  { platform: "darwin", home: "/home/example", playwright: "/home/example/Library/Caches/ms-playwright", puppeteer: "/home/example/.cache/puppeteer" },
+  { platform: "linux", home: "/home/example", playwright: "/home/example/.cache/ms-playwright", puppeteer: "/home/example/.cache/puppeteer" },
+  { platform: "win32", home: "C:\\Users\\example", playwright: "C:\\Users\\example\\AppData\\Local\\ms-playwright", puppeteer: "C:\\Users\\example\\.cache\\puppeteer" },
+];
+
 it("keeps browser discovery pointed at installed caches", () => {
-  expect(browserDiscoveryEnvironment("/workspace", {}, "/home/example")).toEqual({
-    PLAYWRIGHT_BROWSERS_PATH: "/home/example/Library/Caches/ms-playwright",
-    PUPPETEER_CACHE_DIR: "/home/example/.cache/puppeteer",
-  });
+  for (const caches of BROWSER_CACHES) {
+    setPlatformForTest(caches.platform);
+    expect(browserDiscoveryEnvironment("/workspace", {}, caches.home), caches.platform).toEqual({
+      PLAYWRIGHT_BROWSERS_PATH: resolve("/workspace", caches.playwright),
+      PUPPETEER_CACHE_DIR: resolve("/workspace", caches.puppeteer),
+    });
+  }
+  setPlatformForTest("darwin");
   expect(browserDiscoveryEnvironment("/workspace", {
     PLAYWRIGHT_BROWSERS_PATH: "../browsers/playwright", PUPPETEER_CACHE_DIR: "../browsers/puppeteer",
     PUPPETEER_EXECUTABLE_PATH: "/tools/Browser.app/Contents/MacOS/browser", UNRELATED: "not-forwarded",
