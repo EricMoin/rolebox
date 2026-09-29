@@ -900,6 +900,37 @@ including Xcode's adjacent frameworks, and the toolchain's cache is redirected
 into the scratch directory so system tools can resolve their executables without
 writing to the user's cache.
 
+The command boundary itself is stated once, for engineers and for prompt
+injection, in `src/platform/sandbox/boundary.md`. A worker session holds exactly
+two tools — `graph_submit_outcome` and `graph_worker_exec`; the
+Write/Edit/Bash/Read-style native tools are not presented, and every file read,
+edit, check and command goes through `graph_worker_exec`. Writes are confined to
+the session workspace, `/dev`, the per-command scratch directory and `/tmp`, whose
+two spellings `/tmp` and `/private/tmp` are one vnode. Each command
+gets its own `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR` — disposable
+directories removed with the command, carrying no credentials and no host caches —
+so work that needs real credentials or host state, such as a `git push`, `gh`,
+`npm publish` or an authenticated API call, cannot succeed; network egress is
+reachable but unauthenticated by construction. A command runs under a 60-second
+default timeout that the caller may raise to at most 300 seconds, so a long build
+is split across commands rather than run as one. The shell is `/bin/sh`, not bash:
+process substitution `<(...)` is a syntax error, while brace expansion and arrays
+work; `perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are available,
+and `git`, `bun` and `node` run inside the workspace with disposable caches. The
+boundary is macOS-only: it requires an installed OS sandbox and refuses to start
+elsewhere.
+
+The read filter is built from `require-not` clauses over the allow-listed roots
+rather than being a filesystem-wide read allow-list, so a path already outside
+those roots is not forced through the deny rule. The allow-list exists to force
+read access on those roots and to keep the private paths denied. A literal `/tmp`
+path is an ordinary command input and works like any other command input: `/tmp`
+and `/private/tmp` are the same vnode, and a write there is a write to a shared,
+world-writable directory rather than to the per-command scratch root. A path that
+answers `Operation not permitted` — a `/var/tmp` write, an attempt to read another
+user's home, or the protected workspace private paths — is reporting a boundary
+denial rather than a failed task.
+
 Installed work software is readable from `/Applications` and `~/Applications`,
 including app frameworks and helper executables. Playwright's
 `~/Library/Caches/ms-playwright` and Puppeteer's `~/.cache/puppeteer` browser

@@ -88,6 +88,12 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
         "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
         "{\"outcome_id\": \"<an outcome this node declares>\", \"data\": <the outcome payload>, \"evidence_refs\": [\"<path>\"]} " +
         "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
+      "Worker command boundary (source of truth: src/platform/sandbox/boundary.md): " +
+        "HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME and TMPDIR are disposable per-command directories without credentials, " +
+        "so commands needing real credentials or host state (git push, gh, npm publish, authenticated API calls) cannot succeed. " +
+        "A path denied with 'Operation not permitted' — including /tmp and /private/tmp, which are the same vnode — is a boundary denial, not a failed task. " +
+        "The shell is /bin/sh, not bash: process substitution <(...) is a syntax error; brace expansion and arrays work.",
+
       buildAgentPrompt(agent.config, skills, { references, canDelegate: false, resourceTool: "graph_worker_exec" }),
       buildFunctionBlock(active),
       buildAvailableFunctionsBlock(available),
