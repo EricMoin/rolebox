@@ -35,6 +35,9 @@ export function graphWorkerSandbox(options: {
     throw new Error("Graph workers require an installed OS sandbox; this platform has no configured adapter");
   }
   const quoted = (path: string) => JSON.stringify(canonical(path));
+  // A path is denied only when it is outside every listed root, so a root must be a canonical
+  // path that can match a real vnode; a duplicate would only repeat the same filter.
+  const outside = (paths: readonly string[]) => [...new Set(paths.map(canonical))].map(path => `(require-not (subpath ${JSON.stringify(path)}))`).join(" ");
   const privatePaths = [options.dataDirectory, join(options.workspace, ".rolebox"), join(options.workspace, ".dsh")];
   if (options.agentDirectory) privatePaths.push(join(options.agentDirectory, "sessions"));
   const readExceptions = [...(options.inputPaths ?? []).map(path => `(require-not (subpath ${quoted(path)}))`), ...(options.routeFile ? [`(require-not (literal ${quoted(options.routeFile)}))`] : [])].join(" ");
@@ -49,10 +52,13 @@ export function graphWorkerSandbox(options: {
     "(deny process-info*)", "(allow process-info* (target self))",
   ];
   if (options.workspaceReadsOnly) {
-    const roots = [options.workspace, "/bin", "/sbin", "/usr", "/System", "/Library", "/opt", "/dev", "/private/etc", "/private/var/db", dirname(process.execPath), ...developerReadRoots(), ...(options.softwareReadPaths ?? []), ...(options.scratchDirectory ? [options.scratchDirectory] : []), ...(options.inputPaths ?? [])];
-    const writable = [options.workspace, "/dev", ...(options.scratchDirectory ? [options.scratchDirectory] : [])];
-    profile.push(`(deny file-write* (require-all ${writable.map(path => `(require-not (subpath ${quoted(path)}))`).join(" ")}))`);
-    profile.push(`(deny file-read-data (require-all ${roots.map(path => `(require-not (subpath ${quoted(path)}))`).join(" ")}))`);
+    // /tmp is a symlink to /private/tmp and commands address either spelling, so both are real
+    // roots: a literal /tmp path stays readable and writable without a workspace symlink.
+    const temporary = ["/tmp", "/private/tmp"];
+    const roots = [options.workspace, "/bin", "/sbin", "/usr", "/System", "/Library", "/opt", "/dev", "/private/etc", "/private/var/db", ...temporary, dirname(process.execPath), ...developerReadRoots(), ...(options.softwareReadPaths ?? []), ...(options.scratchDirectory ? [options.scratchDirectory] : []), ...(options.inputPaths ?? [])];
+    const writable = [options.workspace, "/dev", ...temporary, ...(options.scratchDirectory ? [options.scratchDirectory] : [])];
+    profile.push(`(deny file-write* (require-all ${outside(writable)}))`);
+    profile.push(`(deny file-read-data (require-all ${outside(roots)}))`);
   }
   profile.push("(allow file-read-data (vnode-type DIRECTORY))");
   return { executable: "/usr/bin/sandbox-exec", args: ["-p", profile.join("\n"), options.executable, ...options.args] };

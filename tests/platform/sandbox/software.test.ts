@@ -8,6 +8,16 @@ import { graphWorkerSoftware } from "../../../src/platform/sandbox/software.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+// macOS cannot nest an OS sandbox: applying any profile from an already sandboxed process
+// fails with "sandbox_apply: Operation not permitted". That is an environment limitation,
+// not a boundary failure. The OS cases below run on a developer machine and in CI; the
+// profile they exercise is asserted without spawning a sandbox in tmp-boundary.test.ts.
+function canApplySandbox(): boolean {
+  if (process.platform !== "darwin") return false;
+  return spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status === 0;
+}
+const boundaryRunnable = canApplySandbox();
+if (process.platform === "darwin" && !boundaryRunnable) console.warn("nested OS sandbox unavailable: OS boundary cases are skipped in this environment");
 
 it("keeps browser discovery pointed at installed caches when commands use a disposable home", () => {
   const software = graphWorkerSoftware("/workspace", {}, "/home/example");
@@ -44,7 +54,7 @@ it("preserves package-local Playwright installs and standalone browser executabl
   expect(software.readPaths).toContain("/browser");
 });
 
-it.skipIf(process.platform !== "darwin")("reads software resources while denying installation writes, private state and paths outside installations", () => {
+it.skipIf(!boundaryRunnable)("reads software resources while denying installation writes, private state and paths outside installations", () => {
   const root = mkdtempSync(join(tmpdir(), "graph-worker-software-policy-"));
   roots.push(root);
   const workspace = join(root, "workspace");
