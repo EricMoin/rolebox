@@ -6,6 +6,7 @@ import {
   piPlatformPaths,
 } from "../platform/paths.ts";
 import { PLATFORM_REGISTRY } from "../platform/registry.ts";
+import { currentPlatform, setPlatformForTest as setSystemPlatformForTest } from "../platform/system/index.ts";
 
 /**
  * Strictly resolve a CLI sync target's platform paths from the registry.
@@ -28,17 +29,19 @@ function resolveSyncTargetPaths(target: string): PlatformPaths {
 // real `process.platform`, but tests can override it (via setPlatformForTest)
 // to exercise the win32 / darwin branches of getDataDir / getConfigDir on any
 // host OS without restructuring the module or spawning a real platform.
-
-let _platformOverride: string | undefined;
+//
+// The override itself lives in the system module (src/platform/system/), which
+// owns OS detection for the whole project; these two functions delegate to it so
+// the seams cannot diverge.
 
 /** Resolve the current platform. Defaults to `process.platform`. */
 export function getPlatform(): string {
-  return _platformOverride ?? process.platform;
+  return currentPlatform();
 }
 
 /** Test-only seam. Pass `undefined` to restore the real platform. */
 export function setPlatformForTest(platform: string | undefined): void {
-  _platformOverride = platform;
+  setSystemPlatformForTest(platform);
 }
 
 // ── Opencode Paths ────────────────────────────────────────────────
