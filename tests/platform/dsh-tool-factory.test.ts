@@ -18,6 +18,7 @@ import type {
 } from "../../src/platform/adapters/dsh/tool-factory.ts";
 import type { DshContentBlock } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
+import { probeSandbox, probeSandboxPolicy } from "../../src/entries/dsh.ts";
 import { defineTool } from "../../src/platform/ports/tool-factory.ts";
 import type { CanonicalToolDef } from "../../src/platform/types.ts";
 import type { ResolvedRole } from "../../src/types.ts";
@@ -678,5 +679,67 @@ describe("dsh tool-factory adapter import hygiene", () => {
       (s) => s.includes("@opencode-ai/") || s.includes("@deepseek-ai/"),
     );
     expect(forbidden, `${FILE} imports platform SDK packages`).toEqual([]);
+  });
+});
+
+// ── Optional confinement services: probe, never bare-read ──────────────────
+
+/**
+ * The host's confinement services are optional on purpose: they are NOT in the
+ * plugin's `inject` roster, and cordis refuses a bare property read of a
+ * service that was never injected — "cannot get property \"sandbox\" without
+ * inject". A regression that reads `ctx.sandbox` directly therefore crashes
+ * the FIRST graph tool call (the graph runtime is opened lazily), which is
+ * exactly what shipped once. These cases pin the probe contract against a
+ * double that reproduces the cordis guard.
+ */
+describe("optional confinement services are probed, not bare-read", () => {
+  const confine = async () => ({ argv: ["x"], enforcement: "full" as const, denialSignatures: [] });
+  const resolvePolicy = () => ({ mode: "read-only" as const, workspaceRoot: "/w" });
+
+  /** A double whose property reads throw the cordis guard, as a real fiber does. */
+  const guarded = (services: Record<string, unknown>) => {
+    const context: Record<string, unknown> = { get: (name: string) => services[name] };
+    for (const name of Object.keys(services)) {
+      Object.defineProperty(context, name, {
+        get() {
+          throw new Error(`cannot get property "${name}" without inject`);
+        },
+      });
+    }
+    return context as never;
+  };
+
+  it("resolves both services through the named-service resolver", () => {
+    const sandbox = { confine };
+    const sandboxPolicy = { resolve: resolvePolicy };
+    const ctx = guarded({ sandbox, sandboxPolicy });
+    expect(probeSandbox(ctx)).toBe(sandbox);
+    expect(probeSandboxPolicy(ctx)).toBe(sandboxPolicy);
+  });
+
+  it("prefers the direct service when the host presents it without a guard", () => {
+    const sandbox = { confine };
+    const sandboxPolicy = { resolve: resolvePolicy };
+    const ctx = { sandbox, sandboxPolicy, get: () => undefined } as never;
+    expect(probeSandbox(ctx)).toBe(sandbox);
+    expect(probeSandboxPolicy(ctx)).toBe(sandboxPolicy);
+  });
+
+  it("answers absent, never a fabricated service, when nothing resolves", () => {
+    // The guard throws AND the named-resolver answers nothing: both probes must
+    // report absence, which is what makes a confined command fail closed.
+    const throwingGet = {
+      get: () => {
+        throw new Error("no such service");
+      },
+      sandbox: undefined,
+      sandboxPolicy: undefined,
+    } as never;
+    expect(probeSandbox(throwingGet)).toBeUndefined();
+    expect(probeSandboxPolicy(throwingGet)).toBeUndefined();
+    // And a non-conforming value is refused by duck typing.
+    expect(probeSandbox({ get: (name: string) => (name === "sandbox" ? { nope: 1 } : undefined) } as never)).toBeUndefined();
+    expect(probeSandboxPolicy({ get: (name: string) => (name === "sandboxPolicy" ? { nope: 1 } : undefined) } as never)).toBeUndefined();
   });
 });

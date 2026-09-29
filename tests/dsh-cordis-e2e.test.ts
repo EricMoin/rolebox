@@ -37,7 +37,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Context, Service } from "@deepseek-ai/cordis";
 import SystemPrompt, { renderPrompt } from "@deepseek-ai/dsh-system-prompt";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -608,6 +608,42 @@ describe("rolebox plugin on a real cordis Context", () => {
     // settled on the microtask loop.
     expect(tools.tools).toHaveLength(0);
     expect(subagents.providers.size).toBe(0);
+  });
+
+  /**
+   * Regression: opening the graph runtime must not touch the optional
+   * confinement services as bare properties. The graph runtime is opened
+   * lazily by the FIRST graph tool call, so a boot-only test cannot see that
+   * path at all — this invokes a graph tool and requires the normal business
+   * answer rather than an activation failure.
+   *
+   * The cordis guard itself ("cannot get property ... without inject") only
+   * fires inside the plugin's own fiber proxy, not on the root Context this
+   * fixture holds, so the guard is reproduced directly against the exported
+   * probes in tests/platform/dsh-tool-factory.test.ts instead of here.
+   */
+  it("opening the graph runtime does not require the optional confinement services", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { tools, fiber } = await bootPlugin({ roleboxDir: tmpDir });
+
+    const status = tools.tools.find((t) => t.name === "graph_status");
+    expect(status).toBeDefined();
+    const reading = await status!.execute(
+      { graph_id: "no-such-graph", format: "json" },
+      {
+        // The canonical context is derived from the running AGENT's session
+        // header (`toCanonicalContext` reads `agent.session.header.cwd`), and
+        // the graph runtime requires that workspace to be absolute — so this
+        // is mounted in the real run-time shape rather than as loose fields.
+        agent: { id: "tester", session: { id: "ses_e2e", header: { cwd: realpathSync(tmpDir) } } },
+        callId: "m1",
+        signal: new AbortController().signal,
+      } as never,
+    );
+    expect(String(reading)).not.toContain("without inject");
+
+    fiber.dispose();
+    await new Promise((r) => setTimeout(r, 10));
   });
 });
 

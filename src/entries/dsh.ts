@@ -987,6 +987,69 @@ function probeSkillRegistry(
 }
 
 /**
+ * Structurally probe the cordis ctx for the host's process-confinement seam
+ * (`@deepseek-ai/dsh-sandbox`, structural subset — see {@link DshSandboxService}).
+ *
+ * This service is deliberately NOT in the `inject` roster: rolebox consumes it
+ * only to confine `graph_worker_exec` commands, and an optional service must not
+ * gate plugin activation. It is therefore resolved structurally — the direct
+ * `ctx.sandbox` property read can throw before the dependency is injected
+ * ("cannot get property without inject") and a service mounted by a SIBLING
+ * plugin fiber throws on the property-resolver walk, so a throw falls through to
+ * the named-service resolver `ctx.get("sandbox")`. The value is consumed by duck
+ * typing (`confine`), so a missing `get`, a throw, or a non-conforming value all
+ * resolve to "absent" — and an absent service refuses a confined command rather
+ * than running it unconfined.
+ */
+export function probeSandbox(ctx: DshPluginContext): DshSandboxService | undefined {
+  let service: unknown;
+  try {
+    service = ctx.sandbox;
+  } catch {
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("sandbox");
+    } catch {
+      return undefined;
+    }
+  }
+  if (service !== undefined && service !== null && typeof (service as { confine?: unknown }).confine === "function") {
+    return service as DshSandboxService;
+  }
+  return undefined;
+}
+
+/**
+ * Structurally probe the cordis ctx for the host's session-policy resolver
+ * (`@deepseek-ai/dsh-sandbox-policy`, structural subset — see
+ * {@link DshSandboxPolicyService}), with the same optional-service discipline as
+ * {@link probeSandbox}: not in the `inject` roster, direct property read then
+ * named-service fallback, duck typed on `resolve`. An absent resolver refuses a
+ * worker command rather than letting it run at an unstated boundary.
+ */
+export function probeSandboxPolicy(ctx: DshPluginContext): DshSandboxPolicyService | undefined {
+  let service: unknown;
+  try {
+    service = ctx.sandboxPolicy;
+  } catch {
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("sandboxPolicy");
+    } catch {
+      return undefined;
+    }
+  }
+  if (service !== undefined && service !== null && typeof (service as { resolve?: unknown }).resolve === "function") {
+    return service as DshSandboxPolicyService;
+  }
+  return undefined;
+}
+
+/**
  * Structurally probe the cordis ctx for the dsh llm service
  * (`ctx.llm`, `@deepseek-ai/dsh-llm`).
  *
@@ -1397,7 +1460,7 @@ export async function apply(
         // states the mode the host resolves for the request (its deployment default);
         // each command's own result carries the authoritative mode and enforcement.
         const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory,
-          resolveDshWorkerCommandBoundary(ctx.sandboxPolicy, ctx.sandbox));
+          resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)));
         return workerBoundary!.start(label, start, prompt);
       },
       workerTools: DSH_GRAPH_WORKER_TOOLS,
@@ -1683,7 +1746,7 @@ export async function apply(
 
     return { host: outcomeHost, application: graphApplication, delivery: outcomeDelivery,
       tools: runtimeTools, workspace, storeRoot: outcomeStoreRoot,
-      sandbox: ctx.sandbox, sandboxPolicy: ctx.sandboxPolicy,
+      sandbox: probeSandbox(ctx), sandboxPolicy: probeSandboxPolicy(ctx),
       sessionOf: (sessionId: string) => ctx.sessions.get(sessionId) };
   }
   function graphRuntime(directory: string) {
