@@ -63,6 +63,18 @@ describe("system registry", () => {
     for (const system of SYSTEM_REGISTRY) expect(system.label, system.id).toBe(labels[system.id]);
   });
 
+  it("declares directory-entry durability for every system", () => {
+    const canSyncDirectoryEntries: Record<SystemId, boolean> = {
+      darwin: true,
+      linux: true,
+      win32: false,
+      posix: true,
+    };
+    for (const system of SYSTEM_REGISTRY) {
+      expect(system.canSyncDirectoryEntries, system.id).toBe(canSyncDirectoryEntries[system.id]);
+    }
+  });
+
   it("states shell guidance for every system", () => {
     for (const system of SYSTEM_REGISTRY) {
       expect(system.shellHint.length, system.id).toBeGreaterThan(20);

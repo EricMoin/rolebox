@@ -27,6 +27,7 @@ function posixFamilyDescriptor(id: SystemId, label: string): SystemDescriptor {
   return {
     id,
     label,
+    canSyncDirectoryEntries: true,
     browserCaches(home) {
       return {
         playwright: posix.join(home, ".cache", "ms-playwright"),
@@ -51,6 +52,7 @@ function posixFamilyDescriptor(id: SystemId, label: string): SystemDescriptor {
 const darwinDescriptor: SystemDescriptor = {
   id: "darwin",
   label: "macOS",
+  canSyncDirectoryEntries: true,
   browserCaches(home) {
     return {
       playwright: posix.join(home, "Library", "Caches", "ms-playwright"),
@@ -83,6 +85,7 @@ const darwinDescriptor: SystemDescriptor = {
 const win32Descriptor: SystemDescriptor = {
   id: "win32",
   label: "Windows",
+  canSyncDirectoryEntries: false,
   browserCaches(home) {
     return {
       playwright: win32.join(home, "AppData", "Local", "ms-playwright"),

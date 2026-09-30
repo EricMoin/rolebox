@@ -6,8 +6,9 @@ import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { loadGraphStoreSync } from "../../src/graph/store/load.ts";
 import { GRAPH_STORE_FORMAT_VERSION, GRAPH_STORE_TABLES, graphStoreFilePath } from "../../src/graph/store/schema.ts";
-import { initializeStoreIdentity, storeIdentityPath } from "../../src/graph/store/identity.ts";
+import { initializeStoreIdentity, readStoreIdentity, storeIdentityPath } from "../../src/graph/store/identity.ts";
 import { createDatabaseSync } from "../../src/memory/db-driver.ts";
+import { setPlatformForTest } from "../../src/platform/system/index.ts";
 
 const roots: string[] = [];
 function root(): string {
@@ -120,4 +121,33 @@ it("refuses missing or malformed markers and fences an already open handle", () 
     expect(() => store.get("SELECT 1")).toThrow("disappeared");
     expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
   } finally { store.close(); }
+});
+
+/**
+ * Simulation, not a Windows execution: this host cannot run win32, so the win32
+ * descriptor is selected through the platform seam and the open is exercised
+ * here. The point is that the durability step Windows cannot perform is the one
+ * the store now skips — an unguarded directory fsync would make every store open
+ * fail on Windows, which is what the CI windows-latest lane reported.
+ */
+it("simulates the Windows path: a win32 host initializes, verifies and reuses one store id", () => {
+  const directory = root();
+  const file = graphStoreFilePath(directory);
+  setPlatformForTest("win32");
+  try {
+    const first = GraphStore.openFile(directory);
+    const storeId = readStoreIdentity(file);
+    try {
+      expect(existsSync(storeIdentityPath(file))).toBe(true);
+      expect(first.get(`SELECT store_id FROM ${GRAPH_STORE_TABLES.meta}`)).toEqual({ store_id: storeId });
+    } finally { first.close(); }
+    const second = GraphStore.openFile(directory);
+    try {
+      expect(readStoreIdentity(file)).toBe(storeId);
+      expect(second.get(`SELECT store_id FROM ${GRAPH_STORE_TABLES.meta}`)).toEqual({ store_id: storeId });
+    } finally { second.close(); }
+    const loaded = loadGraphStoreSync(directory);
+    expect(loaded.kind).toBe("valid");
+    if (loaded.kind === "valid") loaded.value.close();
+  } finally { setPlatformForTest(undefined); }
 });

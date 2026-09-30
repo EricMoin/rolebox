@@ -43,6 +43,14 @@ export interface SystemDescriptor {
   readonly id: SystemId;
   /** Human-readable label for diagnostics (never used to branch on). */
   readonly label: string;
+  /**
+   * Whether this OS lets Node fsync a DIRECTORY handle — the POSIX idiom that
+   * makes a newly written directory entry (the new file's name) durable.
+   * Windows has no equivalent through Node, so a caller skips the sync there and
+   * relies on the filesystem's metadata journaling instead; the POSIX family
+   * keeps the sync, so a crash cannot lose the entry.
+   */
+  readonly canSyncDirectoryEntries: boolean;
   /** The installed Playwright/Puppeteer cache locations under a REAL home. */
   browserCaches(home: string): { playwright: string; puppeteer: string };
   /** The variables that point software at the disposable directories. */

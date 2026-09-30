@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DatabaseDriver } from "../../memory/db-driver.ts";
+import { getSystem } from "../../platform/system/index.ts";
 import { GraphStoreFormatError } from "./errors.ts";
 import { GRAPH_STORE_FORMAT_VERSION, GRAPH_STORE_TABLES } from "./schema.ts";
 
@@ -31,8 +32,15 @@ export function initializeStoreIdentity(filePath: string): string {
     writeFileSync(fd, JSON.stringify({ version: 1, storeId }) + "\n");
     fsyncSync(fd);
   } finally { closeSync(fd); }
-  const directory = openSync(dirname(marker), "r");
-  try { fsyncSync(directory); } finally { closeSync(directory); }
+  // POSIX durability: the marker's own fd fsync above does not make its new
+  // NAME durable, so the containing directory is fsynced too. Windows has no
+  // equivalent through Node (a directory handle cannot be flushed that way), so
+  // the step is skipped there and the entry relies on the filesystem journaling
+  // its metadata — the surface's own canSyncDirectoryEntries fact decides.
+  if (getSystem().canSyncDirectoryEntries) {
+    const directory = openSync(dirname(marker), "r");
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  }
   return storeId;
 }
 
