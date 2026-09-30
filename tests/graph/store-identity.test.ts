@@ -9,6 +9,7 @@ import { GRAPH_STORE_FORMAT_VERSION, GRAPH_STORE_TABLES, graphStoreFilePath } fr
 import { initializeStoreIdentity, readStoreIdentity, storeIdentityPath } from "../../src/graph/store/identity.ts";
 import { createDatabaseSync } from "../../src/memory/db-driver.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";
+import { moveStoreRootAside, vanishStoreDatabase } from "./helpers/vanish-store.ts";
 
 const roots: string[] = [];
 function root(): string {
@@ -117,7 +118,34 @@ it("refuses missing or malformed markers and fences an already open handle", () 
     rmSync(marker);
     expect(() => GraphStore.openFile(directory)).toThrow("missing or malformed");
     writeFileSync(marker, saved);
-    rmSync(graphStoreFilePath(directory));
+    // The store is OPEN here, and Windows refuses to unlink an entry an open
+    // handle holds; `vanishStoreDatabase` makes the same path disappear the way
+    // that platform allows, so the fence below is exercised on both families.
+    vanishStoreDatabase(directory);
+    expect(() => store.get("SELECT 1")).toThrow("disappeared");
+    expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+  } finally { store.close(); }
+});
+
+/**
+ * The same fence for the platform that REFUSES the unlink — the branch Windows
+ * takes for an open database. A POSIX filesystem would unlink the entry happily,
+ * so this calls the fallback Windows reaches directly rather than pretending the
+ * refusal happened: the root is moved out of the way and recreated, which is
+ * exactly what `vanishStoreDatabase` does there, and the store's verdict on the
+ * disappearance is asserted unchanged.
+ */
+it("fences the store when the platform refuses to unlink the open database", () => {
+  const directory = root();
+  const store = GraphStore.openFile(directory);
+  const file = graphStoreFilePath(directory);
+  try {
+    const moved = moveStoreRootAside(directory);
+    expect(existsSync(moved)).toBe(true);
+    expect(existsSync(file)).toBe(false);
+    // The marker stays behind, which is what makes the recreated root still this
+    // store's directory rather than a new one.
+    expect(existsSync(storeIdentityPath(file))).toBe(true);
     expect(() => store.get("SELECT 1")).toThrow("disappeared");
     expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
   } finally { store.close(); }

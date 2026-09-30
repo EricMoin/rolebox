@@ -7,6 +7,7 @@ import { openGraphWorkerChannel, invokeGraphWorkerChannel } from "../../src/grap
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import type { CanonicalToolDef } from "../../src/platform/types.ts";
+import { moveStoreRootAside, vanishStoreDatabase } from "./helpers/vanish-store.ts";
 
 const roots: string[] = [];
 const channels: Awaited<ReturnType<typeof openGraphWorkerChannel>>[] = [];
@@ -72,7 +73,25 @@ it("returns unavailable when its authoritative store disappears", async () => {
   const { root, open } = fixture();
   const channel = await open();
   const grant = channel.issue("worker");
-  rmSync(graphStoreFilePath(join(root, "store")));
+  // The channel's store is live here: on Windows the entry cannot be unlinked
+  // while that handle holds it, so it is made to disappear by moving it (see
+  // helpers/vanish-store.ts) — the same disappearance the POSIX unlink gives.
+  vanishStoreDatabase(join(root, "store"));
+  const response = await fetch(grant.endpoint, {
+    method: "POST", headers: { authorization: `Bearer ${grant.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ tool: "graph_submit_outcome", args: { value: "x" } }),
+  });
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ error: "Graph worker channel is unavailable" });
+});
+
+it("returns unavailable when its store root is moved out of the way", async () => {
+  const { root, open } = fixture();
+  const channel = await open();
+  const grant = channel.issue("worker");
+  // The branch Windows takes for the live entry: it cannot be unlinked there, so
+  // the whole store root is moved and recreated instead (helpers/vanish-store.ts).
+  moveStoreRootAside(join(root, "store"));
   const response = await fetch(grant.endpoint, {
     method: "POST", headers: { authorization: `Bearer ${grant.token}`, "content-type": "application/json" },
     body: JSON.stringify({ tool: "graph_submit_outcome", args: { value: "x" } }),
