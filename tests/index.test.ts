@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, lstatSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir as osTmpdir, homedir as osHomedir } from "node:os";
@@ -8,6 +8,7 @@ import type { Config } from "@opencode-ai/sdk";
 import RoleboxModule, { roleFunctionsMap } from "../src/entries/opencode.ts";
 import { getDataDir } from "../src/cli/paths.ts";
 import { graphStoreFilePath, graphStoreRoot } from "../src/graph/store/schema.ts";
+import { removeTempTree } from "./graph/helpers/temp-dirs.ts";
 import type { GraphDeclarationV3 } from "../src/graph/compiler/declaration-v3.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
 const RoleboxPlugin = RoleboxModule.server;
@@ -15,6 +16,7 @@ const RoleboxPlugin = RoleboxModule.server;
 let tmpDir: string;
 let originalXdg: string | undefined;
 let originalDataDir: string | undefined;
+let originalLogFile: string | undefined;
 
 /**
  * DATA-DIR REDIRECT — the declared-graph host the entry opens during `setup`
@@ -36,14 +38,52 @@ beforeEach(() => {
   originalDataDir = process.env.ROLEBOX_DATA_DIR;
   process.env.XDG_CONFIG_HOME = tmpDir;
   process.env.ROLEBOX_DATA_DIR = path.join(tmpDir, "data");
+  originalLogFile = process.env.ROLEBOX_LOG_FILE;
+  // LOG-FILE REDIRECT: `configureLogDirectory` (src/entries/opencode.ts) points
+  // the process-wide file logger at the workspace, i.e. at
+  // `<tmpDir>/.rolebox/logs/rolebox.log`, and the transport's write stream is
+  // released only at process exit. That is one more open handle inside the tree
+  // this file's `afterEach` removes — the same EBUSY on Windows — and it is not
+  // what any case here asserts. `ROLEBOX_LOG_FILE` wins the resolution chain
+  // (src/logger.ts:resolveLogFilePath), so the stream lands outside every
+  // fixture tree; tests/logger.test.ts sets the same variable for the same
+  // reason.
+  process.env.ROLEBOX_LOG_FILE = path.join(
+    osTmpdir(),
+    "rolebox-idx-logs-" + process.pid + ".log",
+  );
 });
 
-afterEach(() => {
-  if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-  else process.env.XDG_CONFIG_HOME = originalXdg;
-  if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
-  else process.env.ROLEBOX_DATA_DIR = originalDataDir;
-  rmSync(tmpDir, { recursive: true, force: true });
+afterEach(async () => {
+  let firstError: unknown;
+  try {
+    // Dispose EVERY boot this case made, whether or not the case disposed it
+    // itself — `hooks.dispose` routes to the host's idempotent close chain, and
+    // the two cases that dispose explicitly are not harmed by a second call.
+    // The boot's host owns an open store connection under `<tmpDir>/data`, so
+    // leaving it open makes the tree removal below fail where an open handle is
+    // observable (Windows: `EBUSY: resource busy or locked, rm …`).
+    for (const hooks of bootedPluginHooks.splice(0)) {
+      try {
+        await hooks.dispose?.();
+      } catch (error) {
+        if (firstError === undefined) firstError = error;
+      }
+    }
+  } finally {
+    if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalXdg;
+    if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
+    else process.env.ROLEBOX_DATA_DIR = originalDataDir;
+    if (originalLogFile === undefined) delete process.env.ROLEBOX_LOG_FILE;
+    else process.env.ROLEBOX_LOG_FILE = originalLogFile;
+    try {
+      removeTempTree(tmpDir);
+    } catch (error) {
+      if (firstError === undefined) firstError = error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
 });
 
 // ── helpers ──────────────────────────────────────────────────────
@@ -92,13 +132,31 @@ function emptyConfig(): Config {
   return {};
 }
 
+/**
+ * Boot the plugin the way opencode does, and RECORD the hooks it returns.
+ *
+ * The boot opens the declared-graph host under `ROLEBOX_DATA_DIR`
+ * (`<tmpDir>/data/host/<workspaceHash>`), and that host owns an open store
+ * connection. Previously most cases here never disposed the hooks, so the
+ * connection outlived the test and the `afterEach` tree removal had to delete a
+ * directory holding a live handle. Every boot is released by the `afterEach`
+ * below, before the removal.
+ */
+const bootedPluginHooks: Hooks[] = [];
+
+async function bootPlugin(input: PluginInput): Promise<Hooks> {
+  const hooks = await RoleboxPlugin(input);
+  bootedPluginHooks.push(hooks);
+  return hooks;
+}
+
 // ── tests ────────────────────────────────────────────────────────
 
 describe("RoleboxPlugin config hook", () => {
   // Scenario 1: rolebox dir doesn't exist → no crash, no agents
   it("handles non-existent rolebox directory gracefully", async () => {
     const base = path.join(tmpDir, "no-such-dir");
-    const hooks = await RoleboxPlugin(createPluginInput(base));
+    const hooks = await bootPlugin(createPluginInput(base));
 
     const cfg = emptyConfig();
     await hooks.config!(cfg);
@@ -109,7 +167,7 @@ describe("RoleboxPlugin config hook", () => {
   // Scenario 1b: rolebox dir exists but is empty → no agents
   it("returns empty agents when rolebox dir has no roles", async () => {
     mkdirSync(roleboxPath(), { recursive: true });
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
 
     const cfg = emptyConfig();
     await hooks.config!(cfg);
@@ -120,7 +178,7 @@ describe("RoleboxPlugin config hook", () => {
   // Scenario 1c: config hook preserves existing agent entries
   it("preserves existing agent entries when no roles are found", async () => {
     mkdirSync(roleboxPath(), { recursive: true });
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
 
     const cfg: Config = {
       agent: { existing: { prompt: "keep-me", mode: "primary" } },
@@ -141,7 +199,7 @@ describe("RoleboxPlugin config hook", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -192,7 +250,7 @@ describe("RoleboxPlugin config hook", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -225,7 +283,7 @@ describe("RoleboxPlugin config hook", () => {
       "prompt: I am gamma.",
     ].join("\n"));
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -256,7 +314,7 @@ describe("RoleboxPlugin config hook", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -279,7 +337,7 @@ describe("RoleboxPlugin config hook", () => {
       "name: Minimal\ndescription: Bare minimum\nprompt: Hello.\n",
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -305,7 +363,7 @@ describe("RoleboxPlugin config hook", () => {
       "name: Defaulted\ndescription: No mode\nprompt: Let opencode decide.\n",
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -340,7 +398,7 @@ describe("RoleboxPlugin config hook", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -378,7 +436,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -408,7 +466,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -448,7 +506,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -478,7 +536,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -506,7 +564,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    await RoleboxPlugin(createPluginInput(tmpDir));
+    await bootPlugin(createPluginInput(tmpDir));
 
     const funcs = roleFunctionsMap.get("manager--helper");
     expect(funcs).toBeDefined();
@@ -532,7 +590,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -570,7 +628,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -599,7 +657,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -629,7 +687,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -669,7 +727,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -713,7 +771,7 @@ describe("RoleboxPlugin subagents", () => {
       ].join("\n"),
     );
 
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
     const cfg = emptyConfig();
     await hooks.config!(cfg);
 
@@ -764,7 +822,7 @@ describe("RoleboxPlugin declared-graph tools", () => {
 
   it("registers the five declared-graph tools on the returned handler map", async () => {
     mkdirSync(roleboxPath(), { recursive: true });
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
 
     const names = Object.keys(hooks.tool ?? {});
     for (const name of GRAPH_TOOL_NAMES) {
@@ -784,7 +842,7 @@ describe("RoleboxPlugin declared-graph tools", () => {
 
   it("opens the host's store root under the redirected data dir, not the real one", async () => {
     mkdirSync(roleboxPath(), { recursive: true });
-    await RoleboxPlugin(createPluginInput(tmpDir));
+    await bootPlugin(createPluginInput(tmpDir));
 
     // The host owns `<getDataDir()>/host/<workspaceHash>` and CREATES it when it
     // opens (src/graph/store/schema.ts:58-60; src/graph/host/execution-index.ts).
@@ -797,7 +855,7 @@ describe("RoleboxPlugin declared-graph tools", () => {
 
   it("keeps forwarding every event to the composition's own handler", async () => {
     mkdirSync(roleboxPath(), { recursive: true });
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
 
     // The returned `event` is the entry's WRAPPER, and the composition's own
     // handler is what it forwards to (`handleEvent` + the bus emit,
@@ -835,7 +893,7 @@ describe("RoleboxPlugin declared-graph tools", () => {
 
   it("returns a dispose that closes the declared-graph host", async () => {
     mkdirSync(roleboxPath(), { recursive: true });
-    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const hooks = await bootPlugin(createPluginInput(tmpDir));
 
     expect(typeof hooks.dispose).toBe("function");
     // Closing twice must be safe: `OpencodeGraphHost.close` is idempotent, and
@@ -989,7 +1047,7 @@ describe("RoleboxPlugin declared-graph run notifications", () => {
     // session adapter from `client`, hands that SAME adapter to the host as its
     // wake-up channel, and returns the handler map opencode iterates.
     const fake = fakeOpencodeClient();
-    const hooks = await RoleboxPlugin({ ...createPluginInput(tmpDir), client: fake.client });
+    const hooks = await bootPlugin({ ...createPluginInput(tmpDir), client: fake.client });
 
     try {
       const declared = JSON.parse(

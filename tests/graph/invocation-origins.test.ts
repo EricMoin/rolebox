@@ -17,13 +17,20 @@
  * as "no origins".
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
 import { HostInvocationOrigins } from "../../src/graph/host/invocation-origins.ts";
 import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";
 import { graphStoreFilePath } from "../../src/graph/store/schema.ts";
-import { makeTmpDir } from "./helpers/host-graph-fixture.ts";
+import { makeTmpDir, removeTempDirs } from "./helpers/host-graph-fixture.ts";
+import { trackFixtureStore } from "./helpers/temp-dirs.ts";
+
+afterEach(() => {
+  // Release the stores these cases opened, then remove each tree ONCE — a
+  // removal that throws must not leave the directory queued for a later sweep.
+  removeTempDirs();
+});
 
 describe("HostInvocationOrigins", () => {
   it("records one origin per graph and replaces it when the invocation changes", () => {
@@ -54,14 +61,14 @@ describe("HostInvocationOrigins", () => {
 
   it("reads its durable record back in a later process", () => {
     const root = makeTmpDir("invocation-origins-durable-");
-    const first = HostInvocationOrigins.open({ root, durability: "file" });
+    const first = trackFixtureStore(root, HostInvocationOrigins.open({ root, durability: "file" }));
     first.record("graph.a", { sessionId: "session-1", agent: "agent.one" });
     first.record("graph.b", { sessionId: "session-2" });
     // The record lives in the workspace's graph store: no second authority file.
     expect(existsSync(graphStoreFilePath(root))).toBe(true);
     expect(existsSync(root + "/host-invocation-origins.json")).toBe(false);
 
-    const second = HostInvocationOrigins.open({ root, durability: "file" });
+    const second = trackFixtureStore(root, HostInvocationOrigins.open({ root, durability: "file" }));
     expect(second.get("graph.a")).toEqual({ sessionId: "session-1", agent: "agent.one" });
     expect(second.get("graph.b")).toEqual({ sessionId: "session-2" });
     expect(second.graphIds()).toEqual(["graph.a", "graph.b"]);
@@ -72,7 +79,9 @@ describe("HostInvocationOrigins", () => {
     const origins = HostInvocationOrigins.open({ root, durability: "memory" });
     origins.record("graph.a", { sessionId: "session-1" });
     expect(existsSync(graphStoreFilePath(root))).toBe(false);
-    expect(HostInvocationOrigins.open({ root }).get("graph.a")).toBeUndefined();
+    // THE DEFAULT DURABILITY IS `file`: this open owns a connection too, so
+    // the fixture teardown has to release it like the two durable ones above.
+    expect(trackFixtureStore(root, HostInvocationOrigins.open({ root })).get("graph.a")).toBeUndefined();
   });
 
   it("refuses a store file it cannot read instead of treating it as empty", () => {
@@ -101,7 +110,7 @@ describe("HostInvocationOrigins", () => {
 
   it("stores its record in the same file as the acceptance ledger", async () => {
     const root = makeTmpDir("invocation-origins-one-store-");
-    const origins = HostInvocationOrigins.open({ root, durability: "file" });
+    const origins = trackFixtureStore(root, HostInvocationOrigins.open({ root, durability: "file" }));
     origins.record("graph.a", { sessionId: "session-1" });
     const { SqliteAcceptanceLedger } = await import(
       "../../src/graph/ledger/sqlite-ledger.ts"

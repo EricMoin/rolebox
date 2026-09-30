@@ -12,12 +12,13 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { Hooks, PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
 
+import { removeTempTree } from "./graph/helpers/temp-dirs.ts";
 import { discoverRoles } from "../src/loader/role-loader.js";
 import { resolveSkills } from "../src/resolver/skill-resolver.js";
 import { buildAgentPrompt } from "../src/prompt/builder.js";
@@ -278,6 +279,7 @@ describe("End-to-end", () => {
 
       const originalXdg = process.env.XDG_CONFIG_HOME;
       const originalDataDir = process.env.ROLEBOX_DATA_DIR;
+      const originalLogFile = process.env.ROLEBOX_LOG_FILE;
       process.env.XDG_CONFIG_HOME = tmpDir;
       // DATA-DIR REDIRECT: `RoleboxPlugin` opens the declared-graph host during
       // setup, and opening it CREATES `<getDataDir()>/host/<workspaceHash>`
@@ -285,7 +287,16 @@ describe("End-to-end", () => {
       // ROLEBOX_DATA_DIR first (src/cli/paths.ts:61-86), so without this the
       // boot below writes into the developer's real data directory.
       process.env.ROLEBOX_DATA_DIR = path.join(tmpDir, "data");
+      // LOG-FILE REDIRECT: the boot's file logger is a process-wide stream that
+      // `configureLogDirectory` points at the workspace — a handle inside the
+      // tree the finally below removes, which fails on Windows (EBUSY). Nothing
+      // here asserts on the log file, so it goes to the OS temp root instead.
+      process.env.ROLEBOX_LOG_FILE = path.join(
+        osTmpdir(),
+        "rolebox-e2e-logs-" + process.pid + ".log",
+      );
 
+      let hooks: Hooks | undefined;
       try {
         cpSync(
           path.join(examplesDir, "code-reviewer"),
@@ -298,7 +309,7 @@ describe("End-to-end", () => {
           { recursive: true },
         );
 
-        const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+        hooks = await RoleboxPlugin(createPluginInput(tmpDir));
         const cfg = emptyConfig();
         await hooks.config!(cfg);
 
@@ -326,11 +337,17 @@ describe("End-to-end", () => {
         expect("model" in tw).toBe(false);
         expect("color" in tw).toBe(false);
       } finally {
+        // The boot's declared-graph host owns an open store connection under
+        // `<tmpDir>/data`; disposing it is what releases that connection before
+        // the tree is removed (Windows: an open handle makes the removal EBUSY).
+        await hooks?.dispose?.();
         if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
         else process.env.XDG_CONFIG_HOME = originalXdg;
         if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
         else process.env.ROLEBOX_DATA_DIR = originalDataDir;
-        rmSync(tmpDir, { recursive: true, force: true });
+        if (originalLogFile === undefined) delete process.env.ROLEBOX_LOG_FILE;
+        else process.env.ROLEBOX_LOG_FILE = originalLogFile;
+        removeTempTree(tmpDir);
       }
     });
 
@@ -341,9 +358,19 @@ describe("End-to-end", () => {
 
       const originalXdg = process.env.XDG_CONFIG_HOME;
       const originalDataDir = process.env.ROLEBOX_DATA_DIR;
+      const originalLogFile = process.env.ROLEBOX_LOG_FILE;
       process.env.XDG_CONFIG_HOME = tmpDir;
       process.env.ROLEBOX_DATA_DIR = path.join(tmpDir, "data");
+      // LOG-FILE REDIRECT: the boot's file logger is a process-wide stream that
+      // `configureLogDirectory` points at the workspace — a handle inside the
+      // tree the finally below removes, which fails on Windows (EBUSY). Nothing
+      // here asserts on the log file, so it goes to the OS temp root instead.
+      process.env.ROLEBOX_LOG_FILE = path.join(
+        osTmpdir(),
+        "rolebox-e2e-logs-" + process.pid + ".log",
+      );
 
+      let hooks: Hooks | undefined;
       try {
         cpSync(
           path.join(examplesDir, "team-lead"),
@@ -351,7 +378,7 @@ describe("End-to-end", () => {
           { recursive: true },
         );
 
-        const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+        hooks = await RoleboxPlugin(createPluginInput(tmpDir));
         const cfg = emptyConfig();
         await hooks.config!(cfg);
 
@@ -389,11 +416,17 @@ describe("End-to-end", () => {
         expect(impl.prompt).not.toContain("<available_subagents>");
         expect(res.prompt).not.toContain("<available_subagents>");
       } finally {
+        // The boot's declared-graph host owns an open store connection under
+        // `<tmpDir>/data`; disposing it is what releases that connection before
+        // the tree is removed (Windows: an open handle makes the removal EBUSY).
+        await hooks?.dispose?.();
         if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
         else process.env.XDG_CONFIG_HOME = originalXdg;
         if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
         else process.env.ROLEBOX_DATA_DIR = originalDataDir;
-        rmSync(tmpDir, { recursive: true, force: true });
+        if (originalLogFile === undefined) delete process.env.ROLEBOX_LOG_FILE;
+        else process.env.ROLEBOX_LOG_FILE = originalLogFile;
+        removeTempTree(tmpDir);
       }
     });
   });

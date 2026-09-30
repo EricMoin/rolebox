@@ -9,7 +9,7 @@
  * surfaces read).
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ import type { GraphDeclarationV3 } from "../../../src/graph/compiler/declaration
 import { OutcomeHost } from "../../../src/graph/host/outcome-host.ts";
 import type { OutcomeDispatchRequest } from "../../../src/graph/outcome/runtime.ts";
 import { createValidatorRegistry } from "../../../src/graph/outcome/validators.ts";
+import { removeTempTrees } from "./temp-dirs.ts";
 import {
   completionPolicyRefOf,
   createCompletionPolicyRegistry,
@@ -100,8 +101,27 @@ export function makeTmpDir(prefix: string): string {
   return dir;
 }
 
+/**
+ * Release and remove every tree `makeTmpDir` handed out. A test file that uses
+ * this fixture calls it from an `afterEach`, so nothing outlives the case; the
+ * exit handler below is the last resort for a tree a file never swept.
+ */
+export function removeTempDirs(): void {
+  removeTempTrees(tmpDirs);
+}
+
 process.on("exit", () => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+  // Release the stores each tree holds BEFORE removing it: this helper's
+  // registry lives until the process exits, so an unclosed fixture connection
+  // would make the removal fail on Windows (EBUSY) in every file that uses it.
+  for (const dir of tmpDirs) {
+    try {
+      removeTempDirs();
+    } catch {
+      // Nothing can be reported from an exit handler; each test file's own
+      // teardown is the reporting path.
+    }
+  }
 });
 
 /** One host over one store root, with the deliveries it was handed recorded. */

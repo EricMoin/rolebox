@@ -11,17 +11,17 @@
  * first-execution/restart behaviour.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -347,6 +347,18 @@ describe("OutcomeHost.recoverDeclaredGraphs — first execution and restart", ()
   });
 });
 
+afterEach(() => {
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
+});
+
 process.on("exit", () => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+  // Last resort for a tree a case built outside a test: release the stores
+  // first, then remove. Nothing can be reported from an exit handler.
+  try {
+    removeTempTrees(tmpDirs);
+  } catch {
+    // The tree is left behind rather than reported: the process is leaving.
+  }
 });

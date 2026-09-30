@@ -32,7 +32,8 @@ import { approvalPolicyFor } from "./helpers/approval-policy.ts";
  */
 
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -106,8 +107,9 @@ function makeTmpDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
 });
 
 /** A canonical tool context, as a platform hands one to a tool call. */

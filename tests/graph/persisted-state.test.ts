@@ -11,7 +11,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -103,7 +104,7 @@ describe("stored-graph scanner", () => {
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempTree(dir);
   });
 
   it("returns an empty result for a missing store (never throws)", () => {

@@ -22,12 +22,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DshOutcomeDelivery } from "../src/platform/adapters/dsh/outcome-dispatch.ts";
 import { OutcomeHost } from "../src/graph/host/outcome-host.ts";
 import { HostExecutionIndex } from "../src/graph/host/execution-index.ts";
+import { removeTempTree } from "./graph/helpers/temp-dirs.ts";
 import {
   dispatchEffectKeyOf,
   type OutcomeDispatchEffectKey,
@@ -241,7 +242,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+  // Release the fixture's stores, then remove the tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTree(tmpDir);
 });
 
 
@@ -704,9 +707,16 @@ describe("the real host execution-id flow over the production dsh delivery", () 
     try {
       // THE DURABLE REGISTRY ANSWERS THE PLATFORM'S ID, in the 'created' state —
       // not 'pending', not 'creating', and not an id this test invented.
-      const row = HostExecutionIndex.open({ root: flow.storeRoot }).read(flow.effect);
-      expect(row?.state).toBe("created");
-      expect(row?.execution?.executionId).toBe(flow.platformRunId);
+      const index = HostExecutionIndex.open({ root: flow.storeRoot });
+      try {
+        const row = index.read(flow.effect);
+        expect(row?.state).toBe("created");
+        expect(row?.execution?.executionId).toBe(flow.platformRunId);
+      } finally {
+        // The registry's connection is NOT the host's: an index read inline and
+        // dropped would keep the store file open inside the temp tree.
+        index.close();
+      }
       expect(flow.host.dispatch.lookup(flow.effect).kind).toBe("created");
 
       // THE CREDENTIAL REACHES THE DISPATCH REQUEST — the one channel that
@@ -778,9 +788,16 @@ describe("the real host execution-id flow over the production dsh delivery", () 
     });
     try {
       expect(second.dispatch.lookup(flow.effect).kind).toBe("created");
-      const row = HostExecutionIndex.open({ root: flow.storeRoot }).read(flow.effect);
-      expect(row?.state).toBe("created");
-      expect(row?.execution?.executionId).toBe(platformRunId);
+      const index = HostExecutionIndex.open({ root: flow.storeRoot });
+      try {
+        const row = index.read(flow.effect);
+        expect(row?.state).toBe("created");
+        expect(row?.execution?.executionId).toBe(platformRunId);
+      } finally {
+        // The registry's connection is NOT the host's: an index read inline and
+        // dropped would keep the store file open inside the temp tree.
+        index.close();
+      }
     } finally {
       second.close();
     }

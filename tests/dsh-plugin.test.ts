@@ -34,6 +34,7 @@
 import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { load } from "js-yaml";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { removeTempTree } from "./graph/helpers/temp-dirs.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -552,6 +553,45 @@ function roleIds(res: { text: string }): string[] {
   return (JSON.parse(res.text) as Array<{ id: string }>).map((role) => role.id);
 }
 
+/**
+ * Disposers from this file's boots that the case has not released yet.
+ *
+ * `apply()` opens the declared-graph host under `ROLEBOX_DATA_DIR`
+ * (`tmpDataDir`), and the host owns a store connection. A case that asserts
+ * before calling its `disposer()`, or that boots a second plugin without
+ * releasing the first, leaves that connection open inside the temp directory —
+ * and the `afterEach` below cannot remove a directory holding a live handle
+ * (Windows: `EBUSY: resource busy or locked, rm …`).
+ */
+const pendingDisposers = new Set<DshPluginDisposer>();
+
+/**
+ * `apply()` with an UNCONDITIONALLY RELEASABLE disposer: a second call is a
+ * no-op, so the `afterEach` can release whatever a case left behind without
+ * releasing anything twice. The caller sees the boot's own `stats` and reload
+ * seam; the disposer it gets is the one that closes the boot.
+ */
+async function applyTracked(
+  ctx: DshPluginContext,
+  config: DshPluginConfig,
+): Promise<DshPluginDisposer> {
+  const released = { value: false };
+  const boot = await apply(ctx, config);
+  const tracked = Object.assign(
+    (): void => {
+      if (released.value) return;
+      released.value = true;
+      boot();
+    },
+    {
+      stats: boot.stats,
+      registerRoleSnapshotTools: boot.registerRoleSnapshotTools,
+    },
+  );
+  pendingDisposers.add(tracked);
+  return tracked;
+}
+
 let tmpDataDir: string;
 let priorDataDir: string | undefined;
 beforeEach(() => {
@@ -562,10 +602,33 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (priorDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
-  else process.env.ROLEBOX_DATA_DIR = priorDataDir;
-  rmSync(tmpDir, { recursive: true, force: true });
-  rmSync(tmpDataDir, { recursive: true, force: true });
+  let firstError: unknown;
+  try {
+    // Release every boot this case did not release itself, BEFORE the removal:
+    // each boot's host owns a store connection inside `tmpDataDir`.
+    for (const disposer of [...pendingDisposers]) {
+      pendingDisposers.delete(disposer);
+      try {
+        disposer();
+      } catch (error) {
+        if (firstError === undefined) firstError = error;
+      }
+    }
+  } finally {
+    if (priorDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
+    else process.env.ROLEBOX_DATA_DIR = priorDataDir;
+    for (const dir of [tmpDir, tmpDataDir]) {
+      try {
+        // Each tree is removed ONCE and the list is dropped with it, so a
+        // removal that throws cannot leave the directory queued for the next
+        // sweep (that is what turned one leaked handle into 27 failures).
+        removeTempTree(dir);
+      } catch (error) {
+        if (firstError === undefined) firstError = error;
+      }
+    }
+  }
+  if (firstError !== undefined) throw firstError;
 });
 
 // ── Plugin shape ───────────────────────────────────────────────────────────
@@ -693,7 +756,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools, providers, listeners } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const stats: DshPluginStats = disposer.stats;
 
     // Role discovery/resolution against the temp dir.
@@ -739,7 +802,7 @@ describe("dsh plugin apply()", () => {
       },
     };
     const { ctx: ctxAgents } = createFakeCtx({ agents });
-    const disposerWith = await apply(
+    const disposerWith = await applyTracked(
       ctxAgents,
       { roleboxDir: tmpDir } as DshPluginConfig,
     );
@@ -753,7 +816,7 @@ describe("dsh plugin apply()", () => {
     // documented no-op (the F6 notifier logs the degraded reminder). The
     // injector is NOT wired, so the boot does not gate on it.
     const { ctx: ctxNoAgents } = createFakeCtx();
-    const disposerWithout = await apply(
+    const disposerWithout = await applyTracked(
       ctxNoAgents,
       { roleboxDir: tmpDir } as DshPluginConfig,
     );
@@ -795,7 +858,7 @@ describe("dsh plugin apply()", () => {
     });
     let disposer: DshPluginDisposer | undefined;
     try {
-      disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
       const byName = new Map(tools.registeredTools.map((t) => [t.name, t]));
       const exec = {
         signal: new AbortController().signal,
@@ -919,7 +982,7 @@ describe("dsh plugin apply()", () => {
       const requests: DshSubagentStartRequest[] = [];
       const workerSections: string[] = [];
       const workerContexts: string[] = [];
-      disposer = await apply(fixture.ctx, {
+      disposer = await applyTracked(fixture.ctx, {
         roleboxDir: tmpDir,
         onSpawn: async (_definition, request) => {
           const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: { presentAs: () => () => {} } } };
@@ -965,7 +1028,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     // The intersection tool set spans multiple namespaces.
@@ -980,7 +1043,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["hashline", "web"],
     } as DshPluginConfig);
@@ -999,7 +1062,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["*", "!web"],
     } as DshPluginConfig);
@@ -1024,13 +1087,13 @@ describe("dsh plugin apply()", () => {
 
     // Baseline: the same boot with the filter absent — the full compiled set.
     const unfiltered = createFakeCtx();
-    const unfilteredDisposer = await apply(unfiltered.ctx, {
+    const unfilteredDisposer = await applyTracked(unfiltered.ctx, {
       roleboxDir: tmpDir,
     } as DshPluginConfig);
     const allKeys = unfiltered.tools.registeredTools.map((t) => t.name);
 
     const { ctx, tools } = createFakeCtx();
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["!web"],
     } as DshPluginConfig);
@@ -1054,7 +1117,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["hashline", "memory", "!hashline_edit"],
     } as DshPluginConfig);
@@ -1073,7 +1136,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["*", "!interactive_terminal"],
     } as DshPluginConfig);
@@ -1090,7 +1153,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: [" hashline ", "!", "  "],
     } as DshPluginConfig);
@@ -1119,7 +1182,7 @@ describe("dsh plugin apply()", () => {
     });
 
     const { ctx } = createFakeCtx();
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["hashline"],
     } as DshPluginConfig);
@@ -1167,7 +1230,7 @@ describe("dsh plugin apply()", () => {
 
     // Baseline boot — no filter: the whole compiled face, both paths.
     const unfiltered = createFakeCtx();
-    const unfilteredDisposer = await apply(unfiltered.ctx, {
+    const unfilteredDisposer = await applyTracked(unfiltered.ctx, {
       roleboxDir: tmpDir,
     } as DshPluginConfig);
     const allKeys = unfiltered.tools.registeredTools.map((t) => t.name);
@@ -1177,7 +1240,7 @@ describe("dsh plugin apply()", () => {
     // generation's `asset_*` keys, `!web` the main loop's `web_*` keys. Both
     // paths must therefore report, and neither may report the other's silence.
     const filtered = createFakeCtx();
-    const filteredDisposer = await apply(filtered.ctx, {
+    const filteredDisposer = await applyTracked(filtered.ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["*", "!asset", "!web"],
     } as DshPluginConfig);
@@ -1286,7 +1349,7 @@ describe("dsh plugin apply()", () => {
     const entries = captureLogEntries();
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     expect(keys).toContain("web_search");
@@ -1308,7 +1371,7 @@ describe("dsh plugin apply()", () => {
       takenTools: new Set(["web_search"]),
     });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     // The CANONICAL name is left to the host; rolebox registers the prefixed
@@ -1332,7 +1395,7 @@ describe("dsh plugin apply()", () => {
     // The canonical compile, from a boot with NOTHING taken: this is the
     // definition the rename must copy verbatim apart from `name`.
     const { ctx: canonicalCtx, tools: canonicalTools } = createFakeCtx();
-    const canonicalDisposer = await apply(canonicalCtx, {
+    const canonicalDisposer = await applyTracked(canonicalCtx, {
       roleboxDir: tmpDir,
     } as DshPluginConfig);
     const canonical = canonicalTools.registeredTools.find(
@@ -1343,7 +1406,7 @@ describe("dsh plugin apply()", () => {
     const { ctx, tools } = createFakeCtx({
       takenTools: new Set(["web_search"]),
     });
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const renamed = tools.registeredTools.find(
       (t) => t.name === "rb_web_search",
     );
@@ -1374,7 +1437,7 @@ describe("dsh plugin apply()", () => {
       takenTools: new Set(["web_search", "rb_web_search"]),
     });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     // Skipped — not renamed twice, not registered over the host's name.
@@ -1401,7 +1464,7 @@ describe("dsh plugin apply()", () => {
       },
     });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     expect(keys).toContain("web_search");
@@ -1414,7 +1477,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx({ noToolsLookup: true });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     expect(keys).toContain("web_search");
@@ -1431,7 +1494,7 @@ describe("dsh plugin apply()", () => {
       takenTools: new Set(["asset_search"]),
     });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     // The reload-managed generation goes through the same helper: the taken
@@ -1452,7 +1515,7 @@ describe("dsh plugin apply()", () => {
       takenTools: new Set(["graph_worker_exec"]),
     });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     // The worker guard matches `execution.name` by literal and the dispatch
@@ -1476,7 +1539,7 @@ describe("dsh plugin apply()", () => {
       },
     });
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["*", "!web"],
     } as DshPluginConfig);
@@ -1501,7 +1564,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("beta", SIMPLE_ROLE.replace("Test Role", "Beta"));
     const { ctx } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir, defaultRole: "beta" } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir, defaultRole: "beta" } as DshPluginConfig);
     const roles = disposer.stats.resolvedRoles;
 
     const alpha = roles.find((r) => r.id === "alpha");
@@ -1529,7 +1592,7 @@ describe("dsh plugin apply()", () => {
       };
     };
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       onSpawn,
     } as DshPluginConfig);
@@ -1580,7 +1643,7 @@ describe("dsh plugin apply()", () => {
       };
     };
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       onSpawn,
     } as DshPluginConfig);
@@ -1620,7 +1683,7 @@ describe("dsh plugin apply()", () => {
       };
     };
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       onSpawn,
     } as DshPluginConfig);
@@ -1658,7 +1721,7 @@ describe("dsh plugin apply()", () => {
       };
     };
 
-    const disposer = await apply(ctx, {
+    const disposer = await applyTracked(ctx, {
       roleboxDir: tmpDir,
       onSpawn,
     } as DshPluginConfig);
@@ -1686,7 +1749,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools, listeners } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     expect(tools.registeredTools.length).toBeGreaterThanOrEqual(1);
 
     disposer();
@@ -1710,7 +1773,7 @@ describe("dsh plugin apply()", () => {
     };
     const { ctx } = createFakeCtx({ webServer: fakeWebServer });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
     // The seam registered the COMPOSED /rolebox prefix route exactly once:
     // the real host webserver rejects duplicate (kind, path) registrations
@@ -1795,7 +1858,7 @@ describe("dsh plugin apply()", () => {
     };
     const { ctx } = createFakeCtx({ webServer: fakeWebServer });
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
     // Exactly ONE registration under /rolebox — no duplicate was attempted
     // and nothing was swallowed: BOTH route surfaces report registered, and
@@ -1847,7 +1910,7 @@ describe("dsh plugin apply()", () => {
           skills: true,
         });
 
-      const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
       const route = registered[0];
       expect(route).toBeDefined();
 
@@ -1942,7 +2005,7 @@ describe("dsh plugin apply()", () => {
     process.chdir(tmpDir);
     try {
       const { ctx } = createFakeCtx({ webServer: fakeWebServer });
-      const disposer = await apply(ctx, {
+      const disposer = await applyTracked(ctx, {
         roleboxDir: tmpDir,
         defaultRole: "tester",
       } as DshPluginConfig);
@@ -1974,7 +2037,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx } = createFakeCtx(); // no webServer — headless profile
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     expect(disposer.stats.webRouteRegistered).toBe(false);
     expect(disposer.stats.monitorRouteRegistered).toBe(false);
 
@@ -2008,7 +2071,7 @@ describe("dsh plugin apply()", () => {
         systemPrompt: true,
       });
 
-      const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
       const stats = disposer.stats;
 
       // The prompt double recorded the two contributions at their documented
@@ -2101,7 +2164,7 @@ describe("dsh plugin apply()", () => {
         webServer: fakeWebServer,
         systemPrompt: true,
       });
-      const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
       // Read side: the hydrated selection is live — the prompt section
       // resolves the active role seeded in the workspace sidecar.
@@ -2176,7 +2239,7 @@ describe("dsh plugin apply()", () => {
       );
 
       const { ctx } = createFakeCtx();
-      const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
       // Hydration is a read — no synchronous write happened during boot.
       expect(spy).not.toHaveBeenCalled();
@@ -2207,14 +2270,14 @@ describe("dsh plugin apply()", () => {
 
     // Baseline boot WITH the prompt seam present — the stats it reports.
     const withPrompt = createFakeCtx({ systemPrompt: true });
-    const baselineDisposer = await apply(withPrompt.ctx, {
+    const baselineDisposer = await applyTracked(withPrompt.ctx, {
       roleboxDir: tmpDir,
     } as DshPluginConfig);
 
     // No systemPrompt double (the default fake — headless profile): apply()
     // must not throw, must still resolve roles + register tools/agents...
     const { ctx, tools, providers } = createFakeCtx();
-    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const stats = disposer.stats;
 
     expect(stats.discovered).toBeGreaterThanOrEqual(1);

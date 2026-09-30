@@ -34,9 +34,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
+import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -219,7 +219,7 @@ async function withGateFixture<T>(
     });
   } finally {
     host?.close();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    removeTempTree(dir);
   }
 }
 

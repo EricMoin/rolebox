@@ -18,8 +18,9 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { join } from "node:path";
 
 import {
@@ -56,10 +57,20 @@ interface Roots {
   readonly root: string;
   readonly contentStoreRoot: string;
   readonly deliveryRoot: string;
+  /**
+   * The execution indexes this fixture's adapters opened. `withRoots` owns the
+   * list and closes every index in it BEFORE it removes the tree: a
+   * `HostExecutionIndex` holds a store connection, and an index opened inline
+   * inside the tree (as this fixture used to open one) makes the removal fail
+   * where an open handle is observable — Windows: `EBUSY: resource busy or
+   * locked, rm …`.
+   */
+  readonly executions: HostExecutionIndex[];
 }
 
 async function withRoots<T>(fn: (roots: Roots) => T | Promise<T>): Promise<T> {
   const root = mkdtempSync(join(tmpdir(), "p42-dispatch-inputs-"));
+  const executions: HostExecutionIndex[] = [];
   try {
     const contentStoreRoot = join(root, "host-store");
     mkdirSync(contentStoreRoot, { recursive: true });
@@ -67,9 +78,26 @@ async function withRoots<T>(fn: (roots: Roots) => T | Promise<T>): Promise<T> {
       root,
       contentStoreRoot,
       deliveryRoot: join(contentStoreRoot, "input-deliveries"),
+      executions,
     });
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    // Release what the fixture opened, then remove the tree. Every index is
+    // attempted and the first failure is rethrown, so a release that fails is
+    // reported once instead of blocking the removal behind it.
+    let firstError: unknown;
+    for (const index of executions.splice(0)) {
+      try {
+        index.close();
+      } catch (error) {
+        if (firstError === undefined) firstError = error;
+      }
+    }
+    try {
+      removeTempTree(root);
+    } catch (error) {
+      if (firstError === undefined) firstError = error;
+    }
+    if (firstError !== undefined) throw firstError;
   }
 }
 
@@ -86,13 +114,20 @@ function openAdapter(options: {
   readonly indexRoot: string;
   readonly recorded: RecordedDelivery[];
   readonly onDeliver?: () => void;
+  /**
+   * Where the execution index THIS CALL opens is parked, so the fixture that
+   * owns the tree closes it before the tree is removed.
+   */
+  readonly ownedIndexes: HostExecutionIndex[];
 }): HostOutcomeDispatch {
   const deliver: HostDispatchDelivery = (request, _effect, _invocation, inputView) => {
     options.recorded.push({ request, inputView });
     options.onDeliver?.();
   };
+  const executions = HostExecutionIndex.open({ root: options.indexRoot });
+  options.ownedIndexes.push(executions);
   return new HostOutcomeDispatch({
-    executions: HostExecutionIndex.open({ root: options.indexRoot }),
+    executions,
     deliver,
     ...(options.deliveryRoot === undefined
       ? {}
@@ -140,6 +175,7 @@ describe("HostOutcomeDispatch — the delivery seam receives a real input view",
         deliveryRoot: roots.deliveryRoot,
         indexRoot: join(roots.root, "index"),
         recorded,
+        ownedIndexes: roots.executions,
       });
       const request = requestOf([
         inputOf([{ ref: REF, artifactId: deposit.artifactId, digest: deposit.digest, size: deposit.size }]),
@@ -180,6 +216,7 @@ describe("HostOutcomeDispatch — the delivery seam receives a real input view",
         deliveryRoot: roots.deliveryRoot,
         indexRoot: join(roots.root, "index"),
         recorded,
+        ownedIndexes: roots.executions,
       });
       adapter.create(requestOf([]), dispatchEffectKeyOf(GRAPH, "review#2"));
       adapter.create(
@@ -204,6 +241,7 @@ describe("HostOutcomeDispatch — a view that cannot be built launches nothing",
         deliveryRoot: roots.deliveryRoot,
         indexRoot: join(roots.root, "index"),
         recorded,
+        ownedIndexes: roots.executions,
       });
       const missing = {
         ref: REF,
@@ -255,6 +293,7 @@ describe("HostOutcomeDispatch — a view that cannot be built launches nothing",
         deliveryRoot: roots.deliveryRoot,
         indexRoot: join(roots.root, "index"),
         recorded,
+        ownedIndexes: roots.executions,
       });
       const request = requestOf([inputOf([retainedRecord])]);
       const effect = dispatchEffectKeyOf(GRAPH, "review#2");
@@ -288,6 +327,7 @@ describe("HostOutcomeDispatch — a view that cannot be built launches nothing",
         deliveryRoot: undefined,
         indexRoot: join(roots.root, "index"),
         recorded,
+        ownedIndexes: roots.executions,
       });
       let caught: unknown;
       try {
@@ -332,6 +372,7 @@ describe("HostOutcomeDispatch — a view that cannot be built launches nothing",
         deliveryRoot: roots.deliveryRoot,
         indexRoot: join(roots.root, "index"),
         recorded,
+        ownedIndexes: roots.executions,
       });
       adapter.create(requestOf([inputOf([record])]), dispatchEffectKeyOf(GRAPH, "review#2"));
       adapter.create(

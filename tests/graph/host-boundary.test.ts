@@ -31,12 +31,13 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { openTrackedCredentialVault, openTrackedExecutionIndex } from "./helpers/temp-dirs.ts";
+import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
-import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import {
   HostExecutionIndex,
@@ -79,14 +80,15 @@ function makeTmpDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
 });
 
 describe("host boundary — the reproduced defects stay closed", () => {
   it("a same-account read of the whole host root yields no credential value", () => {
     const dir = makeTmpDir("host-boundary-read-");
-    const vault = HostCredentialVault.open({ root: dir });
+    const vault = openTrackedCredentialVault({ root: dir });
     const alpha = { graphId: GRAPH_ID, nodeId: "alpha", attemptId: "alpha#1" };
     const beta = { graphId: GRAPH_ID, nodeId: "beta", attemptId: "beta#1" };
     const alphaCredential = vault.mint({ ...alpha, planRevision: "rev-1", permission: "submit-outcome" });
@@ -111,7 +113,7 @@ describe("host boundary — the reproduced defects stay closed", () => {
     // A RESTART sees both attempts (the mapping is durable) and neither value;
     // the capability states the durable-store position instead of claiming a
     // protection this build cannot provide.
-    const restarted = HostCredentialVault.open({ root: dir });
+    const restarted = openTrackedCredentialVault({ root: dir });
     expect(restarted.durableRecord(alpha)).toBe("not-retained");
     expect(restarted.durableRecord(beta)).toBe("not-retained");
     expect(restarted.resolve(alpha)).toBeUndefined();
@@ -128,8 +130,8 @@ describe("host boundary — the reproduced defects stay closed", () => {
     const dir = makeTmpDir("host-boundary-crash-");
     const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
     const deliveries: string[] = [];
-    const registryA = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
-    const registryB = HostExecutionIndex.open({ root: dir, ownerId: "host-b" });
+    const registryA = openTrackedExecutionIndex({ root: dir, ownerId: "host-a" });
+    const registryB = openTrackedExecutionIndex({ root: dir, ownerId: "host-b" });
     const owner = new HostOutcomeDispatch({
       executions: registryA,
       deliver: () => {
@@ -172,7 +174,7 @@ describe("host boundary — the reproduced defects stay closed", () => {
     expect(afterCrash.kind).toBe("unknown");
     expect(() => other.create(REQUEST, effect)).toThrow();
     const reopened = new HostOutcomeDispatch({
-      executions: HostExecutionIndex.open({ root: dir, ownerId: "host-c" }),
+      executions: openTrackedExecutionIndex({ root: dir, ownerId: "host-c" }),
       deliver: () => {
         deliveries.push("host-c");
       },
@@ -190,7 +192,7 @@ describe("host boundary — the reproduced defects stay closed", () => {
     expect(reopened.lookup(effect).kind).toBe("unknown");
     expect(owner.confirmStarted(effect, { executionId: "dsh-run-42" })).toBe(true);
     expect(reopened.lookup(effect).kind).toBe("created");
-    const row = HostExecutionIndex.open({ root: dir, ownerId: "host-d" }).read(effect);
+    const row = openTrackedExecutionIndex({ root: dir, ownerId: "host-d" }).read(effect);
     expect(row?.state).toBe("created");
     expect(row?.execution?.executionId).toBe("dsh-run-42");
     expect(row?.ownerId).toBe("host-a");
@@ -205,14 +207,14 @@ describe("host boundary — the reproduced defects stay closed", () => {
     const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
     const deliveries: string[] = [];
     const failing = new HostOutcomeDispatch({
-      executions: HostExecutionIndex.open({ root: dir, ownerId: "host-a" }),
+      executions: openTrackedExecutionIndex({ root: dir, ownerId: "host-a" }),
       deliver: () => {
         deliveries.push("host-a");
         throw new Error("the platform refused before starting anything");
       },
     });
     const next = new HostOutcomeDispatch({
-      executions: HostExecutionIndex.open({ root: dir, ownerId: "host-b" }),
+      executions: openTrackedExecutionIndex({ root: dir, ownerId: "host-b" }),
       deliver: () => {
         deliveries.push("host-b");
       },
@@ -231,7 +233,7 @@ describe("host boundary — the reproduced defects stay closed", () => {
     // more, so a late confirmation of a different execution is fenced and
     // recorded rather than binding a second execution to next's row.
     expect(failing.confirmStarted(effect, { executionId: "dsh-run-0" })).toBe(false);
-    const row = HostExecutionIndex.open({ root: dir, ownerId: "host-e" }).read(effect);
+    const row = openTrackedExecutionIndex({ root: dir, ownerId: "host-e" }).read(effect);
     expect(row?.state).toBe("created");
     expect(row?.ownerId).toBe("host-b");
     expect(row?.execution?.executionId).toBe("dsh-run-1");
@@ -250,18 +252,18 @@ describe("host boundary — the reproduced defects stay closed", () => {
     // THE REPRODUCED LOSS: two vaults over one root, interleaved writes, the
     // later writer rewriting the whole file from its own snapshot. y vanished.
     const retainedRoot = join(dir, "retained");
-    const a = HostCredentialVault.open({
+    const a = openTrackedCredentialVault({
       root: retainedRoot,
       durableCredentialStore: "platform-isolated",
     });
     a.remember(x, "cred-x");
-    const b = HostCredentialVault.open({
+    const b = openTrackedCredentialVault({
       root: retainedRoot,
       durableCredentialStore: "platform-isolated",
     });
     b.remember(y, "cred-y");
     a.remember(z, "cred-z");
-    const reopened = HostCredentialVault.open({
+    const reopened = openTrackedCredentialVault({
       root: retainedRoot,
       durableCredentialStore: "platform-isolated",
     });
@@ -273,12 +275,12 @@ describe("host boundary — the reproduced defects stay closed", () => {
     // attempt is recorded, none of the values is, and a recovery reports that
     // instead of inventing a credential.
     const defaultRoot = join(dir, "records");
-    const c = HostCredentialVault.open({ root: defaultRoot });
+    const c = openTrackedCredentialVault({ root: defaultRoot });
     c.remember(x, "cred-x");
-    const d = HostCredentialVault.open({ root: defaultRoot });
+    const d = openTrackedCredentialVault({ root: defaultRoot });
     d.remember(y, "cred-y");
     c.remember(z, "cred-z");
-    const records = HostCredentialVault.open({ root: defaultRoot });
+    const records = openTrackedCredentialVault({ root: defaultRoot });
     expect(records.durableRecord(x)).toBe("not-retained");
     expect(records.durableRecord(y)).toBe("not-retained");
     expect(records.durableRecord(z)).toBe("not-retained");
@@ -494,7 +496,7 @@ describe("host boundary — a completion after a restart is bound and settles on
       // THE HOST FACT SURVIVES THE RESTART: the platform execution is still
       // recorded, by the id the platform minted rather than a local guess.
       expect(hostTwo.dispatch.lookup(effect).kind).toBe("created");
-      const row = HostExecutionIndex.open({ root: storeRoot }).read(effect);
+      const row = openTrackedExecutionIndex({ root: storeRoot }).read(effect);
       expect(row?.state).toBe("created");
       expect(row?.execution?.executionId).toBe(platformExecutionId);
       expect(

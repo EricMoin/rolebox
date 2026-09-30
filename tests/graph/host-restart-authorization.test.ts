@@ -26,13 +26,14 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { openTrackedCredentialVault, openTrackedExecutionIndex } from "./helpers/temp-dirs.ts";
+import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { auditGraphStore } from "../../src/graph/audit/drain-audit.ts";
-import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import {
   HostExecutionIndex,
@@ -70,8 +71,9 @@ function makeTmpDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
 });
 
 /** One node with one EXPLICIT outcome: only a worker submission settles it. */
@@ -414,8 +416,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // ── PROCESS ONE: the same synchronous refusal, but this host's execution
       // registry is MEMORY-ONLY, so a later process cannot see the row at all.
       const firstDeliveries: string[] = [];
-      const firstIndex = HostExecutionIndex.open({ root: dir, durability: "memory" });
-      const firstVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const firstIndex = openTrackedExecutionIndex({ root: dir, durability: "memory" });
+      const firstVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const firstRuntime = new OutcomeGraphRuntime({
         plan,
         ledger,
@@ -441,8 +443,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // ── PROCESS TWO: a fresh registry that never saw the row answers UNKNOWN
       // for the effect, and "the create failed" is not "no execution exists".
       const secondDeliveries: string[] = [];
-      const secondIndex = HostExecutionIndex.open({ root: dir, durability: "memory" });
-      const secondVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const secondIndex = openTrackedExecutionIndex({ root: dir, durability: "memory" });
+      const secondVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const secondRuntime = new OutcomeGraphRuntime({
         plan,
         ledger,
@@ -539,8 +541,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // ── PROCESS ZERO: the effect is committed and the delivery refuses
       // synchronously, so the create right is released with a proof and the
       // effect is PENDING with a credential no later process can resolve.
-      const zeroIndex = HostExecutionIndex.open({ root: dir });
-      const zeroVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const zeroIndex = openTrackedExecutionIndex({ root: dir });
+      const zeroVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const zeroDeliveries: string[] = [];
       const zeroRuntime = new OutcomeGraphRuntime({
         plan,
@@ -568,8 +570,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
 
       // ── THE TWO RECOVERERS. Both are real runtimes over the SAME store, each
       // with its own owner and the store-backed create-right fence.
-      const loserIndex = HostExecutionIndex.open({ root: dir });
-      const loserVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const loserIndex = openTrackedExecutionIndex({ root: dir });
+      const loserVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const loserDeliveries: string[] = [];
       const loserRuntime = new OutcomeGraphRuntime({
         plan,
@@ -588,8 +590,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
         reissueFence: storeFence(loserIndex),
       });
 
-      const winnerIndex = HostExecutionIndex.open({ root: dir });
-      const winnerVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const winnerIndex = openTrackedExecutionIndex({ root: dir });
+      const winnerVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const winnerDeliveries: string[] = [];
       const winnerCredentials: string[] = [];
       let winnerMints = 0;
@@ -664,8 +666,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // ── PROCESS ZERO: the effect is committed, the delivery refuses
       // synchronously, and the proof-backed release leaves it PENDING with a
       // credential no later process can resolve.
-      const zeroIndex = HostExecutionIndex.open({ root: dir });
-      const zeroVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const zeroIndex = openTrackedExecutionIndex({ root: dir });
+      const zeroVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const zeroRuntime = new OutcomeGraphRuntime({
         plan,
         ledger,
@@ -687,8 +689,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
 
       // ── THE WINNER re-issues, commits the new generation and hands it to the
       // platform, whose synchronous refusal releases the create right again.
-      const winnerIndex = HostExecutionIndex.open({ root: dir });
-      const winnerVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const winnerIndex = openTrackedExecutionIndex({ root: dir });
+      const winnerVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const winnerCredentials: string[] = [];
       const winnerRuntime = new OutcomeGraphRuntime({
         plan,
@@ -716,8 +718,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // presents is the REAL store claim, taken after the winner's failed create
       // released the right. The create right alone therefore cannot refuse it
       // for the right reason; the conditional write must.
-      const loserIndex = HostExecutionIndex.open({ root: dir });
-      const loserVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const loserIndex = openTrackedExecutionIndex({ root: dir });
+      const loserVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const loserDeliveries: string[] = [];
       let loserMints = 0;
       // THE WINNER'S RESULT IS KEPT FOR AN ASSERTION OUTSIDE THE HOOK: a
@@ -795,8 +797,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // AND THE REFUSAL IS NOT A STRAND: a later recoverer observes the CURRENT
       // generation, re-issues it, delivers once, and the credential it dispatched
       // verifies against the recorded one.
-      const thirdIndex = HostExecutionIndex.open({ root: dir });
-      const thirdVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const thirdIndex = openTrackedExecutionIndex({ root: dir });
+      const thirdVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const thirdDeliveries: string[] = [];
       const thirdCredentials: string[] = [];
       const thirdRuntime = new OutcomeGraphRuntime({
@@ -845,8 +847,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
     try {
       // The same lost-credential setup: pending effect, released claim, and a
       // credential value that died with the process that minted it.
-      const firstIndex = HostExecutionIndex.open({ root: dir });
-      const firstVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const firstIndex = openTrackedExecutionIndex({ root: dir });
+      const firstVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const firstRuntime = new OutcomeGraphRuntime({
         plan,
         ledger,
@@ -869,8 +871,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // A FILE registry answers `absent` (the claim was released by the seam's
       // proof) and the credential is gone — but NOTHING installs the fence, so
       // the runtime does not silently re-issue without the mechanism.
-      const secondIndex = HostExecutionIndex.open({ root: dir });
-      const secondVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const secondIndex = openTrackedExecutionIndex({ root: dir });
+      const secondVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const secondDeliveries: string[] = [];
       const unfenced = new OutcomeGraphRuntime({
         plan,
@@ -915,8 +917,8 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
     const ledger = await SqliteAcceptanceLedger.create(dir);
     try {
       // The effect is committed with a credential this process cannot resolve.
-      const firstIndex = HostExecutionIndex.open({ root: dir });
-      const firstVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const firstIndex = openTrackedExecutionIndex({ root: dir });
+      const firstVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const firstRuntime = new OutcomeGraphRuntime({
         plan,
         ledger,
@@ -939,15 +941,15 @@ describe("§3.3 — a lost credential is re-issued only on a proven absence", ()
       // ANOTHER HOST TAKES THE CREATE RIGHT and does not hand it over yet — the
       // state a second recoverer meets in the window between a re-issue and its
       // create.
-      const holderIndex = HostExecutionIndex.open({ root: dir });
+      const holderIndex = openTrackedExecutionIndex({ root: dir });
       const effect = dispatchEffectKeyOf(XPROC_GRAPH_ID, "work#1");
       expect(holderIndex.claim(effect).kind).toBe("claimed");
 
       // THE LOSER'S LOOKUP IS STALE: it answers the absent it saw before the
       // claim was taken. The fence is the REAL store claim, and it refuses.
       let created = 0;
-      const loserIndex = HostExecutionIndex.open({ root: dir });
-      const loserVault = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const loserIndex = openTrackedExecutionIndex({ root: dir });
+      const loserVault = openTrackedCredentialVault({ root: dir, durability: "memory" });
       const raced = new OutcomeGraphRuntime({
         plan,
         ledger,

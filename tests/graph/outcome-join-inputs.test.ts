@@ -48,7 +48,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -531,7 +532,7 @@ async function withHarness<T>(
     });
   } finally {
     ledger?.close();
-    rmSync(dir, { recursive: true, force: true });
+    removeTempTree(dir);
   }
 }
 

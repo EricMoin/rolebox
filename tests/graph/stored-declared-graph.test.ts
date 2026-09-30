@@ -19,7 +19,7 @@
  *   auto-initialized over or rewritten.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -41,10 +41,17 @@ import {
   EMPTY_VALIDATORS,
   GRAPH_ID,
   makeTmpDir,
+  removeTempDirs,
   naturalDeclaration,
   openHost,
 } from "./helpers/host-graph-fixture.ts";
 import { testHostCredentialIsolation } from "./helpers/credential-isolation.ts";
+
+afterEach(() => {
+  // Release the fixture's stores (the credential vault this file opens through
+  // the shared helper included), then remove its tree — each directory once.
+  removeTempDirs();
+});
 import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
 
 describe("the stored graph record", () => {

@@ -22,9 +22,9 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
+import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -95,8 +95,9 @@ function makeTmpDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
 });
 
 /** A one-node graph whose `done` outcome carries the given contract/gates. */

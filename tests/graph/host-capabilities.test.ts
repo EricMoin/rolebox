@@ -32,7 +32,13 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  openTrackedCredentialVault,
+  openTrackedExecutionIndex,
+  removeTempTree,
+  removeTempTrees,
+} from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -56,10 +62,7 @@ import {
   type CompletionPolicyBody,
 } from "../../src/graph/policy/completion-policy.ts";
 import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
-import {
-  HostExecutionIndex,
-  hostExecutionNotCreated,
-} from "../../src/graph/host/execution-index.ts";
+import { hostExecutionNotCreated } from "../../src/graph/host/execution-index.ts";
 import { GRAPH_STORE_FILE } from "../../src/graph/store/schema.ts";
 import { HostOutcomeDispatch } from "../../src/graph/host/dispatch-host.ts";
 import {
@@ -137,9 +140,20 @@ function makeTmpDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
 });
+
+/**
+ * THE VAULTS AND THE EXECUTION INDEXES THIS FILE OPENS ARE TRACKED. Each one
+ * owns an open store connection inside its temp directory, and the shared
+ * teardown (`removeTempTree`) releases every tracked one before it removes the
+ * directory — an unclosed connection there is what made this file's per-test
+ * `finally` fail on Windows (EBUSY: resource busy or locked, rm …).
+ * `openTrackedCredentialVault` / `openTrackedExecutionIndex` are that
+ * registration.
+ */
 
 // ── The credential vault ────────────────────────────────────────────────────
 
@@ -147,7 +161,7 @@ describe("host credential vault — the credential lives here and nowhere else",
   it("resolves a credential for exactly the attempt it was issued for", () => {
     const dir = makeTmpDir("host-vault-");
     try {
-      const vault = HostCredentialVault.open({ root: dir });
+      const vault = openTrackedCredentialVault({ root: dir });
       vault.remember({ graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" }, "cred-work-1");
       vault.remember({ graphId: GRAPH_ID, nodeId: "ship", attemptId: "ship#2" }, "cred-ship-2");
       expect(vault.size).toBe(2);
@@ -189,7 +203,7 @@ describe("host credential vault — the credential lives here and nowhere else",
       ).toThrow();
       expect(vault.size).toBe(2);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -197,7 +211,7 @@ describe("host credential vault — the credential lives here and nowhere else",
     const dir = makeTmpDir("host-vault-nodisk-");
     const identity = { graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" };
     try {
-      const first = HostCredentialVault.open({ root: dir });
+      const first = openTrackedCredentialVault({ root: dir });
       first.remember(identity, "cred-work-1");
       expect(first.resolve(identity)).toBe("cred-work-1");
 
@@ -212,7 +226,7 @@ describe("host credential vault — the credential lives here and nowhere else",
       // A SECOND host process over the same root — a restart — sees the attempt
       // and cannot produce the value: it reports the loss instead of inventing
       // one, and its capability says exactly that.
-      const restarted = HostCredentialVault.open({ root: dir });
+      const restarted = openTrackedCredentialVault({ root: dir });
       expect(restarted.resolve(identity)).toBeUndefined();
       expect(restarted.has(identity)).toBe(false);
       expect(restarted.durableRecord(identity)).toBe("not-retained");
@@ -223,12 +237,12 @@ describe("host credential vault — the credential lives here and nowhere else",
 
       // A MEMORY-ONLY vault holds nothing across processes either: it can only
       // ever answer for what it remembered itself.
-      const memory = HostCredentialVault.open({ root: dir, durability: "memory" });
+      const memory = openTrackedCredentialVault({ root: dir, durability: "memory" });
       expect(memory.resolve(identity)).toBeUndefined();
       expect(memory.size).toBe(0);
       expect(readCredentialIsolationAdapter(memory.capability())?.version).toBe(3);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -236,14 +250,14 @@ describe("host credential vault — the credential lives here and nowhere else",
     const dir = makeTmpDir("host-vault-retained-");
     const identity = { graphId: GRAPH_ID, nodeId: "work", attemptId: "work#1" };
     try {
-      const first = HostCredentialVault.open({
+      const first = openTrackedCredentialVault({
         root: dir,
         durableCredentialStore: "platform-isolated",
       });
       first.remember(identity, "cred-work-1");
       expect(first.durableRecord(identity)).toBe("retained");
 
-      const restarted = HostCredentialVault.open({
+      const restarted = openTrackedCredentialVault({
         root: dir,
         durableCredentialStore: "platform-isolated",
       });
@@ -253,14 +267,14 @@ describe("host credential vault — the credential lives here and nowhere else",
       // The contradiction is REFUSED rather than declared: a store that does
       // not outlive the process cannot be a durable credential store.
       expect(() =>
-        HostCredentialVault.open({
+        openTrackedCredentialVault({
           root: dir,
           durability: "memory",
           durableCredentialStore: "platform-isolated",
         }),
       ).toThrow();
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -270,9 +284,9 @@ describe("host credential vault — the credential lives here and nowhere else",
       // The vault's records live in the workspace's ONE graph store now, so the
       // file a damaged store must be refused at is that store's file.
       writeFileSync(join(dir, GRAPH_STORE_FILE), "{ not json", "utf8");
-      expect(() => HostCredentialVault.open({ root: dir })).toThrow();
+      expect(() => openTrackedCredentialVault({ root: dir })).toThrow();
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 });
@@ -284,7 +298,7 @@ describe("host execution registry — three states, one owner, a real host fact"
     const dir = makeTmpDir("host-index-states-");
     try {
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
-      const registry = HostExecutionIndex.open({ root: dir });
+      const registry = openTrackedExecutionIndex({ root: dir });
       // A durable registry wrote every create it ever made, so an effect with
       // no row is genuinely absent — which is what lets a recovery create once.
       expect(registry.lookup(effect).kind).toBe("absent");
@@ -311,12 +325,12 @@ describe("host execution registry — three states, one owner, a real host fact"
 
       // The row survives a reopen WITH the host's own id, so a restart can
       // reconcile the effect against the platform instead of guessing.
-      const reopened = HostExecutionIndex.open({ root: dir });
+      const reopened = openTrackedExecutionIndex({ root: dir });
       expect(reopened.lookup(effect).kind).toBe("created");
       expect(reopened.read(effect)?.execution?.executionId).toBe("dsh-run-7");
       expect(reopened.has(effect)).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -324,8 +338,8 @@ describe("host execution registry — three states, one owner, a real host fact"
     const dir = makeTmpDir("host-index-owner-");
     try {
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
-      const first = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
-      const second = HostExecutionIndex.open({ root: dir, ownerId: "host-b" });
+      const first = openTrackedExecutionIndex({ root: dir, ownerId: "host-a" });
+      const second = openTrackedExecutionIndex({ root: dir, ownerId: "host-b" });
 
       const owned = first.claim(effect);
       expect(owned.kind).toBe("claimed");
@@ -361,7 +375,7 @@ describe("host execution registry — three states, one owner, a real host fact"
       expect(retaken.kind).toBe("claimed");
       expect(second.size).toBe(1);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -370,13 +384,13 @@ describe("host execution registry — three states, one owner, a real host fact"
     try {
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
       let clock = 1_000;
-      const first = HostExecutionIndex.open({
+      const first = openTrackedExecutionIndex({
         root: dir,
         ownerId: "host-a",
         leaseMs: 100,
         now: () => clock,
       });
-      const second = HostExecutionIndex.open({
+      const second = openTrackedExecutionIndex({
         root: dir,
         ownerId: "host-b",
         leaseMs: 100,
@@ -401,15 +415,15 @@ describe("host execution registry — three states, one owner, a real host fact"
       const resumed = second.lookup(effect);
       expect(resumed.kind).toBe("unknown");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
   it("does not lose one instance's rows to another instance's writes", () => {
     const dir = makeTmpDir("host-index-interleaved-");
     try {
-      const a = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
-      const b = HostExecutionIndex.open({ root: dir, ownerId: "host-b" });
+      const a = openTrackedExecutionIndex({ root: dir, ownerId: "host-a" });
+      const b = openTrackedExecutionIndex({ root: dir, ownerId: "host-b" });
       const x = dispatchEffectKeyOf(GRAPH_ID, "x#1");
       const y = dispatchEffectKeyOf(GRAPH_ID, "y#1");
       const z = dispatchEffectKeyOf(GRAPH_ID, "z#1");
@@ -419,11 +433,11 @@ describe("host execution registry — three states, one owner, a real host fact"
       expect(b.claim(y).kind).toBe("claimed");
       expect(a.claim(z).kind).toBe("claimed");
 
-      const reopened = HostExecutionIndex.open({ root: dir, ownerId: "host-c" });
+      const reopened = openTrackedExecutionIndex({ root: dir, ownerId: "host-c" });
       expect(reopened.size).toBe(3);
       for (const effect of [x, y, z]) expect(reopened.has(effect)).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -431,7 +445,7 @@ describe("host execution registry — three states, one owner, a real host fact"
     const dir = makeTmpDir("host-index-memory-");
     try {
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
-      const memory = HostExecutionIndex.open({ root: dir, durability: "memory" });
+      const memory = openTrackedExecutionIndex({ root: dir, durability: "memory" });
       const unknown = memory.lookup(effect);
       expect(unknown.kind).toBe("unknown");
       if (unknown.kind === "unknown") {
@@ -447,10 +461,10 @@ describe("host execution registry — three states, one owner, a real host fact"
 
       // A DURABLE registry over the same root sees none of it: the memory-only
       // rows never reached the store.
-      const durable = HostExecutionIndex.open({ root: dir });
+      const durable = openTrackedExecutionIndex({ root: dir });
       expect(durable.lookup(effect).kind).toBe("absent");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 });
@@ -464,7 +478,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       const deliveries: OutcomeDispatchRequest[] = [];
       const bindings: string[] = [];
       const host = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: dir }),
+        executions: openTrackedExecutionIndex({ root: dir }),
         deliver: (request) => {
           deliveries.push(request);
         },
@@ -510,7 +524,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       expect(host.confirmStarted(second, { executionId: "dsh-run-2" })).toBe(true);
       expect(host.lookup(second).kind).toBe("created");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -519,7 +533,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
     try {
       let attempts = 0;
       const host = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: dir }),
+        executions: openTrackedExecutionIndex({ root: dir }),
         deliver: (request) => {
           attempts += 1;
           if (attempts === 1) {
@@ -548,7 +562,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       expect(host.confirmStarted(effect, { executionId: "dsh-run-1" })).toBe(true);
       expect(host.lookup(effect).kind).toBe("created");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -556,12 +570,12 @@ describe("host dispatch adapter — create at most once, look up the host's fact
     const dir = makeTmpDir("host-dispatch-owned-");
     try {
       const first = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: dir, ownerId: "host-a" }),
+        executions: openTrackedExecutionIndex({ root: dir, ownerId: "host-a" }),
         deliver: () => undefined,
       });
       const secondDeliveries: OutcomeDispatchRequest[] = [];
       const second = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: dir, ownerId: "host-b" }),
+        executions: openTrackedExecutionIndex({ root: dir, ownerId: "host-b" }),
         deliver: (request) => {
           secondDeliveries.push(request);
         },
@@ -582,7 +596,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       expect(secondDeliveries).toEqual([]);
       expect(second.lookup(effect).kind).toBe("unknown");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -591,7 +605,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
     try {
       let delivered = 0;
       const host = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: dir }),
+        executions: openTrackedExecutionIndex({ root: dir }),
         deliver: () => {
           delivered += 1;
         },
@@ -612,7 +626,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       ).toThrow();
       expect(delivered).toBe(0);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -631,7 +645,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       };
       let platformSaysAbsent = false;
       const deliveries: OutcomeDispatchRequest[] = [];
-      const index = HostExecutionIndex.open({ root: dir, ownerId: "host-a" });
+      const index = openTrackedExecutionIndex({ root: dir, ownerId: "host-a" });
       const host = new HostOutcomeDispatch({
         executions: index,
         deliver: (delivered) => {
@@ -685,7 +699,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       expect(host.lookup(effect).kind).toBe("created");
       expect(index.read(effect)?.generation).toBe(adopted?.generation);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -694,8 +708,8 @@ describe("host dispatch adapter — create at most once, look up the host's fact
     try {
       const effect = dispatchEffectKeyOf(GRAPH_ID, "work#1");
       const now = 1_700_000_000_000;
-      const first = HostExecutionIndex.open({ root: dir, ownerId: "host-a", now: () => now });
-      const second = HostExecutionIndex.open({ root: dir, ownerId: "host-b", now: () => now });
+      const first = openTrackedExecutionIndex({ root: dir, ownerId: "host-a", now: () => now });
+      const second = openTrackedExecutionIndex({ root: dir, ownerId: "host-b", now: () => now });
 
       const firstClaim = first.claim(effect);
       expect(firstClaim.kind).toBe("claimed");
@@ -752,7 +766,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       expect(second.read(effect)?.refused?.count).toBe(2);
       expect(second.read(effect)?.refused?.executionId).toBe("task-a-again");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -762,7 +776,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       const deliveries: string[] = [];
       const bindings: string[] = [];
       let platformSaysAbsent = false;
-      const index = HostExecutionIndex.open({ root: dir, ownerId: "host-one" });
+      const index = openTrackedExecutionIndex({ root: dir, ownerId: "host-one" });
       const host = new HostOutcomeDispatch({
         executions: index,
         deliver: (request) => {
@@ -833,7 +847,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
       }
       expect(deliveries).toEqual(["work#1", "ship#2", "work#3", "ship#2"]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 });
@@ -884,7 +898,7 @@ async function withHostRun<T>(
       declaration: naturalDeclaration(),
       completionPolicies: AUTHORIZED,
     }).plan;
-    const vault = HostCredentialVault.open({ root: join(dir, "host-store") });
+    const vault = openTrackedCredentialVault({ root: join(dir, "host-store") });
     const deliveries: OutcomeDispatchRequest[] = [];
     const holder = createHostInvocationHolder();
     // The real host shape: the bridge takes a PROVIDER, because the production
@@ -902,7 +916,7 @@ async function withHostRun<T>(
       clock: () => NOW,
     });
     const host = new HostOutcomeDispatch({
-      executions: HostExecutionIndex.open({ root: join(dir, "host-store") }),
+      executions: openTrackedExecutionIndex({ root: join(dir, "host-store") }),
       deliver: (request) => {
         deliveries.push(request);
       },
@@ -1068,13 +1082,13 @@ describe("host completion bridge — a dispatched attempt settles through settle
       // the credential the first process minted, and the honest default
       // (`durableCredentialStore: "none"`) keeps no value on disk. The shipped
       // entries take the default; a host with a real platform boundary opts in.
-      const firstVault = HostCredentialVault.open({
+      const firstVault = openTrackedCredentialVault({
         root: join(dir, "host-store"),
         durableCredentialStore: "platform-isolated",
       });
       const firstDeliveries: OutcomeDispatchRequest[] = [];
       const firstHost = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: join(dir, "host-store") }),
+        executions: openTrackedExecutionIndex({ root: join(dir, "host-store") }),
         deliver: (request) => {
           firstDeliveries.push(request);
           throw new Error("the platform died before the execution started");
@@ -1099,13 +1113,13 @@ describe("host completion bridge — a dispatched attempt settles through settle
       // SECOND PROCESS: fresh vault, fresh index and a fresh runtime over the
       // same roots. The host looks the effect up, reports the truth (absent),
       // and the recovery creates it EXACTLY once.
-      const secondVault = HostCredentialVault.open({
+      const secondVault = openTrackedCredentialVault({
         root: join(dir, "host-store"),
         durableCredentialStore: "platform-isolated",
       });
       const deliveries: OutcomeDispatchRequest[] = [];
       const secondHost = new HostOutcomeDispatch({
-        executions: HostExecutionIndex.open({ root: join(dir, "host-store") }),
+        executions: openTrackedExecutionIndex({ root: join(dir, "host-store") }),
         deliver: (request, effect) => {
           deliveries.push(request);
           // The platform names the execution it created, so the registry holds
@@ -1157,7 +1171,7 @@ describe("host completion bridge — a dispatched attempt settles through settle
       expect(deliveries).toHaveLength(1);
     } finally {
       ledger.close();
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -1169,7 +1183,7 @@ describe("host completion bridge — a dispatched attempt settles through settle
         declaration: naturalDeclaration(),
         completionPolicies: AUTHORIZED,
       }).plan;
-      const vault = HostCredentialVault.open({ root: join(dir, "host-store") });
+      const vault = openTrackedCredentialVault({ root: join(dir, "host-store") });
       // FIRST PROCESS: the delivery throws, so the effect is committed and left
       // PENDING — the one state in which the host's answer decides whether the
       // attempt is dispatched again.
@@ -1177,7 +1191,7 @@ describe("host completion bridge — a dispatched attempt settles through settle
         plan,
         ledger,
         dispatch: new HostOutcomeDispatch({
-          executions: HostExecutionIndex.open({ root: join(dir, "host-store") }),
+          executions: openTrackedExecutionIndex({ root: join(dir, "host-store") }),
           deliver: () => {
             throw new Error("the platform refused the delivery");
           },
@@ -1203,7 +1217,7 @@ describe("host completion bridge — a dispatched attempt settles through settle
         plan,
         ledger,
         dispatch: new HostOutcomeDispatch({
-          executions: HostExecutionIndex.open({
+          executions: openTrackedExecutionIndex({
             root: join(dir, "host-store"),
             durability: "memory",
           }),
@@ -1231,7 +1245,7 @@ describe("host completion bridge — a dispatched attempt settles through settle
       }
     } finally {
       ledger.close();
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 

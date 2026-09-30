@@ -30,7 +30,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -540,7 +541,7 @@ async function withHarness<T>(
     });
   } finally {
     if (ledger !== undefined) ledger.close();
-    rmSync(dir, { recursive: true, force: true });
+    removeTempTree(dir);
   }
 }
 
@@ -1081,7 +1082,7 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
       }
     } finally {
       ledger.close();
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -3465,7 +3466,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       expect(first).not.toBe(second);
     } finally {
       ledger?.close();
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 

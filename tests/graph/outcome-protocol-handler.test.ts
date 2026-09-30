@@ -12,7 +12,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -125,7 +126,7 @@ describe("execution-protocol registry — the outcome handler", () => {
       );
     } finally {
       ledger.close();
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 });
@@ -154,7 +155,7 @@ describe("the stored record's gates", () => {
       expect(OUTCOME_PROTOCOL_HANDLER.version).toBe(OUTCOME_PROTOCOL);
       expect(isOutcomeProtocolHandler(OUTCOME_PROTOCOL_HANDLER)).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 
@@ -180,7 +181,7 @@ describe("the stored record's gates", () => {
       expect(JSON.stringify(reading.verdict)).toContain("engine-graph.protocol.json");
       expect(readFileSync(retiredPath, "utf-8")).toBe(retiredText);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 });
@@ -245,7 +246,7 @@ describe("a declared graph runs its plan through the outcome run path", () => {
       expect(ledger.acceptedEvents("graph.protocol")).toHaveLength(2);
     } finally {
       ledger.close();
-      rmSync(dir, { recursive: true, force: true });
+      removeTempTree(dir);
     }
   });
 });

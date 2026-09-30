@@ -40,13 +40,13 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { openTrackedCredentialVault, removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { auditGraphStore } from "../../src/graph/audit/drain-audit.ts";
-import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
 import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
 import {
   engineStateDir,
@@ -143,8 +143,9 @@ function makeTmpDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
-  tmpDirs.length = 0;
+  // Release the fixture's stores, then remove each tree ONCE — a removal that
+  // throws must not leave the directory queued for the next sweep.
+  removeTempTrees(tmpDirs);
 });
 
 /** The dispatch surface the sweep touches for legacy graphs; nothing here. */
@@ -588,7 +589,7 @@ describe("the ledger yields no usable credential — the value lives in the host
     const ledger = await SqliteAcceptanceLedger.create(dir);
     try {
       const requests: OutcomeDispatchRequest[] = [];
-      const vault = HostCredentialVault.open({
+      const vault = openTrackedCredentialVault({
         root: dir,
         id: "test-host:credential-vault",
       });
