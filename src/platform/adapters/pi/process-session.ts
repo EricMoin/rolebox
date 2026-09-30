@@ -37,6 +37,7 @@ import type {
   CanonicalEventType,
   IEventBridge,
 } from "../../ports/event-bridge.ts";
+import { resolveSpawnCommand } from "../../system/spawn-command.ts";
 import { PiSessionAdapter, hasInFlightToolPart } from "./session.ts";
 import type {
   PiJsonEventType,
@@ -1078,7 +1079,12 @@ export class PiProcessSessionAdapter implements ISessionClient {
       childEnv.ROLEBOX_ACTIVE_AGENT = agentId;
     }
 
-    const command = { executable: this._resolvePiBinary(), args };
+    // How THIS system starts that binary. An npm-installed pi on Windows is a
+    // `pi.cmd` batch shim, which CreateProcess cannot start at all, so the
+    // resolved path goes through the shell the system descriptor names
+    // (COMSPEC) with every argument quoted for it; every other system — and
+    // every non-batch binary — keeps the direct `[executable, ...args]` vector.
+    const command = resolveSpawnCommand(this._resolvePiBinary(), args);
     if (this.graphWorkerChannel && this.graphDispatch.getStore()) {
       const grant = this.graphWorkerChannel(id, agentId);
       childEnv.ROLEBOX_GRAPH_WORKER_ENDPOINT = grant.endpoint;
@@ -1091,9 +1097,14 @@ export class PiProcessSessionAdapter implements ISessionClient {
       // docs/graph-outcome-protocol.md, "Worker execution boundary".
     }
 
-    const proc = spawn(command.executable, command.args, {
+    const proc = spawn(command.argv[0], command.argv.slice(1), {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv,
+      // True only for the shell vector, whose command string this module already
+      // quoted for cmd.exe; Node must then pass it through instead of quoting it
+      // a second time. False is Node's own default, so a direct spawn is
+      // byte-identical to before.
+      windowsVerbatimArguments: command.windowsVerbatimArguments,
     });
 
     record.proc = proc;
