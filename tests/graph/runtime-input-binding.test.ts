@@ -98,7 +98,7 @@ const CREDENTIAL_SOURCE: AttemptCredentialSource = (binding) =>
  * arms a node whose declared input the producing attempt did not produce.
  */
 function chainDeclaration(
-  options: { readonly withFailedBranch?: boolean } = {},
+  options: { readonly withFailedBranch?: boolean; readonly withTriggeredInput?: boolean } = {},
 ): GraphDeclarationV3 {
   const outcomes = options.withFailedBranch
     ? [
@@ -121,7 +121,7 @@ function chainDeclaration(
         agent: "agent.review",
         prompt: "Review the work.",
         outcomes: [{ id: "checked" }],
-        inputs: [{ from: "work", outcome: "done" }],
+        inputs: [{ from: "work", outcome: "done", ...(options.withTriggeredInput ? { when: "triggered" as const } : {}) }],
       },
     ],
     edges: [
@@ -577,8 +577,8 @@ describe("the run path binds a node's declared inputs (D6)", () => {
 // ── 2. A restart delivers the bound view, and never re-derives it ───────────
 
 describe("a restarted process delivers the bound input view (D6)", () => {
-  it("re-launches the armed successor with the SAME entries, without reading the accepted result again", async () => {
-    await withHarness(chainDeclaration(), async (harness) => {
+  it.each([false, true])("re-launches with the SAME entries without reading the result again (triggered=%s)", async (withTriggeredInput) => {
+    await withHarness(chainDeclaration({ withTriggeredInput }), async (harness) => {
       const { dir, plan, graphId, ledger } = harness;
       // THE CRASH WINDOW, reproduced by its real mechanism: the acceptance
       // commits the successor's dispatch intent, and the create throws before it

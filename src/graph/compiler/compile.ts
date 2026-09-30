@@ -79,6 +79,7 @@ export type CompileErrorCode =
   | "self-referential-input"
   | "duplicate-input"
   | "input-not-upstream"
+  | "input-trigger-not-edge"
   | "missing-edge-outcome"
   | "natural-completion-unknown-outcome"
   | "duplicate-natural-completion"
@@ -356,6 +357,20 @@ function compileDeclaration(
   // dispatch time.
   for (const node of nodes) {
     for (const input of node.inputs ?? []) {
+      if (
+        input.when === "triggered" &&
+        !compiledEdges.some(
+          (edge) => edge.from === input.from && edge.to === node.id && edge.outcome === input.outcome,
+        )
+      ) {
+        log.errors.push(
+          issue(
+            "input-trigger-not-edge",
+            `node ${JSON.stringify(node.id)} declares a triggered input ${JSON.stringify(input.from)}/${JSON.stringify(input.outcome)}, but no matching incoming edge can trigger it`,
+            nodePath(node.id) + ".inputs",
+          ),
+        );
+      }
       if (!upstreamOf(compiledEdges, node.id).has(input.from)) {
         log.errors.push(
           issue(
@@ -660,6 +675,12 @@ function readInputs(
     }
     const from = entry.from;
     const outcome = entry.outcome;
+    if (entry.when !== undefined && entry.when !== "triggered") {
+      log.errors.push(
+        issue("malformed-declaration", `input at ${entryPath}.when must be "triggered" when present`, entryPath + ".when"),
+      );
+      continue;
+    }
     if (!isNonEmptyString(from) || !isNonEmptyString(outcome)) {
       log.errors.push(
         issue(
@@ -713,7 +734,11 @@ function readInputs(
       continue;
     }
     seen.add(key);
-    refs.push(Object.freeze({ from, outcome }));
+    refs.push(Object.freeze({
+      from,
+      outcome,
+      ...(entry.when === undefined ? {} : { when: "triggered" as const }),
+    }));
   }
   return refs.length === 0 ? undefined : Object.freeze(refs);
 }

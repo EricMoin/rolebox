@@ -107,6 +107,8 @@ export interface CompiledInputRef {
   readonly from: string;
   /** The outcome of `from` whose accepted result is consumed. */
   readonly outcome: string;
+  /** Bind the matching arrival's exact attempt; omit this input on other routes or entry. */
+  readonly when?: "triggered";
 }
 
 export interface CompiledNode {

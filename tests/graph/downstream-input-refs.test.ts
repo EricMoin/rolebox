@@ -14,8 +14,9 @@
 
 import { describe, it, expect } from "bun:test";
 import { compileGraph } from "../../src/graph/compiler/compile.ts";
+import { parseGraphDeclarationV3 } from "../../src/graph/compiler/parse-declaration-v3.ts";
 
-type Inputs = Array<{ from: string; outcome: string }> | undefined;
+type Inputs = Array<{ from: string; outcome: string; when?: string }> | undefined;
 
 function chain(inputs: Inputs, opts: { extraNode?: boolean } = {}) {
   return {
@@ -61,6 +62,39 @@ function codesOf(declaration: unknown): string[] {
 }
 
 describe("downstream inputs are compiled into fixed references", () => {
+  it("preserves a triggered input through parsing and compilation, including plan identity", () => {
+    const parsed = parseGraphDeclarationV3(chain([{ from: "work", outcome: "done", when: "triggered" }]));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const result = compileGraph(parsed.declaration);
+    const required = compileGraph(chain([{ from: "work", outcome: "done" }]));
+    expect(result.ok).toBe(true);
+    expect(required.ok).toBe(true);
+    if (!result.ok || !required.ok) return;
+    expect(result.plan.nodes.find((node) => node.id === "review")?.inputs).toEqual([
+      { from: "work", outcome: "done", when: "triggered" },
+    ]);
+    expect(result.plan.planRevision).not.toBe(required.plan.planRevision);
+  });
+
+  it("refuses an unknown input condition in both compiler entry points", () => {
+    const declaration = chain([{ from: "work", outcome: "done", when: "optional" }]);
+    expect(parseGraphDeclarationV3(declaration).ok).toBe(false);
+    expect(codesOf(declaration)).toContain("malformed-declaration");
+  });
+
+  it("requires a triggered input's exact outcome to have a direct incoming edge", () => {
+    const declaration = chain([{ from: "work", outcome: "failed", when: "triggered" }]);
+    declaration.nodes[0]!.outcomes.push({ id: "failed" });
+    expect(codesOf(declaration)).toContain("input-trigger-not-edge");
+    const indirect = chain([{ from: "work", outcome: "done", when: "triggered" }], { extraNode: true });
+    indirect.edges = [
+      { from: "work", to: "other", outcome: "done" },
+      { from: "other", to: "review", outcome: "spare" },
+    ];
+    expect(codesOf(indirect)).toContain("input-trigger-not-edge");
+  });
+
   it("pins an upstream node and outcome into the plan", () => {
     const result = compileGraph(chain([{ from: "work", outcome: "done" }]));
     expect(result.ok).toBe(true);

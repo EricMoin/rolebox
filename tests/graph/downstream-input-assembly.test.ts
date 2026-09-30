@@ -19,6 +19,7 @@ import {
   readResolvedInputs,
   type AcceptedResultFacts,
   type AcceptedResultReading,
+  type DownstreamInputRefusalCode,
   type ResolvedInput,
 } from "../../src/graph/outcome/inputs.ts";
 import {
@@ -45,6 +46,50 @@ function readingOf(found: AcceptedResultFacts | undefined): AcceptedResultReadin
 }
 
 describe("assembleDownstreamInput", () => {
+  it("omits a triggered input on entry or a different route, even if an old result exists", () => {
+    for (const arrivals of [[], [{ from: "review", outcome: "approve", attemptId: "review#4" }]]) {
+      const assembled = assembleDownstreamInput(
+        [{ from: "review", outcome: "revise", when: "triggered" }],
+        () => "review#2",
+        () => { throw new Error("must not read an unrelated result"); },
+        arrivals,
+      );
+      expect(assembled).toEqual({ kind: "resolved", entries: [] });
+    }
+  });
+
+  it("pins a triggered result to the arriving attempt, alongside required inputs", () => {
+    const assembled = assembleDownstreamInput(
+      [{ from: "design", outcome: "selected" }, { from: "review", outcome: "revise", when: "triggered" }],
+      (from) => from === "design" ? "design#1" : "review#99",
+      (attemptId) => readingOf(facts(attemptId === "design#1" ? "selected" : "revise", "sha256:" + "a".repeat(64))),
+      [{ from: "review", outcome: "revise", attemptId: "review#4" }],
+    );
+    expect(assembled.kind).toBe("resolved");
+    if (assembled.kind !== "resolved") return;
+    expect(assembled.entries.map((entry) => entry.attemptId)).toEqual(["design#1", "review#4"]);
+    expect(assembled.entries[1]?.artifacts).toHaveLength(1);
+  });
+
+  it("blocks a triggered input whose accepted result is missing, unreadable or mismatched", () => {
+    const cases: [AcceptedResultReading, DownstreamInputRefusalCode][] = [
+      [{ kind: "none" }, "input-producer-unsettled"],
+      [{ kind: "unreadable", reason: "damaged" }, "input-result-unreadable"],
+      [readingOf(facts("approve", "sha256:" + "a".repeat(64))), "input-outcome-mismatch"],
+    ];
+    for (const [reading, code] of cases) {
+      const assembled = assembleDownstreamInput(
+        [{ from: "review", outcome: "revise", when: "triggered" }],
+        () => undefined,
+        () => reading,
+        [{ from: "review", outcome: "revise", attemptId: "review#2" }],
+      );
+      expect(assembled.kind).toBe("blocked");
+      if (assembled.kind !== "blocked") return;
+      expect(assembled.refusals.map((entry) => entry.code)).toEqual([code]);
+    }
+  });
+
   it("resolves nothing when the node declares no inputs", () => {
     const assembled = assembleDownstreamInput([], () => undefined, () => readingOf(undefined));
     expect(assembled.kind).toBe("resolved");

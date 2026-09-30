@@ -156,7 +156,10 @@ function guidedLoopDeclaration(): GraphDeclarationV3 {
     version: 3,
     name: "p43.guided-loop",
     nodes: [
-      { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+      {
+        id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }],
+        inputs: [{ from: "review", outcome: "revise", when: "triggered" }],
+      },
       {
         id: "review",
         agent: "agent.review",
@@ -694,6 +697,7 @@ describe("a loop consumer is bound to the attempt that opened THIS round (R4)", 
   it("re-binds the consumer on every round and keeps the earlier accepted result", async () => {
     await withHarness(guidedLoopDeclaration(), (harness) => {
       harness.runtime.start(NOW);
+      expect(deliveredTo(harness, "work#1")?.inputs).toEqual([]);
 
       const opened = accept(harness, "work", "done", "work#1", NOW + 1, { report: "W1" });
       expect(attemptIds(opened.dispatched)).toEqual(["review#2"]);
@@ -706,6 +710,10 @@ describe("a loop consumer is bound to the attempt that opened THIS round (R4)", 
         revision: "r1",
       });
       expect(attemptIds(revised.dispatched)).toEqual(["work#3"]);
+      const repair = nodeOf(revised.state, "work");
+      expect(boundRefs(repair)).toEqual(["review@review#2"]);
+      expect(boundPayloads(repair)).toEqual([{ kind: "value", value: { revision: "r1" } }]);
+      expect(deliveredTo(harness, "work#3")?.inputs).toEqual(repair.inputs);
 
       // ROUND 2 — the same node, a NEW producing attempt. The consumer must be
       // bound to work#3, never to work#1 (whose accepted result still exists).
@@ -719,6 +727,13 @@ describe("a loop consumer is bound to the attempt that opened THIS round (R4)", 
 
       // The round-1 result is still readable; only the BINDING moved on.
       expect(acceptedAttempts(harness)).toEqual(["work#1", "review#2", "work#3"]);
+      const revisedAgain = accept(harness, "review", "revise", "review#4", NOW + 4, {
+        revision: "r2",
+      });
+      expect(boundRefs(nodeOf(revisedAgain.state, "work"))).toEqual(["review@review#4"]);
+      expect(deliveredTo(harness, "work#5")?.inputs?.[0]?.payload).toEqual({
+        kind: "value", value: { revision: "r2" },
+      });
       console.log(
         "[probe:loop-binding] bound=" +
           JSON.stringify(
@@ -818,6 +833,29 @@ describe("a join binds the attempts of ITS round (R4)", () => {
 // ── The unselected branch of a join:any ─────────────────────────────────────
 
 describe("an unselected branch leaves the armed consumer alone (R4)", () => {
+  it.each(["any", "all", "quorum"] as const)("binds only participating triggered inputs at a %s join", async (strategy) => {
+    const declaration = diamondAnyDeclaration();
+    const consumer = declaration.nodes.find((node) => node.id === "djoin");
+    if (consumer === undefined) throw new Error("fixture: missing consumer");
+    consumer.join = strategy === "quorum" ? { strategy, quorum: 2 } : { strategy };
+    consumer.inputs = [
+      { from: "brc", outcome: "done", when: "triggered" },
+      { from: "crb", outcome: "done", when: "triggered" },
+    ];
+    await withHarness(declaration, (harness) => {
+      harness.runtime.start(NOW);
+      accept(harness, "arb", "split", "arb#1", NOW + 1, {});
+      const first = accept(harness, "brc", "done", "brc#2", NOW + 2, { branch: "B" });
+      expect(attemptIds(first.dispatched)).toEqual(strategy === "any" ? ["djoin#4"] : []);
+      const second = accept(harness, "crb", "done", "crb#3", NOW + 3, { branch: "C" });
+      expect(attemptIds(second.dispatched)).toEqual(strategy === "any" ? [] : ["djoin#4"]);
+      expect(boundRefs(nodeOf(second.state, "djoin"))).toEqual(
+        strategy === "any" ? ["brc@brc#2"] : ["brc@brc#2", "crb@crb#3"],
+      );
+      expect(deliveredTo(harness, "djoin#4")?.inputs).toEqual(nodeOf(second.state, "djoin").inputs);
+    });
+  });
+
   it("arms a join:any on the feeder its input names, and a later arrival neither re-arms nor re-binds it", async () => {
     await withHarness(diamondAnyDeclaration(), (harness) => {
       harness.runtime.start(NOW);

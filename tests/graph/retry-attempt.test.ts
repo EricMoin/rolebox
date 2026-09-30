@@ -1032,7 +1032,10 @@ const LOOP_BOUND: GraphDeclarationV3 = {
   version: 3,
   name: "retry.loop-bound",
   nodes: [
-    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }],
+      inputs: [{ from: "review", outcome: "revise", when: "triggered" }],
+    },
     {
       id: "review",
       agent: "agent.review",
@@ -1057,6 +1060,30 @@ const LOOP_BOUND: GraphDeclarationV3 = {
 };
 
 describe("retry — a superseded consumer's binding is CARRIED, never re-derived (D6)", () => {
+  it("carries triggered repair feedback across a retry, while entry has no feedback", async () => {
+    const fixture = await openRetryFixture(LOOP_BOUND);
+    try {
+      expect(fixture.dispatched[0]?.inputs).toEqual([]);
+      expect(await settle(fixture, "work", "work#1", "done")).toBe("accepted");
+      const report = { items: [{ id: "defect-1", problem: "Missing cleanup" }] };
+      expect(await settle(fixture, "review", "review#2", "revise", report)).toBe("accepted");
+      const bound = fixture.dispatched.find((request) => request.attemptId === "work#3")?.inputs;
+      expect(bound).toEqual([{
+        from: "review", outcome: "revise", attemptId: "review#2",
+        payload: { kind: "value", value: report }, artifacts: [],
+      }]);
+      const answer = await control(fixture, {
+        graph_id: fixture.graphId, command: "retry", node_id: "work", reason: "transient worker failure",
+      }, fixture.declarer);
+      expect(answer.kind).toBe("applied");
+      expect(answer.minted?.map((attempt) => attempt.attemptId)).toEqual(["work#4"]);
+      expect(nodeEntry(readBody(fixture), "work")["inputs"]).toEqual(bound);
+      expect(fixture.dispatched.find((request) => request.attemptId === "work#4")?.inputs).toEqual(bound);
+    } finally {
+      fixture.host.close();
+    }
+  });
+
   it("arms the successor attempt with the SAME bound inputs, in its state entry and in the delivered request", async () => {
     const fixture = await openRetryFixture(BOUND_CHAIN);
     try {

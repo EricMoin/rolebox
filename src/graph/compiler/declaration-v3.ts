@@ -121,6 +121,8 @@ export interface InputDeclarationV3 {
   from: string;
   /** The outcome of `from` whose accepted result is consumed. */
   outcome: string;
+  /** Require this result only when its matching incoming edge participates in dispatch. */
+  when?: "triggered";
 }
 
 export interface NodeDeclarationV3 {

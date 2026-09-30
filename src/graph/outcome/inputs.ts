@@ -1,5 +1,6 @@
 import { errorText } from "../../utils/error-text.ts";
 import type { CompiledInputRef } from "../compiler/plan.ts";
+import type { OutcomeArrival } from "./state-model.ts";
 import type { AcceptanceLedgerTx, AcceptedResultEvidence } from "../ledger/types.ts";
 import type { ArtifactObjectRead } from "../store/artifacts.ts";
 import type {
@@ -114,11 +115,14 @@ export type DownstreamInput =
  *
  * TOTAL: every way a declared input can fail is a named refusal, and ANY refusal
  * blocks — a node with three inputs and one missing one has no input at all.
+ * Triggered inputs apply only to matching arrivals in this dispatch's arm set.
+ * Once triggered, they are required and pinned to that arrival's attempt.
  */
 export function assembleDownstreamInput(
   inputs: readonly CompiledInputRef[],
   settledAttemptOf: (nodeId: string) => string | undefined,
   acceptedOf: (attemptId: string) => AcceptedResultReading,
+  arrivals: readonly OutcomeArrival[] = [],
 ): DownstreamInput {
   if (inputs.length === 0) {
     return { kind: "resolved", entries: Object.freeze([]) };
@@ -126,7 +130,11 @@ export function assembleDownstreamInput(
   const entries: ResolvedInput[] = [];
   const refusals: DownstreamInputRefusal[] = [];
   for (const input of inputs) {
-    const attemptId = settledAttemptOf(input.from);
+    const arrival = input.when === "triggered"
+      ? arrivals.find((entry) => entry.from === input.from && entry.outcome === input.outcome)
+      : undefined;
+    if (input.when === "triggered" && arrival === undefined) continue;
+    const attemptId = arrival?.attemptId ?? settledAttemptOf(input.from);
     if (attemptId === undefined) {
       refusals.push(
         Object.freeze({
@@ -682,4 +690,3 @@ function describe(value: unknown): string {
   if (typeof value === "object") return "an object";
   return typeof value;
 }
-

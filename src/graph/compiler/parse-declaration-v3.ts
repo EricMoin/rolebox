@@ -160,7 +160,7 @@ const NODE_KEYS = [
   "budget",
   "inputs",
 ] as const;
-const INPUT_KEYS = ["from", "outcome"] as const;
+const INPUT_KEYS = ["from", "outcome", "when"] as const;
 const OUTCOME_KEYS = ["id", "data", "acceptance"] as const;
 const OUTCOME_DATA_KEYS = ["schema", "version"] as const;
 const ACCEPTANCE_KEYS = ["validator", "version"] as const;
@@ -390,11 +390,10 @@ function readNode(
 }
 
 /**
- * Read one declared DOWNSTREAM INPUT: exactly `{ from, outcome }`, both
- * non-empty strings.
+ * Read one declared input: `{ from, outcome, when?: "triggered" }`.
  *
  * The grammar is closed here like everywhere else — an extra key inside an entry
- * is `unknown-key`, so a document cannot smuggle a third member (a path, a
+ * is `unknown-key`, so a document cannot smuggle an extra member (a path, a
  * version, a "latest" flag) past the front-end and have it silently dropped.
  * Whether the reference can actually be PINNED is the compiler's question, not
  * this one: this reader owns the shape, and an EMPTY list is a legal
@@ -412,7 +411,17 @@ function readInput(
   const from = readNonEmptyString(record.from, `${path}.from`, log);
   const outcome = readNonEmptyString(record.outcome, `${path}.outcome`, log);
   if (from === undefined || outcome === undefined) return undefined;
-  return { from, outcome };
+  if (record.when !== undefined && record.when !== "triggered") {
+    log.issues.push(
+      issue("invalid-value", `${path}.when must be "triggered" when present`, `${path}.when`),
+    );
+    return undefined;
+  }
+  return {
+    from,
+    outcome,
+    ...(record.when === undefined ? {} : { when: "triggered" as const }),
+  };
 }
 
 /** Read one outcome declaration. */

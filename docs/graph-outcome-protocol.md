@@ -128,7 +128,7 @@ the failing path, and nothing is persisted.
 | `contractRef` | No | The exact contract identity this node is bound to. A ref that does not resolve, or whose digest disagrees, is a compile error. |
 | `join` | No | Fan-in strategy: `{ strategy: "all" }`, `{ strategy: "any" }` or `{ strategy: "quorum", quorum: N }` with a positive integer `N`. |
 | `budget` | No | Per-node ceilings: `timeout_ms`, `max_input_tokens`, `max_output_tokens`, `max_cost_usd`. `max_retries` is refused by name. |
-| `inputs` | No | The accepted results this node consumes, each `{ from, outcome }`. Resolved against declared nodes and outcomes at compile time. |
+| `inputs` | No | The accepted results this node consumes, each `{ from, outcome, when?: "triggered" }`. Resolved against declared nodes and outcomes at compile time. |
 
 ### Outcome fields
 
@@ -176,6 +176,8 @@ weaker than what was written. The rules that decide this:
   be reachable from the producing node along declared edges. A self-referential
   input, a repeated reference, or a producer that no edge path reaches, is an
   error: a consumer never reads "the latest result of some type" at run time.
+  A triggered input additionally requires a direct incoming edge matching both
+  its source and outcome.
 - **Loops declare their routes and their cap.** A group that leaves its traversal
   cap, continuation outcome or exit outcome open, or whose continuation edge
   leaves the group, is refused as a structural defect, not deferred to run time.
@@ -498,6 +500,25 @@ The consumer receives a manifest and real files inside its workspace, and it
 reads the revision the acceptance named. A consumer that cannot receive a
 declared input records an input refusal rather than silently proceeding with
 nothing.
+
+An input without `when` is required on every dispatch. A `when: "triggered"`
+input applies only when its matching incoming edge contributes an arrival to
+that dispatch. The compiler requires a direct edge with the same source and
+outcome; an indirect upstream dependency is insufficient. For example, a `work`
+node in `work --done--> review --revise--> work` declares:
+
+```json
+"inputs": [{ "from": "review", "outcome": "revise", "when": "triggered" }]
+```
+
+The initial entry dispatch has no review input. A repair dispatch binds the
+exact review attempt that arrived, including its accepted data and retained
+artifacts. Missing, unreadable or mismatched results block dispatch once the
+input is triggered; this is not permission to omit missing feedback. Join
+dispatches use their participating arrivals, excluding producers re-entered in
+the same advance. Bound results persist in the attempt and dispatch effect, so
+recovery and retries carry the same view rather than reading a newer result.
+Edges continue to route by declared outcomes and never interpret payload fields.
 
 ## Runs, controls and limits
 

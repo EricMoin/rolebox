@@ -449,15 +449,18 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       const routedCandidates = candidates.filter((candidate) =>
         armSet.has(candidate.node.id),
       );
-      const assembleAgainst = (inFlight: ReadonlySet<string>) =>
-        routedCandidates.map((candidate) => ({
+      const assembleAgainst = (inFlight: ReadonlySet<string>) => {
+        const arrivals = materializeArrivals(plan, nodes, inFlight);
+        return routedCandidates.map((candidate) => ({
           candidate,
           assembled: assembleDownstreamInput(
             candidate.node.inputs ?? [],
             (nodeId) => (inFlight.has(nodeId) ? undefined : settledAttemptOf(nodeId)),
             readAccepted,
+            arrivals.get(candidate.node.id),
           ),
         }));
+      };
       const armedAgainst = (inFlight: ReadonlySet<string>): ReadonlySet<string> =>
         new Set(
           assembleAgainst(inFlight)
