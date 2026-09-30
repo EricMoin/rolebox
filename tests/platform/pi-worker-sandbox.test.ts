@@ -42,7 +42,12 @@ describe("Pi graph worker boundary", () => {
     const { root } = fixture();
     const record = join(root, "spawn-record.txt");
     const binary = join(root, "fake-pi");
-    writeFileSync(binary, '#!/bin/sh\n{ printf "argv0=%s\\n" "$0"; env | grep "^ROLEBOX_GRAPH_WORKER_"; } > "$PI_SPAWN_RECORD"\nexit 0\n');
+    // Publish the record by rename. A plain redirect creates the record file
+    // BEFORE the "env | grep" subprocess writes into it, and spawnRecord() returns
+    // as soon as the file exists, so the poller could read the argv0 line alone.
+    // The rename is atomic within the directory: the record is absent or complete,
+    // and the trailing marker makes a regression a plain completeness failure.
+    writeFileSync(binary, '#!/bin/sh\n{ printf "argv0=%s\\n" "$0"; env | grep "^ROLEBOX_GRAPH_WORKER_"; printf "record-complete\\n"; } > "$PI_SPAWN_RECORD.tmp"\nmv "$PI_SPAWN_RECORD.tmp" "$PI_SPAWN_RECORD"\nexit 0\n');
     chmodSync(binary, 0o755);
     const previousBinary = process.env.PI_BIN_PATH;
     const previousRecord = process.env.PI_SPAWN_RECORD;
@@ -64,6 +69,7 @@ describe("Pi graph worker boundary", () => {
       expect(output).not.toContain("sandbox-exec");
       expect(output).toContain("ROLEBOX_GRAPH_WORKER_ENDPOINT=http://127.0.0.1:9/worker");
       expect(output).toContain("ROLEBOX_GRAPH_WORKER_TOKEN=attempt-token");
+      expect(output).toContain("record-complete");
     } finally {
       process.chdir(previousCwd);
       if (previousBinary === undefined) delete process.env.PI_BIN_PATH; else process.env.PI_BIN_PATH = previousBinary;

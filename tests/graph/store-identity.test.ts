@@ -2,9 +2,10 @@ import { afterEach, expect, it } from "bun:test";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { loadGraphStoreSync } from "../../src/graph/store/load.ts";
-import { GRAPH_STORE_TABLES, graphStoreFilePath } from "../../src/graph/store/schema.ts";
+import { GRAPH_STORE_FORMAT_VERSION, GRAPH_STORE_TABLES, graphStoreFilePath } from "../../src/graph/store/schema.ts";
 import { initializeStoreIdentity, storeIdentityPath } from "../../src/graph/store/identity.ts";
 import { createDatabaseSync } from "../../src/memory/db-driver.ts";
 
@@ -16,6 +17,24 @@ function root(): string {
 }
 afterEach(() => { for (const directory of roots.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
+/**
+ * The refusal an open call throws, narrowed to the stable typed facts.
+ * GraphStoreFormatProblem documents its identifiers as stable and its wording as
+ * not API, so the message is deliberately not asserted: a message substring can
+ * match a temporary PATH instead of the refusal (a darwin mkdtempSync root
+ * contains the letters of "older"), which is exactly what made the old assertion
+ * pass on one platform and fail on another.
+ */
+function refusalOf(open: () => unknown): GraphStoreFormatError {
+  try {
+    open();
+  } catch (error) {
+    if (error instanceof GraphStoreFormatError) return error;
+    throw error;
+  }
+  throw new Error("expected the open to refuse, but it returned a store");
+}
+
 it("classifies a real older metadata layout as unsupported without adding a binding", () => {
   const directory = root();
   const file = graphStoreFilePath(directory);
@@ -24,7 +43,10 @@ it("classifies a real older metadata layout as unsupported without adding a bind
   database.run(`INSERT INTO ${GRAPH_STORE_TABLES.meta} VALUES (1, 7)`);
   database.close();
   expect(loadGraphStoreSync(directory).kind).toBe("unsupported");
-  expect(() => GraphStore.openFile(directory)).toThrow("older");
+  const refusal = refusalOf(() => GraphStore.openFile(directory));
+  expect(refusal.problem).toBe("older-format");
+  expect(refusal.found).toBe(7);
+  expect(refusal.supported).toBe(GRAPH_STORE_FORMAT_VERSION);
   expect(existsSync(storeIdentityPath(file))).toBe(false);
 });
 
