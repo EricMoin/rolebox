@@ -23,6 +23,9 @@ jobs:
     # so these tests typically run; if a tar variant diverges, the test reports
     # it rather than masking it.
     strategy:
+      # Each platform reports its own result independently: without this, GitHub's
+      # default fail-fast cancels the other two OS jobs as soon as one fails.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
