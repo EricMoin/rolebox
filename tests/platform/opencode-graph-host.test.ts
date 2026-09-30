@@ -467,6 +467,62 @@ function cancelProbe(executionId?: string): OutcomeExecutionCancelProbe {
 // ── The tool face ───────────────────────────────────────────────────────────
 
 describe("opencode graph host — the declared-graph tool face", () => {
+  it.each(["v1", "v2"] as const)("%s delivers triggered review feedback and retry context", async (version) => {
+    const workspace = makeTmpDir("opencode-repair-feedback-");
+    let sequence = 0;
+    const session = makeSession({ create: async () => ({ id: `worker_${++sequence}` }) });
+    const v2 = makeV2Client();
+    const host = version === "v1"
+      ? openHost(session, { workspace, sessionEndFeed: true }).host
+      : track(openOpencode2GraphHost({ directory: workspace, client: v2.client, wait: v2.wait, env: {} }));
+    const prompts = () => (version === "v1" ? session.prompts : v2.prompts)
+      .filter(prompt => prompt.sessionID !== "session-parent");
+    const tools = host.createTools();
+    const parent = makeContext("session-parent", "agent.parent", workspace);
+    const declaration: GraphDeclarationV3 = {
+      version: 3, name: "repair-feedback",
+      nodes: [
+        { id: "work", agent: "agent.work", prompt: "Implement and repair.", outcomes: [{ id: "done" }],
+          inputs: [{ from: "review", outcome: "revise", when: "triggered" }] },
+        { id: "review", agent: "agent.review", prompt: "Review.", outcomes: [{ id: "revise" }, { id: "pass" }],
+          inputs: [{ from: "work", outcome: "done" }] },
+      ],
+      edges: [{ from: "work", to: "review", outcome: "done" }, { from: "review", to: "work", outcome: "revise" }],
+      loop_groups: [{ id: "repair", nodes: ["work", "review"], max_traversals: 2, continuation_outcome: "revise", exit_outcome: "pass" }],
+    };
+    await callTool(tools, "graph_declare", { declaration }, parent);
+    await waitFor(() => prompts().length === 1, "initial work");
+    expect(prompts()[0]?.text).not.toContain("[rolebox graph inputs");
+    const submit = async (index: number, nodeId: string, outcomeId: string, data: object) => {
+      const prompt = prompts()[index];
+      if (!prompt) throw new Error("fixture: missing prompt");
+      const credential = /credential: (\S+)/.exec(prompt.text)?.[1];
+      const answer = JSON.parse(await callTool(tools, "graph_submit_outcome", {
+        graph_id: declaration.name, node_id: nodeId, outcome_id: outcomeId, credential, data,
+      }, makeContext(prompt.sessionID, `agent.${nodeId}`, workspace)));
+      expect(answer.decision).toBe("accepted");
+    };
+    await submit(0, "work", "done", { changed: "implementation" });
+    await waitFor(() => prompts().length === 2, "review");
+    await submit(1, "review", "revise", { items: [{ id: "cleanup", problem: "Missing cleanup" }] });
+    await waitFor(() => prompts().length === 3, "repair");
+    const repair = prompts()[2]!;
+    expect(repair.text).toContain('from "review", outcome "revise", attempt "review#2"');
+    expect(repair.text).toContain('"problem":"Missing cleanup"');
+    expect(host.host.workerPrincipalOf(repair.sessionID)?.attemptId).toBe("work#3");
+    expect(host.host.workerPrincipalOf("session-parent")).toBeUndefined();
+    host.noteSessionEnded(repair.sessionID, "errored");
+    await settleWindow();
+    const retried = JSON.parse(await callTool(tools, "graph_control", {
+      graph_id: declaration.name, node_id: "work", command: "retry", reason: "Worker interrupted after editing; inspect existing work",
+    }, parent));
+    expect(retried.kind).toBe("applied");
+    await waitFor(() => prompts().length === 4, "repair retry");
+    expect(prompts()[3]?.text).toContain("Worker interrupted after editing; inspect existing work");
+    expect(prompts()[3]?.text).toContain('from "review", outcome "revise", attempt "review#2"');
+    expect(prompts()[3]?.text).toContain('"problem":"Missing cleanup"');
+  });
+
   it("registers exactly the five declared-graph tools", () => {
     const { host } = openHost(makeSession(), { sessionEndFeed: true });
     expect(Object.keys(host.createTools()).sort()).toEqual([

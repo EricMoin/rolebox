@@ -7,7 +7,8 @@ import type { ResolvedInput } from "./inputs.ts";
  * The provenance of one dispatch, WITHOUT the attempt credential.
  *
  * Every field is runtime provenance: the graph and plan revision the node
- * belongs to, the attempt id the STATE minted, and the plan's own agent/prompt.
+ * belongs to, the attempt id the STATE minted, and the plan's own agent/prompt
+ * with any attempt-local retry context appended.
  * Nothing here comes from a worker. This is also the shape the ledger persists
  * as a dispatch effect's payload — deliberately credential-free: the durable
  * state records the credential's DIGEST, the host's store holds the value, and

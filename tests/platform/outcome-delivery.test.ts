@@ -469,7 +469,10 @@ interface MaterializedFixture {
  */
 function materializedView(
   dir: string,
-  options: { readonly attemptId: string; readonly payload: ResolvedInput["payload"] },
+  options: {
+    readonly attemptId: string; readonly payload: ResolvedInput["payload"];
+    readonly producer?: Pick<ResolvedInput, "from" | "outcome" | "attemptId">;
+  },
 ): MaterializedFixture {
   const contentStore = join(dir, "host-store");
   const deposit = putArtifact(contentStore, VIEW_BYTES);
@@ -484,6 +487,7 @@ function materializedView(
         from: "work",
         outcome: "done",
         attemptId: "work#1",
+        ...options.producer,
         payload: options.payload,
         artifacts: [
           {
@@ -526,6 +530,28 @@ function reviewRequest(attemptId: string): OutcomeDispatchRequest {
 }
 
 describe("the input view reaches the worker each adapter starts (D7)", () => {
+  it.each(["pi", "dsh"] as const)("%s preserves review feedback and the retry reason in the handed prompt", async (adapter) => {
+    const dir = makeTmpDir("repair-input-view-");
+    const fixture = materializedView(dir, {
+      attemptId: "work#4", producer: { from: "review", outcome: "revise", attemptId: "review#2" },
+      payload: { kind: "value", value: { items: [{ id: "cleanup", problem: "Missing cleanup" }] } },
+    });
+    const retry = { ...request(), attemptId: "work#4", prompt: 'Implement.\n[rolebox retry context]\nThis attempt replaces "work#3".\nResume after interruption.' };
+    const pi = makePiPort();
+    const dsh = makeDshRuntime();
+    const delivery = adapter === "pi"
+      ? new PiOutcomeDelivery({ manager: pi.port, directory: dir, onSettled: () => {}, onStartFailed: () => {} })
+      : new DshOutcomeDelivery({ subagents: dsh.runtime, parentResolver: () => ({ id: "parent" }), onSettled: () => {}, onStartFailed: () => {} });
+    delivery.deliver(retry, effect(), INVOCATION, fixture.view);
+    await flush();
+    const prompt = adapter === "pi" ? pi.launches[0]?.prompt ?? ""
+      : dsh.starts[0]?.request.prompt.map(block => block.text).join("\n") ?? "";
+    expect(prompt).toContain('from "review", outcome "revise", attempt "review#2"');
+    expect(prompt).toContain('"problem":"Missing cleanup"');
+    expect(prompt).toContain("Resume after interruption.");
+    expect(readFileSync(deliveredPathIn(prompt)).equals(VIEW_BYTES)).toBe(true);
+  });
+
   it("Pi: the launched task's prompt names the delivered file, and it reads back", async () => {
     const dir = makeTmpDir("pi-input-view-");
     const fixture = materializedView(dir, {

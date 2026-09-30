@@ -282,7 +282,16 @@ export function applyRetryCommand(ctx: ControlCommandContext<"retry">): GraphCon
     nodeId: node.nodeId,
     attemptId: successorAttemptId,
     agent: planNode.agent,
-    prompt: planNode.prompt,
+    prompt: [
+      planNode.prompt,
+      "",
+      "---",
+      "[rolebox retry context]",
+      "This attempt replaces " + JSON.stringify(supersededAttemptId) + ".",
+      "Reason supplied by the graph controller: " + request.reason,
+      "Inspect existing work and this reason before repeating operations. Preserve completed work; " +
+      "the node's scope, declared outcomes and bound upstream inputs still apply.",
+    ].join("\n"),
     // The SAME view the state entry records below: the dispatch target and the
     // armed attempt can never describe two different bindings.
     inputs: carriedInputs,

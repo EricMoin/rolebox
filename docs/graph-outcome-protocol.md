@@ -520,6 +520,11 @@ the same advance. Bound results persist in the attempt and dispatch effect, so
 recovery and retries carry the same view rather than reading a newer result.
 Edges continue to route by declared outcomes and never interpret payload fields.
 
+A node-scoped control retry appends the superseded attempt id and the controller's
+reason to the new dispatch prompt. This context persists with the dispatch effect;
+the compiled node prompt stays unchanged. A subsequent retry starts from that same
+compiled prompt with its own reason, without accumulating earlier retry prompts.
+
 ## Runs, controls and limits
 
 A graph owns a sequence of runs; a run owns attempts; an attempt is the unit a

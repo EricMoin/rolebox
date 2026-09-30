@@ -429,6 +429,11 @@ describe("retry — a new attempt on the same run", () => {
       });
       expect(answer.decided?.[0]?.decision.command).toBe("retry");
       expect(answer.decided?.[0]?.decision.successorAttemptId).toBe("work#2");
+      const retryPrompt = fixture.dispatched.find((request) => request.attemptId === "work#2")?.prompt;
+      expect(retryPrompt).toContain("the attempt has produced nothing for an hour");
+      expect(retryPrompt).toContain("work#1");
+      expect(retryPrompt?.startsWith("Do the work.")).toBe(true);
+      expect(fixture.dispatched[0]?.prompt).toBe("Do the work.");
 
       const after = readRows(fixture);
       // THE SUPERSEDED ATTEMPT'S EFFECT IS UNTOUCHED: same row, same status —
