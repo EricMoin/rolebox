@@ -9,7 +9,10 @@ import { GRAPH_STORE_FORMAT_VERSION, GRAPH_STORE_TABLES, graphStoreFilePath } fr
 import { initializeStoreIdentity, readStoreIdentity, storeIdentityPath } from "../../src/graph/store/identity.ts";
 import { createDatabaseSync } from "../../src/memory/db-driver.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";
-import { moveStoreRootAside, vanishStoreDatabase } from "./helpers/vanish-store.ts";
+import { attemptStoreEntryRemoval, attemptStoreRootMoveAside } from "./helpers/vanish-store.ts";
+
+/** SQLite's own file magic, the first 16 bytes of every database file. */
+const SQLITE_MAGIC = "SQLite format 3\u0000";
 
 const roots: string[] = [];
 function root(): string {
@@ -109,7 +112,9 @@ it("accepts a matching restored backup and refuses a database from another ident
 it("refuses missing or malformed markers and fences an already open handle", () => {
   const directory = root();
   const store = GraphStore.openFile(directory);
-  const marker = storeIdentityPath(graphStoreFilePath(directory));
+  const file = graphStoreFilePath(directory);
+  const marker = storeIdentityPath(file);
+  const storeId = readStoreIdentity(file);
   try {
     const saved = readFileSync(marker);
     writeFileSync(marker, "{");
@@ -118,36 +123,91 @@ it("refuses missing or malformed markers and fences an already open handle", () 
     rmSync(marker);
     expect(() => GraphStore.openFile(directory)).toThrow("missing or malformed");
     writeFileSync(marker, saved);
-    // The store is OPEN here, and Windows refuses to unlink an entry an open
-    // handle holds; `vanishStoreDatabase` makes the same path disappear the way
-    // that platform allows, so the fence below is exercised on both families.
-    vanishStoreDatabase(directory);
-    expect(() => store.get("SELECT 1")).toThrow("disappeared");
-    expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+    // Can this platform make an OPEN database's path disappear? The POSIX family
+    // unlinks it under the handle; windows-latest refuses the unlink (`EBUSY`)
+    // and the move of the entry (`EPERM`) — the CI finding helpers/vanish-store.ts
+    // records. The helper reports which happened, and each platform asserts the
+    // truth it can have.
+    const removal = attemptStoreEntryRemoval(directory);
+    if (removal.removed) {
+      expect(() => store.get("SELECT 1")).toThrow("disappeared");
+      expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+    } else {
+      // The refusal is the OS's, reported with its own errno — not this helper
+      // giving up — and it changed nothing: the open store keeps serving and
+      // raises NO false fence, and the authoritative file is still the database
+      // that holds this store's records.
+      expect(removal.refusals.map(refusal => refusal.operation)).toEqual(["unlink", "rename-entry"]);
+      for (const refusal of removal.refusals) {
+        expect(refusal.code, refusal.operation).toMatch(/^(EBUSY|EPERM|EACCES)$/);
+      }
+      expect(() => store.get("SELECT 1")).not.toThrow();
+      expect(store.get(`SELECT store_id FROM ${GRAPH_STORE_TABLES.meta} WHERE id = 1`)).toEqual({ store_id: storeId });
+      expect(existsSync(file)).toBe(true);
+      expect(readFileSync(file).subarray(0, 16).toString("latin1")).toBe(SQLITE_MAGIC);
+      // The refusal was the open handle's, not the path's: with the store closed
+      // the very same removal is permitted, and the next open refuses the bound
+      // database it can no longer find.
+      store.close();
+      expect(attemptStoreEntryRemoval(directory).removed).toBe(true);
+      expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+    }
   } finally { store.close(); }
 });
 
 /**
- * The same fence for the platform that REFUSES the unlink — the branch Windows
- * takes for an open database. A POSIX filesystem would unlink the entry happily,
- * so this calls the fallback Windows reaches directly rather than pretending the
- * refusal happened: the root is moved out of the way and recreated, which is
- * exactly what `vanishStoreDatabase` does there, and the store's verdict on the
- * disappearance is asserted unchanged.
+ * The ROOT-move mechanism: where the platform lets it run, and the refusal where
+ * it does not.
+ *
+ * A store root has no open handle of its own, so the POSIX family moves the whole
+ * root while the database inside stays open — the path the store was opened over
+ * disappears and the store fences. windows-latest REFUSES that move while the
+ * store is open (`EPERM: operation not permitted, rename '<root>' ->
+ * '<aside>\<name>'`, run 36673190424), so on that family the same test asserts
+ * the truth the refusal leaves behind: the root, its marker and its database are
+ * untouched and the open store keeps serving instead of raising a false fence —
+ * and the very same move is permitted, and the next open refuses, once the store
+ * is closed. Neither branch is a weakened claim: each is what the platform really
+ * does with an open database's path.
  */
-it("fences the store when the platform refuses to unlink the open database", () => {
+it("fences the store when the open database's root can be moved aside, and keeps serving when the platform refuses", () => {
   const directory = root();
   const store = GraphStore.openFile(directory);
   const file = graphStoreFilePath(directory);
+  const storeId = readStoreIdentity(file);
   try {
-    const moved = moveStoreRootAside(directory);
-    expect(existsSync(moved)).toBe(true);
-    expect(existsSync(file)).toBe(false);
-    // The marker stays behind, which is what makes the recreated root still this
-    // store's directory rather than a new one.
-    expect(existsSync(storeIdentityPath(file))).toBe(true);
-    expect(() => store.get("SELECT 1")).toThrow("disappeared");
-    expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+    const attempt = attemptStoreRootMoveAside(directory);
+    if (attempt.removed) {
+      const moved = attempt.movedTo ?? "";
+      expect(moved).not.toBe("");
+      expect(existsSync(moved)).toBe(true);
+      expect(existsSync(file)).toBe(false);
+      // The marker stays behind, which is what makes the recreated root still this
+      // store's directory rather than a new one.
+      expect(existsSync(storeIdentityPath(file))).toBe(true);
+      expect(() => store.get("SELECT 1")).toThrow("disappeared");
+      expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+    } else {
+      expect(attempt.refusals.map(refusal => refusal.operation)).toEqual(["rename-root"]);
+      for (const refusal of attempt.refusals) {
+        expect(refusal.code, refusal.operation).toMatch(/^(EBUSY|EPERM|EACCES)$/);
+      }
+      // Nothing moved: the root, its marker and its database are where they were,
+      // and the open store still reads the records it holds.
+      expect(existsSync(file)).toBe(true);
+      expect(existsSync(storeIdentityPath(file))).toBe(true);
+      expect(() => store.get("SELECT 1")).not.toThrow();
+      expect(store.get(`SELECT store_id FROM ${GRAPH_STORE_TABLES.meta} WHERE id = 1`)).toEqual({ store_id: storeId });
+      expect(readFileSync(file).subarray(0, 16).toString("latin1")).toBe(SQLITE_MAGIC);
+      // The refusal was the open handle's, not the directory's: with the store
+      // closed the very same move succeeds and the next open refuses the database
+      // the recreated root no longer holds.
+      store.close();
+      const afterClose = attemptStoreRootMoveAside(directory);
+      expect(afterClose.removed).toBe(true);
+      expect(existsSync(file)).toBe(false);
+      expect(() => GraphStore.openFile(directory)).toThrow("bound database is missing");
+    }
   } finally { store.close(); }
 });
 
