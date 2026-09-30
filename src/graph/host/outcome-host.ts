@@ -2775,10 +2775,36 @@ export class OutcomeHost {
     this.closed = true;
     this.runtimes.close();
     this.bridges.clear();
+    // The host is the ONLY owner of these three long-lived capabilities, and
+    // EACH holds a borrow on the same GraphStore connection: the store's shared
+    // connection map closes the database only when the LAST borrow returns, so
+    // a host that released fewer than all three would leave the file open for
+    // the life of the process. That is invisible where unlinking an open file
+    // succeeds, and an observable leak where it does not (Windows: EBUSY on
+    // every teardown), so releasing all three here is exactly this call's job.
+    // No callee is reachable from anywhere else once the host is closed.
+    //
+    // One guard per capability, in the file's own style: a release failure
+    // cannot replace the caller's own outcome, and closing an already-closed
+    // store is not a host failure.
+    try {
+      this.vault.close();
+    } catch {
+      // The vault's borrow stays outstanding; that is not a close failure.
+    }
+    try {
+      this.executions.close();
+    } catch {
+      // The index's borrow stays outstanding; that is not a close failure.
+    }
+    try {
+      this.origins.close();
+    } catch {
+      // The origin record's borrow stays outstanding; not a close failure.
+    }
     // The memory-mode capabilities share ONE private store; releasing it here
     // is what keeps the host's process-only records from outliving the host.
-    // In file mode the capabilities own their own connections, exactly as the
-    // per-graph ledgers above do, and closing them is not this call's job.
+    // In file mode it is undefined and the three releases above are the whole job.
     try {
       this.sharedStore?.close();
     } catch {

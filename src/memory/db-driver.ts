@@ -120,6 +120,13 @@ interface BunSqliteStatement {
   get(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
   run(...params: unknown[]): unknown;
+  /**
+   * Release the statement's SQLite handle.
+   *
+   * Required by `close()`: see {@link finalizeAll} for why the connection's
+   * statements must be finalized before the database is closed.
+   */
+  finalize(): unknown;
 }
 
 interface BunSqliteDatabase {
@@ -142,6 +149,37 @@ interface NodeSqliteDatabase {
   close(): unknown;
 }
 
+/**
+ * Finalize every statement a Bun connection handed out, returning the FIRST
+ * failure instead of hiding it.
+ *
+ * WHY THIS IS PART OF `close()`. `bun:sqlite` caches ONE prepared statement per
+ * SQL string on its connection, and `Database.close()` alone does not release
+ * the file: SQLite's `sqlite3_close_v2` turns a connection that still has
+ * statements into a zombie that keeps the descriptor open until the last
+ * statement is finalized (in practice, until a GC finalizes the cache). POSIX
+ * hides that — unlinking an open file succeeds, so a leaked descriptor is
+ * invisible — while Windows makes it observable: removing the directory fails
+ * with EBUSY. The driver created every one of these statements, so it owns
+ * finalizing them, and it does so BEFORE `db.close()` rather than relying on a
+ * collection the caller cannot schedule.
+ *
+ * A failure is reported to the caller (which decides what a failed release
+ * means) and one bad statement does not stop the others: the point of the loop
+ * is to release as much as the connection can release.
+ */
+function finalizeAll(statements: Iterable<BunSqliteStatement>): unknown {
+  let firstFailure: unknown;
+  for (const statement of statements) {
+    try {
+      statement.finalize();
+    } catch (error) {
+      if (firstFailure === undefined) firstFailure = error;
+    }
+  }
+  return firstFailure;
+}
+
 function createBunDatabaseSync(
   path: string,
   options: DatabaseOpenOptions,
@@ -156,15 +194,22 @@ function createBunDatabaseSync(
     options.readonly === true
       ? new Database(path, { readonly: true })
       : new Database(path);
+  // Every statement this connection hands out — `db.query` returns the SAME
+  // object for the same SQL, so a set is the connection's real cache. `close()`
+  // finalizes them; see `finalizeAll`.
+  const statements = new Set<BunSqliteStatement>();
   return {
     exec(sql: string): void {
       db.exec(sql);
     },
     run(sql: string, ...params: unknown[]): void {
-      db.query(sql).run(...params);
+      const statement = db.query(sql);
+      statements.add(statement);
+      statement.run(...params);
     },
     query(sql: string): StatementDriver {
       const stmt = db.query(sql);
+      statements.add(stmt);
       return {
         get: (...params: unknown[]) => stmt.get(...params),
         all: (...params: unknown[]) => stmt.all(...params),
@@ -177,7 +222,10 @@ function createBunDatabaseSync(
       return db.transaction(fn);
     },
     close(): void {
+      const failure = finalizeAll(statements);
+      statements.clear();
       db.close();
+      if (failure !== undefined) throw failure;
     },
   };
 }
@@ -246,6 +294,15 @@ async function createBunDatabase(
       ? new Database(path, { readonly: true })
       : new Database(path);
 
+  // Every statement this connection hands out — `db.query` returns the SAME
+  // object for the same SQL, so a set is the connection's real cache. `close()`
+  // finalizes them; see `finalizeAll`.
+  //
+  // `run` deliberately stays on `db.run`: measured on this host, 40 distinct
+  // `db.run` calls leave NO descriptor after `close()`, so that path does not
+  // populate the cached-statement set and routing it through `query` here would
+  // add statements to track rather than remove a leak.
+  const statements = new Set<BunSqliteStatement>();
   return {
     exec(sql: string): void {
       db.exec(sql);
@@ -255,6 +312,7 @@ async function createBunDatabase(
     },
     query(sql: string): StatementDriver {
       const stmt = db.query(sql);
+      statements.add(stmt);
       return {
         get(...params: unknown[]) {
           return stmt.get(...params);
@@ -271,7 +329,10 @@ async function createBunDatabase(
       return db.transaction(fn);
     },
     close(): void {
+      const failure = finalizeAll(statements);
+      statements.clear();
       db.close();
+      if (failure !== undefined) throw failure;
     },
   };
 }
