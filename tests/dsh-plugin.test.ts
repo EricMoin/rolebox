@@ -289,6 +289,8 @@ function createFakeCtx(
     description: `host-owned ${name}`,
     parameters: {},
     output: { schema: {}, render: () => [] },
+    // The collision probe only reads the definition, never executes it.
+    execute: async () => ({}),
   });
   // The collision probe: a name the host owns (statically declared taken, or
   // already in this registry) resolves to a definition, everything else to
