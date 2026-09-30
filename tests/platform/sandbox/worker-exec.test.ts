@@ -36,9 +36,8 @@ const perOs = (posix: string, windows: string): string => (hostSystem.id === "wi
 
 it("spawns the caller's argv in the workspace and reports exit code and output", async () => {
   const root = workspace("graph-worker-exec-");
-  // `$PWD`/`cd` report the command's own working directory, and cmd's `echo`
-  // writes CRLF where /bin/sh's writes LF — so the expected bytes travel with
-  // the per-OS command pair.
+  // `$PWD`/`cd` report the command's own working directory, so the per-OS command
+  // pair carries which spelling of it the shell prints.
   const result = await executeGraphWorkerCommand({ workspace: root, timeoutMs: 10_000,
     argv: shell(perOs(`echo decided > output.txt && printf '%s' "$PWD"`, "echo decided> output.txt && cd")) });
   expect(result.exitCode, result.output).toBe(0);
@@ -46,7 +45,14 @@ it("spawns the caller's argv in the workspace and reports exit code and output",
   // report names: a short (8.3) or differently-cased spelling of the same
   // directory on Windows still proves which directory the command ran in.
   expect(realpathSync(result.output.trim())).toBe(realpathSync(root));
-  expect(readFileSync(join(root, "output.txt"), "utf8")).toBe(perOs("decided\n", "decided\r\n"));
+  // The marker the command WROTE, not the terminator the shell appends: /bin/sh's
+  // `echo` writes "decided\n" and cmd's writes "decided \r\n" — cmd inserts a
+  // space before the CRLF its own redirection adds, measured on windows-latest
+  // (run 36673190424 received `decided ` + CRLF where the file was expected to
+  // hold `decided` + CRLF). Which terminator a shell appends is that shell's
+  // business; that the command ran in the workspace and wrote the marker is the
+  // claim, so the bytes are compared after trimming the shell's own terminator.
+  expect(readFileSync(join(root, "output.txt"), "utf8").trim()).toBe("decided");
 });
 
 it("refuses an empty argv instead of spawning anything", async () => {
@@ -73,15 +79,44 @@ it("provides disposable home, config and cache directories to work software", as
     `test -d "$HOME" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && echo configured > "$HOME/settings" && echo cached > "$XDG_CACHE_HOME/cache" && printf '%s' "$HOME"`,
     // No embedded quotes: a command string is one argv entry of `cmd /d /s /c`,
     // and quote characters here would be escaped for CreateProcess and then
-    // re-parsed by cmd itself. The disposable paths carry no spaces, and the two
-    // writes are chained with `&&` exactly as the POSIX branch chains them, so a
-    // write that does not land fails the command instead of being reported as a
-    // success.
-    `if not exist %HOME% exit /b 1 & if not exist %XDG_CONFIG_HOME% exit /b 1 & if not exist %XDG_CACHE_HOME% exit /b 1 & echo configured> %HOME%\\settings && echo cached> %XDG_CACHE_HOME%\\cache && echo %HOME%`)) });
+    // re-parsed by cmd itself. Each `&&`-chained redirect proves a disposable
+    // directory exists AND is writable — cmd refuses a redirect into a directory
+    // that is missing — and stops the chain, so a directory the runner did not
+    // create fails the command instead of being reported as a success.
+    // The three redirect targets are the runner's OWN three variables (HOME,
+    // XDG_CONFIG_HOME, XDG_CACHE_HOME — src/platform/system/descriptors.ts, win32),
+    // the same three the POSIX branch `test -d`s, so both branches state the same
+    // facts instead of this branch re-deriving the config and cache paths from HOME.
+    //
+    // That chain replaces the `if not exist … exit /b 1 & …` guards this branch
+    // used to carry: on windows-latest (run 36673190424) the command ended with
+    // exit code 0 and NO stdout at all, so its final print never ran even though
+    // the guards conditions held. The writes prove the same facts the guards were
+    // there for, and a redirect that cannot land fails the chain.
+    //
+    // The final print is cmd's own no-newline idiom, `<nul set /p =`, so stdout is
+    // the disposable home path ITSELF rather than a line `echo` would terminate —
+    // the same fact the POSIX branch's `printf '%s' "$HOME"` reports. The
+    // disposable paths carry no character cmd treats specially, which is what the
+    // unquoted prompt needs: the quotes the idiom is usually written with cannot
+    // survive the CreateProcess escaping described above.
+    //
+    // `set /p` leaves ERRORLEVEL 1 when its input is empty — it reads `<nul` to
+    // EOF — and `cmd /c` exits with the ERRORLEVEL of its LAST command, so the
+    // print alone would end this command with exit code 1 for a reason that has
+    // nothing to do with the runner. The group below is therefore `&&`-gated by
+    // the three writes and ends with an explicit successful exit INSIDE the group:
+    // a redirect that cannot land still short-circuits the chain and leaves its
+    // own non-zero code, while the success path reports 0 without depending on
+    // the print's own status. The exit-code assertion below keeps its meaning —
+    // the three disposable directories existed and were writable — under either
+    // reading of that quirk.
+    `echo configured> %HOME%\\settings && echo configured> %XDG_CONFIG_HOME%\\settings && echo cached> %XDG_CACHE_HOME%\\cache && (<nul set /p =%HOME% & exit /b 0)`)) });
   expect(result.exitCode, result.output).toBe(0);
   expect(result.output).not.toBe("");
-  // The directory the command reported is its disposable home, and it is gone
-  // once the command ends (`echo` adds the line ending of whichever shell ran).
+  // The reported path is the runner's own per-command scratch home — the one the
+  // command was given — and it is gone once the command ends.
+  expect(result.output.trim()).toContain("graph-worker-command-");
   expect(existsSync(result.output.trim())).toBe(false);
 });
 
