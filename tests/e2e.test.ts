@@ -211,7 +211,7 @@ describe("End-to-end", () => {
   // ── Prompt building ────────────────────────────────────────
 
   describe("prompt building", () => {
-    it("code-reviewer prompt includes <available_skills> XML block", async () => {
+    it("code-reviewer prompt includes the Available skills section", async () => {
       const roles = await discoverRoles(examplesDir);
       const cr = roles.get("code-reviewer")!;
 
@@ -225,15 +225,10 @@ describe("End-to-end", () => {
 
       expect(prompt).toContain("You are an expert code reviewer");
 
-      expect(prompt).toContain("<available_skills>");
-      expect(prompt).toContain("<skill>");
-      expect(prompt).toContain("<name>review-checklist</name>");
+      expect(prompt).toContain("## Available skills");
       expect(prompt).toContain(
-        "<description>Standard code review checklist covering correctness, security, performance, and style</description>",
+        "- `review-checklist` — Standard code review checklist covering correctness, security, performance, and style",
       );
-      expect(prompt).toContain("<scope>rolebox</scope>");
-      expect(prompt).toContain("</skill>");
-      expect(prompt).toContain("</available_skills>");
     });
 
     it("tech-writer prompt is raw when no skills are resolved", async () => {
@@ -242,12 +237,12 @@ describe("End-to-end", () => {
 
       const prompt = buildAgentPrompt(tw, []);
 
-      expect(prompt).not.toContain("<available_skills>");
+      expect(prompt).not.toContain("## Available skills");
       expect(prompt).toContain("You are a technical writer");
       expect(prompt).toContain("accurate, well-structured");
     });
 
-    it("team-lead prompt includes <available_subagents> XML block", async () => {
+    it("team-lead prompt includes the Available sub-agents section", async () => {
       const roles = await discoverRoles(examplesDir);
       const tl = roles.get("team-lead")!;
 
@@ -260,12 +255,9 @@ describe("End-to-end", () => {
 
       expect(prompt).toContain("You are a team lead");
 
-      expect(prompt).toContain("<available_subagents>");
-      expect(prompt).toContain("<id>team-lead--implementer</id>");
-      expect(prompt).toContain("<name>Implementer</name>");
-      expect(prompt).toContain("<id>team-lead--researcher</id>");
-      expect(prompt).toContain("<name>Researcher</name>");
-      expect(prompt).toContain("</available_subagents>");
+      expect(prompt).toContain("## Available sub-agents");
+      expect(prompt).toContain("- `team-lead--implementer` — Writes production code");
+      expect(prompt).toContain("- `team-lead--researcher` — Finds and synthesizes information");
     });
   });
 
@@ -319,8 +311,8 @@ describe("End-to-end", () => {
 
         const cr = agents["code-reviewer"]!;
         expect(cr.prompt).toContain("You are an expert code reviewer");
-        expect(cr.prompt).toContain("<available_skills>");
-        expect(cr.prompt).toContain("<name>review-checklist</name>");
+        expect(cr.prompt).toContain("## Available skills");
+        expect(cr.prompt).toContain("- `review-checklist` — ");
         expect(cr.mode).toBe("subagent");
         expect(cr.model).toBe("gpt-4");
         expect(cr.description).toContain("Expert code reviewer");
@@ -331,7 +323,7 @@ describe("End-to-end", () => {
 
         const tw = agents["tech-writer"]!;
         expect(tw.prompt).toContain("You are a technical writer");
-        expect(tw.prompt).not.toContain("<available_skills>");
+        expect(tw.prompt).not.toContain("## Available skills");
         expect(tw.mode).toBe("primary");
         expect(tw.description).toBe("Technical documentation specialist");
         expect("model" in tw).toBe(false);
@@ -388,9 +380,9 @@ describe("End-to-end", () => {
         const tl = agents["team-lead"]!;
         expect(tl).toBeDefined();
         expect(tl.prompt).toContain("You are a team lead");
-        expect(tl.prompt).toContain("<available_subagents>");
-        expect(tl.prompt).toContain("<id>team-lead--implementer</id>");
-        expect(tl.prompt).toContain("<id>team-lead--researcher</id>");
+        expect(tl.prompt).toContain("## Available sub-agents");
+        expect(tl.prompt).toContain("`team-lead--implementer`");
+        expect(tl.prompt).toContain("`team-lead--researcher`");
         expect(tl.mode).toBe("primary");
         expect(tl.model).toBe("gpt-4");
         expect(tl.temperature).toBe(0.3);
@@ -409,12 +401,12 @@ describe("End-to-end", () => {
         expect(res.mode).toBe("subagent");
         expect((res as Record<string, unknown>).hidden).toBe(true);
         expect(res.prompt).toContain("You are a research specialist");
-        expect(res.prompt).toContain("<available_skills>");
-        expect(res.prompt).toContain("<name>research-checklist</name>");
+        expect(res.prompt).toContain("## Available skills");
+        expect(res.prompt).toContain("- `research-checklist` — ");
 
-        // Subagents should NOT have recursive <available_subagents>
-        expect(impl.prompt).not.toContain("<available_subagents>");
-        expect(res.prompt).not.toContain("<available_subagents>");
+        // Subagents should NOT have a recursive sub-agents section
+        expect(impl.prompt).not.toContain("## Available sub-agents");
+        expect(res.prompt).not.toContain("## Available sub-agents");
       } finally {
         // The boot's declared-graph host owns an open store connection under
         // `<tmpDir>/data`; disposing it is what releases that connection before

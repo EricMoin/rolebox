@@ -8,7 +8,7 @@
  * Controls how memories are injected into the system prompt.
  */
 export interface MemoryConfig {
-  /** Whether to auto-inject <available_memory> block at session start (default: true) */
+  /** Whether to auto-inject the `## Available memory` block at session start (default: true) */
   inject?: boolean;
   /** Max memory summaries to inject into system prompt (default: 10) */
   max_inject?: number;

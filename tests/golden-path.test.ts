@@ -194,7 +194,7 @@ The plan is ready for your review.`;
     expect(sessions.isActive(SID, "plan")).toBe(false);
     log("[6] ✓ execute activated, plan deactivated");
 
-    // ═══ STEP 7: Execute sees <active_artifact name="plan"> ═══
+    // ═══ STEP 7: Execute sees the `## Active artifact: plan` block ═══
     const execSt = singletonRt.init(SID, "execute", 1);
     execSt.currentTurn = 2;
     execSt.activatedAtTurn = 2;
@@ -202,9 +202,9 @@ The plan is ready for your review.`;
 
     // Simulate system.transform injection of consumed artifact
     const injectedArtifact = buildActiveArtifactBlock("plan", planContent!);
-    expect(injectedArtifact).toContain("<active_artifact");
+    expect(injectedArtifact).toContain("## Active artifact: plan");
     expect(injectedArtifact).toContain("Build X");
-    log("[7] ✓ execute sees <active_artifact name=\"plan\">");
+    log("[7] ✓ execute sees the Active artifact block for plan");
 
     // ═══ STEP 8: Model works — todowrite, lsp_diagnostics, test ═══
     log("[8] Model starts executing...");

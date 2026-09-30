@@ -210,8 +210,8 @@ describe("RoleboxPlugin config hook", () => {
     expect(agent.mode).toBe("primary");
   });
 
-  // Scenario 3: role with skills → prompt contains <available_skills>
-  it("includes <available_skills> block in prompt when role has skills", async () => {
+  // Scenario 3: role with skills → prompt contains the Available skills section
+  it("includes the Available skills section in prompt when role has skills", async () => {
     await writeRole(
       "reviewer",
       [
@@ -256,13 +256,9 @@ describe("RoleboxPlugin config hook", () => {
 
     const prompt = cfg.agent!.reviewer!.prompt!;
     expect(prompt).toStartWith("You review code.");
-    expect(prompt).toContain("<available_skills>");
-    expect(prompt).toContain("<name>git-master</name>");
-    expect(prompt).toContain("<description>Expert git workflows</description>");
-    expect(prompt).toContain("<name>dart-add-unit-test</name>");
-    expect(prompt).toContain("<description>Unit test patterns for Dart</description>");
-    expect(prompt).toContain("<scope>rolebox</scope>");
-    expect(prompt).toContain("</available_skills>");
+    expect(prompt).toContain("## Available skills");
+    expect(prompt).toContain("- `git-master` — Expert git workflows");
+    expect(prompt).toContain("- `dart-add-unit-test` — Unit test patterns for Dart");
   });
 
   // Scenario 4: multiple roles → all registered
@@ -410,13 +406,8 @@ describe("RoleboxPlugin config hook", () => {
     const prompt = agent.prompt!;
     const lines = prompt.split("\n");
     expect(lines[0]).toBe("You are a senior developer.");
-    expect(lines).toContain("<available_skills>");
-    expect(lines).toContain("  <skill>");
-    expect(lines).toContain("    <name>typescript-patterns</name>");
-    expect(lines).toContain("    <description>Common TS design patterns</description>");
-    expect(lines).toContain("    <scope>rolebox</scope>");
-    expect(lines).toContain("  </skill>");
-    expect(lines).toContain("</available_skills>");
+    expect(lines).toContain("## Available skills");
+    expect(lines).toContain("- `typescript-patterns` — Common TS design patterns");
   });
 });
 
@@ -451,8 +442,8 @@ describe("RoleboxPlugin subagents", () => {
     expect(child.description).toBe("A child agent");
   });
 
-  // Scenario 10: parent prompt contains <available_subagents> block
-  it("includes <available_subagents> in parent prompt when role has subagents", async () => {
+  // Scenario 10: parent prompt contains the Available sub-agents section
+  it("includes the sub-agents section in parent prompt when role has subagents", async () => {
     await writeRole(
       "orchestrator",
       [
@@ -471,15 +462,12 @@ describe("RoleboxPlugin subagents", () => {
     await hooks.config!(cfg);
 
     const parentPrompt = cfg.agent!.orchestrator!.prompt!;
-    expect(parentPrompt).toContain("<available_subagents>");
-    expect(parentPrompt).toContain("<id>orchestrator--worker-bee</id>");
-    expect(parentPrompt).toContain("<name>Worker Bee</name>");
-    expect(parentPrompt).toContain("<description>Does the actual work</description>");
-    expect(parentPrompt).toContain("</available_subagents>");
+    expect(parentPrompt).toContain("## Available sub-agents");
+    expect(parentPrompt).toContain("- `orchestrator--worker-bee` — Does the actual work");
   });
 
-  // Scenario 11: subagent with own skills → prompt has <available_skills>
-  it("includes <available_skills> in subagent prompt when subagent has skills", async () => {
+  // Scenario 11: subagent with own skills → prompt has the skills section
+  it("includes the skills section in subagent prompt when subagent has skills", async () => {
     await writeRole(
       "boss",
       [
@@ -511,11 +499,8 @@ describe("RoleboxPlugin subagents", () => {
     await hooks.config!(cfg);
 
     const subPrompt = cfg.agent!["boss--analyst"]!.prompt!;
-    expect(subPrompt).toContain("<available_skills>");
-    expect(subPrompt).toContain("<name>data-review</name>");
-    expect(subPrompt).toContain("<description>Data review patterns</description>");
-    expect(subPrompt).toContain("<scope>rolebox</scope>");
-    expect(subPrompt).toContain("</available_skills>");
+    expect(subPrompt).toContain("## Available skills");
+    expect(subPrompt).toContain("- `data-review` — Data review patterns");
   });
 
   // Scenario 12: multiple subagents → all registered
@@ -576,7 +561,7 @@ describe("RoleboxPlugin subagents", () => {
   });
 
   // Scenario 14: no recursive subagent injection in subagent prompts
-  it("does not inject <available_subagents> into subagent prompts", async () => {
+  it("does not inject the sub-agents section into subagent prompts", async () => {
     await writeRole(
       "root",
       [
@@ -595,7 +580,7 @@ describe("RoleboxPlugin subagents", () => {
     await hooks.config!(cfg);
 
     const subPrompt = cfg.agent!["root--leaf"]!.prompt!;
-    expect(subPrompt).not.toContain("<available_subagents>");
+    expect(subPrompt).not.toContain("## Available sub-agents");
   });
 
   // Scenario 15: subagent skill symlinks created with correct prefix
@@ -694,11 +679,11 @@ describe("RoleboxPlugin subagents", () => {
     const agentKeys = Object.keys(cfg.agent ?? {}).sort();
     expect(agentKeys).toEqual(["solo"]);
     expect(cfg.agent!.solo!.prompt).toBe("I work alone.");
-    expect(cfg.agent!.solo!.prompt).not.toContain("<available_subagents>");
+    expect(cfg.agent!.solo!.prompt).not.toContain("## Available sub-agents");
   });
 
-  // Scenario 18: subagent with skills has <available_skills> in prompt
-  it("includes <available_skills> in subagent prompt from file-based subagent", async () => {
+  // Scenario 18: subagent with skills has the skills section in its prompt
+  it("includes the skills section in subagent prompt from file-based subagent", async () => {
     await writeRole(
       "manager",
       [
@@ -732,10 +717,8 @@ describe("RoleboxPlugin subagents", () => {
     await hooks.config!(cfg);
 
     const subPrompt = cfg.agent!["manager--analyst"]!.prompt!;
-    expect(subPrompt).toContain("<available_skills>");
-    expect(subPrompt).toContain("<name>data-analysis</name>");
-    expect(subPrompt).toContain("<description>Data analysis patterns and methodology</description>");
-    expect(subPrompt).toContain("<scope>rolebox</scope>");
+    expect(subPrompt).toContain("## Available skills");
+    expect(subPrompt).toContain("- `data-analysis` — Data analysis patterns and methodology");
   });
 
   // Scenario 19: parent and subagent with same skill name → resolve independently
@@ -776,16 +759,16 @@ describe("RoleboxPlugin subagents", () => {
     await hooks.config!(cfg);
 
     const parentPrompt = cfg.agent!.dual!.prompt!;
-    expect(parentPrompt).toContain("<available_skills>");
-    expect(parentPrompt).toContain("<name>shared-skill</name>");
+    expect(parentPrompt).toContain("## Available skills");
+    expect(parentPrompt).toContain("- `shared-skill` — A skill shared by parent and child");
 
     const childPrompt = cfg.agent!["dual--child"]!.prompt!;
-    expect(childPrompt).toContain("<available_skills>");
-    expect(childPrompt).toContain("<name>shared-skill</name>");
+    expect(childPrompt).toContain("## Available skills");
+    expect(childPrompt).toContain("- `shared-skill` — A skill shared by parent and child");
 
     // Both parent and child should have the skill independently
-    const parentSkillCount = (parentPrompt.match(/<name>shared-skill<\/name>/g) ?? []).length;
-    const childSkillCount = (childPrompt.match(/<name>shared-skill<\/name>/g) ?? []).length;
+    const parentSkillCount = (parentPrompt.match(/- `shared-skill` — /g) ?? []).length;
+    const childSkillCount = (childPrompt.match(/- `shared-skill` — /g) ?? []).length;
     expect(parentSkillCount).toBe(1);
     expect(childSkillCount).toBe(1);
   });
@@ -1094,7 +1077,7 @@ describe("RoleboxPlugin declared-graph run notifications", () => {
         parts: [{ type: "text", text: "Parent task" }],
       } as never);
       await hooks["experimental.chat.system.transform"]!({ sessionID: "ses_parent", model }, parentSystem);
-      expect(parentSystem.system.join("\n")).toContain("<available_functions>");
+      expect(parentSystem.system.join("\n")).toContain("## Available functions");
       expect(parentSystem.system.join("\n")).toContain("Inactive orchestration instructions");
       const handoffText = promptCallText(handoff);
       expect(handoffText).toContain("[rolebox outcome protocol — attempt handoff]");

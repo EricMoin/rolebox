@@ -1322,7 +1322,7 @@ export async function apply(
 
   // Optional skills service seam — register rolebox's LAZY skill provider on
   // dsh's global `ctx.skills` registry so every skill name in the role prompt's
-  // `<available_skills>` block is resolvable by the `skill` tool under dsh.
+  // `## Available skills` block is resolvable by the `skill` tool under dsh.
   // The registry's plugin seam is `registerProvider(create)` — a FACTORY — fed
   // the `(control) => SkillProvider` factory built from the resolved roles (the
   // candidate pool, narrowed by the provider to the active ∪ default roles),

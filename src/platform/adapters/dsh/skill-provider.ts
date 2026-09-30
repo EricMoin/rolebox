@@ -5,8 +5,8 @@
  * dsh resolves model- and user-facing skills EXCLUSIVELY through the
  * `dsh-skill` registry (`ctx.skills`), a layered merge of
  * provider catalogs. rolebox never registered into it, so under dsh the role
- * prompt's `<available_skills>` block (`buildSkillBlock`,
- * `src/prompt/builder.ts:127`) advertised names the `skill` tool could not
+ * prompt's `## Available skills` block (`buildSkillBlock`,
+ * `src/prompt/builder.ts`) advertised names the `skill` tool could not
  * resolve — the defect this module closes.
  *
  * The registry's plugin seam is `ctx.skills.registerProvider(create)` — a

@@ -3,7 +3,7 @@
  *
  * Covers:
  *   1. Fast reload (skill-only change) rebuilds a consumer role's prompt WITH
- *      the <available_public_agents> block intact — the block must survive
+ *      the `## Available public agents` block intact — the block must survive
  *      skill-only reloads for roles declaring open_roles.
  *   2. Full reload recomputes the shared open-roles registry from the freshly
  *      resolved roles (stale entries removed, open producers re-registered).
@@ -137,7 +137,7 @@ describe("HotReloadService open-roles wiring", () => {
     roleOpenRegistry.clear();
   });
 
-  it("fast reload retains <available_public_agents> in the rebuilt prompt for a role declaring open_roles", async () => {
+  it("fast reload retains the public-agents block in the rebuilt prompt for a role declaring open_roles", async () => {
     const svc = new HotReloadService();
     const core = makeMockCore();
     const ctx = makeCtx(tempDir, core);
@@ -149,14 +149,11 @@ describe("HotReloadService open-roles wiring", () => {
 
     expect(result.success).toBe(true);
 
-    // The rebuilt prompt must retain the <available_public_agents> block
-    // listing the declared producer with its id, name, and description.
+    // The rebuilt prompt must retain the `## Available public agents` block
+    // listing the declared producer with its id and description.
     const consumer = ctx.resolvedRoles.find((r: ResolvedRole) => r.id === "consumer")!;
-    expect(consumer.prompt).toContain("<available_public_agents>");
-    expect(consumer.prompt).toContain("</available_public_agents>");
-    expect(consumer.prompt).toContain("<id>producer</id>");
-    expect(consumer.prompt).toContain("Producer Role");
-    expect(consumer.prompt).toContain("Exposes a helper subagent");
+    expect(consumer.prompt).toContain("## Available public agents");
+    expect(consumer.prompt).toContain("- `producer` — Exposes a helper subagent");
 
     await svc.dispose();
   });

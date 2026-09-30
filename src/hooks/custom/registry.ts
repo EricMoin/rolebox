@@ -6,6 +6,7 @@ import type {
 } from "./types.ts";
 import { loadHookModule } from "./loader.ts";
 import { createSubLogger } from "../../logger.ts";
+import { blockTag } from "../../prompt/builder.ts";
 
 const log = createSubLogger("hook:custom-registry");
 
@@ -148,17 +149,16 @@ export class CustomHookRegistry {
     ctx.getBlocks = () => {
       if (event !== "system.transform") return [];
       const sysInput = input as { system?: string[] };
-      return (sysInput.system ?? []).map((s) => {
-        const match = s.match(/^<(\w+)>/);
-        return { tag: match ? match[1] : "text", content: s };
-      });
+      // Block identity comes from the shared normalizer so markdown blocks and
+      // legacy `<tag>` blocks resolve to the same stable tag.
+      return (sysInput.system ?? []).map((s) => ({ tag: blockTag(s), content: s }));
     };
 
     ctx.replaceBlock = (tag: string, newContent: string) => {
       if (event !== "system.transform") return;
       const sysInput = input as { system?: string[] };
       if (!sysInput.system) return;
-      const idx = sysInput.system.findIndex((s) => s.includes(`<${tag}>`));
+      const idx = sysInput.system.findIndex((s) => blockTag(s) === tag);
       if (idx >= 0) sysInput.system[idx] = newContent;
     };
 
@@ -166,7 +166,7 @@ export class CustomHookRegistry {
       if (event !== "system.transform") return;
       const sysInput = input as { system?: string[] };
       if (!sysInput.system) return;
-      const idx = sysInput.system.findIndex((s) => s.includes(`<${tag}>`));
+      const idx = sysInput.system.findIndex((s) => blockTag(s) === tag);
       if (idx >= 0) sysInput.system.splice(idx, 1);
     };
 

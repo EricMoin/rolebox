@@ -1,5 +1,6 @@
 import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
 import { buildGraphWorkerRolePrompt } from "../prompt/graph-worker.ts";
+import { renderInjectBlock } from "../prompt/blocks.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
 /**
@@ -1503,9 +1504,10 @@ export default async function(pi: any): Promise<void> {
 
     // ── 7. Agent system prompt injection ────────────────────────────────
     //
-    // Before Pi starts an agent, inject a section listing all registered
-    // rolebox roles as available agents. This makes the role hierarchy
-    // visible to the active agent's system prompt.
+    // Before Pi starts an agent, inject markdown sections listing all
+    // registered rolebox roles as available agents (plus the loop tool).
+    // This makes the role hierarchy visible to the active agent's system
+    // prompt.
     //
     // Skipped entirely in child-process mode (subtask S2): the spawned
     // subagent already received its dispatch prompt via
@@ -1518,29 +1520,13 @@ export default async function(pi: any): Promise<void> {
           const agents = registrar.getRegisteredAgents();
           if (agents.length === 0) return;
 
-          const lines: string[] = [
-            "",
-            "<available_roles>",
-            "The following rolebox agent roles are available for delegation.",
-            "Use dispatch() to route work to a specific role.",
-            "",
-          ];
-
-          for (const agent of agents) {
-            const model = agent.model ?? "default";
-            lines.push(`- **${agent.name}** (\`${agent.id}\`) — ${agent.description} [model: ${model}]`);
-          }
-
-          lines.push("</available_roles>", "");
-
           // ── Loop tool availability ────────────────────────────────────
           //
           // Tell the agent about the loop tool for multi-round iteration.
           // The loop tool runs rounds in background dispatch sessions;
           // progress is delivered via silent notification markers and
           // the agent can use /stop-loop to cancel an active loop.
-          lines.push(
-            "<loop_tool>",
+          const loopToolGuidance = [
             "The `loop_start(iterations, mode, prompt, objective?)` tool runs a task across",
             "multiple sessions. All parameters except `objective` are required:",
             "- `iterations` (1–50, default 5): number of rounds to execute.",
@@ -1551,11 +1537,25 @@ export default async function(pi: any): Promise<void> {
             "Register errors (duplicate task, budget exhausted) are returned as corrective",
             "feedback. Track progress with `loop_status`, read output with `loop_output`,",
             "view history with `loop_history`. Use `/stop-loop` to cancel an active loop.",
-            "</loop_tool>",
-            "",
-          );
+          ].join("\n");
 
-          const agentSection = lines.join("\n");
+          // Both sections are rendered by the shared block constructor, so the
+          // entry hands over declarations instead of assembling markdown. The
+          // id-first bullet intentionally omits the display name.
+          const agentSection = [
+            "",
+            renderInjectBlock({
+              title: "Available roles",
+              instruction: "The following rolebox agent roles are available for delegation.\nUse dispatch() to route work to a specific role.",
+              items: agents.map((agent) => ({
+                label: agent.id,
+                value: `${agent.description} [model: ${agent.model ?? "default"}]`,
+              })),
+            }),
+            "",
+            renderInjectBlock({ title: "Loop tool", instruction: loopToolGuidance }),
+            "",
+          ].join("\n");
           const currentPrompt = typeof event.systemPrompt === "string" ? event.systemPrompt : "";
 
           // ── S7: opencode system-transform pipeline (Pi adapter) ──────

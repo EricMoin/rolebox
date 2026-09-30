@@ -1,6 +1,12 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { handleSystemTransform } from "../../src/hooks/system-transform.ts";
 import { HookState } from "../../src/hooks/state.ts";
+import { CustomHookRegistry } from "../../src/hooks/custom/registry.ts";
+import { createSubLogger } from "../../src/logger.ts";
+import { buildAvailableFunctionsBlock, buildMemoryBlock, buildSkillBlock } from "../../src/prompt/builder.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
 import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 import type { ResolvedFunction, ResolvedRole } from "../../src/types.ts";
@@ -96,7 +102,7 @@ describe("handleSystemTransform — early exit", () => {
     expect(output.system.slice(0, 2)).toEqual(["Host instructions", "Worker"]);
     expect(output.system.join("\n")).toContain("active content");
     expect(output.system.join("\n")).not.toContain("inactive content");
-    expect(output.system.join("\n")).not.toContain("<available_functions>");
+    expect(output.system.join("\n")).not.toContain("## Available functions");
     expect(deps.customHooks.runHooks).not.toHaveBeenCalled();
   });
 
@@ -316,7 +322,7 @@ describe("handleSystemTransform — function block and graph state", () => {
     );
 
     // Should have at least function block + available functions
-    const fnBlock = output.system.find((s) => s.includes("available_functions") || s.includes("fn1"));
+    const fnBlock = output.system.find((s) => s.includes("## Available functions") || s.includes("fn1"));
     expect(fnBlock).toBeDefined();
   });
 });
@@ -342,5 +348,77 @@ describe("handleSystemTransform — metadata injection via builtinConfig", () =>
     const beforeCall = builtInRunHooks.mock.calls[0];
     expect(beforeCall[0]).toBe("system.transform");
     expect(beforeCall[4]).toEqual(builtinConfig);
+  });
+});
+
+// ── Custom-hook block addressing (markdown ⇄ tag contract) ───────────────────
+
+describe("custom hook block addressing", () => {
+  it("resolves markdown blocks and legacy tags to the same stable tags", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rolebox-hook-blocks-"));
+    try {
+      // A real hook module: read the block inventory, replace one block by tag,
+      // remove another, and drop a legacy entry's tag into the same inventory.
+      writeFileSync(
+        join(dir, "block-hook.ts"),
+        [
+          "export const onSystemTransform = (ctx, _input) => {",
+          "  globalThis.__blockTags = ctx.getBlocks().map((block) => block.tag);",
+          '  ctx.replaceBlock("available_functions", "REPLACED FUNCTIONS");',
+          '  ctx.removeBlock("available_memory");',
+          "};",
+        ].join("\n"),
+      );
+
+      const registry = new CustomHookRegistry();
+      await registry.register(
+        { name: "block-hook", events: ["system.transform"], module: "./block-hook.ts" },
+        dir,
+      );
+      registry.setDeps({
+        pendingCorrections: new Map(),
+        functionRuntime: { get: () => undefined },
+        dispatchManager: {},
+      });
+
+      const system = [
+        "Host instructions",
+        buildSkillBlock([{ name: "git-master", description: "Expert git", scope: "rolebox", filePath: "/s/SKILL.md", references: [] }]),
+        "<function_state>\n  <phase>active</phase>\n</function_state>",
+        buildAvailableFunctionsBlock([makeFn("fn1")]),
+        buildMemoryBlock([{ id: "m1", title: "T", category: "note", relevance: "high", updated_at: "now" }]),
+      ];
+
+      await registry.runHooks(
+        "system.transform",
+        "after",
+        () => ({
+          hookName: "[test]",
+          config: undefined,
+          sessionID: "sess-1",
+          inject: () => {},
+          log: createSubLogger("hook:test"),
+        }),
+        { system },
+      );
+
+      expect((globalThis as Record<string, unknown>).__blockTags).toEqual([
+        "text",
+        "available_skills",
+        "function_state",
+        "available_functions",
+        "available_memory",
+      ]);
+      // replaceBlock writes the caller's content; removeBlock drops the entry.
+      expect(system).toEqual([
+        "Host instructions",
+        buildSkillBlock([{ name: "git-master", description: "Expert git", scope: "rolebox", filePath: "/s/SKILL.md", references: [] }]),
+        "<function_state>\n  <phase>active</phase>\n</function_state>",
+        "REPLACED FUNCTIONS",
+      ]);
+    } finally {
+      delete (globalThis as Record<string, unknown>).__blockTags;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

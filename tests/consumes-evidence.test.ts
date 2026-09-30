@@ -34,12 +34,10 @@ function mockEnv(overrides: Partial<CondEnv> = {}): CondEnv {
 }
 
 describe("consumes artifact injection", () => {
-  it("buildActiveArtifactBlock wraps content in <active_artifact> with name attr", () => {
+  it("buildActiveArtifactBlock renders the artifact heading over a fenced body", () => {
     const block = buildActiveArtifactBlock("plan", "# My Plan\n\n- Step 1\n- Step 2");
-    expect(block).toContain('<active_artifact name="plan">');
-    expect(block).toContain("# My Plan");
-    expect(block).toContain("- Step 1");
-    expect(block).toContain("</active_artifact>");
+    expect(block).toContain("## Active artifact: plan");
+    expect(block).toContain("~~~\n# My Plan\n\n- Step 1\n- Step 2\n~~~");
   });
 
   it("ArtifactStore.read returns content for written artifact", () => {
@@ -73,7 +71,7 @@ describe("consumes artifact injection", () => {
       const content = store.read("test-session", "plan");
       expect(content).not.toBeNull();
       const block = buildActiveArtifactBlock("plan", content!);
-      expect(block).toContain('<active_artifact name="plan">');
+      expect(block).toContain("## Active artifact: plan");
       expect(block).toContain("the plan content");
     } finally {
       rmSync(dir, { recursive: true, force: true });

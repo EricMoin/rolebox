@@ -110,13 +110,10 @@ describe("Recursive subagent resolution", () => {
     try {
       const resolved = await resolveAllRoles(roleMap, ctx);
       const chancellor = resolved[0].subagents[0];
-      expect(chancellor.prompt).toContain("available_subagents");
-      expect(chancellor.prompt).toContain("emperor--chancellor--drafter");
-      expect(chancellor.prompt).toContain("emperor--chancellor--reviewer");
-      expect(chancellor.prompt).toContain("emperor--chancellor--finalizer");
-      expect(chancellor.prompt).toContain("Drafter");
-      expect(chancellor.prompt).toContain("Reviewer");
-      expect(chancellor.prompt).toContain("Finalizer");
+      expect(chancellor.prompt).toContain("## Available sub-agents");
+      expect(chancellor.prompt).toContain("- `emperor--chancellor--drafter` — Writes first draft");
+      expect(chancellor.prompt).toContain("- `emperor--chancellor--reviewer` — Reviews output");
+      expect(chancellor.prompt).toContain("- `emperor--chancellor--finalizer` — Finalizes work");
     } finally {
       cleanup();
     }
@@ -130,7 +127,7 @@ describe("Recursive subagent resolution", () => {
       const resolved = await resolveAllRoles(roleMap, ctx);
       const chancellor = resolved[0].subagents[0];
       expect(chancellor.subagents).toHaveLength(3);
-      expect(chancellor.prompt).not.toContain("available_subagents");
+      expect(chancellor.prompt).not.toContain("## Available sub-agents");
       expect(chancellor.prompt).not.toContain("You can delegate tasks");
     } finally { cleanup(); }
   });
@@ -172,7 +169,7 @@ describe("Recursive subagent resolution", () => {
     try {
       const resolved = await resolveAllRoles(roleMap, ctx);
       const emperor = resolved[0];
-      expect(emperor.prompt).toContain("Chancellor");
+      expect(emperor.prompt).toContain("- `emperor--chancellor` — Strategic planner");
       expect(emperor.prompt).toContain("emperor--chancellor");
       expect(emperor.prompt).not.toContain("emperor--chancellor--drafter");
     } finally {
@@ -269,18 +266,15 @@ describe("Open-role consumer wiring", () => {
     return { ctx, roleMap, cleanup: () => rmSync(TEST_DIR, { recursive: true }) };
   }
 
-  it("injects <available_public_agents> into a consumer role's prompt listing the declared producer", async () => {
+  it("injects the public-agents section into a consumer role's prompt listing the declared producer", async () => {
     const { ctx, roleMap, cleanup } = setupConsumerScenario();
     try {
       const resolved = await resolveAllRoles(roleMap, ctx);
       const consumer = resolved.find((r) => r.id === "consumer")!;
 
-      expect(consumer.prompt).toContain("<available_public_agents>");
-      expect(consumer.prompt).toContain("</available_public_agents>");
-      // Producer id, name, and description are all listed.
-      expect(consumer.prompt).toContain("<id>producer</id>");
-      expect(consumer.prompt).toContain("Producer Role");
-      expect(consumer.prompt).toContain("Exposes a helper subagent");
+      // Producer id and description are listed.
+      expect(consumer.prompt).toContain("## Available public agents");
+      expect(consumer.prompt).toContain("- `producer` — Exposes a helper subagent");
     } finally {
       cleanup();
     }
@@ -293,8 +287,8 @@ describe("Open-role consumer wiring", () => {
       const plain = resolved.find((r) => r.id === "plain")!;
       const producer = resolved.find((r) => r.id === "producer")!;
 
-      expect(plain.prompt).not.toContain("<available_public_agents>");
-      expect(producer.prompt).not.toContain("<available_public_agents>");
+      expect(plain.prompt).not.toContain("## Available public agents");
+      expect(producer.prompt).not.toContain("## Available public agents");
     } finally {
       cleanup();
     }
@@ -307,7 +301,7 @@ describe("Open-role consumer wiring", () => {
       const producer = resolved.find((r) => r.id === "producer")!;
       const helper = producer.subagents[0];
 
-      expect(helper.prompt).not.toContain("<available_public_agents>");
+      expect(helper.prompt).not.toContain("## Available public agents");
     } finally {
       cleanup();
     }
@@ -321,7 +315,7 @@ describe("Open-role consumer wiring", () => {
       const consumer = resolved.find((r) => r.id === "consumer")!;
 
       // Known producer still listed; unknown one silently skipped.
-      expect(consumer.prompt).toContain("<id>producer</id>");
+      expect(consumer.prompt).toContain("- `producer` — Exposes a helper subagent");
       expect(consumer.prompt).not.toContain("no-such-open-role");
     } finally {
       cleanup();
@@ -346,17 +340,17 @@ describe("Open-role consumer wiring", () => {
       const producer = resolved.find((r) => r.id === "producer")!;
 
       // The consumer's own subagent block lists its subagent full id.
-      expect(consumer.prompt).toContain("<available_subagents>");
-      expect(consumer.prompt).toContain("<id>consumer--worker</id>");
+      expect(consumer.prompt).toContain("## Available sub-agents");
+      expect(consumer.prompt).toContain("- `consumer--worker` — Does consumer work");
 
-      // The public-agents block lists the open role itself (id, name,
+      // The public-agents block lists the open role itself (id and
       // description) — exports are registry metadata, not consumer entries.
-      expect(consumer.prompt).toContain("<available_public_agents>");
-      expect(consumer.prompt).toContain("<id>producer</id>");
-      expect(consumer.prompt).not.toContain("<id>producer--helper</id>");
+      expect(consumer.prompt).toContain("## Available public agents");
+      expect(consumer.prompt).toContain("- `producer` — Exposes a helper subagent");
+      expect(consumer.prompt).not.toContain("`producer--helper`");
 
       // The producer's own subagent full id is visible on the producer side.
-      expect(producer.prompt).toContain("<id>producer--helper</id>");
+      expect(producer.prompt).toContain("- `producer--helper` — Does the helper work");
 
       // Namespace disjointness: the open-role id referenced as a public agent
       // never contains the separator; subagent full ids always do.
@@ -365,8 +359,8 @@ describe("Open-role consumer wiring", () => {
       expect("producer--helper".includes("--")).toBe(true);
 
       // Both blocks appear in the SAME consumer prompt, subagents first.
-      const subIdx = consumer.prompt.indexOf("<available_subagents>");
-      const pubIdx = consumer.prompt.indexOf("<available_public_agents>");
+      const subIdx = consumer.prompt.indexOf("## Available sub-agents");
+      const pubIdx = consumer.prompt.indexOf("## Available public agents");
       expect(subIdx).toBeGreaterThanOrEqual(0);
       expect(pubIdx).toBeGreaterThan(subIdx);
     } finally {
@@ -427,11 +421,11 @@ describe("Circular open_roles declarations", () => {
       const alpha = resolved.find((r) => r.id === "alpha")!;
       const beta = resolved.find((r) => r.id === "beta")!;
 
-      // Each consumer prompt lists the other's id in <available_public_agents>.
-      expect(alpha.prompt).toContain("<available_public_agents>");
-      expect(alpha.prompt).toContain("<id>beta</id>");
-      expect(beta.prompt).toContain("<available_public_agents>");
-      expect(beta.prompt).toContain("<id>alpha</id>");
+      // Each consumer prompt lists the other in its public-agents section.
+      expect(alpha.prompt).toContain("## Available public agents");
+      expect(alpha.prompt).toContain("- `beta` — ");
+      expect(beta.prompt).toContain("## Available public agents");
+      expect(beta.prompt).toContain("- `alpha` — ");
     } finally {
       cleanup();
     }
@@ -491,10 +485,10 @@ describe("Open-role exports validation at resolution level", () => {
       const resolved = await resolveAllRoles(roleMap, ctx);
 
       // Resolution completes with both roles; the consumer still receives the
-      // producer's <available_public_agents> block.
+      // producer's `## Available public agents` section.
       expect(resolved.length).toBe(2);
       const consumer = resolved.find((r) => r.id === "consumer")!;
-      expect(consumer.prompt).toContain("<id>producer</id>");
+      expect(consumer.prompt).toContain("- `producer` — Exports a known and an unknown subagent");
 
       // The registry entry exports only the known subagent id — the unknown
       // name is dropped, not fatal.

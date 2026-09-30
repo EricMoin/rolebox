@@ -1003,21 +1003,24 @@ describe("dsh plugin apply()", () => {
       expect(requests).toHaveLength(1);
       const prompt = requests[0].prompt.map(block => block.text ?? "").join("\n\n");
       expect(prompt).toContain("Planner-only prompt");
-      expect(prompt).toContain("<active_functions>");
+      expect(prompt).toContain("## Active functions");
       expect(prompt).toContain("Child planning function");
       expect(prompt).toContain("Produce a strategy.");
       expect(prompt.match(/attempt handoff/g)).toHaveLength(1);
       expect(prompt).not.toContain("Coordinator-only prompt");
       expect(prompt).not.toContain("Parent routing function");
-      expect(prompt).not.toContain("<available_functions>");
+      expect(prompt).not.toContain("## Available functions");
       expect(prompt).not.toContain("Inactive worker instructions");
       expect(prompt).not.toContain("Use the Read tool");
       expect(prompt).not.toContain("Use the skill tool");
-      expect(prompt).not.toContain("available_subagents");
+      expect(prompt).not.toContain("## Available sub-agents");
       expect(requests[0].agentOptions).toEqual({ provider: "worker-provider", model: "model-name" });
-      const reference = prompt.match(/<path>([^<]+)<\/path>/)![1];
-      expect(reference.startsWith(tmpDataDir)).toBe(true);
-      expect(readFileSync(reference, "utf8")).toBe("The planning schema");
+      // The block states the delivery directory once; each entry names its own
+      // file below it, so base + name is the readable private copy.
+      const referenceDirectory = prompt.match(/^Base directory: `([^`]+)`$/m)![1];
+      expect(referenceDirectory.startsWith(tmpDataDir)).toBe(true);
+      expect(prompt).toContain("- `schema` — ");
+      expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       expect(workerSections).toEqual([""]);
       expect(workerContexts).toEqual([""]);
       expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
@@ -1971,8 +1974,8 @@ describe("dsh plugin apply()", () => {
         JSON.stringify({ role: "reloader", session: "s1" }),
       );
       expect(switchToNew.status).toBe(200);
-      // The resolved prompt carries the role's <available_skills> block after
-      // its own text, so assert the prompt prefix.
+      // The resolved prompt carries the role's `## Available skills` section
+      // after its own text, so assert the prompt prefix.
       expect(
         sections[0].text({ agent: { id: "s1" }, sessionID: "s1" }),
       ).toStartWith("You are a reloaded role.");

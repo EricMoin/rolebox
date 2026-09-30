@@ -33,7 +33,7 @@ it("debug researcher subagent prompt", async () => {
       console.log(`  Subagent: ${sub.id}`);
       console.log(`    config.skills: ${JSON.stringify(sub.config.skills)}`);
       console.log(`    resolved skills: [${sub.skills.map(s => s.name).join(", ")}]`);
-      console.log(`    Has <available_skills>: ${sub.prompt.includes("<available_skills>")}`);
+      console.log(`    Has ## Available skills: ${sub.prompt.includes("## Available skills")}`);
       console.log(`    Prompt (first 200): ${sub.prompt.substring(0, 200)}`);
       console.log(`    Full prompt:`);
       console.log(sub.prompt);

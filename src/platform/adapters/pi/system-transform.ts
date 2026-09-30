@@ -8,15 +8,16 @@
  *
  *   - pending correction injection (`state.pendingCorrections`, consumed by
  *     `appendCorrection` from the S6 hook pipeline's event handlers)
- *   - `<available_functions>` block (`buildAvailableFunctionsBlock`)
- *   - `<available_memory>` block (`MemoryStore.create(deps.dir)` + the role's
- *     `config.memory` block, per system-transform.ts:87-110)
+ *   - the `## Available functions` block (`buildAvailableFunctionsBlock`)
+ *   - the `## Available memory` block (`MemoryStore.create(deps.dir)` + the
+ *     role's `config.memory` block, per system-transform.ts:87-110)
  *   - gate/transition evaluation (`evaluateGateAndTransitions` +
  *     `functionSessionState.activate`/`deactivate`), the function kernel's
- *     turn increment, and the priority-ordered `<active_functions>` block
+ *     turn increment, and the priority-ordered `## Active functions` block
  *     (`buildFunctionBlock`)
  *   - artifact consumption blocks (`buildActiveArtifactBlock`)
- *   - `<graph_state>` engine-v2 graph orientation block
+ *   - the graph-worker function block for a session the dispatcher marked as a
+ *     graph worker (`buildGraphWorkerFunctionBlock`, src/prompt/graph-worker.ts)
  *
  * The adapter is intentionally thin: it extracts the session id and acting
  * agent from the loosely-typed Pi event / extension ctx / active-agent ref,
@@ -99,7 +100,7 @@ export interface PiSystemTransformOptions {
   ctx?: Record<string, unknown> | undefined;
   /**
    * Static guidance appended verbatim after the base system prompt
-   * (the existing `<available_roles>` / `<loop_tool>` block). The
+   * (the existing `## Available roles` / `## Loop tool` sections). The
    * transform pipeline pushes its own blocks AFTER this section.
    */
   baseSection?: string;

@@ -248,7 +248,7 @@ export class HotReloadService implements PluginService {
 
       // Recompute the open-role registry from the currently cached resolved
       // roles and re-resolve this role's public-agents metadata, so the
-      // <available_public_agents> block survives skill-only reloads.
+      // `## Available public agents` block survives skill-only reloads.
       const openRegistry = collectOpenRoles(this.ctx.resolvedRoles);
       const publicAgents = resolvePublicAgents(existingRole.config, openRegistry);
 

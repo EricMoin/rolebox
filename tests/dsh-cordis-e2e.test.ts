@@ -27,8 +27,8 @@
  *     on the cordis Context: the `rolebox:role` section + `rolebox:context`
  *     entry register into it, and `systemPrompt.assemble({ agent: { id:
  *     sessionId }, scope: {} })` — the real harness context shape — renders
- *     the ACTIVE role's system prompt (with its <available_skills> and
- *     <available_references> blocks) after a switcher activation, and drops
+ *     the ACTIVE role's system prompt (with its `## Available skills` and
+ *     `## Available references` sections) after a switcher activation, and drops
  *     it again after the role is cleared
  *
  * @module
@@ -366,7 +366,7 @@ const SIMPLE_ROLE = [
 //
 // The resolver turns `skills:` + the `references/` dir into the role's
 // systemPrompt via buildAgentPrompt (prompt/builder.ts), which renders the
-// <available_skills> and <available_references> blocks. The prompt and the
+// `## Available skills` and `## Available references` sections. The prompt and the
 // descriptions deliberately avoid `{{` so the registry's strict
 // renderPrompt interpolation never trips.
 
@@ -709,8 +709,8 @@ describe("real @deepseek-ai/dsh-system-prompt registry on the cordis boot", () =
       } as never),
     );
     expect(before).not.toContain("You are the prompter for the real registry test.");
-    expect(before).not.toContain("<available_skills>");
-    expect(before).not.toContain("<available_references>");
+    expect(before).not.toContain("## Available skills");
+    expect(before).not.toContain("## Available references");
 
     // Activate the role for the session via the switcher's /rolebox surface
     // (the route handler delegates to DshRoleSwitcher.activate; the session
@@ -727,18 +727,18 @@ describe("real @deepseek-ai/dsh-system-prompt registry on the cordis boot", () =
     // Assemble with the REAL harness context shape ({ agent, scope } — the
     // adapter resolves the session from agent.id): the rendered prompt now
     // carries the active role's systemPrompt — its own prompt text plus the
-    // <available_skills> and <available_references> blocks the resolver
-    // baked in from the role's skill + references dir.
+    // `## Available skills` and `## Available references` sections the
+    // resolver baked in from the role's skill + references dir.
     const assembly = await systemPrompt.assemble({
       agent: { id: SESSION_ID },
       scope: {},
     } as never);
     const rendered = renderPrompt(assembly);
     expect(rendered).toContain("You are the prompter for the real registry test.");
-    expect(rendered).toContain("<available_skills>");
-    expect(rendered).toContain("checklist");
-    expect(rendered).toContain("<available_references>");
-    expect(rendered).toContain("guidelines");
+    expect(rendered).toContain("## Available skills");
+    expect(rendered).toContain("- `checklist` — ");
+    expect(rendered).toContain("## Available references");
+    expect(rendered).toContain("- `guidelines` — ");
 
     // The contribution is a named, ordered section of the real assembly.
     const roleSection = assembly.sections.find((s) => s.name === "rolebox:role");
@@ -761,8 +761,8 @@ describe("real @deepseek-ai/dsh-system-prompt registry on the cordis boot", () =
       } as never),
     );
     expect(after).not.toContain("You are the prompter for the real registry test.");
-    expect(after).not.toContain("<available_skills>");
-    expect(after).not.toContain("<available_references>");
+    expect(after).not.toContain("## Available skills");
+    expect(after).not.toContain("## Available references");
 
     fiber.dispose();
     await new Promise((r) => setTimeout(r, 10));

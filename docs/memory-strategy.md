@@ -30,7 +30,7 @@ All decisions are finalized:
 | Consolidation write | `\|memory\|` function activated by user, current agent executes |
 | Writer role | NOT needed — function injection content IS the writer instructions |
 | Customization | Override `functions/memory.md` (standard rolebox function override pattern) |
-| Injection | Auto-inject `<available_memory>` summary block at session start |
+| Injection | Auto-inject the `## Available memory` summary table at session start |
 | Visibility | Consolidation can see ALL project sessions (not just current) |
 | Trigger | Manual via `\|memory\|` function, no idle/auto-trigger |
 
@@ -458,9 +458,9 @@ This is enforced by `resolveFunctions()` in `src/function-resolver.ts` with zero
 
 ## 6. System Prompt Injection
 
-### 6.1 `<available_memory>` Block
+### 6.1 `## Available memory` Block
 
-At session start, inject a `<available_memory>` block listing memory summaries — same pattern as `buildReferenceBlock` and `buildSkillBlock`.
+At session start, inject an `## Available memory` block listing memory summaries — same pattern as `buildReferenceBlock` and `buildSkillBlock`.
 
 New function in `src/prompt-builder.ts`:
 
@@ -469,33 +469,28 @@ import type { MemorySummary } from "./types.ts";
 
 export function buildMemoryBlock(memories: MemorySummary[]): string {
   if (memories.length === 0) return "";
-  return renderSection(
-    "available_memory",
-    "Memory entries from previous sessions. Use memory_recall to search for specific memories.",
-    memories.map((m) => xml("memory", [
-      xml("id", [m.id]),
-      xml("title", [m.title]),
-      xml("category", [m.category]),
-      xml("relevance", [m.relevance]),
-      xml("updated", [m.updated_at]),
-    ])),
+  const rows = memories.map(
+    (m) => `| ${m.id} | ${m.category} | ${m.relevance} | ${m.title} | ${m.updated_at} |`,
   );
+  return [
+    "## Available memory",
+    "Memory entries from previous sessions. Use memory_recall to search for specific memories.",
+    ["| id | category | relevance | title | updated |",
+     "| --- | --- | --- | --- | --- |", ...rows].join("\n"),
+  ].join("\n\n");
 }
 ```
 
 Output:
 
-```xml
-<available_memory>
+```markdown
+## Available memory
+
 Memory entries from previous sessions. Use memory_recall to search for specific memories.
-  <memory>
-    <id>auth-jwt-decision</id>
-    <title>Auth uses JWT with refresh tokens</title>
-    <category>decision</category>
-    <relevance>high</relevance>
-    <updated>2026-07-04T10:30:00Z</updated>
-  </memory>
-</available_memory>
+
+| id | category | relevance | title | updated |
+| --- | --- | --- | --- | --- |
+| auth-jwt-decision | decision | high | Auth uses JWT with refresh tokens | 2026-07-04T10:30:00Z |
 ```
 
 Only summaries (id, title, category, relevance, updated_at) are injected — not full content — to minimize token consumption. The agent uses `memory_recall` to retrieve full content when needed, the same UX pattern as references.
@@ -506,7 +501,7 @@ In `role.yaml`, add an optional `memory` block:
 
 ```yaml
 memory:
-  inject: true           # default true — auto-inject <available_memory> block at session start
+  inject: true           # default true — auto-inject the available-memory block at session start
   max_inject: 10         # default 10 — max summaries to inject
   min_relevance: medium  # default medium — only inject relevance >= this
   scope: both            # default both — which scope to inject (role|workspace|both)
@@ -744,7 +739,7 @@ The eviction mechanism keeps the database bounded and relevant:
 ### Phase 3: Injection
 
 **Subtask 6** — Implement `buildMemoryBlock()` in `src/prompt-builder.ts`:
-- Format `<available_memory>` XML block with summaries
+- Format the `## Available memory` markdown table with summaries
 - Follow same pattern as `buildReferenceBlock`, `buildSkillBlock`
 
 **Subtask 7** — Add memory injection to `handleSystemTransform` in `src/hooks/system-transform.ts`:
@@ -784,7 +779,7 @@ The eviction mechanism keeps the database bounded and relevant:
 - Schema validation (title empty, category invalid, etc.)
 
 **Subtask 13** — Injection test and regression test:
-- Verify `<available_memory>` block format via `buildMemoryBlock()`
+- Verify the `## Available memory` block format via `buildMemoryBlock()`
 - Verify `handleSystemTransform` injection with mocked store
 - Ensure existing tests (`bun test`) pass with zero regressions
 
@@ -858,7 +853,7 @@ The eviction mechanism keeps the database bounded and relevant:
 
 1. **4 memory tools** registered in `src/plugin-hooks.ts`: `memory_write`, `memory_recall`, `memory_list`, `memory_update`
 2. **`\|memory\|` function file** exists at `functions/memory.md` with correct frontmatter and consolidation instructions
-3. **`<available_memory>` block** injected at session start when `memory.inject !== false`, using `buildMemoryBlock()` in `src/prompt-builder.ts`
+3. **`## Available memory` block** injected at session start when `memory.inject !== false`, using `buildMemoryBlock()` in `src/prompt-builder.ts`
 4. **`tsc --noEmit`** passes with zero errors
 5. **`bun test tests/memory/`** passes (store.test.ts + tools.test.ts, minimum 20+ test cases)
 6. **SQLite DB** created at `.rolebox/memory.db` with correct schema (WAL mode, FTS5, indexes, triggers)

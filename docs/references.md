@@ -59,4 +59,4 @@ references:
 - Role-level references are discovered from `{roleDir}/references/`
 - Skill-level references are discovered from `{roleDir}/skills/{name}/references/`
 - Explicit declarations override auto-discovered descriptions for the same file
-- All references are surfaced to the agent in an `<available_references>` block
+- All references are surfaced to the agent in the `## Available references` section — one bullet per reference carrying its name and description. When every reference of the role sits under one directory (so each name locates its own file), that directory is stated once as a `Base directory:` line; otherwise each bullet also carries its own readable path

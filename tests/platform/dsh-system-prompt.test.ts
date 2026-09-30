@@ -16,7 +16,7 @@
  *     that full systemPrompt (and the rolebox `sessionId` spelling works too)
  *   - clearing the active role returns `''` again — live re-evaluation with
  *     no re-registration
- *   - the context provider returns the `<available_functions>` block for the
+ *   - the context provider returns the `## Available functions` block for the
  *     active role's function map, and `''` when no role is active or the role
  *     has no resolved functions
  *   - dispose() invokes every recorded registry disposer (and is idempotent)
@@ -318,7 +318,7 @@ describe("DshSystemPromptAdapter section provider", () => {
 describe("DshSystemPromptAdapter context provider", () => {
   const CTX: DshSystemPromptContext = { agent: { id: "s1" }, sessionID: "s1" };
 
-  it("returns the <available_functions> block for the active role's function map", async () => {
+  it("returns the available-functions block for the active role's function map", async () => {
     const fixture = createFixture([makeAgent("tester")]);
     const { activeRole, adapter } = await fixture.build();
     const { registry, contexts } = createFakeRegistry();
@@ -330,9 +330,9 @@ describe("DshSystemPromptAdapter context provider", () => {
     ]);
     activeRole.set("s1", "tester");
     const block = contexts[0].text(CTX);
-    expect(block).toContain("<available_functions>");
-    expect(block).toContain("<name>fn-a</name>");
-    expect(block).toContain("<name>fn-b</name>");
+    expect(block).toContain("## Available functions");
+    expect(block).toContain("### fn-a");
+    expect(block).toContain("### fn-b");
   });
 
   it("returns '' when no role is active", async () => {

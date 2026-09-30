@@ -1452,7 +1452,7 @@ adapter collects them and releases them on fiber unload (`dispose()`).
 
 ### 4.6 Skill registry: `ctx.skills` — the rolebox skill-provider seam
 
-Under dsh the role prompt's `<available_skills>` block is resolved EXCLUSIVELY
+Under dsh the role prompt's `## Available skills` block is resolved EXCLUSIVELY
 through the `@deepseek-ai/dsh-skill` registry (`ctx.skills`), a layered merge of
 provider catalogs. rolebox registers one LAZY skill provider into it so every
 advertised skill name is resolvable by the `skill` tool. This section records the

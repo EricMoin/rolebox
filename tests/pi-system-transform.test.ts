@@ -4,12 +4,12 @@
  * Verifies `src/platform/adapters/pi/system-transform.ts`:
  *   1. With a mocked roleFunctionsMap containing a function AND an active
  *      functionSessionState entry, the augmented system prompt contains the
- *      function's name block (`<active_functions>`) and the gate/transition
+ *      function's name block (`## Active functions`) and the gate/transition
  *      kernel ran (runtime turn incremented).
- *   2. The `<available_memory>` block is injected when the role's memory
+ *   2. The `## Available memory` block is injected when the role's memory
  *      config enables injection and memories exist in the store.
  *   3. A pending correction is prepended to (and consumed from) the prompt.
- *   4. The static baseSection (available_roles/loop_tool guidance) is
+ *   4. The static baseSection (available roles / loop tool guidance) is
  *      preserved verbatim after the base prompt.
  *   5. Session/agent resolution fallbacks (ctx.sessionManager, activeAgent)
  *      and the no-session-id early return.
@@ -120,10 +120,10 @@ describe("runPiSystemTransform — active function blocks", () => {
     // Base prompt preserved.
     expect(result!).toContain("<base>static</base>");
     // Available functions block lists the function.
-    expect(result!).toContain("<available_functions>");
+    expect(result!).toContain("## Available functions");
     // Active function block carries the function's name.
-    expect(result!).toContain("<active_functions>");
-    expect(result!).toContain(`<name>${fnName}</name>`);
+    expect(result!).toContain("## Active functions");
+    expect(result!).toContain(`### ${fnName}`);
     // The function kernel ran: runtime turn was incremented by the transform.
     expect(functionRuntime.get(sid, fnName)!.currentTurn).toBe(1);
   });
@@ -142,9 +142,9 @@ describe("runPiSystemTransform — active function blocks", () => {
       makeDeps(tmpDir, { roleFunctionsMap }),
     );
 
-    expect(result).toContain("<available_functions>");
+    expect(result).toContain("## Available functions");
     expect(result).toContain(fnName);
-    expect(result).not.toContain("<active_functions>");
+    expect(result).not.toContain("## Active functions");
   });
 });
 
@@ -192,7 +192,7 @@ describe("runPiSystemTransform — memory injection", () => {
       makeDeps(tmpDir, { roleMap: new Map([["agent-a", role]]) }),
     );
 
-    expect(result).toContain("<available_memory>");
+    expect(result).toContain("## Available memory");
     expect(result).toContain("Pi runs on Bun");
   });
 
@@ -210,7 +210,7 @@ describe("runPiSystemTransform — memory injection", () => {
     );
 
     expect(result).toBe("base");
-    expect(result).not.toContain("<available_memory>");
+    expect(result).not.toContain("## Available memory");
   });
 });
 
@@ -241,17 +241,17 @@ describe("runPiSystemTransform — pending correction", () => {
 // ── 4. Static guidance preservation ─────────────────────────────────────────
 
 describe("runPiSystemTransform — static guidance preservation", () => {
-  it("preserves the available_roles/loop_tool baseSection after the base prompt", async () => {
+  it("preserves the available-roles/loop-tool baseSection after the base prompt", async () => {
     const sid = "sess-static";
     const baseSection = [
       "",
-      "<available_roles>",
-      "- **Role A** (`agent-a`) — does things [model: default]",
-      "</available_roles>",
+      "## Available roles",
       "",
-      "<loop_tool>",
+      "- `agent-a` — does things [model: default]",
+      "",
+      "## Loop tool",
+      "",
       "loop_start(iterations, mode, prompt)",
-      "</loop_tool>",
       "",
     ].join("\n");
 
@@ -261,9 +261,9 @@ describe("runPiSystemTransform — static guidance preservation", () => {
       makeDeps(tmpDir, {}),
     );
 
-    expect(result).toContain("<available_roles>");
-    expect(result).toContain("<loop_tool>");
-    expect(result!.indexOf("<available_roles>")).toBeGreaterThan(
+    expect(result).toContain("## Available roles");
+    expect(result).toContain("## Loop tool");
+    expect(result!.indexOf("## Available roles")).toBeGreaterThan(
       result!.indexOf("base prompt"),
     );
   });
@@ -308,7 +308,7 @@ describe("runPiSystemTransform — resolution and early return", () => {
       makeDeps(tmpDir, { roleFunctionsMap }),
     );
 
-    expect(result).toContain("<available_functions>");
+    expect(result).toContain("## Available functions");
     expect(result).toContain(fnName);
   });
 });

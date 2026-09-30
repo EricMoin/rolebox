@@ -113,7 +113,7 @@ async function resolveSubagents(
       const { skills: saSkills, functions: saFunctions, references: saReferences } = saBundle;
 
       // Resolve nested subagents first so we can include their metadata
-      // in this subagent's prompt <available_subagents> block.
+      // in this subagent's prompt `## Available sub-agents` block.
       const resolvedChildren = saConfig.subagents?.length
         ? await resolveSubagents(
             childId,
@@ -206,7 +206,7 @@ function stubResolvedRole(roleId: string, config: RoleConfig): ResolvedRole {
 }
 
 /**
- * Resolve the <available_public_agents> metadata for a consumer role: every
+ * Resolve the `## Available public agents` metadata for a consumer role: every
  * producer id in config.open_roles that exists in the open-role registry
  * yields {id, name, description}. Unknown producer ids warn and are skipped;
  * duplicate declarations are collapsed.
@@ -245,7 +245,7 @@ export async function resolveAllRoles(
   // Pre-pass: compute the open-role registry (roles with open: true plus their
   // resolved export ids) from the raw configs, BEFORE per-role resolution.
   // Consumer roles declaring open_roles: [producerId] then receive the
-  // producer's metadata in <available_public_agents> inside the loop.
+  // producer's metadata in the `## Available public agents` block inside the loop.
   const openRegistry = collectOpenRoles(
     Array.from(roles.entries(), ([roleId, config]) =>
       stubResolvedRole(roleId, config),

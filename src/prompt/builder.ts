@@ -1,60 +1,51 @@
+import { dirname, extname, resolve } from "node:path";
 import type { MemorySummary, ResolvedFunction, ResolvedReference, ResolvedSkill } from "../types.ts";
 import type { FnState } from "../function/runtime-state.ts";
 import { createSubLogger } from "../logger.ts";
+import { injectCode, renderInjectBlock } from "./blocks.ts";
 
 const PROMPT_SIZE_WARN_THRESHOLD = 400000;
 
 const log = createSubLogger("prompt-builder");
 
-type XmlChild = XmlNode | string;
+// ---------------------------------------------------------------------------
+// Block identity (custom-hook contract)
+// ---------------------------------------------------------------------------
 
-export type XmlNode = { tag: string; children: XmlChild[] };
-type CdataNode = { cdata: string };
+/**
+ * Markdown heading → block tag. The tag names are a stable contract: custom
+ * hooks address injected blocks by tag through `ctx.getBlocks()`,
+ * `ctx.replaceBlock()` and `ctx.removeBlock()`.
+ */
+const MARKDOWN_BLOCK_TAGS: ReadonlyArray<readonly [prefix: string, tag: string]> = [
+  ["## Available skills", "available_skills"],
+  ["## Available references", "available_references"],
+  ["## Available sub-agents", "available_subagents"],
+  ["## Available public agents", "available_public_agents"],
+  ["## Active functions", "active_functions"],
+  ["## Available functions", "available_functions"],
+  ["## Available memory", "available_memory"],
+  ["## Function state:", "function_state"],
+  ["## Active artifact:", "active_artifact"],
+];
 
-export function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-export function xml(tag: string, children: (XmlChild | CdataNode)[]): XmlNode {
-  return { tag, children: children as XmlChild[] };
-}
-
-function cdata(content: string): CdataNode {
-  return { cdata: content };
-}
-
-function isCdata(child: unknown): child is CdataNode {
-  return typeof child === "object" && child !== null && "cdata" in child;
-}
-
-export function renderXml(node: XmlNode, indent = 0): string {
-  const pad = "  ".repeat(indent);
-  const children = node.children as (XmlChild | CdataNode)[];
-
-  if (children.length === 1 && typeof children[0] === "string") {
-    return `${pad}<${node.tag}>${escapeXml(children[0])}</${node.tag}>`;
+/**
+ * Block tag of one system entry. Recognizes the markdown blocks emitted by this
+ * module and the legacy `<tag>` shape, so hooks written against either prompt
+ * format resolve the same block. Anything unrecognized is `text`.
+ *
+ * The legacy branch keeps the original `^<(\w+)>` behavior exactly: an
+ * attribute-bearing tag such as `<function_state name="plan">` was never
+ * addressable through this contract, and widening the match now would move
+ * entries between tags for hooks that already exist.
+ */
+export function blockTag(block: string): string {
+  const legacy = /^<(\w+)>/.exec(block);
+  if (legacy) return legacy[1];
+  for (const [prefix, tag] of MARKDOWN_BLOCK_TAGS) {
+    if (block.startsWith(prefix)) return tag;
   }
-
-  const childPad = "  ".repeat(indent + 1);
-  const inner = children
-    .map((child) => {
-      if (typeof child === "string") return `${childPad}${escapeXml(child)}`;
-      if (isCdata(child)) return `${childPad}<![CDATA[\n${child.cdata}\n${childPad}]]>`;
-      return renderXml(child, indent + 1);
-    })
-    .join("\n");
-  return `${pad}<${node.tag}>\n${inner}\n${pad}</${node.tag}>`;
-}
-
-function renderSection(tag: string, instruction: string, items: XmlNode[]): string {
-  if (items.length === 0) return "";
-  const body = items.map((item) => renderXml(item, 1)).join("\n");
-  return `<${tag}>\n${instruction}\n${body}\n</${tag}>`;
+  return "text";
 }
 
 export interface PromptSource {
@@ -106,64 +97,110 @@ export function buildAgentPrompt(
 }
 
 export function buildFunctionBlock(functions: ResolvedFunction[]): string {
-  return renderSection(
-    "active_functions",
-    "These functions are currently active for this session. Follow their instructions.",
-    functions.map((fn) => xml("function", [
-      xml("name", [fn.name]),
-      xml("description", [fn.description]),
-      xml("instructions", [cdata(fn.content)]),
-    ])),
-  );
+  if (functions.length === 0) return "";
+  return renderInjectBlock({
+    title: "Active functions",
+    instruction: "These functions are currently active for this session. Follow their instructions.",
+    sections: functions.map((fn) => ({
+      title: fn.name,
+      level: 3,
+      instruction: fn.description,
+      body: fn.content,
+    })),
+  });
 }
 
 export function buildSkillBlock(skills: ResolvedSkill[], resourceTool?: "graph_worker_exec"): string {
-  return renderSection(
-    "available_skills",
-    resourceTool
-      ? "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory."
-      : "Skills provide specialized instructions. Use the skill tool to load when task matches.",
-    skills.map((s) => {
-      const children: XmlChild[] = [
-        xml("name", [s.name]),
-        xml("description", [s.description]),
-        xml("scope", [s.scope]),
-      ];
-      if (s.filePath) {
-        children.push(xml("location", [s.filePath]));
-      }
-      return xml("skill", children);
-    }),
-  );
+  if (skills.length === 0) return "";
+  const instruction = resourceTool
+    ? "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory."
+    : "Skills provide specialized instructions. Use the skill tool to load when task matches.";
+  // One bullet per skill: the name in inline code, then the description as
+  // prose, for both instruction variants. Neither `scope` nor the absolute
+  // `<location>` path is rendered: the path was the single largest cost of
+  // the block and follows from the skill name and its directory.
+  return renderInjectBlock({
+    title: "Available skills",
+    instruction,
+    items: skills.map((s) => ({ label: s.name, value: s.description })),
+  });
+}
+
+/**
+ * The directory an entry's own name is relative to — stated ONCE for the block
+ * — or `undefined` when the references share no such directory.
+ *
+ * A candidate is always an ancestor DIRECTORY of the first file, so it can only
+ * ever be a real path-segment boundary: the character prefix `…/theory` shared
+ * by `…/theory-x.md` and `…/theory-y.md` is never a candidate, because neither
+ * file sits under it. Candidates are tried from the deepest (`dirname` of the
+ * first file) upward, so the base is the closest directory the entries are
+ * actually named relative to.
+ *
+ * The one test a candidate must pass: joining it with every entry's own name
+ * has to land exactly on that entry's file, because in the shared form the
+ * bullet is ``- `<name>` — <description>`` and the name is the only thing
+ * locating the file. A flat reference (`guide` → `…/references/guide.md`) is
+ * located by its own directory. A resolver-named nested reference
+ * (`theory/psychology` → `…/references/theory/psychology.md`) is located by the
+ * `references` directory above it — the walk steps up to exactly that
+ * directory. An explicit name that derives nothing from its file
+ * (`api-docs` → `…/references/api.md`) is located by no ancestor at all, so the
+ * set keeps the per-entry path line rather than a subtly wrong base.
+ */
+function sharedReferenceBase(references: ResolvedReference[]): string | undefined {
+  const first = references[0];
+  if (first === undefined) return undefined;
+  for (let candidate = dirname(first.filePath); ; candidate = dirname(candidate)) {
+    if (referenceBaseLocatesEvery(candidate, references)) return candidate;
+    // Root reached: no ancestor locates every entry, so there is no shared base.
+    if (dirname(candidate) === candidate) return undefined;
+  }
+}
+
+/** True when `base` + each entry's own name is exactly that entry's file. */
+function referenceBaseLocatesEvery(base: string, references: ResolvedReference[]): boolean {
+  const canonical = resolve(base);
+  for (const reference of references) {
+    // Reference names are the file path below `references/` without its
+    // extension, so both forms have to be accepted: nesting (`theory/x`) and a
+    // name written with the extension.
+    const filePath = resolve(reference.filePath);
+    const extension = extname(filePath);
+    if (resolve(canonical, reference.name) !== filePath &&
+        resolve(canonical, `${reference.name}${extension}`) !== filePath) return false;
+  }
+  return true;
 }
 
 export function buildReferenceBlock(references: ResolvedReference[], resourceTool?: "graph_worker_exec"): string {
-  return renderSection(
-    "available_references",
-    resourceTool
-      ? "Reference documents provide deep knowledge. Use graph_worker_exec to read the listed files. Resolve relative references against the document's directory."
-      : "Reference documents provide deep knowledge. Use the Read tool to load full content when needed.",
-    references.map((r) => xml("reference", [
-      xml("name", [r.name]),
-      xml("path", [r.filePath]),
-      xml("description", [r.description]),
-    ])),
-  );
+  if (references.length === 0) return "";
+  const instruction = resourceTool
+    ? "Reference documents provide deep knowledge. Use graph_worker_exec to read the listed files. Resolve relative references against the document's directory."
+    : "Reference documents provide deep knowledge. Use the Read tool to load full content when needed.";
+  // One `Base directory:` line for a shared directory; the old per-entry
+  // `` `name`: `path` `` line otherwise, so no reference becomes unlocatable.
+  const base = sharedReferenceBase(references);
+  return renderInjectBlock({
+    title: "Available references",
+    instruction,
+    ...(base === undefined ? {} : { base }),
+    items: references.map((r) => (base === undefined
+      ? { label: r.name, value: r.description, sub: `${injectCode(r.name)}: ${injectCode(r.filePath)}` }
+      : { label: r.name, value: r.description })),
+  });
 }
 
 export function buildMemoryBlock(memories: MemorySummary[]): string {
   if (memories.length === 0) return "";
-  return renderSection(
-    "available_memory",
-    "Memory entries from previous sessions. Use memory_recall to search for specific memories.",
-    memories.map((m) => xml("memory", [
-      xml("id", [m.id]),
-      xml("title", [m.title]),
-      xml("category", [m.category]),
-      xml("relevance", [m.relevance]),
-      xml("updated", [m.updated_at]),
-    ])),
-  );
+  return renderInjectBlock({
+    title: "Available memory",
+    instruction: "Memory entries from previous sessions. Use memory_recall to search for specific memories.",
+    table: {
+      header: ["id", "category", "relevance", "title", "updated"],
+      rows: memories.map((m) => [m.id, m.category, m.relevance, m.title, m.updated_at]),
+    },
+  });
 }
 
 const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents through the graph outcome protocol.\n" +
@@ -184,15 +221,15 @@ const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents throug
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,
 ): string {
-  return renderSection(
-    "available_subagents",
-    SUBAGENT_INSTRUCTIONS,
-    subagents.map((a) => xml("subagent", [
-      xml("id", [a.id]),
-      xml("name", [a.name]),
-      xml("description", [a.description]),
-    ])),
-  );
+  if (subagents.length === 0) return "";
+  // The display `name` stays in the type but is not rendered: the id-first
+  // bullet is the deliberate information reduction, like the dropped skill
+  // `<location>` path.
+  return renderInjectBlock({
+    title: "Available sub-agents",
+    instruction: SUBAGENT_INSTRUCTIONS,
+    items: subagents.map((a) => ({ label: a.id, value: a.description })),
+  });
 }
 
 const PUBLIC_AGENT_INSTRUCTIONS = "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.\n" +
@@ -214,49 +251,49 @@ const PUBLIC_AGENT_INSTRUCTIONS = "You can dispatch tasks to these open roles of
 export function buildPublicAgentsBlock(
   agents: Array<{ id: string; name: string; description: string }>,
 ): string {
-  return renderSection(
-    "available_public_agents",
-    PUBLIC_AGENT_INSTRUCTIONS,
-    agents.map((a) => xml("public_agent", [
-      xml("id", [a.id]),
-      xml("name", [a.name]),
-      xml("description", [a.description]),
-    ])),
-  );
+  if (agents.length === 0) return "";
+  // Same id-first bullet as the sub-agent block; `name` is not rendered.
+  return renderInjectBlock({
+    title: "Available public agents",
+    instruction: PUBLIC_AGENT_INSTRUCTIONS,
+    items: agents.map((a) => ({ label: a.id, value: a.description })),
+  });
 }
 
+/** Exported API for role workspaces; src has no call site of its own. */
 export function buildFunctionStateBlock(fnName: string, s: FnState, todosRemaining: number): string {
-  return `<function_state name="${fnName}">
-  <phase>${s.phase}</phase>
-  <gate_satisfied>${s.gateSatisfied}</gate_satisfied>
-  <todos_remaining>${todosRemaining}</todos_remaining>
-  <evidence>${Object.entries(s.evidenceObserved).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}</evidence>
-  <continuation>${s.continuationCount}</continuation>
-</function_state>`;
+  const evidence = Object.entries(s.evidenceObserved).map(([k, v]) => `${k}=${v}`).join(", ") || "none";
+  return renderInjectBlock({
+    title: `Function state: ${fnName}`,
+    items: [
+      { value: `phase: ${s.phase}` },
+      { value: `gate satisfied: ${s.gateSatisfied}` },
+      { value: `todos remaining: ${todosRemaining}` },
+      { value: `evidence: ${evidence}` },
+      { value: `continuation count: ${s.continuationCount}` },
+    ],
+  });
 }
 
 export function buildActiveArtifactBlock(name: string, content: string): string {
-  return `<active_artifact name="${name}">\n${content}\n</active_artifact>`;
+  return renderInjectBlock({ title: `Active artifact: ${name}`, body: content });
 }
 
 export function buildAvailableFunctionsBlock(functions: ResolvedFunction[]): string {
   if (functions.length === 0) return "";
-  return renderSection(
-    "available_functions",
-    "These functions are available for activation. Use |function_name| or |function_name:params| syntax to activate them.",
-    functions.map((fn) => {
-      const children: (XmlChild | CdataNode)[] = [
-        xml("name", [fn.name]),
-        xml("description", [fn.description]),
-      ];
-      if (fn.params) {
-        const paramsStr = Object.entries(fn.params)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(", ");
-        children.push(xml("params", [paramsStr]));
-      }
-      children.push(xml("content", [cdata(fn.content)]));
-      return xml("function", children);
+  return renderInjectBlock({
+    title: "Available functions",
+    instruction: "These functions are available for activation. Use |function_name| or |function_name:params| syntax to activate them.",
+    sections: functions.map((fn) => {
+      const paramsStr = fn.params
+        ? Object.entries(fn.params).map(([k, v]) => `${k}=${v}`).join(", ")
+        : undefined;
+      return {
+        title: fn.name,
+        level: 3 as const,
+        instruction: paramsStr === undefined ? fn.description : [fn.description, `params: ${paramsStr}`],
+        body: fn.content,
+      };
     }),
-  );
+  });
 }

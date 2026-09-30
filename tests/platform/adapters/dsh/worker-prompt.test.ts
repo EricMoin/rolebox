@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { FunctionSource, ReferenceScope } from "../../../../src/constants.ts";
 import { prepareDshGraphWorkerPrompt } from "../../../../src/platform/adapters/dsh/worker-prompt.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../../src/types.ts";
@@ -19,6 +19,7 @@ function fixture() {
   const skill = join(directory, "roles", "planner", "skills", "research");
   mkdirSync(refs, { recursive: true });
   mkdirSync(join(skill, "scripts"), { recursive: true });
+  mkdirSync(join(refs, "theory"), { recursive: true });
   writeFileSync(join(refs, "schema.md"), "Strategy schema; also read ./examples.json");
   writeFileSync(join(refs, "examples.json"), '{"example":true}');
   writeFileSync(join(skill, "SKILL.md"), "Read scripts/check.sh beside this skill.");
@@ -44,11 +45,38 @@ function fixture() {
   return { directory, inputDirectory, workspace, planner, roles: [parent], refs, skill };
 }
 
-function resourcePaths(prompt: string) {
-  return {
-    reference: prompt.match(/<path>([^<]+)<\/path>/)![1],
-    skill: prompt.match(/<location>([^<]+)<\/location>/)![1],
-  };
+/** How many times a pattern matches — a count, never a truthiness check on `match`. */
+function countMatches(text: string, pattern: RegExp): number {
+  return text.match(pattern)?.length ?? 0;
+}
+
+/** The directory the reference block states once, shared by every entry. */
+function referenceBase(prompt: string): string {
+  expect(countMatches(prompt, /^Base directory: `/gm)).toBe(1);
+  return prompt.match(/^Base directory: `([^`\n]+)`$/m)![1];
+}
+
+/**
+ * The readable private copy a reference bullet advertises: the block states the
+ * base once and each bullet names its own file below it (the resolver names a
+ * reference after its path under `references/` without the extension). The path
+ * is derived from the prompt, so this asserts the worker can actually reach the
+ * copy — not merely that the prompt mentions a path.
+ */
+function referencePath(prompt: string, name: string): string {
+  expect(countMatches(prompt, new RegExp("^- `" + name + "` — ", "gm"))).toBe(1);
+  const copy = join(referenceBase(prompt), `${name}.md`);
+  expect(existsSync(copy)).toBe(true);
+  expect(readFileSync(copy, "utf8").length).toBeGreaterThan(0);
+  return copy;
+}
+
+/** Every regular file under a directory tree — the private copies a worker may read. */
+function filesUnder(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(root, entry.name);
+    return entry.isDirectory() ? filesUnder(path) : [path];
+  });
 }
 
 describe("DSH graph worker prompt", () => {
@@ -59,7 +87,7 @@ describe("DSH graph worker prompt", () => {
       filePath: "loop.md", source: FunctionSource.RoleLocal,
     });
     const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED);
-    expect(prompt).not.toContain("<available_functions>");
+    expect(prompt).not.toContain("## Available functions");
     expect(prompt).not.toContain("Inactive orchestration instructions.");
     expect(prompt).toContain("Return a Strategy.");
     expect(prompt).toContain("graph_submit_outcome");
@@ -70,30 +98,71 @@ describe("DSH graph worker prompt", () => {
     f.planner.references.push({ ...f.planner.references[0] });
     const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED);
     expect(prompt).toContain("You are the planner.");
-    expect(prompt).toContain("<active_functions>");
+    expect(prompt).toContain("## Active functions");
     expect(prompt).toContain("Return a Strategy.");
     expect(prompt).toContain("Use graph_worker_exec to read");
-    for (const forbidden of ["You are the coordinator.", "triage", "Legacy rendered", "graph_declare", "Use the Read tool", "Use the skill tool", "available_subagents"]) {
+    for (const forbidden of ["You are the coordinator.", "triage", "Legacy rendered", "graph_declare", "Use the Read tool", "Use the skill tool", "## Available sub-agents"]) {
       expect(prompt).not.toContain(forbidden);
     }
-    expect(prompt.match(/<reference>/g)).toHaveLength(1);
-    const paths = resourcePaths(prompt);
-    expect(paths.reference.startsWith(f.inputDirectory)).toBe(true);
-    expect(paths.skill.startsWith(f.inputDirectory)).toBe(true);
-    expect(readFileSync(paths.reference, "utf8")).toContain("Strategy schema");
-    expect(readFileSync(join(dirname(paths.reference), "examples.json"), "utf8")).toBe('{"example":true}');
-    expect(readFileSync(join(dirname(paths.skill), "scripts", "check.sh"), "utf8")).toBe("printf checked");
+    // Two identical references collapse into one rendered entry: one bullet,
+    // no second `` `name`: `path` `` line, and the base stated once.
+    expect(countMatches(prompt, /^- `schema` — /gm)).toBe(1);
+    expect(prompt).not.toMatch(/^ {2}`schema`: /m);
+    // The skill bullet carries name and description only; its private copy is
+    // delivered under the attempt's input directory and readable from there.
+    expect(prompt).toContain("## Available skills");
+    expect(prompt).toContain("- `research` — Research");
+    const reference = referencePath(prompt, "schema");
+    // Base + the entry's own name land inside the attempt's delivery directory,
+    // and the advertised file is the readable copy of the role's reference.
+    expect(referenceBase(prompt).startsWith(f.inputDirectory)).toBe(true);
+    expect(reference.startsWith(f.inputDirectory)).toBe(true);
+    expect(readFileSync(reference, "utf8")).toContain("Strategy schema");
+    expect(readFileSync(join(dirname(reference), "examples.json"), "utf8")).toBe('{"example":true}');
+    const copies = filesUnder(f.inputDirectory);
+    const skillCopy = copies.find((path) => basename(path) === "SKILL.md")!;
+    expect(skillCopy.startsWith(f.inputDirectory)).toBe(true);
+    expect(readFileSync(skillCopy, "utf8")).toBe("Read scripts/check.sh beside this skill.");
+    expect(readFileSync(join(dirname(skillCopy), "scripts", "check.sh"), "utf8")).toBe("printf checked");
     writeFileSync(join(f.refs, "schema.md"), "changed after dispatch");
-    expect(readFileSync(paths.reference, "utf8")).toContain("Strategy schema");
+    expect(readFileSync(reference, "utf8")).toContain("Strategy schema");
+  });
+
+  it("locates every delivered reference from the base it states once", () => {
+    const f = fixture();
+    // A realistic bundle: a flat reference beside a nested one, all named below
+    // `references/`. The block states that one directory and each bullet names
+    // its own file below it, so every entry has to resolve to a readable copy.
+    writeFileSync(join(f.refs, "theory", "deep.md"), "Nested theory; read ./examples.json beside it.");
+    writeFileSync(join(f.refs, "theory", "examples.json"), '{"nested":true}');
+    f.planner.references.push({
+      name: "theory/deep", description: "Nested theory",
+      scope: ReferenceScope.Role, relativePath: "references/theory/deep.md",
+      filePath: join(f.refs, "theory", "deep.md"),
+    });
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED);
+
+    // One base line for both entries, one bullet per entry, no path line.
+    expect(countMatches(prompt, /^Base directory: `/gm)).toBe(1);
+    expect(countMatches(prompt, /^- `schema` — /gm)).toBe(1);
+    expect(countMatches(prompt, /^- `theory\/deep` — /gm)).toBe(1);
+    expect(prompt).not.toMatch(/^ {2}`/m);
+    const flat = referencePath(prompt, "schema");
+    const nested = referencePath(prompt, "theory/deep");
+    expect(flat.startsWith(f.inputDirectory)).toBe(true);
+    expect(nested.startsWith(f.inputDirectory)).toBe(true);
+    expect(readFileSync(nested, "utf8")).toContain("Nested theory");
+    expect(readFileSync(join(dirname(nested), "examples.json"), "utf8")).toBe('{"nested":true}');
+    expect(nested).not.toBe(flat);
   });
 
   it("gives separate attempts independent resource copies", () => {
     const f = fixture();
-    const first = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED));
+    const first = referencePath(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED), "schema");
     const secondRoot = join(f.directory, "data", "inputs", "another-attempt");
-    const second = resourcePaths(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, secondRoot, CONFINED));
-    expect(first.reference).not.toBe(second.reference);
-    expect(second.reference.startsWith(secondRoot)).toBe(true);
+    const second = referencePath(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, secondRoot, CONFINED), "schema");
+    expect(first).not.toBe(second);
+    expect(second.startsWith(secondRoot)).toBe(true);
   });
 
   it("fails before dispatch for missing agents or resources and removes partial copies", () => {

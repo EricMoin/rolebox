@@ -77,10 +77,10 @@ describe("Function Integration — Full Pipeline", () => {
 
     const block = buildFunctionBlock(activeFunctions);
 
-    expect(block).toContain("<active_functions>");
-    expect(block).toContain("<name>plan</name>");
+    expect(block).toContain("## Active functions");
+    expect(block).toContain("### plan");
     expect(block).toContain("Strategic planning");
-    expect(block).toContain("<![CDATA[");
+    expect(block).toContain("~~~");
   });
 
   it("does not activate functions not in the role", () => {

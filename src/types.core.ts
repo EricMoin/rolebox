@@ -206,7 +206,7 @@ export interface ResolvedFunction {
 export interface ReferenceEntry {
   /** Relative path from the role/skill directory to the reference file */
   path: string;
-  /** Human-readable description surfaced in <available_references> */
+  /** Human-readable description surfaced in the `## Available references` block */
   description?: string;
 }
 
