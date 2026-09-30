@@ -20,6 +20,16 @@ import {
   type DshSandboxPolicyService,
   type DshSandboxService,
 } from "../../../../src/platform/adapters/dsh/graph-worker.ts";
+import { getSystem } from "../../../../src/platform/system/index.ts";
+
+/**
+ * The shell vector, as the per-OS fact it is: the adapter builds the argv it
+ * confines with `getSystem().commandShell(command, process.env)`, so the fake
+ * confinement service answers with the same vector and the `confinements`
+ * comparison below keeps proving that the runner spawns exactly what the
+ * service returned.
+ */
+const system = getSystem();
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -48,13 +58,13 @@ describe("dsh worker command boundary", () => {
     const sandbox: DshSandboxService = {
       async confine(argv, policy) {
         confinements.push({ argv, policy });
-        return { argv: ["/bin/sh", "-c", "echo CONFINE-ARGV"], enforcement: "partial",
+        return { argv: system.commandShell("echo CONFINE-ARGV", process.env), enforcement: "partial",
           denialSignatures: ["sandbox: file-write*"] };
       },
     };
     const result = await executeDshWorkerCommand({ command: "echo ORIGINAL", workspace: root,
       sandbox, sandboxPolicy, session });
-    expect(confinements).toEqual([{ argv: ["/bin/sh", "-c", "echo ORIGINAL"],
+    expect(confinements).toEqual([{ argv: system.commandShell("echo ORIGINAL", process.env),
       policy: { mode: "workspace-write", workspaceRoot: root, sessionId: "session-1" } }]);
     expect(resolutions).toEqual([{ session }]);
     expect(result.exitCode, result.output).toBe(0);
@@ -72,7 +82,7 @@ describe("dsh worker command boundary", () => {
     };
     const sandbox: DshSandboxService = {
       async confine() {
-        return { argv: ["/bin/sh", "-c", "echo READ-ONLY"], enforcement: "full", denialSignatures: [] };
+        return { argv: system.commandShell("echo READ-ONLY", process.env), enforcement: "full", denialSignatures: [] };
       },
     };
     const result = await executeDshWorkerCommand({ command: "echo ORIGINAL", workspace: root, sandbox, sandboxPolicy });
@@ -88,7 +98,7 @@ describe("dsh worker command boundary", () => {
     const sandbox: DshSandboxService = {
       async confine() {
         confined++;
-        return { argv: ["/bin/sh", "-c", "echo WRONG"], enforcement: "full", denialSignatures: [] };
+        return { argv: system.commandShell("echo WRONG", process.env), enforcement: "full", denialSignatures: [] };
       },
     };
     const sandboxPolicy: DshSandboxPolicyService = {
@@ -112,7 +122,7 @@ describe("dsh worker command boundary", () => {
     };
     const sandbox: DshSandboxService = {
       async confine() {
-        return { argv: ["/bin/sh", "-c", "echo CONFINE-ARGV"], enforcement: "full", denialSignatures: [] };
+        return { argv: system.commandShell("echo CONFINE-ARGV", process.env), enforcement: "full", denialSignatures: [] };
       },
     };
     // No policy resolver at all.
@@ -140,7 +150,7 @@ describe("dsh worker command boundary", () => {
       .rejects.toThrow("no usable spawn argv");
     // A malformed enforcement claim.
     await expect(executeDshWorkerCommand({ command, workspace: root, sandboxPolicy,
-      sandbox: { confine: async () => ({ argv: ["/bin/sh", "-c", "true"], enforcement: "maybe" as never, denialSignatures: [] }) } }))
+      sandbox: { confine: async () => ({ argv: system.commandShell("exit 0", process.env), enforcement: "maybe" as never, denialSignatures: [] }) } }))
       .rejects.toThrow("unknown enforcement level");
     expect(ran()).toBe(false);
   });

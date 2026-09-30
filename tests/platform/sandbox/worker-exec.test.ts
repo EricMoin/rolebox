@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSy
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { browserDiscoveryEnvironment, executeGraphWorkerCommand } from "../../../src/platform/sandbox/worker-exec.ts";
-import { setPlatformForTest } from "../../../src/platform/system/index.ts";
+import { getSystem, setPlatformForTest } from "../../../src/platform/system/index.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -17,15 +17,36 @@ function workspace(prefix: string): string {
   return root;
 }
 
-/** The runner is boundary-free: it spawns exactly the vector its caller decided. */
-const shell = (command: string): string[] => ["/bin/sh", "-c", command];
+/**
+ * The shell these probes really run in.
+ *
+ * The runner is boundary-free: it spawns exactly the vector its caller decided,
+ * and a caller decides that vector with the detected system's
+ * `commandShell(command, env)` — so these tests build their argv the same way
+ * instead of hardcoding a POSIX `/bin/sh` that Windows does not have. The
+ * descriptor is resolved once, from the platform this process runs on:
+ * `setPlatformForTest` below changes which DESCRIPTOR answers (the disposable
+ * variable set under test), never which shell this host can spawn.
+ */
+const hostSystem = getSystem();
+const shell = (command: string): string[] => hostSystem.commandShell(command, process.env);
+
+/** The same probe written for this host's shell: POSIX first, cmd.exe second. */
+const perOs = (posix: string, windows: string): string => (hostSystem.id === "win32" ? windows : posix);
 
 it("spawns the caller's argv in the workspace and reports exit code and output", async () => {
   const root = workspace("graph-worker-exec-");
-  const result = await executeGraphWorkerCommand({ argv: shell("echo decided > output.txt && printf '%s' \"$PWD\""), workspace: root, timeoutMs: 10_000 });
+  // `$PWD`/`cd` report the command's own working directory, and cmd's `echo`
+  // writes CRLF where /bin/sh's writes LF — so the expected bytes travel with
+  // the per-OS command pair.
+  const result = await executeGraphWorkerCommand({ workspace: root, timeoutMs: 10_000,
+    argv: shell(perOs(`echo decided > output.txt && printf '%s' "$PWD"`, "echo decided> output.txt && cd")) });
   expect(result.exitCode, result.output).toBe(0);
-  expect(result.output).toBe(realpathSync(root));
-  expect(readFileSync(join(root, "output.txt"), "utf8")).toBe("decided\n");
+  // The reported directory is the workspace, compared as the canonical path the
+  // report names: a short (8.3) or differently-cased spelling of the same
+  // directory on Windows still proves which directory the command ran in.
+  expect(realpathSync(result.output.trim())).toBe(realpathSync(root));
+  expect(readFileSync(join(root, "output.txt"), "utf8")).toBe(perOs("decided\n", "decided\r\n"));
 });
 
 it("refuses an empty argv instead of spawning anything", async () => {
@@ -35,38 +56,60 @@ it("refuses an empty argv instead of spawning anything", async () => {
 
 it("stops a command at its timeout and reports the stop", async () => {
   const root = workspace("graph-worker-exec-");
+  // Both probes outlive the 500ms timeout: /bin/sh's `sleep` is ended by the
+  // runner's process-group kill, cmd's `ping` is bounded so the stop report
+  // still arrives promptly on a system whose command shell has no process group
+  // to kill. The report, and the prompt return, are what this asserts.
   const started = Date.now();
-  const result = await executeGraphWorkerCommand({ argv: shell("sleep 30"), workspace: root, timeoutMs: 500 });
+  const result = await executeGraphWorkerCommand({ workspace: root, timeoutMs: 500,
+    argv: shell(perOs("sleep 30", "ping -n 4 127.0.0.1 >nul")) });
   expect(result.output).toContain("Command stopped by cancellation, timeout or output limit.");
   expect(Date.now() - started).toBeLessThan(10_000);
 }, 15_000);
 
 it("provides disposable home, config and cache directories to work software", async () => {
   const root = workspace("graph-worker-software-");
-  const result = await executeGraphWorkerCommand({ workspace: root,
-    argv: shell('test -d "$HOME" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && echo configured > "$HOME/settings" && echo cached > "$XDG_CACHE_HOME/cache" && printf "%s" "$HOME"') });
+  const result = await executeGraphWorkerCommand({ workspace: root, argv: shell(perOs(
+    `test -d "$HOME" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && echo configured > "$HOME/settings" && echo cached > "$XDG_CACHE_HOME/cache" && printf '%s' "$HOME"`,
+    // No embedded quotes: a command string is one argv entry of `cmd /d /s /c`,
+    // and quote characters here would be escaped for CreateProcess and then
+    // re-parsed by cmd itself. The disposable paths carry no spaces.
+    `if not exist %HOME% exit /b 1 & if not exist %XDG_CONFIG_HOME% exit /b 1 & if not exist %XDG_CACHE_HOME% exit /b 1 & echo configured> %HOME%\\settings & echo cached> %XDG_CACHE_HOME%\\cache & echo %HOME%`)) });
   expect(result.exitCode, result.output).toBe(0);
   expect(result.output).not.toBe("");
-  expect(existsSync(result.output)).toBe(false);
+  // The directory the command reported is its disposable home, and it is gone
+  // once the command ends (`echo` adds the line ending of whichever shell ran).
+  expect(existsSync(result.output.trim())).toBe(false);
 });
 
 // The disposable variable NAMES are per-OS facts (src/platform/system/): Windows
 // software and Node's os.homedir() read USERPROFILE, and the macOS-only Cocoa and
 // Chromium names must not be set on another system. These are environment
-// assertions on a simulated system — the argv is still this host's /bin/sh probe,
-// so nothing here claims a Windows or Linux execution.
+// assertions on a simulated system — the command still runs in THIS host's own
+// shell (POSIX sh or cmd.exe), so nothing here claims a Windows or Linux
+// execution.
 const PROBE_VARIABLES = ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "CFFIXED_USER_HOME",
   "MAC_CHROMIUM_TMPDIR", "xcrun_db", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP"] as const;
 
-/** Read those variables back out of a real command run on the simulated system. */
+/**
+ * Read those variables back out of a real command run on the simulated system.
+ *
+ * The dump is the detected system's own: `env` prints `NAME=value` lines on the
+ * POSIX family, `set` prints them under cmd.exe. A variable the descriptor does
+ * not set is simply absent from the dump, which is the empty string the
+ * assertions compare.
+ */
 async function probeEnvironment(root: string, platform: string): Promise<Record<string, string>> {
   setPlatformForTest(platform);
-  const command = `printf '%s\\n' ${PROBE_VARIABLES.map(name => `"$${name}"`).join(" ")}`;
-  const result = await executeGraphWorkerCommand({ workspace: root, argv: shell(command) });
+  const result = await executeGraphWorkerCommand({ workspace: root, argv: shell(perOs("env", "set")) });
   expect(result.exitCode, result.output).toBe(0);
-  const values = result.output.split("\n");
+  const dumped: Record<string, string> = {};
+  for (const line of result.output.split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator > 0) dumped[line.slice(0, separator)] = line.slice(separator + 1);
+  }
   const environment: Record<string, string> = {};
-  PROBE_VARIABLES.forEach((name, index) => { environment[name] = values[index] ?? ""; });
+  for (const name of PROBE_VARIABLES) environment[name] = dumped[name] ?? "";
   return environment;
 }
 
@@ -118,12 +161,16 @@ it("keeps browser discovery pointed at installed caches", () => {
     });
   }
   setPlatformForTest("darwin");
+  // A host-set cache path is resolved against the workspace by the HOST's own
+  // resolve() — the product promises the host-native absolute path, so the
+  // expectation is built with that same call instead of a literal POSIX one.
   expect(browserDiscoveryEnvironment("/workspace", {
     PLAYWRIGHT_BROWSERS_PATH: "../browsers/playwright", PUPPETEER_CACHE_DIR: "../browsers/puppeteer",
     PUPPETEER_EXECUTABLE_PATH: "/tools/Browser.app/Contents/MacOS/browser", UNRELATED: "not-forwarded",
   }, "/home/example")).toEqual({
-    PLAYWRIGHT_BROWSERS_PATH: "/browsers/playwright", PUPPETEER_CACHE_DIR: "/browsers/puppeteer",
-    PUPPETEER_EXECUTABLE_PATH: "/tools/Browser.app/Contents/MacOS/browser",
+    PLAYWRIGHT_BROWSERS_PATH: resolve("/workspace", "../browsers/playwright"),
+    PUPPETEER_CACHE_DIR: resolve("/workspace", "../browsers/puppeteer"),
+    PUPPETEER_EXECUTABLE_PATH: resolve("/workspace", "/tools/Browser.app/Contents/MacOS/browser"),
   });
   expect(browserDiscoveryEnvironment("/workspace", { PLAYWRIGHT_BROWSERS_PATH: "0" }, "/home/example").PLAYWRIGHT_BROWSERS_PATH).toBe("0");
 });

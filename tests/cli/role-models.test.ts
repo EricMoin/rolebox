@@ -51,9 +51,11 @@ describe("scanRoleModels", () => {
       .map((e) => ({ ...e, path: e.path.replace(roleDir, "<roleDir>") }))
       .sort((a, b) => a.path.localeCompare(b.path));
 
+    // scanRoleModels returns the host's own separators, so the expected spelling
+    // is built with the host's join() instead of hardcoded "/" segments.
     expect(entries).toEqual([
-      { path: "<roleDir>/role.yaml", name: "demo", model: "openrouter/anthropic/claude-sonnet-4" },
-      { path: "<roleDir>/subagents/helper/role.yaml", name: "helper", model: "openrouter/openai/gpt-4o" },
+      { path: join("<roleDir>", "role.yaml"), name: "demo", model: "openrouter/anthropic/claude-sonnet-4" },
+      { path: join("<roleDir>", "subagents", "helper", "role.yaml"), name: "helper", model: "openrouter/openai/gpt-4o" },
     ]);
   });
 
