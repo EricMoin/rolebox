@@ -3,7 +3,7 @@ import { handleSystemTransform } from "../../src/hooks/system-transform.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
 import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
-import type { ResolvedFunction } from "../../src/types.ts";
+import type { ResolvedFunction, ResolvedRole } from "../../src/types.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 
 // ── Cleanup ─────────────────────────────────────────────────────────────────
@@ -74,6 +74,32 @@ function makeState(): HookState {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("handleSystemTransform — early exit", () => {
+  it("hands a confirmed graph worker only its own active functions", async () => {
+    const active = makeFn("active");
+    const inactive = makeFn("inactive");
+    const role: ResolvedRole = {
+      id: "parent", config: { name: "Parent", description: "Parent", prompt: "Parent" },
+      prompt: "Parent", skills: [], references: [], functions: [],
+      subagents: [{
+        id: "parent--worker", parentId: "parent", inheritedFrom: {},
+        config: { name: "Worker", description: "Worker", prompt: "Worker", auto_activate: ["active"] },
+        prompt: "Worker", skills: [], references: [], functions: [active, inactive], subagents: [],
+      }],
+    };
+    const output = { system: ["Host instructions", "Worker"] };
+    const deps = minimalDeps({
+      roleMap: new Map([[role.id, role]]),
+      roleFunctionsMap: new Map([["parent--worker", [active, inactive]]]),
+      isGraphWorker: (sessionID) => sessionID === "sess-1",
+    });
+    await handleSystemTransform({ sessionID: "sess-1", agent: "parent--worker" }, output, makeState(), deps);
+    expect(output.system.slice(0, 2)).toEqual(["Host instructions", "Worker"]);
+    expect(output.system.join("\n")).toContain("active content");
+    expect(output.system.join("\n")).not.toContain("inactive content");
+    expect(output.system.join("\n")).not.toContain("<available_functions>");
+    expect(deps.customHooks.runHooks).not.toHaveBeenCalled();
+  });
+
   it("returns early when sessionID is missing", async () => {
     const builtInRunHooks = makeBuiltInRunHooks();
     const output = { system: [] as string[] };

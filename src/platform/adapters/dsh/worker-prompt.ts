@@ -1,21 +1,10 @@
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { buildAgentPrompt, buildAvailableFunctionsBlock, buildFunctionBlock } from "../../../prompt/builder.ts";
-import type { ResolvedRole, ResolvedSubAgent } from "../../../types.ts";
+import { buildGraphWorkerRolePrompt, findGraphWorkerRole } from "../../../prompt/graph-worker.ts";
+import type { ResolvedRole } from "../../../types.ts";
 import type { DshWorkerCommandBoundary } from "./graph-worker.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
-
-type WorkerRole = ResolvedRole | ResolvedSubAgent;
-
-function findAgent(agents: readonly WorkerRole[], id: string): WorkerRole | undefined {
-  for (const agent of agents) {
-    if (agent.id === id) return agent;
-    const nested = findAgent(agent.subagents, id);
-    if (nested) return nested;
-  }
-  return undefined;
-}
 
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path);
@@ -80,7 +69,7 @@ function boundaryBlock(boundary: DshWorkerCommandBoundary): string {
 
 /** Copy only this role's resource bundles into its attempt's sandbox-readable input directory. */
 export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, boundary: DshWorkerCommandBoundary): string {
-  const agent = findAgent(roles, agentId);
+  const agent = findGraphWorkerRole(roles, agentId);
   if (!agent) throw new Error(`Graph worker agent is not resolved: ${agentId}`);
   mkdirSync(inputDirectory, { recursive: true, mode: 0o700 });
   const resourceDirectory = mkdtempSync(join(inputDirectory, "role-resources-"));
@@ -109,9 +98,6 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
       ...ref,
       filePath: deliver(ref.filePath, referenceRoot(ref.filePath)),
     }));
-    const activeNames = new Set(agent.auto_activate ?? agent.config.auto_activate ?? []);
-    const active = agent.functions.filter(fn => activeNames.has(fn.name));
-    const available = agent.functions.filter(fn => !activeNames.has(fn.name));
     return [
       "You are a graph worker assigned to the role below. Complete only the dispatched task. " +
         "Your tools are graph_worker_exec and graph_submit_outcome. Use graph_worker_exec for all file reads, commands and permitted edits. " +
@@ -122,9 +108,7 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
         "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
       boundaryBlock(boundary),
 
-      buildAgentPrompt(agent.config, skills, { references, canDelegate: false, resourceTool: "graph_worker_exec" }),
-      buildFunctionBlock(active),
-      buildAvailableFunctionsBlock(available),
+      buildGraphWorkerRolePrompt(agent, { skills, references, resourceTool: "graph_worker_exec" }),
     ].filter(Boolean).join("\n\n");
   } catch (error) {
     rmSync(resourceDirectory, { recursive: true, force: true });

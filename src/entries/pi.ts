@@ -1,4 +1,5 @@
 import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
+import { buildGraphWorkerRolePrompt } from "../prompt/graph-worker.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
 /**
@@ -598,7 +599,7 @@ export default async function(pi: any): Promise<void> {
     }
 
     function registerPiAgentConfigs(
-      subagents: ResolvedSubAgent[],
+      subagents: (ResolvedRole | ResolvedSubAgent)[],
       parentModel: string | undefined,
     ): void {
       for (const sub of subagents) {
@@ -608,6 +609,7 @@ export default async function(pi: any): Promise<void> {
           model: key,
           tools: PI_SUBAGENT_TOOLS,
           systemPrompt: sub.prompt,
+          graphWorkerSystemPrompt: buildGraphWorkerRolePrompt(sub),
         });
         if (sub.subagents.length > 0) {
           registerPiAgentConfigs(sub.subagents, model);
@@ -615,7 +617,7 @@ export default async function(pi: any): Promise<void> {
       }
     }
     for (const role of resolvedRoles) {
-      registerPiAgentConfigs(role.subagents, role.config.model);
+      registerPiAgentConfigs([role], role.config.model);
     }
 
     log.info("Subagent lineage registered", {

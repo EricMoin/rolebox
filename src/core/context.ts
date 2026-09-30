@@ -39,6 +39,7 @@ export interface PluginContext {
    * `graph_*` tool is registered (src/platform/tool-assembly.ts:62-74).
    */
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
+  isGraphWorker?: (sessionID: string) => boolean;
   /** Platform capabilities for feature detection and graceful degradation.
    * Always present: the composition layer resolves the entry's explicit
    * declaration (or its platformId) BEFORE constructing the context, so an

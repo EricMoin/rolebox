@@ -74,6 +74,8 @@ export interface PiProcessAgentConfig {
   tools: string[];
   /** System prompt text written to a temp file for --append-system-prompt. */
   systemPrompt: string;
+  /** Prepared role context for graph attempts; ordinary child sessions keep systemPrompt. */
+  graphWorkerSystemPrompt?: string;
 }
 
 /**
@@ -1056,14 +1058,17 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // --append-system-prompt). Falls back to the record's config when no
     // explicit prompt is passed (e.g. reopenForContinuation).
     // If there is no system prompt, an empty file is written.
-    await writeFile(sysPromptPath, systemPrompt ?? record.agentConfig.systemPrompt, "utf-8");
+    const effectivePrompt = this.graphDispatch.getStore()
+      ? record.agentConfig.graphWorkerSystemPrompt ?? systemPrompt ?? record.agentConfig.systemPrompt
+      : systemPrompt ?? record.agentConfig.systemPrompt;
+    await writeFile(sysPromptPath, effectivePrompt, "utf-8");
 
     // Persist the effective system prompt NEXT TO the transcript
     // (`.rolebox/pi-sessions/{id}.systemprompt.txt`) so a completed or
     // failed child's prompt can be inspected after the temp dir is cleaned
     // up on exit. Best-effort; pruned in lockstep with the sidecar by
     // pruneSidecars().
-    void writeSystemPrompt(id, systemPrompt ?? record.agentConfig.systemPrompt);
+    void writeSystemPrompt(id, effectivePrompt);
 
     // Build CLI arguments (ordering locked by buildSpawnArgs + unit tests).
     const nativeSessionFile = await childSessionFile(process.cwd(), id);

@@ -14,6 +14,8 @@ export interface HookDeps {
   session: ISessionClient;
   roleFunctionsMap: Map<string, ResolvedFunction[]>;
   roleMap: Map<string, ResolvedRole>;
+  /** Host-confirmed attempt sessions, including workers recovered after restart. */
+  isGraphWorker?: (sessionID: string) => boolean;
   dir: string;
   dispatchManager: DispatchManager;
   loopManager: LoopCoordinator;

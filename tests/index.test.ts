@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir as osTmpdir, homedir as osHomedir } from "node:os";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
-import type { Config } from "@opencode-ai/sdk";
+import type { Config, Model } from "@opencode-ai/sdk";
 import RoleboxModule, { roleFunctionsMap } from "../src/entries/opencode.ts";
 import { getDataDir } from "../src/cli/paths.ts";
 import { graphStoreFilePath, graphStoreRoot } from "../src/graph/store/schema.ts";
@@ -1041,7 +1041,7 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 
 describe("RoleboxPlugin declared-graph run notifications", () => {
   it("wakes the declaring session through the real v1 entry when a graph completes", async () => {
-    mkdirSync(roleboxPath(), { recursive: true });
+    await writeRole("agent.worker", "name: Worker\ndescription: Worker\nprompt: Worker instructions\n");
 
     // THE REAL ENTRY over a fake opencode 1.x client: `RoleboxPlugin` builds the
     // session adapter from `client`, hands that SAME adapter to the host as its
@@ -1068,6 +1068,34 @@ describe("RoleboxPlugin declared-graph run notifications", () => {
       expect(fake.created).toEqual([{ directory: tmpDir }]);
       const handoff = fake.prompts[0]!;
       expect(handoff.sessionID).toBe("ses_worker");
+      roleFunctionsMap.set("agent.worker", [{
+        name: "unused", description: "Unused", content: "Inactive orchestration instructions",
+        filePath: "unused.md", source: "role-local",
+      }]);
+      const model: Model = {
+        id: "fixture", providerID: "fixture", name: "Fixture",
+        api: { id: "fixture", url: "https://example.test", npm: "fixture" },
+        capabilities: {
+          temperature: false, reasoning: false, attachment: false, toolcall: true,
+          input: { text: true, audio: false, image: false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+        },
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: 1024, output: 1024 }, status: "active", options: {}, headers: {},
+      };
+      const workerSystem = { system: ["Host and worker role instructions"] };
+      await hooks["chat.message"]!({ sessionID: "ses_worker", agent: "agent.worker" }, {
+        parts: [{ type: "text", text: "Inspect the literal |unused| marker." }],
+      } as never);
+      await hooks["experimental.chat.system.transform"]!({ sessionID: "ses_worker", model }, workerSystem);
+      expect(workerSystem.system).toEqual(["Host and worker role instructions"]);
+      const parentSystem = { system: ["Parent instructions"] };
+      await hooks["chat.message"]!({ sessionID: "ses_parent", agent: "agent.worker" }, {
+        parts: [{ type: "text", text: "Parent task" }],
+      } as never);
+      await hooks["experimental.chat.system.transform"]!({ sessionID: "ses_parent", model }, parentSystem);
+      expect(parentSystem.system.join("\n")).toContain("<available_functions>");
+      expect(parentSystem.system.join("\n")).toContain("Inactive orchestration instructions");
       const handoffText = promptCallText(handoff);
       expect(handoffText).toContain("[rolebox outcome protocol — attempt handoff]");
       const credential = /credential: (\S+)/.exec(handoffText)?.[1];

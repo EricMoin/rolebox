@@ -19,6 +19,10 @@ export async function handleChatMessage(
   state: HookState,
   deps: HookDeps,
 ): Promise<void> {
+  if (deps.isGraphWorker?.(input.sessionID)) {
+    if (input.agent) state.sessionAgentRegistry.set(input.sessionID, input.agent);
+    return;
+  }
   const firstText = output.parts.find(
     (p: { type: string; text?: string }) => p.type === "text" && typeof p.text === "string",
   ) as { text?: string } | undefined;

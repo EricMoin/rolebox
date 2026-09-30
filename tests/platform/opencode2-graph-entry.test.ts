@@ -239,6 +239,7 @@ interface OpenOptions {
 }
 
 interface SpyHost {
+  readonly host: { workerPrincipalOf(sessionID: string): object | undefined };
   /** The ONE tool the spy host binds — proves the host's face is what registers. */
   readonly createTools: () => Record<string, never>;
   readonly noteSessionEnded: (sessionID: string, kind?: "ended" | "errored") => void;
@@ -277,6 +278,7 @@ function makeHostSpy(options: { throws?: Error } = {}): HostSpy {
     calls.push(openOptions);
     if (options.throws !== undefined) throw options.throws;
     last = {
+      host: { workerPrincipalOf: sessionID => sessionID === "ses_worker" ? { workerSessionId: sessionID } : undefined },
       createTools: () => ({ spy_graph_tool: {} as never }),
       noteSessionEnded: (sessionID: string, kind: "ended" | "errored" = "ended") => {
         noted.push({ sessionID, kind });
@@ -380,6 +382,28 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 // ── The real host ───────────────────────────────────────────────────────────
 
 describe("opencode v2 entry — the declared-graph face registers through the real host", () => {
+  it("connects prompt isolation to the host's confirmed worker identity", async () => {
+    writeRole();
+    const { ctx } = contextInTmp();
+    const spy = makeHostSpy();
+    let isWorker: ((sessionID: string) => boolean) | undefined;
+    const deps = withGraphSpy(spy.openGraphHost);
+    const plugin = createOpencode2Plugin({
+      ...deps,
+      createHooks: async config => {
+        isWorker = config.isGraphWorker;
+        return createPluginHooks(config);
+      },
+    });
+    const cleanup = await plugin.setup(ctx);
+    try {
+      expect(isWorker?.("ses_worker")).toBe(true);
+      expect(isWorker?.("ses_parent")).toBe(false);
+    } finally {
+      await cleanup?.();
+    }
+  });
+
   it("adds exactly the five graph tools to the editor, and nothing else changes", async () => {
     writeRole();
     const { ctx, fake } = contextInTmp();

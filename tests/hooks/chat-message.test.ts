@@ -71,6 +71,19 @@ function makeState(): HookState {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("handleChatMessage — before/after hook phases", () => {
+  it("keeps graph briefs intact without activating parent functions", async () => {
+    const state = makeState();
+    state.roleAutoActivateMap.set("worker", ["plan"]);
+    const deps = minimalDeps({ isGraphWorker: sessionID => sessionID === "sess-1" });
+    const output = makeTextOutput("Inspect the literal |loop| marker in the source.");
+    await handleChatMessage({ agent: "worker", sessionID: "sess-1" }, output, state, deps);
+    expect(output.parts[0]?.text).toBe("Inspect the literal |loop| marker in the source.");
+    expect(state.sessionAgentRegistry.get("sess-1")).toBe("worker");
+    expect(deps.customHooks.runHooks).not.toHaveBeenCalled();
+    expect(functionSessionState.isActive("sess-1", "plan")).toBe(false);
+    expect(functionSessionState.isActive("sess-1", "loop")).toBe(false);
+  });
+
   it("calls built-in hooks in before and after phases", async () => {
     const builtInRunHooks = makeBuiltInRunHooks();
     const customRunHooks = makeCustomRunHooks();

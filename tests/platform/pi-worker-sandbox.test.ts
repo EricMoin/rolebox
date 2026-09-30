@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { PiProcessSessionAdapter } from "../../src/platform/adapters/pi/process-session.ts";
 import { childSessionFile } from "../../src/platform/adapters/pi/child-session.ts";
 import { getSystem } from "../../src/platform/system/index.ts";
+import { buildGraphWorkerRolePrompt } from "../../src/prompt/graph-worker.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -57,6 +58,12 @@ describe("Pi graph worker boundary", () => {
     if (system.id === "win32") {
       writeFileSync(binary, [
         "@echo off",
+        ":scan",
+        'if "%~1"=="" goto record',
+        'if "%~1"=="--append-system-prompt" type "%~2" > "%PI_SPAWN_RECORD%.prompt"',
+        "shift",
+        "goto scan",
+        ":record",
         "(",
         "echo argv0=%0",
         "set ROLEBOX_GRAPH_WORKER_",
@@ -66,7 +73,7 @@ describe("Pi graph worker boundary", () => {
         "",
       ].join("\r\n"));
     } else {
-      writeFileSync(binary, '#!/bin/sh\n{ printf "argv0=%s\\n" "$0"; env | grep "^ROLEBOX_GRAPH_WORKER_"; printf "record-complete\\n"; } > "$PI_SPAWN_RECORD.tmp"\nmv "$PI_SPAWN_RECORD.tmp" "$PI_SPAWN_RECORD"\nexit 0\n');
+      writeFileSync(binary, '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\nif [ "$1" = "--append-system-prompt" ]; then cat "$2" > "$PI_SPAWN_RECORD.prompt"; fi\nshift\ndone\n{ printf "argv0=%s\\n" "$0"; env | grep "^ROLEBOX_GRAPH_WORKER_"; printf "record-complete\\n"; } > "$PI_SPAWN_RECORD.tmp"\nmv "$PI_SPAWN_RECORD.tmp" "$PI_SPAWN_RECORD"\nexit 0\n');
       chmodSync(binary, 0o755);
     }
     const previousBinary = process.env.PI_BIN_PATH;
@@ -79,9 +86,20 @@ describe("Pi graph worker boundary", () => {
     process.chdir(root);
     try {
       const adapter = new PiProcessSessionAdapter();
+      adapter.registerAgentConfig("worker", {
+        model: "example/model", tools: [], systemPrompt: "Ordinary agent context",
+        graphWorkerSystemPrompt: buildGraphWorkerRolePrompt({
+          id: "worker", config: { name: "Worker", description: "Worker", prompt: "Worker assignment", auto_activate: ["active"] },
+          prompt: "Unused rendered context", subagents: [], skills: [], references: [],
+          functions: ["active", "inactive"].map(name => ({
+            name, description: name, content: `${name} function instructions`,
+            filePath: `${name}.md`, source: "role-local" as const,
+          })),
+        }),
+      });
       adapter.setGraphWorkerChannel(() => ({ endpoint: "http://127.0.0.1:9/worker", token: "attempt-token",
         routeFile: join(root, "route.json") }));
-      const info = await adapter.create({ directory: root });
+      const info = await adapter.create({ directory: root, agent: "worker" });
       if (!info) throw new Error("the adapter did not create a session");
       await adapter.runGraphWorker(() => adapter.prompt(info.id, { parts: [{ type: "text", text: "Task: fixture" }] }));
       const output = await spawnRecord(record);
@@ -94,6 +112,18 @@ describe("Pi graph worker boundary", () => {
       expect(output).toContain("ROLEBOX_GRAPH_WORKER_ENDPOINT=http://127.0.0.1:9/worker");
       expect(output).toContain("ROLEBOX_GRAPH_WORKER_TOKEN=attempt-token");
       expect(output).toContain("record-complete");
+      const prompt = readFileSync(record + ".prompt", "utf8");
+      expect(prompt).toContain("Worker assignment");
+      expect(prompt).toContain("active function instructions");
+      expect(prompt).not.toContain("inactive function instructions");
+      expect(prompt).not.toContain("Ordinary agent context");
+
+      const ordinary = await adapter.create({ directory: root, agent: "worker" });
+      if (!ordinary) throw new Error("the adapter did not create an ordinary session");
+      process.env.PI_SPAWN_RECORD = join(root, "ordinary-record.txt");
+      await adapter.prompt(ordinary.id, { parts: [{ type: "text", text: "Ordinary task" }] });
+      await spawnRecord(process.env.PI_SPAWN_RECORD);
+      expect(readFileSync(process.env.PI_SPAWN_RECORD + ".prompt", "utf8")).toBe("Ordinary agent context");
     } finally {
       process.chdir(previousCwd);
       if (previousBinary === undefined) delete process.env.PI_BIN_PATH; else process.env.PI_BIN_PATH = previousBinary;

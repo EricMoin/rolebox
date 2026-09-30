@@ -955,13 +955,14 @@ describe("dsh plugin apply()", () => {
     ].join("\n"));
     writeRoleYaml("coordinator/subagents/planner", [
       "name: Planner", "description: Plans", "prompt: Planner-only prompt",
-      "model: worker-provider/model-name", "functions: [plan]", "auto_activate: [plan]",
+      "model: worker-provider/model-name", "functions: [plan, unused]", "auto_activate: [plan]",
       "disable_functions: [execute, loop]", "skills: [research]", "tools:", "  graph_declare: false",
     ].join("\n"));
     writeRoleSkill("coordinator/subagents/planner", "research");
     const roleFiles: Record<string, string> = {
       "coordinator/functions/triage.md": "---\nname: triage\ndescription: Route work\n---\nParent routing function",
       "coordinator/subagents/planner/functions/plan.md": "---\nname: plan\ndescription: Plan work\n---\nChild planning function",
+      "coordinator/subagents/planner/functions/unused.md": "---\nname: unused\ndescription: Other work\n---\nInactive worker instructions",
       "coordinator/references/schema.md": "The planning schema",
     };
     for (const [file, content] of Object.entries(roleFiles)) {
@@ -1008,6 +1009,8 @@ describe("dsh plugin apply()", () => {
       expect(prompt.match(/attempt handoff/g)).toHaveLength(1);
       expect(prompt).not.toContain("Coordinator-only prompt");
       expect(prompt).not.toContain("Parent routing function");
+      expect(prompt).not.toContain("<available_functions>");
+      expect(prompt).not.toContain("Inactive worker instructions");
       expect(prompt).not.toContain("Use the Read tool");
       expect(prompt).not.toContain("Use the skill tool");
       expect(prompt).not.toContain("available_subagents");

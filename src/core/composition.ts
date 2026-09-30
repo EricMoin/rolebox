@@ -105,6 +105,7 @@ export interface CreatePluginHooksConfig {
    * tools; absent means the host has no such layer and registers none.
    */
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
+  isGraphWorker?: (sessionID: string) => boolean;
 }
 
 export async function createPluginHooks(config: CreatePluginHooksConfig) {
@@ -136,7 +137,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
 
-  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, outcomeGraphTools, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
+  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, outcomeGraphTools, isGraphWorker: config.isGraphWorker, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget). The
   // flush is hoisted out of the guard so the observation-only fatal reporter

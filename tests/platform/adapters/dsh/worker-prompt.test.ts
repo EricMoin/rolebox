@@ -52,6 +52,19 @@ function resourcePaths(prompt: string) {
 }
 
 describe("DSH graph worker prompt", () => {
+  it("omits inactive function instructions that the worker cannot activate", () => {
+    const f = fixture();
+    f.planner.functions.push({
+      name: "loop", description: "Orchestrate", content: "Inactive orchestration instructions.",
+      filePath: "loop.md", source: FunctionSource.RoleLocal,
+    });
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED);
+    expect(prompt).not.toContain("<available_functions>");
+    expect(prompt).not.toContain("Inactive orchestration instructions.");
+    expect(prompt).toContain("Return a Strategy.");
+    expect(prompt).toContain("graph_submit_outcome");
+  });
+
   it("uses only the target role and functions, with readable copies of its resources", () => {
     const f = fixture();
     f.planner.references.push({ ...f.planner.references[0] });

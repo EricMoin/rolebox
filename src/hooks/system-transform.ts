@@ -11,6 +11,7 @@ import { createSubLogger } from "../logger.ts";
 import type { ResolvedFunction } from "../types.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
+import { buildGraphWorkerFunctionBlock, findGraphWorkerRole } from "../prompt/graph-worker.ts";
 
 const log = createSubLogger("hook-sys-xform");
 
@@ -22,6 +23,13 @@ export async function handleSystemTransform(
 ): Promise<void> {
   if (!input.sessionID) return;
   const sid: string = input.sessionID;
+  if (deps.isGraphWorker?.(sid)) {
+    const agentId = input.agent ?? state.sessionAgentRegistry.get(sid);
+    const role = agentId === undefined ? undefined : findGraphWorkerRole([...deps.roleMap.values()], agentId);
+    const block = role === undefined ? "" : buildGraphWorkerFunctionBlock(role);
+    if (block) output.system.push(block);
+    return;
+  }
 
   // Built-in hooks: before phase (runs before custom hooks)
   await deps.builtInHooks?.runHooks(

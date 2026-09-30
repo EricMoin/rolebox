@@ -525,6 +525,14 @@ reason to the new dispatch prompt. This context persists with the dispatch effec
 the compiled node prompt stays unchanged. A subsequent retry starts from that same
 compiled prompt with its own reason, without accumulating earlier retry prompts.
 
+**Worker role context across hosts.** DSH, Pi and OpenCode 1/2 include only the
+worker role's explicitly auto-activated function instructions, without an inactive
+function catalog or parent-session function activation. DSH and Pi prepare the
+worker's role prompt before launch; OpenCode keeps the host's existing system
+instructions and applies the same function selection in its system hook, using
+the host-confirmed worker session identity. Ordinary sessions retain their normal
+function activation. Codex's MCP adapter currently has no graph dispatch backend.
+
 ## Runs, controls and limits
 
 A graph owns a sequence of runs; a run owns attempts; an attempt is the unit a

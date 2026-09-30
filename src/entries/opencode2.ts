@@ -574,6 +574,7 @@ export function createOpencode2Plugin(
         builtinDir: dirs.builtinDir,
         capabilities: opencodeV2Capabilities(),
         ...(graphHost === undefined ? {} : { outcomeGraphTools: graphHost.createTools() }),
+        isGraphWorker: sessionID => graphHost?.host.workerPrincipalOf(sessionID) !== undefined,
       })) as unknown as Opencode2Handlers;
 
       // 2d. What the declared-graph host installed or had to degrade, one line

@@ -112,6 +112,7 @@ const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
     builtinDir: dirs.builtinDir,
     capabilities: opencodeCapabilities(),
     ...(graphHost === undefined ? {} : { outcomeGraphTools: graphHost.createTools() }),
+    isGraphWorker: sessionID => graphHost?.host.workerPrincipalOf(sessionID) !== undefined,
   });
 
   // The session ends and the session STATES the declared-graph host reads arrive

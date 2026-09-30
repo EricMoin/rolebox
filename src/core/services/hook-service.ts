@@ -122,6 +122,7 @@ export class HookService implements PluginService {
       session: ctx.session,
       roleFunctionsMap,
       roleMap,
+      isGraphWorker: ctx.isGraphWorker,
       dir,
       dispatchManager,
       loopManager: loopService.getLoopManager(),
