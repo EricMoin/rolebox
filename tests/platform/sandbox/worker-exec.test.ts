@@ -73,8 +73,11 @@ it("provides disposable home, config and cache directories to work software", as
     `test -d "$HOME" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_CACHE_HOME" && echo configured > "$HOME/settings" && echo cached > "$XDG_CACHE_HOME/cache" && printf '%s' "$HOME"`,
     // No embedded quotes: a command string is one argv entry of `cmd /d /s /c`,
     // and quote characters here would be escaped for CreateProcess and then
-    // re-parsed by cmd itself. The disposable paths carry no spaces.
-    `if not exist %HOME% exit /b 1 & if not exist %XDG_CONFIG_HOME% exit /b 1 & if not exist %XDG_CACHE_HOME% exit /b 1 & echo configured> %HOME%\\settings & echo cached> %XDG_CACHE_HOME%\\cache & echo %HOME%`)) });
+    // re-parsed by cmd itself. The disposable paths carry no spaces, and the two
+    // writes are chained with `&&` exactly as the POSIX branch chains them, so a
+    // write that does not land fails the command instead of being reported as a
+    // success.
+    `if not exist %HOME% exit /b 1 & if not exist %XDG_CONFIG_HOME% exit /b 1 & if not exist %XDG_CACHE_HOME% exit /b 1 & echo configured> %HOME%\\settings && echo cached> %XDG_CACHE_HOME%\\cache && echo %HOME%`)) });
   expect(result.exitCode, result.output).toBe(0);
   expect(result.output).not.toBe("");
   // The directory the command reported is its disposable home, and it is gone
@@ -92,15 +95,31 @@ const PROBE_VARIABLES = ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", 
   "MAC_CHROMIUM_TMPDIR", "xcrun_db", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP"] as const;
 
 /**
+ * One probe's report: what the command saw, and what the descriptor DECLARED.
+ *
+ * The declared names come from the simulated system's own descriptor rather than
+ * from a hand-written list, so the assertions cannot drift from the environment
+ * the runner applies. Only the KEY SET is read — the runner chooses the
+ * disposable paths, so their values are its own.
+ */
+interface EnvironmentProbe {
+  /** The value the command saw for every name under test ("" when absent). */
+  readonly values: Record<string, string>;
+  /** The names the simulated descriptor puts in the command's environment. */
+  readonly declared: ReadonlySet<string>;
+}
+
+/**
  * Read those variables back out of a real command run on the simulated system.
  *
  * The dump is the detected system's own: `env` prints `NAME=value` lines on the
- * POSIX family, `set` prints them under cmd.exe. A variable the descriptor does
- * not set is simply absent from the dump, which is the empty string the
- * assertions compare.
+ * POSIX family, `set` prints them under cmd.exe.
  */
-async function probeEnvironment(root: string, platform: string): Promise<Record<string, string>> {
+async function probeEnvironment(root: string, platform: string): Promise<EnvironmentProbe> {
   setPlatformForTest(platform);
+  const declared = new Set(Object.keys(getSystem().disposableEnvironment({
+    home: "<home>", config: "<config>", cache: "<cache>", temp: "<temp>", env: process.env,
+  })));
   const result = await executeGraphWorkerCommand({ workspace: root, argv: shell(perOs("env", "set")) });
   expect(result.exitCode, result.output).toBe(0);
   const dumped: Record<string, string> = {};
@@ -108,38 +127,76 @@ async function probeEnvironment(root: string, platform: string): Promise<Record<
     const separator = line.indexOf("=");
     if (separator > 0) dumped[line.slice(0, separator)] = line.slice(separator + 1);
   }
-  const environment: Record<string, string> = {};
-  for (const name of PROBE_VARIABLES) environment[name] = dumped[name] ?? "";
-  return environment;
+  const values: Record<string, string> = {};
+  for (const name of PROBE_VARIABLES) values[name] = dumped[name] ?? "";
+  return { values, declared };
+}
+
+/** A name the descriptor declares is the descriptor's to fill: the command sees a value. */
+function expectDeclared(probe: EnvironmentProbe, ...names: string[]): void {
+  for (const name of names) {
+    expect(probe.declared.has(name), `${name} must be declared`).toBe(true);
+    expect(probe.values[name], name).not.toBe("");
+  }
+}
+
+/**
+ * A name the descriptor does NOT declare is not the descriptor's to decide.
+ *
+ * "The descriptor leaves it alone" is what this asserts, and that is not the same
+ * claim as "the command sees nothing": the runner builds the environment from the
+ * descriptor, and a host that carries its own environment into every child
+ * (Windows hands every process the ambient USERPROFILE, TEMP, …) shows exactly
+ * that ambient value, while a host whose spawn REPLACES the environment shows
+ * nothing. Either way the value is never one the descriptor invented — so the
+ * assertion is the ambient value or the empty string, and the DECLARED set is
+ * checked directly, which is where "macOS-only names nowhere else" really lives.
+ */
+function expectUndeclared(probe: EnvironmentProbe, ...names: string[]): void {
+  for (const name of names) {
+    expect(probe.declared.has(name), `${name} must not be declared`).toBe(false);
+    const ambient = process.env[name] ?? "";
+    const observed = probe.values[name];
+    expect([ambient, ""], `${name}=${JSON.stringify(observed)}`).toContain(observed);
+  }
 }
 
 it("gives a command the disposable variables of the detected system, and macOS-only names nowhere else", async () => {
   const root = workspace("graph-worker-system-");
 
+  // Linux: the POSIX family's four names, and none of the macOS-only ones.
   const linux = await probeEnvironment(root, "linux");
-  for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR"]) {
-    expect(linux[name], name).not.toBe("");
-  }
-  for (const name of ["CFFIXED_USER_HOME", "MAC_CHROMIUM_TMPDIR", "xcrun_db", "USERPROFILE"]) {
-    expect(linux[name], name).toBe("");
-  }
+  expectDeclared(linux, "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR");
+  expectUndeclared(linux, "CFFIXED_USER_HOME", "MAC_CHROMIUM_TMPDIR", "xcrun_db", "USERPROFILE",
+    "LOCALAPPDATA", "APPDATA", "TEMP", "TMP");
 
+  // macOS: the Cocoa and Chromium names are derived from the same two directories,
+  // which is only checkable as a relationship — the paths themselves are the
+  // runner's own disposable ones.
   const darwin = await probeEnvironment(root, "darwin");
-  expect(darwin.CFFIXED_USER_HOME).toBe(darwin.HOME);
-  expect(darwin.MAC_CHROMIUM_TMPDIR).toBe(darwin.TMPDIR);
-  expect(darwin.xcrun_db).toBe(`${darwin.TMPDIR}/xcrun_db`);
-  expect(darwin.USERPROFILE).toBe("");
+  expectDeclared(darwin, "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "CFFIXED_USER_HOME",
+    "MAC_CHROMIUM_TMPDIR", "xcrun_db");
+  expect(darwin.values.CFFIXED_USER_HOME).toBe(darwin.values.HOME);
+  expect(darwin.values.MAC_CHROMIUM_TMPDIR).toBe(darwin.values.TMPDIR);
+  expect(darwin.values.xcrun_db).toBe(`${darwin.values.TMPDIR}/xcrun_db`);
+  expectUndeclared(darwin, "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP");
 
+  // Windows: Node's os.homedir() reads USERPROFILE, so the disposable home is
+  // named there too, and the AppData/TEMP names follow it.
   const windows = await probeEnvironment(root, "win32");
-  expect(windows.USERPROFILE).toBe(windows.HOME);
-  expect(windows.LOCALAPPDATA.endsWith("AppData\\Local")).toBe(true);
-  expect(windows.APPDATA.endsWith("AppData\\Roaming")).toBe(true);
-  expect(windows.TEMP).toBe(windows.TMPDIR);
-  expect(windows.TMP).toBe(windows.TMPDIR);
+  expectDeclared(windows, "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR");
+  expect(windows.values.USERPROFILE).toBe(windows.values.HOME);
+  expect(windows.values.LOCALAPPDATA.endsWith("AppData\\Local")).toBe(true);
+  expect(windows.values.APPDATA.endsWith("AppData\\Roaming")).toBe(true);
+  // Asserted against TMPDIR, which Windows does not carry ambiently: the equality
+  // proves both names took the descriptor's value rather than the host's TEMP.
+  expect(windows.values.TEMP).toBe(windows.values.TMPDIR);
+  expect(windows.values.TMP).toBe(windows.values.TMPDIR);
   // HOME and the XDG_* names stay set on Windows (src/cli/paths.ts honours XDG there).
-  expect(windows.HOME).not.toBe("");
-  expect(windows.XDG_CONFIG_HOME).not.toBe("");
-  expect(windows.CFFIXED_USER_HOME).toBe("");
+  expect(windows.values.HOME).not.toBe("");
+  expect(windows.values.XDG_CONFIG_HOME).not.toBe("");
+  expectUndeclared(windows, "CFFIXED_USER_HOME", "MAC_CHROMIUM_TMPDIR", "xcrun_db");
 });
 
 // Installed browsers live under the real home, which the disposable command HOME
