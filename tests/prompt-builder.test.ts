@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { lexer } from "marked";
+import { lexer, type Tokens } from "marked";
 import type { RoleConfig, ResolvedSkill, ResolvedFunction, ResolvedReference } from "../src/types.js";
 import type { FnState } from "../src/function/runtime-state.js";
 import { ReferenceScope } from "../src/constants.js";
@@ -730,7 +730,11 @@ describe("buildReferenceBlock", () => {
     expect(heading.type === "heading" ? [heading.depth, heading.text] : null).toEqual([2, "Available references"]);
     expect(instruction.type === "paragraph" ? instruction.text : null).toBe(RESOURCE_INSTRUCTION);
     expect(base.type === "paragraph" ? base.text : null).toBe("Base directory: `/attempt/role-resources-x/references`");
-    expect(list.type === "list" ? list.items.map((item) => item.text) : []).toEqual([
+    // `marked` types a token as `MarkedToken | Tokens.Generic`, and Generic's
+    // `[index: string]: any` keeps the union alive through the `type === "list"`
+    // check, so the discriminant cannot narrow `items` on its own: this states
+    // the invariant that runtime check already establishes.
+    expect(list.type === "list" ? (list as Tokens.List).items.map((item) => item.text) : []).toEqual([
       "`best-practices` — Practices",
       "`anti-patterns` — Anti-patterns",
     ]);
