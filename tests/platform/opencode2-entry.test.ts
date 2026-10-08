@@ -513,6 +513,13 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = originalXdg;
   if (originalDataDir === undefined) delete process.env.ROLEBOX_DATA_DIR;
   else process.env.ROLEBOX_DATA_DIR = originalDataDir;
+
+  // ORDER-INDEPENDENCE. `sessionAgentRegistry` is process-wide module state
+  // (src/hooks/state.ts:16) and these tests key it by literal session ids such as
+  // `ses_1`, so no test may decide another's outcome. The per-test `delete(...)`
+  // calls stay as documentation of intent; this reset is what isolates the file.
+  hookState.sessionAgentRegistry.clear();
+
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
