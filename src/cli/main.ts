@@ -29,6 +29,7 @@ const main = defineCommand({
     info: () => import("./commands/info.ts").then((m) => m.default),
     config: () => import("./commands/config.ts").then((m) => m.default),
     monitor: () => import("./commands/monitor.ts").then((m) => m.default),
+    logs: () => import("./commands/logs.ts").then((m) => m.default),
     memory: () => import("./commands/memory.ts").then((m) => m.default),
     checkpoint: () => import("./commands/checkpoint.ts").then((m) => m.default),
     mcp: () => import("./commands/mcp.ts").then((m) => m.default),

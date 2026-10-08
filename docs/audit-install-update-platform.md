@@ -88,49 +88,31 @@ warning — masking a real permission problem as a "valid" hash.
 `getDataDir` (`src/cli/paths.ts`) honors only `LOCALAPPDATA` (win32) and `XDG_DATA_HOME`.
 `getConfigDir` (`src/cli/paths.ts`) honors only `APPDATA` (win32) and `XDG_CONFIG_HOME`.
 There is **no** rolebox-specific env override, no cwd-local fallback, and no OS-temp fallback. The
-contrast pattern exists in `resolveLogFilePath` (`src/logger.ts`): env var (`ROLEBOX_LOG_FILE`)
-→ project-local `.rolebox` dir (`_baseDirectory`, `logger.ts`) → config dir (`logger.ts`)
-→ `os.tmpdir()` (`logger.ts`) → `null` (disable). The rolebox data/config resolution has no
-such chain, so if `~/.config`/`~/.local/share` (or `%APPDATA%`/`%LOCALAPPDATA%`) are unavailable or
-unwritable, the CLI has no built-in fallback and no clear message about *where* it tried to write.
+contrast pattern lives in the log sink: `resolveLogFile` / `resolveLogDir`
+(`src/log/sinks/file.ts`) resolve the log location through legacy `ROLEBOX_LOG_FILE`
+(one file every channel writes to) → an explicit directory → `ROLEBOX_LOG_DIR` →
+the workspace's `.rolebox/logs` (the nearest ancestor of the working directory holding a
+`.rolebox` directory) → `<config dir>/logs` → `<tmpdir>/rolebox-logs`. The rolebox data/config
+resolution has no such chain, so if `~/.config`/`~/.local/share` (or
+`%APPDATA%`/`%LOCALAPPDATA%`) are unavailable or unwritable, the CLI has no built-in fallback and
+no clear message about *where* it tried to write.
 
-`src/logger.ts` — `resolveLogFilePath` (the fallback-chain contrast):
+`src/log/sinks/file.ts` — the fallback-chain contrast (the retired `src/logger.ts`
+`resolveLogFilePath` this finding used to quote is gone; the platform sink resolves the same
+question, and the chain, summarised rather than copied, is):
 
 ```ts
-export function resolveLogFilePath(): string | null {
-  // 1. Explicit env var
-  if (process.env.ROLEBOX_LOG_FILE) {
-    const result = ensureLogDir(process.env.ROLEBOX_LOG_FILE);
-    if (result) return result;
-  }
-
-  // 2. Project-local .rolebox dir (set via configureLogDirectory)
-  if (_baseDirectory) {
-    const localPath = join(_baseDirectory, ".rolebox", "logs", "rolebox.log");
-    const result = ensureLogDir(localPath);
-    if (result) return result;
-  }
-
-  // 3. Config dir (fallback for CLI / pre-init calls)
-  try {
-    const configLogPath = join(getConfigDir(), "logs", "rolebox.log");
-    const result = ensureLogDir(configLogPath);
-    if (result) return result;
-  } catch {
-    // getConfigDir itself shouldn't throw, but guard anyway
-  }
-
-  // 4. OS-native temp directory fallback (cross-platform)
-  const tmpPath = join(tmpdir(), "rolebox.log");
-  const tmpResult = ensureLogDir(tmpPath);
-  if (tmpResult) return tmpResult;
-
-  // All failed — disable file logging
-  return null;
-}
+// The chain the log sink resolves, in order (see src/log/sinks/file.ts for the bodies):
+resolveLogFile({ file })   // 1. ROLEBOX_LOG_FILE (legacy): ONE file for every channel
+resolveLogDir({ dir })     // 2. an explicit dir (configureLogging({ logDir }))
+                           // 3. ROLEBOX_LOG_DIR
+                           // 4. <workspace>/.rolebox/logs — nearest ancestor of cwd with .rolebox
+                           // 5. <config dir>/logs
+                           // 6. <tmpdir>/rolebox-logs
+                           // (the directory is created lazily on the first write)
 ```
 
-*Post-audit: `getDataDir`/`getConfigDir` gained `ROLEBOX_DATA_DIR`/`ROLEBOX_CONFIG_DIR` overrides and an explicit darwin branch (the env override closes the "no override" half of this finding; no cwd-local/temp fallback chain was added). See the Remediation status sections below. The `resolveLogFilePath` contrast above is unchanged.*
+*Post-audit: `getDataDir`/`getConfigDir` gained `ROLEBOX_DATA_DIR`/`ROLEBOX_CONFIG_DIR` overrides and an explicit darwin branch (the env override closes the "no override" half of this finding; no cwd-local/temp fallback chain was added). See the Remediation status sections below. The log-directory contrast above now names the platform sink (`src/log/sinks/file.ts`); `resolveLogFilePath` itself no longer exists.*
 
 **F3.2 [MED] Recursive creation exists but is fragmented, and the chosen location is never surfaced.**
 `mkdirSync(..., { recursive: true })` is used at `src/cli/config.ts`, `src/cli/commands/install.ts`,
@@ -406,8 +388,8 @@ The following known anchors were explicitly checked. Status: **confirm** (verifi
 6. **[HIGH] Add writability pre-checks and a documented fallback chain for data/config dirs.**
    Check `W_OK` (or wrap with actionable context) before `mkdir`/`write`; add `ROLEBOX_DATA_DIR` /
    `ROLEBOX_CONFIG_DIR` env overrides and a fallback chain (env → platform default → cwd-local →
-   OS temp) like `resolveLogFilePath` (`src/logger.ts`); surface the resolved location to the
-   user. Blocks F2.1, F3.1, F3.2.
+   OS temp) like the log sink's directory resolution (`resolveLogDir`, `src/log/sinks/file.ts`);
+   surface the resolved location to the user. Blocks F2.1, F3.1, F3.2.
 7. **[HIGH] Expand the CI platform matrix.**
    Add macOS and Windows jobs to `.github/workflows/ci.yml` (and WSL where practical). Blocks F5.1.
 8. **[MED] Verify integrity against an expected value.**

@@ -195,6 +195,40 @@ rolebox monitor --watch --json               # NDJSON output (one JSON line per 
 
 The TUI dashboard shows: active loops, graph workflows, dispatch summary (queue depth, concurrent slots), and concurrency pool health. Use `--no-status` to hide the overview panel.
 
+### `logs`
+
+Read the rolebox log files: answer the records a query matches, list the files on disk, and prune rotated copies. The pipeline itself — the two audiences, the record shape, the environment variables and the `jq` recipes — is documented in [logging.md](logging.md).
+
+```bash
+rolebox logs                                    # the last 100 records, newest first
+rolebox logs --level warn --channel graph:host  # warn and above, one channel
+rolebox logs --since 2h --text timeout          # the last two hours mentioning "timeout"
+rolebox logs --graph g-42 --json | jq .         # one raw JSON record per line
+rolebox logs --follow                           # stream new records, Ctrl-C to stop
+rolebox logs files                              # channel, rotation, size and mtime
+rolebox logs prune --dry-run                    # what would be removed, and how much that frees
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--level <level>` | Lowest level to show: `warn` shows warn, error and fatal (a threshold, like `ROLEBOX_LOG_LEVEL`) |
+| `--channel <a,b>` | Only these channels, exact match |
+| `--code <a,b>` | Only these event codes, exact match |
+| `--graph <id>` / `--session <id>` | Only records whose scope carries that id |
+| `--since <time>` / `--until <time>` | Time window: a duration (`30s`, `10m`, `2h`, `1d`, `1w`), an ISO 8601 instant, or epoch milliseconds |
+| `--limit <n>` | How many records to show (default: 100) |
+| `--order <asc\|desc>` | Newest first (`desc`, the default) or oldest first |
+| `--text <substring>` | Case-insensitive substring looked for in the message, the channel, the code and the field values |
+| `--log-dir <path>` | Read from exactly this directory instead of the resolved log directory. It beats `ROLEBOX_LOG_FILE`, so the files listed, read and pruned are the ones in `<path>`; without the flag the resolved chain applies, and `ROLEBOX_LOG_FILE` makes the one file it names the source |
+| `--json` | One raw JSON record per line, for `jq` |
+| `--follow`, `-f` | Stream records written after the command starts (does not replay history; `--limit`/`--order` do not apply; a source with no files yet is waited for, like `tail -f`, and the first record written is delivered) |
+
+**Exit codes.** `0` for any answer — including "no records matched" and a source that does not exist yet, where the command names the location it actually read (the directory, or the one file `ROLEBOX_LOG_FILE` names) and how to point it elsewhere — and `1` only for an argument the command cannot honour, reported with the usage line. Records go to stdout; the notes about the answer (an empty result, a truncation at `--limit`, skipped malformed lines) go to stderr, so `--json` stays parseable.
+
+**`rolebox logs files`** lists every log file with the channel its name spells, its rotation (`active`, `.1`, `.2`, …), its size and its modification time. The active file of a channel is the one being written. The heading names the source that was read: the `--log-dir` directory, or — when `ROLEBOX_LOG_FILE` names one file and no `--log-dir` was given — that file.
+
+**`rolebox logs prune`** removes rotated copies only — an active `<channel>.log` is never a candidate, and the report says so. It acts inside the source it names (`--log-dir`, else the resolved chain), so it can never remove a file outside it. Both gates must pass: `--keep <n>` is how many of a channel's newest rotated copies stay (default: the writer's `ROLEBOX_LOG_RETAIN`, else 3) and `--days <n>` is how old by mtime a candidate must additionally be. `--dry-run` reports what would go and removes nothing.
+
 ### `status`
 
 Show overall health of the rolebox installation: version, registries, installed roles, and — for **every** registered platform (opencode, pi, dsh, and any future harness) — its sync target, per-target synced role count, host integration/registration status, and skill symlink integrity.
