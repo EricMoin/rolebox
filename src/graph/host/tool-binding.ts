@@ -1,6 +1,6 @@
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
-import { logWarn } from "../log-warn.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import {
   type OutcomeResumeResult
 } from "../outcome/runtime.ts";
@@ -182,36 +182,29 @@ export function bindOutcomeToolInvocation(
  * could not launch is visible instead of silently absent.
  */
 export function reportControlContinuation(graphId: string, result: OutcomeResumeResult): void {
-  const parts: string[] = [];
   if (result.kind === "refused") {
-    parts.push("REFUSED (" + result.refusals.map((entry) => entry.code).join(", ") + ")");
-  } else {
-    parts.push(result.kind);
-    if (result.kind === "resumed" && result.reexecuted !== undefined) {
-      parts.push(
-        "re-executed run " +
-        JSON.stringify(result.reexecuted.fromRunId) +
-        " as " +
-        JSON.stringify(result.reexecuted.runId) +
-        " (runSeq " +
-        String(result.reexecuted.runSeq) +
-        ", plan revision " +
-        JSON.stringify(result.reexecuted.planRevision) +
-        ")",
-      );
-    }
-    if (result.dispatched.length > 0) {
-      parts.push(String(result.dispatched.length) + " dispatched");
-    }
-    if (result.refusals.length > 0) {
-      parts.push(String(result.refusals.length) + " effect refusal(s)");
-    }
+    withLogScope({ graphId }, () =>
+      logEvent("tool.control-continuation", {
+        kind: "refused",
+        refusals: result.refusals.map((entry) => entry.code),
+      }),
+    );
+    return;
   }
-  logWarn(
-    "outcome-host: control follow-up for graph " +
-    JSON.stringify(graphId) +
-    " — " +
-    parts.join(", "),
+  withLogScope({ graphId }, () =>
+    logEvent("tool.control-continuation", {
+      kind: result.kind,
+      dispatched: result.dispatched.length,
+      refusals: result.refusals.map((entry) => entry.code),
+      ...(result.kind === "resumed" && result.reexecuted !== undefined
+        ? {
+          fromRunId: result.reexecuted.fromRunId,
+          runId: result.reexecuted.runId,
+          runSeq: result.reexecuted.runSeq,
+          planRevision: result.reexecuted.planRevision,
+        }
+        : {}),
+    }),
   );
 }
 
@@ -250,13 +243,10 @@ export function withCancelDelivery(
               await host.continueAfterControl(applied.graphId);
             }
           } catch (error) {
-            logWarn(
-              "outcome-host: the control follow-up of graph " +
-              JSON.stringify(applied.graphId) +
-              " threw (" +
-              errorText(error) +
-              ") — the durable cancel intent and every unconfirmed execution stay visible, " +
-              "and the next boot sweep is the next window that delivers them",
+            withLogScope({ graphId: applied.graphId }, () =>
+              logEvent("tool.control-follow-up-threw", {
+                failure: errorText(error),
+              }),
             );
           }
         }
@@ -310,14 +300,11 @@ function appliedControlAnswerOf(
  */
 function reportCancelDelivery(report: OutcomeCancelDeliveryReport): void {
   if (report.entries.length === 0 && report.blocked === undefined) return;
-  logWarn(
-    "outcome-host: cancel delivery for graph " +
-    JSON.stringify(report.graphId) +
-    " — " +
-    (report.blocked === undefined ? "" : "BLOCKED (" + report.blocked + "); ") +
-    report.entries.map((entry) => entry.attemptId + ":" + entry.state).join(", ") +
-    " — 'confirmed' is the platform's own substantiation; every other state leaves the " +
-    "execution visible and unsettled, and no unconfirmed cancel is reported as cancelled",
+  withLogScope({ graphId: report.graphId }, () =>
+    logEvent("tool.cancel-delivery", {
+      ...(report.blocked === undefined ? {} : { blocked: report.blocked }),
+      entries: report.entries.map((entry) => entry.attemptId + ":" + entry.state),
+    }),
   );
 }
 

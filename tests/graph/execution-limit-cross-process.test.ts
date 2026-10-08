@@ -43,7 +43,11 @@ it("serializes different nodes at the run ceiling and replays the winner after p
     store.close();
     const barrier = join(directory, "go");
     const spawn = (attempt: string, wait?: string) => {
-      const child = Bun.spawn([process.execPath, worker, directory, attempt, ...(wait ? [wait] : [])], { stdout: "pipe", stderr: "pipe" });
+      // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+      // the start-time OS environ, not this process's `process.env` — the
+      // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+      // so the child would resolve and append to the workspace's `.rolebox/logs`.
+      const child = Bun.spawn([process.execPath, worker, directory, attempt, ...(wait ? [wait] : [])], { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
       children.push(child);
       return child;
     };

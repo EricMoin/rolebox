@@ -145,6 +145,10 @@ function startWorker(
   fixture: { readonly dir: string; readonly storeRoot: string },
   extra: readonly string[] = [],
 ): RunningWorker {
+  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+  // the start-time OS environ, not this process's `process.env` — the
+  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+  // so the child would resolve and append to the workspace's `.rolebox/logs`.
   const proc = Bun.spawn(
     [
       process.execPath,
@@ -159,7 +163,7 @@ function startWorker(
       String(RETRY_RESTART_AT),
       ...extra,
     ],
-    { stdout: "pipe", stderr: "pipe" },
+    { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
   const stdout = Bun.readableStreamToText(proc.stdout);
   const stderr = Bun.readableStreamToText(proc.stderr);

@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
-import { logWarn } from "../log-warn.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import { describeStoreVerdict } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
@@ -1601,13 +1601,10 @@ export class OutcomeHost {
       const result = await this.startDeclaredGraph(graphId, origin ?? {});
       reportControlContinuation(graphId, result);
     } catch (error) {
-      logWarn(
-        "outcome-host: continuing graph " +
-        JSON.stringify(graphId) +
-        " after an applied control command threw (" +
-        describeWatchFailure(error) +
-        ") — the durable control fact and effect stay visible, and the next boot " +
-        "sweep is the next window that continues them",
+      withLogScope({ graphId }, () =>
+        logEvent("host.control-continuation.failed", {
+          failure: describeWatchFailure(error),
+        }),
       );
     }
   }
@@ -2033,11 +2030,7 @@ export class OutcomeHost {
       }
     }
     if (inventory.blocked !== undefined) {
-      logWarn(
-        "outcome-host: declared-graph sweep — the workspace store could not be read (" +
-        inventory.blocked +
-        "), so there was NO inventory to visit; this is a BLOCKED sweep, not an empty one",
-      );
+      logEvent("sweep.store-blocked", { reason: inventory.blocked });
     }
     if (
       started.length > 0 ||
@@ -2052,52 +2045,35 @@ export class OutcomeHost {
       cancellations.length > 0 ||
       cancelBlocked.length > 0
     ) {
-      logWarn(
-        "outcome-host: declared-graph sweep — started=[" +
-        started.join(", ") +
-        "] resumed=[" +
-        resumed.join(", ") +
-        "] refused=[" +
-        refused.join(", ") +
-        "] effect-refusals=[" +
-        effectRefusals
-          .map((refusal) => refusal.graphId + ":" + refusal.code)
-          .join(", ") +
-        "] divergences=[" +
-        divergences
-          .map(
-            (divergence) =>
-              divergence.graphId +
-              ":" +
-              divergence.effectId +
-              ":" +
-              divergence.local +
-              "->" +
-              divergence.host,
-          )
-          .join(", ") +
-        "] completed=[" +
-        completed.join(", ") +
-        "] awaiting=[" +
-        awaiting
-          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status)
-          .join(", ") +
-        "] controlled=[" +
-        controlled.join(", ") +
-        "] failed-attempts=[" +
-        failedAttempts.join(", ") +
-        "] cancellations=[" +
-        cancellations
-          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
-          .join(", ") +
-        "] cancel-blocked=[" +
-        cancelBlocked.join(", ") +
-        "] unconfirmed=[" +
-        unconfirmed
-          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state)
-          .join(", ") +
-        "]",
-      );
+      logEvent("sweep.summary", {
+        started,
+        resumed,
+        refused,
+        effectRefusals: effectRefusals.map((refusal) => refusal.graphId + ":" + refusal.code),
+        divergences: divergences.map(
+          (divergence) =>
+            divergence.graphId +
+            ":" +
+            divergence.effectId +
+            ":" +
+            divergence.local +
+            "->" +
+            divergence.host,
+        ),
+        completed,
+        awaiting: awaiting.map(
+          (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status,
+        ),
+        controlled,
+        failedAttempts,
+        cancellations: cancellations.map(
+          (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+        ),
+        cancelBlocked,
+        unconfirmed: unconfirmed.map(
+          (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state,
+        ),
+      });
     }
     return Object.freeze({
       started: Object.freeze(started),
@@ -2215,20 +2191,14 @@ export class OutcomeHost {
       );
     }
     if (unwatched.length > 0) {
-      logWarn(
-        "outcome-host: awaiting-completion re-subscribe — " +
-        String(watched.length) +
-        " watched, " +
-        String(settled.length) +
-        " settled from a terminal read, " +
-        String(unwatched.length) +
-        " WITHOUT an established observation ([" +
-        unwatched
-          .map((entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.reason)
-          .join(", ") +
-        "]) — these executions stay named in the sweep's awaiting inventory and the next " +
-        "recovery window is the next time anything looks at them",
-      );
+      logEvent("watch.unwatched-executions", {
+        watched: watched.length,
+        settled: settled.length,
+        unwatched: unwatched.length,
+        unwatchedExecutions: unwatched.map(
+          (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.reason,
+        ),
+      });
     }
     return Object.freeze({
       watched: Object.freeze(watched),
@@ -2488,14 +2458,11 @@ export class OutcomeHost {
         }) === "watching"
       );
     } catch (error) {
-      logWarn(
-        "outcome-host: the platform completion-watch port threw for execution " +
-        JSON.stringify(entry.executionId) +
-        " of graph " +
-        JSON.stringify(entry.graphId) +
-        " — the execution is reported as unwatched rather than treated as covered (" +
-        describeWatchFailure(error) +
-        ")",
+      withLogScope({ graphId: entry.graphId, attemptId: entry.attemptId }, () =>
+        logEvent("watch.port-threw", {
+          executionId: entry.executionId,
+          failure: describeWatchFailure(error),
+        }),
       );
       return false;
     }
@@ -2535,18 +2502,13 @@ export class OutcomeHost {
         return;
       }
       if (observation.kind !== "completed") {
-        logWarn(
-          "outcome-host: the platform announced execution " +
-          JSON.stringify(entry.executionId) +
-          " of graph " +
-          JSON.stringify(entry.graphId) +
-          " attempt " +
-          JSON.stringify(entry.attemptId) +
-          " ended, but the host's own read of that execution does not report a " +
-          "completion [completion-unsettled] (" +
-          describeUnconfirmedAnnouncement(observation) +
-          ") — the attempt stays unsettled and is reported rather than settled on the " +
-          "announcement alone",
+        withLogScope({ graphId: entry.graphId, attemptId: entry.attemptId }, () =>
+          logEvent("watch.announcement-unconfirmed", {
+            executionId: entry.executionId,
+            refusalCode: "completion-unsettled",
+            observation: observation.kind,
+            reason: observation.kind === "unknown" ? observation.reason : undefined,
+          }),
         );
         return;
       }
@@ -2558,32 +2520,24 @@ export class OutcomeHost {
       if (report.kind === "settled" || report.kind === "already-settled") {
         options.onSettled?.(entry.graphId, entry.attemptId);
       }
-      logWarn(
-        "outcome-host: the platform announced execution " +
-        JSON.stringify(entry.executionId) +
-        " of graph " +
-        JSON.stringify(entry.graphId) +
-        " attempt " +
-        JSON.stringify(entry.attemptId) +
-        " ended; the settlement report is " +
-        report.kind +
-        (report.kind === "settled"
-          ? " (" + describeFinishedAttempt(report) + ")"
-          : report.kind === "unsettled"
-            ? " (" + report.reason + ")"
-            : " (" + report.submissionId + ")"),
+      withLogScope({ graphId: entry.graphId, attemptId: entry.attemptId }, () =>
+        logEvent("watch.announcement-settled", {
+          executionId: entry.executionId,
+          kind: report.kind,
+          detail:
+            report.kind === "settled"
+              ? describeFinishedAttempt(report)
+              : report.kind === "unsettled"
+                ? report.reason
+                : report.submissionId,
+        }),
       );
     } catch (error) {
-      logWarn(
-        "outcome-host: the platform announced execution " +
-        JSON.stringify(entry.executionId) +
-        " of graph " +
-        JSON.stringify(entry.graphId) +
-        " attempt " +
-        JSON.stringify(entry.attemptId) +
-        " ended, but the settlement threw (" +
-        describeWatchFailure(error) +
-        ") — the attempt stays unsettled and is reported",
+      withLogScope({ graphId: entry.graphId, attemptId: entry.attemptId }, () =>
+        logEvent("watch.settlement-threw", {
+          executionId: entry.executionId,
+          failure: describeWatchFailure(error),
+        }),
       );
     }
   }
@@ -2757,15 +2711,10 @@ export class OutcomeHost {
    */
   reportDeliveryFailure(effect: OutcomeDispatchEffectKey, reason: string): void {
     this.executions.release(effect, this.executions.ownerId);
-    logWarn(
-      "outcome-host: delivery failed for graph " +
-      JSON.stringify(effect.graphId) +
-      " effect " +
-      JSON.stringify(effect.effectId) +
-      " — no execution can be PROVEN absent, so the create right is KEPT (the row stays " +
-      "'creating', every lookup answers 'unknown', and the effect is reported as unresolved " +
-      "rather than re-dispatched): " +
-      reason,
+    withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
+      logEvent("dispatch.delivery-unproven", {
+        reason,
+      }),
     );
   }
 
@@ -3354,43 +3303,6 @@ function describeUnwatched(
     "the platform cannot say whether this execution has ended (" +
     observation.reason +
     "), so no observation is established and the attempt stays unsettled"
-  );
-}
-
-/**
- * Why an ANNOUNCED end was not settled (F4 / W5), in the platform's own words
- * when it has any.
- *
- * An announcement says the platform's execution is over; it does not say the
- * execution reached the outcome its plan authorized. Each answer of the host's
- * four-way read that is NOT a completion therefore has its own wording: a
- * failed end says how it ended, a read that has not caught up says it still
- * reports the execution running, and an unanswerable read carries its reason.
- * Every one of them leaves the attempt unsettled and reported — never settled
- * on the announcement alone.
- */
-function describeUnconfirmedAnnouncement(
-  observation: HostExecutionObservation,
-): string {
-  if (observation.kind === "failed") {
-    return (
-      "the platform reports that execution ENDED without reaching its authorized outcome (" +
-      observation.reason +
-      "), so it is not a completion"
-    );
-  }
-  if (observation.kind === "running") {
-    return "the platform's own read still reports that execution running";
-  }
-  if (observation.kind === "completed") {
-    // Unreachable from the watch path (only a non-completion reaches here),
-    // kept total so the wording never falls through to the unknown branch.
-    return "the platform's own read reports that execution complete";
-  }
-  return (
-    "the platform cannot say whether that execution reached its authorized outcome (" +
-    observation.reason +
-    ")"
   );
 }
 

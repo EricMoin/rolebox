@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { logWarn } from "../log-warn.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import type {
   OutcomeDispatchEffectKey,
   OutcomeExecutionLookup,
@@ -383,7 +383,28 @@ export class HostExecutionIndex {
       this.now(),
     );
     if (verdict.kind === "fenced" || verdict.kind === "conflict") {
-      logWarn(describeRefusal(effect, verdict, this.ownerId));
+      // The refusal IS the report now (the removed sentence was read only here):
+      // ids and claim generations only, never a credential or host text.
+      if (verdict.kind === "conflict") {
+        withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
+          logEvent("index.confirmation-refused", {
+            kind: "conflict",
+            recordedExecutionId: verdict.recorded.executionId,
+            reportedExecutionId: verdict.reported.executionId,
+          }),
+        );
+      } else {
+        withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
+          logEvent("index.confirmation-refused", {
+            kind: "fenced",
+            attemptedOwnerId: this.ownerId,
+            attemptedGeneration: verdict.attemptedGeneration,
+            ownerId: verdict.ownerId,
+            generation: verdict.generation,
+            state: verdict.state,
+          }),
+        );
+      }
     }
     return verdict;
   }
@@ -410,13 +431,7 @@ export class HostExecutionIndex {
     const generation = this.claims.get(key) ?? NO_CLAIM_GENERATION;
     if (proof === undefined) {
       this.store.recordUnprovenFailure(effect, ownerId, generation, this.now());
-      logWarn(
-        "execution-index: the delivery of effect " +
-        JSON.stringify(effect.effectId) +
-        " failed WITHOUT proving that no execution was created, so the create right is KEPT " +
-        "— the row stays 'creating', every lookup answers 'unknown', and the effect is " +
-        "reported as unresolved instead of being re-dispatched",
-      );
+      withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () => logEvent("index.release-unproven"));
       return false;
     }
     const released = this.store.releaseExecution(
@@ -584,48 +599,4 @@ function heldClaim(row: HostDispatchExecution): HostExecutionClaim {
     generation: row.generation,
     ...(row.execution === undefined ? {} : { execution: row.execution }),
   });
-}
-
-/**
- * One refused confirmation, worded for the log.
- *
- * Ids and claim generations only: this is a warning about a WRITE, and it must
- * not become the channel a credential or a host error string travels over.
- */
-function describeRefusal(
-  effect: OutcomeDispatchEffectKey,
-  verdict: Extract<HostExecutionConfirmation, { kind: "fenced" | "conflict" }>,
-  attemptedOwnerId: string,
-): string {
-  if (verdict.kind === "conflict") {
-    return (
-      "execution-index: refusing to rebind effect " +
-      JSON.stringify(effect.effectId) +
-      " of graph " +
-      JSON.stringify(effect.graphId) +
-      " from the execution it already records (" +
-      JSON.stringify(verdict.recorded.executionId) +
-      ") to " +
-      JSON.stringify(verdict.reported.executionId) +
-      " — two executions for one stable effect id is what this registry exists to prevent; " +
-      "the recorded fact is unchanged and the attempt was reported"
-    );
-  }
-  return (
-    "execution-index: refused a confirmation of effect " +
-    JSON.stringify(effect.effectId) +
-    " of graph " +
-    JSON.stringify(effect.graphId) +
-    " from owner " +
-    JSON.stringify(attemptedOwnerId) +
-    " claim " +
-    String(verdict.attemptedGeneration) +
-    " — the row belongs to owner " +
-    JSON.stringify(verdict.ownerId) +
-    " claim " +
-    String(verdict.generation) +
-    " in state " +
-    JSON.stringify(verdict.state) +
-    "; the stale attempt was recorded on the row and nothing was written"
-  );
 }

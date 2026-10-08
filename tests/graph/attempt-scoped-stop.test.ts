@@ -595,7 +595,12 @@ function applyAttemptStopFromAnotherProcess(options: {
   ].join("\n");
   const scriptPath = join(options.dir, "attempt-stop-racer.ts");
   writeFileSync(scriptPath, script);
+  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+  // the start-time OS environ, not this process's `process.env` — the
+  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+  // so the child would resolve and append to the workspace's `.rolebox/logs`.
   const result = Bun.spawnSync([process.execPath, scriptPath], {
+    env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -680,6 +685,7 @@ function applyControlFromAnotherProcess(options: {
   const scriptPath = join(options.dir, "run-wide-stop-racer.ts");
   writeFileSync(scriptPath, script);
   const result = Bun.spawnSync([process.execPath, scriptPath], {
+    env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });

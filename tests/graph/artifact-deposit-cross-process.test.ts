@@ -96,7 +96,11 @@ function spawnWorker(
 ): Child {
   const argv = [process.execPath, WORKER, "--id", id];
   for (const [name, value] of Object.entries(args)) argv.push("--" + name, value);
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+  // the start-time OS environ, not this process's `process.env` — the
+  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+  // so the child would resolve and append to the workspace's `.rolebox/logs`.
+  const proc = Bun.spawn(argv, { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
   const stdout = Bun.readableStreamToText(proc.stdout);
   const stderr = Bun.readableStreamToText(proc.stderr);
 

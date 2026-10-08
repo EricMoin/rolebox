@@ -286,8 +286,12 @@ describe("durable graph notifications", () => {
       // store directory instead of the checkout keeps an environment-level
       // `bun` startup notice about an unreadable ancestor directory out of the
       // stderr this assertion reads. What the child must produce is unchanged.
+      // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+      // the start-time OS environ, not this process's `process.env` — the
+      // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+      // so the child would resolve and append to the workspace's `.rolebox/logs`.
       const child = Bun.spawn([process.execPath, "--eval", script, f.storeRoot, String(f.clock())],
-        { cwd: f.storeRoot, stdout: "pipe", stderr: "pipe" });
+        { env: { ...process.env }, cwd: f.storeRoot, stdout: "pipe", stderr: "pipe" });
       const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect({ code, error }).toEqual({ code: 0, error: "" });
       return JSON.parse(output);

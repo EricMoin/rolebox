@@ -1,4 +1,4 @@
-import { logWarn } from "../log-warn.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import type {
   OutcomeDispatchEffectKey,
   OutcomeDispatchHost,
@@ -447,14 +447,10 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     try {
       await prime.call(this.query, probes);
     } catch (error) {
-      logWarn(
-        "host-dispatch: priming the platform execution readings for " +
-        String(probes.length) +
-        " effect(s) failed — every reading stays unset, so the next lookup answers " +
-        "'unknown' and the affected effects stay blocked rather than being guessed at (" +
-        describeError(error) +
-        ")",
-      );
+      logEvent("dispatch.prime-failed", {
+        probeCount: probes.length,
+        failure: describeError(error),
+      });
     }
   }
 
@@ -528,14 +524,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     try {
       return query.lookup(probe);
     } catch {
-      logWarn(
-        "host-dispatch: the platform execution query for effect " +
-        JSON.stringify(effect.effectId) +
-        " of graph " +
-        JSON.stringify(effect.graphId) +
-        " threw — reporting the create outcome as UNKNOWN (its message is not quoted: the " +
-        "request carries an attempt credential)",
-      );
+      withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () => logEvent("dispatch.query-threw"));
       return Object.freeze({
         kind: "unknown" as const,
         reason:
@@ -605,32 +594,21 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     try {
       verdict = this.executions.confirmExecution(effect, execution);
     } catch (error) {
-      logWarn(
-        "host-dispatch: the platform names execution " +
-        JSON.stringify(execution.executionId) +
-        " for effect " +
-        JSON.stringify(effect.effectId) +
-        " of graph " +
-        JSON.stringify(effect.graphId) +
-        ", but binding it locally failed (" +
-        describeError(error) +
-        ") — the platform's name is kept for the recovery and no second execution is created",
+      withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
+        logEvent("dispatch.binding-failed", {
+          executionId: execution.executionId,
+          failure: describeError(error),
+        }),
       );
       return;
     }
     if (verdict.kind === "confirmed" || verdict.kind === "replayed") return;
     this.unboundReports.add(key);
-    logWarn(
-      "host-dispatch: the platform names execution " +
-      JSON.stringify(execution.executionId) +
-      " for effect " +
-      JSON.stringify(effect.effectId) +
-      " of graph " +
-      JSON.stringify(effect.graphId) +
-      ", but this process does not hold the claim that recorded the create (" +
-      verdict.kind +
-      ") — the durable row is NOT rewritten, the platform's name is kept for the " +
-      "recovery, and no second execution is created",
+    withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
+      logEvent("dispatch.unclaimed-confirmation", {
+        executionId: execution.executionId,
+        verdict: verdict.kind,
+      }),
     );
   }
 }

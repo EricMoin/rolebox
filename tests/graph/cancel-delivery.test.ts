@@ -643,6 +643,10 @@ function applyCancelFromAnotherProcess(options: {
   readonly attemptId: string;
   readonly reason: string;
 }): ApplyCancelReport {
+  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+  // the start-time OS environ, not this process's `process.env` — the
+  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+  // so the child would resolve and append to the workspace's `.rolebox/logs`.
   const result = Bun.spawnSync(
     [
       process.execPath,
@@ -666,7 +670,7 @@ function applyCancelFromAnotherProcess(options: {
       "--session",
       "session.declarer",
     ],
-    { stdout: "pipe", stderr: "pipe" },
+    { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
   const stdout = new TextDecoder().decode(result.stdout);
   const stderr = new TextDecoder().decode(result.stderr);
@@ -719,7 +723,7 @@ async function runRecordingProcessUntilItDiesAtTheAsk(
       "--graph",
       XPROC_CANCEL_GRAPH_ID,
     ],
-    { stdout: "pipe", stderr: "pipe" },
+    { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
   const stdout = Bun.readableStreamToText(proc.stdout);
   const stderr = Bun.readableStreamToText(proc.stderr);

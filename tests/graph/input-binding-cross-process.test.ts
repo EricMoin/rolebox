@@ -125,7 +125,12 @@ afterEach(() => {
 
 /** Spawn one REAL bun process running the worker fixture and await its report. */
 async function runWorker(args: readonly string[]): Promise<WorkerReport> {
+  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+  // the start-time OS environ, not this process's `process.env` — the
+  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+  // so the child would resolve and append to the workspace's `.rolebox/logs`.
   const proc = Bun.spawn([process.execPath, WORKER, ...args], {
+    env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });

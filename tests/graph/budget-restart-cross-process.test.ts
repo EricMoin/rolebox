@@ -176,6 +176,10 @@ async function runWorker(
   workspaceDir: string,
   extra: readonly string[] = [],
 ): Promise<WorkerReport> {
+  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
+  // the start-time OS environ, not this process's `process.env` — the
+  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
+  // so the child would resolve and append to the workspace's `.rolebox/logs`.
   const proc = Bun.spawn(
     [
       process.execPath,
@@ -190,7 +194,7 @@ async function runWorker(
       BUDGET_RESTART_GRAPH,
       ...extra,
     ],
-    { stdout: "pipe", stderr: "pipe" },
+    { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
   const timer = setTimeout(() => proc.kill(), CHILD_DEADLINE_MS);
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -413,7 +417,7 @@ describe("the dispatch budget across real processes", () => {
             "--now",
             String(BUDGET_RESTART_AT + 20),
           ],
-          { stdout: "pipe", stderr: "pipe" },
+          { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
         );
       const racers = [
         { id: "a", proc: launch("a") },

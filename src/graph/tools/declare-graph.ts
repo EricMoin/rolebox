@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 
 import { errorText } from "../../utils/error-text.ts";
-import { logWarn } from "../log-warn.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import type { PlanBinding } from "../compiler/plan.ts";
 import { contractDigest } from "../contracts/contract-definition.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
@@ -679,8 +679,10 @@ function logDeclarePersistenceFailure(graphId: string, error: unknown): void {
     error instanceof GraphStoreFormatError
       ? `the store refused it (${error.problem}): ${error.message}`
       : errorText(error);
-  logWarn(
-    `graph_declare: the definition of graph "${graphId}" did not reach the graph store: ${detail}`,
+  withLogScope({ graphId }, () =>
+    logEvent("declare.persistence-failed", {
+      detail,
+    }),
   );
 }
 
