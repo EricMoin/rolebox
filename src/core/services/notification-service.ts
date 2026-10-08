@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
 import { NotificationManager } from "../../notifications/manager.ts";
@@ -8,11 +9,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("notification-service");
+const log = createSubLogger(SERVICE_NAMES.notification);
 
 export class NotificationService implements PluginService {
-  readonly name = "notification-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = SERVICE_NAMES.notification;
+  readonly dependencies: readonly ServiceName[] = [];
 
   private notificationManager?: NotificationManager;
   private bus?: EventBus;

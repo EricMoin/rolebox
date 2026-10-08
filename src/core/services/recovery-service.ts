@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { RecoveryEngine } from "../../recovery/engine.ts";
 import { RecoveryStateStore } from "../../recovery/state.ts";
@@ -16,11 +17,11 @@ import { StartupChecker } from "../../recovery/startup-check.ts";
 import type { StartupHealth } from "../../recovery/startup-check.ts";
 import { stateDirFor } from "../../utils/state-paths.ts";
 
-const log = createSubLogger("recovery-service");
+const log = createSubLogger(SERVICE_NAMES.recovery);
 
 export class RecoveryService implements PluginService {
-  readonly name = "recovery-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = SERVICE_NAMES.recovery;
+  readonly dependencies: readonly ServiceName[] = [];
   readonly critical = true;
 
   private recoveryEngine?: RecoveryEngine;

@@ -28,6 +28,8 @@ import { DispatchService } from "../../src/core/services/dispatch-service.ts";
 import { RecoveryService } from "../../src/core/services/recovery-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import type { PluginService } from "../../src/core/service.ts";
+import type { ServiceName } from "../../src/core/service-names.ts";
+import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
 
 // Dispatch types & helpers
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
@@ -85,8 +87,8 @@ class FailingSessionClient implements ISessionClient {
 // ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
 
 class AlwaysFailingService implements PluginService {
-  readonly name = "test-failing-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = fakeServiceName("test-failing-service");
+  readonly dependencies: readonly ServiceName[] = fakeServiceNames([]);
   readonly critical = false;
 
   async init(): Promise<void> {
@@ -297,8 +299,8 @@ describe("degradation integration", () => {
         const supervisor = core.getSupervisor();
 
         // ── Attempt 1: fails → backoff, attempt=1 ───────────────
-        await supervisor.tryRestart("test-failing-service");
-        let status = supervisor.getStatus("test-failing-service");
+        await supervisor.tryRestart(fakeServiceName("test-failing-service"));
+        let status = supervisor.getStatus(fakeServiceName("test-failing-service"));
         expect(status.status).toBe("backoff");
         expect(status.attempts).toBe(1);
         expect(status.backoffUntil).toBeGreaterThan(Date.now());
@@ -309,8 +311,8 @@ describe("degradation integration", () => {
         status.backoffUntil = 0;
 
         // ── Attempt 2: fails → backoff, attempt=2 ───────────────
-        await supervisor.tryRestart("test-failing-service");
-        status = supervisor.getStatus("test-failing-service");
+        await supervisor.tryRestart(fakeServiceName("test-failing-service"));
+        status = supervisor.getStatus(fakeServiceName("test-failing-service"));
         expect(status.status).toBe("backoff");
         expect(status.attempts).toBe(2);
 
@@ -318,14 +320,14 @@ describe("degradation integration", () => {
         status.backoffUntil = 0;
 
         // ── Attempt 3: fails → permanently_degraded (hits window) ─
-        await supervisor.tryRestart("test-failing-service");
-        status = supervisor.getStatus("test-failing-service");
+        await supervisor.tryRestart(fakeServiceName("test-failing-service"));
+        status = supervisor.getStatus(fakeServiceName("test-failing-service"));
         expect(status.status).toBe("permanently_degraded");
         expect(status.attempts).toBe(3);
 
         // ── Attempt 4: degraded → no-op (still degraded) ─────────
-        await supervisor.tryRestart("test-failing-service");
-        status = supervisor.getStatus("test-failing-service");
+        await supervisor.tryRestart(fakeServiceName("test-failing-service"));
+        status = supervisor.getStatus(fakeServiceName("test-failing-service"));
         expect(status.status).toBe("permanently_degraded");
         expect(status.attempts).toBe(3); // unchanged
       } finally {

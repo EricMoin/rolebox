@@ -4,13 +4,14 @@ import type { PluginService } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { makeSessionClient } from "./helpers.ts";
+import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 function makeService(name: string, deps: string[] = []): PluginService {
   return {
-    name,
-    dependencies: deps,
+    name: fakeServiceName(name),
+    dependencies: fakeServiceNames(deps),
     init: mock(() => Promise.resolve()),
     dispose: mock(() => Promise.resolve()),
   };
@@ -51,7 +52,7 @@ describe("PluginCore", () => {
       (svc.init as ReturnType<typeof mock>).mockClear();
       (svc.dispose as ReturnType<typeof mock>).mockClear();
 
-      await core.restartService("alpha");
+      await core.restartService(svc.name);
 
       expect(svc.dispose).toHaveBeenCalledTimes(1);
       expect(svc.init).toHaveBeenCalledTimes(1);
@@ -72,7 +73,7 @@ describe("PluginCore", () => {
       (svcB.dispose as ReturnType<typeof mock>).mockClear();
 
       // Restart A — B depends on A, so both should restart
-      await core.restartService("a");
+      await core.restartService(svcA.name);
 
       // A is restarted
       expect(svcA.dispose).toHaveBeenCalledTimes(1);
@@ -101,7 +102,7 @@ describe("PluginCore", () => {
       (svcC.init as ReturnType<typeof mock>).mockClear();
       (svcC.dispose as ReturnType<typeof mock>).mockClear();
 
-      await core.restartService("a");
+      await core.restartService(svcA.name);
 
       // A restarted
       expect(svcA.dispose).toHaveBeenCalledTimes(1);
@@ -119,7 +120,7 @@ describe("PluginCore", () => {
       await core.init(makeContext(core));
 
       // Should not throw
-      await core.restartService("nonexistent");
+      await core.restartService(fakeServiceName("nonexistent"));
       expect(svcA.dispose).not.toHaveBeenCalled();
     });
 
@@ -133,7 +134,7 @@ describe("PluginCore", () => {
       (svcA.init as ReturnType<typeof mock>).mockClear();
 
       // Should not throw despite dispose failure
-      await core.restartService("a");
+      await core.restartService(svcA.name);
 
       // Init should still be called after failed dispose
       expect(svcA.init).toHaveBeenCalledTimes(1);
@@ -145,7 +146,7 @@ describe("PluginCore", () => {
       core.registerService(svc);
 
       // Not yet initialized — no ctx
-      await core.restartService("alpha");
+      await core.restartService(svc.name);
       expect(svc.dispose).not.toHaveBeenCalled();
       expect(svc.init).not.toHaveBeenCalled();
     });
@@ -169,7 +170,7 @@ describe("PluginCore", () => {
       (svcA.dispose as ReturnType<typeof mock>).mockClear();
 
       // The re-init error should propagate
-      expect(core.restartService("a")).rejects.toThrow("init boom");
+      expect(core.restartService(svcA.name)).rejects.toThrow("init boom");
     });
   });
 
@@ -191,7 +192,7 @@ describe("PluginCore", () => {
       core.registerService(svcA);
 
       await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-      expect(core.isDegraded("a")).toBe(true);
+      expect(core.isDegraded(svcA.name)).toBe(true);
     });
 
     it("skips downstream services when their dependency is degraded", async () => {
@@ -205,8 +206,8 @@ describe("PluginCore", () => {
       core.registerService(svcB);
 
       await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-      expect(core.isDegraded("a")).toBe(true);
-      expect(core.isDegraded("b")).toBe(true);
+      expect(core.isDegraded(svcA.name)).toBe(true);
+      expect(core.isDegraded(svcB.name)).toBe(true);
       expect(bInit).not.toHaveBeenCalled();
     });
 
@@ -221,8 +222,8 @@ describe("PluginCore", () => {
       core.registerService(svcC);
 
       await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-      expect(core.isDegraded("a")).toBe(true);
-      expect(core.isDegraded("c")).toBe(false);
+      expect(core.isDegraded(svcA.name)).toBe(true);
+      expect(core.isDegraded(svcC.name)).toBe(false);
       expect(cInit).toHaveBeenCalledTimes(1);
     });
 
@@ -303,10 +304,10 @@ describe("PluginCore", () => {
       core.registerService(svcD);
 
       await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-      expect(core.isDegraded("a")).toBe(false);
-      expect(core.isDegraded("b")).toBe(false);
-      expect(core.isDegraded("c")).toBe(false);
-      expect(core.isDegraded("d")).toBe(false);
+      expect(core.isDegraded(svcA.name)).toBe(false);
+      expect(core.isDegraded(svcB.name)).toBe(false);
+      expect(core.isDegraded(svcC.name)).toBe(false);
+      expect(core.isDegraded(svcD.name)).toBe(false);
     });
   });
 });

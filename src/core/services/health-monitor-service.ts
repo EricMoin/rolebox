@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ServiceHealth } from "../service.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -14,9 +15,9 @@ const log = createSubLogger("health-monitor");
 const DEFAULT_INTERVAL_MS = 30_000; // 30 seconds
 
 export class HealthMonitorService implements PluginService {
-  readonly name = "health-monitor-service";
+  readonly name: ServiceName = SERVICE_NAMES.healthMonitor;
   // Depends on hook-service so it initializes LAST (after all other services)
-  readonly dependencies = ["hook-service"];
+  readonly dependencies: readonly ServiceName[] = [SERVICE_NAMES.hook];
 
   private intervalTimer: ReturnType<typeof setInterval> | undefined;
   private ctx!: PluginContext;

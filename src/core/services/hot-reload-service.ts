@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { createSubLogger } from "../../logger.ts";
 import { clearExtensionModuleCache } from "../../extensions/loader.ts";
@@ -21,7 +22,7 @@ import { ROLE_YAML } from "../../constants.ts";
 import { invalidateAssetIndex } from "../../asset/asset-search.ts";
 import { toPosixPath } from "../../utils/paths.ts";
 
-const log = createSubLogger("hot-reload-service");
+const log = createSubLogger(SERVICE_NAMES.hotReload);
 
 const DEBOUNCE_MS = 500;
 
@@ -54,8 +55,8 @@ const WATCH_EXTENSIONS = new Set([
 ]);
 
 export class HotReloadService implements PluginService {
-  readonly name = "hot-reload-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = SERVICE_NAMES.hotReload;
+  readonly dependencies: readonly ServiceName[] = [];
 
   private watchers: FSWatcher[] = [];
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -371,7 +372,7 @@ export class HotReloadService implements PluginService {
     //    so newly-discovered role agents are resolvable to the dispatch and
     //    graph run paths synchronously after the reload returns (no
     //    "Agent not found" race).
-    await this.ctx.core.restartService("dispatch-service");
+    await this.ctx.core.restartService(SERVICE_NAMES.dispatch);
 
     log.info("Hot reload complete", {
       discovered: newRoles.size,

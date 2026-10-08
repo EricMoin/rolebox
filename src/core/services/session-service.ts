@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
@@ -12,8 +13,8 @@ import {
 } from "../../session/tools.ts";
 
 export class SessionService implements PluginService, ToolContributor {
-  readonly name = "session-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = SERVICE_NAMES.session;
+  readonly dependencies: readonly ServiceName[] = [];
 
   private sessionClient!: ISessionClient;
 

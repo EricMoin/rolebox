@@ -1,6 +1,7 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { ServiceSupervisor, SUPERVISOR_DEFAULTS } from "../../src/core/service-supervisor.ts";
 import type { PluginCoreLike } from "../../src/core/service.ts";
+import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
@@ -34,12 +35,12 @@ describe("ServiceSupervisor", () => {
       const { core, restartService } = makeMockCore();
       const supervisor = new ServiceSupervisor(core);
 
-      await supervisor.tryRestart("svc1");
+      await supervisor.tryRestart(fakeServiceName("svc1"));
 
       expect(restartService).toHaveBeenCalledTimes(1);
       expect(restartService).toHaveBeenCalledWith("svc1");
 
-      const status = supervisor.getStatus("svc1");
+      const status = supervisor.getStatus(fakeServiceName("svc1"));
       expect(status.attempts).toBe(0);
       expect(status.status).toBe("ok");
     });
@@ -48,13 +49,13 @@ describe("ServiceSupervisor", () => {
       const { core, restartService } = makeMockCore();
       const supervisor = new ServiceSupervisor(core);
 
-      await supervisor.tryRestart("alpha");
-      await supervisor.tryRestart("beta");
+      await supervisor.tryRestart(fakeServiceName("alpha"));
+      await supervisor.tryRestart(fakeServiceName("beta"));
 
       expect(restartService).toHaveBeenCalledTimes(2);
-      expect(supervisor.getStatus("alpha").status).toBe("ok");
-      expect(supervisor.getStatus("beta").status).toBe("ok");
-      expect(supervisor.getStatus("gamma").status).toBe("ok"); // never touched
+      expect(supervisor.getStatus(fakeServiceName("alpha")).status).toBe("ok");
+      expect(supervisor.getStatus(fakeServiceName("beta")).status).toBe("ok");
+      expect(supervisor.getStatus(fakeServiceName("gamma")).status).toBe("ok"); // never touched
     });
   });
 
@@ -65,19 +66,19 @@ describe("ServiceSupervisor", () => {
       restartService.mockRejectedValueOnce(new Error("temp failure"));
       const supervisor = new ServiceSupervisor(core);
 
-      await supervisor.tryRestart("svc2");
+      await supervisor.tryRestart(fakeServiceName("svc2"));
 
       expect(restartService).toHaveBeenCalledTimes(1);
-      let status = supervisor.getStatus("svc2");
+      let status = supervisor.getStatus(fakeServiceName("svc2"));
       expect(status.attempts).toBe(1);
       expect(status.status).toBe("backoff");
       expect(status.backoffUntil).toBeGreaterThan(Date.now());
 
       // Second call within backoff window → should be skipped
-      await supervisor.tryRestart("svc2");
+      await supervisor.tryRestart(fakeServiceName("svc2"));
 
       expect(restartService).toHaveBeenCalledTimes(1); // not called again
-      status = supervisor.getStatus("svc2");
+      status = supervisor.getStatus(fakeServiceName("svc2"));
       expect(status.status).toBe("backoff");
     });
 
@@ -88,8 +89,8 @@ describe("ServiceSupervisor", () => {
 
       // First failure: backoff = 1000 * 2^1 = 2000ms
       restartService.mockRejectedValueOnce(new Error("fail 1"));
-      await supervisor.tryRestart("svcBackoff");
-      let status = supervisor.getStatus("svcBackoff");
+      await supervisor.tryRestart(fakeServiceName("svcBackoff"));
+      let status = supervisor.getStatus(fakeServiceName("svcBackoff"));
       expect(status.attempts).toBe(1);
       expect(status.backoffUntil).toBeGreaterThanOrEqual(before + SUPERVISOR_DEFAULTS.baseBackoffMs * 2);
       expect(status.backoffUntil).toBeLessThanOrEqual(before + SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100);
@@ -110,32 +111,32 @@ describe("ServiceSupervisor", () => {
       try {
         // Attempt 1: fails (attempts → 1, backoff)
         restartService.mockRejectedValueOnce(new Error("fail 1"));
-        await supervisor.tryRestart("svc3");
-        expect(supervisor.getStatus("svc3").attempts).toBe(1);
-        expect(supervisor.getStatus("svc3").status).toBe("backoff");
+        await supervisor.tryRestart(fakeServiceName("svc3"));
+        expect(supervisor.getStatus(fakeServiceName("svc3")).attempts).toBe(1);
+        expect(supervisor.getStatus(fakeServiceName("svc3")).status).toBe("backoff");
 
         // Advance past backoff (2000ms from now)
         fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
 
         // Attempt 2: fails (attempts → 2, backoff)
         restartService.mockRejectedValueOnce(new Error("fail 2"));
-        await supervisor.tryRestart("svc3");
-        expect(supervisor.getStatus("svc3").attempts).toBe(2);
-        expect(supervisor.getStatus("svc3").status).toBe("backoff");
+        await supervisor.tryRestart(fakeServiceName("svc3"));
+        expect(supervisor.getStatus(fakeServiceName("svc3")).attempts).toBe(2);
+        expect(supervisor.getStatus(fakeServiceName("svc3")).status).toBe("backoff");
 
         // Advance past backoff (4000ms from now)
         fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 4 + 100;
 
         // Attempt 3: fails → permanently_degraded
         restartService.mockRejectedValueOnce(new Error("fail 3"));
-        await supervisor.tryRestart("svc3");
+        await supervisor.tryRestart(fakeServiceName("svc3"));
 
-        const status = supervisor.getStatus("svc3");
+        const status = supervisor.getStatus(fakeServiceName("svc3"));
         expect(status.attempts).toBe(3);
         expect(status.status).toBe("permanently_degraded");
 
         // Subsequent calls are no-op
-        await supervisor.tryRestart("svc3");
+        await supervisor.tryRestart(fakeServiceName("svc3"));
         expect(restartService).toHaveBeenCalledTimes(3);
       } finally {
         Date.now = origDateNow;
@@ -154,15 +155,15 @@ describe("ServiceSupervisor", () => {
         // Exhaust 3 attempts
         restartService.mockRejectedValue(new Error("fail"));
         for (let i = 0; i < 3; i++) {
-          await supervisor.tryRestart("permDeg");
+          await supervisor.tryRestart(fakeServiceName("permDeg"));
           fakeNow += 10_000; // advance past each backoff
         }
 
-        expect(supervisor.getStatus("permDeg").status).toBe("permanently_degraded");
+        expect(supervisor.getStatus(fakeServiceName("permDeg")).status).toBe("permanently_degraded");
         const callCountAfter = restartService.mock.calls.length;
 
         // Try again — should be no-op
-        await supervisor.tryRestart("permDeg");
+        await supervisor.tryRestart(fakeServiceName("permDeg"));
         expect(restartService.mock.calls.length).toBe(callCountAfter);
       } finally {
         Date.now = origDateNow;
@@ -182,16 +183,16 @@ describe("ServiceSupervisor", () => {
       try {
         // First failure (attempts → 1)
         restartService.mockRejectedValueOnce(new Error("fail 1"));
-        await supervisor.tryRestart("svcWindow");
-        expect(supervisor.getStatus("svcWindow").attempts).toBe(1);
+        await supervisor.tryRestart(fakeServiceName("svcWindow"));
+        expect(supervisor.getStatus(fakeServiceName("svcWindow")).attempts).toBe(1);
 
         // Advance past backoff (so the next restart is attempted)
         fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
 
         // Second failure (attempts → 2)
         restartService.mockRejectedValueOnce(new Error("fail 2"));
-        await supervisor.tryRestart("svcWindow");
-        expect(supervisor.getStatus("svcWindow").attempts).toBe(2);
+        await supervisor.tryRestart(fakeServiceName("svcWindow"));
+        expect(supervisor.getStatus(fakeServiceName("svcWindow")).attempts).toBe(2);
 
         // Advance past the full 60-second window
         fakeNow += SUPERVISOR_DEFAULTS.windowMs + 100;
@@ -199,9 +200,9 @@ describe("ServiceSupervisor", () => {
         // Now the window has expired — budget should reset
         // Next failure will be first in the new window
         restartService.mockRejectedValueOnce(new Error("fail after window"));
-        await supervisor.tryRestart("svcWindow");
+        await supervisor.tryRestart(fakeServiceName("svcWindow"));
 
-        const status = supervisor.getStatus("svcWindow");
+        const status = supervisor.getStatus(fakeServiceName("svcWindow"));
         // Attempts should have been reset to 0 before incrementing
         expect(status.attempts).toBe(1);
         // Status should be 'backoff' (not permanently_degraded)
@@ -223,8 +224,8 @@ describe("ServiceSupervisor", () => {
         const firstAttempt = fakeNow;
 
         restartService.mockRejectedValueOnce(new Error("fail"));
-        await supervisor.tryRestart("svcResetTime");
-        let status = supervisor.getStatus("svcResetTime");
+        await supervisor.tryRestart(fakeServiceName("svcResetTime"));
+        let status = supervisor.getStatus(fakeServiceName("svcResetTime"));
         expect(status.firstAttemptTime).toBe(firstAttempt);
 
         // Advance past window
@@ -233,9 +234,9 @@ describe("ServiceSupervisor", () => {
         fakeNow += SUPERVISOR_DEFAULTS.maxBackoffMs + 1;
 
         restartService.mockRejectedValueOnce(new Error("fail again"));
-        await supervisor.tryRestart("svcResetTime");
+        await supervisor.tryRestart(fakeServiceName("svcResetTime"));
 
-        status = supervisor.getStatus("svcResetTime");
+        status = supervisor.getStatus(fakeServiceName("svcResetTime"));
         // firstAttemptTime should have been updated to the new attempt time
         expect(status.firstAttemptTime).toBe(fakeNow);
       } finally {
@@ -251,7 +252,7 @@ describe("ServiceSupervisor", () => {
       const supervisor = new ServiceSupervisor(core);
 
       // Even though restartService throws, tryRestart should not reject
-      await expect(supervisor.tryRestart("svcSafe")).resolves.toBeUndefined();
+      await expect(supervisor.tryRestart(fakeServiceName("svcSafe"))).resolves.toBeUndefined();
     });
 
     it("does not propagate if a catastrophic error occurs inside supervisor logic", async () => {
@@ -267,7 +268,7 @@ describe("ServiceSupervisor", () => {
 
       const supervisor = new ServiceSupervisor(brokenCore);
 
-      await expect(supervisor.tryRestart("anything")).resolves.toBeUndefined();
+      await expect(supervisor.tryRestart(fakeServiceName("anything"))).resolves.toBeUndefined();
     });
 
     it("calling tryRestart for a non-existent service does not throw", async () => {
@@ -275,7 +276,7 @@ describe("ServiceSupervisor", () => {
       const supervisor = new ServiceSupervisor(core);
 
       // No service registered anywhere, but supervisor should still be safe
-      await expect(supervisor.tryRestart("ghost")).resolves.toBeUndefined();
+      await expect(supervisor.tryRestart(fakeServiceName("ghost"))).resolves.toBeUndefined();
     });
   });
 
@@ -284,7 +285,7 @@ describe("ServiceSupervisor", () => {
       const { core } = makeMockCore();
       const supervisor = new ServiceSupervisor(core);
 
-      const status = supervisor.getStatus("never-seen");
+      const status = supervisor.getStatus(fakeServiceName("never-seen"));
       expect(status.attempts).toBe(0);
       expect(status.status).toBe("ok");
       expect(status.firstAttemptTime).toBe(0);
@@ -297,9 +298,9 @@ describe("ServiceSupervisor", () => {
       restartService.mockRejectedValueOnce(new Error("fail"));
       const supervisor = new ServiceSupervisor(core);
 
-      await supervisor.tryRestart("track-me");
+      await supervisor.tryRestart(fakeServiceName("track-me"));
 
-      const status = supervisor.getStatus("track-me");
+      const status = supervisor.getStatus(fakeServiceName("track-me"));
       expect(status.attempts).toBe(1);
       expect(status.status).toBe("backoff");
       expect(status.firstAttemptTime).toBeGreaterThan(0);
@@ -318,18 +319,18 @@ describe("ServiceSupervisor", () => {
       try {
         // First call fails (to create tracking)
         restartService.mockRejectedValueOnce(new Error("fail"));
-        await supervisor.tryRestart("svcOk");
+        await supervisor.tryRestart(fakeServiceName("svcOk"));
 
-        let status = supervisor.getStatus("svcOk");
+        let status = supervisor.getStatus(fakeServiceName("svcOk"));
         expect(status.attempts).toBe(1);
         expect(status.status).toBe("backoff");
 
         // Advance past backoff (2000ms)
         fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
         restartService.mockResolvedValueOnce(undefined);
-        await supervisor.tryRestart("svcOk");
+        await supervisor.tryRestart(fakeServiceName("svcOk"));
 
-        status = supervisor.getStatus("svcOk");
+        status = supervisor.getStatus(fakeServiceName("svcOk"));
         expect(status.attempts).toBe(0);
         expect(status.status).toBe("ok");
       } finally {
@@ -344,16 +345,16 @@ describe("ServiceSupervisor", () => {
       restartService.mockRejectedValue(new Error("fail"));
       const supervisor = new ServiceSupervisor(core);
 
-      await supervisor.tryRestart("alpha");
-      await supervisor.tryRestart("beta");
-      await supervisor.tryRestart("alpha"); // skipped (backoff)
+      await supervisor.tryRestart(fakeServiceName("alpha"));
+      await supervisor.tryRestart(fakeServiceName("beta"));
+      await supervisor.tryRestart(fakeServiceName("alpha")); // skipped (backoff)
 
       // alpha: 1 attempt then skipped
       // beta: 1 attempt
-      const alphaStatus = supervisor.getStatus("alpha");
+      const alphaStatus = supervisor.getStatus(fakeServiceName("alpha"));
       expect(alphaStatus.attempts).toBe(1);
 
-      const betaStatus = supervisor.getStatus("beta");
+      const betaStatus = supervisor.getStatus(fakeServiceName("beta"));
       expect(betaStatus.attempts).toBe(1);
     });
   });

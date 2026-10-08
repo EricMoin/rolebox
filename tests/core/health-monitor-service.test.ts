@@ -6,14 +6,15 @@ import { HealthMonitorService } from "../../src/core/services/health-monitor-ser
 import { ServiceSupervisor, type ServiceRestartState } from "../../src/core/service-supervisor.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { makeSessionClient } from "./helpers.ts";
+import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
 import { __resetForTest } from "../../src/logger.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 function makeService(name: string, deps: string[] = [], healthFn?: () => ServiceHealth): PluginService {
   return {
-    name,
-    dependencies: deps,
+    name: fakeServiceName(name),
+    dependencies: fakeServiceNames(deps),
     init: mock(() => Promise.resolve()),
     dispose: mock(() => Promise.resolve()),
     ...(healthFn ? { health: healthFn } : {}),

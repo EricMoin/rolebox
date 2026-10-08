@@ -1,4 +1,5 @@
 import type { PluginService, ServiceHealth } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
 import type { PlatformCapabilities } from "../../platform/capabilities.ts";
@@ -18,7 +19,7 @@ import {
   buildRoleConfigs,
 } from "../../dispatch/factory.ts";
 
-const log = createSubLogger("dispatch-service");
+const log = createSubLogger(SERVICE_NAMES.dispatch);
 
 /** Message shown by stub dispatch tools when the service is degraded on Pi. */
 const PI_UNAVAILABLE_MSG =
@@ -54,8 +55,8 @@ function stubTool(description: string): CanonicalToolDef {
  * clear "not available" messages, and reports degraded health.
  */
 export class DispatchService implements PluginService, ToolContributor {
-  readonly name = "dispatch-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = SERVICE_NAMES.dispatch;
+  readonly dependencies: readonly ServiceName[] = [];
   readonly critical = true;
 
   private dispatchManager!: DispatchManager;

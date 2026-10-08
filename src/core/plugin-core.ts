@@ -1,4 +1,5 @@
 import type { PluginService, PluginCoreLike } from "./service.ts";
+import type { ServiceName } from "./service-names.ts";
 import type { PluginContext } from "./context.ts";
 import { EventBus } from "./event-bus.ts";
 import { createSubLogger } from "../logger.ts";
@@ -21,7 +22,7 @@ export class DescriptiveCycleError extends Error {
 const log = createSubLogger("plugin-core");
 
 export class PluginCore implements PluginCoreLike {
-  private services = new Map<string, PluginService>();
+  private services = new Map<ServiceName, PluginService>();
   private ctx!: PluginContext;
   private disposed = false;
   private bus = new EventBus();
@@ -40,11 +41,11 @@ export class PluginCore implements PluginCoreLike {
     this.services.set(svc.name, svc);
   }
 
-  getService<T>(name: string): T | undefined {
+  getService<T>(name: ServiceName): T | undefined {
     return this.services.get(name) as T | undefined;
   }
 
-  getServices(): Map<string, PluginService> {
+  getServices(): Map<ServiceName, PluginService> {
     return this.services;
   }
 
@@ -52,7 +53,7 @@ export class PluginCore implements PluginCoreLike {
     return this.bus;
   }
 
-  isDegraded(name: string): boolean {
+  isDegraded(name: ServiceName): boolean {
     return this.degraded.has(name);
   }
 
@@ -141,7 +142,7 @@ export class PluginCore implements PluginCoreLike {
    * re-initializes every service that depends on it (transitively).
    * Errors during dispose are caught and logged; re-init errors propagate.
    */
-  async restartService(name: string): Promise<void> {
+  async restartService(name: ServiceName): Promise<void> {
     const svc = this.services.get(name);
     if (!svc) {
       log.warn("restartService: service not found", { name });
@@ -153,7 +154,7 @@ export class PluginCore implements PluginCoreLike {
     }
 
     // Build reverse dependency map to compute transitive dependents
-    const revDeps = new Map<string, string[]>();
+    const revDeps = new Map<ServiceName, ServiceName[]>();
     for (const [, s] of this.services) {
       for (const dep of s.dependencies) {
         const list = revDeps.get(dep);
@@ -166,8 +167,8 @@ export class PluginCore implements PluginCoreLike {
     }
 
     // BFS to find the target + all transitive dependents
-    const affected = new Set<string>([name]);
-    const queue = [name];
+    const affected = new Set<ServiceName>([name]);
+    const queue: ServiceName[] = [name];
     while (queue.length > 0) {
       const current = queue.shift()!;
       for (const dependent of revDeps.get(current) ?? []) {
@@ -199,12 +200,12 @@ export class PluginCore implements PluginCoreLike {
   }
 
   private topoSort(): PluginService[] {
-    const visited = new Set<string>();
+    const visited = new Set<ServiceName>();
     const result: PluginService[] = [];
-    const visiting = new Set<string>();
-    const path: string[] = [];
+    const visiting = new Set<ServiceName>();
+    const path: ServiceName[] = [];
 
-    const visit = (name: string) => {
+    const visit = (name: ServiceName) => {
       if (visited.has(name)) return;
       if (visiting.has(name)) {
         // Recover the cycle members from the current DFS path

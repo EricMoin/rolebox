@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { Config, Hooks } from "@opencode-ai/plugin";
@@ -29,17 +30,17 @@ import type { ToolService } from "./tool-service.ts";
 import { parseCopilotConfig } from "../../copilot/config.ts";
 import type { CopilotConfig } from "../../copilot/types.ts";
 
-const log = createSubLogger("hook-service");
+const log = createSubLogger(SERVICE_NAMES.hook);
 
 export class HookService implements PluginService {
-  readonly name = "hook-service";
-  readonly dependencies = [
-    "dispatch-service",
-    "loop-service",
-    "notification-service",
-    "recovery-service",
-    "extension-service",
-    "tool-service",
+  readonly name: ServiceName = SERVICE_NAMES.hook;
+  readonly dependencies: readonly ServiceName[] = [
+    SERVICE_NAMES.dispatch,
+    SERVICE_NAMES.loop,
+    SERVICE_NAMES.notification,
+    SERVICE_NAMES.recovery,
+    SERVICE_NAMES.extension,
+    SERVICE_NAMES.tool,
   ];
 
   private customHookRegistry?: CustomHookRegistry;
@@ -82,7 +83,7 @@ export class HookService implements PluginService {
     // --- Custom Hook Registry ---
     this.customHookRegistry = new CustomHookRegistry();
 
-    const dispatchService = ctx.core.getService<DispatchService>("dispatch-service")!;
+    const dispatchService = ctx.core.getService<DispatchService>(SERVICE_NAMES.dispatch)!;
     const dispatchManager = dispatchService.getDispatchManager();
 
     this.customHookRegistry.setDeps({
@@ -102,11 +103,11 @@ export class HookService implements PluginService {
     }
 
     // --- Assemble HookDeps (original lines 415-428) ---
-    const loopService = ctx.core.getService<LoopService>("loop-service")!;
-    const recoveryService = ctx.core.getService<RecoveryService>("recovery-service");
-    const extensionService = ctx.core.getService<ExtensionService>("extension-service");
-    const notificationService = ctx.core.getService<NotificationService>("notification-service");
-    const toolService = ctx.core.getService<ToolService>("tool-service")!;
+    const loopService = ctx.core.getService<LoopService>(SERVICE_NAMES.loop)!;
+    const recoveryService = ctx.core.getService<RecoveryService>(SERVICE_NAMES.recovery);
+    const extensionService = ctx.core.getService<ExtensionService>(SERVICE_NAMES.extension);
+    const notificationService = ctx.core.getService<NotificationService>(SERVICE_NAMES.notification);
+    const toolService = ctx.core.getService<ToolService>(SERVICE_NAMES.tool)!;
 
     const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
 

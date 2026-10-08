@@ -5,6 +5,7 @@ export interface ServiceHealth {
 }
 
 import type { PluginContext } from "./context.ts";
+import type { ServiceName } from "./service-names.ts";
 
 /**
  * A service that participates in the plugin lifecycle.
@@ -12,9 +13,10 @@ import type { PluginContext } from "./context.ts";
  * PluginCore topo-sorts by dependencies and calls init() in order.
  */
 export interface PluginService {
-  /** Unique service name (e.g. "dispatch-service"). */
-  name: string;
-  dependencies: string[];
+  /** Unique service name from the closed SERVICE_NAMES set (e.g. "dispatch-service"). */
+  name: ServiceName;
+  /** Names of the services that must be initialized before this one. */
+  dependencies: readonly ServiceName[];
   /** Whether this service is critical for plugin operation.
    * When true and init() fails, PluginCore.init() rejects fatally.
    * When false/undefined and init() fails, the service is marked
@@ -35,9 +37,9 @@ export interface PluginService {
  * This breaks circular imports — services depend on the interface, not the concrete core.
  */
 export interface PluginCoreLike {
-  getService<T>(name: string): T | undefined;
-  getServices(): Map<string, PluginService>;
-  restartService(name: string): Promise<void>;
+  getService<T>(name: ServiceName): T | undefined;
+  getServices(): Map<ServiceName, PluginService>;
+  restartService(name: ServiceName): Promise<void>;
   /** Whether a service has been permanently degraded after init failure. */
-  isDegraded(name: string): boolean;
+  isDegraded(name: ServiceName): boolean;
 }

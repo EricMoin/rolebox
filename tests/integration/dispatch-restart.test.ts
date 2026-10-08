@@ -16,6 +16,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { PluginCore } from "../../src/core/plugin-core.ts";
+import { SERVICE_NAMES } from "../../src/core/service-names.ts";
 import { DispatchService } from "../../src/core/services/dispatch-service.ts";
 import { HealthMonitorService } from "../../src/core/services/health-monitor-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
@@ -58,7 +59,7 @@ describe("dispatch-service restart (integration)", () => {
       const m1 = svc.getDispatchManager();
       expect(m1.isOperational()).toBe(true);
 
-      await core.restartService("dispatch-service");
+      await core.restartService(SERVICE_NAMES.dispatch);
 
       const m2 = svc.getDispatchManager();
       expect(m2).not.toBe(m1);

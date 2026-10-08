@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { createMemoryUpdateTool } from "../../memory/tools.ts";
 import { registerToolSchema } from "../../hooks/tool-before.ts";
@@ -15,17 +16,17 @@ import { createFunctionGraphTool } from "../../function/function-graph.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 import { buildCanonicalTools } from "../../platform/tool-assembly.ts";
 
-const log = createSubLogger("tool-service");
+const log = createSubLogger(SERVICE_NAMES.tool);
 
 export class ToolService implements PluginService {
-  readonly name = "tool-service";
-  readonly dependencies = ["dispatch-service", "loop-service", "lsp-service", "session-service", "hot-reload-service"];
+  readonly name: ServiceName = SERVICE_NAMES.tool;
+  readonly dependencies: readonly ServiceName[] = [SERVICE_NAMES.dispatch, SERVICE_NAMES.loop, SERVICE_NAMES.lsp, SERVICE_NAMES.session, SERVICE_NAMES.hotReload];
 
   private tools: Record<string, any> = {};
 
   async init(ctx: PluginContext): Promise<void> {
     // 1. Get dispatch tools from DispatchService
-    const dispatchService = ctx.core.getService<DispatchService>("dispatch-service");
+    const dispatchService = ctx.core.getService<DispatchService>(SERVICE_NAMES.dispatch);
     if (!dispatchService) throw new Error("dispatch-service not found");
     const dispatchManager = dispatchService.getDispatchManager();
     const resolvedSubagents = dispatchService.getResolvedSubagents();
@@ -39,15 +40,15 @@ export class ToolService implements PluginService {
     // const loopToolsOverride = loopService.getLoopTools();
 
     // 2. Get LSP tools from LspService
-    const lspService = ctx.core.getService<LspService>("lsp-service");
+    const lspService = ctx.core.getService<LspService>(SERVICE_NAMES.lsp);
     if (!lspService) throw new Error("lsp-service not found");
 
     // 3. Get session tools from SessionService
-    const sessionService = ctx.core.getService<SessionService>("session-service");
+    const sessionService = ctx.core.getService<SessionService>(SERVICE_NAMES.session);
     if (!sessionService) throw new Error("session-service not found");
 
     // 3.6. Get HotReloadService for P2 tools
-    const hotReloadService = ctx.core.getService<HotReloadService>("hot-reload-service");
+    const hotReloadService = ctx.core.getService<HotReloadService>(SERVICE_NAMES.hotReload);
     if (!hotReloadService) throw new Error("hot-reload-service not found");
     const sessionClient = sessionService.getSessionClient();
 

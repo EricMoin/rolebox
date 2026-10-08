@@ -21,6 +21,7 @@ import { LoopService } from "../src/core/services/loop-service.ts";
 import { EventBus } from "../src/core/event-bus.ts";
 import { minimalCapabilities, opencodeCapabilities, piCapabilities } from "../src/platform/capabilities.ts";
 import type { PluginCoreLike } from "../src/core/service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../src/core/service-names.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -31,14 +32,14 @@ import type { CanonicalToolContext } from "../src/platform/types.ts";
  */
 function createMiniCore(): {
   core: PluginCoreLike;
-  serviceMap: Map<string, any>;
+  serviceMap: Map<ServiceName, any>;
 } {
-  const serviceMap = new Map<string, any>();
+  const serviceMap = new Map<ServiceName, any>();
   const core: PluginCoreLike = {
-    getService: <T>(name: string): T | undefined => serviceMap.get(name) as T | undefined,
+    getService: <T>(name: ServiceName): T | undefined => serviceMap.get(name) as T | undefined,
     getServices: () => serviceMap,
-    isDegraded: (_name: string) => false,
-    restartService: async (_name: string) => {},
+    isDegraded: (_name: ServiceName) => false,
+    restartService: async (_name: ServiceName) => {},
   };
   return { core, serviceMap };
 }
@@ -106,7 +107,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("init() with piCapabilities() does not throw", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     // Should not throw despite Pi's missing session create support
@@ -116,7 +117,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("init() with piCapabilities() marks itself degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -128,7 +129,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("health() details mention Pi when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -141,7 +142,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("getDispatchManager() throws when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -152,7 +153,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("getTools() returns stub dispatch tools when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -169,7 +170,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("stub dispatch tool returns clear not-available message", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -182,7 +183,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("stub dispatch_output tool returns same message", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -195,7 +196,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("stub dispatch_cancel tool returns same message", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -208,7 +209,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("stub dispatch_metrics tool returns same message", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -221,7 +222,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("stub dispatch_status tool returns same message", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -234,7 +235,7 @@ describe("DispatchService — Pi graceful degradation", () => {
   it("dispose() is safe when degraded (no-op)", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
     const ctx = createServiceCtx(core, piCapabilities());
 
     await svc.init(ctx);
@@ -246,7 +247,7 @@ describe("DispatchService — normal capabilities (no degradation)", () => {
   it("init() with opencodeCapabilities does not degrade", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
 
     const ctx = createServiceCtx(core, opencodeCapabilities());
     ctx.session = createMockSessionClient() as any;
@@ -261,7 +262,7 @@ describe("DispatchService — normal capabilities (no degradation)", () => {
     const { core, serviceMap } = createMiniCore();
     const sessionClient = createMockSessionClient() as any;
     const svc = new DispatchService({ sessionClient });
-    serviceMap.set("dispatch-service", svc);
+    serviceMap.set(SERVICE_NAMES.dispatch, svc);
 
     // The degradation guard checks the CONSTRUCTOR-injected client, so a host
     // with no session-create capability is still survivable when one is given.
@@ -277,9 +278,9 @@ describe("LoopService — Pi graceful degradation", () => {
   it("init() skips gracefully when DispatchService is degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     const ctx = createServiceCtx(core, piCapabilities());
 
@@ -293,9 +294,9 @@ describe("LoopService — Pi graceful degradation", () => {
   it("marks itself degraded when dispatch is degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     const ctx = createServiceCtx(core, piCapabilities());
 
@@ -309,9 +310,9 @@ describe("LoopService — Pi graceful degradation", () => {
   it("health() detail mentions dispatch when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     const ctx = createServiceCtx(core, piCapabilities());
 
@@ -325,9 +326,9 @@ describe("LoopService — Pi graceful degradation", () => {
   it("getLoopManager() throws when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     const ctx = createServiceCtx(core, piCapabilities());
 
@@ -340,9 +341,9 @@ describe("LoopService — Pi graceful degradation", () => {
   it("getLoopStore() throws when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     const ctx = createServiceCtx(core, piCapabilities());
 
@@ -355,9 +356,9 @@ describe("LoopService — Pi graceful degradation", () => {
   it("dispose() is safe when degraded", async () => {
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     const ctx = createServiceCtx(core, piCapabilities());
 
@@ -372,9 +373,9 @@ describe("LoopService — Pi graceful degradation", () => {
     // LoopService has no stub tool registration mechanism through its public API.
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const loopSvc = new LoopService();
-    serviceMap.set("loop-service", loopSvc);
+    serviceMap.set(SERVICE_NAMES.loop, loopSvc);
 
     // Without Pi capabilities, both services should NOT degrade
     // (but will fail on client access)
@@ -389,7 +390,7 @@ describe("PiLightweightServiceStack — integration", () => {
 
     const { core, serviceMap } = createMiniCore();
     const dispatchSvc = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchSvc);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchSvc);
     const ctx = createServiceCtx(core, piCapabilities());
     await dispatchSvc.init(ctx);
 
@@ -431,10 +432,10 @@ describe("Pi extension log messages — degradation verification", () => {
     const capabilities = piCapabilities();
 
     const dispatchService = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchService);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchService);
 
     const loopService = new LoopService();
-    serviceMap.set("loop-service", loopService);
+    serviceMap.set(SERVICE_NAMES.loop, loopService);
 
     const ctx = createServiceCtx(core, capabilities);
 
@@ -463,9 +464,9 @@ describe("Pi extension log messages — degradation verification", () => {
     const capabilities = piCapabilities();
 
     const dispatchService = new DispatchService();
-    serviceMap.set("dispatch-service", dispatchService);
+    serviceMap.set(SERVICE_NAMES.dispatch, dispatchService);
     const loopService = new LoopService();
-    serviceMap.set("loop-service", loopService);
+    serviceMap.set(SERVICE_NAMES.loop, loopService);
 
     const ctx = createServiceCtx(core, capabilities);
     await dispatchService.init(ctx);

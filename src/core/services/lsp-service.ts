@@ -1,4 +1,5 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
 import { LspClientManager } from "../../lsp/client-manager.ts";
@@ -6,8 +7,8 @@ import { LspDocumentManager } from "../../lsp/document-manager.ts";
 import { createAllLspTools } from "../../lsp/index.ts";
 
 export class LspService implements PluginService, ToolContributor {
-  readonly name = "lsp-service";
-  readonly dependencies: string[] = [];
+  readonly name: ServiceName = SERVICE_NAMES.lsp;
+  readonly dependencies: readonly ServiceName[] = [];
 
   private lspClientManager!: LspClientManager;
   private lspDocManager!: LspDocumentManager;

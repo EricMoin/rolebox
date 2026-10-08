@@ -1,4 +1,5 @@
 import type { PluginCoreLike } from "./service.ts";
+import type { ServiceName } from "./service-names.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("service-supervisor");
@@ -40,7 +41,7 @@ export const SUPERVISOR_DEFAULTS = {
  * (always-bootable principle).
  */
 export class ServiceSupervisor {
-  private states = new Map<string, ServiceRestartState>();
+  private states = new Map<ServiceName, ServiceRestartState>();
   private core: PluginCoreLike;
 
   constructor(core: PluginCoreLike) {
@@ -59,7 +60,7 @@ export class ServiceSupervisor {
    *     - Failure → increment attempts, apply backoff or mark degraded.
    *  5. All errors within the supervisor are caught — never propagate.
    */
-  async tryRestart(name: string): Promise<void> {
+  async tryRestart(name: ServiceName): Promise<void> {
     try {
       const now = Date.now();
       let state = this.states.get(name);
@@ -142,7 +143,7 @@ export class ServiceSupervisor {
    * Return the current restart tracking state for a service.
    * When no tracking record exists, returns a default 'ok' state.
    */
-  getStatus(name: string): ServiceRestartState {
+  getStatus(name: ServiceName): ServiceRestartState {
     return (
       this.states.get(name) ?? {
         attempts: 0,

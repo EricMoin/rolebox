@@ -10,6 +10,7 @@ import { functionRuntime } from "../function/runtime-state.ts";
 import { sessionSignalLedger } from "../signal/session-signal-ledger.ts";
 import { createSubLogger } from "../logger.ts";
 import { PluginCore } from "./plugin-core.ts";
+import { SERVICE_NAMES } from "./service-names.ts";
 import { HotReloadService } from "./services/hot-reload-service.ts";
 import { DispatchService } from "./services/dispatch-service.ts";
 import { LoopService } from "./services/loop-service.ts";
@@ -147,7 +148,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
       try { hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates()); } catch (err) { log.warn("flushAllSync saveSync failed for directory", d, err); }
       mgr.dispose();
     }
-    core.getService<DispatchService>("dispatch-service")?.flushPersistSync();
+    core.getService<DispatchService>(SERVICE_NAMES.dispatch)?.flushPersistSync();
     if (directory) { functionRuntime.flushSync(); sessionSignalLedger.flushSync(); }
     void core.dispose(); // fire-and-forget for async service disposal
   };
@@ -162,13 +163,13 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
     new ProcessFatalReporter({ flush: flushAllSync }).install();
   }
 
-  const loopService = core.getService<LoopService>("loop-service");
+  const loopService = core.getService<LoopService>(SERVICE_NAMES.loop);
   if (loopService) {
     hookState.activeLoopManager = loopService.getLoopManager();
     activeLoopManager = loopService.getLoopManager();
   }
 
-  const hookService = core.getService<HookService>("hook-service");
+  const hookService = core.getService<HookService>(SERVICE_NAMES.hook);
   if (!hookService) {
     // hook-service was never registered — unexpected in this composition (it is
     // always registered), but never return undefined to opencode.
@@ -189,7 +190,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
       "hook-service unavailable: handlers not initialized (degraded or skipped init); returning no-op handlers to keep opencode alive",
       {
         degradedServices: listDegradedServices(core),
-        failedServiceChain: ["hook-service", ...listDegradedServices(core)],
+        failedServiceChain: [SERVICE_NAMES.hook, ...listDegradedServices(core)],
       },
     );
     return buildNoOpHandlers();

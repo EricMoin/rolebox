@@ -1,4 +1,5 @@
 import type { PluginService, PluginCoreLike, ServiceHealth } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
@@ -14,7 +15,7 @@ import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 
-const log = createSubLogger("loop-service");
+const log = createSubLogger(SERVICE_NAMES.loop);
 
 /** Message shown by stub loop tools when the service is degraded on Pi. */
 const PI_LOOP_UNAVAILABLE_MSG =
@@ -38,8 +39,8 @@ function stubTool(description: string): CanonicalToolDef {
 }
 
 export class LoopService implements PluginService {
-  readonly name = "loop-service";
-  readonly dependencies = ["dispatch-service"];
+  readonly name: ServiceName = SERVICE_NAMES.loop;
+  readonly dependencies: readonly ServiceName[] = [SERVICE_NAMES.dispatch];
   readonly critical = true;
 
   private loopManager!: LoopCoordinator;
@@ -51,7 +52,7 @@ export class LoopService implements PluginService {
 
   async init(ctx: PluginContext): Promise<void> {
     // Check if DispatchService is degraded. If so, skip init gracefully.
-    const dispatchService = ctx.core.getService<DispatchService>("dispatch-service");
+    const dispatchService = ctx.core.getService<DispatchService>(SERVICE_NAMES.dispatch);
     if (!dispatchService) {
       this.stateDegraded = true;
       this.degradedDetail = "dispatch-service not initialized";

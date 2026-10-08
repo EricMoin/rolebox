@@ -1,10 +1,11 @@
 import type { PluginService } from "../service.ts";
+import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { ExtensionRegistry } from "../../extensions/index.ts";
 import { createSubLogger } from "../../logger.ts";
 import type { RecoveryStrategy, ErrorPattern } from "../../recovery/types.ts";
 
-const log = createSubLogger("extension-service");
+const log = createSubLogger(SERVICE_NAMES.extension);
 
 /**
  * Owns the ExtensionRegistry lifecycle and bridges extension-loaded
@@ -14,8 +15,8 @@ const log = createSubLogger("extension-service");
  * because it bridges into both engines.
  */
 export class ExtensionService implements PluginService {
-  readonly name = "extension-service";
-  readonly dependencies = ["dispatch-service", "recovery-service"];
+  readonly name: ServiceName = SERVICE_NAMES.extension;
+  readonly dependencies: readonly ServiceName[] = [SERVICE_NAMES.dispatch, SERVICE_NAMES.recovery];
 
   private extensionRegistry!: ExtensionRegistry;
 
@@ -40,7 +41,7 @@ export class ExtensionService implements PluginService {
     }
 
     // Bridge loaded strategies/patterns into RecoveryEngine
-    const recoveryService = ctx.core.getService<import("./recovery-service.ts").RecoveryService>("recovery-service");
+    const recoveryService = ctx.core.getService<import("./recovery-service.ts").RecoveryService>(SERVICE_NAMES.recovery);
     const recoveryEngine = recoveryService?.getRecoveryEngine();
 
     if (recoveryEngine) {
@@ -53,7 +54,7 @@ export class ExtensionService implements PluginService {
     }
 
     // Bridge loaded strategies/patterns into RecoveryEngine
-    const dispatchService = ctx.core.getService<import("./dispatch-service.ts").DispatchService>("dispatch-service");
+    const dispatchService = ctx.core.getService<import("./dispatch-service.ts").DispatchService>(SERVICE_NAMES.dispatch);
     const dispatchManager = dispatchService?.getDispatchManager();
 
     if (recoveryEngine && dispatchManager) {

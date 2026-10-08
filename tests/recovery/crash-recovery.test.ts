@@ -38,6 +38,7 @@ import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/concurr
 import { __resetForTest } from "../../src/logger.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { makeSessionClient } from "../core/helpers.ts";
+import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
 
 // ── Test lifecycle ──────────────────────────────────────────────────
 
@@ -73,8 +74,8 @@ function makeService(
   critical?: boolean,
 ): PluginService {
   return {
-    name,
-    dependencies: deps,
+    name: fakeServiceName(name),
+    dependencies: fakeServiceNames(deps),
     critical,
     init: mock(() => Promise.resolve()),
     dispose: mock(() => Promise.resolve()),
@@ -314,7 +315,7 @@ describe("(d) Service init failure — optional vs critical", () => {
     core.registerService(svcA);
 
     await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-    expect(core.isDegraded("a")).toBe(true);
+    expect(core.isDegraded(fakeServiceName("a"))).toBe(true);
   });
 
   it("optional service failure: independent services still initialize", async () => {
@@ -328,8 +329,8 @@ describe("(d) Service init failure — optional vs critical", () => {
     core.registerService(svcC);
 
     await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-    expect(core.isDegraded("a")).toBe(true);
-    expect(core.isDegraded("c")).toBe(false);
+    expect(core.isDegraded(fakeServiceName("a"))).toBe(true);
+    expect(core.isDegraded(fakeServiceName("c"))).toBe(false);
     expect(cInit).toHaveBeenCalledTimes(1);
   });
 
@@ -344,8 +345,8 @@ describe("(d) Service init failure — optional vs critical", () => {
     core.registerService(svcB);
 
     await expect(core.init(makeContext(core))).resolves.toBeUndefined();
-    expect(core.isDegraded("a")).toBe(true);
-    expect(core.isDegraded("b")).toBe(true);
+    expect(core.isDegraded(fakeServiceName("a"))).toBe(true);
+    expect(core.isDegraded(fakeServiceName("b"))).toBe(true);
     expect(bInit).not.toHaveBeenCalled();
   });
 
@@ -402,8 +403,8 @@ describe("(e) Supervisor crash-loop protection", () => {
 
     try {
       // Attempt 1: fails, backoff ~2s
-      await supervisor.tryRestart("crash-loop-svc");
-      let status = supervisor.getStatus("crash-loop-svc");
+      await supervisor.tryRestart(fakeServiceName("crash-loop-svc"));
+      let status = supervisor.getStatus(fakeServiceName("crash-loop-svc"));
       expect(status.status).toBe("backoff");
       expect(status.attempts).toBe(1);
 
@@ -411,8 +412,8 @@ describe("(e) Supervisor crash-loop protection", () => {
       fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
 
       // Attempt 2: fails, backoff ~4s
-      await supervisor.tryRestart("crash-loop-svc");
-      status = supervisor.getStatus("crash-loop-svc");
+      await supervisor.tryRestart(fakeServiceName("crash-loop-svc"));
+      status = supervisor.getStatus(fakeServiceName("crash-loop-svc"));
       expect(status.status).toBe("backoff");
       expect(status.attempts).toBe(2);
 
@@ -420,8 +421,8 @@ describe("(e) Supervisor crash-loop protection", () => {
       fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 4 + 100;
 
       // Attempt 3: fails → permanently_degraded
-      await supervisor.tryRestart("crash-loop-svc");
-      status = supervisor.getStatus("crash-loop-svc");
+      await supervisor.tryRestart(fakeServiceName("crash-loop-svc"));
+      status = supervisor.getStatus(fakeServiceName("crash-loop-svc"));
       expect(status.status).toBe("permanently_degraded");
       expect(status.attempts).toBe(3);
 
@@ -452,29 +453,29 @@ describe("(e) Supervisor crash-loop protection", () => {
 
     try {
       // Attempt 1: fails → backoff
-      await supervisor.tryRestart("perm-deg-svc");
-      expect(supervisor.getStatus("perm-deg-svc").attempts).toBe(1);
+      await supervisor.tryRestart(fakeServiceName("perm-deg-svc"));
+      expect(supervisor.getStatus(fakeServiceName("perm-deg-svc")).attempts).toBe(1);
 
       // Advance past backoff (2000ms)
       fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
 
       // Attempt 2: fails → backoff
-      await supervisor.tryRestart("perm-deg-svc");
-      expect(supervisor.getStatus("perm-deg-svc").attempts).toBe(2);
+      await supervisor.tryRestart(fakeServiceName("perm-deg-svc"));
+      expect(supervisor.getStatus(fakeServiceName("perm-deg-svc")).attempts).toBe(2);
 
       // Advance past backoff (4000ms)
       fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 4 + 100;
 
       // Attempt 3: fails → permanently_degraded
-      await supervisor.tryRestart("perm-deg-svc");
-      expect(supervisor.getStatus("perm-deg-svc").status).toBe("permanently_degraded");
-      expect(supervisor.getStatus("perm-deg-svc").attempts).toBe(3);
+      await supervisor.tryRestart(fakeServiceName("perm-deg-svc"));
+      expect(supervisor.getStatus(fakeServiceName("perm-deg-svc")).status).toBe("permanently_degraded");
+      expect(supervisor.getStatus(fakeServiceName("perm-deg-svc")).attempts).toBe(3);
 
       // Capture call count BEFORE the no-op attempt
       const callsBeforeNoop = (crashy.init as ReturnType<typeof mock>).mock.calls.length;
 
       // Subsequent attempt should be no-op (permanently_degraded → returns immediately)
-      await supervisor.tryRestart("perm-deg-svc");
+      await supervisor.tryRestart(fakeServiceName("perm-deg-svc"));
 
       const callsAfterNoop = (crashy.init as ReturnType<typeof mock>).mock.calls.length;
       expect(callsAfterNoop).toBe(callsBeforeNoop);
@@ -526,7 +527,7 @@ describe("(f) Supervisor error isolation (always-bootable)", () => {
     };
 
     const supervisor = new ServiceSupervisor(throwingCore);
-    await expect(supervisor.tryRestart("anything")).resolves.toBeUndefined();
+    await expect(supervisor.tryRestart(fakeServiceName("anything"))).resolves.toBeUndefined();
   });
 
   it("does not propagate when supervisor internal logic catastrophically fails", async () => {
@@ -538,7 +539,7 @@ describe("(f) Supervisor error isolation (always-bootable)", () => {
     };
 
     const supervisor = new ServiceSupervisor(brokenCore);
-    await expect(supervisor.tryRestart("anything")).resolves.toBeUndefined();
+    await expect(supervisor.tryRestart(fakeServiceName("anything"))).resolves.toBeUndefined();
   });
 
   it("PluginCore.init() resolves when a service's restartService path fails inside supervisor", async () => {
@@ -552,10 +553,10 @@ describe("(f) Supervisor error isolation (always-bootable)", () => {
     (svc.dispose as ReturnType<typeof mock>).mockClear();
 
     const supervisor = core.getSupervisor();
-    await expect(supervisor.tryRestart("nonexistent-service")).resolves.toBeUndefined();
+    await expect(supervisor.tryRestart(fakeServiceName("nonexistent-service"))).resolves.toBeUndefined();
 
     // The healthy service should still work
-    expect(core.getService<PluginService>("reliable")).not.toBeUndefined();
+    expect(core.getService<PluginService>(fakeServiceName("reliable"))).not.toBeUndefined();
   });
 });
 
@@ -579,8 +580,8 @@ describe("(g) Backoff timing", () => {
 
     try {
       // Attempt 1: backoff = 1000 * 2^1 = 2000ms
-      await supervisor.tryRestart("svc");
-      let status = supervisor.getStatus("svc");
+      await supervisor.tryRestart(fakeServiceName("svc"));
+      let status = supervisor.getStatus(fakeServiceName("svc"));
       let expectedBackoff = fakeNow + SUPERVISOR_DEFAULTS.baseBackoffMs * 2; // 2000
       expect(status.backoffUntil).toBe(expectedBackoff);
       expect(status.attempts).toBe(1);
@@ -589,8 +590,8 @@ describe("(g) Backoff timing", () => {
       fakeNow = expectedBackoff + 100;
 
       // Attempt 2: backoff = 1000 * 2^2 = 4000ms
-      await supervisor.tryRestart("svc");
-      status = supervisor.getStatus("svc");
+      await supervisor.tryRestart(fakeServiceName("svc"));
+      status = supervisor.getStatus(fakeServiceName("svc"));
       expectedBackoff = fakeNow + SUPERVISOR_DEFAULTS.baseBackoffMs * 4; // 4000
       expect(status.backoffUntil).toBe(expectedBackoff);
       expect(status.attempts).toBe(2);
@@ -599,8 +600,8 @@ describe("(g) Backoff timing", () => {
       fakeNow = expectedBackoff + 100;
 
       // Attempt 3: budget exhausted → permanently_degraded, not backoff
-      await supervisor.tryRestart("svc");
-      status = supervisor.getStatus("svc");
+      await supervisor.tryRestart(fakeServiceName("svc"));
+      status = supervisor.getStatus(fakeServiceName("svc"));
       expect(status.status).toBe("permanently_degraded");
       expect(status.attempts).toBe(3);
     } finally {
@@ -659,16 +660,16 @@ describe("(g) Backoff timing", () => {
 
     try {
       // First call fails → backoff
-      await supervisor.tryRestart("reset-svc");
-      expect(supervisor.getStatus("reset-svc").attempts).toBe(1);
-      expect(supervisor.getStatus("reset-svc").status).toBe("backoff");
+      await supervisor.tryRestart(fakeServiceName("reset-svc"));
+      expect(supervisor.getStatus(fakeServiceName("reset-svc")).attempts).toBe(1);
+      expect(supervisor.getStatus(fakeServiceName("reset-svc")).status).toBe("backoff");
 
       // Advance past backoff
       fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
 
       // Second call succeeds → reset
-      await supervisor.tryRestart("reset-svc");
-      const status = supervisor.getStatus("reset-svc");
+      await supervisor.tryRestart(fakeServiceName("reset-svc"));
+      const status = supervisor.getStatus(fakeServiceName("reset-svc"));
       expect(status.attempts).toBe(0);
       expect(status.status).toBe("ok");
     } finally {
@@ -691,22 +692,22 @@ describe("(g) Backoff timing", () => {
 
     try {
       // First failure
-      await supervisor.tryRestart("window-svc");
-      expect(supervisor.getStatus("window-svc").attempts).toBe(1);
+      await supervisor.tryRestart(fakeServiceName("window-svc"));
+      expect(supervisor.getStatus(fakeServiceName("window-svc")).attempts).toBe(1);
 
       // Advance past backoff (2000ms) but not past window (60000ms)
       fakeNow += SUPERVISOR_DEFAULTS.baseBackoffMs * 2 + 100;
 
       // Second failure (still within window, 2 < maxRestarts=3)
-      await supervisor.tryRestart("window-svc");
-      expect(supervisor.getStatus("window-svc").attempts).toBe(2);
+      await supervisor.tryRestart(fakeServiceName("window-svc"));
+      expect(supervisor.getStatus(fakeServiceName("window-svc")).attempts).toBe(2);
 
       // Advance past the full window
       fakeNow += SUPERVISOR_DEFAULTS.windowMs + 100;
 
       // Third call: window expired → budget should reset, then fail → now attempt=1
-      await supervisor.tryRestart("window-svc");
-      const status = supervisor.getStatus("window-svc");
+      await supervisor.tryRestart(fakeServiceName("window-svc"));
+      const status = supervisor.getStatus(fakeServiceName("window-svc"));
       expect(status.attempts).toBe(1); // reset to 0 then increment to 1
       expect(status.status).toBe("backoff"); // not permanently_degraded
     } finally {
