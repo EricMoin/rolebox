@@ -1,4 +1,4 @@
-import type { PluginService } from "../service.ts";
+import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { createMemoryUpdateTool } from "../../memory/tools.ts";
@@ -120,5 +120,12 @@ export class ToolService implements PluginService {
 
   getTools(): Record<string, any> {
     return this.tools;
+  }
+
+  health(): ServiceHealth {
+    if (Object.keys(this.tools).length === 0) {
+      return { status: "unhealthy", detail: "tool surface not assembled" };
+    }
+    return { status: "healthy" };
   }
 }

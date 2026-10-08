@@ -1,4 +1,4 @@
-import type { PluginService } from "../service.ts";
+import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { ExtensionRegistry } from "../../extensions/index.ts";
@@ -19,8 +19,10 @@ export class ExtensionService implements PluginService {
   readonly dependencies: readonly ServiceName[] = [SERVICE_NAMES.dispatch, SERVICE_NAMES.recovery];
 
   private extensionRegistry!: ExtensionRegistry;
+  private extensionLoadFailures = 0;
 
   async init(ctx: PluginContext): Promise<void> {
+    this.extensionLoadFailures = 0;
     this.extensionRegistry = new ExtensionRegistry();
 
     const { resolvedRoles, directory } = ctx;
@@ -32,6 +34,7 @@ export class ExtensionService implements PluginService {
           await this.extensionRegistry.loadExtensions(role.config.extensions, directory);
           log.debug("Loaded extensions for role", { role: role.id });
         } catch (err) {
+          this.extensionLoadFailures++;
           log.warn("Failed to load extensions for role", {
             role: role.id,
             error: err instanceof Error ? err.message : String(err),
@@ -72,5 +75,15 @@ export class ExtensionService implements PluginService {
 
   getExtensionRegistry(): ExtensionRegistry {
     return this.extensionRegistry;
+  }
+
+  health(): ServiceHealth {
+    if (!this.extensionRegistry) {
+      return { status: "unhealthy", detail: "ExtensionRegistry not initialized" };
+    }
+    if (this.extensionLoadFailures > 0) {
+      return { status: "degraded", detail: `${this.extensionLoadFailures} extension load failure(s)` };
+    }
+    return { status: "healthy" };
   }
 }

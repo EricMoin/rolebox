@@ -1,4 +1,4 @@
-import type { PluginService } from "../service.ts";
+import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
@@ -40,5 +40,12 @@ export class SessionService implements PluginService, ToolContributor {
 
   getSessionClient(): ISessionClient {
     return this.sessionClient;
+  }
+
+  health(): ServiceHealth {
+    if (!this.sessionClient) {
+      return { status: "unhealthy", detail: "ISessionClient not initialized" };
+    }
+    return { status: "healthy" };
   }
 }

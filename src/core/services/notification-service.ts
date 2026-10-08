@@ -1,4 +1,4 @@
-import type { PluginService } from "../service.ts";
+import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -107,5 +107,15 @@ export class NotificationService implements PluginService {
 
   getNotificationManager(): NotificationManager | undefined {
     return this.notificationManager;
+  }
+
+  health(): ServiceHealth {
+    if (!this.notificationManager) {
+      return { status: "unhealthy", detail: "NotificationManager not initialized" };
+    }
+    if (this.unsubs.length === 0) {
+      return { status: "degraded", detail: "bus subscriptions not established" };
+    }
+    return { status: "healthy" };
   }
 }

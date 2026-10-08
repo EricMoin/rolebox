@@ -145,6 +145,21 @@ describe("SessionService", () => {
     });
   });
 
+  describe("health", () => {
+    it("reports unhealthy before init", () => {
+      const svc = new SessionService();
+
+      expect(svc.health()).toEqual({ status: "unhealthy", detail: "ISessionClient not initialized" });
+    });
+
+    it("reports healthy after init wired ctx.session", async () => {
+      const svc = new SessionService();
+      await svc.init(makeMinimalContext());
+
+      expect(svc.health()).toEqual({ status: "healthy" });
+    });
+  });
+
   describe("static properties", () => {
     it("has name 'session-service' and no dependencies", () => {
       const svc = new SessionService();

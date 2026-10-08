@@ -230,4 +230,27 @@ describe("ROLEBOX_NOTIFICATIONS_ENABLED", () => {
       await expect(svc.dispose()).resolves.toBeUndefined();
     });
   });
+
+  describe("health", () => {
+    it("reports unhealthy before init", () => {
+      const svc = new NotificationService();
+
+      expect(svc.health()).toEqual({ status: "unhealthy", detail: "NotificationManager not initialized" });
+    });
+
+    it("reports healthy after init once the bus subscriptions exist", async () => {
+      const svc = new NotificationService();
+      await svc.init(makeContext());
+
+      expect(svc.health()).toEqual({ status: "healthy" });
+    });
+
+    it("reports degraded after dispose drops the bus subscriptions", async () => {
+      const svc = new NotificationService();
+      await svc.init(makeContext());
+      await svc.dispose();
+
+      expect(svc.health()).toEqual({ status: "degraded", detail: "bus subscriptions not established" });
+    });
+  });
 });

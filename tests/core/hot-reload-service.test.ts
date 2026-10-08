@@ -360,6 +360,7 @@ describe("HotReloadService", () => {
 
       const svc = new HookService();
       await svc.init(ctx as any);
+      expect(svc.health().status).toBe("healthy");
 
       // role-auto has auto_activate
       expect(hookState.roleAutoActivateMap.has("role-auto")).toBe(true);

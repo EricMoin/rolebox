@@ -1,4 +1,4 @@
-import type { PluginService } from "../service.ts";
+import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -275,5 +275,14 @@ export class HookService implements PluginService {
       },
     } satisfies Hooks;
     return handlers;
+  }
+
+  health(): ServiceHealth {
+    // opencode drives this service only through the stable handlers wrapper
+    // (getHandlers()), so an empty wrapper means the whole hook surface is inert.
+    if (!this.deps || Object.keys(this.handlersWrapper).length === 0) {
+      return { status: "unhealthy", detail: "hook handlers not assembled" };
+    }
+    return { status: "healthy" };
   }
 }
