@@ -58,6 +58,7 @@ describe("Pi graph worker boundary", () => {
     if (system.id === "win32") {
       writeFileSync(binary, [
         "@echo off",
+        'set "ARGV0=%~f0"',
         ":scan",
         'if "%~1"=="" goto record',
         'if "%~1"=="--append-system-prompt" type "%~2" > "%PI_SPAWN_RECORD%.prompt"',
@@ -65,7 +66,7 @@ describe("Pi graph worker boundary", () => {
         "goto scan",
         ":record",
         "(",
-        "echo argv0=%0",
+        "echo argv0=%ARGV0%",
         "set ROLEBOX_GRAPH_WORKER_",
         "echo record-complete",
         ') > "%PI_SPAWN_RECORD%.tmp"',
