@@ -87,7 +87,7 @@
  */
 
 import { createSubLogger } from "../../../logger.ts";
-import type { Logger, ILogObj } from "tslog";
+import type { Logger, ILogObj } from "../../../logger.ts";
 import { splitModel } from "../../model-ref.ts";
 import type { IAgentRegistrar } from "../../ports/agent-registrar.ts";
 import type { AgentDefinition } from "../../types.ts";

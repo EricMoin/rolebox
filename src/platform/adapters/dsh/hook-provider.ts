@@ -47,8 +47,8 @@
  * @module
  */
 
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../../../logger.ts";
+import type { ILogObj } from "../../../logger.ts";
 import type { Events } from "@deepseek-ai/cordis";
 // Type-only service imports: their `declare module "@deepseek-ai/cordis"` augmentations add
 // `tools/*` and `session/event` to `Events`, which types the mapping table in `wire()`.

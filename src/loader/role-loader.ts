@@ -18,7 +18,7 @@ import { resolveModel } from "../resolver/model-resolver.ts";
 import type { RoleConfig, SubAgentConfig, DispatchRoleConfig, GraphRoleConfig } from "../types.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
-import type { Logger, ILogObj } from "tslog";
+import type { Logger, ILogObj } from "../logger.ts";
 import {
   resolveSubagentEntry,
   buildSubAgentFields,

@@ -16,7 +16,7 @@ import { resolveModel } from "../resolver/model-resolver.ts";
 import type { SubAgentConfig } from "../types.ts";
 import { ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
-import type { Logger, ILogObj } from "tslog";
+import type { Logger, ILogObj } from "../logger.ts";
 import { validateRoleId } from "./role-loader.ts";
 
 let log: Logger<ILogObj> = createSubLogger("role-loader");

@@ -30,8 +30,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createSubLogger } from "../../../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../../../logger.ts";
+import type { ILogObj } from "../../../logger.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type {
   CanonicalEventType,

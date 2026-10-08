@@ -25,8 +25,7 @@
 import { describe, it, expect, mock } from "bun:test";
 import { PiNotificationSessionClient } from "../src/platform/adapters/pi/notification-session.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { ILogObj, Logger } from "../src/logger.ts";
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 

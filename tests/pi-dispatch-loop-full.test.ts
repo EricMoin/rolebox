@@ -24,8 +24,7 @@ import { DispatchAdapter, type IDispatchAdapter } from "../src/loop/dispatch-ada
 import { LOOP_PROGRESS_MARKER, LOOP_STATE_SCHEMA_VERSION } from "../src/loop/constants.ts";
 import type { LoopState, LoopPhase, LoopMode } from "../src/loop/types.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { ILogObj, Logger } from "../src/logger.ts";
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Helpers

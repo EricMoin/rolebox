@@ -25,8 +25,27 @@ import {
   listStateFiles,
   listNDJSONFiles,
 } from "../cli/commands/monitor/monitor-reader-utils.ts";
+import { createLogger } from "../log/index.ts";
 import { stateDirFor } from "../utils/state-paths.ts";
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
+
+// ── Diagnostics ────────────────────────────────────────────────────────────
+
+/**
+ * The TUI bridge's logging channel. What this module records is a DEGRADED
+ * CAPABILITY — a notification that did not go out, a host subscription that is
+ * not available — never user-visible output: the event buffer is the UI, and
+ * this channel is the diagnostic beside it. The kernel gates the records
+ * (console at "warn" and above by default) and writes its file and memory
+ * destinations like every other channel.
+ */
+const log = createLogger("tui");
+
+/** The reason a failed call states: the error's message, never a payload or a stack. */
+function describeFailure(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return typeof err === "string" ? err : String(err);
+}
 
 // ── Event types ────────────────────────────────────────────────────────────
 
@@ -631,8 +650,16 @@ export function createEventBridge(
         sound: { name: "error" },
       });
     } catch (err) {
-      // Attention API call failed — silent (TUI may not support it in headless mode)
-      console.warn("[rolebox-tui] api.attention.notify() failed:", err);
+      // The TUI may not support attention notifications in headless mode. The
+      // failed dispatch itself is already in the event buffer; this records that
+      // nobody was notified of it.
+      log.warn("the attention notification call failed, so the operator was not notified of this dispatch failure", {
+        capability: "attention.notify",
+        agent: evt.agent,
+        taskId: evt.taskId,
+        status: evt.status,
+        reason: describeFailure(err),
+      });
     }
   }
 
@@ -674,8 +701,12 @@ export function createEventBridge(
     });
     opencodeCleanups.push(unsubStatus);
   } catch (err) {
-    // api.event subscription not available in all environments — non-fatal
-    console.warn('[rolebox-tui] api.event.on("session.status") failed:', err);
+    // An api.event subscription is not available in every environment; the
+    // bridge keeps polling, but live status updates are off.
+    log.warn("the TUI could not subscribe to session.status events, so live status updates are off", {
+      capability: "event.on(session.status)",
+      reason: describeFailure(err),
+    });
   }
 
   try {
@@ -693,8 +724,11 @@ export function createEventBridge(
     });
     opencodeCleanups.push(unsubError);
   } catch (err) {
-    // Silent
-    console.warn('[rolebox-tui] api.event.on("session.error") failed:', err);
+    // As above: the bridge keeps polling, but live error events are off.
+    log.warn("the TUI could not subscribe to session.error events, so live error events are off", {
+      capability: "event.on(session.error)",
+      reason: describeFailure(err),
+    });
   }
 
   // ── Start fast-poll ──

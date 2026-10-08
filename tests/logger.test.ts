@@ -1,253 +1,456 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+/**
+ * THE COMPATIBILITY SHELL, ON THE PLATFORM PIPELINE.
+ *
+ * src/logger.ts is what ~170 modules import; it used to be tslog and is now a
+ * thin translation layer over src/log/**. This suite pins that contract, not
+ * tslog's: the module surface the call sites use, the level helpers (including
+ * the fifth level, `fatal`), the channel a logger records on and the file it
+ * writes, the transport adapter the capture tests rely on, the legacy single
+ * file (ROLEBOX_LOG_FILE), the workspace mapping of configureLogDirectory, and
+ * the flat record that replaces tslog's `{"0":…,"1":…,"_meta":{…}}` shape.
+ *
+ * WHAT IT DELIBERATELY DOES NOT PIN: `_meta`, `parentNames`, a numeric level
+ * ladder, per-sub-logger transports, the stderr warning for an invalid level and
+ * the two helpers that answered the level ladder and the old transport's file
+ * (`parseLogLevel`, `resolveLogFilePath`). Those were tslog behaviours and they
+ * are gone; the cases below pin what replaced them.
+ *
+ * Every case runs against a temporary ROLEBOX_LOG_DIR (tests/helpers/log.ts), so
+ * no case writes into the workspace's own log directory.
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { Logger } from "tslog";
-import type { ILogObj, ILogObjMeta, IMeta } from "tslog";
+import { join } from "node:path";
+
 import {
-  parseLogLevel,
-  resolveLogFilePath,
+  __resetForTest,
+  configureLogDirectory,
   createSubLogger,
   formatError,
   getLogFilePath,
   getRootLogger,
   rootLogger,
-  __resetForTest,
-} from "../src/logger.js";
+} from "../src/logger.ts";
+import { beginLogTest, captureConsole, endLogTest, setLogEnv } from "./helpers/log.ts";
 
-// What attachTransport hands the callback: the tslog metadata object plus the
-// positional log arguments. Spelled explicitly because ILogObjMeta's string
-// index signature types every numeric argument slot as IMeta, while at runtime
-// those slots hold the raw arguments.
-type CapturedEntry = ILogObjMeta & { [index: number]: unknown };
+let state: { env: Record<string, string | undefined>; dir: string };
 
-function captureTransport(logger: Logger<ILogObj>): CapturedEntry[] {
-  const entries: CapturedEntry[] = [];
-  logger.attachTransport((logObj) => {
-    entries.push(logObj);
-  });
-  return entries;
+beforeEach(() => {
+  state = beginLogTest();
+});
+
+afterEach(() => {
+  endLogTest(state);
+});
+
+/** The parsed JSON lines a file holds right now. */
+function lines(path: string): Array<Record<string, unknown>> {
+  return readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** The levels a channel's file recorded, in order. */
+function levels(channel: string): unknown[] {
+  return lines(join(state.dir, channel.replace(/[^A-Za-z0-9]/g, "-") + ".log")).map((record) => record.level);
 }
 
-// ── Level filtering ──────────────────────────────────────────
+// ── Channels ─────────────────────────────────────────────────────────────────
 
-describe("level filtering", () => {
-  it("only delivers messages at or above minLevel", () => {
-    const logger = new Logger<ILogObj>({ type: "hidden", name: "level-test", minLevel: 4 });
-    const entries = captureTransport(logger);
+describe("channel loggers", () => {
+  it("records on the channel createSubLogger was given, colons and all", () => {
+    createSubLogger("tui:events").warn("attention failed");
 
-    logger.silly("s");
-    logger.trace("t");
-    logger.debug("d");
-    logger.info("i");
-    logger.warn("w");
-    logger.error("e");
-    logger.fatal("f");
-
-    const messages = entries.map((e) => e[0]);
-    expect(messages).toEqual(["w", "e", "f"]);
+    const file = join(state.dir, "tui-events.log");
+    expect(existsSync(file)).toBe(true);
+    const [record] = lines(file);
+    expect(record.channel).toBe("tui:events");
+    expect(record.level).toBe("warn");
+    expect(record.message).toBe("attention failed");
   });
 
-  it("defaults to info level (3) when no env is set", () => {
-    const logger = new Logger<ILogObj>({ type: "hidden", name: "default-test", minLevel: 3 });
-    const entries = captureTransport(logger);
+  it("keeps the channel name verbatim in the record, not just in the file name", () => {
+    createSubLogger("graph:host").info("sweep finished");
 
-    logger.debug("d");
-    logger.info("i");
-    logger.warn("w");
+    expect(lines(join(state.dir, "graph-host.log"))[0].channel).toBe("graph:host");
+  });
 
-    const messages = entries.map((e) => e[0]);
-    expect(messages).toEqual(["i", "w"]);
+  it("root-logger and createSubLogger write to their own channel's file", () => {
+    getRootLogger().warn("from the root");
+    createSubLogger("dispatch").warn("from a sub-logger");
+
+    expect(lines(join(state.dir, "rolebox.log")).map((record) => record.message)).toEqual(["from the root"]);
+    expect(lines(join(state.dir, "dispatch.log")).map((record) => record.message)).toEqual(["from a sub-logger"]);
+  });
+
+  it("getRootLogger and rootLogger are the same logger on the root channel", () => {
+    expect(rootLogger).toBe(getRootLogger());
+    rootLogger.info("through the alias");
+
+    expect(lines(join(state.dir, "rolebox.log"))[0].channel).toBe("rolebox");
+  });
+
+  it("getSubLogger stays on the parent's channel unless a name is given", () => {
+    const parent = createSubLogger("parent");
+    parent.getSubLogger().info("anonymous child");
+    parent.getSubLogger({ name: "child:one" }).info("named child");
+
+    expect(lines(join(state.dir, "parent.log")).map((record) => record.message)).toEqual(["anonymous child"]);
+    expect(lines(join(state.dir, "child-one.log")).map((record) => record.message)).toEqual(["named child"]);
+  });
+
+  it("falls back to the root channel for an unusable name", () => {
+    createSubLogger("").info("no name at all");
+
+    expect(lines(join(state.dir, "rolebox.log"))[0].channel).toBe("rolebox");
   });
 });
 
-// ── Async file transport ─────────────────────────────────────
+// ── Levels ───────────────────────────────────────────────────────────────────
 
-describe("async file transport", () => {
-  let tmpDir: string;
-  const origLogFile = process.env.ROLEBOX_LOG_FILE;
-  const origLogLevel = process.env.ROLEBOX_LOG_LEVEL;
-  const origMaxBytes = process.env.ROLEBOX_LOG_MAX_BYTES;
+describe("level helpers", () => {
+  it("covers debug/info/warn/error/fatal and drops what is below the global level", () => {
+    setLogEnv("ROLEBOX_LOG_LEVEL", "info");
+    setLogEnv("ROLEBOX_LOG_CONSOLE_LEVEL", "fatal");
+    const log = createSubLogger("levels");
 
-  beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "rolebox-log-test-"));
-    __resetForTest();
+    log.debug("dropped");
+    log.info("kept");
+    log.warn("kept");
+    log.error("kept");
+    log.fatal("kept");
+
+    expect(levels("levels")).toEqual(["info", "warn", "error", "fatal"]);
   });
 
-  afterEach(() => {
-    __resetForTest();
-    rmSync(tmpDir, { recursive: true, force: true });
-    if (origLogFile) process.env.ROLEBOX_LOG_FILE = origLogFile;
-    else delete process.env.ROLEBOX_LOG_FILE;
-    if (origLogLevel) process.env.ROLEBOX_LOG_LEVEL = origLogLevel;
-    else delete process.env.ROLEBOX_LOG_LEVEL;
-    if (origMaxBytes) process.env.ROLEBOX_LOG_MAX_BYTES = origMaxBytes;
-    else delete process.env.ROLEBOX_LOG_MAX_BYTES;
-  });
-
-  it("writes JSON log entries to file via async stream", async () => {
-    const logFile = join(tmpDir, "app.log");
-    process.env.ROLEBOX_LOG_FILE = logFile;
-    process.env.ROLEBOX_LOG_LEVEL = "info";
-
-    const logger = getRootLogger();
-    logger.info("hello async transport");
-    logger.warn("warning message");
-
-    // Allow async stream to flush
-    await wait(100);
-
-    const content = readFileSync(logFile, "utf-8");
-    const lines = content.trim().split("\n");
-    expect(lines.length).toBe(2);
-
-    const first = JSON.parse(lines[0]!);
-    expect(first[0]).toBe("hello async transport");
-    expect(first._meta.name).toBe("rolebox");
-    expect(first._meta.logLevelName).toBe("INFO");
-    expect(first.pid).toBe(process.pid);
-
-    const second = JSON.parse(lines[1]!);
-    expect(second[0]).toBe("warning message");
-    expect(second._meta.logLevelName).toBe("WARN");
-  });
-
-  it("does not write entries below minLevel", async () => {
-    const logFile = join(tmpDir, "filtered.log");
-    process.env.ROLEBOX_LOG_FILE = logFile;
-    process.env.ROLEBOX_LOG_LEVEL = "warn";
-
-    const logger = getRootLogger();
-    logger.info("should be filtered");
-    logger.warn("should appear");
-
-    await wait(100);
-
-    const content = readFileSync(logFile, "utf-8");
-    const lines = content.trim().split("\n");
-    expect(lines.length).toBe(1);
-    expect(lines[0]).toContain("should appear");
-  });
-});
-
-// ── Log rotation ─────────────────────────────────────────────
-
-describe("log rotation", () => {
-  let tmpDir: string;
-  const origLogFile = process.env.ROLEBOX_LOG_FILE;
-  const origLogLevel = process.env.ROLEBOX_LOG_LEVEL;
-  const origMaxBytes = process.env.ROLEBOX_LOG_MAX_BYTES;
-
-  beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "rolebox-rotation-test-"));
-    __resetForTest();
-  });
-
-  afterEach(() => {
-    __resetForTest();
-    rmSync(tmpDir, { recursive: true, force: true });
-    if (origLogFile) process.env.ROLEBOX_LOG_FILE = origLogFile;
-    else delete process.env.ROLEBOX_LOG_FILE;
-    if (origLogLevel) process.env.ROLEBOX_LOG_LEVEL = origLogLevel;
-    else delete process.env.ROLEBOX_LOG_LEVEL;
-    if (origMaxBytes) process.env.ROLEBOX_LOG_MAX_BYTES = origMaxBytes;
-    else delete process.env.ROLEBOX_LOG_MAX_BYTES;
-  });
-
-  it("rotates log file when size exceeds max bytes", async () => {
-    const logFile = join(tmpDir, "rotatable.log");
-    process.env.ROLEBOX_LOG_FILE = logFile;
-    process.env.ROLEBOX_LOG_LEVEL = "info";
-    process.env.ROLEBOX_LOG_MAX_BYTES = "200";
-
-    const logger = getRootLogger();
-
-    for (let i = 0; i < 30; i++) {
-      logger.info(`rotation test entry ${i} with padding ${"x".repeat(100)}`);
-      // Small yield to let the stream flush between writes
-      if (i % 5 === 4) await wait(50);
+  it("records fatal as its own level and routes it to console.error", () => {
+    setLogEnv("ROLEBOX_LOG_CONSOLE_LEVEL", "warn");
+    const captured = captureConsole();
+    try {
+      const log = createSubLogger("loud");
+      log.warn("a warning");
+      log.fatal("the process cannot go on");
+    } finally {
+      captured.restore();
     }
 
-    await wait(300);
-
-    expect(existsSync(logFile)).toBe(true);
-    const mainContent = readFileSync(logFile, "utf-8");
-    expect(mainContent.length).toBeGreaterThan(0);
-
-    expect(existsSync(`${logFile}.1`)).toBe(true);
+    // THE DISCLOSED BEHAVIOUR CHANGE: warnings are visible on the console now.
+    expect(captured.warn).toHaveLength(1);
+    expect(captured.warn[0]).toBe("[warn] loud — a warning");
+    expect(captured.error).toHaveLength(1);
+    expect(captured.error[0]).toBe("[fatal] loud — the process cannot go on");
+    expect(levels("loud")).toEqual(["warn", "fatal"]);
   });
 
-  it("pre-existing oversized file triggers rotation on init", async () => {
-    const logFile = join(tmpDir, "preexisting.log");
-    process.env.ROLEBOX_LOG_FILE = logFile;
-    process.env.ROLEBOX_LOG_LEVEL = "info";
-    process.env.ROLEBOX_LOG_MAX_BYTES = "100";
+  it("keeps info and debug off the console at the default console gate", () => {
+    const captured = captureConsole();
+    try {
+      const log = createSubLogger("quiet");
+      log.debug("quiet");
+      log.info("quiet");
+    } finally {
+      captured.restore();
+    }
 
-    // Create oversized file before logger init
-    writeFileSync(logFile, "x".repeat(200));
+    expect(captured.debug).toHaveLength(0);
+    expect(captured.warn).toHaveLength(0);
+    expect(captured.error).toHaveLength(0);
+    // ...while the file still takes the info record. Debug is below the
+    // default global level, so it is dropped before any sink sees it.
+    expect(levels("quiet")).toEqual(["info"]);
+  });
 
-    getRootLogger();
+  it("maps silly and trace onto debug and records the alias in the fields", () => {
+    setLogEnv("ROLEBOX_LOG_LEVEL", "debug");
+    const log = createSubLogger("aliases");
 
-    await wait(50);
+    log.silly("the quietest message");
+    log.trace("the second quietest");
 
-    // Original content should be rotated
-    expect(existsSync(`${logFile}.1`)).toBe(true);
-    const rotatedContent = readFileSync(`${logFile}.1`, "utf-8");
-    expect(rotatedContent).toBe("x".repeat(200));
+    const records = lines(join(state.dir, "aliases.log"));
+    expect(records.map((record) => record.level)).toEqual(["debug", "debug"]);
+    expect(records.map((record) => record.fields)).toEqual([{ alias: "silly" }, { alias: "trace" }]);
+  });
+
+  it("gates a sub-logger with a numeric minLevel before the kernel's own gate", () => {
+    setLogEnv("ROLEBOX_LOG_LEVEL", "debug");
+    const log = createSubLogger("gated", 5 /* error */);
+
+    log.debug("dropped by the logger's own gate");
+    log.warn("dropped too");
+    log.error("kept");
+    log.fatal("kept");
+
+    expect(levels("gated")).toEqual(["error", "fatal"]);
+  });
+
+  it("gates a sub-logger with a level name and lets a child inherit the parent's gate", () => {
+    setLogEnv("ROLEBOX_LOG_LEVEL", "debug");
+    const parent = createSubLogger("inherited", "warn");
+    parent.info("dropped");
+    parent.getSubLogger({ name: "inherited:child" }).info("dropped by the inherited gate");
+    parent.getSubLogger({ name: "inherited:open", minLevel: "debug" }).debug("kept");
+
+    // A dropped record never reaches a sink, so neither file is even created.
+    expect(existsSync(join(state.dir, "inherited.log"))).toBe(false);
+    expect(existsSync(join(state.dir, "inherited-child.log"))).toBe(false);
+    expect(levels("inherited-open")).toEqual(["debug"]);
+  });
+
+  it("renders a non-string message instead of dropping the record", () => {
+    const log = createSubLogger("messages");
+    log.warn(new Error("boom"));
+    log.warn({ code: 7 });
+    log.warn(42);
+
+    expect(lines(join(state.dir, "messages.log")).map((record) => record.message)).toEqual([
+      "boom",
+      '{"code":7}',
+      "42",
+    ]);
   });
 });
 
-// ── Sub-logger naming ────────────────────────────────────────
+// ── Argument adaptation ──────────────────────────────────────────────────────
 
-describe("sub-logger naming", () => {
-  it("creates sub-logger with correct name in metadata", () => {
-    const parent = new Logger<ILogObj>({ type: "hidden", name: "Parent" });
-    const entries = captureTransport(parent);
+describe("argument adaptation", () => {
+  it("keeps the field bag, drops what the record may not carry", () => {
+    createSubLogger("fields").warn("mixed bag", {
+      count: 3,
+      ok: true,
+      names: ["a", "b"],
+      missing: undefined,
+      nested: { deep: true },
+      objects: [{ deep: true }],
+    });
 
-    const child = parent.getSubLogger({ name: "Child" });
-    const grandchild = child.getSubLogger({ name: "Grandchild" });
-
-    child.info("child log");
-    grandchild.warn("grandchild log");
-
-    expect(entries.length).toBe(2);
-    expect(entries[0]!._meta.name).toBe("Child");
-    expect(entries[0]!._meta.logLevelName).toBe("INFO");
-    expect(entries[1]!._meta.name).toBe("Grandchild");
-    expect(entries[1]!._meta.logLevelName).toBe("WARN");
+    expect(lines(join(state.dir, "fields.log"))[0].fields).toEqual({
+      count: 3,
+      ok: true,
+      names: ["a", "b"],
+    });
   });
 
-  it("createSubLogger uses the root logger", () => {
-    const sub = createSubLogger("TestSub");
-    const entries = captureTransport(sub);
+  it("turns a bare error argument into its reason", () => {
+    createSubLogger("errors").warn("save failed", new Error("disk full"));
 
-    sub.info("via sub");
-
-    expect(entries.length).toBe(1);
-    expect(entries[0]!._meta.name).toBe("TestSub");
-    expect(entries[0]!._meta.logLevelName).toBe("INFO");
+    expect(lines(join(state.dir, "errors.log"))[0].fields).toEqual({ error: "disk full" });
   });
 
-  it("createSubLogger with level override filters correctly", () => {
-    const sub = createSubLogger("LevelSub", 5);
+  it("keeps an error-shaped value's message, and a scalar under its position", () => {
+    createSubLogger("shapes").warn("saveSync failed for directory", "/tmp/x", new Error("read-only"));
 
-    const parentLogger = new Logger<ILogObj>({ type: "hidden", name: "ParentLogger" });
-    const parentEntries = captureTransport(parentLogger);
-    const childLogger = parentLogger.getSubLogger({ name: "ChildLogger", minLevel: 5 });
+    expect(lines(join(state.dir, "shapes.log"))[0].fields).toEqual({ arg1: "/tmp/x", error: "read-only" });
+  });
 
-    childLogger.error("this");
-    childLogger.warn("not this");
+  it("flattens a formatError result the call site passed as the field bag", () => {
+    const err = new TypeError("something broke");
+    createSubLogger("formatted").error("boom", formatError(err));
 
-    expect(parentEntries.length).toBe(1);
-    expect(parentEntries[0]![0]).toBe("this");
+    const [record] = lines(join(state.dir, "formatted.log"));
+    expect(record.message).toBe("boom");
+    const fields = record.fields as Record<string, unknown>;
+    expect(fields.name).toBe("TypeError");
+    expect(fields.message).toBe("something broke");
+    expect(String(fields.stack)).toContain("something broke");
   });
 });
 
-// ── Error formatting ─────────────────────────────────────────
+// ── The transport adapter ────────────────────────────────────────────────────
+
+describe("attachTransport", () => {
+  it("hands the transport the message at 0 and the fields at 1", () => {
+    const entries: Array<Record<string, unknown>> = [];
+    getRootLogger().attachTransport((entry) => entries.push(entry as Record<string, unknown>));
+
+    createSubLogger("transport").warn("delivered", { reason: "why" });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]["0"]).toBe("delivered");
+    expect(entries[0]["1"]).toEqual({ reason: "why" });
+  });
+
+  it("adds the level and the channel in the open, with no legacy metadata object", () => {
+    const entries: Array<Record<string, unknown>> = [];
+    rootLogger.attachTransport((entry) => entries.push(entry as Record<string, unknown>));
+
+    createSubLogger("transport:shape").error("failed");
+
+    expect(Object.keys(entries[0])).toEqual(["0", "1", "level", "channel"]);
+    expect(entries[0].level).toBe("error");
+    expect(entries[0].channel).toBe("transport:shape");
+    expect(entries[0]._meta).toBeUndefined();
+  });
+
+  it("sees every sub-logger, including one built before the attach", () => {
+    const early = createSubLogger("early");
+    const entries: Array<Record<string, unknown>> = [];
+    getRootLogger().attachTransport((entry) => entries.push(entry as Record<string, unknown>));
+
+    early.warn("built before");
+    createSubLogger("late").warn("built after");
+
+    expect(entries.map((entry) => entry["0"])).toEqual(["built before", "built after"]);
+  });
+
+  it("contains a transport that throws and keeps the caller untouched", () => {
+    let called = false;
+    getRootLogger().attachTransport(() => {
+      called = true;
+      throw new Error("transport explosion");
+    });
+
+    expect(() => createSubLogger("boom").warn("safe")).not.toThrow();
+    expect(called).toBe(true);
+  });
+
+  it("stops delivering to a transport attached before __resetForTest", () => {
+    // The reset clears the kernel's memory buffer, subscribers included. The
+    // supported order is reset first, attach after — which is what the capture
+    // suites do.
+    const entries: Array<Record<string, unknown>> = [];
+    getRootLogger().attachTransport((entry) => entries.push(entry as Record<string, unknown>));
+    createSubLogger("before-reset").warn("seen");
+
+    __resetForTest();
+    createSubLogger("after-reset").warn("not seen");
+
+    expect(entries.map((entry) => entry["0"])).toEqual(["seen"]);
+  });
+});
+
+// ── File layout ──────────────────────────────────────────────────────────────
+
+describe("file layout", () => {
+  it("writes one flat JSON line per record, one file per channel, in the documented key order", () => {
+    createSubLogger("flat").warn("the workspace store could not be read", { reason: "unreadable" });
+
+    const [record] = lines(join(state.dir, "flat.log"));
+    expect(Object.keys(record)).toEqual(["time", "level", "channel", "message", "scope", "fields", "process"]);
+    expect(record["0"]).toBeUndefined();
+    expect(record._meta).toBeUndefined();
+    expect(record.fields).toEqual({ reason: "unreadable" });
+    expect(record.scope).toEqual({});
+    expect(record.process).toEqual({ pid: process.pid, role: "host" });
+  });
+
+  it("puts every channel into the one file ROLEBOX_LOG_FILE names", () => {
+    setLogEnv("ROLEBOX_LOG_FILE", join(state.dir, "legacy.log"));
+    __resetForTest();
+
+    createSubLogger("alpha").info("alpha line");
+    createSubLogger("beta").warn("beta line");
+    getRootLogger().fatal("root line");
+
+    const records = lines(join(state.dir, "legacy.log"));
+    expect(records.map((record) => record.channel)).toEqual(["alpha", "beta", "rolebox"]);
+    expect(records.map((record) => record.level)).toEqual(["info", "warn", "fatal"]);
+    expect(existsSync(join(state.dir, "alpha.log"))).toBe(false);
+    expect(getLogFilePath()).toBe(join(state.dir, "legacy.log"));
+    expect(getLogFilePath("any:channel")).toBe(join(state.dir, "legacy.log"));
+  });
+
+  it("beats ROLEBOX_LOG_DIR, so the legacy contract wins over the new layout", () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "rolebox-legacy-dir-"));
+    try {
+      setLogEnv("ROLEBOX_LOG_DIR", elsewhere);
+      setLogEnv("ROLEBOX_LOG_FILE", join(state.dir, "single.log"));
+      __resetForTest();
+
+      createSubLogger("alpha").warn("here");
+
+      expect(lines(join(state.dir, "single.log"))).toHaveLength(1);
+      expect(existsSync(join(elsewhere, "alpha.log"))).toBe(false);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("rotates the legacy file at the byte limit and keeps the retained copies", () => {
+    const file = join(state.dir, "rotating.log");
+    setLogEnv("ROLEBOX_LOG_FILE", file);
+    setLogEnv("ROLEBOX_LOG_MAX_BYTES", "120");
+    setLogEnv("ROLEBOX_LOG_RETAIN", "2");
+    __resetForTest();
+
+    const log = createSubLogger("rotate");
+    for (let index = 0; index < 6; index++) log.info("entry " + index + " " + "x".repeat(60));
+
+    expect(existsSync(file)).toBe(true);
+    expect(existsSync(file + ".1")).toBe(true);
+    expect(existsSync(file + ".2")).toBe(true);
+    expect(existsSync(file + ".3")).toBe(false);
+    expect(readFileSync(file, "utf8")).toContain('"entry 5');
+  });
+
+  it("creates the configured directory lazily, on the first record", () => {
+    const nested = join(state.dir, "nested", "logs");
+    setLogEnv("ROLEBOX_LOG_DIR", nested);
+    __resetForTest();
+
+    createSubLogger("lazy").info("first");
+    createSubLogger("lazy").info("second");
+
+    expect(lines(join(nested, "lazy.log")).map((record) => record.message)).toEqual(["first", "second"]);
+  });
+});
+
+// ── Path resolution ──────────────────────────────────────────────────────────
+
+describe("path resolution", () => {
+  it("answers the channel's file, and the root channel's when no channel is named", () => {
+    expect(getLogFilePath("graph:host")).toBe(join(state.dir, "graph-host.log"));
+    expect(getLogFilePath(":::")).toBe(join(state.dir, "rolebox.log"));
+    expect(getLogFilePath()).toBe(join(state.dir, "rolebox.log"));
+  });
+
+  it("reads ROLEBOX_LOG_DIR after a reset", () => {
+    const other = mkdtempSync(join(tmpdir(), "rolebox-log-other-"));
+    try {
+      setLogEnv("ROLEBOX_LOG_DIR", other);
+      __resetForTest();
+
+      expect(getLogFilePath()).toBe(join(other, "rolebox.log"));
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── configureLogDirectory ────────────────────────────────────────────────────
+
+describe("configureLogDirectory", () => {
+  it("maps a workspace root to the directory the legacy API meant", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "rolebox-workspace-"));
+    try {
+      configureLogDirectory(workspace);
+      createSubLogger("workspace").warn("inside the workspace");
+
+      const expected = join(workspace, ".rolebox", "logs", "workspace.log");
+      expect(getLogFilePath("workspace")).toBe(expected);
+      expect(lines(expected)).toHaveLength(1);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards a path that already is the log directory unchanged", () => {
+    const already = join(state.dir, "already", ".rolebox", "logs");
+    configureLogDirectory(already);
+
+    expect(getLogFilePath("dispatch")).toBe(join(already, "dispatch.log"));
+  });
+
+  it("never throws on an unusable argument", () => {
+    expect(() => configureLogDirectory("")).not.toThrow();
+    expect(() => configureLogDirectory(undefined as unknown as string)).not.toThrow();
+  });
+});
+
+// ── Error formatting ─────────────────────────────────────────────────────────
 
 describe("formatError", () => {
   it("extracts message, stack, and name from Error", () => {
@@ -295,224 +498,54 @@ describe("formatError", () => {
   });
 });
 
-// ── ROLEBOX_LOG_LEVEL parsing ────────────────────────────────
+// ── Reset ────────────────────────────────────────────────────────────────────
 
-describe("parseLogLevel", () => {
-  it("returns 3 (info) when env var is unset", () => {
-    delete process.env.ROLEBOX_LOG_LEVEL;
-    expect(parseLogLevel()).toBe(3);
-  });
+describe("__resetForTest", () => {
+  it("re-reads the environment on the next record", () => {
+    const first = join(state.dir, "first.log");
+    const second = join(state.dir, "second.log");
 
-  it("returns 3 (info) when env var is empty string", () => {
-    process.env.ROLEBOX_LOG_LEVEL = "";
-    expect(parseLogLevel()).toBe(3);
-  });
-
-  it("parses known levels case-insensitively", () => {
-    expect(parseLogLevel("silly")).toBe(0);
-    expect(parseLogLevel("TRACE")).toBe(1);
-    expect(parseLogLevel("Debug")).toBe(2);
-    expect(parseLogLevel("info")).toBe(3);
-    expect(parseLogLevel("WARN")).toBe(4);
-    expect(parseLogLevel("Error")).toBe(5);
-    expect(parseLogLevel("FATAL")).toBe(6);
-  });
-
-  it("trims whitespace from level string", () => {
-    expect(parseLogLevel("  warn  ")).toBe(4);
-  });
-
-  it("falls back to info and warns on invalid value via raw arg", () => {
-    const stderrMock = mock((_s: string) => {});
-    const orig = process.stderr.write;
-    process.stderr.write = stderrMock as unknown as typeof process.stderr.write;
-
-    const level = parseLogLevel("invalid");
-
-    process.stderr.write = orig;
-
-    expect(level).toBe(3);
-    expect(stderrMock).toHaveBeenCalledTimes(1);
-    const callArg = stderrMock.mock.calls[0]![0] as string;
-    expect(callArg).toContain("Invalid ROLEBOX_LOG_LEVEL='invalid'");
-    expect(callArg).toContain("falling back to 'info'");
-  });
-
-  it("falls back to info and warns on invalid env var", () => {
-    process.env.ROLEBOX_LOG_LEVEL = "not-a-real-level";
-    const stderrMock = mock((_s: string) => {});
-    const orig = process.stderr.write;
-    process.stderr.write = stderrMock as unknown as typeof process.stderr.write;
-
-    const level = parseLogLevel();
-
-    process.stderr.write = orig;
-
-    expect(level).toBe(3);
-    expect(stderrMock).toHaveBeenCalledTimes(1);
-    const callArg = stderrMock.mock.calls[0]![0] as string;
-    expect(callArg).toContain("not-a-real-level");
-  });
-});
-
-// ── Log file path resolution ─────────────────────────────────
-
-describe("resolveLogFilePath", () => {
-  const origLogFile = process.env.ROLEBOX_LOG_FILE;
-
-  afterEach(() => {
-    if (origLogFile) {
-      process.env.ROLEBOX_LOG_FILE = origLogFile;
-    } else {
-      delete process.env.ROLEBOX_LOG_FILE;
-    }
-  });
-
-  it("uses ROLEBOX_LOG_FILE env var when set to writable path", () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-path-test-"));
-    const logPath = join(tmpDir, "custom.log");
-    process.env.ROLEBOX_LOG_FILE = logPath;
-
-    const resolved = resolveLogFilePath();
-    expect(resolved).toBe(logPath);
-
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("falls back to config dir when env var is not set", () => {
-    delete process.env.ROLEBOX_LOG_FILE;
-    const resolved = resolveLogFilePath();
-    expect(resolved).not.toBeNull();
-  });
-
-  it("uses os.tmpdir() based fallback when config dir is unavailable", () => {
-    delete process.env.ROLEBOX_LOG_FILE;
-    const resolved = resolveLogFilePath();
-    expect(resolved).not.toBeNull();
-    expect(typeof resolved).toBe("string");
-  });
-
-  it("falls back when ROLEBOX_LOG_FILE points to unwritable location", () => {
-    // /dev/null does not exist on Windows, so the old hardcoded target was
-    // POSIX-only. To preserve real coverage on every platform we build an
-    // unwritable target cross-platform: a regular FILE used as a parent directory
-    // makes mkdirSync(dirname(...)) throw ENOTDIR on all OSes (the same mechanism
-    // as the old /dev/null trick — the parent is not a directory). No skip needed.
-    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-unwritable-"));
-    try {
-      const blocker = join(tmpDir, "blocker");
-      writeFileSync(blocker, "blocker");
-      const logPath = join(blocker, "nope", "subdir", "file.log");
-      process.env.ROLEBOX_LOG_FILE = logPath;
-      const resolved = resolveLogFilePath();
-      expect(resolved).not.toBe(logPath);
-      expect(resolved).not.toBeNull();
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-});
-
-// ── Transport safety ─────────────────────────────────────────
-
-describe("transport safety", () => {
-  it("wrapping transport body in try/catch prevents exception propagation", () => {
-    const logger = new Logger<ILogObj>({ type: "hidden", name: "safety-test" });
-    let caught = false;
-
-    logger.attachTransport(() => {
-      try {
-        throw new Error("transport explosion");
-      } catch {
-        caught = true;
-      }
-    });
-
-    expect(() => logger.info("safe")).not.toThrow();
-    expect(caught).toBe(true);
-  });
-});
-
-// ── Lazy initialization ──────────────────────────────────────
-
-describe("lazy initialization", () => {
-  const origLogFile = process.env.ROLEBOX_LOG_FILE;
-  const origLogLevel = process.env.ROLEBOX_LOG_LEVEL;
-
-  beforeEach(() => {
+    setLogEnv("ROLEBOX_LOG_FILE", first);
     __resetForTest();
-  });
+    expect(getLogFilePath()).toBe(first);
+    createSubLogger("rediscover").warn("into the first file");
 
-  afterEach(() => {
+    setLogEnv("ROLEBOX_LOG_FILE", second);
     __resetForTest();
-    if (origLogFile) process.env.ROLEBOX_LOG_FILE = origLogFile;
-    else delete process.env.ROLEBOX_LOG_FILE;
-    if (origLogLevel) process.env.ROLEBOX_LOG_LEVEL = origLogLevel;
-    else delete process.env.ROLEBOX_LOG_LEVEL;
+    expect(getLogFilePath()).toBe(second);
+    createSubLogger("rediscover").warn("into the second file");
+
+    expect(lines(first).map((record) => record.message)).toEqual(["into the first file"]);
+    expect(lines(second).map((record) => record.message)).toEqual(["into the second file"]);
   });
 
-  it("__resetForTest allows re-initialization with different env vars", async () => {
-    const logFile1 = join(mkdtempSync(join(tmpdir(), "rolebox-lazy-1-")), "first.log");
-    process.env.ROLEBOX_LOG_FILE = logFile1;
-    process.env.ROLEBOX_LOG_LEVEL = "info";
-
-    const path1 = getLogFilePath();
-    expect(path1).toBe(logFile1);
-
+  it("is re-entrant and leaves a working pipeline behind", () => {
+    __resetForTest();
     __resetForTest();
 
-    const logFile2 = join(mkdtempSync(join(tmpdir(), "rolebox-lazy-2-")), "second.log");
-    process.env.ROLEBOX_LOG_FILE = logFile2;
-
-    const path2 = getLogFilePath();
-    expect(path2).toBe(logFile2);
-    expect(path2).not.toBe(path1);
-  });
-
-  it("rootLogger proxy delegates to lazy-initialized instance", () => {
-    expect(rootLogger).toBeDefined();
-    expect(typeof rootLogger.info).toBe("function");
-  });
-
-  it("getRootLogger returns a Logger instance", () => {
-    const logger = getRootLogger();
-    expect(logger).toBeInstanceOf(Logger);
+    expect(() => createSubLogger("after-reset").warn("still works")).not.toThrow();
+    expect(lines(join(state.dir, "after-reset.log"))).toHaveLength(1);
   });
 });
 
-// ── Exported API surface ─────────────────────────────────────
+// ── Exported API surface ─────────────────────────────────────────────────────
 
 describe("exported API", () => {
-  it("exports getRootLogger as a function", () => {
+  it("exports the surface every call site imports", () => {
+    expect(typeof createSubLogger).toBe("function");
     expect(typeof getRootLogger).toBe("function");
-  });
-
-  it("exports rootLogger as a proxy", () => {
+    expect(typeof formatError).toBe("function");
+    expect(typeof configureLogDirectory).toBe("function");
+    expect(typeof getLogFilePath).toBe("function");
+    expect(typeof __resetForTest).toBe("function");
     expect(rootLogger).toBeDefined();
   });
 
-  it("exports createSubLogger as a function", () => {
-    expect(typeof createSubLogger).toBe("function");
-  });
-
-  it("exports formatError as a function", () => {
-    expect(typeof formatError).toBe("function");
-  });
-
-  it("exports getLogFilePath returning string or null", () => {
-    const path = getLogFilePath();
-    expect(path === null || typeof path === "string").toBe(true);
-  });
-
-  it("exports parseLogLevel as a function", () => {
-    expect(typeof parseLogLevel).toBe("function");
-  });
-
-  it("exports resolveLogFilePath as a function", () => {
-    expect(typeof resolveLogFilePath).toBe("function");
-  });
-
-  it("exports __resetForTest as a function", () => {
-    expect(typeof __resetForTest).toBe("function");
+  it("gives every logger the methods the call sites use", () => {
+    const log = createSubLogger("surface");
+    for (const method of ["debug", "info", "warn", "error", "fatal", "silly", "trace", "getSubLogger", "attachTransport"] as const) {
+      expect(typeof log[method]).toBe("function");
+    }
+    expect(typeof rootLogger.fatal).toBe("function");
   });
 });

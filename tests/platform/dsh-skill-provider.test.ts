@@ -55,7 +55,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Logger } from "tslog";
+import { getRootLogger } from "../../src/logger.ts";
 import {
   DshSkillProvider,
   ROLEBOX_SKILL_PROVIDER,
@@ -327,29 +327,25 @@ describe("DshSkillProvider (c) recursive subagent skills", () => {
 
 describe("DshSkillProvider (d) invalid skill-name grammar", () => {
   it("filters a bad name with a warning and does NOT abort the whole list()", async () => {
-    const warnings: unknown[][] = [];
-    const originalWarn = Logger.prototype.warn;
-    Logger.prototype.warn = ((...args: unknown[]) => {
-      warnings.push(args);
-    }) as unknown as typeof Logger.prototype.warn;
-    try {
-      const names = (await makeProvider().list({})).map((c) => c.name);
+    // CAPTURE THROUGH THE PIPELINE: a root transport sees every record the
+    // provider emits on its own channel — the message at "0", the fields at "1".
+    const entries: Array<Record<string, unknown>> = [];
+    getRootLogger().attachTransport((entry) => entries.push(entry as Record<string, unknown>));
 
-      // Rejected names are dropped...
-      expect(names).not.toContain("bad~name");
-      expect(names).not.toContain("bad--name");
-      // ...while the valid catalog still resolves (no catalog-wide abort).
-      expect(names).toContain("active-skill");
+    const names = (await makeProvider().list({})).map((c) => c.name);
 
-      // One warning per rejected name, carrying the offending name.
-      const warnedNames = warnings
-        .map((args) => (args[1] as { name?: string } | undefined)?.name)
-        .filter((name): name is string => typeof name === "string");
-      expect(warnedNames).toContain("bad~name");
-      expect(warnedNames).toContain("bad--name");
-    } finally {
-      Logger.prototype.warn = originalWarn;
-    }
+    // Rejected names are dropped...
+    expect(names).not.toContain("bad~name");
+    expect(names).not.toContain("bad--name");
+    // ...while the valid catalog still resolves (no catalog-wide abort).
+    expect(names).toContain("active-skill");
+
+    // One warning per rejected name, carrying the offending name.
+    const warnedNames = entries
+      .map((entry) => (entry["1"] as { name?: string } | undefined)?.name)
+      .filter((name): name is string => typeof name === "string");
+    expect(warnedNames).toContain("bad~name");
+    expect(warnedNames).toContain("bad--name");
   });
 });
 

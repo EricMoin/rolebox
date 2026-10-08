@@ -7,8 +7,8 @@
 
 import type { NotificationManager } from "./manager.ts";
 import { createSubLogger } from "../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../logger.ts";
+import type { ILogObj } from "../logger.ts";
 
 const log: Logger<ILogObj> = createSubLogger("NotificationHook");
 

@@ -24,8 +24,8 @@
 import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, basename, extname, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../../../logger.ts";
+import type { ILogObj } from "../../../logger.ts";
 import { createSubLogger } from "../../../logger.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type {

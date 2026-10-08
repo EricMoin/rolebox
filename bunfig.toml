@@ -1,10 +1,17 @@
 # Bun test configuration.
 #
-# Only `[test] preload` lives here. Bun 1.3.14 does NOT honor a `[test] timeout`
-# key (a 6s test still dies at "timed out after 5000ms"), so the per-test cap is
-# raised the one way this runtime does honor: a preload that calls
-# `setDefaultTimeout(...)` from `bun:test`. See
-# tests/helpers/test-timeout-preload.ts for the derivation of the value and
-# tests/helpers/test-timeout-preload.ts's header for why the cap exists at all.
+# Only `[test] preload` lives here.
+#
+# tests/helpers/test-timeout-preload.ts — Bun 1.3.14 does NOT honor a
+# `[test] timeout` key (a 6s test still dies at "timed out after 5000ms"), so the
+# per-test cap is raised the one way this runtime does honor: a preload that
+# calls `setDefaultTimeout(...)` from `bun:test`. See that file's header for the
+# derivation of the value and why the cap exists at all.
+#
+# tests/helpers/log-dir-preload.ts — points ROLEBOX_LOG_DIR at a per-process
+# directory under the OS temp directory, so a suite that logs during a test run
+# never writes into the workspace's own `.rolebox/logs/`. See that file's header
+# for the precedence rules (an explicit ROLEBOX_LOG_DIR, or ROLEBOX_LOG_FILE,
+# still wins).
 [test]
-preload = ["./tests/helpers/test-timeout-preload.ts"]
+preload = ["./tests/helpers/test-timeout-preload.ts", "./tests/helpers/log-dir-preload.ts"]

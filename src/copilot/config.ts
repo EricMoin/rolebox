@@ -9,8 +9,8 @@
 //   - field coercion where safe (string → boolean / number).
 
 import { createSubLogger } from "../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../logger.ts";
+import type { ILogObj } from "../logger.ts";
 import {
   asBoolean,
   asNumber,

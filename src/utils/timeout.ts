@@ -7,7 +7,7 @@
 //   1. `ROLEBOX_CLIENT_TIMEOUT_MS` environment variable
 //   2. The `DEFAULT_TIMEOUT_MS` constant (30s fallback)
 
-import type { Logger } from "tslog";
+import type { Logger } from "../logger.ts";
 
 /**
  * Default timeout for external client API calls (30 seconds).

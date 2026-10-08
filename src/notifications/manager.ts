@@ -6,8 +6,8 @@
 
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { createSubLogger } from "../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../logger.ts";
+import type { ILogObj } from "../logger.ts";
 import {
   NOTIFICATION_EVENT_TYPES,
   VALID_NOTIFICATION_EVENT_TYPES,

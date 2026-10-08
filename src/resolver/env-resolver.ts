@@ -7,8 +7,8 @@
  */
 
 import { createSubLogger } from "../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../logger.ts";
+import type { ILogObj } from "../logger.ts";
 
 const ENV_VAR_PATTERN = /(?<!\{env:)\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g;
 

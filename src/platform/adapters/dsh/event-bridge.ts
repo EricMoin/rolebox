@@ -32,8 +32,8 @@
  * @module
  */
 
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../../../logger.ts";
+import type { ILogObj } from "../../../logger.ts";
 import type { Events } from "@deepseek-ai/cordis";
 // Type-only service imports: each package ships a `declare module "@deepseek-ai/cordis"`
 // augmentation adding its own events to `Events`. Importing them (erased at runtime) is what

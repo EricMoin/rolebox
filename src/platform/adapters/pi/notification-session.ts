@@ -13,8 +13,8 @@
  * @module
  */
 
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../../../logger.ts";
+import type { ILogObj } from "../../../logger.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type { IEventBridge } from "../../ports/event-bridge.ts";
 import type { PiProcessSessionAdapter } from "./process-session.ts";

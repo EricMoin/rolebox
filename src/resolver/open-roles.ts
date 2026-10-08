@@ -13,8 +13,8 @@
  */
 
 import { createSubLogger } from "../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../logger.ts";
+import type { ILogObj } from "../logger.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../types.ts";
 
 /** A single open-role registry entry: the role's metadata plus resolved export ids. */

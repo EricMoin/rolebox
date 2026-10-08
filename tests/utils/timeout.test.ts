@@ -1,6 +1,6 @@
 import { describe, test, expect, jest, mock, beforeEach, afterEach } from "bun:test";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../src/utils/timeout.ts";
-import type { Logger } from "tslog";
+import type { Logger } from "../../src/logger.ts";
 
 // ── Mock Logger ──────────────────────────────────────────────────────
 // Only warn() is called by withTimeout; the rest are filler for the type.

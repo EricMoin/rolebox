@@ -158,6 +158,44 @@
 //
 // `src/tui` stays excluded. Adding it here would only reproduce a known-bad
 // gate.
+//
+// ADDENDUM (Stage 2, logging platform). `tests/log/**/*.ts` joins the include
+// array below: the suite was written beside src/log/** and had never been gated
+// by anything, so a kernel change could break it without a single command
+// noticing. The widened program added no diagnostic of its own — but it does NOT
+// exit 0, and this comment states the measurement rather than the intention.
+//
+// TODAY'S MEASUREMENT, on the bytes this config gates:
+//
+//   bun run typecheck:tests 2>&1 | grep -c 'error TS'   # 1
+//   bun run typecheck:tests; echo $?                    # 2
+//
+// The gate's ENTIRE diagnostic output is this one, and it is not in tests/log:
+//
+//   tests/core/service-health-coverage.test.ts(101,29): error TS2769:
+//   No overload matches this call.
+//     Overload 1 of 2, '(expected: ServiceName): void', gave the following
+//     error.
+//       Argument of type 'string' is not assignable to parameter of type
+//       'ServiceName'.
+//     (Overload 2 of 2 repeats the identical complaint.)
+//
+// Its subject is `expect(svc.name).toBe(name)` (line 101, in "every registered
+// service exposes a callable health() probe"): the loop iterates
+// `Object.entries(REGISTERED_SERVICES)`, so `name` is `string`, while the
+// matcher is declared over `ServiceName`.
+//
+// IT IS NEITHER THIS ROUND'S NOR tests/log'S. The file is byte-identical to HEAD
+// (`git diff -- tests/core/service-health-coverage.test.ts` is empty), so no
+// edit here introduced or repaired it, and not one diagnostic under tests/log
+// appears in the output at all. It arrived with commit 423355b ("feat(core): add
+// health probes to five services", 2026-10-08) — AFTER c3ee393, the round whose
+// probe measured 0 diagnostics in tests/**; the AFTER paragraph above is that
+// round's history on that round's bytes, not today's count. tests/core/** has
+// been in the include array since the widening, so the case is gated and fails
+// the gate as a pre-existing diagnostic; repairing it is a test-side change
+// outside the logging platform, and the honest gate claim is "the logging
+// platform's bytes add no diagnostic", not "the gate exits 0".
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
@@ -166,6 +204,7 @@
   "include": [
     "src",
     "tests/graph/**/*.ts",
+    "tests/log/**/*.ts",
     "tests/utils/**/*.ts",
     "tests/dsh-dispatch.test.ts",
     "tests/platform/**/*.ts",

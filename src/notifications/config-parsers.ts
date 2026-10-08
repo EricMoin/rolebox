@@ -5,8 +5,8 @@
 // helpers consumed by parseNotificationConfig and mergeNotificationConfigs.
 
 import { createSubLogger } from "../logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger } from "../logger.ts";
+import type { ILogObj } from "../logger.ts";
 import {
   DEFAULT_NOTIFICATION_THROTTLE_WINDOW_MS,
   DEFAULT_NOTIFICATION_MAX_PER_WINDOW,

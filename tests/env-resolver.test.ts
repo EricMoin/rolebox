@@ -1,15 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/resolver/env-resolver.js";
-import { Logger } from "tslog";
-import type { ILogObj } from "tslog";
-import { createSubLogger } from "../src/logger.js";
+import { createSubLogger, type Logger } from "../src/logger.js";
 
 const capturedWarnings: unknown[][] = [];
 
 beforeAll(() => {
-  // A real Logger with its emitting methods replaced, so the double satisfies
-  // the same ILogger surface env-resolver's log seam is declared against.
-  const mockLog = new Logger<ILogObj>({ type: "hidden", name: "env-resolver-test" });
+  // A real channel logger with its emitting methods replaced, so the double
+  // satisfies the same Logger surface env-resolver's log seam is declared
+  // against.
+  const mockLog: Logger = createSubLogger("env-resolver-test");
   mockLog.warn = (...args: unknown[]) => { capturedWarnings.push(args); return undefined; };
   mockLog.debug = () => undefined;
   mockLog.error = () => undefined;

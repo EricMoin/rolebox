@@ -1,4 +1,4 @@
-import type { Logger, ILogObj } from "tslog";
+import type { Logger, ILogObj } from "../../logger.ts";
 import type { RecoveryConfig } from "../../recovery/types.ts";
 import type { CanonicalEventType } from "../../platform/types.ts";
 

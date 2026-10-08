@@ -26,10 +26,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { z } from "zod";
-import type { ILogObj } from "tslog";
 import type { HookDeps } from "../src/hooks/deps.ts";
 import type { ResolvedRole } from "../src/types.ts";
-import { getRootLogger } from "../src/logger.ts";
+import { getRootLogger, type ILogObj } from "../src/logger.ts";
 
 // ── Log capture: attach the root transport BEFORE any src module is
 //    imported. tslog sub-loggers (e.g. "hook-tool-before", created at module
