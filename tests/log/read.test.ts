@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -494,6 +494,46 @@ describe("followLogRecords", () => {
     stop();
   });
 
+  it("keeps a file's offset while a rotation hides it from one poll", async () => {
+    // THE RACE A REAL PROCESS PRODUCES. A concurrent rotation renames the file
+    // between the follower's listing and its read, so one poll sees that file
+    // under NO name at all. A ledger rebuilt from each poll's listing forgets
+    // the offset, and the whole file is delivered a second time when it
+    // reappears under its rotated name — the probe
+    // (scripts/log-multiprocess-probe.ts) had a run that delivered 157 of 1200
+    // records twice that way. The ledger is keyed by file identity and survives
+    // the poll that could not see the file.
+    const dir = state.dir;
+    const path = writeThroughSink(dir, [rec(100, "moved", "one"), rec(200, "moved", "two")]);
+    const sleeper = manualSleeper();
+    const seen: LogRecord[] = [];
+    const stop = followLogRecords({ logDir: dir, sleep: sleeper.sleep }, (record) => seen.push(record));
+
+    await sleeper.advance();
+    expect(seen).toEqual([]);
+
+    appendFileSync(path, JSON.stringify(rec(300, "moved", "three")) + "\n");
+    await sleeper.advance();
+    expect(seen.map((record) => record.message)).toEqual(["three"]);
+
+    // The file leaves the source for exactly one poll: the name it had is gone
+    // and the name it will have does not exist yet.
+    const parked = join(dir, "parked.tmp");
+    renameSync(path, parked);
+    await sleeper.advance();
+    expect(seen.map((record) => record.message)).toEqual(["three"]);
+
+    // It comes back under its rotated name; nothing may be replayed.
+    renameSync(parked, path + ".1");
+    await sleeper.advance();
+    expect(seen.map((record) => record.message)).toEqual(["three"]);
+
+    appendFileSync(path + ".1", JSON.stringify(rec(400, "moved", "four")) + "\n");
+    await sleeper.advance();
+    expect(seen.map((record) => record.message)).toEqual(["three", "four"]);
+    stop();
+  });
+
   it("applies the query's filters to what it delivers", async () => {
     const keep = writeThroughSink(state.dir, [rec(1, "keep", "seed")]);
     const drop = writeThroughSink(state.dir, [rec(1, "drop", "seed")]);
@@ -656,5 +696,98 @@ describe("pruneLogs", () => {
 
   it("answers zeros for a missing directory", () => {
     expect(pruneLogs({ logDir: join(state.dir, "missing") })).toEqual({ removed: [], freedBytes: 0, kept: 0 });
+  });
+});
+
+/**
+ * The BYTE BUDGET is the third prune gate, and the only one that may reach
+ * inside the retained window: a disk budget is a budget. These cases pin what it
+ * may and may not do — oldest first, never an active file, never past the age
+ * gate, and an honest "not met" when the active files alone are larger than it.
+ */
+describe("pruneLogs byte budget", () => {
+  /** Five rotated copies with distinct mtimes, plus one active file, all sized. */
+  function budgetFixture(): { active: string; rotated: string[] } {
+    const dir = state.dir;
+    const rotated: string[] = [];
+    for (let rotation = 1; rotation <= 5; rotation++) {
+      // Write ONE record through the real sink, then move the file aside: this
+      // is exactly what a rotation does, so each copy has the writer's bytes.
+      const written = writeThroughSink(dir, [rec(rotation, "budget", "rotation " + rotation)], { maxBytes: 10_000_000 });
+      const copy = join(dir, "budget.log." + rotation);
+      renameSync(written, copy);
+      // .1 is the newest, .5 the oldest — the writer's own convention.
+      const seconds = Date.now() / 1000 - rotation * 60;
+      utimesSync(copy, seconds, seconds);
+      rotated.push(copy);
+    }
+    // The active file last, so it is the one a process would be appending to.
+    const active = writeThroughSink(dir, [rec(100, "budget", "active")], { maxBytes: 10_000_000 });
+    return { active, rotated };
+  }
+
+  it("removes the oldest survivors until the budget is met, never the active file", () => {
+    const { active, rotated } = budgetFixture();
+    const budget = statSync(active).size + statSync(rotated[0] ?? "").size + statSync(rotated[1] ?? "").size;
+
+    const result = pruneLogs({ logDir: state.dir, keepRotated: 99, maxTotalBytes: budget });
+
+    expect(result.removed.map((entry) => entry.path)).toEqual([rotated[4], rotated[3], rotated[2]]);
+    expect(result.budget?.removed).toBe(3);
+    expect(result.budget?.satisfied).toBe(true);
+    expect(result.budget?.remainingBytes).toBeLessThanOrEqual(budget);
+    expect(result.budget?.maxTotalBytes).toBe(budget);
+    expect(result.kept).toBe(2);
+    expect(existsSync(active)).toBe(true);
+    expect(existsSync(rotated[0] ?? "")).toBe(true);
+    expect(existsSync(rotated[1] ?? "")).toBe(true);
+    expect(existsSync(rotated[2] ?? "")).toBe(false);
+  });
+
+  it("squeezes out every rotated copy and still reports a budget the active files alone exceed", () => {
+    const { active, rotated } = budgetFixture();
+    const result = pruneLogs({ logDir: state.dir, keepRotated: 99, maxTotalBytes: 1 });
+
+    // The budget squeezes as far as it legally can — every rotated copy goes —
+    // and then says the truth: the active file alone is already over budget.
+    expect(result.removed.length).toBe(5);
+    expect(result.kept).toBe(0);
+    expect(result.budget?.removed).toBe(5);
+    expect(result.budget?.satisfied).toBe(false);
+    expect(result.budget?.remainingBytes).toBe(statSync(active).size);
+    expect(existsSync(active)).toBe(true);
+    for (const path of rotated) expect(existsSync(path)).toBe(false);
+  });
+
+  it("keeps what the age gate protects, even when that leaves the budget unmet", () => {
+    const { rotated } = budgetFixture();
+    // Every rotated copy is minutes old, so a one-day age gate protects all of
+    // them; the budget cannot reach past the operator's freshness promise.
+    const result = pruneLogs({ logDir: state.dir, keepRotated: 99, olderThanMs: 86_400_000, maxTotalBytes: 1 });
+
+    expect(result.removed).toEqual([]);
+    expect(result.budget?.satisfied).toBe(false);
+    for (const path of rotated) expect(existsSync(path)).toBe(true);
+  });
+
+  it("honours dryRun: the removals are reported, the budget counts them and nothing goes", () => {
+    const { active, rotated } = budgetFixture();
+    const budget = statSync(active).size + statSync(rotated[0] ?? "").size;
+
+    const result = pruneLogs({ logDir: state.dir, keepRotated: 99, maxTotalBytes: budget, dryRun: true });
+
+    expect(result.removed.length).toBe(4);
+    expect(result.budget?.removed).toBe(4);
+    expect(result.budget?.satisfied).toBe(true);
+    expect(result.kept).toBe(1);
+    expect(existsSync(active)).toBe(true);
+    for (const path of rotated) expect(existsSync(path)).toBe(true);
+  });
+
+  it("omits the budget report when the caller set no budget", () => {
+    budgetFixture();
+    const result = pruneLogs({ logDir: state.dir, keepRotated: 99 });
+    expect(result.budget).toBeUndefined();
+    expect("budget" in result).toBe(false);
   });
 });

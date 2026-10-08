@@ -207,6 +207,7 @@ rolebox logs --graph g-42 --json | jq .         # one raw JSON record per line
 rolebox logs --follow                           # stream new records, Ctrl-C to stop
 rolebox logs files                              # channel, rotation, size and mtime
 rolebox logs prune --dry-run                    # what would be removed, and how much that frees
+rolebox logs prune --max-total-bytes 50000000   # keep the whole log directory under ~50 MB
 ```
 
 | Flag | Meaning |
@@ -227,7 +228,7 @@ rolebox logs prune --dry-run                    # what would be removed, and how
 
 **`rolebox logs files`** lists every log file with the channel its name spells, its rotation (`active`, `.1`, `.2`, …), its size and its modification time. The active file of a channel is the one being written. The heading names the source that was read: the `--log-dir` directory, or — when `ROLEBOX_LOG_FILE` names one file and no `--log-dir` was given — that file.
 
-**`rolebox logs prune`** removes rotated copies only — an active `<channel>.log` is never a candidate, and the report says so. It acts inside the source it names (`--log-dir`, else the resolved chain), so it can never remove a file outside it. Both gates must pass: `--keep <n>` is how many of a channel's newest rotated copies stay (default: the writer's `ROLEBOX_LOG_RETAIN`, else 3) and `--days <n>` is how old by mtime a candidate must additionally be. `--dry-run` reports what would go and removes nothing.
+**`rolebox logs prune`** removes rotated copies only — an active `<channel>.log` is never a candidate, and the report says so. It acts inside the source it names (`--log-dir`, else the resolved chain), so it can never remove a file outside it. Three gates apply. `--keep <n>` is how many of a channel's newest rotated copies stay (default: the writer's `ROLEBOX_LOG_RETAIN` as this process sees it, else 3), and `--days <n>` is how old by mtime a candidate must additionally be. `--max-total-bytes <n>` is a byte budget for the whole source: after the other two gates, the oldest surviving rotated copies go until every log file left (active files included) fits — it may reach inside the kept window, but never past `--days` and never at an active file, and the report says whether the budget was met. `--dry-run` reports what would go and removes nothing. The relation between the flags and the write-side variables, with measured boundaries, is in [logging.md](logging.md#files-and-pruning).
 
 ### `status`
 

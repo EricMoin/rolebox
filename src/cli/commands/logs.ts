@@ -88,6 +88,10 @@ export const logsPruneCommand = defineCommand({
       type: "string",
       description: "Rotated copies to keep per channel (default: the writer's ROLEBOX_LOG_RETAIN, else 3)",
     },
+    "max-total-bytes": {
+      type: "string",
+      description: "Remove the oldest rotated copies until every log file left fits in this many bytes",
+    },
     "dry-run": {
       type: "boolean",
       description: "Report what would be removed and remove nothing",

@@ -4,14 +4,15 @@
  *
  * What these cases fix in place:
  *
- * 1. THE TABLE'S FAMILIES. The four platform codes are the table's head, in
- *    their original order, the graph engine's nineteen follow them on the
- *    engine's own "graph:" channels, and stage 4's engine-slice entries follow
- *    those on the channels of the modules that emit them. (Before the migration
- *    node ran, this suite pinned the platform-only intermediate state the
- *    registry marked as an insertion point; that node filled it, and stage 4
- *    appended its own per-channel sections — so the graph engine's nineteen are
- *    guarded by their channel, which is what the table actually promises.)
+ * 1. THE TABLE'S SECTIONS, EXACTLY. The four platform codes are the table's
+ *    head, in their original order; the graph engine's nineteen follow them as
+ *    four channel sections (thirteen `graph:host`, two `graph:index`, three
+ *    `graph:tool`, one `graph:declare`); stage 4's per-channel sections follow
+ *    those. The appended block is pinned ENTRY BY ENTRY against a fixture
+ *    grouped by channel, so this suite answers "which codes exist, in which
+ *    section, in what order" rather than "at least nineteen of something" —
+ *    an entry dropped, reordered into another channel's section, or added
+ *    without updating the fixture fails here by name.
  * 2. EVERY ENTRY IS USABLE. A level from the four, a non-empty channel, a
  *    non-empty single-line message and, when present, a positive integer
  *    throttle window.
@@ -49,6 +50,180 @@ const PLATFORM_CODES: readonly string[] = [
   "log.event.unknown-code",
 ];
 
+/**
+ * The GRAPH ENGINE EVENTS block: one section per channel, in the table's own
+ * order, each holding every code that section declares in declaration order.
+ *
+ * These are the nineteen diagnostics the engine emitted before the platform
+ * existed, and their counts are the engine's own mapping (13 host / 2 index /
+ * 3 tool / 1 declare) — a code that moves to another channel without moving
+ * section is a vocabulary change, not a refactor, so it belongs here.
+ */
+const ENGINE_SECTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["graph:host", [
+    "host.control-continuation.failed",
+    "sweep.store-blocked",
+    "sweep.summary",
+    "watch.unwatched-executions",
+    "watch.port-threw",
+    "watch.announcement-unconfirmed",
+    "watch.announcement-settled",
+    "watch.settlement-threw",
+    "dispatch.delivery-unproven",
+    "dispatch.prime-failed",
+    "dispatch.query-threw",
+    "dispatch.binding-failed",
+    "dispatch.unclaimed-confirmation",
+  ]],
+  ["graph:index", [
+    "index.confirmation-refused",
+    "index.release-unproven",
+  ]],
+  ["graph:tool", [
+    "tool.control-continuation",
+    "tool.control-follow-up-threw",
+    "tool.cancel-delivery",
+  ]],
+  ["graph:declare", [
+    "declare.persistence-failed",
+  ]],
+];
+
+/**
+ * Every section stage 4 appended after the engine's block, in table order.
+ *
+ * Grouped exactly the way `LOG_EVENTS` is written: the channel comment
+ * introduces the entries below it, so the fixture is also the statement that a
+ * code lives in the section of the channel it reports on.
+ */
+const STAGE_SECTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["graph:notifications", [
+    "notifications.source-unreadable",
+    "notifications.lease-renewal-failed",
+    "notifications.delivery-failed",
+  ]],
+  ["dispatch:checkpoint", [
+    "checkpoint.rewrite-failed",
+  ]],
+  ["task:tools", [
+    "tools.result-preview-failed",
+    "tools.retry-failed",
+  ]],
+  ["dispatch:notify", [
+    "notify.parent-notify-failed",
+  ]],
+  ["loop/worker-dispatch", [
+    "worker-dispatch.started-note-failed",
+    "worker-dispatch.round-cancel-failed",
+    "worker-dispatch.error-note-failed",
+  ]],
+  ["loop/coordinator", [
+    "coordinator.stale-advancing-lock",
+    "coordinator.progress-note-failed",
+    "coordinator.cascade-cancel-failed",
+    "coordinator.resubscribe-advance-failed",
+    "coordinator.task-status-read-failed",
+  ]],
+  ["plugin-core", [
+    "plugin-core.registration-replaced",
+    "plugin-core.init-skipped",
+    "plugin-core.init-failed",
+    "plugin-core.dispose-failed",
+    "plugin-core.restart-unknown-service",
+    "plugin-core.restart-no-context",
+    "plugin-core.restart-dispose-failed",
+  ]],
+  ["plugin-hooks", [
+    "plugin-hooks.hook-service-unavailable",
+    "plugin-hooks.handlers-uninitialized",
+  ]],
+  ["service-supervisor", [
+    "service-supervisor.budget-exceeded",
+    "service-supervisor.permanently-degraded",
+  ]],
+  ["health-monitor", [
+    "health-monitor.service-unhealthy",
+    "health-monitor.service-degraded",
+    "health-monitor.supervisor-error",
+  ]],
+  ["loop-service", [
+    "loop-service.degraded",
+    "loop-service.state-load-failed",
+    "loop-service.state-reconcile-failed",
+  ]],
+  ["dispatch-service", [
+    "dispatch-service.degraded",
+    "dispatch-service.recover-failed",
+    "dispatch-service.flush-failed",
+  ]],
+  ["hook-tool-after", [
+    "tool-after.observe-failed",
+    "tool-after.handler-failed",
+  ]],
+  ["hook-tool-before", [
+    "tool-before.deprecated-tool",
+  ]],
+  ["handler-drain", [
+    "handler-drain.inject-cap-reached",
+    "handler-drain.activation-cap-reached",
+  ]],
+  ["hook-sys-xform", [
+    "sys-xform.memory-inject-failed",
+  ]],
+  ["hook:custom-registry", [
+    "custom-registry.on-load-failed",
+    "custom-registry.hook-failed",
+    "custom-registry.on-dispose-failed",
+  ]],
+  ["recovery:chain-executor", [
+    "chain-executor.strategy-missing",
+    "chain-executor.strategy-threw",
+  ]],
+  ["recovery:engine", [
+    "engine.aborted",
+    "engine.exhausted",
+  ]],
+  ["hook:context-window", [
+    "context-window.large-output",
+  ]],
+  ["recovery:builtin-registry", [
+    "builtin-registry.hook-failed",
+  ]],
+  ["memory:store", [
+    "store.read-failed",
+  ]],
+  ["log:compat", [
+    "log.field.narrowed",
+  ]],
+];
+
+/** The two blocks above, in the order `LOG_EVENTS` declares them. */
+const APPENDED_SECTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ...ENGINE_SECTIONS,
+  ...STAGE_SECTIONS,
+];
+
+/** Every appended code, in table order. */
+const APPENDED_CODES: readonly string[] = APPENDED_SECTIONS.flatMap(([, codes]) => codes);
+
+/**
+ * The appended entries, grouped by channel in the order each channel first
+ * appears — i.e. the table's section layout, read off the table itself.
+ */
+function observedSections(codes: readonly string[]): Array<[string, string[]]> {
+  const sections: Array<[string, string[]]> = [];
+  for (const code of codes) {
+    const channel = logEventDefinition(code as LogEventCode).channel;
+    const last = sections[sections.length - 1];
+    if (last !== undefined && last[0] === channel) {
+      last[1].push(code);
+      continue;
+    }
+    sections.push([channel, [code]]);
+  }
+  return sections;
+}
+
 let state: { env: Record<string, string | undefined>; dir: string };
 let memory: MemorySink;
 
@@ -67,17 +242,34 @@ describe("closed event vocabulary", () => {
     expect(Object.keys(LOG_EVENTS).slice(0, PLATFORM_CODES.length)).toEqual([...PLATFORM_CODES]);
   });
 
-  it("holds the graph engine's events after them, on the engine's own channels", () => {
+  it("holds every appended entry in its channel's section, in table order", () => {
     const appended = Object.keys(LOG_EVENTS).slice(PLATFORM_CODES.length);
-    // Every appended entry — the engine's nineteen and each section a later
-    // stage added — reports on the channel of the module that emits it, never
-    // on the platform's "log", and the engine's own channels are all still
-    // present among them.
-    expect(appended.length).toBeGreaterThanOrEqual(19);
-    const channels = new Set(appended.map((code) => logEventDefinition(code as LogEventCode).channel));
-    for (const engineChannel of ["graph:host", "graph:index", "graph:tool", "graph:declare"]) {
-      expect(channels.has(engineChannel)).toBe(true);
-    }
+    // The exact code set, in the exact order: a dropped, renamed, duplicated or
+    // moved entry fails with both lists side by side.
+    expect(appended).toEqual([...APPENDED_CODES]);
+    // And the same entries grouped by channel: every section holds exactly the
+    // codes the fixture lists for it — no code of one channel inside another
+    // channel's run, no extra section, no missing one.
+    expect(observedSections(appended)).toEqual(APPENDED_SECTIONS.map(([channel, codes]) => [channel, [...codes]]));
+  });
+
+  it("holds the graph engine's nineteen after the platform entries, on the engine's own channels", () => {
+    const appended = Object.keys(LOG_EVENTS).slice(PLATFORM_CODES.length);
+    const engineCount = ENGINE_SECTIONS.reduce((total, [, codes]) => total + codes.length, 0);
+    expect(engineCount).toBe(19);
+    // The engine's block is the head of the appended entries — not merely
+    // present somewhere after the platform four.
+    expect(appended.slice(0, engineCount)).toEqual([...ENGINE_SECTIONS.flatMap(([, codes]) => codes)]);
+    // One section per engine channel, in the engine's own order, each with the
+    // engine's count for that channel.
+    expect(ENGINE_SECTIONS.map(([channel, codes]) => `${channel}=${codes.length}`)).toEqual([
+      "graph:host=13",
+      "graph:index=2",
+      "graph:tool=3",
+      "graph:declare=1",
+    ]);
+    // No appended entry reports on the platform's own "log" channel: the
+    // platform section is closed above.
     for (const code of appended) {
       expect(logEventDefinition(code as LogEventCode).channel).not.toBe("log");
     }

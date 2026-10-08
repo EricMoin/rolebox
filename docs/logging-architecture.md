@@ -192,7 +192,11 @@ the redaction pass is not a substitute for not passing it.
    diagnostic. The window is per `(record channel, code)`; the first occurrence
    opens it, later ones are counted, and the count rides on the next emitted
    record as its `suppressed` field. Entries without `throttleMs` are never
-   suppressed.
+   suppressed. **A first-failure event never opts in**: the gate is keyed by
+   `(channel, code)`, not by graph or attempt, so a suppression could hide the
+   first report about a *different* subject. The rule, the measured windows and
+   the count behind each one are in [logging.md](logging.md#throttling), and
+   `tests/log/throttle-policy.test.ts` pins both the set and the rule.
 6. **Emit it** with `logEvent(code, fields)` from `src/log/index.ts`, or
    `createLogger(channel).event(code, fields)` when the module already holds a
    logger. `event()` ignores the logger's own channel on purpose: the registry
@@ -271,27 +275,175 @@ directory is resolved in this order (`src/log/sinks/file.ts`):
 The directory is created lazily on the first write, so a process that never logs
 opens nothing.
 
-**Rotation** happens before a line is appended: at `ROLEBOX_LOG_MAX_BYTES`
+**Rotation** happens before a line is appended, and the size it compares is read
+from the file itself, not counted per process: at `ROLEBOX_LOG_MAX_BYTES`
 (default 10 MB) the file becomes `.1`, `.1` becomes `.2`, and only
 `ROLEBOX_LOG_RETAIN` rotated copies (default 3) are kept — a retain of `0`
-removes the file instead of keeping a copy. Writes are synchronous appends
+removes the file instead of keeping a copy. Both halves of that matter under
+concurrency, and both were measured: a per-process byte count lets N writers run
+one shared file to N × the limit before anybody rotates (three writers at a 1 KB
+limit: a 2316-byte live file, 2.3×), and appending into the file while another
+process renames it adds every record written during the shift to the copy being
+made (three writers appending back to back at a 2 KB limit: an 8431-byte copy,
+4.1×). The gate therefore stats the file before every record — about 1 µs against
+an 18 µs append — and a writer that finds another process rotating waits for it
+while it keeps making progress (below), before appending to whatever file the
+path names afterwards. Writes are synchronous appends
 (`appendFileSync`): no open stream, no flush on exit, no drain handling, and a
-process that logs three lines does not hold a file descriptor. Asynchronous
-writing and backpressure are a later hardening stage, and the
-retention/rotation boundaries are the file sink's own tests.
+process that logs three lines does not hold a file descriptor. That is a
+measured decision rather than a standing gap — [What one write costs,
+measured](#what-one-write-costs-measured) — so there is no write queue today and
+no write-side dropped-record counter to report; the losses this pipeline does
+count are the throttle's `suppressed` field, the unknown-code counter behind
+`log.event.unknown-code`, and the reader's `skippedLines`. The retention and
+rotation boundaries are the file sink's own tests.
+
+**Rotation is serialized across processes by a per-file lock, because the
+uncoordinated version loses records.** The shift is a chain of atomic renames,
+but `rename(path, path + ".1")` REPLACES an existing `.1`: a second process that
+decided to rotate a moment before the first one finished overwrites the copy the
+first just made, and the records in that copy are gone. Three real processes
+writing one channel through this sink
+(`bun scripts/log-multiprocess-probe.ts`, 3 × 400 records, 4 KB limit, retention
+far above the volume so retention cannot be the cause) lost **70 of 1200**
+records that way, and a replay lost 143 — always a prefix of each writer, exactly
+the records the first rotation had moved aside. The sink therefore creates
+`<path>.rotate.lock` with `O_EXCL` before rotating, re-reads the file's size once
+it holds the lock (the holder that just left may have rotated already), and never
+queues a second rotation behind a live one. A lock older than
+`ROTATE_LOCK_STALE_MS` (10 s) is broken rather than blocking rotation forever.
+**The wait follows the holder's progress, not a stopwatch**, and that is what
+keeps the copy bound when a rotation is slow: the holder refreshes its lock's
+mtime at least every `ROTATE_HEARTBEAT_MS` (5 ms) while it scans slots and
+shifts copies, and a writer keeps waiting while that mtime is younger than
+`ROTATE_WAIT_MS` (25 ms) — five missed heartbeats. A slow rotation is therefore
+waited out for as long as it keeps moving, and only a rotation that has
+*stopped* releases the writer. The give-up is remembered per lock *stamp*
+(inode + mtime), so the holder's next refresh, or a replaced lock file, arms the
+wait again; it used to be a permanent per-process flag, and that one difference
+let a single slow rotation turn a process into a writer that appended into every
+later file mid-rename — rotated copies reached 40× the limit.
+The shift itself starts at the copies that exist instead of at slot `retain`:
+walking 4096 empty slots cost 8–13 ms per rotation on a 40-copy file (0.34 ms at
+the default retain of 3), and those milliseconds are exactly the window in which
+other writers would otherwise append into the copy being made.
+The lock file is not a log file: the read side's name grammar is
+`<channel>.log` plus `.N`, so `listLogFiles`, a query and `prune` never see it.
+The probe above is now the regression test's engine
+(`tests/log/multiprocess.test.ts`), and after the fix it delivers every record
+exactly once with no torn line and no duplicate — with the worst rotated copy at
+1.010–1.204× the limit across the configurations measured since: a 32 KB limit
+with a 6-copy ladder on a 2 ms cadence, 1.010×; a 2 KB limit with `RETAIN` 4096
+on a 2 ms cadence, 1.031×; the same with writers back to back, 1.204× (+418 B);
+the probe's default 4 KB limit, 1.128× (+524 B).
+
+**What that bound is, and what it is not.** The gate is a check followed by an
+append, so a record that passes the gate an instant before another process
+rotates still lands in the copy being made: the bound is the limit **plus one
+record per concurrent writer**, which is why the numbers above carry the bytes
+they overshoot by and not just a fraction (about +0.5× at a 1 KB limit with
+~280-byte records). The other residual is a holder that has *stopped* progressing
+for a whole `ROTATE_WAIT_MS`: the waiter appends — one stalled record per stalled
+lock instance, not one per record — because blocking a caller for as long as an
+unresponsive process holds a lock is worse than a file that is briefly over its
+limit, and `ROTATE_LOCK_STALE_MS` breaks that lock and resumes rotation. Measured
+on the deep-ladder load that broke the stopwatch version (three real processes,
+one channel, a 1 KB limit, `RETAIN` 4096, writers back to back): the worst
+rotated copy fell from **27.6×** the limit (28,300 B) to **1.58–1.70×**
+(1,617–1,737 B) with 1,800 of 1,800 records delivered exactly once. A factor
+check on its own is therefore not load-independent: the probe's `rotation-bound`
+now compares `maxRotatedBytes` against the limit plus one MEASURED record per
+concurrent writer (never below 512 B each) and reports the overshoot and the
+factor beside it, so a configuration whose records are a large fraction of the
+limit (1 KB limit, ~280 B records, three writers) no longer sits above a factor
+while losing nothing — the load-independent statement is the limit plus the
+allowance, and `tests/log/multiprocess.test.ts` asserts the same byte bound
+independently, so a regression has to defeat both numbers.
 
 The operator view of all of this — where the files are, what to grep, how to
 prune rotated copies — is [logging.md](logging.md#where-the-files-are).
+
+## What one write costs, measured
+
+The file sink is synchronous on purpose (above), and stage 5 measured it before
+deciding whether that should change. The answer is that it should not: a scratch
+harness (`.rolebox/tmp/bench-write-path*.ts`, throwaway) puts one representative
+record — 267 to 295 bytes, 19,800 to 99,500 samples per case,
+`performance.now()` around every call, every case in a temporary directory — at
+**0.03 ms at p99**, of which the append itself is 93%. The per-record rows — the
+sink alone and the runtime with its gate open — re-ran in the same range on the
+tree as it stands (29,700–30,000 calls: p50 0.018–0.019 ms, p99 0.033–0.036
+ms); the rotation row is that re-run's figure, because the cross-process
+rotation lock (above) is charged to the crossing record.
+
+| Case | n | p50 | p99 | p99.9 | max |
+| --- | --- | --- | --- | --- | --- |
+| one record straight into the file sink | 99,500 ×3 | 0.018–0.020 ms | 0.034–0.039 ms | 0.051–0.070 ms | 1.4–3.9 ms |
+| one record through the runtime, file sink | 30,000 | 0.019 ms | 0.036 ms | 0.046 ms | 1.09 ms |
+| one record through the runtime, memory sink | 30,000 | 0.0004 ms | 0.003 ms | 0.016 ms | 0.05 ms |
+| the record that crosses the rotation limit | 300 | 0.32 ms | 0.47 ms | — | 0.55 ms |
+
+* **Burst.** 10,000 records back to back cost 179–206 ms straight into the sink
+  (19–20 µs each) and 192 ms through the runtime (re-measured on the repaired
+  sink: 185.6 ms and 206.7 ms): the per-call cost times the count rather than an
+  added stall, and because the append is synchronous that time is the calling
+  thread's — a caller that emits 10,000 records in one loop spends those
+  ~200 ms inside the sink before it continues. The same 10,000 through the
+  memory sink cost 5 ms,
+  so attaching the file sink costs about 0.017 ms per record more than memory
+  alone.
+* **Where the time goes.** `appendFileSync` 18.0 µs, the gate's `statSync` ~1.1 µs
+  (it reads the file's real size on every record — see above), `JSON.stringify`
+  0.9 µs, `Buffer.byteLength` 0.02 µs, the sink's own bookkeeping the rest.
+* **Tail.** Per 100,000 records, 3–12 single calls exceeded 0.5 ms and 0–6
+  exceeded 2 ms; the worst observed call was 3.9 ms, still inside a 60 Hz frame.
+  Rotation is cheap: the record that crosses the limit pays 0.32 ms (0.47 ms at
+  p99) and the two crossing records a 100,000-record file sees at the 10 MB
+  default cost at most 0.29 ms.
+* **What the rotation lock added.** The crossing record cost 0.20 ms before the
+  lock and 0.32 ms after it (+0.12 ms mean): one `O_EXCL` create, one small write
+  and one unlink, all on the rotation path only. The lock is still not consulted
+  until the size check trips, and the size check itself is one `statSync` per
+  record: re-measured after the gate began reading the file's size, an ordinary
+  record costs 0.022 ms mean and 0.042 ms p99 over 20,000 calls (0.0195/0.033
+  before it), about 12× under the 0.5 ms budget. The repair round that made the
+  wait progress-driven re-ran the same harness on the repaired sink — 29,700
+  calls, p50 0.0185, p99 0.0351 ms, worst 0.94 ms; the crossing record 0.316 ms
+  mean / 0.466 ms p99; a 10,000-record burst 185.6 ms — so the heartbeat and the
+  per-stamp give-up left the per-record cost where it was. A record that arrives while
+  another process holds the lock waits for that rotation for as long as it is
+  progressing (`ROTATE_WAIT_MS` is the no-progress window, not a deadline) — the
+  one case where a record pays a rotation it did not cause, and it is the same
+  rotation the lock holder is paying. What it pays is that rotation's own
+  duration: ~0.3 ms at the default `RETAIN` 3, tens of milliseconds on the
+  deliberately deep ladders the probe uses. One rotation
+  per 10 MB file — roughly 39,000 records at this size — at 0.32 ms is not the
+  kind of stall the revisit trigger below is about.
+
+The 10,000-record burst is volume, not latency, and it only appears when an
+operator turns a channel to `debug`. Asynchronous writing would buy that volume
+back at the price of a bounded queue that drops exactly the records `debug` was
+enabled to capture, a flush-on-exit contract (signal handlers the process does
+not install today), and the read-after-write visibility that `rolebox logs`, the
+TUI pane and the read side's tests are built on. At 0.03 ms p99 that trade is
+not worth making, so the sink stays a synchronous append.
+
+**When to revisit.** The trigger is the measurement, not taste: if p99 per
+record crosses 0.5 ms, or single calls start stalling for tens of milliseconds
+(a slow or networked file system), the next step is the bounded queue with a
+batched flush, a registered `log.sink.backpressure-dropped` event carrying the
+channel and the dropped count, and a flush on exit.
 
 ## Reading it back: sources and cursors
 
 `src/log/read.ts` is the read side of the same files, and `src/log/view.ts` adds
 the piece the live surfaces need.
 
-**The source.** `resolveLogSource` decides where a read looks, and the explicit
-argument wins: `logDir` (exactly that directory — the legacy `ROLEBOX_LOG_FILE`
-is not consulted), then `logFile` (that file and its rotated copies), then the
-writer's own chain. This is why `rolebox logs --log-dir <D>` reads, lists and
+**The source.** `resolveLogSource` decides where a read looks, and an explicit
+argument wins over the environment: `logFile` (that one file and its rotated
+copies — the CLI has no flag for it, so only an embedder passes one), then
+`logDir` (exactly that directory — the legacy `ROLEBOX_LOG_FILE` is not
+consulted), then the writer's own chain. This is why `rolebox logs --log-dir <D>` reads, lists and
 prunes exactly `<D>`, and why the write side keeps the opposite precedence
 (one process, one file).
 
@@ -300,6 +452,37 @@ versions and a human with an editor, so a line that is not JSON, or JSON that is
 not a record, is counted (`skippedLines`) and skipped, never thrown. A record
 missing a key is normalised to the writer's default for it, and unknown extra
 keys are ignored. A missing directory answers an empty result.
+
+**The follower's offset ledger is keyed by file IDENTITY, and the identity is
+read from the open descriptor.** `followLogRecords` polls instead of watching,
+which means every poll re-lists the files — and under a concurrent rotation the
+listing and the read are two different moments. Both halves of that rule were
+measured wrong first: the probe's live `rolebox logs --follow` process delivered
+**157 of 1200 records twice** in one run, because the ledger was rebuilt from
+each poll's listing and a file the rotation had renamed between the listing and
+the read was forgotten (and then replayed from its beginning when it reappeared
+under its new name). The ledger is now `(device, inode) → bytes delivered`, kept
+across polls and capped at `MAX_FOLLOW_IDENTITIES`, and every file is opened
+BEFORE it is asked who it is (`fstat` on the descriptor), so the offset and the
+bytes always belong to the same inode. `tests/log/read.test.ts` pins the
+one-poll disappearance directly, and the probe checks the live process end to
+end.
+
+**A poll is several passes, because one walk cannot see a moving ladder.** The
+listing puts the oldest copy first, while a rotation renames every copy UP one
+name: a file can move to a name the walk has already passed, so a single pass
+misses it — and delivering the next poll then puts that file's records after ones
+written into the fresh active file (the probe caught exactly that: seq 394-399
+delivered, then 325-330 of the same writer). A poll therefore re-lists and reads
+until a pass finds no unread byte, up to `MAX_FOLLOW_PASSES` (6); the carried
+offsets make a repeated pass free of duplicates, since a file read to its end
+answers no lines. Measured over ten stress runs (three writers back to back, a
+2 KB limit, ~29 rotations per run): no record lost, none duplicated, and the
+share of records that arrived out of `time` order fell from a 17% late block to
+zero in nine runs and 2.5% in the tenth. The remaining case is a rotation that
+lands inside the last pass's window — a tail that polls cannot snapshot a
+directory that is being renamed under it, and this is where the honest bound
+is.
 
 **The cursor.** `readLogView(query)` answers a window of records plus a `cursor`:
 `"<epoch-millis, padded>.<millis>~<how many records share that millisecond>"`.
@@ -432,9 +615,21 @@ from `createSubLogger(name)`.
 ```sh
 bun run typecheck                                  # the vocabulary is typed; a bad code fails here
 bun run scripts/check-logging-boundaries.ts        # exit 0, or the violation names file:line
-bun test --isolate tests/log/                      # the kernel's own suite
+bun test --isolate tests/log/                      # the kernel's own suite (includes the probe)
 bun test --isolate tests/logger.test.ts            # the compatibility shell's contract
 bun test tests/tui/                                # the Logs pane (no --isolate: @opentui/core)
+```
+
+Two probes answer questions a unit test cannot, and both are re-runnable:
+
+```sh
+# Three real processes writing one channel, plus a live `rolebox logs --follow`:
+# exactly-once, no torn line, rotation, merged order, follower order.
+bun scripts/log-multiprocess-probe.ts --records 400 --max-bytes 4096 --retain 4096
+
+# Which registered events flood a log directory, and what a throttle window would
+# cost: the evidence behind every `throttleMs` in the registry.
+bun scripts/log-event-density.ts --dir .rolebox/logs
 ```
 
 The whole `bun test` suite is CI's job; see `AGENTS.md` for the module-scoped

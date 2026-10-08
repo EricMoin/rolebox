@@ -42,6 +42,20 @@
 // registered event is emitted every time until someone deliberately says
 // otherwise.
 //
+// WHAT MAY OPT IN. An entry earns a `throttleMs` only when the log of a real
+// workspace shows the SAME observation being re-reported in a loop — the counts
+// live in the entry's own comment, and `bun scripts/log-event-density.ts` prints
+// them for any log directory (records, the largest 60 s/10 s/1 s burst, how many
+// records repeat their predecessor's fields, and how many records a window would
+// let through). The window is chosen from the measured cadence: long enough to
+// collapse the burst, short enough that a state that changes seconds later is
+// still reported. AN ENTRY THAT REPORTS A FIRST FAILURE NEVER OPTS IN: an event
+// whose whole value is "this just broke" (a store that cannot be written, a
+// delivery with no proof, an unproven release, a definition that did not reach
+// the store) keeps every occurrence, because the next occurrence may be the
+// first one about something else — the gate is keyed by (channel, code), not by
+// graph or attempt, so a suppression can hide a DIFFERENT subject's report.
+//
 // PRIVACY. A message states the durable fact in one sentence; the fields an
 // entry's callers pass carry ids, states, reasons and counts — never a payload,
 // an accepted result, a credential or a raw platform error body. The comments
@@ -235,11 +249,22 @@ export const LOG_EVENTS = {
    * `unconfirmed` — each an array of ids, states and counts, and each entry of
    * the per-graph arrays a "graphId:…" string rather than a nested object.
    * Caller: src/graph/host/outcome-host.ts (recoverDeclaredGraphs).
+   * THROTTLED: 10s, and this is the densest code the platform has. Measured on
+   * the workspace's own log (`bun scripts/log-event-density.ts`): 335 records,
+   * 74 of them inside ONE ten-second window, 20 inside one second, and 36
+   * carrying exactly their predecessor's fields. The sweep re-derives the same
+   * non-empty lists on every boot in a burst (a test run, a supervisor restarting
+   * workers), so the burst is one observation repeated, not 74 observations. The
+   * window is deliberately the SHORTEST of the throttled entries: a sweep only
+   * runs at boot in a long-lived host, and a state that moves ten seconds later
+   * must still produce its own line. Suppressed sweeps ride on the next record as
+   * `suppressed`.
    */
   "sweep.summary": {
     level: "warn",
     channel: "graph:host",
     message: "declared-graph boot sweep summary",
+    throttleMs: 10_000,
   },
 
   /**
@@ -385,12 +410,20 @@ export const LOG_EVENTS = {
    * not allowed to overwrite a live claim) and no second execution is created.
    * Scope: `graphId`, `effectId`. Fields: `executionId`, `verdict`.
    * Caller: src/graph/host/dispatch-host.ts (bindPlatformExecution).
+   * THROTTLED: 60s. Measured: 48 records carrying TWO distinct facts — 41 of them
+   * repeat their predecessor's fields, with a median gap of 169 ms between
+   * reports of the same unclaimed execution. `bindPlatformExecution` already
+   * remembers one report per effect per PROCESS (`unboundReports`), so what the
+   * log shows is the same refusal re-derived by the sweep and the completion path
+   * across boots; one line per minute per code is the durable fact, and the
+   * suppressed count rides on the next one.
    */
   "dispatch.unclaimed-confirmation": {
     level: "warn",
     channel: "graph:host",
     message:
       "the platform named an execution, but this process does not hold the claim that recorded the create; the durable row is not rewritten",
+    throttleMs: 60_000,
   },
 
   // ── graph:index — the host execution index ────────────────────────────────
@@ -442,11 +475,18 @@ export const LOG_EVENTS = {
    * stay FIELDS because the record's own run context is the graph, not the run
    * the re-execution minted.
    * Caller: src/graph/host/tool-binding.ts (reportControlContinuation).
+   * THROTTLED: 60s. Measured: 93 records, 16 of them inside one second and 28
+   * repeating their predecessor's fields — the same follow-up summary re-derived
+   * while a control command is retried or continued across boots. A follow-up
+   * that changes state still reports, because the window is measured from the
+   * last EMITTED record; what it collapses is the repetition, and the count of
+   * suppressed occurrences rides on the next record as `suppressed`.
    */
   "tool.control-continuation": {
     level: "warn",
     channel: "graph:tool",
     message: "control follow-up summary for the graph",
+    throttleMs: 60_000,
   },
 
   /**
@@ -472,12 +512,19 @@ export const LOG_EVENTS = {
    * Scope: `graphId`. Fields: `blocked` (when the platform could not be asked)
    * and `entries`, one "attemptId:state" string per attempt.
    * Caller: src/graph/host/tool-binding.ts (reportCancelDelivery).
+   * THROTTLED: 60s. Measured: 66 records carrying seven distinct attempt states,
+   * 21 of them repeating their predecessor's fields with a median gap of 21 ms —
+   * a cancel delivery re-reported per attempt while the intent is delivered.
+   * Only `confirmed` substantiates a cancel, and a state CHANGE is what an
+   * operator must see, so the first record of each minute is kept and the
+   * suppressed count rides on the next one.
    */
   "tool.cancel-delivery": {
     level: "warn",
     channel: "graph:tool",
     message:
       "cancel delivery results per attempt; only 'confirmed' is the platform's own substantiation",
+    throttleMs: 60_000,
   },
 
   // ── graph:declare — the declaration tool ──────────────────────────────────

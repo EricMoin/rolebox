@@ -268,6 +268,31 @@ export interface PruneLogsOptions {
   readonly keepRotated?: number;
   /** Report what would be removed without removing anything. */
   readonly dryRun?: boolean;
+  /**
+   * A BYTE BUDGET for the whole source: after the retention and age gates have
+   * run, the oldest rotated copies still present are removed until every log
+   * file left (active files included) fits in this many bytes. Active files are
+   * still never candidates, so a budget smaller than the active files' own size
+   * cannot be met — {@link PruneBudgetReport.satisfied} then says so. Omitted
+   * means no budget.
+   */
+  readonly maxTotalBytes?: number;
+}
+
+/** What a byte budget did, reported only when {@link PruneLogsOptions.maxTotalBytes} was given. */
+export interface PruneBudgetReport {
+  /** The budget the prune worked to. */
+  readonly maxTotalBytes: number;
+  /**
+   * Rotated copies removed (or, under `dryRun`, that would be removed) TO MEET
+   * THE BUDGET — a subset of {@link PruneLogsResult.removed}, counted apart from
+   * the copies the retention and age gates had already rejected.
+   */
+  readonly removed: number;
+  /** Bytes of every log file left after the prune (active files and survivors). */
+  readonly remainingBytes: number;
+  /** True when the files left fit the budget; false when active files alone exceed it. */
+  readonly satisfied: boolean;
 }
 
 /** One file a prune removed (or, under `dryRun`, would remove). */
@@ -284,6 +309,8 @@ export interface PruneLogsResult {
   readonly freedBytes: number;
   /** How many ROTATED copies were left in place — active files are never counted. */
   readonly kept: number;
+  /** Present only when the caller set a byte budget; see {@link PruneBudgetReport}. */
+  readonly budget?: PruneBudgetReport;
 }
 
 /** A file's identity, its size and its modification time. */
@@ -642,17 +669,83 @@ export function readLogRecords(options?: LogQuery): LogReadResult {
   };
 }
 
-/** How a follower remembers one file between polls. */
-interface FollowFileState {
+/**
+ * How many file identities a follower remembers before it forgets the oldest.
+ * A rotation renames a file rather than changing it, so the entries are small
+ * and a long-running follower over a busy directory must not grow without bound;
+ * an identity is only evicted once thousands of newer files have been seen.
+ */
+const MAX_FOLLOW_IDENTITIES = 4_096;
+
+/**
+ * How many times one poll may re-list and read what it has not read yet.
+ *
+ * WHY A POLL IS NOT ONE PASS. The scan lists files OLDEST COPY FIRST — highest
+ * rotation number down to the active file — while a concurrent rotation shifts
+ * every copy UP one name. A file whose name changes after the walk has passed
+ * that name is therefore missed until the next poll, and by then the follower
+ * may have delivered newer records from the active file: the stream goes back in
+ * `time` (measured while three processes rotated one channel at ~100
+ * rotations/second: seq 394-399 delivered, then 325-330 of the same writer).
+ * Re-listing until a pass reads no file it has not already read this poll closes
+ * that window: whatever the churn, everything in the directory at the last
+ * listing is read into the SAME batch, which is delivered sorted by `time`. The
+ * bound keeps a pathological directory from turning one poll into a loop; at the
+ * bound the follower behaves as it did before, delivering the rest next poll.
+ */
+const MAX_FOLLOW_PASSES = 6;
+
+/** An open log file: the descriptor, and the identity read FROM that descriptor. */
+interface OpenLogFile {
+  readonly fd: number;
   readonly dev: number;
   readonly ino: number;
-  /** Bytes already consumed; a record's line begins at or after this offset. */
-  readonly offset: number;
+  readonly sizeBytes: number;
 }
 
 /** The key two names for the SAME file share, so a rename keeps its offset. */
 function identityKey(entry: { readonly dev: number; readonly ino: number }): string {
   return entry.dev + ":" + entry.ino;
+}
+
+/**
+ * Open a file and stat the DESCRIPTOR rather than the path.
+ *
+ * WHY THIS IS NOT `stat(path)` FOLLOWED BY `open(path)`. A concurrent rotation
+ * renames the file between the two calls, so the stat describes one inode and the
+ * descriptor another: reading at an offset that belongs to the first from the
+ * second either re-delivers a prefix or skips one. Opening first and asking the
+ * DESCRIPTOR who it is makes the identity and the bytes the same inode, always.
+ */
+function openLogFile(path: string): OpenLogFile | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const info = fstatSync(fd);
+    if (!info.isFile()) {
+      closeSync(fd);
+      return undefined;
+    }
+    return { fd, dev: info.dev, ino: info.ino, sizeBytes: info.size };
+  } catch {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // A descriptor that cannot be closed must not hide the failure above.
+      }
+    }
+    return undefined;
+  }
+}
+
+/** Close a descriptor without letting a failure escape. */
+function closeQuietly(fd: number): void {
+  try {
+    closeSync(fd);
+  } catch {
+    // Closing a reader must not break the follower.
+  }
 }
 
 /** The default wait between polls: a plain timer, which also keeps a CLI alive. */
@@ -662,11 +755,13 @@ function defaultSleep(ms: number): Promise<void> {
   });
 }
 
-/** Complete lines after `offset`, and the offset they end at. */
-function readNewLines(path: string, offset: number): { lines: string[]; offset: number } | undefined {
-  let fd: number | undefined;
+/**
+ * Complete lines after `offset` of an ALREADY OPEN descriptor, and the offset
+ * they end at. The caller owns the descriptor (it was opened together with the
+ * identity), so this reads exactly the inode the offset belongs to.
+ */
+function readNewLines(fd: number, offset: number): { lines: string[]; offset: number } | undefined {
   try {
-    fd = openSync(path, "r");
     const info = fstatSync(fd);
     if (info.size <= offset) return { lines: [], offset };
     const length = info.size - offset;
@@ -680,14 +775,6 @@ function readNewLines(path: string, offset: number): { lines: string[]; offset: 
     return { lines: buffer.subarray(0, lastNewline).toString("utf8").split("\n"), offset: offset + lastNewline + 1 };
   } catch {
     return undefined;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // Closing a reader must not break the follower.
-      }
-    }
   }
 }
 
@@ -704,6 +791,34 @@ function readNewLines(path: string, offset: number): { lines: string[]; offset: 
  * already-seen prefix is not delivered again. Records are delivered in `time`
  * order within a poll, filtered by the same query readLogRecords applies —
  * `limit` and `order` do not apply to a live stream, which has no end.
+ *
+ * THE OFFSET LEDGER IS KEYED BY FILE IDENTITY AND IS NEVER DROPPED BY A RENAME.
+ * Both halves of that sentence are load-bearing under concurrent rotation, and
+ * both were measured wrong before this was written (the same probe that found
+ * the writer's rotation window — scripts/log-multiprocess-probe.ts — had a run
+ * that delivered 157 of 1200 records twice):
+ *
+ *   • IDENTITY, NOT PATH. A rotation renames the file, so the name a record was
+ *     last read under is not the name it has now; the ledger is keyed by
+ *     (device, inode) and the map is kept ACROSS polls. Rebuilding it from each
+ *     poll's listing forgets a file that a rotation hid between the listing and
+ *     the read — and a forgotten file is re-delivered from its beginning when it
+ *     reappears under its new name. The map is capped at
+ *     {@link MAX_FOLLOW_IDENTITIES} and evicts the oldest entry, which is a file
+ *     thousands of rotations old.
+ *   • OPEN FIRST, THEN ASK THE DESCRIPTOR WHO IT IS. Statting the path and then
+ *     opening it lets a rotation slip in between, and the offset then belongs to
+ *     a different inode than the bytes: the read either re-delivers a prefix or
+ *     skips one. {@link openLogFile} opens once and takes the identity from the
+ *     descriptor, so the two always agree.
+ *   • ONE POLL IS SEVERAL PASSES. The listing is oldest-copy-first while a
+ *     rotation moves every copy UP a name, so a single walk can pass a file that
+ *     then moves to a name the walk is already past — and delivering what the
+ *     walk did read, then that file, puts the stream back in `time`. A poll
+ *     therefore re-lists and reads until a pass finds no unread byte, up to
+ *     {@link MAX_FOLLOW_PASSES} passes, and delivers the union of the passes as
+ *     one batch sorted by `time`. The carried offsets are what make a repeated
+ *     pass free of duplicates: a file read to its end answers no lines.
  *
  * Polling waits `pollMs` (default {@link DEFAULT_FOLLOW_POLL_MS}) through
  * `sleep`, both injectable so a test can step the follower. The returned
@@ -728,7 +843,9 @@ export function followLogRecords(
   const canAbort = signal !== undefined && typeof signal.addEventListener === "function";
 
   let stopped = false;
-  let state = new Map<string, FollowFileState>();
+  // The offset ledger: (device, inode) → bytes already delivered. It is keyed by
+  // identity rather than by path on purpose, and it survives every poll.
+  let state = new Map<string, number>();
 
   const stop = (): void => {
     if (stopped) return;
@@ -751,48 +868,78 @@ export function followLogRecords(
     }
   }
 
-  /** Where the follower is now: every listed file, consumed up to its size. */
-  const baseline = (): void => {
-    const next = new Map<string, FollowFileState>();
-    for (const path of queryPaths(query)) {
-      const info = statLogFile(path);
-      if (info === undefined) continue;
-      next.set(path, { dev: info.dev, ino: info.ino, offset: info.sizeBytes });
+  /** Remember an offset for an identity, keeping the map bounded and LRU-ordered. */
+  const remember = (identity: string, offset: number): void => {
+    // Delete first, so an updated identity moves to the end of the insertion
+    // order and the entry evicted at the cap is the least recently seen one.
+    state.delete(identity);
+    state.set(identity, offset);
+    while (state.size > MAX_FOLLOW_IDENTITIES) {
+      const oldest = state.keys().next();
+      if (oldest.done === true) break;
+      state.delete(oldest.value);
     }
-    state = next;
   };
 
-  /** One poll: read every file from where the follower left it, then deliver. */
-  const poll = (): void => {
-    const previous = state;
-    const byIdentity = new Map<string, FollowFileState>();
-    for (const entry of previous.values()) byIdentity.set(identityKey(entry), entry);
-
-    const next = new Map<string, FollowFileState>();
-    const batch: LogRecord[] = [];
+  /** Where the follower is now: every listed file, consumed up to its size. */
+  const baseline = (): void => {
+    state = new Map<string, number>();
     for (const path of queryPaths(query)) {
-      const info = statLogFile(path);
-      if (info === undefined) continue;
-      const carried = byIdentity.get(identityKey(info));
-      // A carried entry means this file was already known — under this name
-      // (an append) or under another one (a rotation renamed it). A file that
-      // shrank in place was rewritten, so it is read from the start again.
-      let offset = carried !== undefined && carried.offset <= info.sizeBytes ? carried.offset : 0;
-      const read = readNewLines(path, offset);
-      if (read === undefined) {
-        next.set(path, { dev: info.dev, ino: info.ino, offset });
-        continue;
-      }
-      offset = read.offset;
-      next.set(path, { dev: info.dev, ino: info.ino, offset });
-      for (const line of read.lines) {
-        if (line.trim().length === 0) continue;
-        const record = parseLogLine(line);
-        if (record === undefined) continue;
-        if (matchesQuery(record, query)) batch.push(record);
-      }
+      const opened = openLogFile(path);
+      if (opened === undefined) continue;
+      remember(identityKey(opened), opened.sizeBytes);
+      closeQuietly(opened.fd);
     }
-    state = next;
+  };
+
+  /**
+   * One poll: read every file from where the follower left it, then deliver.
+   *
+   * The read walks every file the listing names, oldest copy first, and REPEATS
+   * until a pass finds no byte it has not already read; a file that a rotation
+   * renamed past the walk is caught by the re-listing, and a file that grew while
+   * the poll was reading is caught by the next pass. The offsets make a repeated
+   * pass idempotent — a file already read to its end returns no lines, so nothing
+   * is delivered twice — and {@link MAX_FOLLOW_PASSES} bounds the work a
+   * directory under continuous rotation can ask for. Without this, a file the
+   * walk passed over was delivered a poll later, after newer records (measured:
+   * seq 394-399, then 325-330 of the same writer).
+   */
+  const poll = (): void => {
+    const batch: LogRecord[] = [];
+    for (let pass = 0; pass < MAX_FOLLOW_PASSES; pass++) {
+      let readAnyBytes = false;
+      for (const path of queryPaths(query)) {
+        const opened = openLogFile(path);
+        if (opened === undefined) continue;
+        const identity = identityKey(opened);
+        try {
+          const carried = state.get(identity);
+          // A carried offset means this file was already known — under this name
+          // (an append) or under another one (a rotation renamed it). An offset
+          // beyond the current size means the file was REWRITTEN, so it is read
+          // from the start again. Identities this poll does NOT see keep their
+          // offsets: a rotation can hide a file between the listing and the open,
+          // and forgetting it would re-deliver the whole file next poll.
+          const offset = carried !== undefined && carried <= opened.sizeBytes ? carried : 0;
+          const read = readNewLines(opened.fd, offset);
+          remember(identity, read === undefined ? offset : read.offset);
+          if (read === undefined) continue;
+          if (read.lines.length > 0) readAnyBytes = true;
+          for (const line of read.lines) {
+            if (line.trim().length === 0) continue;
+            const record = parseLogLine(line);
+            if (record === undefined) continue;
+            if (matchesQuery(record, query)) batch.push(record);
+          }
+        } finally {
+          closeQuietly(opened.fd);
+        }
+      }
+      // A pass that found no unread byte has nothing left to catch; another pass
+      // would re-list every directory and read nothing.
+      if (!readAnyBytes) break;
+    }
 
     batch.sort((left, right) => left.time - right.time);
     for (const record of batch) {
@@ -872,6 +1019,17 @@ function removeLogFile(path: string): boolean {
  * olderThanMs`. Both gates must pass; a copy inside the window, or younger than
  * the age limit, is kept.
  *
+ * A BYTE BUDGET IS A SECOND, HARDER GATE. When `maxTotalBytes` is given, the
+ * files that survived the two gates above are weighed together with the active
+ * files: while that total exceeds the budget, the OLDEST surviving rotated copy
+ * is removed — oldest by mtime first, and, at equal mtimes, the highest rotation
+ * number first — until the total fits or no candidate is left. The budget
+ * therefore reaches INSIDE the retained window (that is what a disk budget
+ * means), but it never touches what the age gate protected: `--days` is the
+ * operator's freshness promise and it outranks the budget. A budget smaller than
+ * the active files' own bytes cannot be met; the report says so rather than
+ * deleting a file a process is writing to.
+ *
  * `dryRun` reports what would be removed and removes nothing: `removed` and
  * `freedBytes` then describe the files that would go. A file that cannot be
  * removed is reported as kept rather than thrown, a missing directory answers
@@ -881,21 +1039,37 @@ export function pruneLogs(options?: PruneLogsOptions): PruneLogsResult {
   const removed: PruneRemoval[] = [];
   let kept = 0;
   let freedBytes = 0;
+  let budget: PruneBudgetReport | undefined;
   try {
     const keep = resolveKeepRotated(options?.keepRotated);
     const dryRun = options?.dryRun === true;
     const age = options?.olderThanMs;
     const cutoff = typeof age === "number" && Number.isFinite(age) && age >= 0 ? Date.now() - age : undefined;
+    const rawBudget = options?.maxTotalBytes;
+    const maxTotalBytes =
+      typeof rawBudget === "number" && Number.isFinite(rawBudget) && rawBudget >= 0 ? Math.floor(rawBudget) : undefined;
 
-    const channels = new Map<string, LogFileInfo[]>();
-    for (const file of listLogFiles(options)) {
-      if (file.rotation < 1) continue;
-      const group = channels.get(file.channel);
-      if (group === undefined) channels.set(file.channel, [file]);
+    const files = listLogFiles(options);
+    let activeBytes = 0;
+    const byChannel = new Map<string, LogFileInfo[]>();
+    for (const file of files) {
+      if (file.rotation < 1) {
+        activeBytes += file.sizeBytes;
+        continue;
+      }
+      const group = byChannel.get(file.channel);
+      if (group === undefined) byChannel.set(file.channel, [file]);
       else group.push(file);
     }
 
-    for (const group of channels.values()) {
+    // What the two gates left behind, and — of that — what a byte budget may
+    // still take. The two sets differ by exactly one rule: the age gate is the
+    // operator's freshness promise and a byte budget may NOT override it, while
+    // a copy that is merely inside the retained window is fair game (a disk
+    // budget is a budget).
+    const remainingFiles: LogFileInfo[] = [];
+    const budgetCandidates: LogFileInfo[] = [];
+    for (const group of byChannel.values()) {
       // Newest first (`.1` is the most recent rotation), so the copies to KEEP
       // are the first `keep` entries and everything after them is beyond the
       // retained window — the oldest copies go first.
@@ -905,18 +1079,42 @@ export function pruneLogs(options?: PruneLogsOptions): PruneLogsResult {
         const oldEnough = cutoff === undefined || file.mtimeMs <= cutoff;
         if (!beyondRetention || !oldEnough) {
           kept += 1;
+          remainingFiles.push(file);
+          if (oldEnough) budgetCandidates.push(file);
           return;
         }
         if (!dryRun && !removeLogFile(file.path)) {
           kept += 1;
+          remainingFiles.push(file);
           return;
         }
         removed.push({ path: file.path, sizeBytes: file.sizeBytes });
         freedBytes += file.sizeBytes;
       });
     }
+
+    if (maxTotalBytes !== undefined) {
+      // Oldest first: the oldest mtime goes first and, at equal mtimes, the
+      // highest rotation number — the copy furthest from the active file.
+      const candidates = [...budgetCandidates].sort(
+        (left, right) => left.mtimeMs - right.mtimeMs || right.rotation - left.rotation || left.path.localeCompare(right.path),
+      );
+      let remainingBytes = activeBytes + remainingFiles.reduce((total, file) => total + file.sizeBytes, 0);
+      let budgetRemoved = 0;
+      for (const file of candidates) {
+        if (remainingBytes <= maxTotalBytes) break;
+        if (!dryRun && !removeLogFile(file.path)) continue;
+        removed.push({ path: file.path, sizeBytes: file.sizeBytes });
+        freedBytes += file.sizeBytes;
+        remainingBytes -= file.sizeBytes;
+        budgetRemoved += 1;
+        kept -= 1;
+      }
+      budget = { maxTotalBytes, removed: budgetRemoved, remainingBytes, satisfied: remainingBytes <= maxTotalBytes };
+    }
   } catch {
     // Pruning is maintenance: it reports what it managed, never an exception.
   }
-  return { removed, freedBytes, kept };
+  const result: PruneLogsResult = { removed, freedBytes, kept };
+  return budget === undefined ? result : { ...result, budget };
 }

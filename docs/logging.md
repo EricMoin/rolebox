@@ -91,14 +91,16 @@ whole point of the legacy mode.
 ### The read chain: an explicit source beats the environment
 
 `rolebox logs` (and the read API it uses) resolves the source it READS in this
-order:
+order — an explicit file, then an explicit directory, then the writer's own
+chain:
 
-1. `--log-dir <D>` (`logDir` on the read API): exactly `<D>` is read, listed and
+1. an explicit single file (`logFile` on the read API): that file and its
+   rotated copies alone. The CLI has no flag for it, so only an embedder passes
+   one;
+2. `--log-dir <D>` (`logDir` on the read API): exactly `<D>` is read, listed and
    pruned. `ROLEBOX_LOG_FILE` is deliberately **not** consulted, so the location
    a command prints is the location it read and nothing outside `<D>` can be
    removed;
-2. an explicit single file (`logFile` on the read API): that file and its
-   rotated copies alone;
 3. neither: the WRITE chain above decides, so a process logging to
    `ROLEBOX_LOG_FILE` is still readable without options.
 
@@ -136,12 +138,59 @@ to it the same way. `rolebox logs` reads it too — unless `--log-dir` names a
 directory — because with no explicit source the read side resolves the same
 location the writer does.
 
-**Rotation.** Before a line is appended the file's size is checked against
-`ROLEBOX_LOG_MAX_BYTES` (default 10 MB): at the limit the file becomes `.1`, the
-old `.1` becomes `.2`, and only `ROLEBOX_LOG_RETAIN` rotated copies (default 3)
-are kept — a retain of `0` removes the file instead of keeping a copy.
-`rolebox logs prune` is what removes rotated copies an operator no longer wants,
-including copies left behind after `ROLEBOX_LOG_RETAIN` was lowered.
+**Rotation.** Before a line is appended the file's size is read **from disk** and
+checked against `ROLEBOX_LOG_MAX_BYTES` (default 10 MB): at the limit the file
+becomes `.1`, the old `.1` becomes `.2`, and only `ROLEBOX_LOG_RETAIN` rotated
+copies (default 3) are kept — a retain of `0` removes the file instead of keeping
+a copy. `rolebox logs prune` is what removes rotated copies an operator no longer
+wants, including copies left behind after `ROLEBOX_LOG_RETAIN` was lowered.
+
+Reading the size from the file, rather than counting the bytes *this* process
+appended, is what makes the limit the size the file actually rotates at: the file
+is shared, so three processes each waiting for their own share of a 1 KB limit
+let it reach 2316 bytes — 2.3× — before anybody rotated. A writer that finds
+another process rotating also **waits** for that rotation instead of appending
+into the file about to be renamed, because those bytes travel with the inode into
+the copy being made.
+
+**The wait follows the holder's progress, not a stopwatch.** While it walks the
+retention ladder, the process holding the rotation lock refreshes the lock file's
+mtime at least every 5 ms, and a waiting writer keeps waiting while that mtime is
+younger than 25 ms: a rotation that is slow but moving is waited out for as long
+as it takes, and only one that has *stopped* for a whole window releases the
+writer — one record per stalled lock instance, not one per record. The give-up is
+remembered per lock instance (inode + mtime), so a resumed heartbeat or a replaced
+lock arms the wait again. An earlier version gave up **permanently** after 25 ms,
+and that one flag turned a single slow rotation into a process that appended into
+every later file mid-rename: rotated copies reached 39–50× the limit. The bound
+now is **the limit plus one record per concurrent writer**, because the gate is a
+check followed by an append — a record that passed the gate an instant before
+another process rotated is *in* the copy. Measured on three real processes writing
+one channel through the multi-process probe: 1.118–1.128× at its 4 KB default,
+1.012–1.014× at a 32 KB limit with an 8-copy ladder, and 1.385× (1,418 B for a
+1 KB limit, 394 B of it in-flight records) on the deep-ladder load — a 1 KB limit,
+4096 copies, writers back to back, the same configuration in which the
+permanent-give-up version measured 39–50×. Every one of those runs delivered all
+of its records exactly once.
+
+**Rotation is coordinated between processes, and it has to be.** More than one
+process writes the same channel file — a host and the workers it started all
+resolve the same `.rolebox/logs` — and an uncoordinated rename LOSES records:
+`rename(path, path.1)` *replaces* an existing `.1`, so a process that decided to
+rotate a moment before another one finished overwrites the copy the first just
+made. Measured with three real processes writing one channel
+(`bun scripts/log-multiprocess-probe.ts`, 3 × 400 records, a 4 KB limit and a
+retention far above the volume so that retention could not be the cause): the
+uncoordinated sink lost **70 of 1200** records, and a replay lost 143 — always
+the first ~24 records of every writer, i.e. exactly what the first rotation had
+moved aside. The sink now rotates under a per-file lock
+(`<channel>.log.rotate.lock`, created `O_EXCL`) and re-reads the file's size once
+it holds the lock: exactly one process renames, and the others append to whatever
+file results. A lock left behind by a process that died is broken after 10
+seconds. The lock is **not a log file** — `rolebox logs files`, a query and
+`prune` never list it. After the change the same probe delivers every record
+**exactly once**: 1200/1200, no torn or interleaved line, no duplicate, and the
+merged view is ordered by `time`.
 
 ## Environment variables
 
@@ -182,6 +231,40 @@ grep -n '^  "' src/log/registry.ts          # every registered code, in table or
 
 Records that are not events carry no `code`; they come from the level helpers
 (`log.warn("…", { … })`) with a sentence that only exists at the call site.
+
+### Throttling
+
+A few events opt into a suppression window (`throttleMs` in the registry). The
+**first** occurrence in each window is emitted; the repeats inside it are counted,
+and the count rides on the next emitted record as the `suppressed` field — the
+loss is reported, never silent. Every other event, which is the default, is
+emitted every time.
+
+| code | window | why it opted in (counts from this workspace's own `.rolebox/logs`) |
+| --- | --- | --- |
+| `sweep.summary` | 10 s | the densest code measured: 335 records, **74 inside one ten-second window**, 20 inside one second, 36 repeating their predecessor's fields |
+| `dispatch.unclaimed-confirmation` | 60 s | 48 records carrying **two** distinct facts; 41 repeat their predecessor's fields, median gap 169 ms |
+| `tool.control-continuation` | 60 s | 93 records, 16 inside one second, 28 consecutive identical |
+| `tool.cancel-delivery` | 60 s | 66 records carrying seven attempt states, 21 consecutive identical, median gap 21 ms |
+| `log.event.unknown-code` | 60 s | a call site that drifted into a loop |
+| `log.field.narrowed` | 60 s | a call site that narrows a field value on every record |
+
+**No first-failure event is throttled.** A store that could not be read, a
+delivery with no proof that no execution exists, an unproven release, a
+definition that never reached the store: each of those keeps every occurrence,
+because the gate is keyed by `(channel, code)` — not by graph or attempt — so a
+suppression can hide a first report about a *different* subject. The rule and the
+reason are stated at the top of `src/log/registry.ts`, and the exact set is
+pinned by `tests/log/throttle-policy.test.ts`.
+
+Re-measure the evidence on any log directory:
+
+```bash
+bun scripts/log-event-density.ts                # the resolved source (.rolebox/logs here)
+bun scripts/log-event-density.ts --dir /path/to/project/.rolebox/logs
+# records, the largest 60 s/10 s/1 s burst, repeated fields, and — for a code that
+# already has a window — how many records the window would let through.
+```
 
 ## Reading the logs
 
@@ -254,10 +337,50 @@ rolebox logs prune --keep 0 --days 30 # keep none: every rotated copy older than
 
 `prune` removes **rotated copies only**. The active `<channel>.log` is the file a
 running process appends to, and it is never a candidate — the report says so
-every time. Two gates apply and a file must pass both: `--keep` (default: the
-writer's own `ROLEBOX_LOG_RETAIN`, else 3) is how many of a channel's newest
-rotated copies stay, and `--days` is how old by mtime a candidate must
-additionally be.
+every time. Three gates apply:
+
+* **`--keep <n>`** — how many of a channel's newest rotated copies stay. Its
+  default is the WRITER's own retention, read from `ROLEBOX_LOG_RETAIN` in the
+  pruning process, else 3. Because the writer never rotates past that many
+  copies, a *default* prune on a healthy directory finds nothing to do; it earns
+  its place after the variable was **lowered** (the copies the writer rotated
+  while it was higher stay on disk) or on a directory several processes wrote
+  under different limits. Measured: the writer keeps **at most**
+  `ROLEBOX_LOG_RETAIN` copies, so a channel written under
+  `ROLEBOX_LOG_RETAIN=8` that rotated eight times holds `.1`–`.8`;
+  `ROLEBOX_LOG_RETAIN=2 rolebox logs prune` then removes `.3`–`.8` and keeps
+  `.1`, `.2`; an explicit `--keep 0` removes those two as well. The WRITE side
+  under the same variable: `ROLEBOX_LOG_RETAIN=0` keeps no rotated copy at all
+  (rotation *removes* the full file), `=1` keeps exactly `.1`, `=3` keeps
+  `.1`–`.3`.
+* **`--days <n>`** — an mtime age gate on top: a candidate must ALSO be at least
+  that old. It has nothing to do with `ROLEBOX_LOG_MAX_BYTES`; the writer never
+  reads it.
+* **`--max-total-bytes <n>`** — a byte budget for the whole source, and the only
+  gate that reaches INSIDE the retained window: while the total size of every log
+  file left (active files included) exceeds the budget, the oldest surviving
+  rotated copy goes — oldest by mtime first, and at equal mtimes the highest
+  rotation number. `--days` outranks it: a copy the age gate protects is never
+  removed to meet a budget, so the report can say the budget was **not met**. A
+  budget smaller than the active files alone is never met either, because an
+  active file is never removed; the report says exactly that instead of deleting
+  the file a process is writing to.
+
+```bash
+rolebox logs prune --dry-run                    # what would go, and how much that frees
+rolebox logs prune --keep 1                     # only the newest rotated copy survives
+rolebox logs prune --days 7                     # ...and only copies older than a week
+rolebox logs prune --max-total-bytes 50000000   # keep the whole log dir under ~50 MB
+rolebox logs prune --keep 0 --days 30           # keep none: every copy older than 30 days
+```
+
+Measured boundaries for `--max-total-bytes` (a directory with an active file and
+five rotated copies, `--keep 99` so the count gate keeps all of them): a budget
+of *active + one copy* removes the four oldest copies and reports `met`; a budget
+of `0` removes all five and reports `NOT met — 172 B left, and active files are
+never removed`; a 30-day `--days` gate together with a budget of `0` removes
+nothing and reports `NOT met`, because the age gate is the operator's freshness
+promise and outranks the budget.
 
 ## The live view (dsh web UI)
 
@@ -425,7 +548,7 @@ the level threshold in force.
 | `ctrl+up` | raise the level threshold by one rank (towards `fatal`) |
 | `ctrl+down` | lower it by one rank (towards `debug`) |
 | `ctrl+n` | cycle the channel filter: each channel the buffer holds, then every channel again |
-| `ctrl+g` | follow: drop the pane's own narrowing, unpause, and read the newest records now |
+| `ctrl+g` | follow: clear the pane's free-text filter, unpause the stream, and read the newest records now — the level and channel filters stay in force |
 
 Every Logs control is a `ctrl`-modified key, registered as one disposable keymap
 layer by the plugin (`src/tui/index.tsx`), so the host's bare keys (`r` refresh,
@@ -462,7 +585,7 @@ count, and each loss named only when there is one:
 
 | Part | Meaning |
 | --- | --- |
-| `N/M records` | the buffer: N records match the pane's own narrowing out of the M it holds, and the pane paints the newest 200 rows of them |
+| `N/M records` | the buffer: N records match the pane's free-text filter out of the M it holds, and the pane paints the newest 200 rows of them |
 | `dropped` | records the 500-record cap discarded from the front of the **current** view; `(N earlier)` is the half discarded by the views before it — the two are disjoint, so adding them is the lifetime total and never a doubled loss |
 | `skipped` | malformed lines the reader counted in the last answer — a line that is not JSON, or JSON that is not a record. They are counted and skipped, never fatal |
 | `more waiting` | the last answer came back truncated: more records existed than one poll delivers, and the next poll drains them from the cursor |
@@ -524,8 +647,81 @@ and which direction new call sites should take, is
   with no files yet is also like `tail -f`: the command waits, says so on stderr
   and delivers the first record written — it does not exit just because the
   directory (or the file) is empty at the moment it starts.
-* File writes are synchronous appends. Asynchronous writing, backpressure and
-  dropped-record accounting are a later hardening stage.
+* File writes are synchronous appends, **by measurement rather than omission**:
+  the stage-5 write-path review put one representative record at 0.03 ms p99
+  (13–16× under the 0.5 ms budget it was reviewed against), a record crossing
+  the rotation limit at 0.2–0.3 ms, and the worst single call still inside a
+  60 Hz frame — so the sink stays a synchronous `appendFileSync`, which is also
+  what keeps a record readable the moment it is written. Re-measured after the
+  rotation gate began reading the file's size on every record (one extra `stat`,
+  ~1 µs): 0.022 ms mean, 0.042 ms p99 over 20,000 records, still about 12× under
+  that budget. A record that arrives while *another process* is rotating waits
+  for that rotation while the holder keeps refreshing its lock (a 5 ms heartbeat;
+  25 ms without progress releases the waiter), which is the same rotation the
+  process holding the lock is already performing. The numbers, the
+  10,000-record burst and the revisit trigger are in
+  [logging-architecture.md](logging-architecture.md#what-one-write-costs-measured).
+  There is therefore **no write queue and nothing for the writer to drop**: the
+  losses that are counted today are the throttled events' `suppressed` field,
+  the unknown-code counter behind `log.event.unknown-code`, the reader's
+  `skippedLines`, and the live panes' own buffer-cap drop counts. Backpressure
+  accounting arrives with the queue, if the trigger ever fires.
+* **Concurrent rotation was a real, measured data-loss window, and it is closed.**
+  See [Rotation](#where-the-files-are) above: before the per-file rotation lock,
+  three processes rotating one channel lost 70–143 of 1200 records. The window is
+  the rename itself — `rename(path, path.1)` replaces an existing `.1` — and it
+  now takes a lock to enter. What this does NOT cover: an old rolebox binary (or
+  any other writer) still rotating the same file WITHOUT the lock, and a file
+  system whose renames are not atomic. Two writers that pass different
+  `ROLEBOX_LOG_MAX_BYTES` values still serialize correctly — the gate reads the
+  file, so whichever writer first sees the size reach *its* limit rotates and the
+  others adopt the result — but the file then rotates at the smallest limit in
+  play. A rotated copy holds everything that was in the file when the gate
+  tripped plus what was appended while the shift ran — **the limit plus one
+  record per concurrent writer**, because a record that passed the gate an
+  instant before another process rotated is in the copy. The wait described
+  under [Rotation](#where-the-files-are) is what keeps it to that, and the
+  probe's `rotation-bound` check asserts that bound in bytes
+  (`maxRotatedBytes ≤ ROLEBOX_LOG_MAX_BYTES + one record per writer`), with the
+  overshoot and the factor reported beside it: 1.01–1.13× at the probe's 4 KB and
+  32 KB configurations, 1.385× (394 B over) on the 1 KB deep-ladder load, and
+  39–50× before the wait followed the holder's progress.
+* **The live tail can fall behind a rotation, and it says so rather than
+  pretending otherwise.** A follower polls: it lists the files, reads each from
+  where it left off, and delivers the batch in `time` order. Between two polls a
+  rotation renames every copy UP one name, so a file can move to a name the
+  walk has already passed — the multi-process probe delivered a whole file one
+  poll late that way, after records written into the fresh active file. The
+  follower re-lists and reads again until a pass finds no unread byte (bounded at
+  six passes per poll), which is what turns that from a 17% late block into 0
+  late records in nine of ten stress runs and 2.5% in the tenth; a record is
+  never lost and never delivered twice. The remaining inversion is EXACTLY a
+  same-millisecond tie, and it is measured rather than waved at: on a 1 KB limit
+  with writers back to back, 5 of 1200 records arrived with a `seq` below one
+  already delivered for that writer, and all 5 shared the millisecond of the
+  record that had set the high-water `seq` (none was older); the delivered
+  stream stepped back in `time` 3 times, worst 37 ms, when a renamed file
+  arrived a poll late. Nothing else about the view layer's contract changes:
+  `rolebox logs` (the merged view) is ordered by `time`, and the live stream
+  orders each poll by it.
+* **The live `--follow` stream had the matching read-side race, and it is closed
+  too.** One probe run delivered 157 of 1200 records twice: the follower rebuilt
+  its offset ledger from each poll's listing, so a file a concurrent rotation had
+  renamed between the listing and the read was forgotten and replayed. The ledger
+  is now keyed by file identity, kept across polls, and the identity is taken
+  from the OPEN descriptor. A record is still delivered at most once *per
+  follower process* — two `--follow` processes each deliver the stream once, and
+  a follower that starts later does not replay what was written before it
+  started.
+* **One field name trips the redaction rule.** `context-window.large-output`
+  carries `estimatedTokens`, and the sensitive-term rule matches "token" inside
+  it, so the count reaches the file as `"[redacted]"`. Nothing leaks — the
+  redaction is in the safe direction — but the diagnostic loses its number. It is
+  pinned (code, key, file) in `tests/log/redaction-scan.test.ts`, which fails if a
+  NEW sensitive key appears at any call site and also fails once this one is
+  renamed (the entry must then be deleted). The rename itself belongs to
+  `src/recovery/builtin/context-window-monitor.ts`, outside the logging
+  subsystem.
 * The memory sink is per process. The live views do not depend on it: the dsh
   web UI's Logs panel reads the FILES through the view layer (the route above),
   so it shows records whichever process wrote them; the memory sink stays the

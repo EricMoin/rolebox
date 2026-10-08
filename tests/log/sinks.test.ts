@@ -19,13 +19,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { getConfigDir } from "../../src/cli/paths.ts";
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_RETAIN,
+  ROTATE_LOCK_STALE_MS,
+  ROTATE_LOCK_SUFFIX,
+  ROTATE_WAIT_MS,
   createFileSink,
   logChannelFileName,
   resolveLogDir,
@@ -34,10 +37,30 @@ import {
 } from "../../src/log/sinks/file.ts";
 import { createFanoutSink, type FanoutSink } from "../../src/log/sinks/fanout.ts";
 import { DEFAULT_MEMORY_CAPACITY, createMemorySink, isMemorySink } from "../../src/log/sinks/memory.ts";
+import { listLogFiles } from "../../src/log/index.ts";
 import type { LogSink } from "../../src/log/types.ts";
 import { beginLogTest, endLogTest, makeRecord, removeDir, setLogEnv, tempDir } from "../helpers/log.ts";
 
 let state: { env: Record<string, string | undefined>; dir: string };
+
+/**
+ * The real other process the rotation-wait cases need: one thread cannot hold a
+ * rotation lock and watch the sink wait for it (the wait parks the thread), so
+ * the holder is spawned. See tests/log/fixtures/sink-lock-holder.ts.
+ */
+const LOCK_HOLDER = join(import.meta.dir, "fixtures", "sink-lock-holder.ts");
+
+/** Spawn the holder fixture and hand back the child plus its captured stderr. */
+function spawnLockHolder(args: readonly string[]): { child: Bun.Subprocess; stderr: () => Promise<string> } {
+  const child = Bun.spawn(["bun", "run", LOCK_HOLDER, ...args], {
+    stdout: "ignore",
+    stderr: "pipe",
+    // The legacy single-file variable beats an explicit dir, and this suite's
+    // parent process may have it set: the child must write where it was told.
+    env: { ...process.env, ROLEBOX_LOG_FILE: "" },
+  });
+  return { child, stderr: () => new Response(child.stderr as ReadableStream).text() };
+}
 
 beforeEach(() => {
   state = beginLogTest();
@@ -351,6 +374,51 @@ describe("file sink", () => {
     expect(readFileSync(join(dir, "dispatch.log.1"), "utf8")).toContain('"m2"');
   });
 
+  it("rotates at the limit when the bytes are split between writers", () => {
+    // Two sinks are two writers: each keeps its own byte count, exactly like
+    // two processes, and NEITHER reaches the limit on its own. Gating rotation
+    // on the private count therefore lets the file they share grow to
+    // (writers x maxBytes) before anybody rotates — the defect the multi-process
+    // probe found (a 2.26x live file with three writers at a 1 KB limit). The
+    // gate reads the file, so the file rotates at the limit whoever wrote the
+    // bytes.
+    const first = createFileSink({ dir, maxBytes: 1_024, retain: 40 });
+    const second = createFileSink({ dir, maxBytes: 1_024, retain: 40 });
+    for (let index = 0; index < 6; index++) {
+      first(makeRecord({ level: "info", channel: "split", message: "first-" + index }));
+      second(makeRecord({ level: "info", channel: "split", message: "second-" + index }));
+    }
+    first.close();
+    second.close();
+
+    const path = join(dir, "split.log");
+    // Each writer appended ~700 bytes, so a private-counter gate would not have
+    // rotated at all; the shared file crossed 1024 twice.
+    expect(existsSync(path + ".1")).toBe(true);
+    const lines = [path, path + ".1", path + ".2"]
+      .filter((candidate) => existsSync(candidate))
+      .flatMap((candidate) => readFileSync(candidate, "utf8").trim().split("\n").filter((line) => line.length > 0));
+    // Nothing lost, nothing duplicated across the live file and its copies.
+    expect(lines).toHaveLength(12);
+    // And the live file sits at the limit, not past it: one record may be in
+    // flight while the shift runs.
+    expect(statSync(path).size).toBeLessThanOrEqual(1_024 + 200);
+  });
+
+  it("does not walk retention slots that hold no copy", () => {
+    // The shift must start at the copies that exist. A retain far above them
+    // once meant one stat per empty slot — the rotation window in which other
+    // writers keep appending into the copy being made.
+    const sink = createFileSink({ dir, maxBytes: 1, retain: 512 });
+    for (let index = 0; index < 4; index++) sink(makeRecord({ level: "warn", message: "m" + index }));
+
+    expect(existsSync(join(dir, "dispatch.log.1"))).toBe(true);
+    expect(existsSync(join(dir, "dispatch.log.2"))).toBe(true);
+    expect(existsSync(join(dir, "dispatch.log.3"))).toBe(true);
+    expect(existsSync(join(dir, "dispatch.log.512"))).toBe(false);
+    expect(existsSync(join(dir, "dispatch.log.4"))).toBe(false);
+  });
+
   it("removes the file instead of keeping a copy when retain is 0", () => {
     const sink = createFileSink({ dir, maxBytes: 1, retain: 0 });
     sink(makeRecord({ level: "warn", message: "first" }));
@@ -375,6 +443,168 @@ describe("file sink", () => {
     expect(failures[0].code).toBe("log.file.write-failed");
     expect(failures[0].channel).toBe("dispatch");
     expect(sink.disabled).toBe(true);
+  });
+
+  it("waits out a stalled rotation lock, and waits again for a replacement", () => {
+    // Two processes rotating one file is what loses records: `rename(path,
+    // path.1)` REPLACES an existing `.1`. A lock held by somebody else must
+    // therefore mean "do not rotate" — and the holder's lock must be left
+    // exactly where it is. Appending straight into the file the holder is about
+    // to rename is the other half of the defect (those bytes land in the copy
+    // and push it past the limit), so the writer WAITS while the holder is
+    // making progress and appends anyway only when it has stopped.
+    const sink = createFileSink({ dir: state.dir, maxBytes: 1, retain: 3 });
+    const path = sink.pathFor("locked");
+    const lock = path + ROTATE_LOCK_SUFFIX;
+    writeFileSync(lock, "999999", "utf8");
+
+    // The first record finds an empty file, so the gate does not trip yet.
+    sink(makeRecord({ level: "info", message: "first", channel: "locked" }));
+
+    // Nobody is refreshing this lock, so the record pays one no-progress window
+    // and then appends.
+    const secondStarted = Date.now();
+    sink(makeRecord({ level: "info", message: "second", channel: "locked" }));
+    expect(Date.now() - secondStarted).toBeGreaterThanOrEqual(ROTATE_WAIT_MS - 1);
+
+    // The give-up is scoped to the lock INSTANCE it gave up on: the same
+    // stalled lock is not paid for twice.
+    const thirdStarted = Date.now();
+    sink(makeRecord({ level: "info", message: "third", channel: "locked" }));
+    expect(Date.now() - thirdStarted).toBeLessThan(ROTATE_WAIT_MS);
+
+    // A REPLACED lock is a different stamp (inode + mtime) and is waited for
+    // again. This is the regression: a permanent per-process give-up let ONE
+    // slow rotation turn the sink into a writer that appended into every later
+    // file mid-rename (rotated copies reached 40x the limit).
+    rmSync(lock, { force: true });
+    writeFileSync(lock, "999998", "utf8");
+    const fourthStarted = Date.now();
+    sink(makeRecord({ level: "info", message: "fourth", channel: "locked" }));
+    expect(Date.now() - fourthStarted).toBeGreaterThanOrEqual(ROTATE_WAIT_MS - 1);
+    sink.close();
+
+    expect(existsSync(path + ".1")).toBe(false);
+    const content = readFileSync(path, "utf8");
+    expect(content).toContain('"first"');
+    expect(content).toContain('"second"');
+    expect(content).toContain('"third"');
+    expect(content).toContain('"fourth"');
+    // The lock is not a log file: the read side never lists it.
+    rmSync(lock, { force: true });
+  });
+
+  it("keeps waiting while another process's rotation is making progress", async () => {
+    // THE HEARTBEAT, FROM THE WAITER'S SIDE. A fixed deadline cannot tell a slow
+    // rotation from a dead one: the sink would append into the copy the holder
+    // is making. A holder that keeps refreshing its lock is waited out for as
+    // long as it keeps moving, so this record — which starts while the holder
+    // has 400 ms of work left — must not append until the holder releases.
+    const sink = createFileSink({ dir: state.dir, maxBytes: 1, retain: 3 });
+    const path = sink.pathFor("progressing");
+    const lock = path + ROTATE_LOCK_SUFFIX;
+    sink(makeRecord({ level: "info", message: "before", channel: "progressing" }));
+
+    const holder = spawnLockHolder([
+      "--mode", "hold", "--dir", state.dir, "--channel", "progressing", "--hold-ms", "400",
+    ]);
+    try {
+      const appeared = Date.now() + 10_000;
+      while (!existsSync(lock) && Date.now() < appeared) await Bun.sleep(1);
+      expect(existsSync(lock)).toBe(true);
+
+      const started = Date.now();
+      sink(makeRecord({ level: "info", message: "during", channel: "progressing" }));
+      const waited = Date.now() - started;
+
+      // Far beyond ROTATE_WAIT_MS, because the holder never stopped moving —
+      // and it ended when the holder released, not on a stopwatch.
+      expect(waited).toBeGreaterThanOrEqual(100);
+      expect(waited).toBeLessThan(10_000);
+      expect(existsSync(lock)).toBe(false);
+    } finally {
+      await holder.child.exited;
+      rmSync(lock, { force: true });
+    }
+
+    // The holder released its lock and exited cleanly: the wait ended because
+    // the rotation did, not because a window ran out under it.
+    expect(await holder.stderr()).toBe("");
+    expect(holder.child.exitCode).toBe(0);
+    expect(readFileSync(path, "utf8")).toContain('"during"');
+    sink.close();
+  });
+
+  it("refreshes its lock while a long rotation walks the ladder", async () => {
+    // THE HEARTBEAT, FROM THE HOLDER'S SIDE. A deep ladder is the slow rotation
+    // a waiter must not mistake for a dead one, so the holder announces its
+    // progress while it scans and shifts. The parent cannot watch a rotation it
+    // would have to run itself (one thread), so a child process runs the real
+    // sink over a ladder the parent built, and the parent samples the lock's
+    // mtime until the child releases it.
+    const sink = createFileSink({ dir: state.dir, maxBytes: 1, retain: 4_000 });
+    const path = sink.pathFor("heartbeat");
+    writeFileSync(path, "x".repeat(2_000), "utf8");
+    for (let index = 1; index <= 3_000; index++) writeFileSync(`${path}.${index}`, "x", "utf8");
+    const lock = path + ROTATE_LOCK_SUFFIX;
+
+    const holder = spawnLockHolder([
+      "--mode", "rotate", "--dir", state.dir, "--channel", "heartbeat",
+      "--max-bytes", "1", "--retain", "4000",
+    ]);
+    const stamps = new Set<number>();
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      try {
+        stamps.add(statSync(lock).mtimeMs);
+      } catch {
+        // The lock is gone: the rotation finished (or never started).
+        if (stamps.size > 0 || holder.child.exitCode !== null) break;
+      }
+      await Bun.sleep(1);
+    }
+    await holder.child.exited;
+    rmSync(lock, { force: true });
+    sink.close();
+
+    expect(await holder.stderr()).toBe("");
+    expect(holder.child.exitCode).toBe(0);
+    // More than one stamp means the lock moved while it was held: a waiter
+    // reading it would have kept waiting instead of appending into the copy.
+    expect(stamps.size).toBeGreaterThan(1);
+    // And the walk really happened: the top of the 3,000-copy ladder moved up.
+    expect(existsSync(`${path}.3001`)).toBe(true);
+    expect(readFileSync(path, "utf8")).toContain('"holder-rotated"');
+  });
+
+  it("breaks a stale rotation lock and removes the lock it took", () => {
+    const sink = createFileSink({ dir: state.dir, maxBytes: 1, retain: 3 });
+    const path = sink.pathFor("stale");
+    const lock = path + ROTATE_LOCK_SUFFIX;
+    writeFileSync(lock, "1", "utf8");
+    const old = new Date(Date.now() - ROTATE_LOCK_STALE_MS - 1_000);
+    utimesSync(lock, old, old);
+
+    sink(makeRecord({ level: "info", message: "one", channel: "stale" }));
+    sink(makeRecord({ level: "info", message: "two", channel: "stale" }));
+    sink.close();
+
+    expect(existsSync(path + ".1")).toBe(true);
+    // The lock the sink took for its own rotation is gone afterwards.
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("never lists a rotation lock as a log file", () => {
+    const sink = createFileSink({ dir: state.dir, maxBytes: 1, retain: 3 });
+    const path = sink.pathFor("graph:host");
+    sink(makeRecord({ level: "info", message: "real", channel: "graph:host" }));
+    sink.close();
+    writeFileSync(path + ROTATE_LOCK_SUFFIX, "1", "utf8");
+
+    const listed = listLogFiles({ logDir: state.dir }).map((file) => file.path);
+    // The channel file is listed; the lock sitting beside it is not a log file.
+    expect(listed).toContain(path);
+    expect(listed).not.toContain(path + ROTATE_LOCK_SUFFIX);
   });
 
   it("abandons rotation on a rotate failure, reports it once and keeps writing", () => {

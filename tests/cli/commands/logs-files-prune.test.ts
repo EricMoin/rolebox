@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -283,6 +283,76 @@ describe("rolebox logs prune", () => {
     }
     expect(process.exitCode).toBe(0);
     expect(text(captured.stdout)).toContain("Dry run: would remove 2 rotated file(s)");
+  });
+
+  it("--max-total-bytes reaches inside the kept window, oldest copy first", () => {
+    const { active, rotations } = writePruneFixture();
+    // Room for the active file and ONE rotated copy: the four oldest go, even
+    // though --keep 99 says every one of them is inside the retained window.
+    const budget = statSync(active).size + statSync(rotations[0] ?? "").size;
+    const seen = capture();
+    expect(runLogsPrune({ logDir: dir, keep: 99, maxTotalBytes: budget, dryRun: false }, seen.io)).toBe(0);
+
+    const rendered = text(seen.out);
+    expect(rendered).toContain("Removed 4 rotated file(s)");
+    expect(rendered).toContain("Byte budget");
+    expect(rendered).toContain(": met");
+    expect(existsSync(rotations[0] ?? "")).toBe(true);
+    for (const path of rotations.slice(1)) expect(existsSync(path)).toBe(false);
+    expect(existsSync(active)).toBe(true);
+    expect(readFileSync(active, "utf8")).toBe(body("active", 4));
+  });
+
+  it("--max-total-bytes says NOT met when the active file alone is over budget", () => {
+    const { active, rotations } = writePruneFixture();
+    const seen = capture();
+    expect(runLogsPrune({ logDir: dir, keep: 99, maxTotalBytes: 1, dryRun: true }, seen.io)).toBe(0);
+
+    const rendered = text(seen.out);
+    expect(rendered).toContain("Dry run: would remove 5 rotated file(s)");
+    expect(rendered).toContain(": NOT met");
+    expect(rendered).toContain("active files are never removed");
+    expect(existsSync(active)).toBe(true);
+    for (const path of rotations) expect(existsSync(path)).toBe(true);
+  });
+
+  it("--days outranks the budget: a protected copy is never removed to meet it", () => {
+    const { rotations } = writePruneFixture();
+    const seen = capture();
+    // Every copy is 2-10 days old, so a 30-day age gate protects all of them and
+    // the budget simply cannot be met — the report says so instead of overriding.
+    expect(runLogsPrune({ logDir: dir, keep: 99, days: 30, maxTotalBytes: 1, dryRun: false }, seen.io)).toBe(0);
+
+    const rendered = text(seen.out);
+    expect(rendered).toContain("Nothing to prune");
+    expect(rendered).toContain(": NOT met");
+    for (const path of rotations) expect(existsSync(path)).toBe(true);
+  });
+
+  it("--max-total-bytes travels through the citty command", async () => {
+    const { active, rotations } = writePruneFixture();
+    const budget = statSync(active).size + statSync(rotations[0] ?? "").size;
+    const captured = captureConsole();
+    try {
+      await runCommandWith(logsPruneCommand, { "log-dir": dir, "max-total-bytes": String(budget), "dry-run": true });
+    } finally {
+      captured.restore();
+    }
+    expect(process.exitCode).toBe(0);
+    expect(text(captured.stdout)).toContain("Byte budget");
+  });
+
+  it("rejects an unusable --max-total-bytes with exit 1 and the prune usage line", async () => {
+    writePruneFixture();
+    const captured = captureConsole();
+    try {
+      await runCommandWith(logsPruneCommand, { "log-dir": dir, "max-total-bytes": "1.5" });
+    } finally {
+      captured.restore();
+    }
+    expect(process.exitCode).toBe(1);
+    expect(captured.stderr.join("\n")).toContain('Error: --max-total-bytes must be a whole number (got "1.5")');
+    expect(captured.stderr.join("\n")).toContain("Usage: rolebox logs prune");
   });
 
   it("rejects an unusable --keep with exit 1 and the prune usage line", async () => {
