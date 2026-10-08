@@ -122,16 +122,16 @@ describe("buildAgentPrompt", () => {
     expect(result).not.toContain("graph_declare");
   });
 
-  it("returns the raw prompt when no skills are provided (empty array)", () => {
+  it("labels the role prompt when no skills are provided (empty array)", () => {
     const role = makeRole({ prompt: "Be concise." });
     const result = buildAgentPrompt(role, []);
-    expect(result).toBe("Be concise.");
+    expect(result).toBe("## Role instructions\n\nBe concise.");
   });
 
-  it("returns the raw prompt when skills array is undefined / empty", () => {
+  it("preserves the role prompt text when skills are empty", () => {
     const role = makeRole({ prompt: "Just the prompt." });
     const result = buildAgentPrompt(role, []);
-    expect(result).toBe("Just the prompt.");
+    expect(result).toBe("## Role instructions\n\nJust the prompt.");
   });
 
   it("includes the role prompt text when skills are present", () => {
@@ -211,6 +211,7 @@ describe("buildAgentPrompt", () => {
     const skills = [makeSkill({ name: "multi-skill" })];
     const result = buildAgentPrompt(role, skills);
 
+    expect(result).toStartWith("## Role instructions\n\nLine one.\nLine two.\nLine three.");
     expect(result).toContain("Line one.\nLine two.\nLine three.");
     expect(result).toContain("- `multi-skill` — A test skill");
   });
@@ -274,16 +275,16 @@ describe("buildAgentPrompt", () => {
     expect(result).toContain("- `test-skill` — A test skill");
   });
 
-  it("returns raw prompt when neither skills nor subagents are provided", () => {
+  it("keeps the role instructions heading when neither skills nor subagents are provided", () => {
     const role = makeRole({ prompt: "Just the prompt." });
     const result = buildAgentPrompt(role, [], { subagents: [] });
-    expect(result).toBe("Just the prompt.");
+    expect(result).toBe("## Role instructions\n\nJust the prompt.");
   });
 
-  it("returns raw prompt when skills empty and subagents undefined", () => {
+  it("keeps the role instructions heading when skills are empty and subagents undefined", () => {
     const role = makeRole({ prompt: "Just the prompt." });
     const result = buildAgentPrompt(role, []);
-    expect(result).toBe("Just the prompt.");
+    expect(result).toBe("## Role instructions\n\nJust the prompt.");
   });
 
   it("appends the `## Available sub-agents` section when subagents are present but skills are empty", () => {
@@ -380,11 +381,10 @@ describe("buildAgentPrompt", () => {
   });
 });
 
-describe("Backward compatibility (roles without open-role fields)", () => {
-  it("byte-identical composition with skills + subagents and no public-agents section", () => {
+describe("roles without open-role fields", () => {
+  it("composes role instructions, skills and subagents with no public-agents section", () => {
     // A pre-feature role: no open / exports / open_roles fields, and the
-    // publicAgents option is not supplied — output must be byte-identical
-    // to the pre-feature prompt (raw prompt, then sections, nothing else).
+    // publicAgents option is not supplied.
     const role = makeRole({ prompt: "You are a plain role." });
     const skills = [makeSkill({ name: "core-skill", description: "Core skill", scope: "rolebox" })];
     const subagents = [{ id: "plain--worker", name: "Worker", description: "Does work" }];
@@ -392,7 +392,7 @@ describe("Backward compatibility (roles without open-role fields)", () => {
     const result = buildAgentPrompt(role, skills, { subagents });
 
     expect(result).toBe(
-      "You are a plain role.\n\n" +
+      "## Role instructions\n\nYou are a plain role.\n\n" +
         buildSkillBlock(skills) +
         "\n\n" +
         buildSubagentBlock(subagents),
@@ -400,7 +400,7 @@ describe("Backward compatibility (roles without open-role fields)", () => {
     expect(result).not.toContain("## Available public agents");
   });
 
-  it("byte-identical composition with references + skills + subagents + graph and no public-agents section", () => {
+  it("composes role instructions, references, skills and subagents with no public-agents section", () => {
     const role = makeRole({ prompt: "Raw prompt text." });
     const skills = [makeSkill({ name: "skill-a", description: "Skill A", scope: "rolebox" })];
     const subagents = [{ id: "plain--worker", name: "Worker", description: "Does work" }];
@@ -416,7 +416,7 @@ describe("Backward compatibility (roles without open-role fields)", () => {
     const result = buildAgentPrompt(role, skills, { subagents, references });
 
     expect(result).toBe(
-      "Raw prompt text.\n\n" +
+      "## Role instructions\n\nRaw prompt text.\n\n" +
         buildReferenceBlock(references) +
         "\n\n" +
         buildSkillBlock(skills) +

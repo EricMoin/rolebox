@@ -1978,7 +1978,7 @@ describe("dsh plugin apply()", () => {
       // after its own text, so assert the prompt prefix.
       expect(
         sections[0].text({ agent: { id: "s1" }, sessionID: "s1" }),
-      ).toStartWith("You are a reloaded role.");
+      ).toStartWith("## Role instructions\n\nYou are a reloaded role.");
 
       // Skill consumer: the provider re-reads the SAME captured roles array on
       // every list(), so the new role's skill is advertised after the reload.
@@ -2118,7 +2118,7 @@ describe("dsh plugin apply()", () => {
       // shape pinned by tests/platform/dsh-system-prompt.test.ts.
       expect(
         sections[0].text({ agent: { id: sessionId }, sessionID: sessionId }),
-      ).toBe("You are a test role.");
+      ).toBe("## Role instructions\n\nYou are a test role.");
 
       disposer();
     } finally {
@@ -2176,7 +2176,7 @@ describe("dsh plugin apply()", () => {
       // resolves the active role seeded in the workspace sidecar.
       expect(
         sections[0].text({ agent: { id: "s1" }, sessionID: "s1" }),
-      ).toBe("You are a test role.");
+      ).toBe("## Role instructions\n\nYou are a test role.");
 
       // Write side: a switch through the host route persists to the SAME
       // workspace sidecar. The holder's save is fire-and-forget, so poll

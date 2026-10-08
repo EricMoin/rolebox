@@ -231,12 +231,13 @@ describe("End-to-end", () => {
       );
     });
 
-    it("tech-writer prompt is raw when no skills are resolved", async () => {
+    it("tech-writer prompt labels its role instructions when no skills are resolved", async () => {
       const roles = await discoverRoles(examplesDir);
       const tw = roles.get("tech-writer")!;
 
       const prompt = buildAgentPrompt(tw, []);
 
+      expect(prompt).toStartWith("## Role instructions\n\n");
       expect(prompt).not.toContain("## Available skills");
       expect(prompt).toContain("You are a technical writer");
       expect(prompt).toContain("accurate, well-structured");

@@ -44,6 +44,7 @@ describe("buildAttemptDeliveryPrompt", () => {
 
     const prompt = buildAttemptDeliveryPrompt(REQUEST, view);
 
+    expect(prompt).toStartWith("## Assigned task\n\nVerify the change.\n\n---\n");
     expect(prompt).toContain("## Accepted upstream results");
     expect(prompt).toContain('Full results manifest: "/delivery/review/inputs.json"');
     expect(prompt).toContain('Producer: "work-0"; outcome: "done"; attempt: "work-0#1"');

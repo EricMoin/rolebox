@@ -570,6 +570,7 @@ describe("the input view reaches the worker each adapter starts (D7)", () => {
 
     const prompt = launches[0]?.prompt ?? "";
     // THE HANDOFF STILL TRAVELS.
+    expect(prompt).toStartWith("## Assigned task\n\nDo the work.\n\n---\n");
     expect(prompt).toContain("Do the work.");
     expect(prompt).toContain(CREDENTIAL);
     // THE INPUT: the producer, its outcome, the producing attempt and the

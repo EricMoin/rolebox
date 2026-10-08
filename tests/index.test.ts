@@ -205,7 +205,7 @@ describe("RoleboxPlugin config hook", () => {
 
     expect(Object.keys(cfg.agent ?? {})).toEqual(["engineer"]);
     const agent = cfg.agent!.engineer!;
-    expect(agent.prompt).toBe("Write clean code.");
+    expect(agent.prompt).toBe("## Role instructions\n\nWrite clean code.");
     expect(agent.description).toBe("Builds features");
     expect(agent.mode).toBe("primary");
   });
@@ -255,7 +255,7 @@ describe("RoleboxPlugin config hook", () => {
     await hooks.config!(cfg);
 
     const prompt = cfg.agent!.reviewer!.prompt!;
-    expect(prompt).toStartWith("You review code.");
+    expect(prompt).toStartWith("## Role instructions\n\nYou review code.");
     expect(prompt).toContain("## Available skills");
     expect(prompt).toContain("- `git-master` — Expert git workflows");
     expect(prompt).toContain("- `dart-add-unit-test` — Unit test patterns for Dart");
@@ -285,9 +285,9 @@ describe("RoleboxPlugin config hook", () => {
 
     const keys = Object.keys(cfg.agent ?? {}).sort();
     expect(keys).toEqual(["alpha", "beta", "gamma"]);
-    expect(cfg.agent!.alpha!.prompt).toBe("I am alpha.");
-    expect(cfg.agent!.beta!.prompt).toBe("I am beta.");
-    expect(cfg.agent!.gamma!.prompt).toBe("I am gamma.");
+    expect(cfg.agent!.alpha!.prompt).toBe("## Role instructions\n\nI am alpha.");
+    expect(cfg.agent!.beta!.prompt).toBe("## Role instructions\n\nI am beta.");
+    expect(cfg.agent!.gamma!.prompt).toBe("## Role instructions\n\nI am gamma.");
   });
 
   // Scenario 5: all optional fields populated → all mapped
@@ -322,7 +322,7 @@ describe("RoleboxPlugin config hook", () => {
     expect(agent.variant).toBe("pro");
     expect(agent.temperature).toBe(0.2);
     expect(agent.top_p).toBe(0.95);
-    expect(agent.prompt).toBe("Do it all.");
+    expect(agent.prompt).toBe("## Role instructions\n\nDo it all.");
     expect(agent.tools).toEqual({ bash: true, edit: false });
   });
 
@@ -338,7 +338,7 @@ describe("RoleboxPlugin config hook", () => {
     await hooks.config!(cfg);
 
     const agent = cfg.agent!.minimal!;
-    expect(agent.prompt).toBe("Hello.");
+    expect(agent.prompt).toBe("## Role instructions\n\nHello.");
     expect(agent.description).toBe("Bare minimum");
     expect(agent.mode).toBe("primary");
 
@@ -405,7 +405,8 @@ describe("RoleboxPlugin config hook", () => {
 
     const prompt = agent.prompt!;
     const lines = prompt.split("\n");
-    expect(lines[0]).toBe("You are a senior developer.");
+    expect(lines[0]).toBe("## Role instructions");
+    expect(lines[2]).toBe("You are a senior developer.");
     expect(lines).toContain("## Available skills");
     expect(lines).toContain("- `typescript-patterns` — Common TS design patterns");
   });
@@ -438,7 +439,7 @@ describe("RoleboxPlugin subagents", () => {
     const child = cfg.agent!["parent--child-one"]!;
     expect(child.mode).toBe("subagent");
     expect((child as Record<string, unknown>).hidden).toBe(true);
-    expect(child.prompt).toBe("You are the child.");
+    expect(child.prompt).toBe("## Role instructions\n\nYou are the child.");
     expect(child.description).toBe("A child agent");
   });
 
@@ -678,7 +679,7 @@ describe("RoleboxPlugin subagents", () => {
 
     const agentKeys = Object.keys(cfg.agent ?? {}).sort();
     expect(agentKeys).toEqual(["solo"]);
-    expect(cfg.agent!.solo!.prompt).toBe("I work alone.");
+    expect(cfg.agent!.solo!.prompt).toBe("## Role instructions\n\nI work alone.");
     expect(cfg.agent!.solo!.prompt).not.toContain("## Available sub-agents");
   });
 

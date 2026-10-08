@@ -10,15 +10,16 @@ const SUMMARY_MAX_CHARS = 240;
  * attempt identity and credential handoff, and — when this attempt consumes
  * upstream results — the input view it was armed with.
  *
- * The plan's prompt is preserved verbatim as the first block — every appended
- * block follows it, never interleaves it, so a node author's instructions read
- * exactly as declared.
+ * The plan's prompt follows its heading verbatim. Every later block follows it,
+ * never interleaves it, so a node author's instructions read exactly as declared.
  */
 export function buildAttemptDeliveryPrompt(
   request: OutcomeDispatchRequest,
   inputView?: DeliveredInputView,
 ): string {
   const blocks = [
+    "## Assigned task",
+    "",
     request.prompt,
     "",
     "---",

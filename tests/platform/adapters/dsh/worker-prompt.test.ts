@@ -97,6 +97,7 @@ describe("DSH graph worker prompt", () => {
     const f = fixture();
     f.planner.references.push({ ...f.planner.references[0] });
     const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, CONFINED);
+    expect(prompt).toContain("## Role instructions\n\nYou are the planner.");
     expect(prompt).toContain("You are the planner.");
     expect(prompt).toContain("## Active functions");
     expect(prompt).toContain("Return a Strategy.");

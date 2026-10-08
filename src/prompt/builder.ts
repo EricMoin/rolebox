@@ -67,7 +67,7 @@ export function buildAgentPrompt(
 ): string {
   const { subagents, publicAgents, references, resourceTool } = options;
 
-  const parts: string[] = [role.prompt];
+  const parts: string[] = [role.prompt === "" ? "" : `## Role instructions\n\n${role.prompt}`];
 
   if (references && references.length > 0) {
     parts.push(buildReferenceBlock(references, resourceTool));
