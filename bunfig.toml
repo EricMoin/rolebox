@@ -1,0 +1,10 @@
+# Bun test configuration.
+#
+# Only `[test] preload` lives here. Bun 1.3.14 does NOT honor a `[test] timeout`
+# key (a 6s test still dies at "timed out after 5000ms"), so the per-test cap is
+# raised the one way this runtime does honor: a preload that calls
+# `setDefaultTimeout(...)` from `bun:test`. See
+# tests/helpers/test-timeout-preload.ts for the derivation of the value and
+# tests/helpers/test-timeout-preload.ts's header for why the cap exists at all.
+[test]
+preload = ["./tests/helpers/test-timeout-preload.ts"]
