@@ -328,23 +328,38 @@ passes them when it wants a specific location and omits both to let the writer's
 own chain decide, exactly as `rolebox logs` does), so `?logDir=` in a query
 string changes nothing: an HTTP caller cannot point the reader at a directory of
 its choosing, and `source` is always the location that was actually read.
-Mounting it in the dsh entry sits beside the monitor route and needs one line:
+**Mounted by the dsh entry.** `src/entries/dsh.ts` constructs the route
+immediately beside the composed `/rolebox` (role-switch + run console) route,
+under the same optional-service guard: the route exists whenever the host
+provides the `webServer` service (the web profile) and is skipped entirely on a
+headless boot.
 
 ```ts
-const logsRoute = new DshRoleboxLogsWebRoute({ /* logDir? , logFile? */ });
+const logsRoute = new DshRoleboxLogsWebRoute();
 routeDisposers.push(logsRoute.register(webServer));
 ```
 
-> **Not mounted yet — a recorded deferral.** The adapter above and the panel are
-> delivered and tested, but `src/entries/dsh.ts` still constructs only the
-> role-switch and run-console routes. Nothing in this repository therefore serves
-> `/rolebox/logs` today: in a live dsh host the request falls through to the
-> `/rolebox` run-console prefix and answers `404`, and the Logs tab shows its
-> error state until the wiring lands. Read the endpoint described above as the
-> adapter's contract, not as a running surface. Closing this is a change to the plugin
-> entry (a follow-up node's scope): the three lines above plus an assertion in
-> the entry's own test that the route registers whenever `ctx.webServer` is
-> present.
+> **Mounted — a running surface.** Whenever `ctx.get('webServer')` resolves, the
+> entry registers TWO prefix routes: the composed `/rolebox` (role-switch
+> `/roles*` plus run console `/status` and `/metrics`) and `/rolebox/logs`.
+> They are different `(kind, path)` pairs, so the host's duplicate check does not
+> fire, and the host resolves a request by **longest prefix**: `/rolebox/logs`
+> and everything under it reach the log route, while every other `/rolebox/*`
+> request still reaches the composed route exactly as before. The log
+> registration has its OWN guard — a failure logs
+> `Rolebox logs route registration failed — degrading` and the plugin keeps
+> running, leaving the role-switch/run-console surface untouched (and a failure
+> of that one never prevents the log route's attempt). Both disposers are
+> collected on the fiber, so teardown unmounts the route, and the boot reports
+> the outcome as `stats.logsRouteRegistered`. The behavior is exactly the
+> contract above: read-only `GET` (`200` with the view JSON), `400` for an
+> illegible query parameter, `404` for an unknown sub-path, `405` for a known
+> path with another method, `500` for an unexpected failure, and `200` with an
+> empty set when the log directory does not exist yet. The **Logs** tab (right
+> Sidebar, type `rolebox-logs`) polls this route, so it paints records instead of
+> its error state. `tests/dsh-plugin.test.ts` proves the registration against the
+> registrar itself, and `tests/dsh-cordis-e2e.test.ts` pins the two-route table
+> on a real cordis boot.
 
 (As a delegate of the composed `/rolebox` registration the same handler works
 unchanged, because a delegate receives the same `(req, res)` with the full URL.)

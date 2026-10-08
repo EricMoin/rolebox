@@ -881,8 +881,9 @@ settings-panel counterpart is the "Rolebox" page listing the loaded roles.
 The log view is the third such surface: a read-only `GET /rolebox/logs` view
 endpoint (§4.4.6, its own `/rolebox/logs` prefix registration, so the
 run-console route is untouched) and a second right-Sidebar page tab (§4.4.7).
-Its entry wiring is deferred — §4.4.6 states exactly what is and is not mounted
-today.
+Its entry wiring is MOUNTED — `src/entries/dsh.ts` registers the route under
+the same `webServer` probe as the composed one, and §4.4.6 states the mounted
+behavior.
 
 #### 4.4.1 Host webserver: `ctx.webServer.register` WebRoute shape
 
@@ -1161,11 +1162,21 @@ directory is `200` with an empty set, and every other status follows the shared
 error contract above. The source is FIXED at construction (`logDir` / `logFile`
 options, else the writer's own chain) and is never read from the request, so
 `source` is always the location that was actually read and an HTTP caller cannot
-point the reader at a directory of its choosing. The adapter is delivered and
-tested, but the plugin entry does not construct it yet: `src/entries/dsh.ts`
-mounts only the composed role-switch + run-console route, so `/rolebox/logs` is
-not served by a running host until that wiring lands (see `docs/logging.md`,
-"The live view" — *Not mounted yet*).
+point the reader at a directory of its choosing. The adapter is MOUNTED by the
+plugin entry: `src/entries/dsh.ts` constructs `DshRoleboxLogsWebRoute`
+immediately beside the composed route, under the same optional
+`ctx.get('webServer')` probe, and registers its own
+`{ kind: 'prefix', path: '/rolebox/logs' }` route — the boot reports the outcome
+as `stats.logsRouteRegistered`. The registration sits in its OWN guard: a
+failure logs `Rolebox logs route registration failed — degrading` and leaves the
+composed role-switch + run-console surface running (and a failure of that one
+never prevents the log route's attempt), so a web surface can never fail the
+entry's boot. In a live host the request routing follows the longest-prefix rule
+above: `/rolebox/logs` is served by this route, every other `/rolebox/*`
+request by the composed one (see `docs/logging.md`, "The live view").
+`tests/dsh-plugin.test.ts` asserts the registration against the registrar and
+drives the mounted handler (`GET` = `200` view JSON, `POST` = `405`);
+`tests/dsh-cordis-e2e.test.ts` pins the two-route table on a real cordis boot.
 
 #### 4.4.7 Client entries: the `settings.section` "Rolebox" page and the right-Sidebar tabs
 

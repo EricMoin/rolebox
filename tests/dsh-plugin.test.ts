@@ -80,6 +80,7 @@ import type {
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
 } from "../src/platform/adapters/dsh/web-role-switch-route.ts";
+import { ROLEBOX_LOGS_ROUTE_PREFIX } from "../src/platform/adapters/dsh/web-rolebox-logs-route.ts";
 import type {
   DshSkillProviderControl,
   DshSkillProviderLike,
@@ -1781,17 +1782,26 @@ describe("dsh plugin apply()", () => {
 
     const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
-    // The seam registered the COMPOSED /rolebox prefix route exactly once:
+    // The seam registered the COMPOSED /rolebox prefix route exactly once —
     // the real host webserver rejects duplicate (kind, path) registrations
     // (`webserver: duplicate prefix route "/rolebox"`, lib/index.js:54-55),
-    // so the role-switch surface and the monitor surface share one handler.
+    // so the role-switch surface and the monitor surface share one handler —
+    // PLUS the log view's own `/rolebox/logs` prefix route: a different
+    // (kind, path) pair, so the duplicate check cannot fire and the host
+    // resolves by LONGEST prefix.
     expect(disposer.stats.webRouteRegistered).toBe(true);
     expect(disposer.stats.monitorRouteRegistered).toBe(true);
-    expect(registered).toHaveLength(1);
-    const route = registered[0];
+    expect(disposer.stats.logsRouteRegistered).toBe(true);
+    expect(registered).toHaveLength(2);
+    const route = registered.find((candidate) => candidate.path === "/rolebox")!;
     expect(route.kind).toBe("prefix");
-    expect(route.path).toBe("/rolebox");
     expect(typeof route.handler).toBe("function");
+    const logsRoute = registered.find(
+      (candidate) => candidate.path === ROLEBOX_LOGS_ROUTE_PREFIX,
+    )!;
+    expect(logsRoute).toBeDefined();
+    expect(logsRoute.kind).toBe("prefix");
+    expect(typeof logsRoute.handler).toBe("function");
 
     // The single composed handler serves BOTH surfaces: the role-switch
     // surface (/roles — a bare JSON array) and the monitor surface
@@ -1832,14 +1842,67 @@ describe("dsh plugin apply()", () => {
     expect(statusBody.sessions.mostRecentId).toBeNull();
     expect(statusBody.sessions.activeRoles).toEqual({});
 
-    // The fiber disposer unmounts the route.
+    // The fiber disposer unmounts BOTH registrations.
     disposer();
     expect(registered).toHaveLength(0);
   });
 
+  it("registers the /rolebox/logs route whenever the web server service is present", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const registered: DshWebRouteLike[] = [];
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        registered.push(route);
+        return () => {
+          const i = registered.indexOf(route);
+          if (i >= 0) registered.splice(i, 1);
+        };
+      },
+    };
+    const { ctx } = createFakeCtx({ webServer: fakeWebServer });
 
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
-  it("registers the /rolebox prefix exactly once when the host rejects duplicate prefixes", async () => {
+    // Proven against the REGISTRAR, not only the stats flag: `/rolebox/logs`
+    // is IN the registration table, beside the composed `/rolebox` route — a
+    // distinct (kind, path) pair, so the host's duplicate check cannot fire.
+    expect(disposer.stats.logsRouteRegistered).toBe(true);
+    expect(registered.some((route) => route.path === "/rolebox")).toBe(true);
+    const logsRoute = registered.find(
+      (route) => route.path === ROLEBOX_LOGS_ROUTE_PREFIX,
+    );
+    expect(logsRoute).toBeDefined();
+    expect(logsRoute!.kind).toBe("prefix");
+    expect(logsRoute!.path).toBe("/rolebox/logs");
+    expect(typeof logsRoute!.handler).toBe("function");
+
+    // …and the registered handler really serves the read-only view: one poll
+    // answers 200 with exactly the five keys `readLogView` returns. A missing
+    // log directory is an empty set rather than an error, so this drive READS
+    // (and never writes) the log location the writer's chain resolves.
+    const poll = await invoke(logsRoute!.handler, "GET", "/rolebox/logs");
+    expect(poll.status).toBe(200);
+    const body = JSON.parse(poll.text) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual([
+      "cursor",
+      "records",
+      "skippedLines",
+      "source",
+      "truncated",
+    ]);
+    expect(Array.isArray(body.records)).toBe(true);
+
+    // Read-only: a known path with another method is 405 before any handler
+    // runs, so the mounted surface has no write.
+    const write = await invoke(logsRoute!.handler, "POST", "/rolebox/logs");
+    expect(write.status).toBe(405);
+
+    // The fiber disposer unmounts this registration too.
+    disposer();
+    expect(registered).toHaveLength(0);
+  });
+
+  it("registers each /rolebox prefix exactly once when the host rejects duplicate prefixes", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     // Mirror the real @deepseek-ai/dsh-host-webserver register(): duplicate
     // (kind, path) pairs THROW (`webserver: duplicate prefix route
@@ -1866,21 +1929,26 @@ describe("dsh plugin apply()", () => {
 
     const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
-    // Exactly ONE registration under /rolebox — no duplicate was attempted
-    // and nothing was swallowed: BOTH route surfaces report registered, and
-    // the single composed handler serves the role-switch AND monitor faces.
-    expect(registered).toHaveLength(1);
-    expect(registered[0].kind).toBe("prefix");
-    expect(registered[0].path).toBe("/rolebox");
+    // TWO registrations — `/rolebox` (composed) and `/rolebox/logs` — and no
+    // duplicate: the strict double above throws on a repeated path, so
+    // reaching this line proves each prefix was registered exactly once, and
+    // every surface reports registered.
+    expect(registered.map((candidate) => candidate.path).sort()).toEqual([
+      "/rolebox",
+      "/rolebox/logs",
+    ]);
+    expect(seenPaths.size).toBe(2);
     expect(disposer.stats.webRouteRegistered).toBe(true);
     expect(disposer.stats.monitorRouteRegistered).toBe(true);
+    expect(disposer.stats.logsRouteRegistered).toBe(true);
 
-    const roles = await invoke(registered[0].handler, "GET", "/rolebox/roles");
+    const composed = registered.find((candidate) => candidate.path === "/rolebox")!;
+    const roles = await invoke(composed.handler, "GET", "/rolebox/roles");
     expect(roles.status).toBe(200);
     expect(Array.isArray(JSON.parse(roles.text))).toBe(true);
-    const status = await invoke(registered[0].handler, "GET", "/rolebox/status");
+    const status = await invoke(composed.handler, "GET", "/rolebox/status");
     expect(status.status).toBe(200);
-    const metrics = await invoke(registered[0].handler, "GET", "/rolebox/metrics");
+    const metrics = await invoke(composed.handler, "GET", "/rolebox/metrics");
     expect(metrics.status).toBe(200);
 
     disposer();
@@ -2046,6 +2114,7 @@ describe("dsh plugin apply()", () => {
     const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     expect(disposer.stats.webRouteRegistered).toBe(false);
     expect(disposer.stats.monitorRouteRegistered).toBe(false);
+    expect(disposer.stats.logsRouteRegistered).toBe(false);
 
     disposer();
   });

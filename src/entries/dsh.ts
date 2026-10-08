@@ -103,6 +103,10 @@ import {
 } from "../platform/adapters/dsh/web-role-switch-route.ts";
 import type { DshWebServerRouteRegistrar } from "../platform/adapters/dsh/web-role-switch-route.ts";
 import { DshRoleboxMonitorWebRoute } from "../platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import {
+  DshRoleboxLogsWebRoute,
+  ROLEBOX_LOGS_ROUTE_PREFIX,
+} from "../platform/adapters/dsh/web-rolebox-logs-route.ts";
 import { watchRoleboxState } from "../platform/adapters/dsh/watch-rolebox-state.ts";
 import { DshRoleboxReloader } from "../platform/adapters/dsh/rolebox-reload.ts";
 import {
@@ -390,6 +394,19 @@ export interface DshPluginStats {
    * plugin keeps running.
    */
   monitorRouteRegistered: boolean;
+  /**
+   * Whether the `/rolebox/logs` log-view route was registered on dsh's host
+   * web server. This is a SEPARATE prefix registration from the composed
+   * `/rolebox` one `monitorRouteRegistered` reports: `/rolebox/logs` is a
+   * different `(kind, path)` pair, so the host's duplicate check does not
+   * fire, and longest-prefix resolution gives it every request under the logs
+   * prefix while the composed route keeps every other `/rolebox/*` request.
+   * The two registrations are guarded independently — a failure of either logs
+   * a warning and leaves the other surface (and the plugin) running. `true`
+   * only when the optional `webServer` service was present AND registration
+   * succeeded; headless profiles stay `false`.
+   */
+  logsRouteRegistered: boolean;
   /**
    * Whether graph-notify was wired on the dsh path. `true` only when the
    * optional live-agent registry (`ctx.agents`) was present at boot, so the
@@ -1267,7 +1284,10 @@ export async function apply(
   // registration (`webserver: duplicate prefix route "/rolebox"` — see
   // `@deepseek-ai/dsh-host-webserver` lib/index.js:54-55), so both surfaces
   // MUST share a single prefix registration; a failure logs a warning and
-  // degrades — the plugin keeps running without the web surface.
+  // degrades — the plugin keeps running without the web surface. The log view
+  // (`/rolebox/logs`) is a SECOND, separate prefix registration below that
+  // one: a distinct `(kind, path)` pair the longest-prefix resolver hands the
+  // logs sub-tree to, so the composed route's behaviour is untouched.
   const routeDisposers: Array<() => void> = [];
 
   /**
@@ -1283,6 +1303,7 @@ export async function apply(
   const webServer = probeWebServer(ctx);
   let webRouteRegistered = false;
   let monitorRouteRegistered = false;
+  let logsRouteRegistered = false;
 
   // Optional systemPrompt service seam — register the rolebox session-level
   // system-prompt contributions (`rolebox:role` section + `rolebox:context`
@@ -1953,6 +1974,34 @@ export async function apply(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // The log view (`GET /rolebox/logs`) is its OWN prefix registration,
+    // immediately beside the composed one above and on a SEPARATE try/catch:
+    // `/rolebox/logs` is a different `(kind, path)` pair, so the host's
+    // duplicate check does not fire and longest-prefix resolution hands it
+    // every request under the logs prefix while the composed route keeps every
+    // other `/rolebox/*` request. The guards are independent because the
+    // surfaces are independent — a log route that cannot register must not
+    // disturb the role-switch/monitor registration (and vice versa): either
+    // failure logs a warning and the plugin keeps running.
+    try {
+      // No `logDir` / `logFile`: the route then reads wherever the logging
+      // kernel writes (the writer's own resolution chain — `ROLEBOX_LOG_FILE`,
+      // then `ROLEBOX_LOG_DIR`, then the workspace `.rolebox/logs` fallback),
+      // exactly as `rolebox logs` does. The source is never taken from a
+      // request, so an HTTP caller cannot point the reader elsewhere.
+      const logsRoute = new DshRoleboxLogsWebRoute();
+      routeDisposers.push(logsRoute.register(webServer));
+      logsRouteRegistered = true;
+      log.info("Rolebox logs route registered on host web server", {
+        prefix: ROLEBOX_LOGS_ROUTE_PREFIX,
+        surface: "log view (read-only GET)",
+      });
+    } catch (err) {
+      log.warn("Rolebox logs route registration failed — degrading", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   } else {
     log.debug(
       "No host web server service on ctx — skipping /rolebox route registration",
@@ -2192,6 +2241,7 @@ export async function apply(
     webRouteRegistered,
     graphNotifyWired,
     monitorRouteRegistered,
+    logsRouteRegistered,
   };
   disposer.registerRoleSnapshotTools = registerRoleSnapshotTools;
   return disposer;
