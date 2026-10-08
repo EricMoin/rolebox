@@ -81,6 +81,7 @@ mock.module("react/jsx-dev-runtime", jsxRuntimeDouble);
 const client = await import("../../src/platform/adapters/dsh/web-ui/client.ts");
 const dock = await import("../../src/platform/adapters/dsh/web-ui/role-switch-dock.tsx");
 const monitor = await import("../../src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx");
+const logs = await import("../../src/platform/adapters/dsh/web-ui/rolebox-logs-panel.tsx");
 const roles = await import("../../src/platform/adapters/dsh/web-ui/rolebox-roles-panel.tsx");
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
@@ -260,10 +261,12 @@ describe("dsh web-UI client plugin entry", () => {
       sidebarRight: ctx.right.sidebarRight,
     });
 
-    // The type is registered eagerly (not declaration-waited): the page type
-    // must exist before any openTab call can name its kind.
-    expect(ctx.tabs.registered).toHaveLength(1);
-    const definition = ctx.tabs.registered[0]!;
+    // The types are registered eagerly (not declaration-waited): a page type
+    // must exist before any openTab call can name its kind. The run console and
+    // the log view are SIBLING types, so the monitor definition is looked up by
+    // id rather than by position.
+    expect(ctx.tabs.registered).toHaveLength(2);
+    const definition = ctx.tabs.registered.find((entry) => entry.id === "rolebox-monitor")!;
     expect(definition.id).toBe("rolebox-monitor");
     expect(definition.kind).toBe("rolebox-monitor");
     // A page type: no resource globs.
@@ -282,6 +285,68 @@ describe("dsh web-UI client plugin entry", () => {
     for (const word of ["loops", "engine graphs", "metrics", "sessions"]) {
       expect(description.toLowerCase()).toContain(word);
     }
+  });
+
+  it("registers the right-Sidebar log view tab type with its own guide entry", () => {
+    const ctx = createFakeContext();
+    client.apply({
+      slots: ctx.slots.slots,
+      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
+      sidebarRight: ctx.right.sidebarRight,
+    });
+
+    const definition = ctx.tabs.registered.find((entry) => entry.id === client.LOGS_TAB_ID)!;
+    expect(definition).toBeDefined();
+    expect(definition!.kind).toBe(client.LOGS_TAB_KIND);
+    // A page type: no resource globs.
+    expect(definition!.patterns).toBeUndefined();
+    expect((definition!.title as () => string)()).toBe(client.LOGS_TAB_TITLE);
+
+    const guide = definition!.guide as Array<Record<string, unknown>>;
+    expect(guide).toHaveLength(1);
+    const entry = guide[0]!;
+    expect((entry.title as () => string)()).toBe(client.LOGS_TAB_TITLE);
+    const description = (entry.description as () => string)();
+    for (const word of ["log", "level", "channel", "source"]) {
+      expect(description.toLowerCase()).toContain(word);
+    }
+  });
+
+  it("registers the log view tab body keyed by the logs tab id, beside the monitor body", () => {
+    const ctx = createFakeContext();
+    client.apply({
+      slots: ctx.slots.slots,
+      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
+      sidebarRight: ctx.right.sidebarRight,
+    });
+
+    // ONE keyed seat, two bodies: the seat is declared once and each tab type
+    // registers its own body under its own id.
+    const seatInjections = ctx.slots.injected.filter(
+      (entry) => entry.key === "sidebar.right.pane.tab",
+    );
+    expect(seatInjections).toHaveLength(2);
+    for (const injection of seatInjections) injection.callback();
+
+    const keys = ctx.slots.registered
+      .filter((call) => call.options.name === "sidebar.right.pane.tab")
+      .map((call) => call.options.key);
+    expect(keys).toEqual([client.MONITOR_TAB_ID, client.LOGS_TAB_ID]);
+
+    const logsBody = ctx.slots.registered.find(
+      (call) => call.options.key === client.LOGS_TAB_ID,
+    )!;
+    expect(logsBody).toBeDefined();
+    expect(logsBody!.component).toBe(logs.RoleboxLogsPanel);
+    // A page body needs no inject face and no locale.
+    expect(logsBody!.options.inject).toBeUndefined();
+    expect(logsBody!.options.locale).toBeUndefined();
+  });
+
+  it("declares the same-origin logs route on the log view panel", () => {
+    expect(logs.LOGS_ENDPOINT).toBe("/rolebox/logs");
+    expect(logs.POLL_MS).toBeGreaterThan(0);
+    expect(logs.BUFFER_LIMIT).toBeGreaterThan(0);
   });
 
   it("registers the monitoring tab body keyed by the tab id", () => {
@@ -316,15 +381,16 @@ describe("dsh web-UI client plugin entry", () => {
       sidebarRight: ctx.right.sidebarRight,
     }) as () => void;
 
-    // Three declaration waits (dock, settings, tab body) + the tab type.
-    expect(ctx.slots.injected).toHaveLength(3);
-    expect(ctx.tabs.registered).toHaveLength(1);
-    expect(ctx.slots.injectedDisposers).toEqual([0, 0, 0]);
+    // Four declaration waits (dock, settings, monitor body, logs body) + both
+    // tab types.
+    expect(ctx.slots.injected).toHaveLength(4);
+    expect(ctx.tabs.registered).toHaveLength(2);
+    expect(ctx.slots.injectedDisposers).toEqual([0, 0, 0, 0]);
     expect(ctx.tabs.disposed()).toBe(0);
 
     disposer();
-    expect(ctx.slots.injectedDisposers).toEqual([1, 1, 1]);
-    expect(ctx.tabs.disposed()).toBe(1);
+    expect(ctx.slots.injectedDisposers).toEqual([1, 1, 1, 1]);
+    expect(ctx.tabs.disposed()).toBe(2);
   });
 
   it("keeps the tab body registered when a sibling contribution fails", () => {
@@ -359,21 +425,27 @@ describe("dsh web-UI client plugin entry", () => {
         expect(ctx.slots.injected.some((entry) => entry.key === key)).toBe(true);
       }
 
-      // …and the tab body actually registers when its seat is declared.
-      const bodyInject = ctx.slots.injected.find(
+      // …and BOTH tab bodies actually register when their seat is declared,
+      // even though both types threw: the bodies are keyed independently, so
+      // one type failing can never cost the other body its registration.
+      const seatInjections = ctx.slots.injected.filter(
         (entry) => entry.key === "sidebar.right.pane.tab",
-      )!;
-      bodyInject.callback();
-      const body = ctx.slots.registered.find(
+      );
+      for (const injection of seatInjections) injection.callback();
+      const bodies = ctx.slots.registered.filter(
         (call) => call.options.name === "sidebar.right.pane.tab",
       );
-      expect(body).toBeDefined();
-      expect(body!.options.key).toBe("rolebox-monitor");
-      expect(body!.component).toBe(monitor.RoleboxMonitorPanel);
+      expect(bodies.map((call) => call.options.key)).toEqual([
+        client.MONITOR_TAB_ID,
+        client.LOGS_TAB_ID,
+      ]);
+      expect(bodies[0]!.component).toBe(monitor.RoleboxMonitorPanel);
+      expect(bodies[1]!.component).toBe(logs.RoleboxLogsPanel);
 
       // The failure is reported rather than swallowed, and the fiber still
       // returns a disposer that tears down what DID register.
       expect(warnings.some((line) => line.includes("monitor tab type"))).toBe(true);
+      expect(warnings.some((line) => line.includes("logs tab type"))).toBe(true);
       expect(typeof disposer).toBe("function");
       disposer!();
       expect(ctx.slots.injectedDisposers.some((count) => count > 0)).toBe(true);

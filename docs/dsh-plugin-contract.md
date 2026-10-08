@@ -878,6 +878,11 @@ mounts the dock into the web app). Both surfaces are verified against the
 halves: two read-only endpoints added to the `/rolebox` host API (§4.4.6) and a
 **right-Sidebar page tab** contributed by the same client bundle (§4.4.7), whose
 settings-panel counterpart is the "Rolebox" page listing the loaded roles.
+The log view is the third such surface: a read-only `GET /rolebox/logs` view
+endpoint (§4.4.6, its own `/rolebox/logs` prefix registration, so the
+run-console route is untouched) and a second right-Sidebar page tab (§4.4.7).
+Its entry wiring is deferred — §4.4.6 states exactly what is and is not mounted
+today.
 
 #### 4.4.1 Host webserver: `ctx.webServer.register` WebRoute shape
 
@@ -1136,14 +1141,42 @@ so a failing handler yields stable JSON instead of a bare socket teardown).
 which owns the 64 KiB body cap), so those two role-switch codes cannot fire
 here. Both endpoints have no mutation surface.
 
-#### 4.4.7 Client entries: the `settings.section` "Rolebox" page and the right-Sidebar monitoring tab
+**The log view route (`GET /rolebox/logs`).** A third read-only surface, built
+on the same structural host-route pattern:
+`DshRoleboxLogsWebRoute` (`src/platform/adapters/dsh/web-rolebox-logs-route.ts`)
+registers its OWN `{ kind: 'prefix', path: '/rolebox/logs' }` route. That is a
+different `(kind, path)` pair from the composed `/rolebox` registration, so the
+host's duplicate check does not fire and the run console's route keeps every
+other `/rolebox/*` request — dsh resolves by LONGEST PREFIX
+(`source:packages/host/webserver/src/index.ts`). The same handler also works as
+a `delegate` of the composed registration, because a delegate receives the full
+URL. `GET /rolebox/logs` answers one poll of the view:
+`{ records, cursor, source, truncated, skippedLines }` — exactly the five keys
+`readLogView` returns (`src/log/view.ts`), no envelope. Query parameters
+(`cursor`, `limit`, `level`, `channel`, `code`, `graph`, `session`, `text`) map
+onto that layer's own filters (`level` is a minimum, `channel`/`code` accept a
+comma list and repetition); an illegible parameter is `400` with a message that
+names the parameter, its accepted form and the value it got, a missing log
+directory is `200` with an empty set, and every other status follows the shared
+error contract above. The source is FIXED at construction (`logDir` / `logFile`
+options, else the writer's own chain) and is never read from the request, so
+`source` is always the location that was actually read and an HTTP caller cannot
+point the reader at a directory of its choosing. The adapter is delivered and
+tested, but the plugin entry does not construct it yet: `src/entries/dsh.ts`
+mounts only the composed role-switch + run-console route, so `/rolebox/logs` is
+not served by a running host until that wiring lands (see `docs/logging.md`,
+"The live view" — *Not mounted yet*).
 
-The client bundle now contributes **three** entries — the dock
-(`conversation.input.dock`, §4.4.4, unchanged), the "Rolebox" settings page and
-the monitoring tab — and `apply()` returns one disposer that tears every one of
-them down: the dock declaration wait, the settings declaration wait, the
-tab-type registration (`ctx.sidebarRightTabs.register`) and the tab-body
-declaration wait (`src/platform/adapters/dsh/web-ui/client.ts`).
+#### 4.4.7 Client entries: the `settings.section` "Rolebox" page and the right-Sidebar tabs
+
+The client bundle now contributes **four** entries — the dock
+(`conversation.input.dock`, §4.4.4, unchanged), the "Rolebox" settings page, the
+monitoring tab and the log view tab — and `apply()` returns one disposer that
+tears every one of them down: the dock declaration wait, the settings declaration
+wait, the two tab-type registrations (`ctx.sidebarRightTabs.register`) and the
+two tab-body declaration waits (both keyed into the SAME
+`sidebar.right.pane.tab` seat under their own type ids,
+`src/platform/adapters/dsh/web-ui/client.ts`).
 
 **(a) The `settings.section` page — "Rolebox" (what roles are loaded)**
 
@@ -1248,6 +1281,14 @@ ctx.slots.inject("sidebar.right.pane.tab", () =>
   ),
 );
 ```
+
+The **log view** is the same two stages a second time in the same seat — its own
+type (`id`/`kind` `rolebox-logs`, title "Logs", its own guide entry) and its own
+body keyed `rolebox-logs` for `RoleboxLogsPanel`
+(`src/platform/adapters/dsh/web-ui/rolebox-logs-panel.tsx` +
+`rolebox-logs-panel.css.ts`). One seat, two independently keyed bodies: neither
+type can blank the other's pane, and a failed registration of one is reported
+without costing the other (both bodies install before their types).
 
 - **The seat** — `sidebar.right.pane.tab` is declared keyed and session-scoped
   by `@deepseek-ai/dsh-client-ui-sidebar-right`

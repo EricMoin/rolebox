@@ -2,7 +2,7 @@
  * dsh web-UI slot plugin — browser half (`src/platform/adapters/dsh/web-ui/client.ts`)
  *
  * This module is the client entry of the rolebox web-UI integration: a dsh
- * client plugin that contributes three components to the dsh web app:
+ * client plugin that contributes four components to the dsh web app:
  *
  *   - {@link RoleSwitchDock} → the `'conversation.input.dock'` slot (the
  *     list/session-scoped full-width row above the composer card);
@@ -15,6 +15,11 @@
  *     registry and opened by kind through `ctx.sidebarRight.openTab`
  *     ({@link MONITOR_TAB_KIND}); live monitoring belongs beside the
  *     conversation, not inside settings.
+ *   - {@link RoleboxLogsPanel} → the SAME keyed `'sidebar.right.pane.tab'` seat
+ *     under its own tab TYPE ({@link LOGS_TAB_ID} / {@link LOGS_TAB_KIND}), so
+ *     the live log view is a sibling page of the run console rather than a
+ *     section inside it. The two bodies are independent registrations in one
+ *     seat: each is keyed by its own type id, and neither can blank the other.
  *
  * Each contribution follows the same posture (see below); the sections that
  * follow document the three slot contracts, the tab-type registry, and the
@@ -163,6 +168,7 @@
 
 import { RoleSwitchDock } from "./role-switch-dock.tsx";
 import type { RoleSwitchDockProps } from "./role-switch-dock.tsx";
+import { RoleboxLogsPanel } from "./rolebox-logs-panel.tsx";
 import { RoleboxMonitorPanel } from "./rolebox-monitor-panel.tsx";
 import { RoleboxRolesPanel } from "./rolebox-roles-panel.tsx";
 import type { RoleboxRolesPanelProps } from "./rolebox-roles-panel.tsx";
@@ -237,6 +243,29 @@ export const MONITOR_TAB_GUIDE_ORDER = 20;
 /** The guide capsule's one-line description of what picking it opens. */
 export const MONITOR_TAB_GUIDE_DESCRIPTION =
   "Live rolebox monitoring: loops, engine graphs, metrics and sessions.";
+
+/**
+ * The log view tab type's implementation identity — the key its body registers
+ * under in {@link MONITOR_TAB_SLOT_NAME} and what its title seat uses, exactly
+ * as {@link MONITOR_TAB_ID} is for the run console.
+ */
+export const LOGS_TAB_ID = "rolebox-logs";
+
+/** Type discriminator: what log-view tabs are, and what `openTab` names. */
+export const LOGS_TAB_KIND = "rolebox-logs";
+
+/** The log tab chip's / guide capsule's title text. */
+export const LOGS_TAB_TITLE = "Logs";
+
+/** Stable guide-entry identity within this provider (unique per type). */
+export const LOGS_TAB_GUIDE_ID = "logs";
+
+/** Ascending guide position among every registered type's entries (after the monitor). */
+export const LOGS_TAB_GUIDE_ORDER = 30;
+
+/** The guide capsule's one-line description of what picking it opens. */
+export const LOGS_TAB_GUIDE_DESCRIPTION =
+  "Live log view: one row per record, with level, channel and the source being read.";
 
 // ── Structural slot contract (duck of @deepseek-ai/dsh-client-ui-slots) ────
 
@@ -418,11 +447,16 @@ function toMessage(err: unknown): string {
  *     `'sidebar.right.pane.tab'` seat under the type's `id`. A page body
  *     consumes none of the tab's runtime data, so the registration carries no
  *     inject face.
+ *   - the log view tab BODY ({@link RoleboxLogsPanel}) into the same keyed seat
+ *     under {@link LOGS_TAB_ID}, and its tab TYPE into `ctx.sidebarRightTabs`
+ *     (id / kind {@link LOGS_TAB_ID} / {@link LOGS_TAB_KIND}, titled "Logs" with
+ *     its own guide entry). The log body installs before its type for the same
+ *     reason the monitor's does.
  *
- * The returned disposer tears down EVERY registration created here (the three
- * injection effects — dock, settings page, tab body — and the tab-type
- * registration), so an absent declaration or an unloading fiber degrades
- * gracefully — see the module docstring.
+ * The returned disposer tears down EVERY registration created here (the four
+ * injection effects — dock, settings page, monitor body, logs body — and both
+ * tab-type registrations), so an absent declaration or an unloading fiber
+ * degrades gracefully — see the module docstring.
  *
  * @param ctx - the client cordis context (structural; the injected services).
  * @returns the fiber disposer removing every contribution (through the
@@ -452,7 +486,7 @@ export function apply(ctx: DshClientContext): (() => void) | void {
   /**
    * Install ONE contribution, isolating its failure.
    *
-   * The four contributions are independent, and one of them genuinely can fail
+   * The six contributions are independent, and one of them genuinely can fail
    * at install time: `ctx.sidebarRightTabs.register` throws when its id or kind
    * is already taken (tab-registry.ts:235-247), which a double activation — a
    * hot reload on top of a live fiber, or a second registration from a stale
@@ -476,7 +510,12 @@ export function apply(ctx: DshClientContext): (() => void) | void {
     } catch (err) {
       // Browser code with no logger seat on the structural ctx: the console is
       // the only channel, and staying silent here is exactly what turns a
-      // failed registration into an unexplained empty panel.
+      // failed registration into an unexplained empty panel. The platform kernel
+      // cannot take its place: src/log/context.ts imports node:async_hooks,
+      // which this bundle's browser target stubs to an empty module, so
+      // `new AsyncLocalStorage` throws while the bundle is evaluated. This call
+      // is therefore the one documented exemption in
+      // scripts/check-logging-boundaries.ts.
       console.warn("[rolebox] " + label + " did not register: " + toMessage(err));
     }
   };
@@ -536,6 +575,39 @@ export function apply(ctx: DshClientContext): (() => void) | void {
           order: MONITOR_TAB_GUIDE_ORDER,
           title: () => MONITOR_TAB_TITLE,
           description: () => MONITOR_TAB_GUIDE_DESCRIPTION,
+        },
+      ],
+    }),
+  );
+
+  // The log view is a SECOND page type in the same right-Sidebar seat, with its
+  // own body. Same order of installation (body before type, for the reason
+  // above) and the same isolation: one surface failing to register must not
+  // take the other down with it — the two types fail independently, because
+  // `sidebarRightTabs.register` throws per (id, kind), not per call site.
+  contribute("logs tab body", () =>
+    ctx.slots.inject(MONITOR_TAB_SLOT_NAME, () =>
+      ctx.slots.register(
+        {
+          name: MONITOR_TAB_SLOT_NAME,
+          key: LOGS_TAB_ID,
+        },
+        RoleboxLogsPanel,
+      ),
+    ),
+  );
+
+  contribute("logs tab type", () =>
+    ctx.sidebarRightTabs.register({
+      id: LOGS_TAB_ID,
+      kind: LOGS_TAB_KIND,
+      title: () => LOGS_TAB_TITLE,
+      guide: [
+        {
+          id: LOGS_TAB_GUIDE_ID,
+          order: LOGS_TAB_GUIDE_ORDER,
+          title: () => LOGS_TAB_TITLE,
+          description: () => LOGS_TAB_GUIDE_DESCRIPTION,
         },
       ],
     }),
