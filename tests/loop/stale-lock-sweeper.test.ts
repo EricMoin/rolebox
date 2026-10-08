@@ -1,7 +1,13 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, mock, spyOn, afterEach } from "bun:test";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import { ADVANCING_LOCK_TIMEOUT_MS } from "../../src/loop/constants.ts";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
+
+/**
+ * Frozen wall-clock instant for tests that must not race the real clock.
+ * Same device as tests/loop/inflight-dispatch-guard.test.ts's BASE_TIME.
+ */
+const BASE_TIME = 1_000_000_000;
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 
@@ -103,14 +109,23 @@ describe("_advancing stale lock sweeper", () => {
       _sweepStaleLocks: () => void;
     };
 
-    // Inject a lock acquired just at the boundary (max non-stale age)
-    coord._advancing.set("boundary-session", Date.now() - ADVANCING_LOCK_TIMEOUT_MS);
+    // Freeze the clock: _sweepStaleLocks reads Date.now() a second time, so any
+    // tick between the injection below and the sweep would make the age
+    // TIMEOUT + 1 and sweep a lock that is exactly at the boundary.
+    const nowSpy = spyOn(Date, "now").mockReturnValue(BASE_TIME);
+    try {
+      // Inject a lock acquired just at the boundary (max non-stale age)
+      coord._advancing.set("boundary-session", BASE_TIME - ADVANCING_LOCK_TIMEOUT_MS);
 
-    coord._sweepStaleLocks();
+      coord._sweepStaleLocks();
 
-    // Exactly at the boundary is NOT stale (strictly greater than)
-    expect(coord._advancing.has("boundary-session")).toBe(true);
-    expect(coord._staleLockCount).toBe(0);
+      // Exactly at the boundary is NOT stale (strictly greater than)
+      expect(coord._advancing.has("boundary-session")).toBe(true);
+      expect(coord._staleLockCount).toBe(0);
+    } finally {
+      // Restore explicitly so no later test in this file sees a frozen clock.
+      nowSpy.mockRestore();
+    }
   });
 
   it("only sweeps the stale lock among mixed fresh/stale entries", () => {
