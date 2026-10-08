@@ -18,6 +18,78 @@ import type {
   EngineGraphSnapshot,
 } from "../cli/commands/monitor/monitor-reader-types";
 
+// ── View tabs ────────────────────────────────────────────────────────────
+
+/**
+ * The sidebar's top-level views. The panel has shown ACTIVITY since the
+ * activity-first redesign; the Logs tab is the second live surface over the
+ * platform's own log files, and the tab model keeps a third one a one-line
+ * addition rather than a rewrite of the JSX tree.
+ */
+export type TuiView = "activity" | "logs";
+
+/** Every view, in tab order. */
+export const TUI_VIEWS: readonly TuiView[] = ["activity", "logs"];
+
+/** The next view in tab order, wrapping at the end. */
+export function nextView(current: TuiView): TuiView {
+  const index = TUI_VIEWS.indexOf(current);
+  return TUI_VIEWS[(index + 1) % TUI_VIEWS.length] ?? "activity";
+}
+
+/** The previous view in tab order, wrapping at the start. */
+export function previousView(current: TuiView): TuiView {
+  const index = TUI_VIEWS.indexOf(current);
+  return TUI_VIEWS[(index - 1 + TUI_VIEWS.length) % TUI_VIEWS.length] ?? "activity";
+}
+
+/**
+ * The ONE state a Logs pane polls in: visible and not paused.
+ *
+ * A hidden pane is not a paused pane — it is not painted at all, which is why
+ * the store freezes for it: the sidebar polls the log view only while it is the
+ * active tab, and a freeze is what makes that skip cost nothing (the next poll
+ * resumes from the position the pane stopped at). The two facts are derived
+ * here, once, rather than being re-derived in the JSX and again in the poll.
+ */
+export function isLogsViewLive(view: TuiView, paused: boolean): boolean {
+  return view === "logs" && !paused;
+}
+
+/**
+ * The keys the Logs pane is driven by, ONE SOURCE for the layer that registers
+ * them and the copy that names them.
+ *
+ * A key is a claim the pane makes to the reader: `hidden — press ctrl+l to
+ * open` has to name the key that actually opens it, and the paused banner has
+ * to name the key that actually resumes it. Spelling the same key in two files
+ * is how that claim goes stale, so `index.tsx` builds its bindings from these
+ * constants and `components/Logs.tsx` builds its sentences from them.
+ *
+ * WHY ctrl-MODIFIED KEYS. The pane is a guest in the host's keymap: the bare
+ * keys a reader expects the host to own (`?` help, `r` refresh, `m`, `f`, the
+ * arrows) are left alone, and every Logs control carries `ctrl`. The pane is
+ * also the only surface that can act on them, so they are inert in the Activity
+ * view rather than shadowing a host action.
+ */
+export const LOGS_TOGGLE_KEY = "ctrl+l";
+
+/** The key that freezes and resumes the stream — shown in the paused banner. */
+export const LOGS_PAUSE_KEY = "ctrl+p";
+
+/** The key that raises the level threshold — the opposite of {@link LOGS_LEVEL_LOOSER_KEY}. */
+export const LOGS_LEVEL_STRICTER_KEY = "ctrl+up";
+
+/** The key that lowers the level threshold — the one the empty-filtered sentence names. */
+export const LOGS_LEVEL_LOOSER_KEY = "ctrl+down";
+
+/** The key that advances the channel filter, then clears it. */
+export const LOGS_CHANNEL_KEY = "ctrl+n";
+
+/** The key that follows the newest records again. */
+export const LOGS_FOLLOW_KEY = "ctrl+g";
+
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 export type HealthState = "ACTIVE" | "IDLE" | "NO_STATE" | "STALE" | "ERROR";

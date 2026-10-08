@@ -7,3 +7,5 @@ export { renderTaskDetailPanel } from "./TaskDetail.tsx";
 export { renderNotificationState } from "./NotificationState.tsx";
 export { renderRecoveryStatus } from "./RecoveryStatus.tsx";
 export { renderProgressIndicator } from "./ProgressIndicator.tsx";
+export { renderLogs } from "./Logs.tsx";
+export type { LogsProps } from "./Logs.tsx";

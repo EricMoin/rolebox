@@ -37,7 +37,22 @@ import {
   renderPulse, healthDisplay, renderStaleHint, renderNoStateBody,
   renderActivity, renderTaskDetailPanel,
   renderFilterBar, countTotalItems, collectSessionIds,
+  renderLogs,
 } from "./components/index";
+import {
+  collectLogChannels,
+  cycleLogsChannel,
+  createLogsStore,
+  logsDropCounts,
+  pollLogsStore,
+  setLogsChannel,
+  setLogsPaused,
+  stepLogsLevel,
+  type LogsDropCounts,
+  type LogsStore,
+} from "./logs";
+import type { LogRecord } from "../log/types";
+import { isLogsViewLive, nextView, type TuiView } from "./logic";
 
 import { foldGraphSignals } from "./events";
 import type { EventBridge } from "./events";
@@ -62,6 +77,35 @@ let _toggleSessionFilterRef: ((sessionId: string | null) => void) | null = null;
 
 /** Event bridge reference — set during plugin init, cleared on cleanup. */
 let _eventBridgeRef: EventBridge | null = null;
+
+/**
+ * Logs-view control references, set inside createRoot and cleared on cleanup.
+ *
+ * The keymap layer in `index.tsx` calls the `trigger*` functions below instead
+ * of reaching into the renderer's closure: same one-way shape the refresh /
+ * metrics / filter triggers already use, so a key binding can never hold a
+ * disposed signal.
+ */
+let _logsToggleRef: (() => void) | null = null;
+let _logsPauseRef: (() => void) | null = null;
+let _logsLevelRef: ((direction: number) => void) | null = null;
+let _logsChannelRef: (() => void) | null = null;
+let _logsFollowRef: (() => void) | null = null;
+
+/** Open or leave the Logs tab. */
+export function triggerLogsToggle(): void { _logsToggleRef?.(); }
+
+/** Freeze or resume the log stream (a no-op while the Logs tab is hidden). */
+export function triggerLogsPause(): void { _logsPauseRef?.(); }
+
+/** Raise (+1) or lower (-1) the log level threshold. */
+export function triggerLogsLevel(direction: number): void { _logsLevelRef?.(direction); }
+
+/** Advance the channel filter to the next channel, then back to all. */
+export function triggerLogsChannel(): void { _logsChannelRef?.(); }
+
+/** Follow the newest records (clear the free-text filter and scroll home). */
+export function triggerLogsFollow(): void { _logsFollowRef?.(); }
 
 /** Filter persistence callback — called when filter state changes. */
 let _filterPersistRef: ((filterText: string, activeStatuses: string[], sessionFilterId: string | null) => void) | null = null;
@@ -107,6 +151,16 @@ export function setEventBridgeRef(bridge: EventBridge | null): void {
 const DETAIL_SCROLL_STEP = 500;
 
 /**
+ * How many log records the pane paints.
+ *
+ * The BUFFER holds up to 500 and the pane paints its newest slice: a sidebar is
+ * a few dozen rows tall, so painting the whole buffer would spend the frame on
+ * records no reader can see. The buffer keeps them, the counters report them,
+ * and this is a presentation choice — not a second cap.
+ */
+const LOGS_PANE_ROWS = 200;
+
+/**
  * Create the sidebar renderer closure.
  *
  * Returns a function suitable for use as a sidebar_content slot
@@ -130,15 +184,118 @@ export function createSidebarRenderer(workspaceDir: string) {
       const [filterStatuses, setFilterStatuses] = createSignal<Set<string>>(new Set());
       const [filterSessionId, setFilterSessionId] = createSignal<string | null>(null);
 
+      // Current session ID — used to filter to only this session's activity.
+      // Declared BEFORE the Logs store, which takes it as the view's session
+      // identity at construction: a store built from a `const` that is still in
+      // its temporal dead zone throws `Cannot access 'currentSessionId' before
+      // initialization` while the renderer mounts (measured through the headless
+      // renderer, which is how this ordering was found).
+      const currentSessionId = props?.session_id ?? "";
+      const [sessionScope, setSessionScope] = createSignal<Set<string>>(new Set([currentSessionId]));
+
+      // ── View tabs and the Logs pane ──────────────────────────────────
+      // The Logs view is the second live surface over the platform's own log
+      // files. It shares THIS renderer's 1s refresh instead of starting a timer
+      // of its own, and it holds only a cursor between polls.
+      //
+      // NO SESSION NARROWING BY DEFAULT. The host slot hands this renderer a
+      // session id, and the Activity view narrows by it — but the records on
+      // disk carry no session: no producer in `src/` writes `scope.sessionId`,
+      // so a store built with `sessionId: <host session>` filters every record
+      // away and paints an empty pane over a full log directory (measured: 6
+      // records in the file, 0 in the pane). The Logs view therefore starts on
+      // EVERY session. {@link setLogsSession} stays in the data layer for a
+      // caller whose source really carries the field.
+      const [view, setView] = createSignal<TuiView>("activity");
+      const [logPaused, setLogPaused] = createSignal(false);
+      const [logFilterText, setLogFilterText] = createSignal("");
+      const [logChannels, setLogChannels] = createSignal<readonly string[]>([]);
+      const [logRecords, setLogRecords] = createSignal<readonly LogRecord[]>([]);
+      const [logSource, setLogSource] = createSignal<string | null>(null);
+      const [logSkipped, setLogSkipped] = createSignal(0);
+      const [logDropped, setLogDropped] = createSignal<LogsDropCounts>({ dropped: 0, earlierDropped: 0 });
+      const [logPending, setLogPending] = createSignal(false);
+      const [logError, setLogError] = createSignal<string | null>(null);
+      let logsStore: LogsStore = createLogsStore();
+
+      /**
+       * Publish a store's state to the signals the pane renders from.
+       *
+       * The STORE is the pause state (it owns the frozen cursor), and the
+       * `logPaused` signal is a mirror of it kept for the places that only need
+       * the flag. Both are set here, from the store, so they cannot disagree: a
+       * paused pane that does not say it is paused is the one failure mode a
+       * live stream must not have.
+       */
+      function publishLogs(next: LogsStore): void {
+        logsStore = next;
+        setLogPaused(next.paused);
+        setLogSource(next.source === null ? null : next.source.path);
+        setLogSkipped(next.skippedLines);
+        // ONE mapping for the two counters (logsDropCounts): they are disjoint,
+        // so the pane's status line can add them without doubling a loss.
+        setLogDropped(logsDropCounts(next.buffer));
+        setLogPending(next.pending);
+        setLogError(next.error === null ? null : next.error.message);
+        setLogChannels(next.filters.channels);
+        setLogRecords(next.buffer.records);
+      }
+
+      /**
+       * One log poll, from the sidebar's own 1s refresh.
+       *
+       * The store READS only while the Logs tab is open and unpaused; a hidden
+       * or paused pane passes `hostPaused`, which freezes the stream at the
+       * position it stopped at instead of advancing behind the reader's back —
+       * and a frozen poll performs no disk read at all, so the Activity view
+       * (where the Logs pane is not painted) costs zero log I/O per tick.
+       */
+      function pollLogs(): void {
+        // `view()` is the reactive read: the poll belongs to the panel's 1s
+        // cycle, which runs whether or not the Logs tab is showing, and the
+        // freeze is what a hidden tab costs.
+        const live = isLogsViewLive(view(), logsStore.paused);
+        // ONE store update per tick: a frozen poll answers the very store it was
+        // given, so a tab nobody is looking at publishes nothing.
+        const polled = pollLogsStore(logsStore, { hostPaused: !live });
+        if (polled.store !== logsStore) publishLogs(polled.store);
+      }
+
+      _logsToggleRef = () => {
+        const next = nextView(view());
+        setView(next);
+        // OPENING THE PANE READS NOW. A hidden pane does not poll — a frozen
+        // poll performs no read at all — so without this the Logs tab would
+        // paint `no records yet` for up to a full second over a log directory
+        // full of records: the pane telling the reader something it has not
+        // checked. This is the same read the 1s cycle makes, not a second
+        // cadence, and it resumes from the frozen cursor, so nothing is
+        // repeated and nothing is skipped.
+        if (next === "logs") pollLogs();
+      };
+      _logsPauseRef = () => {
+        if (view() !== "logs") return;
+        publishLogs(setLogsPaused(logsStore, !logsStore.paused));
+      };
+      _logsLevelRef = (direction: number) => publishLogs(stepLogsLevel(logsStore, direction));
+      _logsChannelRef = () => {
+        const available = collectLogChannels(logRecords());
+        publishLogs(available.length === 0 ? setLogsChannel(logsStore, "") : cycleLogsChannel(logsStore, available));
+      };
+      _logsFollowRef = () => {
+        // "Follow" is the free-text filter's opposite number: it clears the
+        // pane's own narrowing and its pause, so the next poll lands on the
+        // newest records — a cursor has nothing to scroll, so this is the whole
+        // of "auto-follow" for a tail-style pane.
+        setLogFilterText("");
+        publishLogs(setLogsPaused(logsStore, false));
+      };
+
       // Task detail panel state
       const [selectedTaskIndex, setSelectedTaskIndex] = createSignal(0);
       const [detailView, setDetailView] = createSignal(false);
       const [detailOffset, setDetailOffset] = createSignal(0);
       const [detailData, setDetailData] = createSignal<TaskDetail | null>(null);
-
-      // Current session ID — used to filter to only this session's activity
-      const currentSessionId = props?.session_id ?? "";
-      const [sessionScope, setSessionScope] = createSignal<Set<string>>(new Set([currentSessionId]));
 
       // Live graph signals, fed from drained graph events for sub-250ms
       // engine-graph signal display:
@@ -291,6 +448,12 @@ export function createSidebarRenderer(workspaceDir: string) {
             setConsecutiveFailures(0);
           }
 
+          // The Logs pane rides this same 1s cycle — no second timer. It is
+          // polled AFTER the activity snapshot is assembled so the two reads
+          // stay in the order the pane's own comments describe, and it never
+          // touches the state signals the activity view renders from.
+          if (!canceled) pollLogs();
+
           setPhase("ready");
         } catch {
           if (canceled) return;
@@ -355,6 +518,11 @@ export function createSidebarRenderer(workspaceDir: string) {
         _setFilterTextRef = null;
         _toggleStatusFilterRef = null;
         _toggleSessionFilterRef = null;
+        _logsToggleRef = null;
+        _logsPauseRef = null;
+        _logsLevelRef = null;
+        _logsChannelRef = null;
+        _logsFollowRef = null;
         _filterPersistRef = null;
         _eventBridgeRef = null;
         dispose();
@@ -463,6 +631,72 @@ export function createSidebarRenderer(workspaceDir: string) {
 
 
 
+      // ── View tab bar ──
+      //
+      // One short line, always painted, naming the active view. The sidebar
+      // shows ONE view at a time and the reader has to be able to tell which
+      // one without guessing: a pane that swaps its whole body silently reads
+      // as a bug the first time the Logs tab is opened by mistake.
+      function renderViewTabs(): JSX.Element {
+        const c = tc();
+        const active = view();
+        return (
+          <text>
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"view "}</span>
+            <span
+              fg={rgbaToCSS(active === "activity" ? c.text : c.textMuted)}
+              attributes={active === "activity" ? BOLD : DIM}
+            >{"activity"}</span>
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" \u00b7 "}</span>
+            <span
+              fg={rgbaToCSS(active === "logs" ? c.text : c.textMuted)}
+              attributes={active === "logs" ? BOLD : DIM}
+            >{"logs"}</span>
+            {active === "logs" && (
+              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>
+                {(logPaused() ? "  paused" : "  live") + "  " + logsStore.filters.minLevel}
+              </span>
+            )}
+          </text>
+        );
+      }
+
+      // ── Logs pane (view tab `logs`, toggled by the host keymap) ──
+      function renderLogsView(): JSX.Element {
+        const text = logFilterText().trim().toLowerCase();
+        const records = text === ""
+          ? logRecords()
+          : logRecords().filter((record) => {
+              const haystack = [
+                record.level,
+                record.channel,
+                record.message,
+                record.code ?? "",
+                ...Object.keys(record.scope).map((key) => record.scope[key as keyof typeof record.scope] ?? ""),
+              ].join(" ").toLowerCase();
+              return haystack.includes(text);
+            });
+        return renderLogs({
+          c: tc(),
+          wide: true,
+          open: isLogsViewLive(view(), false),
+          paused: logPaused(),
+          minLevel: logsStore.filters.minLevel,
+          channels: logChannels(),
+          availableChannels: collectLogChannels(logRecords()),
+          source: logSource(),
+          records: records.slice(-LOGS_PANE_ROWS),
+          skippedLines: logSkipped(),
+          shown: records.length,
+          total: logRecords().length,
+          dropped: logDropped().dropped,
+          earlierDropped: logDropped().earlierDropped,
+          pending: logPending(),
+          error: logError(),
+          filterText: logFilterText(),
+        });
+      }
+
       // ── Metrics panel ──
       function renderMetricsPanel(): JSX.Element | null {
         if (!showMetrics()) return null;
@@ -562,19 +796,20 @@ export function createSidebarRenderer(workspaceDir: string) {
                 });
               })()}
 
-              {/* Filter bar (toggled by `f`) — delegates to FilterBar component */}
-              {renderFilterBarComponent()}
-              {/* Dispatch metrics (toggled by `m`) */}
-              {renderMetricsPanel()}
+              {renderViewTabs()}
 
-              <Show when={health() === "STALE"}>
-                {renderStaleHint({ c: tc(), isStale: true })}
-              </Show>
-              <Show when={!stateDirPresent()}>
-                {renderNoStateBody({ c: tc(), show: true })}
-              </Show>
+              {view() === "logs" && renderLogsView()}
+
+              {/* Filter bar (toggled by `f`) — delegates to FilterBar component */}
+              {view() === "activity" && renderFilterBarComponent()}
+              {/* Dispatch metrics (toggled by `m`) */}
+              {view() === "activity" && renderMetricsPanel()}
+
+              {view() === "activity" && health() === "STALE" && renderStaleHint({ c: tc(), isStale: true })}
+              {view() === "activity" && !stateDirPresent() && renderNoStateBody({ c: tc(), show: true })}
 
               {/* When in detail view, show the detail panel instead of activity list */}
+              {view() === "activity" && (
               <Show when={detailView() && detailData() !== null} fallback={
                 <Show when={snapshot() !== null}>
                   {(() => {
@@ -619,6 +854,7 @@ export function createSidebarRenderer(workspaceDir: string) {
                   });
                 })()}
               </Show>
+              )}
             </Show>
           </box>
         </ErrorBoundary>

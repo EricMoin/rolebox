@@ -6,6 +6,12 @@ import {
   getActiveTasks,
   computeFilteredActivity,
   deriveEnginePhase,
+  nextView,
+  previousView,
+  isLogsViewLive,
+  TUI_VIEWS,
+  LOGS_TOGGLE_KEY,
+  LOGS_PAUSE_KEY,
 } from "../../src/tui/logic.ts";
 import type {
   MonitorSnapshot,
@@ -876,5 +882,35 @@ describe("scope supplement through computeFilteredActivity", () => {
     });
     // No activity in scope => IDLE.
     expect(result).toBe("IDLE");
+  });
+});
+
+// ── View tabs and the Logs liveness rule ────────────────────────────────
+
+describe("TUI view tabs", () => {
+  it("cycles forward through every view and wraps", () => {
+    expect(nextView("activity")).toBe("logs");
+    expect(nextView("logs")).toBe("activity");
+    expect(TUI_VIEWS).toEqual(["activity", "logs"]);
+  });
+
+  it("cycles backward through every view and wraps", () => {
+    expect(previousView("activity")).toBe("logs");
+    expect(previousView("logs")).toBe("activity");
+  });
+
+  it("polls the log view only while it is open AND unpaused", () => {
+    expect(isLogsViewLive("logs", false)).toBe(true);
+    expect(isLogsViewLive("logs", true)).toBe(false);
+    expect(isLogsViewLive("activity", false)).toBe(false);
+    expect(isLogsViewLive("activity", true)).toBe(false);
+  });
+
+  it("names the keys the pane advertises, in the host's own spelling", () => {
+    // `ctrl+…` is the spelling @opentui/keymap parses, and these constants are
+    // what both the keymap layer (index.tsx) and the pane's copy (Logs.tsx)
+    // build from. The bare keys are deliberately NOT claimed.
+    expect(LOGS_TOGGLE_KEY).toBe("ctrl+l");
+    expect(LOGS_PAUSE_KEY).toBe("ctrl+p");
   });
 });
