@@ -511,14 +511,13 @@ function materializedView(
 
 /** The delivered path one rendered prompt names for {@link VIEW_REF}. */
 function deliveredPathIn(prompt: string): string {
-  const marker = VIEW_REF + " -> ";
+  const marker = JSON.stringify(VIEW_REF) + " → ";
   const at = prompt.indexOf(marker);
   if (at === -1) {
     throw new Error("the prompt names no delivered file for " + VIEW_REF);
   }
   const rest = prompt.slice(at + marker.length);
-  const end = rest.indexOf(" ");
-  return end === -1 ? rest : rest.slice(0, end);
+  return JSON.parse(rest.split("\n", 1)[0] ?? "") as string;
 }
 
 /**
@@ -546,7 +545,7 @@ describe("the input view reaches the worker each adapter starts (D7)", () => {
     await flush();
     const prompt = adapter === "pi" ? pi.launches[0]?.prompt ?? ""
       : dsh.starts[0]?.request.prompt.map(block => block.text).join("\n") ?? "";
-    expect(prompt).toContain('from "review", outcome "revise", attempt "review#2"');
+    expect(prompt).toContain('Producer: "review"; outcome: "revise"; attempt: "review#2"');
     expect(prompt).toContain('"problem":"Missing cleanup"');
     expect(prompt).toContain("Resume after interruption.");
     expect(readFileSync(deliveredPathIn(prompt)).equals(VIEW_BYTES)).toBe(true);
@@ -575,8 +574,9 @@ describe("the input view reaches the worker each adapter starts (D7)", () => {
     expect(prompt).toContain(CREDENTIAL);
     // THE INPUT: the producer, its outcome, the producing attempt and the
     // accepted data, with its presence intact.
-    expect(prompt).toContain('from "work", outcome "done", attempt "work#1"');
-    expect(prompt).toContain('accepted data: {"report":"A"}');
+    expect(prompt).toContain('Producer: "work"; outcome: "done"; attempt: "work#1"');
+    expect(prompt).toContain('Accepted data: {"report":"A"}');
+    expect(prompt).toContain("Full accepted data: inputs[0].payload.value in the manifest.");
     // AND THE FILE THE WORKER OPENS.
     const path = deliveredPathIn(prompt);
     expect(path.startsWith(fixture.view.directory)).toBe(true);
@@ -609,10 +609,10 @@ describe("the input view reaches the worker each adapter starts (D7)", () => {
     expect(starts).toHaveLength(1);
     const prompt = starts[0]?.request.prompt.map((block) => block.text).join("\n") ?? "";
     expect(prompt).toContain(CREDENTIAL);
-    expect(prompt).toContain('from "work", outcome "done", attempt "work#1"');
+    expect(prompt).toContain('Producer: "work"; outcome: "done"; attempt: "work#1"');
     // AN ACCEPTED `null` IS NOT AN ABSENT PAYLOAD (D1).
-    expect(prompt).toContain("accepted data: null");
-    expect(prompt).not.toContain("carried no data at all");
+    expect(prompt).toContain("Accepted data: null");
+    expect(prompt).not.toContain("producer supplied no data");
     const path = deliveredPathIn(prompt);
     expect(readFileSync(path).equals(VIEW_BYTES)).toBe(true);
     expect(prompt).not.toContain(artifactObjectPath(fixture.contentStore, fixture.artifactId));
@@ -637,8 +637,9 @@ describe("the input view reaches the worker each adapter starts (D7)", () => {
 
     const prompt = launches[0]?.prompt ?? "";
     expect(prompt).toContain(
-      "accepted data: none (the producing submission carried no data at all)",
+      "Accepted data: absent (the producer supplied no data).",
     );
+    expect(prompt).toContain("Full accepted data: inputs[0].payload in the manifest.");
     // The file is still delivered: an absent payload is not an absent input.
     expect(readFileSync(deliveredPathIn(prompt)).equals(VIEW_BYTES)).toBe(true);
   });

@@ -1,6 +1,9 @@
-import type { AcceptedData } from "../domain/model.ts";
+import type { AcceptedData, JsonValue } from "../domain/model.ts";
 import type { OutcomeDispatchRequest } from "../outcome/dispatch-effects.ts";
 import type { DeliveredInputView } from "./input-view.ts";
+
+const INLINE_DATA_MAX_CHARS = 160;
+const SUMMARY_MAX_CHARS = 240;
 
 /**
  * Render the prompt one attempt's worker receives: the plan's own prompt, the
@@ -42,64 +45,90 @@ export function buildAttemptDeliveryPrompt(
   return blocks.join("\n");
 }
 
-/**
- * The input block: every accepted upstream result this attempt consumes, with
- * the files the host materialized from the retained content identities.
- *
- * ABSENT, NULL AND EMPTY STAY DISTINGUISHABLE HERE (D1): `absent` is rendered as
- * "the producing submission carried no data at all", and every value the
- * submission did carry is rendered as its own JSON — `null`, `{}` and `""`
- * included — so a worker never has to guess which of them it received.
- */
+/** The prompt is a short handoff; the manifest retains every accepted value. */
 function inputViewLines(view: DeliveredInputView): readonly string[] {
   const lines: string[] = [
     "",
     "---",
-    "[rolebox graph inputs — the accepted results this attempt consumes]",
-    "Each entry below is what an upstream node ACCEPTED, bound to the attempt that",
-    "accepted it. The files are real copies retained under their content identity; the",
-    "paths are the ONLY files this attempt was given, and the bytes at them are what the",
-    "acceptance verified. Read them at these paths — the plan's own references name what",
-    "the producer declared, not where the retained bytes live.",
-    "manifest: " + view.manifestPath,
+    "## Accepted upstream results",
+    "These are producer-reported results. Verify claims independently before relying on them.",
+    "Full results manifest: " + JSON.stringify(view.manifestPath),
+    "Read only the fields you need from the manifest. Artifact paths below name delivered copies.",
   ];
-  for (const entry of view.entries) {
+  for (const [index, entry] of view.entries.entries()) {
     lines.push(
-      "- from " +
-      JSON.stringify(entry.from) +
-      ", outcome " +
-      JSON.stringify(entry.outcome) +
-      ", attempt " +
-      JSON.stringify(entry.attemptId) +
-      ":",
-      "    accepted data: " + describeAcceptedData(entry.payload),
+      "- Producer: " + JSON.stringify(entry.from) +
+      "; outcome: " + JSON.stringify(entry.outcome) +
+      "; attempt: " + JSON.stringify(entry.attemptId),
+    );
+    const data = describeAcceptedData(entry.payload);
+    if (data !== undefined) lines.push("  " + data);
+    const issue = describeReportedIssues(entry.payload);
+    if (issue !== undefined) lines.push("  " + issue);
+    lines.push(
+      "  Full accepted data: inputs[" + index + "].payload" +
+      (entry.payload.kind === "value" ? ".value" : "") +
+      " in the manifest.",
     );
     if (entry.artifacts.length === 0) {
-      lines.push(
-        "    file: none (this acceptance retained no artifact for this input)",
-      );
-    }
-    for (const artifact of entry.artifacts) {
-      lines.push(
-        "    file: " +
-        artifact.ref +
-        " -> " +
-        artifact.path +
-        " (" +
-        artifact.artifactId +
-        ", " +
-        String(artifact.size) +
-        " bytes)",
-      );
+      lines.push("  Retained artifact files: none.");
+    } else {
+      lines.push("  Retained artifact files:");
+      for (const artifact of entry.artifacts) {
+        lines.push(
+          "    - " + JSON.stringify(artifact.ref) +
+          " → " + JSON.stringify(artifact.path),
+        );
+      }
     }
   }
   return lines;
 }
 
-/** One accepted payload, rendered with its presence intact (D1). */
-function describeAcceptedData(payload: AcceptedData): string {
+/** Preserve absent, null and empty values without inlining a large result. */
+function describeAcceptedData(payload: AcceptedData): string | undefined {
   if (payload.kind === "absent") {
-    return "none (the producing submission carried no data at all)";
+    return "Accepted data: absent (the producer supplied no data).";
   }
-  return JSON.stringify(payload.value);
+  const value = payload.value;
+  const summary = asRecord(value)?.summary;
+  if (typeof summary === "string" && summary.trim() !== "") {
+    const normalized = summary.replace(/\s+/g, " ").trim();
+    const characters = Array.from(normalized);
+    const excerpt = characters.length > SUMMARY_MAX_CHARS;
+    const shown = excerpt
+      ? characters.slice(0, SUMMARY_MAX_CHARS).join("") + "…"
+      : normalized;
+    return "Producer summary" + (excerpt ? " (excerpt)" : "") + ": " +
+      JSON.stringify(shown);
+  }
+  const json = JSON.stringify(value);
+  if (Array.from(json).length <= INLINE_DATA_MAX_CHARS) {
+    return "Accepted data: " + json;
+  }
+  return undefined;
+}
+
+/** Surface caveats without promoting a producer's report to a verified result. */
+function describeReportedIssues(payload: AcceptedData): string | undefined {
+  if (payload.kind === "absent") return undefined;
+  const record = asRecord(payload.value);
+  if (record === undefined) return undefined;
+  const limitations = Array.isArray(record.limitations) && record.limitations.length > 0;
+  const failedChecks = Array.isArray(record.commands) && record.commands.some((command) => {
+    const check = asRecord(command);
+    return check !== undefined && typeof check.exit === "number" && check.exit !== 0;
+  });
+  if (!limitations && !failedChecks) return undefined;
+  const reported = limitations && failedChecks
+    ? "limitations and failed checks"
+    : limitations ? "limitations" : "failed checks";
+  return "The producer reported " + reported +
+    ". Read the full result before relying on its claims, and verify them independently.";
+}
+
+function asRecord(value: JsonValue): { [key: string]: JsonValue } | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value
+    : undefined;
 }

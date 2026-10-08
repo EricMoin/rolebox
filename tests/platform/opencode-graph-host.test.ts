@@ -492,7 +492,7 @@ describe("opencode graph host — the declared-graph tool face", () => {
     };
     await callTool(tools, "graph_declare", { declaration }, parent);
     await waitFor(() => prompts().length === 1, "initial work");
-    expect(prompts()[0]?.text).not.toContain("[rolebox graph inputs");
+    expect(prompts()[0]?.text).not.toContain("## Accepted upstream results");
     const submit = async (index: number, nodeId: string, outcomeId: string, data: object) => {
       const prompt = prompts()[index];
       if (!prompt) throw new Error("fixture: missing prompt");
@@ -507,7 +507,7 @@ describe("opencode graph host — the declared-graph tool face", () => {
     await submit(1, "review", "revise", { items: [{ id: "cleanup", problem: "Missing cleanup" }] });
     await waitFor(() => prompts().length === 3, "repair");
     const repair = prompts()[2]!;
-    expect(repair.text).toContain('from "review", outcome "revise", attempt "review#2"');
+    expect(repair.text).toContain('Producer: "review"; outcome: "revise"; attempt: "review#2"');
     expect(repair.text).toContain('"problem":"Missing cleanup"');
     expect(host.host.workerPrincipalOf(repair.sessionID)?.attemptId).toBe("work#3");
     expect(host.host.workerPrincipalOf("session-parent")).toBeUndefined();
@@ -519,7 +519,7 @@ describe("opencode graph host — the declared-graph tool face", () => {
     expect(retried.kind).toBe("applied");
     await waitFor(() => prompts().length === 4, "repair retry");
     expect(prompts()[3]?.text).toContain("Worker interrupted after editing; inspect existing work");
-    expect(prompts()[3]?.text).toContain('from "review", outcome "revise", attempt "review#2"');
+    expect(prompts()[3]?.text).toContain('Producer: "review"; outcome: "revise"; attempt: "review#2"');
     expect(prompts()[3]?.text).toContain('"problem":"Missing cleanup"');
   });
 
