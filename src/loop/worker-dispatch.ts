@@ -10,9 +10,7 @@ import {
 /** Number of characters to compare (from the start of the tail segment)
  *  when checking if a round's summary is unchanged from the previous round. */
 const SUMMARY_COMPARE_CHARS = 500;
-import { createSubLogger } from "../logger.ts";
-
-const log = createSubLogger("loop/worker-dispatch");
+import { logEvent, withLogScope } from "../log/index.ts";
 
 /**
  * Dispatch a single loop round: build prompt, call adapter, update loop state.
@@ -63,7 +61,8 @@ export async function dispatchRound(
         `${LOOP_PROGRESS_MARKER} loop started: ${loop.total} rounds, ${loop.mode} mode]`,
       )
       .catch((err) => {
-        log.warn("Failed to inject loop-started note", { err });
+        withLogScope({ sessionId: loop.originSessionId }, () =>
+          logEvent("worker-dispatch.started-note-failed", { error: err instanceof Error ? err.message : String(err) }));
       });
   }
 }
@@ -152,7 +151,12 @@ export async function finalizeLoop(
 ): Promise<void> {
   if (loop.activeWorkerTaskId) {
     await adapter.cancelRound(loop.activeWorkerTaskId).catch((err) => {
-      log.warn("Failed to cancel active round during finalize", { err });
+      withLogScope({ sessionId: loop.originSessionId }, () =>
+        logEvent("worker-dispatch.round-cancel-failed", {
+          phase: terminalPhase,
+          workerTaskId: loop.activeWorkerTaskId,
+          error: err instanceof Error ? err.message : String(err),
+        }));
     });
     workerToOrigin.delete(loop.activeWorkerTaskId);
     loop.activeWorkerTaskId = undefined;
@@ -194,7 +198,12 @@ export async function failLoop(
 ): Promise<void> {
   if (loop.activeWorkerTaskId) {
     await adapter.cancelRound(loop.activeWorkerTaskId).catch((err) => {
-      log.warn("Failed to cancel active round during failLoop", { err });
+      withLogScope({ sessionId: loop.originSessionId }, () =>
+        logEvent("worker-dispatch.round-cancel-failed", {
+          phase: "error",
+          workerTaskId: loop.activeWorkerTaskId,
+          error: err instanceof Error ? err.message : String(err),
+        }));
     });
     workerToOrigin.delete(loop.activeWorkerTaskId);
     loop.activeWorkerTaskId = undefined;
@@ -214,6 +223,7 @@ export async function failLoop(
   await adapter
     .injectNote(loop.originSessionId, `${LOOP_PROGRESS_MARKER} error: ${reason}]`)
     .catch((err) => {
-      log.warn("Failed to inject loop error note", { err });
+      withLogScope({ sessionId: loop.originSessionId }, () =>
+        logEvent("worker-dispatch.error-note-failed", { error: err instanceof Error ? err.message : String(err) }));
     });
 }

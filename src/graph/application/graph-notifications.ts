@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createSubLogger } from "../../logger.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import { readGraphView, type GraphView } from "../query/graph-query.ts";
@@ -190,7 +191,8 @@ export class GraphNotifications {
         this.unreadableGraphs.delete(graphId);
       } catch (error) {
         if (!this.unreadableGraphs.has(graphId)) {
-          log.warn("Graph notification source is unreadable", { graphId, error: errorText(error) });
+          withLogScope({ graphId }, () =>
+            logEvent("notifications.source-unreadable", { error: errorText(error) }));
           this.unreadableGraphs.add(graphId);
         }
         continue;
@@ -262,13 +264,19 @@ export class GraphNotifications {
               WHERE graph_id = ? AND effect_id = ? AND payload = ? AND status = 'started'`,
             next, row.graph_id, row.effect_id, payload));
             payload = next;
-          } catch (error) { log.warn("Graph notification lease renewal failed", { error: errorText(error) }); }
+          } catch (error) {
+            withLogScope({ graphId: String(row.graph_id), effectId: String(row.effect_id) }, () =>
+              logEvent("notifications.lease-renewal-failed", { error: errorText(error) }));
+          }
         }, LEASE_MS / 3);
         renew.unref();
         let delivered = false;
         try {
           delivered = this.obsolete(delivery.notification) || await this.options.send(delivery.notification);
-        } catch (error) { log.warn("Graph notification delivery failed", { error: errorText(error) }); }
+        } catch (error) {
+          withLogScope({ graphId: delivery.notification.graphId, runId: delivery.notification.runId }, () =>
+            logEvent("notifications.delivery-failed", { error: errorText(error) }));
+        }
         finally { clearInterval(renew); }
         const attempts = delivery.attempts + 1;
         const next: Delivery = { notification: delivery.notification, attempts,

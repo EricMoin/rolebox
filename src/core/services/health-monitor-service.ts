@@ -3,6 +3,7 @@ import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import type { ServiceHealth } from "../service.ts";
 import { createSubLogger } from "../../logger.ts";
+import { logEvent } from "../../log/index.ts";
 import type { ServiceSupervisor } from "../service-supervisor.ts";
 
 /** Minimal interface for accessing the supervisor through PluginCore. */
@@ -100,7 +101,7 @@ export class HealthMonitorService implements PluginService {
 
       // Unhealthy: delegate restart decision to ServiceSupervisor
       if (result.status === "unhealthy") {
-        log.warn("Service unhealthy, attempting supervised restart", {
+        logEvent("health-monitor.service-unhealthy", {
           service: name,
           detail: result.detail,
         });
@@ -111,7 +112,7 @@ export class HealthMonitorService implements PluginService {
 
           const state = supervisor.getStatus(name);
           if (state.status === "permanently_degraded") {
-            log.error("Service permanently degraded after restart attempts", {
+            logEvent("health-monitor.service-degraded", {
               service: name,
               detail: result.detail,
             });
@@ -121,7 +122,7 @@ export class HealthMonitorService implements PluginService {
             });
           }
         } catch (err) {
-          log.error("Health monitor supervisor error (continuing check cycle)", {
+          logEvent("health-monitor.supervisor-error", {
             service: name,
             error: err instanceof Error ? err.message : String(err),
           });

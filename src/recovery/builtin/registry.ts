@@ -1,6 +1,7 @@
 import type { BuiltInHookDefinition } from "../types.ts";
 import type { HookContext, HookEvent } from "../../hooks/custom/types.ts";
 import { createSubLogger } from "../../logger.ts";
+import { logEvent } from "../../log/index.ts";
 
 const log = createSubLogger("recovery:builtin-registry");
 
@@ -78,7 +79,11 @@ export class BuiltInHookRegistry {
             break;
         }
       } catch (err) {
-        log.warn(`Built-in hook "${hook.name}" failed on ${event}`, { err });
+        logEvent("builtin-registry.hook-failed", {
+          hook: hook.name,
+          event,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }

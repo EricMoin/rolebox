@@ -8,6 +8,7 @@ import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBl
 import { buildReminder } from "../prompt/reminder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import type { ResolvedFunction } from "../types.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
@@ -103,7 +104,8 @@ export async function handleSystemTransform(
           output.system.push(block);
         }
       } catch (err) {
-        log.warn("Failed to inject memory block", { error: String(err) });
+        withLogScope({ sessionId: sid }, () =>
+          logEvent("sys-xform.memory-inject-failed", { error: String(err) }));
       }
     }
   }

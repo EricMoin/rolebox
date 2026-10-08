@@ -8,6 +8,7 @@ import type {
 } from "./types.ts";
 import type { StrategyRegistry } from "./strategies/registry.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 
 const log = createSubLogger("recovery:chain-executor");
@@ -55,7 +56,8 @@ export class RecoveryChainExecutor {
       const strategy = this.registry.get(step.strategy);
 
       if (!strategy) {
-        log.warn("Strategy not found, skipping step", { strategy: step.strategy, sessionID });
+        withLogScope({ sessionId: sessionID }, () =>
+          logEvent("chain-executor.strategy-missing", { strategy: step.strategy }));
         stepIndex++;
         stepAttempt = 0;
         continue;
@@ -74,7 +76,11 @@ export class RecoveryChainExecutor {
       try {
         result = await strategy.execute(ctx);
       } catch (err) {
-        log.warn("Strategy threw during execution", { strategy: step.strategy, err });
+        withLogScope({ sessionId: sessionID }, () =>
+          logEvent("chain-executor.strategy-threw", {
+            strategy: step.strategy,
+            error: err instanceof Error ? err.message : String(err),
+          }));
         result = { status: "next_strategy", reason: `strategy threw: ${err instanceof Error ? err.message : String(err)}` };
       }
 

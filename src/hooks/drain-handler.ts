@@ -3,9 +3,7 @@ import type { FunctionSessionState } from "../function/session-state.ts";
 import type { FunctionRuntimeManager } from "../function/runtime-state.ts";
 import type { FunctionContext } from "../function/context.ts";
 import { appendCorrection } from "./context.ts";
-import { createSubLogger } from "../logger.ts";
-
-const log = createSubLogger("handler-drain");
+import { logEvent, withLogScope } from "../log/index.ts";
 
 const INJECT_CAP_BYTES = 4096;
 const ACTIVATION_CAP = 3;
@@ -22,13 +20,19 @@ export function drainHandlerContext(
   let injBytes = 0;
   for (const inj of ctx.injects) {
     injBytes += inj.length;
-    if (injBytes > INJECT_CAP_BYTES) { log.warn("handler inject cap reached", { fn: fnName }); break; }
+    if (injBytes > INJECT_CAP_BYTES) {
+      withLogScope({ sessionId: sessionID }, () => logEvent("handler-drain.inject-cap-reached", { fn: fnName }));
+      break;
+    }
     appendCorrection(pendingCorrections, sessionID, inj);
   }
 
   let actCount = 0;
   for (const name of ctx.pendingActivations.activate) {
-    if (++actCount > ACTIVATION_CAP) { log.warn("handler activation cap reached", { fn: fnName }); break; }
+    if (++actCount > ACTIVATION_CAP) {
+      withLogScope({ sessionId: sessionID }, () => logEvent("handler-drain.activation-cap-reached", { fn: fnName }));
+      break;
+    }
     sessionState.activate(sessionID, [name]);
     const resolved = allFns.find((f) => f.name === name);
     runtime.init(sessionID, name, resolved?.state_schema_version ?? 1);

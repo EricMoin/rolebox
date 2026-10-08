@@ -9,6 +9,7 @@ import {
   failLoop,
 } from "./worker-dispatch.js";
 import { createSubLogger } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import { err, ok } from "../utils/result.ts";
 import { createHash } from "node:crypto";
 
@@ -111,7 +112,8 @@ export class LoopCoordinator {
     for (const { sessionId, ageMs } of stale) {
       this._advancing.delete(sessionId);
       this._staleLockCount++;
-      log.warn("advancing-lock: swept stale lock", { sessionId, acquiredAgeMs: ageMs });
+      withLogScope({ sessionId }, () =>
+        logEvent("coordinator.stale-advancing-lock", { acquiredAgeMs: ageMs }));
       // Drain any pending completions that were deferred during the abandoned critical section.
       // Mirror the pattern in _kickoffFromActivating and onWorkerCompleted finally blocks.
       const pending = this._pendingCompletions.get(sessionId);
@@ -429,7 +431,8 @@ export class LoopCoordinator {
             `${LOOP_PROGRESS_MARKER} round ${lastRound.round}/${loop.total} ${lastRound.status}, session=${lastRound.workerSessionId}, duration=${dur}]`,
           )
           .catch((err) => {
-            log.warn("Failed to inject loop progress note", { err });
+            withLogScope({ sessionId: loop.originSessionId }, () =>
+              logEvent("coordinator.progress-note-failed", { error: err instanceof Error ? err.message : String(err) }));
           });
       }
 
@@ -520,11 +523,11 @@ export class LoopCoordinator {
       try {
         await this.cancelNow(childId);
       } catch (err) {
-        log.warn("cancelNow: cascade failed for child loop", {
-          parentId: loop.originSessionId,
-          childId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        withLogScope({ sessionId: loop.originSessionId }, () =>
+          logEvent("coordinator.cascade-cancel-failed", {
+            childId,
+            error: err instanceof Error ? err.message : String(err),
+          }));
       }
     }
   }
@@ -669,10 +672,8 @@ export class LoopCoordinator {
         try {
           await this._advanceFromSummarizing(originSessionId);
         } catch (err) {
-          log.warn("reSubscribeListeners: _advanceFromSummarizing failed", {
-            originSessionId,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          withLogScope({ sessionId: originSessionId }, () =>
+            logEvent("coordinator.resubscribe-advance-failed", { error: err instanceof Error ? err.message : String(err) }));
         } finally {
           this._advancing.delete(originSessionId);
         }
@@ -693,7 +694,11 @@ export class LoopCoordinator {
         try {
           status = await this.adapter.getTaskStatus(taskId);
         } catch (error) {
-          log.warn("reSubscribeListeners: getTaskStatus failed", { taskId, error: error instanceof Error ? error.message : String(error) });
+          withLogScope({ sessionId: originSessionId }, () =>
+            logEvent("coordinator.task-status-read-failed", {
+              taskId,
+              error: error instanceof Error ? error.message : String(error),
+            }));
           loop.phase = "interrupted";
           loop.errorReason = "getTaskStatus failed during reSubscribe: " + (error instanceof Error ? error.message : String(error));
           loop.updatedAt = Date.now();

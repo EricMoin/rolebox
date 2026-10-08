@@ -7,6 +7,7 @@ import { runToolObserve } from "../function/observe.ts";
 import { collectAllFunctions, fetchLastAssistantText, appendCorrection } from "./context.ts";
 import { drainHandlerContext } from "./drain-handler.ts";
 import { createSubLogger, formatError } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
 
@@ -98,7 +99,8 @@ export async function handleToolAfter(
       appendCorrection(state.pendingCorrections, input.sessionID, inj);
     }
   } catch (err) {
-    log.warn("tool.execute.after observe error", { error: formatError(err) });
+    withLogScope({ sessionId: sid }, () =>
+      logEvent("tool-after.observe-failed", { error: formatError(err).message }));
   }
 
   // --- Tier-2 handlers: onToolAfter ---
@@ -115,7 +117,8 @@ export async function handleToolAfter(
       drainHandlerContext(ctx, input.sessionID, fn.name, state.pendingCorrections, functionSessionState, functionRuntime, allFns);
     }
   } catch (err) {
-    log.warn("tool.execute.after handler error", { error: formatError(err) });
+    withLogScope({ sessionId: sid }, () =>
+      logEvent("tool-after.handler-failed", { error: formatError(err).message }));
   }
 
   // Custom hooks: after phase

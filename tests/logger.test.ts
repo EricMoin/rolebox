@@ -33,6 +33,9 @@ import {
   getRootLogger,
   rootLogger,
 } from "../src/logger.ts";
+import { __setLogClockForTest, configureLogging } from "../src/log/index.ts";
+import { createMemorySink, type MemorySink } from "../src/log/sinks/memory.ts";
+import type { LogRecord } from "../src/log/types.ts";
 import { beginLogTest, captureConsole, endLogTest, setLogEnv } from "./helpers/log.ts";
 
 let state: { env: Record<string, string | undefined>; dir: string };
@@ -525,6 +528,107 @@ describe("__resetForTest", () => {
 
     expect(() => createSubLogger("after-reset").warn("still works")).not.toThrow();
     expect(lines(join(state.dir, "after-reset.log"))).toHaveLength(1);
+  });
+});
+
+// ── Field narrowing, made visible ────────────────────────────────────────────
+//
+// The shell drops a value the kernel's field type does not admit, and until this
+// suite existed nothing recorded the drop: a call site could pass an object for
+// years with no trace in the record. The three cases below pin the replacement —
+// the drop is still a drop (the mapping is unchanged), but it is REPORTED once
+// per throttle window, by key name and channel, and never by value.
+
+describe("field narrowing", () => {
+  /** A pipeline whose only destination is a memory sink, at the debug level. */
+  function memoryPipeline(): MemorySink {
+    const memory = createMemorySink({ capacity: 50 });
+    setLogEnv("ROLEBOX_LOG_LEVEL", "debug");
+    configureLogging({ sinks: [memory], level: "debug" });
+    return memory;
+  }
+
+  /** The narrowing reports a memory sink received, in order. */
+  function narrowings(memory: MemorySink): LogRecord[] {
+    return memory.records().filter((record) => record.code === "log.field.narrowed");
+  }
+
+  it("reports a dropped object value once, naming the channel and the keys — never the value", () => {
+    const memory = memoryPipeline();
+    createSubLogger("payloads").warn("save failed", {
+      attemptId: "a2",
+      payload: { secret: "PAYLOAD-MUST-NOT-APPEAR" },
+      items: [1, "two"],
+    });
+
+    const reports = narrowings(memory);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.level).toBe("debug");
+    expect(reports[0]?.channel).toBe("log:compat");
+    expect(reports[0]?.fields).toEqual({ channel: "payloads", keys: ["payload", "items"] });
+    // THE POINT OF REGISTERING THE DROP: the report names the keys and never the
+    // values that could not be carried.
+    expect(JSON.stringify(memory.records())).not.toContain("PAYLOAD-MUST-NOT-APPEAR");
+
+    // ...and the record itself is still written, with the fields the kernel
+    // admits: reporting the narrowing did not change the mapping.
+    const [record] = memory.records().filter((entry) => entry.channel === "payloads");
+    expect(record?.message).toBe("save failed");
+    expect(record?.fields).toEqual({ attemptId: "a2" });
+  });
+
+  it("throttles repeats on the same channel, and reports what the window suppressed", () => {
+    const memory = memoryPipeline();
+    let now = 1_000_000;
+    __setLogClockForTest(() => now);
+    const log = createSubLogger("repeats");
+
+    log.warn("first", { payload: { n: 1 } });
+    now += 30_000; // inside the 60s window the first report opened
+    log.warn("second", { payload: { n: 2 } });
+    now += 31_000; // past that window
+    log.warn("third", { payload: { n: 3 } });
+
+    const reports = narrowings(memory);
+    expect(reports).toHaveLength(2);
+    expect(reports[0]?.fields).toEqual({ channel: "repeats", keys: ["payload"] });
+    // The suppressed occurrence is counted and rides on the next report, so the
+    // throttling is accounted for instead of being silent.
+    expect(reports[1]?.fields).toEqual({ channel: "repeats", keys: ["payload"], suppressed: 1 });
+
+    // The three warnings themselves are untouched by the gate.
+    const warned = memory.records().filter((record) => record.channel === "repeats");
+    expect(warned.map((record) => record.level)).toEqual(["warn", "warn", "warn"]);
+  });
+
+  it("stays silent for the values the kernel admits", () => {
+    const memory = memoryPipeline();
+    createSubLogger("clean").warn("nothing was dropped", {
+      reason: "why",
+      count: 2,
+      ok: true,
+      names: ["a", "b"],
+      ids: [1, 2],
+      missing: undefined,
+      error: new Error("read-only"),
+    });
+
+    expect(narrowings(memory)).toEqual([]);
+    expect(memory.records().find((record) => record.channel === "clean")?.fields).toEqual({
+      reason: "why",
+      count: 2,
+      ok: true,
+      names: ["a", "b"],
+      ids: [1, 2],
+      error: "read-only",
+    });
+  });
+
+  it("names a positional argument that cannot become a field by the key it would have had", () => {
+    const memory = memoryPipeline();
+    createSubLogger("positional").warn("saveSync failed", "/tmp/x", [{ deep: true }]);
+
+    expect(narrowings(memory)[0]?.fields).toEqual({ channel: "positional", keys: ["arg2"] });
   });
 });
 

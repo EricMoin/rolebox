@@ -4,11 +4,14 @@
  *
  * What these cases fix in place:
  *
- * 1. THE TABLE'S TWO FAMILIES. The four platform codes are the table's head, in
- *    their original order, and the graph engine's events follow them on the
- *    engine's own "graph:" channels. (Before the migration node ran, this suite
- *    pinned the platform-only intermediate state the registry marked as an
- *    insertion point; that node filled it, so the guard now covers both halves.)
+ * 1. THE TABLE'S FAMILIES. The four platform codes are the table's head, in
+ *    their original order, the graph engine's nineteen follow them on the
+ *    engine's own "graph:" channels, and stage 4's engine-slice entries follow
+ *    those on the channels of the modules that emit them. (Before the migration
+ *    node ran, this suite pinned the platform-only intermediate state the
+ *    registry marked as an insertion point; that node filled it, and stage 4
+ *    appended its own per-channel sections — so the graph engine's nineteen are
+ *    guarded by their channel, which is what the table actually promises.)
  * 2. EVERY ENTRY IS USABLE. A level from the four, a non-empty channel, a
  *    non-empty single-line message and, when present, a positive integer
  *    throttle window.
@@ -66,9 +69,17 @@ describe("closed event vocabulary", () => {
 
   it("holds the graph engine's events after them, on the engine's own channels", () => {
     const appended = Object.keys(LOG_EVENTS).slice(PLATFORM_CODES.length);
-    expect(appended.length).toBe(19);
+    // Every appended entry — the engine's nineteen and each section a later
+    // stage added — reports on the channel of the module that emits it, never
+    // on the platform's "log", and the engine's own channels are all still
+    // present among them.
+    expect(appended.length).toBeGreaterThanOrEqual(19);
+    const channels = new Set(appended.map((code) => logEventDefinition(code as LogEventCode).channel));
+    for (const engineChannel of ["graph:host", "graph:index", "graph:tool", "graph:declare"]) {
+      expect(channels.has(engineChannel)).toBe(true);
+    }
     for (const code of appended) {
-      expect(logEventDefinition(code as LogEventCode).channel.startsWith("graph:")).toBe(true);
+      expect(logEventDefinition(code as LogEventCode).channel).not.toBe("log");
     }
   });
 

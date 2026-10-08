@@ -1,6 +1,7 @@
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { DispatchTask, NotificationPayload } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import { metrics } from "./persistence/metrics.ts";
 import { buildReminder, type ReminderField } from "../prompt/reminder.ts";
 import { formatDuration } from "../utils/text-format.ts";
@@ -250,10 +251,11 @@ export async function notifyParent(
       }
 
       metrics.counter("notify_failed_total").inc();
-      log.warn(
-        `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
-        lastError,
-      );
+      withLogScope({ sessionId: task.parentSessionId }, () =>
+        logEvent("notify.parent-notify-failed", {
+          taskId: task.id,
+          error: lastError instanceof Error ? lastError.message : String(lastError),
+        }));
       return false;
     } else {
       try {
@@ -266,10 +268,11 @@ export async function notifyParent(
         return false;
       } catch (err) {
         metrics.counter("notify_failed_total").inc();
-        log.warn(
-          `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
-          err,
-        );
+        withLogScope({ sessionId: task.parentSessionId }, () =>
+          logEvent("notify.parent-notify-failed", {
+            taskId: task.id,
+            error: err instanceof Error ? err.message : String(err),
+          }));
         return false;
       }
     }

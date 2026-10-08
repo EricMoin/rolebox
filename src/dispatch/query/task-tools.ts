@@ -28,6 +28,7 @@ import {
 import { formatDuration, formatDurationBetween } from "./format-utils.ts";
 import { formatTimestamp } from "../../utils/text-format.ts";
 import { createSubLogger } from "../../logger.ts";
+import { logEvent } from "../../log/index.ts";
 
 const log = createSubLogger("task:tools");
 
@@ -196,7 +197,7 @@ async function getResultPreview(task: DispatchTask, directory: string): Promise<
     }
     return "(no result)";
   } catch (err) {
-    log.warn("Failed to read result preview", { taskId: task.id, error: String(err) });
+    logEvent("tools.result-preview-failed", { taskId: task.id, error: String(err) });
     return "(error reading result)";
   }
 }
@@ -506,7 +507,7 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         return `Retried task \`${task_id}\` → new task \`${retriedTask.id}\` (status: ${retriedTask.status}, agent: ${retriedTask.agent}). Use task_output \`${retriedTask.id}\` to fetch its result when complete.`;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log.warn(`task_retry failed for id=${task_id}: ${message}`, { tag: "task-retry", taskId: task_id });
+        logEvent("tools.retry-failed", { taskId: task_id, error: message });
         return `Retry failed for task \`${task_id}\`: ${message}`;
       }
     },

@@ -6,6 +6,7 @@ import type {
 } from "./types.ts";
 import { loadHookModule } from "./loader.ts";
 import { createSubLogger } from "../../logger.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 import { blockTag } from "../../prompt/builder.ts";
 
 const log = createSubLogger("hook:custom-registry");
@@ -44,7 +45,10 @@ export class CustomHookRegistry {
       try {
         await mod.onLoad(ctx);
       } catch (err) {
-        log.warn(`Custom hook "${hook.name}" onLoad threw`, { err });
+        logEvent("custom-registry.on-load-failed", {
+          hook: hook.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -127,7 +131,12 @@ export class CustomHookRegistry {
             break;
         }
       } catch (err) {
-        log.warn(`Custom hook "${name}" failed on ${event}`, { err });
+        withLogScope({ sessionId: ctx.sessionID }, () =>
+          logEvent("custom-registry.hook-failed", {
+            hook: name,
+            event,
+            error: err instanceof Error ? err.message : String(err),
+          }));
       }
     }
   }
@@ -201,7 +210,10 @@ export class CustomHookRegistry {
         try {
           await hook.module.onDispose(ctx);
         } catch (err) {
-          log.warn(`Custom hook "${hook.config.name}" onDispose threw`, { err });
+          logEvent("custom-registry.on-dispose-failed", {
+            hook: hook.config.name,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
     }

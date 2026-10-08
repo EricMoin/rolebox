@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { type DatabaseDriver, createDatabase } from "./db-driver.ts";
 import { memoryDbPath, shortHash } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent } from "../log/index.ts";
 import type { MemoryEntry, MemorySummary } from "../types.ts";
 import { ensureMemorySchema } from "./schema.ts";
 import { searchMemories, type MemorySearchOptions } from "./search.ts";
@@ -101,7 +102,7 @@ export class MemoryStore {
         access_count: Number(row.access_count),
       } as MemoryEntry;
     } catch (err) {
-      log.warn("memory read failed", { id, error: String(err) });
+      logEvent("store.read-failed", { id, error: String(err) });
       return null;
     }
   }

@@ -1,6 +1,7 @@
 import type { PluginCoreLike } from "./service.ts";
 import type { ServiceName } from "./service-names.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent } from "../log/index.ts";
 
 const log = createSubLogger("service-supervisor");
 
@@ -98,8 +99,8 @@ export class ServiceSupervisor {
       // 4. Guard: if already at max attempts, mark degraded and bail
       if (state.attempts >= SUPERVISOR_DEFAULTS.maxRestartsPerWindow) {
         state.status = "permanently_degraded";
-        log.error("Service exceeded max restart attempts, permanently degraded", {
-          name,
+        logEvent("service-supervisor.budget-exceeded", {
+          service: name,
           attempts: state.attempts,
           windowMs: SUPERVISOR_DEFAULTS.windowMs,
         });
@@ -119,10 +120,10 @@ export class ServiceSupervisor {
         if (state.attempts >= SUPERVISOR_DEFAULTS.maxRestartsPerWindow) {
           state.status = "permanently_degraded";
           const errMsg = err instanceof Error ? err.message : String(err);
-          log.error("Service permanently degraded after exhausting restart attempts", {
-            name,
+          logEvent("service-supervisor.permanently-degraded", {
+            service: name,
             attempts: state.attempts,
-            lastError: errMsg,
+            error: errMsg,
             windowMs: SUPERVISOR_DEFAULTS.windowMs,
           });
         } else {

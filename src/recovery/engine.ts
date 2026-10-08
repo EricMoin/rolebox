@@ -8,6 +8,7 @@ import { RecoveryChainExecutor } from "./chain-executor.ts";
 import { addKnownStrategy } from "./config.ts";
 import { appendCorrection } from "../hooks/context.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 
 const log = createSubLogger("recovery:engine");
@@ -152,11 +153,13 @@ export class RecoveryEngine {
         return { recovered: true, message: result.finalError };
 
       case "aborted":
-        log.warn("Recovery aborted", { sessionID, reason: result.finalError, totalAttempts: result.totalAttempts });
+        withLogScope({ sessionId: sessionID }, () =>
+          logEvent("engine.aborted", { reason: result.finalError, totalAttempts: result.totalAttempts }));
         return { recovered: false, message: result.finalError };
 
       case "exhausted":
-        log.warn("Recovery exhausted", { sessionID, reason: result.finalError, totalAttempts: result.totalAttempts });
+        withLogScope({ sessionId: sessionID }, () =>
+          logEvent("engine.exhausted", { reason: result.finalError, totalAttempts: result.totalAttempts }));
         return { recovered: false, message: result.finalError };
     }
   }

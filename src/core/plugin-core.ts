@@ -3,6 +3,7 @@ import type { ServiceName } from "./service-names.ts";
 import type { PluginContext } from "./context.ts";
 import { EventBus } from "./event-bus.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent } from "../log/index.ts";
 import { StartupChecker } from "../recovery/startup-check.ts";
 import type { StartupHealth } from "../recovery/startup-check.ts";
 import { stateDirFor } from "../utils/state-paths.ts";
@@ -36,7 +37,7 @@ export class PluginCore implements PluginCoreLike {
 
   registerService(svc: PluginService): void {
     if (this.services.has(svc.name)) {
-      log.warn("Service already registered, replacing", { name: svc.name });
+      logEvent("plugin-core.registration-replaced", { service: svc.name });
     }
     this.services.set(svc.name, svc);
   }
@@ -93,8 +94,8 @@ export class PluginCore implements PluginCoreLike {
       // If any dependency is degraded, skip this service entirely
       const degradedDeps = svc.dependencies.filter(d => this.degraded.has(d));
       if (degradedDeps.length > 0) {
-        log.warn("Skipping init due to degraded dependency", {
-          name: svc.name,
+        logEvent("plugin-core.init-skipped", {
+          service: svc.name,
           degradedDeps,
         });
         this.degraded.add(svc.name);
@@ -106,15 +107,13 @@ export class PluginCore implements PluginCoreLike {
         await svc.init(this.ctx);
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        const errStack = err instanceof Error ? err.stack : undefined;
         if (svc.critical) {
           log.fatal("Critical service init failed, aborting", { name: svc.name, error: errMsg });
           throw err;
         }
-        log.error("Optional service init failed, marking as permanently degraded", {
-          name: svc.name,
+        logEvent("plugin-core.init-failed", {
+          service: svc.name,
           error: errMsg,
-          stack: errStack,
         });
         this.degraded.add(svc.name);
       }
@@ -131,7 +130,7 @@ export class PluginCore implements PluginCoreLike {
       try {
         await svc.dispose();
       } catch (err) {
-        log.warn("Service dispose failed", { name: svc.name, error: err instanceof Error ? err.message : String(err) });
+        logEvent("plugin-core.dispose-failed", { service: svc.name, error: err instanceof Error ? err.message : String(err) });
       }
     }
   }
@@ -145,11 +144,11 @@ export class PluginCore implements PluginCoreLike {
   async restartService(name: ServiceName): Promise<void> {
     const svc = this.services.get(name);
     if (!svc) {
-      log.warn("restartService: service not found", { name });
+      logEvent("plugin-core.restart-unknown-service", { service: name });
       return;
     }
     if (!this.ctx) {
-      log.warn("restartService: no context, cannot restart", { name });
+      logEvent("plugin-core.restart-no-context", { service: name });
       return;
     }
 
@@ -188,8 +187,8 @@ export class PluginCore implements PluginCoreLike {
       try {
         await s.dispose();
       } catch (err) {
-        log.warn("Service dispose during restart failed", {
-          name: s.name,
+        logEvent("plugin-core.restart-dispose-failed", {
+          service: s.name,
           error: err instanceof Error ? err.message : String(err),
         });
       }

@@ -18,13 +18,8 @@ import {
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { createSubLogger } from "../../logger.ts";
+import { logEvent } from "../../log/index.ts";
 import type { CheckpointData, CheckpointStore } from "../types.checkpoint.ts";
-
-// ── Logger ────────────────────────────────────────────────────────────────
-
-const log = createSubLogger("dispatch:checkpoint");
-
 
 /** Maximum checkpoints retained per task. Older entries are evicted (FIFO). */
 export const MAX_CHECKPOINTS_PER_TASK = 100;
@@ -183,8 +178,8 @@ export class FileSystemCheckpointStore implements CheckpointStore {
           }
           renameSync(tmp, filePath);
         } catch (err) {
-          log.warn("Failed to rewrite checkpoint file after cleanup", {
-            file,
+          logEvent("checkpoint.rewrite-failed", {
+            taskId: file.slice(0, -".json".length),
             error: String(err),
           });
         }

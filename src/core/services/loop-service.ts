@@ -9,13 +9,11 @@ import { LoopStore } from "../../loop/loop-store.ts";
 import type { LoopState } from "../../loop/types.ts";
 import { INTER_ROUND_DELAY_MS } from "../../loop/constants.ts";
 import { hookState } from "../../hooks/state.ts";
-import { createSubLogger } from "../../logger.ts";
+import { logEvent } from "../../log/index.ts";
 import { createLoopTools } from "../../loop/loop-tools.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
-
-const log = createSubLogger(SERVICE_NAMES.loop);
 
 /** Message shown by stub loop tools when the service is degraded on Pi. */
 const PI_LOOP_UNAVAILABLE_MSG =
@@ -56,7 +54,7 @@ export class LoopService implements PluginService {
     if (!dispatchService) {
       this.stateDegraded = true;
       this.degradedDetail = "dispatch-service not initialized";
-      log.warn("loop-service: degraded (dispatch-service not initialized)");
+      logEvent("loop-service.degraded", { reason: this.degradedDetail });
       return;
     }
     // DispatchService exposes isDegraded() — check for degraded state
@@ -64,7 +62,7 @@ export class LoopService implements PluginService {
     if (dispatchHealth && dispatchHealth.status === "degraded") {
       this.stateDegraded = true;
       this.degradedDetail = "dispatch not available on Pi";
-      log.warn("loop-service: degraded (dispatch not available on Pi)");
+      logEvent("loop-service.degraded", { reason: this.degradedDetail });
       return;
     }
 
@@ -74,7 +72,7 @@ export class LoopService implements PluginService {
     } catch {
       this.stateDegraded = true;
       this.degradedDetail = "dispatch not available — getDispatchManager() threw";
-      log.warn("loop-service: degraded (dispatch not available)");
+      logEvent("loop-service.degraded", { reason: this.degradedDetail });
       return;
     }
 
@@ -108,7 +106,7 @@ export class LoopService implements PluginService {
     } catch (err) {
       this.stateDegraded = true;
       this.degradedDetail = "LoopStore.load() failed — starting with empty coordinator";
-      log.error(this.degradedDetail, {
+      logEvent("loop-service.state-load-failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -131,7 +129,7 @@ export class LoopService implements PluginService {
       } catch (err) {
         this.stateDegraded = true;
         this.degradedDetail = "LoopStore.reconcile() failed — using empty coordinator";
-        log.error(this.degradedDetail, {
+        logEvent("loop-service.state-reconcile-failed", {
           error: err instanceof Error ? err.message : String(err),
         });
       }

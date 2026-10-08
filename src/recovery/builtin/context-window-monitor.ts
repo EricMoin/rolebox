@@ -1,5 +1,6 @@
 import type { BuiltInHookDefinition } from "../types.ts";
 import { createSubLogger } from "../../logger.ts";
+import { logEvent, withLogScope } from "../../log/index.ts";
 
 const log = createSubLogger("hook:context-window");
 
@@ -76,11 +77,11 @@ export function createContextWindowMonitorHook(
 
         // Rough token estimate: ~4 chars per token
         const estimatedTokens = Math.ceil(outputStr.length / 4);
-        log.warn("Large tool output detected", {
-          tool: input.tool,
-          charLength: outputStr.length,
-          estimatedTokens,
-        });
+        withLogScope({ sessionId: hookCtx.sessionID, tool: input.tool }, () =>
+          logEvent("context-window.large-output", {
+            charLength: outputStr.length,
+            estimatedTokens,
+          }));
 
         hookCtx.inject(
           `\n[RECOVERY] Warning: Large output from "${input.tool}" ` +

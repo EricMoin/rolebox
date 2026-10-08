@@ -28,16 +28,20 @@ import { tmpdir } from "node:os";
 import { z } from "zod";
 import type { HookDeps } from "../src/hooks/deps.ts";
 import type { ResolvedRole } from "../src/types.ts";
-import { getRootLogger, type ILogObj } from "../src/logger.ts";
+import { subscribeLogRecords } from "../src/log/index.ts";
+import type { LogRecord } from "../src/log/types.ts";
 
-// ── Log capture: attach the root transport BEFORE any src module is
-//    imported. tslog sub-loggers (e.g. "hook-tool-before", created at module
-//    load) only inherit transports attached at their creation time, so the
-//    src modules below are imported dynamically — after this attach. ──────
+// ── Log capture: subscribe to the platform pipeline BEFORE any src module is
+//    imported, so the dynamic imports below cannot miss a record produced
+//    while they load. The subscription receives the REAL record — the
+//    deprecated-tool warning is a registered event, so its tool name lives in
+//    `scope.tool` and only the kernel's own record shape carries it (the
+//    tslog-shaped attachTransport entry keeps just the message and the
+//    fields). ──────────────────────────────────────────────────────────────
 
-const logEntries: ILogObj[] = [];
-getRootLogger().attachTransport((logObj) => {
-  logEntries.push(logObj);
+const logEntries: LogRecord[] = [];
+subscribeLogRecords((record) => {
+  logEntries.push(record);
 });
 
 // ── Lazy src module refs (dynamic imports — see note above) ────────────────
@@ -120,10 +124,8 @@ function makeTmpDir(): string {
   return dir;
 }
 
-function warnEntries(): ILogObj[] {
-  return logEntries.filter((e) =>
-    String(e[0]).includes("Deprecated tool invoked"),
-  );
+function deprecatedEntries(): LogRecord[] {
+  return logEntries.filter((record) => record.code === "tool-before.deprecated-tool");
 }
 
 afterEach(() => {
@@ -216,9 +218,9 @@ describe("Pi tool interceptor — deprecated tool warnings", () => {
     const tool = compileTool("legacy_read", def);
     await invoke(tool, { path: "/tmp/x" });
 
-    const warns = warnEntries();
+    const warns = deprecatedEntries();
     expect(warns.length).toBeGreaterThan(0);
-    expect(String(warns[0][0])).toContain("legacy_read");
+    expect(warns[0].scope.tool).toBe("legacy_read");
   });
 
   it("registers deprecation from def.deprecated via PiLightweightServiceStack.init and warns on invocation", async () => {
@@ -256,9 +258,10 @@ describe("Pi tool interceptor — deprecated tool warnings", () => {
 
     await invoke(tool, { path: "/tmp/x" });
 
-    const warns = warnEntries();
+    const warns = deprecatedEntries();
     expect(warns.length).toBeGreaterThan(0);
-    expect(String(warns[0][0])).toContain("legacy_stack_tool");
+    expect(warns[0].scope.tool).toBe("legacy_stack_tool");
+    expect(warns[0].fields?.deprecation).toBe("use hashline_read instead");
   });
 });
 

@@ -9,6 +9,7 @@ import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { sessionSignalLedger } from "../signal/session-signal-ledger.ts";
 import { createSubLogger } from "../logger.ts";
+import { logEvent } from "../log/index.ts";
 import { PluginCore } from "./plugin-core.ts";
 import { SERVICE_NAMES } from "./service-names.ts";
 import { HotReloadService } from "./services/hot-reload-service.ts";
@@ -173,10 +174,9 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   if (!hookService) {
     // hook-service was never registered — unexpected in this composition (it is
     // always registered), but never return undefined to opencode.
-    log.error(
-      "hook-service unavailable (not registered); returning no-op handlers to keep opencode alive",
-      { degradedServices: listDegradedServices(core) },
-    );
+    logEvent("plugin-hooks.hook-service-unavailable", {
+      degradedServices: listDegradedServices(core),
+    });
     return buildNoOpHandlers();
   }
 
@@ -186,13 +186,10 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
     // wrapper is empty). Log the degraded service chain and fall back to no-op
     // handlers — never return undefined, which would break opencode's hook
     // registration.
-    log.error(
-      "hook-service unavailable: handlers not initialized (degraded or skipped init); returning no-op handlers to keep opencode alive",
-      {
-        degradedServices: listDegradedServices(core),
-        failedServiceChain: [SERVICE_NAMES.hook, ...listDegradedServices(core)],
-      },
-    );
+    logEvent("plugin-hooks.handlers-uninitialized", {
+      degradedServices: listDegradedServices(core),
+      failedServiceChain: [SERVICE_NAMES.hook, ...listDegradedServices(core)],
+    });
     return buildNoOpHandlers();
   }
 

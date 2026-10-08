@@ -49,14 +49,40 @@
 //     bag: its string/number/boolean values and its uniform string[]/number[]
 //     arrays are kept as they are, a value that is an Error (or a formatError
 //     result — anything carrying a string `message`) contributes that message as
-//     the reason, and any other object is dropped: the kernel's field type is
-//     the privacy rule, and this shell does not widen it.
+//     the reason, and any other value is dropped: the kernel's field type is the
+//     privacy rule, and this shell does not widen it. A drop is no longer
+//     silent — the keys it happened under are reported through the registered,
+//     throttled `log.field.narrowed` event (see NARROWING IS REPORTED below).
 //   • a further argument that is a SCALAR cannot become a field bag, so it lands
 //     under the positional key `arg1`, `arg2`, … (`log.warn("save failed", dir, err)`
 //     records `arg1` and `error`). Stage 4 rewrites those few call sites.
 //   • an Error passed on its own — `log.warn("save failed", err)` — becomes
 //     `{ error: <message> }`, which is what the call site meant and what the old
 //     numbered slots never actually preserved in JSON.
+//
+// NARROWING IS REPORTED, NOT SILENT. The kernel's field type admits a string, a
+// number, a boolean or a uniform array of them, so a call site that passes an
+// object, a nested array or a mixed array has that KEY dropped from the record.
+// The mapping is unchanged — the value still is not recorded, and an
+// Error-shaped value still becomes the reason — but the drop is now visible: the
+// shell emits the registered `log.field.narrowed` event carrying the CALLER'S
+// channel and the dropped KEY NAMES, never a value, which is exactly what could
+// not be recorded. The table throttles that event (60s), so a call site that
+// narrows on every record cannot flood the log; the suppressed occurrences ride
+// on the next report as its `suppressed` field. `null` and `undefined` values are
+// not narrowing — they mean "no value at all" and were never meant to be
+// recorded — so they report nothing.
+//
+// HOW A DEVELOPER USES IT. Registering the drop is what makes the call sites
+// that still need migrating findable without reading 170 files. The writer has
+// to record the event first (it is a debug record and the default global level
+// is "info"), then the reader can show it:
+//
+//   ROLEBOX_LOG_LEVEL_LOG_COMPAT=debug rolebox monitor   # the writer records them
+//   rolebox logs --channel log:compat --level debug      # the reader lists them
+//
+// Every line names the channel whose call sites pass values the record may not
+// carry, and its `keys` field names the argument to fix in place.
 //
 // THE TRANSPORT ENTRY. `attachTransport(fn)` must keep working for the capture
 // tests that already exist, so the entry keeps the tslog-accessor contract their
@@ -97,6 +123,7 @@ import {
   configureLogging,
   createLogger,
   getLogFilePath as kernelLogFilePath,
+  logEvent,
   subscribeLogRecords,
 } from "./log/index.ts";
 import { LOG_LEVEL_RANK, type LogFields, type LogFieldValue, type LogLevel } from "./log/types.ts";
@@ -211,8 +238,16 @@ function reasonOf(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Merge one field bag into `fields`, keeping only what the kernel admits. */
-function mergeFieldBag(fields: Record<string, LogFieldValue>, bag: object): void {
+/**
+ * Merge one field bag into `fields`, keeping only what the kernel admits and
+ * pushing the NAME of every key it had to drop onto `narrowed`.
+ *
+ * The mapping itself is unchanged: a scalar or a uniform array is kept as it is,
+ * an Error-shaped value becomes its message, and everything else is dropped.
+ * `narrowed` is the only addition — reporting a drop must never change which
+ * values a record carries.
+ */
+function mergeFieldBag(fields: Record<string, LogFieldValue>, bag: object, narrowed: string[]): void {
   for (const key of Object.keys(bag)) {
     const value = (bag as Record<string, unknown>)[key];
     if (value === undefined || value === null) continue;
@@ -221,14 +256,23 @@ function mergeFieldBag(fields: Record<string, LogFieldValue>, bag: object): void
       fields[key] = admissible;
       continue;
     }
-    if (Array.isArray(value) || typeof value !== "object") continue;
+    if (Array.isArray(value) || typeof value !== "object") {
+      narrowed.push(key);
+      continue;
+    }
     const reason = reasonOf(value);
     if (reason !== undefined) fields[key] = reason;
+    else narrowed.push(key);
   }
 }
 
-/** Adapt a level helper's extra arguments into the kernel's named fields. */
-function fieldsFromArgs(args: readonly unknown[]): LogFields {
+/**
+ * Adapt a level helper's extra arguments into the kernel's named fields, pushing
+ * onto `narrowed` the key of every value the kernel's field type does not admit.
+ * A value that cannot become a field bag is named by the positional key it would
+ * have had ("arg1", "arg2", …), which is the only name the call site can look up.
+ */
+function fieldsFromArgs(args: readonly unknown[], narrowed: string[]): LogFields {
   const fields: Record<string, LogFieldValue> = {};
   let position = 0;
   for (const arg of args) {
@@ -239,13 +283,34 @@ function fieldsFromArgs(args: readonly unknown[]): LogFields {
         fields.error = arg.message;
         continue;
       }
-      mergeFieldBag(fields, arg);
+      mergeFieldBag(fields, arg, narrowed);
       continue;
     }
     const admissible = admissibleValue(arg);
     if (admissible !== undefined) fields["arg" + position] = admissible;
+    else narrowed.push("arg" + position);
   }
   return fields;
+}
+
+/**
+ * Report the keys a call site's fields were narrowed under.
+ *
+ * The event is registered (`log.field.narrowed`), so its level, its channel and
+ * its sentence live in the table, and the table throttles it: a call site that
+ * narrows on every record reports once per window, with the count of what that
+ * window suppressed riding on the next report. The dropped VALUE is never part
+ * of the report — it is exactly what the field type refused — only the channel
+ * the caller logged on and the key names, which is what a developer needs to fix
+ * the call site. Repeated key names in one call are reported once.
+ */
+function reportNarrowedFields(channel: string, narrowed: readonly string[]): void {
+  if (narrowed.length === 0) return;
+  try {
+    logEvent("log.field.narrowed", { channel, keys: [...new Set(narrowed)] });
+  } catch {
+    // Reporting a dropped value must not break the call that logged it.
+  }
 }
 
 /**
@@ -260,7 +325,9 @@ function createCompatLogger(channel: string, minLevel?: number | LogLevel): Logg
   const emit = (level: LogLevel, message: unknown, args: readonly unknown[]): void => {
     try {
       if (gate !== undefined && LOG_LEVEL_RANK[level] < LOG_LEVEL_RANK[gate]) return;
-      kernel[level](describeMessage(message), fieldsFromArgs(args));
+      const narrowed: string[] = [];
+      kernel[level](describeMessage(message), fieldsFromArgs(args, narrowed));
+      reportNarrowedFields(name, narrowed);
     } catch {
       // A diagnostic must never break the code it observes.
     }

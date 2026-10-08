@@ -411,6 +411,112 @@ does (refusing any external other than react) and asserts both right-Sidebar tab
 bodies register. The probe's report lands in
 `.rolebox/tmp/webview/bundle-probe.json`.
 
+## The live view (TUI)
+
+The TUI sidebar carries the same view as a second tab. `ctrl+l` toggles between
+**activity** (the default) and **logs**; the sidebar's own `view activity · logs`
+line marks the active tab and, while Logs is showing, adds `live` or `paused` and
+the level threshold in force.
+
+| Key | What it does |
+| --- | --- |
+| `ctrl+l` | open the Logs tab, or go back to Activity |
+| `ctrl+p` | pause the stream, and resume it |
+| `ctrl+up` | raise the level threshold by one rank (towards `fatal`) |
+| `ctrl+down` | lower it by one rank (towards `debug`) |
+| `ctrl+n` | cycle the channel filter: each channel the buffer holds, then every channel again |
+| `ctrl+g` | follow: drop the pane's own narrowing, unpause, and read the newest records now |
+
+Every Logs control is a `ctrl`-modified key, registered as one disposable keymap
+layer by the plugin (`src/tui/index.tsx`), so the host's bare keys (`r` refresh,
+`m` metrics, `f` filter, `?` help, the arrows) stay the host's. Outside the Logs
+tab the controls act on the Logs view's own state — the pane is where you see
+them — and the pause key is ignored entirely while Activity is showing.
+
+The pane paints one row per record and renders it with the runtime's own line
+format (`formatLogLine`, the console sink's renderer), so a row reads exactly
+like the console line for the same record: `[level] channel code scope fields —
+message`, shortened when it cannot fit the sidebar.
+
+### What it reads
+
+The pane reads the **same files the writer writes** — `<log dir>/<channel>.log`,
+or the one file `ROLEBOX_LOG_FILE` names — through the same view layer as the dsh
+web panel (`readLogView`, `src/log/view.ts`): with no explicit location it
+follows the writer's own resolution chain, so a process logging into a workspace
+`.rolebox/logs` is what the pane shows. The `src …` line prints the location the
+last answer was actually read from, cut in the middle so the directory that
+distinguishes it survives; before the first answer it reads `src resolving…`.
+
+There is no second timer: the poll rides the sidebar's existing 1s refresh. The
+first poll paints the newest window; every later poll hands the reader's cursor
+back and appends only what came after it, so a record is painted once. One poll
+asks the reader for 200 records (`POLL_LIMIT`) and the buffer keeps the newest
+**500**, the same cap as the dsh web panel. The level and the channel filter are
+sent to the reader, so a poll scans for what the pane is willing to show.
+
+### The counters on the status line
+
+`12/500 records · 3 dropped · 2 skipped · more waiting` — always led by the record
+count, and each loss named only when there is one:
+
+| Part | Meaning |
+| --- | --- |
+| `N/M records` | the buffer: N records match the pane's own narrowing out of the M it holds, and the pane paints the newest 200 rows of them |
+| `dropped` | records the 500-record cap discarded from the front of the **current** view; `(N earlier)` is the half discarded by the views before it — the two are disjoint, so adding them is the lifetime total and never a doubled loss |
+| `skipped` | malformed lines the reader counted in the last answer — a line that is not JSON, or JSON that is not a record. They are counted and skipped, never fatal |
+| `more waiting` | the last answer came back truncated: more records existed than one poll delivers, and the next poll drains them from the cursor |
+
+### Paused and failed are states, not silence
+
+**Pause** freezes the cursor and stops the read: a frozen poll performs **no disk
+read at all**, so a hidden tab costs no I/O. The pane prints
+`PAUSED — ctrl+p resumes at this position`, and the position is the cursor the
+stream stopped at: the first poll after Resume delivers the window the pause
+withheld, so nothing is repeated and nothing is skipped.
+
+The pane distinguishes the things that all look like an empty pane: `no records
+yet — waiting for the first write` (nothing has been logged, with the source
+named on the `src` line above), a read failure (`log read failed: …`, which keeps
+the last good records on screen and is cleared by the next successful poll), and
+the pause banner. When the Logs tab is not the active one the sidebar paints the
+Activity view instead — one view at a time — with the tab line naming which one
+is showing, and the Logs pane's own collapsed sentence (`hidden — press ctrl+l to
+open`) is what the component paints if it is ever mounted without being live.
+
+Changing the level or the channel filter starts a **new view**: the cursor names
+a position in the old stream and the buffer holds records the new filter
+excludes, so both are cleared together. That reset is the only operation that
+discards what is on screen, and it is the reader's own.
+
+## The compatibility layer, and the values it drops
+
+Most modules still log through the compatibility shell
+(`import { createSubLogger } from "../logger.ts"`), and their records travel this
+same pipeline with the channel the sub-logger was built with. That shell's field
+type is the kernel's — ids, states, reasons, counts — so a call site that hands it
+an object, a nested array or a mixed array has that key dropped from the record.
+
+The drop is no longer silent. The shell emits the registered
+`log.field.narrowed` event — channel `log:compat`, level `debug`, throttled to one
+report per minute, with the suppressed occurrences counted on the next report —
+naming the channel the call site logged on and the dropped **key names**. It never
+carries the value, which is exactly what could not be recorded.
+
+```sh
+ROLEBOX_LOG_LEVEL_LOG_COMPAT=debug rolebox monitor   # the writer records them
+rolebox logs --channel log:compat --level debug      # the reader lists them
+```
+
+```text
+[debug] log:compat log.field.narrowed channel="probe:caller" keys="entity" — a field value the kernel's field type does not admit was dropped from the record
+```
+
+Each line names a source whose call sites still pass values a record may not
+carry, and `keys` names the argument to fix in place. Why the shell exists at all,
+and which direction new call sites should take, is
+[logging-architecture.md](logging-architecture.md#the-compatibility-layer).
+
 ## Limits worth knowing
 
 * `--follow` starts at the **current end** of every file, like `tail -f`: it does

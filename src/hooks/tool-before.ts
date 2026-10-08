@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createSubLogger } from "../logger.ts";
+import { logEvent, withLogScope } from "../log/index.ts";
 import { appendCorrection } from "./context.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
@@ -85,18 +86,10 @@ export async function handleToolBefore(
   // ── Deprecated tool warning ───────────────────────────────────────────
   const depMsg = deprecatedToolRegistry.get(input.tool);
   if (depMsg !== undefined) {
-    if (depMsg) {
-      log.warn(`Deprecated tool invoked: '${input.tool}' — ${depMsg}`, {
-        tool: input.tool,
-        deprecation: depMsg,
-        sessionID: input.sessionID,
-      });
-    } else {
-      log.warn(`Deprecated tool invoked: '${input.tool}'`, {
-        tool: input.tool,
-        sessionID: input.sessionID,
-      });
-    }
+    // One event for both branches: the deprecation hint is data and is simply
+    // absent for a tool registered without one.
+    withLogScope({ sessionId: input.sessionID, tool: input.tool }, () =>
+      logEvent("tool-before.deprecated-tool", { deprecation: depMsg || undefined }));
   }
 
   const schema = toolSchemaRegistry.get(input.tool);

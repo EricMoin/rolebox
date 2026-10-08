@@ -6,7 +6,13 @@
 // message are written down. A call site therefore cannot drift the wording of a
 // stable diagnostic, and a code that is not registered here does not type check.
 //
-// WHAT THIS TABLE HOLDS (23 entries: 4 platform, 19 graph engine)
+// WHAT THIS TABLE HOLDS (75 entries: 4 platform, 19 graph engine, 15 the
+// engine slice registered in stage 4 — the graph notification outbox, the
+// dispatch and the loop modules — 36 the core slice registered in the same
+// stage: the service kernel and its composition, the restart supervisor, the
+// health monitor, the dispatch and loop services, the hook pipelines and their
+// registries, the recovery chain and engine, and the memory store, and 1 the
+// logging compatibility shell's own field-narrowing report on `log:compat`)
 //   The FOUR PLATFORM entries are the logging pipeline's own failures — a sink
 //   that threw, a channel file that could not be written or rotated — plus the
 //   guard for a code that was never registered; all four report on the channel
@@ -157,6 +163,32 @@ export const LOG_EVENTS = {
   // counts and the ids that are NOT in the scope vocabulary (an execution id, a
   // run id, a claim owner). Each entry therefore names its `Scope:` keys and its
   // `Fields:` keys, so a call site can be checked against it.
+  //
+  // STAGE 4 SECTIONS. The sections BELOW the graph engine block are the slices'
+  // own, appended one section per channel as those diagnostics moved here. The
+  // engine slice appended graph:notifications, dispatch:checkpoint, task:tools,
+  // dispatch:notify, loop/worker-dispatch and loop/coordinator (fifteen entries,
+  // every one a warning at its call site). The core slice then appended
+  // plugin-core, plugin-hooks, service-supervisor, health-monitor,
+  // loop-service, dispatch-service, hook-tool-after, hook-tool-before,
+  // handler-drain, hook-sys-xform, hook:custom-registry, recovery:chain-executor,
+  // recovery:engine, hook:context-window, recovery:builtin-registry and
+  // memory:store (thirty-six entries: twenty-six warnings and the ten errors
+  // whose call sites were errors — plugin-core.init-failed,
+  // plugin-hooks.hook-service-unavailable, plugin-hooks.handlers-uninitialized,
+  // service-supervisor.budget-exceeded, service-supervisor.permanently-degraded,
+  // health-monitor.service-degraded, health-monitor.supervisor-error,
+  // loop-service.state-load-failed, loop-service.state-reconcile-failed and
+  // dispatch-service.recover-failed). The same rules hold — the level is the
+  // level the call site had, the channel is the channel of the module that emits
+  // it, identity travels in the scope where the scope vocabulary has a key for
+  // it (a service, a hook, a function and a memory entry do not, so those stay
+  // fields), and the fields keep only ids, states, reasons and counts.
+  // The logging platform then closed the table with its own section,
+  // `log:compat` (one entry), where the compatibility shell reports a value it
+  // had to drop from a caller's fields. That report is a MIGRATION HINT rather
+  // than a run failure — the record itself is written, the pipeline is healthy —
+  // so it is the table's only `debug` entry.
   // ──────────────────────────────────────────────────────────────────────────
 
   // ── graph:host — the host's own diagnostics ───────────────────────────────
@@ -463,6 +495,859 @@ export const LOG_EVENTS = {
     level: "warn",
     channel: "graph:declare",
     message: "the graph definition did not reach the graph store",
+  },
+
+  // ── graph:notifications — the durable notification outbox ─────────────────
+
+  /**
+   * The graph's own view could not be read, so this capture pass produced no
+   * notice for it.
+   * WARNING because the notices for that graph are MISSING, not empty: the
+   * caller remembers the graph and reports it once per unreadable stretch
+   * rather than once per capture pass.
+   * Scope: `graphId`. Fields: `error` (the read failure's text).
+   * Caller: src/graph/application/graph-notifications.ts (capture).
+   */
+  "notifications.source-unreadable": {
+    level: "warn",
+    channel: "graph:notifications",
+    message:
+      "the graph's notification source could not be read, so this pass produced no notice for it",
+  },
+
+  /**
+   * Renewing the lease of a claimed notification delivery failed.
+   * WARNING because the claim is then no longer held for certain: another
+   * owner may claim a delivery that is still running, and the delivery is left
+   * to a later retry window.
+   * Scope: `graphId`, `effectId` (the delivery's pending-effect row). Fields:
+   * `error`.
+   * Caller: src/graph/application/graph-notifications.ts (drain, the lease
+   * renewal interval's catch).
+   */
+  "notifications.lease-renewal-failed": {
+    level: "warn",
+    channel: "graph:notifications",
+    message:
+      "renewing the notification delivery lease failed, so the delivery can be claimed again while it runs",
+  },
+
+  /**
+   * The transport threw while a claimed notification delivery was sent.
+   * WARNING because the notice was NOT delivered: the delivery returns to
+   * `pending` with a backoff and is retried on a later window, and an
+   * undelivered notice is exactly what has to stay visible.
+   * Scope: `graphId`, `runId` (of the notice). Fields: `error`.
+   * Caller: src/graph/application/graph-notifications.ts (drain).
+   */
+  "notifications.delivery-failed": {
+    level: "warn",
+    channel: "graph:notifications",
+    message:
+      "delivering a graph notification failed; the delivery stays pending and is retried on a later window",
+  },
+
+  // ── dispatch:checkpoint — the per-task checkpoint files ───────────────────
+
+  /**
+   * Rewriting a task's checkpoint file after its expired entries were dropped
+   * failed.
+   * WARNING because the cleanup did not land: the expired entries stay on disk
+   * and the file keeps its size, while the task's live checkpoints are
+   * untouched.
+   * Scope: none (the checkpoint store is not a dispatch scope). Fields:
+   * `taskId` — the file is `<taskId>.json`, which is where the caller takes it
+   * from — and `error`.
+   * Caller: src/dispatch/checkpoint/checkpoint-store.ts (cleanupExpired).
+   */
+  "checkpoint.rewrite-failed": {
+    level: "warn",
+    channel: "dispatch:checkpoint",
+    message:
+      "rewriting a task's checkpoint file after expired-entry cleanup failed, so the expired entries stay on disk",
+  },
+
+  // ── task:tools — the dispatch query tools ─────────────────────────────────
+
+  /**
+   * Reading a task's result preview failed while the task table was rendered.
+   * WARNING because the row is reported with a placeholder instead of the
+   * result: a missing preview must not read as the task's output.
+   * Scope: none. Fields: `taskId`, `error`.
+   * Caller: src/dispatch/query/task-tools.ts (getResultPreview).
+   */
+  "tools.result-preview-failed": {
+    level: "warn",
+    channel: "task:tools",
+    message: "reading a task's result preview failed, so the row answers with a placeholder",
+  },
+
+  /**
+   * Reopening a task for continuation (`task_retry`) failed.
+   * WARNING because the retry did not start: the tool result carries the
+   * failure, the original task keeps its terminal state, and the task id is
+   * what the caller follows up with.
+   * Scope: none. Fields: `taskId`, `error` (the thrown value's message).
+   * Caller: src/dispatch/query/task-tools.ts (createTaskRetryTool).
+   */
+  "tools.retry-failed": {
+    level: "warn",
+    channel: "task:tools",
+    message: "reopening a task for continuation failed, so the task was not retried",
+  },
+
+  // ── dispatch:notify — the parent-session notifier ─────────────────────────
+
+  /**
+   * Notifying a completed task's parent session failed after the retry ladder.
+   * Both branches of the notifier report the same fact (the final reply and the
+   * intermediate no-reply send).
+   * WARNING because the parent was never told: the task is terminal while the
+   * session waiting on it learns nothing, and the failure counter counts it.
+   * Scope: `sessionId` (the parent session being notified). Fields: `taskId`,
+   * `error` (the last failure's message).
+   * Caller: src/dispatch/notification.ts (notifyParent).
+   */
+  "notify.parent-notify-failed": {
+    level: "warn",
+    channel: "dispatch:notify",
+    message: "notifying a task's parent session failed after the retry ladder",
+  },
+
+  // ── loop/worker-dispatch — the loop's round dispatch ──────────────────────
+
+  /**
+   * Injecting the loop's started note into its origin session failed.
+   * WARNING because the loop runs anyway: the first round is dispatched and
+   * the session that started the loop is simply never told it began.
+   * Scope: `sessionId` (the loop's origin session). Fields: `error`.
+   * Caller: src/loop/worker-dispatch.ts (the loop-started note).
+   */
+  "worker-dispatch.started-note-failed": {
+    level: "warn",
+    channel: "loop/worker-dispatch",
+    message: "injecting the loop's started note failed, so the origin session never sees the loop begin",
+  },
+
+  /**
+   * Cancelling the loop's active round failed — at finalize and at failure.
+   * WARNING because the worker task may still be running while the loop drops
+   * its id from its own bookkeeping: the cancellation is unconfirmed, and the
+   * worker task id is what an operator cancels by hand.
+   * Scope: `sessionId` (the loop's origin session). Fields: `phase` (the
+   * terminal phase the loop was entering), `workerTaskId`, `error`.
+   * Caller: src/loop/worker-dispatch.ts (finalizeLoop, failLoop).
+   */
+  "worker-dispatch.round-cancel-failed": {
+    level: "warn",
+    channel: "loop/worker-dispatch",
+    message:
+      "cancelling the loop's active round failed, so the round is dropped from the loop's bookkeeping unconfirmed",
+  },
+
+  /**
+   * Injecting the loop's error note into its origin session failed.
+   * WARNING because a failed loop was not explained to the session that
+   * started it; the loop state still carries the reason.
+   * Scope: `sessionId` (the loop's origin session). Fields: `error`.
+   * Caller: src/loop/worker-dispatch.ts (failLoop).
+   */
+  "worker-dispatch.error-note-failed": {
+    level: "warn",
+    channel: "loop/worker-dispatch",
+    message: "injecting the loop's error note failed, so the origin session is not told why the loop failed",
+  },
+
+  // ── loop/coordinator — the loop coordinator ───────────────────────────────
+
+  /**
+   * The sweeper found an advancing lock held past its timeout and released it.
+   * WARNING because the critical section that lock guarded was ABANDONED (an
+   * exception escaped it without reaching its finally): the loop proceeds
+   * again, and the age is how long that window was lost.
+   * Scope: `sessionId` (the loop whose lock it was). Fields: `acquiredAgeMs`.
+   * Caller: src/loop/coordinator.ts (_sweepStaleLocks).
+   */
+  "coordinator.stale-advancing-lock": {
+    level: "warn",
+    channel: "loop/coordinator",
+    message: "a stale advancing lock was swept, so the loop's abandoned critical section no longer blocks it",
+  },
+
+  /**
+   * Injecting a round progress note into the loop's origin session failed.
+   * WARNING because the round advanced while the session that started the loop
+   * was not told, and nothing retries the note.
+   * Scope: `sessionId` (the loop's origin session). Fields: `error`.
+   * Caller: src/loop/coordinator.ts (onWorkerCompleted).
+   */
+  "coordinator.progress-note-failed": {
+    level: "warn",
+    channel: "loop/coordinator",
+    message: "injecting the loop's round progress note failed, so the origin session is not told the round advanced",
+  },
+
+  /**
+   * Cancelling a child loop while a cancel cascaded through the parent failed.
+   * WARNING because the child keeps running: the cascade goes on with the
+   * remaining children, and the child id is what an operator cancels by hand.
+   * Scope: `sessionId` (the parent loop). Fields: `childId`, `error`.
+   * Caller: src/loop/coordinator.ts (cancelNow).
+   */
+  "coordinator.cascade-cancel-failed": {
+    level: "warn",
+    channel: "loop/coordinator",
+    message: "cancelling a child loop during a cancel cascade failed; the child keeps running",
+  },
+
+  /**
+   * Re-subscription could not advance a loop that was left in `summarizing`.
+   * WARNING because the loop stays where it was: it is non-terminal and
+   * nothing else pushes it, so it waits for the next re-subscription.
+   * Scope: `sessionId` (the loop's origin session). Fields: `error`.
+   * Caller: src/loop/coordinator.ts (reSubscribeListeners).
+   */
+  "coordinator.resubscribe-advance-failed": {
+    level: "warn",
+    channel: "loop/coordinator",
+    message: "re-subscription failed to advance the loop out of summarizing, so it stays where it was",
+  },
+
+  /**
+   * Reading the worker task's status during re-subscription failed.
+   * WARNING because the loop is marked `interrupted` on that read: the phase
+   * change is a decision rather than a guess, and the task id keeps it
+   * followable.
+   * Scope: `sessionId` (the loop's origin session). Fields: `taskId`, `error`.
+   * Caller: src/loop/coordinator.ts (reSubscribeListeners).
+   */
+  "coordinator.task-status-read-failed": {
+    level: "warn",
+    channel: "loop/coordinator",
+    message: "reading the loop's worker task status failed, so the loop is marked interrupted",
+  },
+
+  // ── plugin-core — the service kernel ──────────────────────────────────────
+  // The kernel's own lifecycle diagnostics. A service is named by its
+  // ServiceName (a closed union, src/core/service-names.ts); that name is the
+  // entity these five report on, and the scope vocabulary has no key for it, so
+  // it travels as the `service` FIELD — the same reason the engine events keep
+  // an execution id and the checkpoint store keeps a task id.
+  //
+  // LEVELS ARE THE CALL SITES' OWN. Four of the five were warnings; the one that
+  // was an error stays an error, because a service that never came up is a
+  // degradation of a different weight from one that failed to dispose.
+
+  /**
+   * A service was registered twice under one name; the earlier registration is
+   * replaced. The kernel's map is keyed by name, so the first object is dropped
+   * without being disposed.
+   * WARNING because a name collision silently discards a service instance and a
+   * later lookup then answers with the replacement.
+   * Scope: none. Fields: `service`.
+   * Caller: src/core/plugin-core.ts (registerService).
+   */
+  "plugin-core.registration-replaced": {
+    level: "warn",
+    channel: "plugin-core",
+    message:
+      "a service was registered twice under the same name, so the earlier registration was replaced",
+  },
+
+  /**
+   * A service was skipped because at least one of its dependencies is already
+   * degraded.
+   * WARNING because the skip is transitive: this service is now degraded too,
+   * whether or not its own init would have worked, and the named dependency
+   * list is what explains the cascade.
+   * Scope: none. Fields: `service`, `degradedDeps`.
+   * Caller: src/core/plugin-core.ts (init, the degraded-dependency guard).
+   */
+  "plugin-core.init-skipped": {
+    level: "warn",
+    channel: "plugin-core",
+    message: "a service was skipped because one of its dependencies is degraded",
+  },
+
+  /**
+   * An optional service's init threw; the kernel marks it permanently degraded
+   * and goes on.
+   * ERROR because the service is lost for the process lifetime while the rest of
+   * the plugin keeps running: features that depend on it are silently absent.
+   * The stack is NOT carried — the error's message is the reportable reason.
+   * Scope: none. Fields: `service`, `error`.
+   * Caller: src/core/plugin-core.ts (init, the optional-service catch).
+   */
+  "plugin-core.init-failed": {
+    level: "error",
+    channel: "plugin-core",
+    message:
+      "an optional service failed to initialize and is marked permanently degraded",
+  },
+
+  /**
+   * A service threw while it was being disposed.
+   * WARNING because disposal goes on with the remaining services: the failure is
+   * contained, but whatever that service held was not released.
+   * Scope: none. Fields: `service`, `error`.
+   * Caller: src/core/plugin-core.ts (dispose).
+   */
+  "plugin-core.dispose-failed": {
+    level: "warn",
+    channel: "plugin-core",
+    message:
+      "a service threw while it was being disposed; the remaining services were still disposed",
+  },
+
+  /**
+   * A restart was asked for a name no service is registered under.
+   * WARNING because the caller's intent was dropped: the restart returns without
+   * touching anything, and no service reports the miss on its own.
+   * Scope: none. Fields: `service`.
+   * Caller: src/core/plugin-core.ts (restartService, the lookup guard).
+   */
+  "plugin-core.restart-unknown-service": {
+    level: "warn",
+    channel: "plugin-core",
+    message:
+      "a service restart was refused because no service is registered under that name",
+  },
+
+  /**
+   * A restart was asked for before the core had a context.
+   * WARNING because the restart returns immediately: the service keeps whatever
+   * state it had, and nothing else records that the request was dropped.
+   * Scope: none. Fields: `service`.
+   * Caller: src/core/plugin-core.ts (restartService, the context guard).
+   */
+  "plugin-core.restart-no-context": {
+    level: "warn",
+    channel: "plugin-core",
+    message:
+      "a service restart was refused because the core has no initialized context",
+  },
+
+  /**
+   * A service threw while it was being disposed as the first half of a restart.
+   * WARNING because the restart continues into init anyway: a service that could
+   * not release its state is re-initialized over it.
+   * Scope: none. Fields: `service`, `error`.
+   * Caller: src/core/plugin-core.ts (restartService).
+   */
+  "plugin-core.restart-dispose-failed": {
+    level: "warn",
+    channel: "plugin-core",
+    message:
+      "a service threw while it was being disposed for a restart; the restart continued",
+  },
+
+  // ── plugin-hooks — the plugin composition ─────────────────────────────────
+
+  /**
+   * The composition asked the core for hook-service and got nothing back, so it
+   * returns no-op handlers instead of undefined.
+   * ERROR because every host hook is a no-op for that process: the plugin is
+   * loaded but observes nothing, and the degraded-service list is the only trace
+   * of why.
+   * Scope: none. Fields: `degradedServices`.
+   * Caller: src/core/composition.ts (createPluginHooks).
+   */
+  "plugin-hooks.hook-service-unavailable": {
+    level: "error",
+    channel: "plugin-hooks",
+    message:
+      "hook-service was never registered, so no-op handlers are returned to keep the host alive",
+  },
+
+  /**
+   * hook-service exists but assembled no handlers (its init was skipped or
+   * degraded), so the composition again falls back to no-op handlers.
+   * ERROR for the same reason as the entry above: the process runs without
+   * observing anything, and the failed service chain is what names the cause.
+   * Scope: none. Fields: `degradedServices`, `failedServiceChain`.
+   * Caller: src/core/composition.ts (createPluginHooks).
+   */
+  "plugin-hooks.handlers-uninitialized": {
+    level: "error",
+    channel: "plugin-hooks",
+    message:
+      "hook-service has no handlers (degraded or skipped init), so no-op handlers are returned to keep the host alive",
+  },
+
+  // ── service-supervisor — restart discipline ───────────────────────────────
+
+  /**
+   * A service reached the restart budget for the sliding window without a
+   * successful restart, so the supervisor degrades it permanently.
+   * ERROR because the decision is terminal for the process: no later health
+   * check will restart that service again.
+   * Scope: none. Fields: `service`, `attempts`, `windowMs`.
+   * Caller: src/core/service-supervisor.ts (tryRestart, the budget guard).
+   */
+  "service-supervisor.budget-exceeded": {
+    level: "error",
+    channel: "service-supervisor",
+    message:
+      "a service exceeded its restart budget for the window and is permanently degraded",
+  },
+
+  /**
+   * The restart attempt that exhausted the budget also threw, so the service is
+   * permanently degraded after a failed restart rather than a stale counter.
+   * ERROR because it is the same terminal decision as the entry above, reached
+   * from the failure path; the last error names why the restart could not help.
+   * Scope: none. Fields: `service`, `attempts`, `error`, `windowMs`.
+   * Caller: src/core/service-supervisor.ts (tryRestart, the failed-restart
+   * branch).
+   */
+  "service-supervisor.permanently-degraded": {
+    level: "error",
+    channel: "service-supervisor",
+    message:
+      "a service is permanently degraded after exhausting its restart attempts",
+  },
+
+  // ── health-monitor — the periodic health check ────────────────────────────
+
+  /**
+   * One health-check tick found a service reporting `unhealthy`, so a supervised
+   * restart is attempted for it.
+   * WARNING because the tick repeats: the service is still unhealthy at this
+   * point, and the detail is the health function's own reason.
+   * Scope: none. Fields: `service`, `detail`.
+   * Caller: src/core/services/health-monitor-service.ts (checkAll).
+   */
+  "health-monitor.service-unhealthy": {
+    level: "warn",
+    channel: "health-monitor",
+    message:
+      "a service reported itself unhealthy, so a supervised restart was attempted",
+  },
+
+  /**
+   * The restart decision did not rescue the service: the supervisor reports it
+   * permanently degraded.
+   * ERROR because the service is out for the rest of the process, and this is
+   * the health monitor's own record of that verdict (the supervisor reports its
+   * side separately).
+   * Scope: none. Fields: `service`, `detail`.
+   * Caller: src/core/services/health-monitor-service.ts (checkAll).
+   */
+  "health-monitor.service-degraded": {
+    level: "error",
+    channel: "health-monitor",
+    message:
+      "a service stayed permanently degraded after its restart attempts",
+  },
+
+  /**
+   * The supervisor itself threw during a health-check tick.
+   * ERROR because the restart pipeline is what failed — not the service — so the
+   * tick could not act on that service at all, and the check cycle continues
+   * with the remaining ones.
+   * Scope: none. Fields: `service`, `error`.
+   * Caller: src/core/services/health-monitor-service.ts (checkAll).
+   */
+  "health-monitor.supervisor-error": {
+    level: "error",
+    channel: "health-monitor",
+    message:
+      "the service supervisor threw during a health-check cycle; the cycle continued with the remaining services",
+  },
+
+  // ── loop-service — the loop service ───────────────────────────────────────
+
+  /**
+   * The loop service came up degraded and exposes stub loop tools instead of a
+   * coordinator.
+   * WARNING because the service is registered and answers health as degraded:
+   * the reason field distinguishes "dispatch never initialized" from "this
+   * platform cannot dispatch", while the loop capability itself is absent.
+   * Scope: none. Fields: `reason`.
+   * Caller: src/core/services/loop-service.ts (init, the three degradation
+   * branches — one code, because the decision is the same and only the reason
+   * differs).
+   */
+  "loop-service.degraded": {
+    level: "warn",
+    channel: "loop-service",
+    message:
+      "the loop service came up degraded, so it exposes stub tools instead of a coordinator",
+  },
+
+  /**
+   * Reading the persisted loop state failed, so the service starts with an empty
+   * coordinator.
+   * ERROR because persisted loops are not restored: running loops become
+   * invisible to the coordinator until they are re-created.
+   * Scope: none. Fields: `error`.
+   * Caller: src/core/services/loop-service.ts (init, store.load()).
+   */
+  "loop-service.state-load-failed": {
+    level: "error",
+    channel: "loop-service",
+    message:
+      "reading the persisted loop state failed, so the service starts with an empty coordinator",
+  },
+
+  /**
+   * Reconciling the loaded loop state against dispatch failed, so the service
+   * falls back to an empty coordinator.
+   * ERROR because the loop state read from disk is discarded rather than
+   * reconciled, which is the same loss as a failed load.
+   * Scope: none. Fields: `error`.
+   * Caller: src/core/services/loop-service.ts (init, store.reconcile()).
+   */
+  "loop-service.state-reconcile-failed": {
+    level: "error",
+    channel: "loop-service",
+    message:
+      "reconciling the persisted loop state with dispatch failed, so the service uses an empty coordinator",
+  },
+
+  // ── dispatch-service — the dispatch service ───────────────────────────────
+
+  /**
+   * The dispatch service came up degraded because the platform cannot create
+   * sessions and no session client was injected, so it exposes stub dispatch
+   * tools.
+   * WARNING because this is the platform's declared capability rather than a
+   * failure: the degradation is expected on that platform, and the platform id
+   * names which one.
+   * Scope: none. Fields: `platformId`.
+   * Caller: src/core/services/dispatch-service.ts (init, the capability guard).
+   */
+  "dispatch-service.degraded": {
+    level: "warn",
+    channel: "dispatch-service",
+    message:
+      "the dispatch service came up degraded because this platform cannot create sessions, so it exposes stub tools",
+  },
+
+  /**
+   * Recovering the dispatch manager failed, so the service continues with empty
+   * state.
+   * ERROR because the persisted tasks are not restored: dispatch starts from
+   * nothing while the state file still holds the previous run.
+   * Scope: none. Fields: `error`.
+   * Caller: src/core/services/dispatch-service.ts (init).
+   */
+  "dispatch-service.recover-failed": {
+    level: "error",
+    channel: "dispatch-service",
+    message:
+      "recovering the dispatch manager failed, so the service continues with empty state",
+  },
+
+  /**
+   * Flushing the dispatch state failed — at dispose or at process exit.
+   * WARNING because the failure is contained: the process is going away anyway,
+   * and what is lost is the last write, not the service. The `phase` field keeps
+   * the two call sites distinguishable.
+   * Scope: none. Fields: `phase` ("dispose" | "exit"), `error`.
+   * Caller: src/core/services/dispatch-service.ts (dispose, flushPersistSync).
+   */
+  "dispatch-service.flush-failed": {
+    level: "warn",
+    channel: "dispatch-service",
+    message:
+      "flushing the dispatch state failed, so the pending writes did not land",
+  },
+
+  // ── hook-tool-after — the tool.execute.after pipeline ─────────────────────
+
+  /**
+   * The function OBSERVE tier threw while it was reading a tool result.
+   * WARNING because the result was left unobserved: the observe side effects and
+   * injections for that call did not happen, and the tool call itself already
+   * succeeded.
+   * Scope: `sessionId`. Fields: `error`.
+   * Caller: src/hooks/tool-after.ts (handleToolAfter).
+   */
+  "tool-after.observe-failed": {
+    level: "warn",
+    channel: "hook-tool-after",
+    message:
+      "running the function observe tier for a tool result failed; the result was left unobserved",
+  },
+
+  /**
+   * A function's after-handler threw while it was being run for a tool result.
+   * WARNING because the handler's effect was skipped — the functions after it in
+   * the same pass still run — and the tool call itself is unaffected.
+   * Scope: `sessionId`. Fields: `error`.
+   * Caller: src/hooks/tool-after.ts (handleToolAfter).
+   */
+  "tool-after.handler-failed": {
+    level: "warn",
+    channel: "hook-tool-after",
+    message:
+      "running a function's after-handler for a tool result failed; the handler's effect was skipped",
+  },
+
+  // ── hook-tool-before — the tool.execute.before pipeline ───────────────────
+
+  /**
+   * A tool that was registered as deprecated was invoked.
+   * WARNING because the invocation goes through unchanged: the record is the
+   * only signal that a retired tool is still in use, and it repeats on every
+   * call. The tool name is IDENTITY and travels in the scope; the deprecation
+   * hint is data and is omitted for a tool registered without one.
+   * Scope: `sessionId`, `tool`. Fields: `deprecation`.
+   * Caller: src/hooks/tool-before.ts (handleToolBefore).
+   */
+  "tool-before.deprecated-tool": {
+    level: "warn",
+    channel: "hook-tool-before",
+    message: "a deprecated tool was invoked",
+  },
+
+  // ── handler-drain — draining a function handler's context ─────────────────
+
+  /**
+   * A handler's injections passed the per-call byte cap, so the rest were
+   * dropped.
+   * WARNING because the model's context is missing part of what the handler
+   * wanted to inject; the cap keeps one handler from flooding the session, and
+   * the function name stays followable.
+   * Scope: `sessionId`. Fields: `fn`.
+   * Caller: src/hooks/drain-handler.ts (drainHandlerContext).
+   */
+  "handler-drain.inject-cap-reached": {
+    level: "warn",
+    channel: "handler-drain",
+    message:
+      "a handler's injections exceeded the per-call byte cap, so the remaining injections were dropped",
+  },
+
+  /**
+   * A handler asked to activate more functions than the per-call cap allows, so
+   * the rest were not activated.
+   * WARNING because the skipped activations never run, while the ones under the
+   * cap were activated normally.
+   * Scope: `sessionId`. Fields: `fn`.
+   * Caller: src/hooks/drain-handler.ts (drainHandlerContext).
+   */
+  "handler-drain.activation-cap-reached": {
+    level: "warn",
+    channel: "handler-drain",
+    message:
+      "a handler requested more activations than the per-call cap, so the remaining activations were dropped",
+  },
+
+  // ── hook-sys-xform — the system-prompt transform ──────────────────────────
+
+  /**
+   * Reading the memory store and injecting its block into the system prompt
+   * failed.
+   * WARNING because the prompt is still sent: the session simply runs without
+   * the recalled memories for that turn.
+   * Scope: `sessionId`. Fields: `error`.
+   * Caller: src/hooks/system-transform.ts (handleSystemTransform).
+   */
+  "sys-xform.memory-inject-failed": {
+    level: "warn",
+    channel: "hook-sys-xform",
+    message:
+      "injecting the memory block into the system prompt failed; the prompt was left without it",
+  },
+
+  // ── hook:custom-registry — the custom hook registry ───────────────────────
+
+  /**
+   * A custom hook's `onLoad` threw.
+   * WARNING because the hook stays registered: it will be invoked on its events,
+   * and whatever onLoad was meant to prepare is now missing.
+   * Scope: none (onLoad runs at registration, before any session is bound).
+   * Fields: `hook`, `error`.
+   * Caller: src/hooks/custom/registry.ts (register).
+   */
+  "custom-registry.on-load-failed": {
+    level: "warn",
+    channel: "hook:custom-registry",
+    message: "a custom hook's onLoad threw; the hook is still registered",
+  },
+
+  /**
+   * A custom hook threw while handling an event.
+   * WARNING because the event continues to the remaining hooks and the session
+   * is not disturbed; the named hook's contribution for that event is lost.
+   * Scope: `sessionId` when the hook context carries one. Fields: `hook`,
+   * `event`, `error`.
+   * Caller: src/hooks/custom/registry.ts (runHooks).
+   */
+  "custom-registry.hook-failed": {
+    level: "warn",
+    channel: "hook:custom-registry",
+    message:
+      "a custom hook threw while handling an event; the remaining hooks still ran",
+  },
+
+  /**
+   * A custom hook's `onDispose` threw during registry disposal.
+   * WARNING because disposal continues with the remaining hooks: one hook's
+   * cleanup did not run, and the process is shutting down anyway.
+   * Scope: none. Fields: `hook`, `error`.
+   * Caller: src/hooks/custom/registry.ts (dispose).
+   */
+  "custom-registry.on-dispose-failed": {
+    level: "warn",
+    channel: "hook:custom-registry",
+    message:
+      "a custom hook's onDispose threw; disposal went on with the remaining hooks",
+  },
+
+  // ── recovery:chain-executor — the recovery chain ──────────────────────────
+
+  /**
+   * A recovery chain names a strategy that is not registered, so the step is
+   * skipped.
+   * WARNING because the chain continues with the next step: the session gets a
+   * chain that is shorter than configured, and nothing else reports the gap.
+   * Scope: `sessionId`. Fields: `strategy`.
+   * Caller: src/recovery/chain-executor.ts (executeChain).
+   */
+  "chain-executor.strategy-missing": {
+    level: "warn",
+    channel: "recovery:chain-executor",
+    message:
+      "a recovery chain names a strategy that is not registered, so the step was skipped",
+  },
+
+  /**
+   * A recovery strategy threw while it was executing, so the chain moves to the
+   * next strategy.
+   * WARNING because the attempt is not lost — it is recorded and the chain goes
+   * on — but the strategy's own remedy did not run.
+   * Scope: `sessionId`. Fields: `strategy`, `error`.
+   * Caller: src/recovery/chain-executor.ts (executeChain).
+   */
+  "chain-executor.strategy-threw": {
+    level: "warn",
+    channel: "recovery:chain-executor",
+    message:
+      "a recovery strategy threw, so the chain moved to the next strategy",
+  },
+
+  // ── recovery:engine — the recovery engine ─────────────────────────────────
+
+  /**
+   * A recovery chain was aborted, so the session stays unrecovered.
+   * WARNING because the engine hands the failure back to its caller: the reason
+   * and the attempt count are what the caller's decision is based on.
+   * Scope: `sessionId`. Fields: `reason`, `totalAttempts`.
+   * Caller: src/recovery/engine.ts (recover).
+   */
+  "engine.aborted": {
+    level: "warn",
+    channel: "recovery:engine",
+    message:
+      "the recovery chain was aborted, so the session stays unrecovered",
+  },
+
+  /**
+   * Every strategy in a recovery chain was tried without recovering the session.
+   * WARNING because the session stays unrecovered while the engine returns a
+   * normal "not recovered" result: the exhaustion is the operator's signal, not
+   * an exception.
+   * Scope: `sessionId`. Fields: `reason`, `totalAttempts`.
+   * Caller: src/recovery/engine.ts (recover).
+   */
+  "engine.exhausted": {
+    level: "warn",
+    channel: "recovery:engine",
+    message:
+      "the recovery chain was exhausted, so the session stays unrecovered",
+  },
+
+  // ── hook:context-window — the context-window monitor ──────────────────────
+
+  /**
+   * A tool returned an output large enough that the monitor considers the
+   * context window under pressure.
+   * WARNING because the same tool can do it again on every call: the sizes are
+   * what the follow-up decision is made from, and the tool and session are
+   * identity.
+   * Scope: `sessionId`, `tool`. Fields: `charLength`, `estimatedTokens`.
+   * Caller: src/recovery/builtin/context-window-monitor.ts (onToolAfter).
+   */
+  "context-window.large-output": {
+    level: "warn",
+    channel: "hook:context-window",
+    message:
+      "a tool returned an output large enough to put the context window under pressure",
+  },
+
+  // ── recovery:builtin-registry — the built-in hook registry ────────────────
+
+  /**
+   * A built-in recovery hook threw while it was handling an event.
+   * WARNING because the registry continues with the remaining hooks: one hook's
+   * recovery attempt did not happen, and the hook name and event name it.
+   * Scope: none (the context is built per hook and this registry reports the
+   * hook, not a session). Fields: `hook`, `event`, `error`.
+   * Caller: src/recovery/builtin/registry.ts (runHooks).
+   */
+  "builtin-registry.hook-failed": {
+    level: "warn",
+    channel: "recovery:builtin-registry",
+    message:
+      "a built-in recovery hook threw while handling an event; the remaining hooks still ran",
+  },
+
+  // ── memory:store — the memory store ───────────────────────────────────────
+
+  /**
+   * Reading one memory entry by id failed, so the caller is answered with no
+   * entry.
+   * WARNING because "absent" and "unreadable" look the same to the caller: the id
+   * is what makes the failed read distinguishable, and it is a FIELD because the
+   * scope vocabulary carries sessions, not memory entries.
+   * Scope: none. Fields: `id`, `error`.
+   * Caller: src/memory/store.ts (read).
+   */
+  "store.read-failed": {
+    level: "warn",
+    channel: "memory:store",
+    message:
+      "reading a memory entry by id failed, so the caller is answered with no entry",
+  },
+
+  // ── log:compat — the logging compatibility shell ──────────────────────────
+  //
+  // The table's LAST section belongs to the platform itself rather than to a
+  // caller: src/logger.ts is the translation layer the legacy call sites still
+  // import, and this entry is how a value that layer had to drop becomes visible
+  // instead of silent. The channel names the SOURCE, not the code's prefix,
+  // which is why it is `log:compat` and not `log`: an operator can follow the
+  // shell's own reports in <logDir>/log-compat.log beside the pipeline's
+  // failures on `log`.
+
+  /**
+   * The compatibility shell dropped a caller's value because the kernel's field
+   * type does not admit it — an object, a nested array, a mixed array, a
+   * function — so the record is written without that key.
+   * DEBUG because the record itself is still produced and the pipeline is
+   * healthy: this is a hint that a call site still passes data the record may
+   * not carry, not a failure of the run. It is the table's only debug entry for
+   * that reason.
+   * The VALUE is never carried — it is precisely what could not be recorded —
+   * only the keys it was dropped under.
+   * Caller: src/logger.ts (the level helpers' field adaptation).
+   * Fields: `channel` (the channel the call site logged on, so an operator knows
+   * which source to fix) and `keys` (the dropped key names, in call order and
+   * de-duplicated; an argument that cannot become a field is named by the
+   * positional key it would have had — "arg1", "arg2", …).
+   * THROTTLED: 60s, so a call site that narrows on every record — a loop, a hot
+   * path — cannot flood the log; suppressed occurrences are counted and attached
+   * to the next report as `suppressed`.
+   */
+  "log.field.narrowed": {
+    level: "debug",
+    channel: "log:compat",
+    message:
+      "a field value the kernel's field type does not admit was dropped from the record",
+    throttleMs: 60_000,
   },
 
 } as const satisfies Readonly<Record<string, LogEventDefinition>>;

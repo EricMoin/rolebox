@@ -8,7 +8,7 @@ import { DispatchManager } from "../../dispatch/core/manager.ts";
 import { cleanExpiredState } from "../../dispatch/persistence/state-gc.ts";
 import { stateDirFor } from "../../utils/state-paths.ts";
 import { hookState } from "../../hooks/state.ts";
-import { createSubLogger } from "../../logger.ts";
+import { logEvent } from "../../log/index.ts";
 import { createDispatchTools } from "../../dispatch/tools.ts";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
@@ -18,8 +18,6 @@ import {
   buildSubagentLineage,
   buildRoleConfigs,
 } from "../../dispatch/factory.ts";
-
-const log = createSubLogger(SERVICE_NAMES.dispatch);
 
 /** Message shown by stub dispatch tools when the service is degraded on Pi. */
 const PI_UNAVAILABLE_MSG =
@@ -84,7 +82,7 @@ export class DispatchService implements PluginService, ToolContributor {
     if (!this.sessionClient && caps && !caps.hasSessionCreate) {
       this.degraded = true;
       this.degradedDetail = `session create not supported on Pi and no session client provided`;
-      log.warn(`dispatch-service: degraded (session create not supported on ${caps.platformId})`);
+      logEvent("dispatch-service.degraded", { platformId: caps.platformId });
       return;
     }
 
@@ -126,7 +124,7 @@ export class DispatchService implements PluginService, ToolContributor {
       // previous failure. A reused manager keeps its own verdict, because this
       // branch is skipped on the cache-hit path above.
       if (result.recoverError) {
-        log.error("DispatchManager.recover() failed, continuing with empty state", {
+        logEvent("dispatch-service.recover-failed", {
           error: result.recoverError.message,
         });
       }
@@ -154,7 +152,8 @@ export class DispatchService implements PluginService, ToolContributor {
     try {
       await this.dispatchManager.dispose();
     } catch (err) {
-      log.warn("dispatch flush during dispose failed", {
+      logEvent("dispatch-service.flush-failed", {
+        phase: "dispose",
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -176,7 +175,7 @@ export class DispatchService implements PluginService, ToolContributor {
     try {
       this.dispatchManager.flushPersistSync();
     } catch (err) {
-      log.warn("dispatch flush on exit failed", { error: err instanceof Error ? err.message : String(err) });
+      logEvent("dispatch-service.flush-failed", { phase: "exit", error: err instanceof Error ? err.message : String(err) });
     }
   }
 
