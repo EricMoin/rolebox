@@ -1437,19 +1437,20 @@ export const LOG_EVENTS = {
    * A record that had occurrences suppressed also carries `suppressed`, the
    * pipeline's own count (see THROTTLED below).
    * THROTTLED: 60s, keyed by SUBJECT — `throttleBy: "channel"`, the caller
-   * channel this record already carries, so the window is per CALL SITE and one
-   * source narrowing on every record cannot swallow another source's first
-   * report (the pre-subject window was the single channel `log:compat`, i.e. one
-   * window for the whole process).
+   * channel this record already carries, so the window is per caller CHANNEL,
+   * not per call site: call sites that log on the SAME channel share its window,
+   * which is what keeps one source narrowing on every record from swallowing
+   * another source's first report (the pre-subject window was the single channel
+   * `log:compat`, i.e. one window for the whole process).
    * Evidence: `bun scripts/log-event-density.ts --dir .rolebox/logs` shows 12
    * codes in this workspace and 0 records for this one — it is emitted at
    * `debug` while the workspace runs at the default `info`, so no measured burst
    * exists here and the window is not claimed to be earned by one. What it
    * collapses is the repetition the report itself describes: a call site that
    * narrows a value on every record emits this event on every record, so the
-   * per-call-site window turns that unbounded emission into one line per source
-   * per minute, with the suppressed occurrences riding on that source's next
-   * report as `suppressed`.
+   * per-caller-channel window turns that unbounded emission into one line per
+   * caller channel per minute, with the suppressed occurrences riding on that
+   * caller channel's next report as `suppressed`.
    */
   "log.field.narrowed": {
     level: "debug",

@@ -34,9 +34,10 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { LOG_EVENTS, configureLogging, logEvent } from "../../src/log/index.ts";
-import type { LogEventDefinition } from "../../src/log/index.ts";
+import type { LogEventCode, LogEventDefinition } from "../../src/log/index.ts";
 import { createMemorySink, type MemorySink } from "../../src/log/sinks/memory.ts";
 import { logThrottleKey, logThrottleSubject } from "../../src/log/throttle.ts";
+import { createSubLogger } from "../../src/logger.ts";
 import { beginLogTest, endLogTest } from "../helpers/log.ts";
 import { __setLogClockForTest } from "../../src/log/index.ts";
 
@@ -98,51 +99,133 @@ function sourceFiles(dir: string): string[] {
 }
 
 /**
- * The top-level keys of the object literal that starts at `start` (which must
- * point at `{`), with the offset just past its closing brace — the same
+ * The value SOURCE of every top-level key of the object literal that starts at
+ * `start` (which must point at `{`), read out of the call site itself. The VALUE
+ * is what a `throttleBy` has to be checked against: `keys: "a"` and
+ * `keys: ["a"]` pass the same key and only one of them can become a subject. A
+ * shorthand property (`{ channel }`) writes no value of its own — the binding IS
+ * the value — so the key is returned as its own source. This is the same
  * source-adjacent read tests/log/redaction-scan.test.ts does, and for the same
- * reason: a call site that stops passing a field must be able to fail a test
+ * reason: a call site that stops passing a string must be able to fail a test
  * without anyone executing it.
  */
-function literalKeys(text: string, start: number): { keys: string[]; end: number } {
-  const keys: string[] = [];
+function literalValueSources(text: string, start: number): Map<string, string> {
+  const values = new Map<string, string>();
   let depth = 0;
   let quote = "";
-  let token = "";
+  let raw = "";
+  let colon = -1;
+  const record = (): void => {
+    const key = (colon < 0 ? raw : raw.slice(0, colon)).trim().replace(/^["'`]|["'`]$/g, "");
+    const source = colon < 0 ? key : raw.slice(colon + 1).trim();
+    if (key.length > 0 && !values.has(key)) values.set(key, source);
+    raw = "";
+    colon = -1;
+  };
   for (let index = start; index < text.length; index++) {
     const char = text[index] ?? "";
     if (quote.length > 0) {
-      if (char === "\\") index += 1;
-      else if (char === quote) quote = "";
+      raw += char;
+      if (char === "\\") {
+        raw += text[index + 1] ?? "";
+        index += 1;
+      } else if (char === quote) quote = "";
       continue;
     }
     if (char === '"' || char === "'" || char === "`") {
       quote = char;
+      raw += char;
       continue;
     }
     if (char === "{" || char === "[" || char === "(") {
+      if (depth > 0) raw += char;
       depth += 1;
-      if (depth === 1 && keys.length === 0) continue;
+      continue;
     }
     if (char === "}" || char === "]" || char === ")") {
       depth -= 1;
-      if (depth === 0) return { keys, end: index };
+      if (depth === 0) {
+        record();
+        return values;
+      }
+      raw += char;
       continue;
     }
-    if (depth === 1 && char === ",") {
-      const key = token.split(":")[0]?.trim().replace(/^["'`]|["'`]$/g, "") ?? "";
-      if (key.length > 0 && !keys.includes(key)) keys.push(key);
-      token = "";
+    if (char === "," && depth === 1) {
+      record();
       continue;
     }
-    if (depth === 1) token += char;
+    if (char === ":" && depth === 1 && colon < 0) colon = raw.length;
+    if (depth >= 1) raw += char;
   }
-  return { keys, end: text.length };
+  record();
+  return values;
 }
 
-/** The field keys every `logEvent("<code>", { … })` call site passes. */
-function callSiteFields(): Map<string, string[]> {
-  const found = new Map<string, string[]>();
+/** A string literal, a template with no interpolation, or a `String(…)` call. */
+function isStringForm(source: string): boolean {
+  return (
+    /^(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')$/s.test(source) ||
+    /^`[^`$\\]*`$/s.test(source) ||
+    /^String\s*\(/.test(source)
+  );
+}
+
+/**
+ * Every identifier `file` binds to a string: an explicit `name: string` (a
+ * parameter, a property or a variable), or a declaration initialised from a
+ * string form or from another binding. The pass repeats because a binding may be
+ * written in terms of another one: `const dropped = String(code)` — the
+ * runtime's own case — needs no second pass, but `const a = b` does.
+ */
+function stringBindings(file: string): Set<string> {
+  const bound = new Set<string>();
+  for (const match of file.matchAll(/\b([A-Za-z_$][\w$]*)\s*:\s*string\b/g)) bound.add(match[1] ?? "");
+  const declarations = [...file.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^\n;]+)/g)];
+  for (let pass = 0; pass < 4; pass++) {
+    const before = bound.size;
+    for (const [, name = "", initialiser = ""] of declarations) {
+      if (bound.has(name)) continue;
+      const source = initialiser.trim();
+      if (isStringForm(source) || (/^[A-Za-z_$][\w$]*$/.test(source) && bound.has(source))) bound.add(name);
+    }
+    if (bound.size === before) break;
+  }
+  return bound;
+}
+
+/**
+ * True when the source `expression`, read in the file it was written in,
+ * PROVABLY produces a string — the only shape `logThrottleSubject` turns into a
+ * subject: a string form, or a bare identifier that file binds to a string. A
+ * member expression (`state.unknownCodes`), an array (`[…new Set(narrowed)]`), a
+ * number and a boolean are all NOT strings, and that is the point: a
+ * `throttleBy` naming a field its call site passes but does not fill with a
+ * string would silently degrade every report to the empty subject, and this is
+ * what makes that fail a test instead of shipping.
+ */
+function isStringValueSource(expression: string, file: string): boolean {
+  const source = expression.trim();
+  if (isStringForm(source)) return true;
+  if (!/^[A-Za-z_$][\w$]*$/.test(source)) return false;
+  return stringBindings(file).has(source);
+}
+
+/**
+ * One object literal a call site passes: the TEXT of the file it was read out of
+ * (a value source is only readable where its bindings live), its top-level keys
+ * in source order, and each key's value source (`{ channel }` gives `channel` →
+ * `channel`).
+ */
+interface CallSiteLiteral {
+  readonly fileText: string;
+  readonly keys: string[];
+  readonly values: Map<string, string>;
+}
+
+/** Every call site's literal, per event code. */
+function callSiteFields(): Map<string, CallSiteLiteral[]> {
+  const found = new Map<string, CallSiteLiteral[]>();
   const pattern = /(?:logEvent|\.event)\(\s*(?:"([^"]+)"|'([^']+)')\s*,\s*/g;
   for (const file of sourceFiles(SRC_DIR)) {
     const text = readFileSync(file, "utf8");
@@ -150,79 +233,13 @@ function callSiteFields(): Map<string, string[]> {
       const code = match[1] ?? match[2] ?? "";
       const brace = text.indexOf("{", (match.index ?? 0) + match[0].length);
       if (brace < 0) continue;
-      const { keys } = literalKeys(text, brace);
-      const existing = found.get(code) ?? [];
-      for (const key of keys) if (!existing.includes(key)) existing.push(key);
-      found.set(code, existing);
+      const values = literalValueSources(text, brace);
+      const sites = found.get(code) ?? [];
+      sites.push({ fileText: text, keys: [...values.keys()], values });
+      found.set(code, sites);
     }
   }
   return found;
-}
-
-/** The table entry for a code, or `undefined`. */
-function entryOf(code: string): LogEventDefinition | undefined {
-  return (LOG_EVENTS as Record<string, LogEventDefinition>)[code];
-}
-
-/**
- * Parse ONE entry block's `Fields:` declaration out of its comment. The block
- * arrives as `*`-prefixed source lines. The declaration opens at the `Fields:`
- * line, wraps onto the following lines ("and an optional bounded `detail`.",
- * "`arg1`, `arg2`, …") and ends at the next tag line — `Scope:`, `Caller:`,
- * `Code:`, `THROTTLED:` — because that tag's prose may name fields again
- * (`Code:` really does: "the egress and latch codes"). A parse that read those
- * mentions as declarations would accept a typo, which is the one thing this
- * check exists to catch, so the declaration stops where the next tag starts.
- */
-function fieldsFromBlock(lines: readonly string[]): string[] {
-  const keys: string[] = [];
-  let inFields = false;
-  for (const line of lines) {
-    const body = line.trim().replace(/^\/\/ ?/, "").replace(/^\*+\/?\s?/, "").trim();
-    const declaration = body.match(/^Fields:\s*(.*)$/);
-    if (declaration !== null) {
-      inFields = true;
-      addKeys(keys, declaration[1] ?? "");
-      continue;
-    }
-    if (!inFields) continue;
-    // The declaration ends at the next tag: a `Scope:`/`Caller:`/`Code:`/
-    // `THROTTLED:` line opens a different section, and a line that BEGINS with a
-    // backticked token whose key is already declared is the sentence that
-    // follows the keys ("`keys` — the dropped key names …"), not more keys.
-    if (/^[A-Z][A-Za-z]*:/.test(body)) {
-      inFields = false;
-      continue;
-    }
-    // A WRAPPED declaration continues with a lower-case connective ("and an
-    // optional bounded `detail`.", "`arg1`, `arg2`, …"). Anything else is the
-    // entry's prose, which names fields again while explaining them — reading
-    // those mentions as declarations is what would let a key dropped from the
-    // declaration itself pass this check.
-    const wrapped = keys.length > 0 && /^(?:and|or|plus|then)\b/.test(body);
-    const bullet = body.startsWith("`");
-    if (!wrapped && !bullet) {
-      inFields = false;
-      continue;
-    }
-    if (bullet) {
-      const lead = body.match(/^`([^`]+)`/);
-      if (lead !== null && keys.includes(lead[1] ?? "")) {
-        inFields = false;
-        continue;
-      }
-    }
-    addKeys(keys, body);
-  }
-  return keys;
-}
-
-/** Every backticked `` `key` `` in a fragment, in order and de-duplicated. */
-function addKeys(keys: string[], fragment: string): void {
-  for (const match of fragment.matchAll(/`([^`]+)`/g)) {
-    const key = match[1] ?? "";
-    if (!keys.includes(key)) keys.push(key);
-  }
 }
 
 /** The table entry for a code, or `undefined`. */
@@ -375,21 +392,40 @@ describe("throttle policy", () => {
     // suppression this whole file is about).
     const atCallSites = callSiteFields();
     const runtime = readFileSync(RUNTIME_PATH, "utf8");
-    const emitted = (code: string): string[] => {
+    const emitted = (code: string): CallSiteLiteral[] => {
       if (code !== "log.event.unknown-code") return atCallSites.get(code) ?? [];
+      // The unknown-code report is built inline in the runtime's own branch.
       const branch = runtime.slice(runtime.indexOf("state.unknownCodes += 1"));
       const brace = branch.indexOf("{");
-      return brace < 0 ? [] : literalKeys(branch, brace).keys;
+      if (brace < 0) return [];
+      const values = literalValueSources(branch, brace);
+      return [{ fileText: runtime, keys: [...values.keys()], values }];
     };
 
     for (const [code, entry] of subjectKeyed) {
       const field = (entry as LogEventDefinition).throttleBy as string;
-      const fields = emitted(code);
+      const sites = emitted(code);
+      const fields = [...new Set(sites.flatMap((site) => site.keys))];
       expect(fields.length, `${code} must be emitted with fields this check can read`).toBeGreaterThan(0);
       expect(
         fields,
         `${code} throttles by \`${field}\`, which no call site of it passes`,
       ).toContain(field);
+      // AND ITS VALUE, NOT ONLY ITS NAME. `logThrottleSubject` turns a STRING
+      // into a subject and everything else into the EMPTY one, so a `throttleBy`
+      // naming a field the record fills with a count (`dropped`) or an array
+      // (`keys`) would silently collapse every report about this entry onto one
+      // window — the cross-subject suppression this file exists to prevent, with
+      // nothing failing. Every call site that passes the field must pass a
+      // string.
+      for (const site of sites) {
+        const source = site.values.get(field);
+        if (source === undefined) continue;
+        expect(
+          isStringValueSource(source, site.fileText),
+          `${code} throttles by \`${field}\`, but its call site passes \`${source}\` — not a string, so the subject would silently be empty`,
+        ).toBe(true);
+      }
       // The subject read itself: a string field becomes the subject, anything
       // else (missing, non-string) is the empty subject rather than a throw.
       expect(logThrottleSubject({ [field]: "subject-value" }, field)).toBe("subject-value");
@@ -404,7 +440,7 @@ describe("throttle policy", () => {
     // that pins the SUBJECT's name.
     const declaredUnknown = declared.get("log.event.unknown-code") ?? [];
     expect(declaredUnknown.length, "the unknown-code entry must document Fields:").toBeGreaterThan(0);
-    for (const key of emitted("log.event.unknown-code")) {
+    for (const key of [...new Set(emitted("log.event.unknown-code").flatMap((site) => site.keys))]) {
       expect(declaredUnknown, `the unknown-code entry emits \`${key}\` but does not declare it`).toContain(key);
     }
     // The other subject-keyed entry documents the field its window is keyed by.
@@ -477,5 +513,33 @@ describe("throttle policy in the pipeline", () => {
     }
     expect(memory.size).toBe(3);
     expect(memory.records().every((record) => record.fields.suppressed === undefined)).toBe(true);
+  });
+
+  it("reads a non-empty subject out of the record each subject-keyed entry really emits", () => {
+    // THE LAST WORD ON `throttleBy`: not what the field is CALLED but what the
+    // record carries under it. Each row below drives the entry's OWN call site —
+    // the runtime's inline literal for a drifted code, the compatibility shell's
+    // for a narrowed field — and hands the real record back to the pipeline's own
+    // reader. A field that is present but not a string (`dropped`, `count`, an
+    // array of keys) reads as the empty subject here and fails, which is exactly
+    // the silent degradation the source check above cannot see.
+    const site: Record<string, () => void> = {
+      "log.event.unknown-code": () => logEvent("polish.drifted.code" as LogEventCode, {}),
+      "log.field.narrowed": () =>
+        createSubLogger("polish:subject-probe").warn("probe", { payload: { nested: true } }),
+    };
+    for (const [code, entry] of Object.entries(LOG_EVENTS)) {
+      const throttleBy = (entry as LogEventDefinition).throttleBy;
+      if (throttleBy === undefined) continue;
+      const emit = site[code];
+      expect(emit, `${code} throttles by \`${throttleBy}\` and must have a call site this check can drive`).toBeDefined();
+      emit?.();
+      const record = memory.records().find((entry) => entry.code === code);
+      expect(record, `${code} must emit a record under this probe`).toBeDefined();
+      expect(
+        logThrottleSubject(record?.fields, throttleBy),
+        `${code} throttles by \`${throttleBy}\`, which its own record does not carry as a non-empty string`,
+      ).not.toBe("");
+    }
   });
 });

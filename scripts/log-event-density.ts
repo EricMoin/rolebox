@@ -19,7 +19,21 @@
 //                of a re-reporting loop;
 //   would-emit   for a code that already declares `throttleMs`: how many of its
 //                records the gate would let through (the first of each window),
-//                i.e. what the throttle costs and what it saves.
+//                i.e. what the throttle costs and what it saves. A code whose
+//                entry declares `throttleBy` holds ONE WINDOW PER SUBJECT, so
+//                this column sums the per-subject decisions instead of counting
+//                one (channel, code) window — see below.
+//
+// THE SUBJECT DIMENSION IS MODELLED FOR `would-emit` ONLY. A row is one
+// (channel, code) pair, the unit the read layer groups by, and the burst and
+// repetition columns (`total`, `max/60s`, `max/10s`, `max/1s`, `same-as-prev`,
+// `signatures`) say nothing about how a code's records divide into subjects;
+// today no entry with a subject window has a row here at all. `would-emit` is
+// the one column a subject window can make wrong, so it reads the entry's own
+// `throttleBy` through the pipeline's `logThrottleSubject` and measures each
+// subject's window separately: one (channel, code) window would UNDERSTATE what
+// the gate lets through, because every subject emits its own first record.
+// An entry WITHOUT `throttleBy` is computed exactly as it was before.
 //
 // USAGE
 //   bun scripts/log-event-density.ts [--dir <logDir>] [--json] [--window <ms>]
@@ -34,6 +48,7 @@
 // reason live beside each `throttleMs` in the registry.
 
 import { LOG_EVENTS, listLogFiles, readLogRecords } from "../src/log/index.ts";
+import { logThrottleSubject } from "../src/log/throttle.ts";
 import type { LogEventDefinition } from "../src/log/index.ts";
 import type { LogRecord } from "../src/log/types.ts";
 
@@ -71,8 +86,37 @@ function maxInWindow(times: readonly number[], windowMs: number): number {
   return best;
 }
 
-/** How many records a `throttleMs` window would let through, in time order. */
-function emittedUnderThrottle(times: readonly number[], throttleMs: number): number {
+/**
+ * How many records a `throttleMs` window would let through, in time order.
+ *
+ * A SUBJECT-KEYED ENTRY (`throttleBy`) holds one window per `(channel, code,
+ * subject)`, so the count is the sum over subjects: two subjects inside one
+ * window each emit their first record, and a single (channel, code) window would
+ * understate what the gate lets through. The subject is read with the pipeline's
+ * own `logThrottleSubject`, so this column cannot drift from the gate it models.
+ */
+function emittedUnderThrottle(
+  records: readonly LogRecord[],
+  throttleMs: number,
+  throttleBy: string | undefined,
+): number {
+  if (throttleBy === undefined) {
+    return emittedInOneWindow(records.map((record) => record.time), throttleMs);
+  }
+  const bySubject = new Map<string, number[]>();
+  for (const record of records) {
+    const subject = logThrottleSubject(record.fields, throttleBy);
+    const times = bySubject.get(subject);
+    if (times === undefined) bySubject.set(subject, [record.time]);
+    else times.push(record.time);
+  }
+  let emitted = 0;
+  for (const times of bySubject.values()) emitted += emittedInOneWindow(times, throttleMs);
+  return emitted;
+}
+
+/** How many timestamps ONE window lets through, in time order. */
+function emittedInOneWindow(times: readonly number[], throttleMs: number): number {
   const sorted = [...times].sort((left, right) => left - right);
   let emitted = 0;
   let last: number | undefined;
@@ -127,7 +171,9 @@ function density(dir: string | undefined, windowMs: number): DensityRow[] {
       max1: maxInWindow(times, Math.min(1_000, windowMs)),
       sameAsPrev,
       signatures: signatures.size,
-      ...(throttleMs === undefined ? {} : { throttleMs, wouldEmit: emittedUnderThrottle(times, throttleMs) }),
+      ...(throttleMs === undefined
+        ? {}
+        : { throttleMs, wouldEmit: emittedUnderThrottle(group, throttleMs, definition?.throttleBy) }),
     });
   }
   rows.sort((left, right) => right.total - left.total || left.code.localeCompare(right.code));

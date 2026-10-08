@@ -37,7 +37,7 @@ export interface ThrottleDecision {
   readonly suppressed: number;
 }
 
-/** The windowed gate. One instance holds the state of every (channel, code). */
+/** The windowed gate. One instance holds the state of every (channel, code, subject). */
 export interface LogThrottle {
   /**
    * Decide one occurrence of one subject. `throttleMs` is the entry's window;
