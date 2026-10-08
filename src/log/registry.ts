@@ -49,12 +49,31 @@
 // records repeat their predecessor's fields, and how many records a window would
 // let through). The window is chosen from the measured cadence: long enough to
 // collapse the burst, short enough that a state that changes seconds later is
-// still reported. AN ENTRY THAT REPORTS A FIRST FAILURE NEVER OPTS IN: an event
-// whose whole value is "this just broke" (a store that cannot be written, a
-// delivery with no proof, an unproven release, a definition that did not reach
-// the store) keeps every occurrence, because the next occurrence may be the
-// first one about something else — the gate is keyed by (channel, code), not by
-// graph or attempt, so a suppression can hide a DIFFERENT subject's report.
+// still reported. AN ENTRY THAT REPORTS A FIRST FAILURE NEVER OPTS IN unless a
+// subject dimension makes the first report of every DIFFERENT subject
+// unlosable: an event whose whole value is "this just broke" (a store that
+// cannot be written, a delivery with no proof, an unproven release, a definition
+// that did not reach the store) keeps every occurrence.
+//
+// THE SUBJECT DIMENSION. A window is keyed by the channel, the code and — for an
+// entry that declares `throttleBy` — a SUBJECT read from the record's own
+// fields (src/log/throttle.ts). The subject is the thing a suppression would
+// otherwise hide: the drifted code of an unknown-code report, the caller channel
+// of a narrowing report. Each distinct subject holds its OWN window, so
+// suppressing a repeat of subject A can never swallow the first report about
+// subject B, and the `suppressed` count rides on the next record about the SAME
+// subject. `throttleBy` must name a field the entry's callers actually pass with
+// a string value; a misspelling would silently drop the subject dimension and
+// re-create the cross-subject suppression, so the name is checked against the
+// entry's own `Fields:` line by tests/log/throttle-policy.test.ts.
+//
+// ENTRIES MEASURED WITHOUT A FLOOD ARE STILL OPTED IN ONLY WHEN THE WINDOW
+// CANNOT HIDE ANOTHER SUBJECT. `bun scripts/log-event-density.ts --dir
+// .rolebox/logs` reports 12 codes in this workspace and neither of the two
+// entries below has a single record there, so their windows are NOT earned by a
+// measured burst: they are earned by being per-subject deduplicators — with the
+// subject in the key, only an exact repeat about the same subject is ever
+// suppressed, and what the window buys is the count of those repeats.
 //
 // PRIVACY. A message states the durable fact in one sentence; the fields an
 // entry's callers pass carry ids, states, reasons and counts — never a payload,
@@ -75,6 +94,17 @@ export interface LogEventDefinition {
    * suppressed and counted. Omitted means "never throttle".
    */
   readonly throttleMs?: number;
+  /**
+   * The FIELD NAME whose string value identifies the subject this window is
+   * measured over, e.g. "code" for a record that names the drifted code it
+   * reports, or "channel" for a record about one caller channel. The window is
+   * keyed (channel, code, subject), so one subject's suppression never hides
+   * another subject's first report and the `suppressed` count rides on the next
+   * record about the same subject. A field that is absent, or whose value is not
+   * a string, degrades to the empty subject — the pre-subject behaviour
+   * (src/log/throttle.ts, logThrottleSubject).
+   */
+  readonly throttleBy?: string;
 }
 
 /**
@@ -137,15 +167,34 @@ export const LOG_EVENTS = {
    * invisible — a call site that invented a code, or a JavaScript caller. The
    * code is dropped and counted; this entry reports the count.
    * Caller: src/log/runtime.ts (emitLogEvent's unknown-code branch).
-   * Fields: `event` (the dropped code) and `dropped` (the running count).
-   * THROTTLED: 60s, so a call site that drifts inside a loop cannot flood the
-   * log; suppressed occurrences are counted and attached to the next report.
+   * Fields: `event` and `code` (the dropped code, under both names — `code` is
+   * the field the throttle subject reads), `dropped` and `count` (the kernel's
+   * running count of dropped codes, the same number under both names) and
+   * `suppressed` (on a record that had occurrences suppressed, how many
+   * occurrences of THIS code its window dropped).
+   * The counters are the kernel's own (getUnknownEventCodeCount), so no report
+   * states a number the pipeline did not measure.
+   * THROTTLED: 60s, keyed by SUBJECT — `throttleBy: "code"`, so the window that
+   * one drifted code opens cannot swallow another drifted code's first report.
+   * Evidence: the drift case is the window's reason for existing rather than a
+   * measured burst — `bun scripts/log-event-density.ts --dir .rolebox/logs`
+   * shows 12 codes in this workspace and this one has 0 records there, because
+   * both the platform's own call sites and its vocabulary are closed. The
+   * counter is nevertheless unbounded per subject (a call site that drifts into
+   * a loop re-emits the same unknown code once per iteration), so the window
+   * collapses an exact repeat about the SAME code into one line and the
+   * suppressed occurrences ride on that code's next report. Distinct codes are
+   * never suppressed by each other: the reviewer's probe
+   * (.rolebox/tmp/rev12/throttle-subject-probe.ts) emits three different drifted
+   * codes inside one window and now yields three records, one per code, each
+   * naming its own code and carrying the true running total.
    */
   "log.event.unknown-code": {
     level: "warn",
     channel: "log",
     message: "an event code outside the closed vocabulary was dropped",
     throttleMs: 60_000,
+    throttleBy: "code",
   },
 
   // ── GRAPH ENGINE EVENTS ───────────────────────────────────────────────────
@@ -1385,9 +1434,22 @@ export const LOG_EVENTS = {
    * which source to fix) and `keys` (the dropped key names, in call order and
    * de-duplicated; an argument that cannot become a field is named by the
    * positional key it would have had — "arg1", "arg2", …).
-   * THROTTLED: 60s, so a call site that narrows on every record — a loop, a hot
-   * path — cannot flood the log; suppressed occurrences are counted and attached
-   * to the next report as `suppressed`.
+   * A record that had occurrences suppressed also carries `suppressed`, the
+   * pipeline's own count (see THROTTLED below).
+   * THROTTLED: 60s, keyed by SUBJECT — `throttleBy: "channel"`, the caller
+   * channel this record already carries, so the window is per CALL SITE and one
+   * source narrowing on every record cannot swallow another source's first
+   * report (the pre-subject window was the single channel `log:compat`, i.e. one
+   * window for the whole process).
+   * Evidence: `bun scripts/log-event-density.ts --dir .rolebox/logs` shows 12
+   * codes in this workspace and 0 records for this one — it is emitted at
+   * `debug` while the workspace runs at the default `info`, so no measured burst
+   * exists here and the window is not claimed to be earned by one. What it
+   * collapses is the repetition the report itself describes: a call site that
+   * narrows a value on every record emits this event on every record, so the
+   * per-call-site window turns that unbounded emission into one line per source
+   * per minute, with the suppressed occurrences riding on that source's next
+   * report as `suppressed`.
    */
   "log.field.narrowed": {
     level: "debug",
@@ -1395,6 +1457,7 @@ export const LOG_EVENTS = {
     message:
       "a field value the kernel's field type does not admit was dropped from the record",
     throttleMs: 60_000,
+    throttleBy: "channel",
   },
 
 } as const satisfies Readonly<Record<string, LogEventDefinition>>;

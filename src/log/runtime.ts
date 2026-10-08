@@ -20,7 +20,9 @@
 //      variable > "info") drops everything quieter than itself;
 //   2. fields are normalised (undefined dropped) and redacted;
 //   3. the throttle gate, only for an event code whose registry entry declares
-//      `throttleMs`; a suppressed count rides on the next emitted record;
+//      `throttleMs`; the key is the channel, the code and — when the entry names
+//      one with `throttleBy` — the SUBJECT read from the record's fields, and a
+//      suppressed count rides on the next emitted record about that subject;
 //   4. the record is built from the ambient scope, the process identity and the
 //      clock, frozen, and handed to the sink under a guard.
 // Every step is wrapped, so a dispatch NEVER throws — a JavaScript caller
@@ -33,7 +35,7 @@
 import { currentLogScope } from "./context.ts";
 import { redactFields } from "./redact.ts";
 import { LOG_EVENTS, isLogEventCode, logEventDefinition, type LogEventCode } from "./registry.ts";
-import { logThrottle, logThrottleKey } from "./throttle.ts";
+import { logThrottle, logThrottleKey, logThrottleSubject } from "./throttle.ts";
 import {
   LOG_LEVEL_RANK,
   isLogLevel,
@@ -255,12 +257,24 @@ function eventThrottleMs(code: string): number | undefined {
 }
 
 /**
+ * The field name an event code's window is measured over, or `undefined` when
+ * the entry declares no subject.
+ */
+function eventThrottleBy(code: string): string | undefined {
+  if (!isLogEventCode(code)) return undefined;
+  return logEventDefinition(code).throttleBy;
+}
+
+/**
  * Dispatch ONE record. This is the whole pipeline and it NEVER throws.
  *
  * `code` is present only for events; the throttle gate applies only to a code
- * whose registry entry declares `throttleMs`. A record suppressed by the gate
- * is not built at all; the count of what was suppressed is attached to the next
- * emitted record as a `suppressed` field (overwriting any caller field of that
+ * whose registry entry declares `throttleMs`. The window is keyed by the
+ * channel, the code and — when the entry declares `throttleBy` — the subject the
+ * named field carries, so one subject's suppression never hides another
+ * subject's first report. A record suppressed by the gate is not built at all;
+ * the count of what was suppressed is attached to the next emitted record about
+ * the SAME subject as a `suppressed` field (overwriting any caller field of that
  * name, because the number is the pipeline's own accounting).
  */
 export function emitLogRecord(
@@ -280,7 +294,8 @@ export function emitLogRecord(
     if (code !== undefined) {
       const throttleMs = eventThrottleMs(code);
       if (throttleMs !== undefined) {
-        const decision = logThrottle().check(logThrottleKey(name, code), throttleMs);
+        const subject = logThrottleSubject(prepared, eventThrottleBy(code));
+        const decision = logThrottle().checkSubject(logThrottleKey(name, code), throttleMs, subject);
         if (!decision.emit) return;
         if (decision.suppressed > 0) {
           prepared = Object.freeze({ ...prepared, suppressed: decision.suppressed });
@@ -318,18 +333,26 @@ export function emitLogRecord(
  * vocabulary, and only the fields come from the caller.
  *
  * An unregistered code is dropped, counted (getUnknownEventCodeCount) and
- * reported through {@link UNKNOWN_EVENT_CODE}, which is itself throttled so a
- * drifted call site in a loop cannot flood the log. The counter keeps increasing
- * while that report is suppressed, so the next report carries the true total.
+ * reported through {@link UNKNOWN_EVENT_CODE} on a record that NAMES the dropped
+ * code (`code`, the field the entry's `throttleBy` reads, and `event` its
+ * older name) and carries the running total (`count` and `dropped`). The window
+ * is therefore keyed per DROPPED CODE: three different drifted codes inside one
+ * minute produce three reports, one per code, while a repeat of one code is
+ * counted and rides on that code's next report as `suppressed`. The kernel
+ * counter keeps increasing while a report is suppressed, so the total on the
+ * next report is the truth, never a guess.
  */
 export function emitLogEvent(code: LogEventCode, fields?: LogFields): void {
   try {
     if (!isLogEventCode(code)) {
       state.unknownCodes += 1;
+      const dropped = String(code);
       const unknown = LOG_EVENTS[UNKNOWN_EVENT_CODE];
       emitLogRecord(unknown.level, unknown.channel, UNKNOWN_EVENT_CODE, unknown.message, {
-        event: String(code),
+        event: dropped,
+        code: dropped,
         dropped: state.unknownCodes,
+        count: state.unknownCodes,
       });
       return;
     }

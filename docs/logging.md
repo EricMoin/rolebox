@@ -234,28 +234,50 @@ Records that are not events carry no `code`; they come from the level helpers
 
 ### Throttling
 
-A few events opt into a suppression window (`throttleMs` in the registry). The
-**first** occurrence in each window is emitted; the repeats inside it are counted,
-and the count rides on the next emitted record as the `suppressed` field — the
-loss is reported, never silent. Every other event, which is the default, is
-emitted every time.
+A few events opt into a suppression window (`throttleMs` in the registry). A
+window is keyed by **the channel, the code and — when the entry declares
+`throttleBy` — a subject**: the value of that record field. The **first**
+occurrence of each subject opens its own window and is emitted; the repeats of
+that subject inside it are counted, and the count rides on the next emitted
+record **about the same subject** as the `suppressed` field — the loss is
+reported, never silent, and one subject's suppression can never swallow another
+subject's report. Every other event, which is the default, is emitted every
+time.
 
-| code | window | why it opted in (counts from this workspace's own `.rolebox/logs`) |
-| --- | --- | --- |
-| `sweep.summary` | 10 s | the densest code measured: 335 records, **74 inside one ten-second window**, 20 inside one second, 36 repeating their predecessor's fields |
-| `dispatch.unclaimed-confirmation` | 60 s | 48 records carrying **two** distinct facts; 41 repeat their predecessor's fields, median gap 169 ms |
-| `tool.control-continuation` | 60 s | 93 records, 16 inside one second, 28 consecutive identical |
-| `tool.cancel-delivery` | 60 s | 66 records carrying seven attempt states, 21 consecutive identical, median gap 21 ms |
-| `log.event.unknown-code` | 60 s | a call site that drifted into a loop |
-| `log.field.narrowed` | 60 s | a call site that narrows a field value on every record |
+`throttleBy` names a field the entry's callers actually pass with a string
+value:
 
-**No first-failure event is throttled.** A store that could not be read, a
+* `log.event.unknown-code` throttles by `code` — every drifted code is its own
+  subject, so three different unregistered codes inside one minute are **three**
+  records, each naming its own code, and only a repeat of the *same* code is
+  collapsed;
+* `log.field.narrowed` throttles by `channel` — its records all report on the
+  single registry channel `log:compat`, so without the subject one window would
+  cover the whole process and the second call site's first report would be lost.
+  With it, the window is per caller channel.
+
+A field that is absent, or whose value is not a string, degrades to the empty
+subject — the pre-subject behaviour, one window per `(channel, code)`. That is
+why a misspelled `throttleBy` is not harmless, and why the name is checked
+against the entry's own call sites by `tests/log/throttle-policy.test.ts`.
+
+| code | window | subject (`throttleBy`) | why it opted in (counts from this workspace's own `.rolebox/logs`) |
+| --- | --- | --- | --- |
+| `sweep.summary` | 10 s | — | the densest code measured: 335 records, **74 inside one ten-second window**, 20 inside one second, 36 repeating their predecessor's fields |
+| `dispatch.unclaimed-confirmation` | 60 s | — | 48 records carrying **two** distinct facts; 41 repeat their predecessor's fields, median gap 169 ms |
+| `tool.control-continuation` | 60 s | — | 93 records, 16 inside one second, 28 consecutive identical |
+| `tool.cancel-delivery` | 60 s | — | 66 records carrying seven attempt states, 21 consecutive identical, median gap 21 ms |
+| `log.event.unknown-code` | 60 s | `code` | no record in the workspace sample (0 of 12 codes): the window is not earned by a measured burst but by the subject — it collapses an exact repeat of one drifted code and reports the repeat count, while every *different* code still gets its first report |
+| `log.field.narrowed` | 60 s | `channel` | 0 records too (a `debug` record while the workspace runs at the default `info`): the window is per caller channel, so a call site that narrows on every record collapses into one line per minute without hiding another call site's first report |
+
+**No first-failure event is throttled** unless a subject dimension makes every
+different subject's first report unlosable. A store that could not be read, a
 delivery with no proof that no execution exists, an unproven release, a
-definition that never reached the store: each of those keeps every occurrence,
-because the gate is keyed by `(channel, code)` — not by graph or attempt — so a
-suppression can hide a first report about a *different* subject. The rule and the
-reason are stated at the top of `src/log/registry.ts`, and the exact set is
-pinned by `tests/log/throttle-policy.test.ts`.
+definition that never reached the store: each of those keeps every occurrence —
+its subject is not a field the caller passes, so a window would hide a first
+report about something else. The rule and the reason are stated at the top of
+`src/log/registry.ts`, and the exact set, the rule and every `throttleBy` name
+are pinned by `tests/log/throttle-policy.test.ts`.
 
 Re-measure the evidence on any log directory:
 
@@ -622,9 +644,13 @@ an object, a nested array or a mixed array has that key dropped from the record.
 
 The drop is no longer silent. The shell emits the registered
 `log.field.narrowed` event — channel `log:compat`, level `debug`, throttled to one
-report per minute, with the suppressed occurrences counted on the next report —
-naming the channel the call site logged on and the dropped **key names**. It never
-carries the value, which is exactly what could not be recorded.
+report per minute **per caller channel** (`throttleBy: "channel"`), with the
+suppressed occurrences counted on that channel's next report — naming the channel
+the call site logged on and the dropped **key names**. It never carries the value,
+which is exactly what could not be recorded. The subject is what keeps the window
+honest: the record's own registry channel is the single `log:compat`, so a window
+keyed by it alone would be one window for the whole process and the second call
+site to narrow would lose its first report and its key names.
 
 ```sh
 ROLEBOX_LOG_LEVEL_LOG_COMPAT=debug rolebox monitor   # the writer records them
@@ -662,8 +688,9 @@ and which direction new call sites should take, is
   10,000-record burst and the revisit trigger are in
   [logging-architecture.md](logging-architecture.md#what-one-write-costs-measured).
   There is therefore **no write queue and nothing for the writer to drop**: the
-  losses that are counted today are the throttled events' `suppressed` field,
-  the unknown-code counter behind `log.event.unknown-code`, the reader's
+  losses that are counted today are the throttled events' `suppressed` field
+  (per subject), the unknown-code counter behind `log.event.unknown-code` — which
+  the report carries as its `count`, per dropped code — the reader's
   `skippedLines`, and the live panes' own buffer-cap drop counts. Backpressure
   accounting arrives with the queue, if the trigger ever fires.
 * **Concurrent rotation was a real, measured data-loss window, and it is closed.**

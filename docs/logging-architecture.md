@@ -43,7 +43,8 @@ A dispatch does five things, in this order (`src/log/runtime.ts`):
 3. **redaction** — a field whose key names a credential is replaced with
    `[redacted]`;
 4. **the throttle gate**, only for an event code whose registry entry declares
-   `throttleMs`;
+   `throttleMs`; the window is keyed by the channel, the code and the SUBJECT the
+   entry's `throttleBy` names (read out of the record's fields);
 5. **the record** — built from the ambient scope, the process identity
    (`pid` + `role`) and the clock, frozen, and handed to the sink **under a
    guard**.
@@ -192,11 +193,18 @@ the redaction pass is not a substitute for not passing it.
    diagnostic. The window is per `(record channel, code)`; the first occurrence
    opens it, later ones are counted, and the count rides on the next emitted
    record as its `suppressed` field. Entries without `throttleMs` are never
-   suppressed. **A first-failure event never opts in**: the gate is keyed by
-   `(channel, code)`, not by graph or attempt, so a suppression could hide the
-   first report about a *different* subject. The rule, the measured windows and
-   the count behind each one are in [logging.md](logging.md#throttling), and
-   `tests/log/throttle-policy.test.ts` pins both the set and the rule.
+   suppressed. **A first-failure event never opts in** unless it also declares
+   **`throttleBy`**, the FIELD whose string value is the subject the window is
+   keyed by: with the subject in the key, each different subject keeps its own
+   first report and only an exact repeat about the same subject is collapsed, so
+   a suppression cannot hide the first report about something else. `throttleBy`
+   must name a field the entry's callers pass (a misspelling degrades to the
+   empty subject, i.e. one window per channel and code — the very cross-subject
+   suppression the subject exists to prevent), which is why the name is checked
+   against the entry's own call sites. The rule, the measured windows, the
+   subject of each one and the count behind each one are in
+   [logging.md](logging.md#throttling), and `tests/log/throttle-policy.test.ts`
+   pins the set, the rule and every `throttleBy` name.
 6. **Emit it** with `logEvent(code, fields)` from `src/log/index.ts`, or
    `createLogger(channel).event(code, fields)` when the module already holds a
    logger. `event()` ignores the logger's own channel on purpose: the registry
@@ -205,7 +213,9 @@ the redaction pass is not a substitute for not passing it.
 A code is typed: `LogEventCode` is derived from the table, so a code that is not
 registered does not compile. A JavaScript caller that bypasses the types is
 counted and reported by the `log.event.unknown-code` entry instead of being
-silently ignored.
+silently ignored — on a record that NAMES the dropped code (the field its window
+is keyed by) and carries the running total, so three different drifted codes in
+one minute are three reports rather than one.
 
 ```sh
 # The vocabulary, in table order — the table is the authority, so no page copies it.
@@ -294,8 +304,9 @@ process that logs three lines does not hold a file descriptor. That is a
 measured decision rather than a standing gap — [What one write costs,
 measured](#what-one-write-costs-measured) — so there is no write queue today and
 no write-side dropped-record counter to report; the losses this pipeline does
-count are the throttle's `suppressed` field, the unknown-code counter behind
-`log.event.unknown-code`, and the reader's `skippedLines`. The retention and
+count are the throttle's `suppressed` field (per subject), the unknown-code
+counter behind `log.event.unknown-code` (reported per dropped code as `count`),
+and the reader's `skippedLines`. The retention and
 rotation boundaries are the file sink's own tests.
 
 **Rotation is serialized across processes by a per-file lock, because the
@@ -582,9 +593,12 @@ the registered `log.field.narrowed` event, carrying:
 
 It never carries the value, which is precisely what could not be recorded. The
 entry is registered on the channel `log:compat` (the source is the shell) at
-`debug`, throttled over a window of 60 s per `(record channel, code)` — here, the
-single `log:compat` — with the suppressed count riding on the next report as
-`suppressed`.
+`debug`, throttled over a window of 60 s keyed by the CALLER channel
+(`throttleBy: "channel"`, the record's own `channel` field) — the registry
+channel is the single `log:compat`, so a window keyed by it alone would be one
+window for the whole process and the second call site to narrow would lose its
+first report — with the suppressed count riding on that caller channel's next
+report as `suppressed`.
 
 That makes the call sites which still need migrating findable without reading 170
 files: the writer has to record the event first (it is a debug record, and the

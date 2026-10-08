@@ -325,7 +325,7 @@ describe("closed event vocabulary", () => {
     expect(record?.fields).toEqual({ sink: "console", error: "Error" });
   });
 
-  it("drops an unregistered code, counts it and reports it once with the count", () => {
+  it("drops an unregistered code, counts it and NAMES it with the true total", () => {
     expect(() => logEvent("nope.not-registered" as LogEventCode, { detail: 1 })).not.toThrow();
     expect(getUnknownEventCodeCount()).toBe(1);
 
@@ -334,16 +334,34 @@ describe("closed event vocabulary", () => {
     expect(report?.level).toBe(LOG_EVENTS["log.event.unknown-code"].level);
     expect(report?.channel).toBe("log");
     expect(report?.message).toBe(LOG_EVENTS["log.event.unknown-code"].message);
-    expect(report?.fields).toEqual({ event: "nope.not-registered", dropped: 1 });
+    // The report NAMES the code it dropped (`code` is the field the entry's
+    // `throttleBy` reads; `event` is the same value under its older name) and
+    // carries the kernel's running total under `count` and `dropped` — a caller
+    // field of either name is overwritten by the kernel's own accounting.
+    expect(report?.fields).toEqual({
+      event: "nope.not-registered",
+      code: "nope.not-registered",
+      dropped: 1,
+      count: 1,
+    });
   });
 
-  it("keeps counting while the report itself is suppressed by its throttle window", () => {
+  it("names every dropped code, and keeps the running total truthful", () => {
     logEvent("nope.one" as LogEventCode);
     logEvent("nope.two" as LogEventCode);
     logEvent("nope.three" as LogEventCode);
 
     expect(getUnknownEventCodeCount()).toBe(3);
-    expect(memory.records().filter((record) => record.code === "log.event.unknown-code").length).toBe(1);
+    // The report's window is keyed by the DROPPED code, so three different
+    // drifted codes are three subjects and each of them gets its first report —
+    // one window for the whole channel would have named only the first and left
+    // the other two silently unreported (tests/log/throttle.test.ts drives that
+    // case through an injected clock).
+    const reports = memory.records().filter((record) => record.code === "log.event.unknown-code");
+    expect(reports.map((record) => record.fields.code)).toEqual(["nope.one", "nope.two", "nope.three"]);
+    // The total is the kernel's own counter, increasing with every drop, never
+    // the number of reports.
+    expect(reports.map((record) => record.fields.count)).toEqual([1, 2, 3]);
   });
 
   it("drops an unregistered code without a sink, and still counts it", () => {
