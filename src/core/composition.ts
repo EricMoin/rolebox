@@ -142,8 +142,8 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, outcomeGraphTools, isGraphWorker: config.isGraphWorker, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget). The
-  // flush is hoisted out of the guard so the observation-only fatal reporter
-  // below reuses exactly the same synchronous path.
+  // flush is hoisted out of the guard so the process-fatal reporter below
+  // reuses exactly the same synchronous path.
   const flushAllSync = () => {
     for (const [d, mgr] of hookState.loopManagerMap) {
       try { hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates()); } catch (err) { log.warn("flushAllSync saveSync failed for directory", d, err); }
@@ -158,9 +158,13 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
     process.on("exit", () => flushAllSync());
     process.on("SIGINT", () => { flushAllSync(); process.exit(130); });
     process.on("SIGTERM", () => { flushAllSync(); process.exit(143); });
-    // Observation-only crash reporter: flush + one log entry on
-    // uncaughtException/unhandledRejection. It never exits, re-throws or
-    // changes the host's exit semantics — installed once per process.
+    // Process-fatal reporter: on uncaughtException/unhandledRejection it flushes
+    // rolebox state and writes ONE log entry. An `unhandledRejection` is
+    // observe-only by default; a SOLE-OWNER `uncaughtException` additionally
+    // exits 1 — the status the runtime itself would have used, and the one this
+    // listener would otherwise have suppressed, so a crashed process cannot keep
+    // running. Installed once per process; see ProcessFatalReporter for the
+    // listener-count rule and the opt-outs.
     new ProcessFatalReporter({ flush: flushAllSync }).install();
   }
 

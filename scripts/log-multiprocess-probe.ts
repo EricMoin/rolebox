@@ -114,6 +114,20 @@ export const PROBE_WRITERS = ["worker", "pipeline", "sink"] as const;
 export const FOLLOWER_LATE_RECORD_LIMIT = 0.1;
 
 /**
+ * How long, in milliseconds, the follower may still be behind AFTER the writers
+ * finished before the probe stops waiting and SIGINTs it. The follower is a
+ * 250 ms poll loop, so under the load of a whole CI suite it can need longer
+ * than a fixed grace to deliver the tail of the stream: a fixed `Bun.sleep(800)`
+ * here reported a healthy follower that had simply not caught up yet as LOSS
+ * (macOS CI: `follower-complete` false with `follower-missing` false, i.e.
+ * records still arriving). The wait is on the condition the probe actually
+ * needs — every announced record delivered — and this deadline is what keeps it
+ * BOUNDED: it says when to STOP waiting, so a follower that truly loses records
+ * still fails, and fails promptly. It never changes what the checks count.
+ */
+export const FOLLOWER_CATCH_UP_DEADLINE_MS = 5_000;
+
+/**
  * The floor on "one record" in the rotated-copy bound, in bytes. The probe's own
  * records measure a few hundred bytes (its widest line is reported as
  * `maxRecordBytes`), and this floor covers the widest one measured here. It is a
@@ -396,12 +410,66 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   const env = childEnv(options);
   const script = import.meta.path;
 
+  // Every (writer, seq) pair the writers are about to announce. Built here
+  // because the follower's catch-up wait below waits for this many probe
+  // records; the checks below still pair these keys against the full stream.
+  const expectedKeys: string[] = [];
+  for (const writer of PROBE_WRITERS) for (let seq = 0; seq < records; seq++) expectedKeys.push(keyOf(writer, seq));
+
   // The real CLI follower starts FIRST, so it is already polling when the first
   // record is written: this is the live path an operator uses.
   const follower = Bun.spawn(
     [process.execPath, join(import.meta.dir, "..", "src", "cli", "main.ts"), "logs", "--log-dir", dir, "--json", "--follow"],
     { env, stdout: "pipe", stderr: "pipe" },
   );
+  // The follower's stdout is drained WHILE it runs, not only after it exits: the
+  // probe has to know how far the follower has got (the bounded catch-up wait
+  // below), and a piped stream nobody reads fills up and stalls the writer.
+  // `followerChunks` still accumulates the WHOLE stream, so the accounting below
+  // parses exactly what it parsed before — including everything that arrives
+  // after the writers stopped.
+  const followerChunks: string[] = [];
+  const followerDecoder = new TextDecoder();
+  let followerPending = "";
+  // Probe records the follower has delivered so far, counted with the same
+  // classification the end-of-run parse applies (this channel, a numeric `seq`).
+  // No check reads this number: it only decides when waiting is over.
+  let followerStreamed = 0;
+  // Set when the stream reaches end-of-stream, i.e. when no further record can
+  // arrive and waiting longer could not change the answer.
+  let followerStreamClosed = false;
+  const followerDrained = (async (): Promise<void> => {
+    try {
+      const reader = follower.stdout.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = followerDecoder.decode(value, { stream: true });
+        followerChunks.push(text);
+        followerPending += text;
+        const lines = followerPending.split("\n");
+        followerPending = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.trim().length === 0) continue;
+          try {
+            const record = JSON.parse(line) as Partial<LogRecord>;
+            if (record.channel === PROBE_CHANNEL && typeof record.fields?.seq === "number") followerStreamed += 1;
+          } catch {
+            // Not a record at all: the end-of-run parse counts it as malformed.
+          }
+        }
+      }
+      // Flush the decoder's buffered bytes (a multi-byte character split across
+      // two chunks) into the accumulated stream.
+      const tail = followerDecoder.decode();
+      if (tail.length > 0) followerChunks.push(tail);
+    } catch {
+      // A read error ends the drain; whatever arrived is still checked below, so
+      // a short stream shows up as a failed check rather than a thrown probe.
+    } finally {
+      followerStreamClosed = true;
+    }
+  })();
   await Bun.sleep(250);
 
   // The rotated copies say WHERE rotation happened; this sampler says what the
@@ -449,11 +517,28 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
 
   clearInterval(sampler);
 
-  // Let the follower's next poll (default 250 ms) read the tail, then stop it.
-  await Bun.sleep(800);
+  // The writers are done, but the follower is a 250 ms poll loop: under the load
+  // of a full CI run it can still be behind when the last writer exits. Waiting
+  // a FIXED grace here reported exactly that as LOSS — the macOS run failed
+  // `follower-complete` with `follower-missing` still 0, i.e. records were
+  // arriving, not lost. Wait instead on the condition the probe needs: the
+  // follower has delivered as many probe records as the writers announced
+  // (`expectedKeys.length`, counted as the stream arrived above), and keep
+  // reading until that is true OR the bounded deadline expires OR the stream
+  // itself ends. The deadline decides only WHEN the follower is stopped; what
+  // the checks count is still the full stream read below, including whatever
+  // arrives after the writers stopped.
+  const catchUpDeadline = Date.now() + FOLLOWER_CATCH_UP_DEADLINE_MS;
+  while (!followerStreamClosed && followerStreamed < expectedKeys.length && Date.now() < catchUpDeadline) {
+    await Bun.sleep(25);
+  }
   follower.kill("SIGINT");
   const followerCode = await follower.exited;
-  const [followerOut, followerErr] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
+  // The drain ends at end-of-stream, after the SIGINT: `followerOut` is the same
+  // complete stdout the old `new Response(follower.stdout).text()` read.
+  await followerDrained;
+  const followerOut = followerChunks.join("");
+  const followerErr = await new Response(follower.stderr).text();
 
   // The two other real CLI processes: what files exist, and what a prune would
   // remove. Both are the operator's own commands, run against the same directory.
@@ -516,8 +601,6 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
     const key = keyOf(record.fields.writer, record.fields.seq);
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  const expectedKeys: string[] = [];
-  for (const writer of PROBE_WRITERS) for (let seq = 0; seq < records; seq++) expectedKeys.push(keyOf(writer, seq));
   const missing = expectedKeys.filter((key) => (counts.get(key) ?? 0) === 0);
   const duplicates = [...counts.entries()].filter(([, count]) => count > 1);
   const extra = [...counts.keys()].filter((key) => !expectedKeys.includes(key));

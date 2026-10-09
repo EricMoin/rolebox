@@ -18,6 +18,15 @@ const fastConfig = {
   taskTtlMs: 100,
 };
 
+// A TTL that cannot elapse while a case's assertions run. Used by cases that do
+// REAL asynchronous work (a recovery pass, a sidecar read, a follow-up fetch) but
+// are not about TTL expiry: under CI load `fastConfig`'s 100 ms expired mid-case
+// and the expected `ok` came back `expired`. Cases that DO assert expiry keep
+// `fastConfig` — do not fold this back in.
+const lazyFetchConfig = {
+  taskTtlMs: 60_000,
+};
+
 // ── cwd-store isolation ──────────────────────────────────────────
 //
 // DispatchManager defaults its store directory to process.cwd(), so a manager
@@ -2604,7 +2613,7 @@ describe("recover()", () => {
 
     (client.messages as any).mock.calls.length = 0;
 
-    const manager = makeManager(client, fastConfig);
+    const manager = makeManager(client, lazyFetchConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 

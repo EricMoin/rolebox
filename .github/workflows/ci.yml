@@ -29,6 +29,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # A process-fatal event must NAME ITSELF in the CI log.
+      # src/core/composition.ts installs the ProcessFatalReporter once per test
+      # process, and merely HAVING its `uncaughtException` listener suppresses
+      # the runtime's own crash report, while its one structured record goes to
+      # the rolebox log sink — under the test preload (bunfig.toml `[test]
+      # preload` → tests/helpers/log-dir-preload.ts) a per-pid temp directory no
+      # CI reader opens. ROLEBOX_FATAL_STDERR is the reporter's own designed
+      # switch for exactly this: one line on stderr, which IS the CI log.
+      # Without it a crash outside any test surfaces as a complete, all-green
+      # summary followed by a bare `exit code 1` (windows-latest, run 37891045140).
+      ROLEBOX_FATAL_STDERR: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
