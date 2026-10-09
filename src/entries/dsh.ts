@@ -134,6 +134,7 @@ import { LoopStore } from "../loop/loop-store.ts";
 import { createLoopTools } from "../loop/loop-tools.ts";
 import { applyProjectConfig } from "../project-config.ts";
 import { createSubLogger } from "../logger.ts";
+import { watchLogSource } from "../log/index.ts";
 import { roleFunctionsMap } from "../resolver/registry.ts";
 import type { ResolvedRole } from "../types.ts";
 
@@ -1294,12 +1295,16 @@ export async function apply(
    * Change-signal sink for the web console's `/rolebox/events` channel.
    *
    * A mutable binding rather than a service: the producers below (the loop
-   * coordinator, the graph toolset, the state-directory watcher) are constructed
-   * BEFORE the web route exists, and several of them are optional. Until the
-   * route registers, the sink is a no-op — every producer stays unaware of
-   * whether a console is even connected.
+   * coordinator, the graph toolset, the state-directory watcher and the
+   * log-source watcher) are constructed BEFORE the web route exists, and several
+   * of them are optional. Until the route registers, the sink is a no-op — every
+   * producer stays unaware of whether a console is even connected.
+   *
+   * The reason is purely a label for the console's status line: the client
+   * refetches on EVERY frame, and the route's coalescing keeps only the last
+   * reason in a window, so no consumer may route on it.
    */
-  let notifyRoleboxChanged: (reason: "loop" | "graph" | "file") => void = () => { };
+  let notifyRoleboxChanged: (reason: "loop" | "graph" | "file" | "log") => void = () => { };
   const webServer = probeWebServer(ctx);
   let webRouteRegistered = false;
   let monitorRouteRegistered = false;
@@ -1803,16 +1808,28 @@ export async function apply(
   });
 
   // ── Event-driven console updates ─────────────────────────────────────────
-  // Two producers feed the web console's change channel. None of them polls:
+  // Three file-system/in-process producers feed the web console's change
+  // channel. None of them polls:
   //   - the outcome host reports a settlement / start through
   //     `notifyRoleboxChanged("graph")` (above);
   //   - a debounced watch on the state directory covers what neither hook sees
-  //     — node-level writes, dispatch task files, progress and checkpoints.
+  //     — node-level writes, dispatch task files, progress and checkpoints;
+  //   - a debounced watch on the LOG source wakes the log panel when a record
+  //     lands, so the pane refreshes on the append rather than on its fallback
+  //     poll. It is constructed with NO options, which is exactly what
+  //     `new DshRoleboxLogsWebRoute()` below passes: the watcher resolves the
+  //     location through the reader's own `resolveLogSource`, so it watches
+  //     precisely what the logs route reads and cannot drift from it.
   // The route turns any of them into a coalesced SSE frame; with no console
-  // connected, both cost a function call and nothing else.
+  // connected, each costs a function call and nothing else.
   routeDisposers.push(
     watchRoleboxState(process.cwd(), () => {
       notifyRoleboxChanged("file");
+    }),
+  );
+  routeDisposers.push(
+    watchLogSource(undefined, () => {
+      notifyRoleboxChanged("log");
     }),
   );
 

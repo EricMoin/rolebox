@@ -96,10 +96,21 @@ export interface RoleboxMonitorErrorBody {
 }
 
 /**
- * Why the snapshot moved. Purely informative: the client refetches the whole
- * composed snapshot either way, and the reason only labels the status line.
+ * Why the snapshot moved. PURELY INFORMATIVE: every consumer refetches the whole
+ * composed snapshot on any frame, and the reason only labels the status line —
+ * NO CONSUMER MAY ROUTE ON IT. Two properties make routing on it wrong rather
+ * than merely redundant:
+ *
+ *   1. it is LOSSY. {@link DshRoleboxMonitorWebRoute.notifyChanged} coalesces a
+ *      burst to at most one frame per {@link EVENT_COALESCE_MS} and keeps only
+ *      the LAST reason in the window, so a `"log"` change arriving behind a
+ *      `"graph"` one is announced as `"log"` alone;
+ *   2. it is a producer's own label, not a partition of the state. A watcher
+ *      signal says "something in this location moved", and a consumer that
+ *      wanted only some reasons would silently drop the wake-ups it filtered
+ *      out.
  */
-export type RoleboxChangeReason = "loop" | "graph" | "file";
+export type RoleboxChangeReason = "loop" | "graph" | "file" | "log";
 
 /**
  * One frame of the `/rolebox/events` channel.
