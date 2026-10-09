@@ -18,6 +18,8 @@ export function buildAttemptDeliveryPrompt(
   inputView?: DeliveredInputView,
 ): string {
   const blocks = [
+    "",
+    "",
     "## Assigned task",
     "",
     request.prompt,

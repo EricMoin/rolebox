@@ -30,6 +30,14 @@ function viewOf(...payloads: AcceptedData[]): DeliveredInputView {
 }
 
 describe("buildAttemptDeliveryPrompt", () => {
+  it("separates the assigned task from the preceding section", () => {
+    const prompt = buildAttemptDeliveryPrompt(REQUEST);
+
+    expect("Previous section." + prompt).toStartWith(
+      "Previous section.\n\n## Assigned task\n\nVerify the change.",
+    );
+  });
+
   it("hands over a short reported summary and points to the complete accepted data", () => {
     const summary = "Changed service names.\n" + "Long implementation claim. ".repeat(30);
     const view = viewOf({
@@ -44,7 +52,7 @@ describe("buildAttemptDeliveryPrompt", () => {
 
     const prompt = buildAttemptDeliveryPrompt(REQUEST, view);
 
-    expect(prompt).toStartWith("## Assigned task\n\nVerify the change.\n\n---\n");
+    expect(prompt).toStartWith("\n\n## Assigned task\n\nVerify the change.\n\n---\n");
     expect(prompt).toContain("## Accepted upstream results");
     expect(prompt).toContain('Full results manifest: "/delivery/review/inputs.json"');
     expect(prompt).toContain('Producer: "work-0"; outcome: "done"; attempt: "work-0#1"');
