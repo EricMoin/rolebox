@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -229,7 +229,7 @@ describe("pollLogsStore — incremental polling", () => {
 
   it("reports a reader's malformed line as skippedLines and keeps reading", () => {
     writeRecords([rec(1_000, "alpha", "ok")]);
-    Bun.write(join(dir, "alpha.log"), `not json at all\n${JSON.stringify(rec(2_000, "alpha", "after"))}\n`);
+    writeFileSync(join(dir, "alpha.log"), `not json at all\n${JSON.stringify(rec(2_000, "alpha", "after"))}\n`);
 
     const { result } = pollLogsStore(realStore());
 
