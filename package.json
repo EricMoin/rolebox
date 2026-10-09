@@ -1,13 +1,13 @@
 {
   "name": "rolebox",
-  "version": "1.10.0",
+  "version": "2.0.0-alpha.1",
   "description": "Agent plugin — define custom AI agent roles with per-role prompts, models, skills, and permissions",
   "engines": {
     "opencode": "^1.0.0"
   },
   "type": "module",
   "bin": {
-    "rolebox": "./dist/cli/main.js"
+    "rolebox": "dist/cli/main.js"
   },
   "main": "dist/entries/opencode.js",
   "types": "dist/entries/opencode.d.ts",
@@ -112,7 +112,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/EricMoin/rolebox"
+    "url": "git+https://github.com/EricMoin/rolebox.git"
   },
   "dependencies": {
     "@clack/prompts": "^0.9.0",
