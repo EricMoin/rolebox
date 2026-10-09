@@ -19,6 +19,10 @@
 //   resolveLogSource(options)         WHERE list/read/follow/prune actually look
 //                                     (an explicit logDir/logFile beats the
 //                                     environment)
+//   watchLogSource(options, onChange) watch that SAME location: one debounced
+//                                     signal per burst of appends, with a
+//                                     disposer (a no-op when nothing can be
+//                                     watched)
 //   readLogRecords(query)             filtered records back out of those files
 //   readLogView(query)                the same records as a POLLABLE view: one
 //                                     window plus a cursor for the next call,
@@ -108,6 +112,12 @@ export type {
   PruneLogsResult,
   PruneRemoval,
 } from "./read.ts";
+
+// The CHANGE EDGE of the same location, resolved through the same
+// resolveLogSource: a live surface refreshes when a record lands instead of
+// only on its fallback poll.
+export { LOG_WATCH_DEBOUNCE_MS, watchLogSource } from "./watch.ts";
+export type { WatchLogSourceOptions } from "./watch.ts";
 
 // The pollable view: the read layer plus a cursor, for the live surfaces.
 export { DEFAULT_LOG_VIEW_LIMIT, readLogView } from "./view.ts";
