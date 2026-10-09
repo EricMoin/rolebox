@@ -156,9 +156,11 @@ the copy being made.
 **The wait follows the holder's progress, not a stopwatch.** While it walks the
 retention ladder, the process holding the rotation lock refreshes the lock file's
 mtime at least every 5 ms, and a waiting writer keeps waiting while that mtime is
-younger than 25 ms: a rotation that is slow but moving is waited out for as long
-as it takes, and only one that has *stopped* for a whole window releases the
-writer — one record per stalled lock instance, not one per record. The give-up is
+younger than 25 ms. After that window, the writer also checks the lock owner's
+PID: a live process may have been paused by the scheduler, so the writer waits
+until the lock disappears or reaches the 10 s stale-lock limit. A dead or
+demonstrably dead owner releases the writer — one record per stalled lock instance,
+not one per record. The give-up is
 remembered per lock instance (inode + mtime), so a resumed heartbeat or a replaced
 lock arms the wait again. An earlier version gave up **permanently** after 25 ms,
 and that one flag turned a single slow rotation into a process that appended into
@@ -683,7 +685,7 @@ and which direction new call sites should take, is
   ~1 µs): 0.022 ms mean, 0.042 ms p99 over 20,000 records, still about 12× under
   that budget. A record that arrives while *another process* is rotating waits
   for that rotation while the holder keeps refreshing its lock (a 5 ms heartbeat;
-  25 ms without progress releases the waiter), which is the same rotation the
+  25 ms without progress triggers a liveness check), which is the same rotation the
   process holding the lock is already performing. The numbers, the
   10,000-record burst and the revisit trigger are in
   [logging-architecture.md](logging-architecture.md#what-one-write-costs-measured).

@@ -94,8 +94,10 @@
 // at least every ROTATE_HEARTBEAT_MS while it works — the slot scan and the
 // shift both announce — and a waiter keeps waiting while that mtime is younger
 // than ROTATE_WAIT_MS: a slow rotation is waited out for as long as it keeps
-// moving, and only one that has stopped for a whole window (five missed
-// heartbeats) releases the waiter. The give-up is remembered per lock STAMP
+// moving. After five missed heartbeats, the waiter checks whether the owner is
+// alive: a live owner may merely have been descheduled, so it is waited for up
+// to the stale-lock limit; only a demonstrably dead owner releases the waiter.
+// The give-up is remembered per lock STAMP
 // (inode + mtime), so the holder's next refresh or a replaced lock file arms the
 // wait again; it is never a property of this process.
 //
@@ -134,7 +136,7 @@
 // "What one write costs, measured". There is no asynchronous write path behind
 // a flag; this is the decision, not a stage still to come.
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, utimesSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -176,9 +178,10 @@ export const ROTATE_LOCK_STALE_MS = 10_000;
  * appending anyway. Progress is the lock file's mtime, which the holder
  * refreshes at least every {@link ROTATE_HEARTBEAT_MS} while it walks the
  * retention ladder; a writer therefore stays for a rotation that is slow but
- * moving, and leaves only for one that has stopped. It is deliberately a tenth
- * of {@link ROTATE_LOCK_STALE_MS}: a holder that has stalled costs a writer one
- * window per lock instance, not ten seconds of windows.
+ * moving, and checks the owner's PID when the heartbeat stops. It is deliberately a tenth
+ * of {@link ROTATE_LOCK_STALE_MS}: a dead holder costs a writer one window per
+ * lock instance, while a live but stalled holder is waited for until the stale
+ * limit.
  */
 export const ROTATE_WAIT_MS = 25;
 
@@ -415,6 +418,18 @@ function lockStampKey(stamp: LockStamp): string {
   return `${stamp.ino}:${stamp.mtimeMs}`;
 }
 
+/** An unknown owner may still be rotating; only ESRCH proves it is gone. */
+function rotationOwnerMayBeAlive(lockPath: string): boolean {
+  try {
+    const pid = Number(readFileSync(lockPath, "utf8"));
+    if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /** True when a lock file is old enough to be the leftover of a dead process. */
 function rotationLockIsStale(lockPath: string): boolean {
   try {
@@ -475,16 +490,18 @@ function acquireRotationLock(path: string): RotationLock | undefined {
  * appends into the file being renamed for as long as that rotation lasts — which
  * is how a rotated copy once reached 40x the limit. The heartbeat separates the
  * cases: a rotation that is slow but moving is waited out however long it takes,
- * and only a lock that has not moved for ROTATE_WAIT_MS is abandoned. A rotation
- * is finite — the ladder is bounded by `retain` — so waiting for progress is
- * waiting for a bounded piece of work.
+ * and only a lock that has not moved for ROTATE_WAIT_MS and whose owner is known
+ * to be gone is abandoned. A runnable owner can be descheduled longer than that
+ * window on a busy machine, so keep waiting for it until the stale-lock limit.
  */
 function waitForRotation(path: string): LockStamp | undefined {
   const lockPath = path + ROTATE_LOCK_SUFFIX;
   for (;;) {
     const stamp = lockStamp(lockPath);
     if (stamp === undefined) return undefined;
-    if (Date.now() - stamp.mtimeMs > ROTATE_WAIT_MS) return stamp;
+    const age = Date.now() - stamp.mtimeMs;
+    if (age > ROTATE_LOCK_STALE_MS) return stamp;
+    if (age > ROTATE_WAIT_MS && !rotationOwnerMayBeAlive(lockPath)) return stamp;
     sleepSync(ROTATE_WAIT_SLICE_MS);
   }
 }
@@ -662,9 +679,10 @@ export function createFileSink(options?: FileSinkOptions): FileSink {
           // The wait follows the holder's HEARTBEAT, and the give-up is scoped to
           // the lock instance it gave up on: while the holder keeps moving this
           // record appends nothing at all, and when the holder has not moved for
-          // ROTATE_WAIT_MS the stamp is remembered so the next record does not
-          // pay the same window again. Progress resumed, or a replaced lock file,
-          // is a different stamp and is waited for again.
+          // ROTATE_WAIT_MS and its owner is known to be gone, the stamp is
+          // remembered so the next record does not pay the same window again.
+          // Progress resumed, or a replaced lock file, is a different stamp
+          // and is waited for again.
           const stamp = lockStamp(state.path + ROTATE_LOCK_SUFFIX);
           if (stamp === undefined) {
             stalledRotation = undefined;

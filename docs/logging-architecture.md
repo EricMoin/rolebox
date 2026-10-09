@@ -327,9 +327,10 @@ queues a second rotation behind a live one. A lock older than
 keeps the copy bound when a rotation is slow: the holder refreshes its lock's
 mtime at least every `ROTATE_HEARTBEAT_MS` (5 ms) while it scans slots and
 shifts copies, and a writer keeps waiting while that mtime is younger than
-`ROTATE_WAIT_MS` (25 ms) — five missed heartbeats. A slow rotation is therefore
-waited out for as long as it keeps moving, and only a rotation that has
-*stopped* releases the writer. The give-up is remembered per lock *stamp*
+`ROTATE_WAIT_MS` (25 ms) — five missed heartbeats. The waiter then checks the
+lock owner's PID: a live owner may be descheduled, so it is waited out until
+the lock disappears or reaches the 10 s stale-lock limit. A dead or
+demonstrably dead owner releases the writer. The give-up is remembered per lock *stamp*
 (inode + mtime), so the holder's next refresh, or a replaced lock file, arms the
 wait again; it used to be a permanent per-process flag, and that one difference
 let a single slow rotation turn a process into a writer that appended into every
@@ -354,10 +355,10 @@ rotates still lands in the copy being made: the bound is the limit **plus one
 record per concurrent writer**, which is why the numbers above carry the bytes
 they overshoot by and not just a fraction (about +0.5× at a 1 KB limit with
 ~280-byte records). The other residual is a holder that has *stopped* progressing
-for a whole `ROTATE_WAIT_MS`: the waiter appends — one stalled record per stalled
-lock instance, not one per record — because blocking a caller for as long as an
-unresponsive process holds a lock is worse than a file that is briefly over its
-limit, and `ROTATE_LOCK_STALE_MS` breaks that lock and resumes rotation. Measured
+for a whole `ROTATE_WAIT_MS` and whose owner is demonstrably dead: the
+waiter appends — one stalled record per stalled lock instance, not one per record.
+A live owner is waited out up to `ROTATE_LOCK_STALE_MS`, which breaks a stale lock
+and resumes rotation. Measured
 on the deep-ladder load that broke the stopwatch version (three real processes,
 one channel, a 1 KB limit, `RETAIN` 4096, writers back to back): the worst
 rotated copy fell from **27.6×** the limit (28,300 B) to **1.58–1.70×**

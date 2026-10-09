@@ -535,6 +535,35 @@ describe("file sink", () => {
     sink.close();
   });
 
+  it("keeps waiting when a live rotation holder misses the heartbeat window", async () => {
+    const sink = createFileSink({ dir: state.dir, maxBytes: 1, retain: 3 });
+    const path = sink.pathFor("paused");
+    const lock = path + ROTATE_LOCK_SUFFIX;
+    sink(makeRecord({ level: "info", message: "before", channel: "paused" }));
+
+    const holder = spawnLockHolder([
+      "--mode", "hold-still", "--dir", state.dir, "--channel", "paused", "--hold-ms", "400",
+    ]);
+    try {
+      const appeared = Date.now() + 10_000;
+      while (!existsSync(lock) && Date.now() < appeared) await Bun.sleep(1);
+      expect(existsSync(lock)).toBe(true);
+
+      const started = Date.now();
+      sink(makeRecord({ level: "info", message: "during", channel: "paused" }));
+      expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+      expect(existsSync(lock)).toBe(false);
+    } finally {
+      await holder.child.exited;
+      rmSync(lock, { force: true });
+    }
+
+    expect(await holder.stderr()).toBe("");
+    expect(holder.child.exitCode).toBe(0);
+    expect(readFileSync(path, "utf8")).toContain('"during"');
+    sink.close();
+  });
+
   it("refreshes its lock while a long rotation walks the ladder", async () => {
     // THE HEARTBEAT, FROM THE HOLDER'S SIDE. A deep ladder is the slow rotation
     // a waiter must not mistake for a dead one, so the holder announces its

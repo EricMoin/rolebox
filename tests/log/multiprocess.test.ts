@@ -60,6 +60,7 @@ describe("multi-process log writes", () => {
         run.checks,
         `follower=${run.followerRecords}/${run.expected} missing=${run.followerMissing} ` +
           `duplicateRecords=${run.followerDuplicateRecords} late=${run.followerLateRecords} ` +
+          `maxRotatedBytes=${run.maxRotatedBytes} rotationBoundBytes=${run.rotationBoundBytes} ` +
           `elapsedMs=${run.elapsedMs}`,
       ).toEqual({
         children: true,

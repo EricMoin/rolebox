@@ -10,6 +10,8 @@
 //                  while it is held, then remove it. This is a rotation that is
 //                  slow but PROGRESSING — what a waiting sink must stay for,
 //                  however long it takes.
+//   --mode hold-still  hold a live lock without updating its mtime, to model a
+//                  holder paused by the scheduler.
 //   --mode rotate  run ONE real record through createFileSink against the ladder
 //                  the parent built. This is the holder side of the heartbeat:
 //                  the lock's mtime moves while the walk runs.
@@ -39,17 +41,20 @@ const channel = args.get("channel") ?? "held";
 const path = join(dir, logChannelFileName(channel));
 const lock = path + ROTATE_LOCK_SUFFIX;
 
-if ((args.get("mode") ?? "hold") === "hold") {
+const mode = args.get("mode") ?? "hold";
+if (mode === "hold" || mode === "hold-still") {
   const holdMs = Number(args.get("hold-ms") ?? "400");
-  // Tick FASTER than the production heartbeat so a scheduling hiccup cannot
-  // make a holder that is genuinely alive look stalled to the sink under test.
+  // In hold mode, tick faster than the production heartbeat. The still mode
+  // leaves mtime unchanged to model a descheduled owner.
   const tickMs = Math.max(1, Math.floor(ROTATE_HEARTBEAT_MS / 5));
   writeFileSync(lock, String(process.pid), "utf8");
   const deadline = Date.now() + holdMs;
   while (Date.now() < deadline) {
     Bun.sleepSync(tickMs);
-    const now = new Date();
-    utimesSync(lock, now, now);
+    if (mode === "hold") {
+      const now = new Date();
+      utimesSync(lock, now, now);
+    }
   }
   rmSync(lock, { force: true });
 } else {
