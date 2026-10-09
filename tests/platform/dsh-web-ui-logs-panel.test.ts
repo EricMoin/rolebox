@@ -11,10 +11,13 @@
  *   1. WIRE — the panel polls `GET /rolebox/logs`, sends the window size on the
  *      first request, hands the returned cursor back on every later one, and
  *      tolerates a page whose records are partly unreadable.
- *   2. STREAM CONTROL — polling happens only while the document is visible and
- *      the pane is unpaused; a hidden tab tears the interval down, Resume
- *      continues from the SAME cursor, and the buffer is bounded with the
- *      dropped count reported.
+ *   2. STREAM CONTROL — refreshing happens only while the document is visible
+ *      and the pane is unpaused; a hidden tab tears the change channel AND the
+ *      fallback interval down, Resume continues from the SAME cursor, a
+ *      `changed` frame refreshes immediately whatever reason it carries, and a
+ *      trigger that lands during an in-flight fetch is DEFERRED to that fetch's
+ *      `finally` rather than dropped. The buffer is bounded with the dropped
+ *      count reported.
  *   3. READINGS — time, level chip, channel, code, scope, fields and the
  *      message are all rendered, and the pane prints the SOURCE the server
  *      actually read rather than a guess.
@@ -29,10 +32,12 @@
  * does. The double is STATEFUL: a mini-React (hook slots per component
  * instance, synchronous re-render on `setState`, effect flush with dependency
  * comparison and cleanup) plus a virtual-DOM tree with query helpers. On top of
- * it this file installs three deterministic seams the monitor suite does not
+ * it this file installs four deterministic seams the monitor suite does not
  * need: a TIMER double (the panel's own `setInterval` is the thing under test),
- * a `document` double (visibility), and a queue-driven `fetch` double (the
- * polling sequence).
+ * a `document` double (visibility), a queue-driven `fetch` double (the polling
+ * sequence, whose requests can be HELD open so an in-flight fetch is
+ * observable), and an `EventSource` double (the change channel — Bun ships a
+ * real global, so installing the double is what keeps a test from dialling).
  *
  * @module
  */
@@ -278,11 +283,76 @@ function installDocument(): FakeDocument {
   return fakeDocument;
 }
 
+// ── EventSource double (the change channel) ────────────────────────────────
+
+/**
+ * Controllable `EventSource` double.
+ *
+ * The runtime DOES define a global `EventSource` (Bun ships one), so a test that
+ * leaves it alone would dial a real connection; installing this double is what
+ * makes the change channel observable and deterministic. The panel opens a
+ * channel per mounted-and-live effect, so the suite reads the LAST instance
+ * (`eventSource()`) and keeps them all for the teardown assertions.
+ */
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  static reset(): void {
+    FakeEventSource.instances = [];
+  }
+  readonly url: string;
+  closed = false;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  constructor(url: string) {
+    this.url = url;
+    FakeEventSource.instances.push(this);
+  }
+  close(): void {
+    this.closed = true;
+  }
+  /** The channel dropped (the browser retries on its own). */
+  drop(): void {
+    this.onerror?.();
+  }
+  /** One frame from the host. */
+  emit(frame: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(frame) });
+  }
+  /** One RAW frame body, exactly as the wire carried it (malformed included). */
+  raw(data: string): void {
+    this.onmessage?.({ data });
+  }
+}
+
+/** Install the double (the panel's own `typeof EventSource` guard is the fallback path). */
+function installEventSource(): void {
+  (globalThis as { EventSource?: unknown }).EventSource = FakeEventSource;
+  FakeEventSource.reset();
+}
+
+/** Remove the global entirely, to exercise the no-channel fallback. */
+function removeEventSource(): void {
+  delete (globalThis as { EventSource?: unknown }).EventSource;
+  FakeEventSource.reset();
+}
+
+/** The channel the panel most recently opened. */
+function eventSource(): FakeEventSource {
+  return FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+}
+
 // ── fetch double (a queue of pages) ────────────────────────────────────────
 
 interface PageSpec {
   status?: number;
   body?: unknown;
+  /**
+   * Keep the request in flight until {@link releaseHeld} runs, so a test can
+   * place a trigger INSIDE an open fetch (the panel promises never two in
+   * flight, and never a dropped wake-up).
+   */
+  hold?: boolean;
 }
 
 const FIXTURE_SOURCE = { kind: "dir", path: "/tmp/rolebox-fixture-logs" };
@@ -332,14 +402,29 @@ function fakeResponse(status: number, body: unknown): Response {
   } as Response;
 }
 
+/** Resolvers of every held request, in the order the requests were made. */
+const held: Array<() => void> = [];
+
 globalThis.fetch = ((input: unknown, init?: RequestInit) => {
   const url = String(input);
   calls.push(url);
   inits.push(init);
   const next = queue.shift();
   if (next === undefined) return Promise.resolve(fakeResponse(200, emptyPage()));
-  return Promise.resolve(fakeResponse(next.status ?? 200, next.body ?? emptyPage()));
+  const response = fakeResponse(next.status ?? 200, next.body ?? emptyPage());
+  if (next.hold === true) {
+    return new Promise<Response>((resolve) => {
+      held.push(() => resolve(response));
+    });
+  }
+  return Promise.resolve(response);
 }) as typeof fetch;
+
+/** Settle every held request, then flush the chain its answer starts. */
+async function releaseHeld(): Promise<void> {
+  for (const release of held.splice(0)) release();
+  await settle();
+}
 
 // ── Fixtures and helpers ───────────────────────────────────────────────────
 
@@ -370,7 +455,9 @@ beforeEach(() => {
   calls.length = 0;
   inits.length = 0;
   intervals.clear();
+  held.length = 0;
   queue = [];
+  installEventSource();
 });
 
 /** Flush the microtask chain (fetch → json → setState) before asserting. */
@@ -688,6 +775,161 @@ describe("RoleboxLogsPanel", () => {
 
       expect(calls).toHaveLength(2);
       expect(rowTexts().join(" ")).toContain("manual");
+    });
+  });
+
+  describe("change channel (event-driven refresh)", () => {
+    it("refreshes on a `changed` frame long before the fallback interval", async () => {
+      queue = [{ body: page([rec()], "c1") }];
+      mountPanel();
+      await settle();
+      expect(calls).toHaveLength(1);
+
+      // The channel is the PRIMARY trigger and the fallback is deliberately
+      // slow: this test never ticks an interval, so every extra request below
+      // is the frame's.
+      expect(panel.POLL_MS).toBeGreaterThan(10_000);
+      const source = eventSource();
+      expect(source.url).toBe(panel.EVENTS_ENDPOINT);
+
+      queue = [{ body: page([rec({ time: T0 + 1_000, message: "pushed" })], "c2") }];
+      source.emit({ type: "changed", at: Date.now(), reason: "log" });
+      await settle();
+
+      expect(calls).toEqual(["/rolebox/logs?limit=200", "/rolebox/logs?limit=200&cursor=c1"]);
+      expect(rowTexts().join(" ")).toContain("pushed");
+
+      // ANY reason refreshes: the channel coalesces a burst and keeps only the
+      // LAST reason, so a "log"-only filter would drop this wake-up.
+      queue = [{ body: page([rec({ time: T0 + 2_000, message: "graph moved" })], "c3") }];
+      source.emit({ type: "changed", at: Date.now(), reason: "graph" });
+      await settle();
+
+      expect(calls).toHaveLength(3);
+      expect(calls[2]).toBe("/rolebox/logs?limit=200&cursor=c2");
+      expect(rowTexts().join(" ")).toContain("graph moved");
+    });
+
+    it("ignores frames it does not understand, and survives a dropped channel", async () => {
+      queue = [{ body: page([rec()], "c1") }];
+      mountPanel();
+      await settle();
+
+      const source = eventSource();
+      source.emit({ type: "hello", coalesceMs: 250 });
+      source.emit({ type: "something-else" });
+      source.emit("not an object");
+      source.raw("{ this is not json");
+      source.drop(); // A dropped channel reconnects itself; the interval stays in charge.
+      await settle();
+
+      expect(calls).toHaveLength(1);
+
+      // The fallback still works after the drop — that is the whole point of
+      // leaving the interval in charge.
+      queue = [{ body: page([rec({ time: T0 + 1_000, message: "after drop" })], "c2") }];
+      await tick();
+      expect(calls).toHaveLength(2);
+      expect(rowTexts().join(" ")).toContain("after drop");
+    });
+
+    it("defers a trigger that lands during an in-flight fetch, and never overlaps", async () => {
+      queue = [{ body: page([rec({ time: T0, message: "first" })], "c1"), hold: true }];
+      mountPanel();
+      await settle();
+
+      // The mount poll is OPEN: exactly one request is in flight.
+      expect(calls).toHaveLength(1);
+
+      const source = eventSource();
+      // A burst of frames inside that window is ONE deferred poll — not a
+      // second request, and not a lost wake-up.
+      source.emit({ type: "changed", at: Date.now(), reason: "log" });
+      source.emit({ type: "changed", at: Date.now(), reason: "file" });
+      await settle();
+      expect(calls).toHaveLength(1);
+
+      queue = [{ body: page([rec({ time: T0 + 1_000, message: "second" })], "c2") }];
+      await releaseHeld();
+
+      // Exactly one more request, from the cursor the first answer returned.
+      expect(calls).toEqual(["/rolebox/logs?limit=200", "/rolebox/logs?limit=200&cursor=c1"]);
+      expect(rowTexts().join(" ")).toContain("second");
+    });
+
+    it("drains a wake-up recorded by the NEXT run of the effect (manual refresh)", async () => {
+      queue = [{ body: page([rec({ time: T0, message: "first" })], "c1"), hold: true }];
+      mountPanel();
+      await settle();
+
+      // The mount poll is OPEN, and the user presses Refresh: the refresh token
+      // re-runs the effect, so the wake-up is recorded by a NEW run while the
+      // request that must drain it belongs to the OLD one. Nothing may overlap,
+      // and nothing may be lost — with the fallback interval this slow, a
+      // dropped wake-up is 15 seconds of a stale pane.
+      queue = [{ body: page([rec({ time: T0 + 1_000, message: "after refresh" })], "c2") }];
+      click(refreshButton());
+      await settle();
+      expect(calls).toHaveLength(1);
+
+      await releaseHeld();
+
+      // The old request's answer was DISCARDED (a cancelled run writes no
+      // state, cursor included), so the drained poll re-reads from the same
+      // cursorless position — and it is exactly one more request.
+      expect(calls).toEqual(["/rolebox/logs?limit=200", "/rolebox/logs?limit=200"]);
+      expect(rowTexts().join(" ")).toContain("after refresh");
+    });
+
+    it("keeps an interval-only fallback where the platform has no EventSource", async () => {
+      removeEventSource();
+      queue = [{ body: page([rec()], "c1") }];
+      mountPanel();
+      await settle();
+
+      // No channel was opened, and the pane still reads immediately.
+      expect(FakeEventSource.instances).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+
+      queue = [{ body: page([rec({ time: T0 + 1_000, message: "ticked" })], "c2") }];
+      await tick();
+
+      expect(calls).toHaveLength(2);
+      expect(rowTexts().join(" ")).toContain("ticked");
+    });
+
+    it("opens the channel only while visible and unpaused, and closes it on teardown", async () => {
+      queue = [{ body: page([rec()], "c1") }];
+      mountPanel();
+      await settle();
+
+      const first = eventSource();
+      expect(FakeEventSource.instances).toHaveLength(1);
+      expect(first.url).toBe(panel.EVENTS_ENDPOINT);
+      expect(first.closed).toBe(false);
+
+      // Hidden: the channel goes down with the interval...
+      fakeDocument.hide();
+      await settle();
+      expect(first.closed).toBe(true);
+      expect(intervals.size).toBe(0);
+
+      // ...and coming back opens a FRESH one (the effect re-runs).
+      fakeDocument.show();
+      await settle();
+      expect(FakeEventSource.instances).toHaveLength(2);
+      const second = eventSource();
+      expect(second.closed).toBe(false);
+
+      // Paused: gone too, and Resume opens a third.
+      click(pauseButton());
+      await settle();
+      expect(second.closed).toBe(true);
+
+      click(resumeButton());
+      await settle();
+      expect(FakeEventSource.instances).toHaveLength(3);
+      expect(eventSource().closed).toBe(false);
     });
   });
 

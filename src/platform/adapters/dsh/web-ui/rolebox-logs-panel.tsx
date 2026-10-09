@@ -22,17 +22,27 @@
  * holds exactly one string between requests — the cursor. Nothing in this file
  * imports `src/log/**`, a node builtin, or any new dependency.
  *
- * ── Polling semantics (the contract this component owns) ───────────────────
+ * ── Refresh semantics (the contract this component owns) ───────────────────
  *
  *   - CURSOR POLLING. The first poll sends no cursor and paints the newest
  *     window. Every later poll sends the cursor the previous answer returned
  *     and APPENDS what came after it, so a record is painted once and there is
  *     no gap between two polls (that is the view layer's own cursor contract;
  *     this component only has to keep the string and hand it back).
- *   - VISIBLE ONLY. The poll interval exists only while the document is
- *     visible; a `visibilitychange` to `hidden` tears it down, and returning to
- *     the tab starts a fresh interval AND a poll. A host with no `document`
- *     (this component's tests, a non-DOM renderer) counts as visible.
+ *   - CHANGE-DRIVEN, WITH A SAFETY NET. `GET /rolebox/events` is the PRIMARY
+ *     trigger: ANY `changed` frame polls the route, so an append lands about one
+ *     debounce later instead of up to {@link POLL_MS} later. `POLL_MS` stays as
+ *     the fallback for a host where the channel cannot fire (no `EventSource`),
+ *     and a trigger is never lost: one arriving while a poll is in flight
+ *     records exactly ONE pending poll, run when that poll settles. The frame's
+ *     `reason` is deliberately not filtered on — the channel coalesces a burst
+ *     and keeps only the LAST reason, so a `"log"`-only filter would silently
+ *     drop wake-ups.
+ *   - VISIBLE ONLY. The channel AND the interval exist only while the document
+ *     is visible; a `visibilitychange` to `hidden` tears both down, and
+ *     returning to the tab starts a fresh channel, a fresh interval AND a poll.
+ *     A host with no `document` (this component's tests, a non-DOM renderer)
+ *     counts as visible.
  *   - PAUSABLE. The Pause control stops the stream while leaving the buffer on
  *     screen; Resume continues from the SAME cursor, so a pause never costs or
  *     repeats records. Manual Refresh polls once, immediately, without waiting
@@ -67,15 +77,25 @@ import { logsClass } from "./rolebox-logs-panel.css.ts";
 export const LOGS_ENDPOINT = "/rolebox/logs";
 
 /**
- * How often a visible, unpaused panel polls.
- *
- * Two seconds is the compromise the surface is built around: fast enough that a
- * graph's progress reads as live, slow enough that a pane left open costs one
- * request per two seconds rather than a stream. The cursor is what makes the
- * cadence a presentation choice instead of a correctness one — a slower poll
- * shows the same records, just later.
+ * The shared change channel (`GET /rolebox/events`, registered by
+ * web-rolebox-monitor-route.ts). A frame carries a SIGNAL, never a payload: a
+ * `changed` frame says "what you are holding is stale", and this panel answers
+ * by polling {@link LOGS_ENDPOINT}.
  */
-export const POLL_MS = 2_000;
+export const EVENTS_ENDPOINT = "/rolebox/events";
+
+/**
+ * The FALLBACK cadence for hosts where the change channel cannot fire (no
+ * `EventSource`, no `fs.watch`, a dropped connection), and a slow re-read for a
+ * frame that was missed.
+ *
+ * The channel is the primary trigger — an append wakes the pane about one
+ * debounce later — so this interval is deliberately slow: fifteen seconds is a
+ * safety net, not a cadence. The cursor is what makes the number a presentation
+ * choice instead of a correctness one: a slower tick shows the same records,
+ * just later, and a tick with nothing new costs one incremental scan.
+ */
+export const POLL_MS = 15_000;
 
 /** How many records one poll asks for. */
 export const POLL_LIMIT = 200;
@@ -190,6 +210,21 @@ function toMessage(err: unknown): string {
 /** Structural record guard. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * True for a `changed` frame of the change channel, false for anything else
+ * (`hello`, a malformed body, a frame this build does not know). The frame's
+ * REASON is not read here on purpose — see the module comment.
+ */
+function isChangedFrame(data: unknown): boolean {
+  if (typeof data !== "string" || data.length === 0) return false;
+  try {
+    const parsed: unknown = JSON.parse(data);
+    return isRecord(parsed) && parsed.type === "changed";
+  } catch {
+    return false;
+  }
 }
 
 /** True when the document (when there is one) is visible. */
@@ -409,6 +444,24 @@ export function RoleboxLogsPanel(props: RoleboxLogsPanelProps) {
   const bufferRef = useRef<LogsPanelRecord[]>([]);
   /** One poll in flight at a time. */
   const busyRef = useRef(false);
+  /**
+   * A wake-up that arrived while a request was in flight, waiting for that
+   * request to settle.
+   *
+   * SHARED across runs of the refresh effect rather than local to one: the
+   * effect re-runs on a manual refresh, a filter change, a pause and a
+   * visibility change, so the request that drains this flag can belong to an
+   * EARLIER run while the wake-up belongs to the current one.
+   */
+  const pendingPollRef = useRef(false);
+  /**
+   * The live run's poll, which an in-flight run drains a deferred wake-up into.
+   *
+   * `null` while the pane is paused or hidden — the runs that start no request
+   * and open no channel — so a deferred wake-up can never restart polling on a
+   * surface that was told to stop.
+   */
+  const pollRef = useRef<(() => Promise<void>) | null>(null);
   /** The filter the buffer belongs to; a change starts a new view. */
   const filterRef = useRef<string>("");
 
@@ -439,11 +492,12 @@ export function RoleboxLogsPanel(props: RoleboxLogsPanelProps) {
   }, []);
 
   /**
-   * The poll loop. One effect owns the whole lifecycle: it paints immediately,
-   * then keeps an interval only while the pane is visible and unpaused. The
-   * effect re-runs on pause/resume, on visibility, on a filter change and on a
-   * manual refresh; a filter change additionally RESETS the view (the cursor
-   * names a position in the previous filter's stream).
+   * The refresh loop. One effect owns the whole lifecycle: it paints
+   * immediately, then keeps the change channel AND the fallback interval only
+   * while the pane is visible and unpaused. The effect re-runs on pause/resume,
+   * on visibility, on a filter change and on a manual refresh; a filter change
+   * additionally RESETS the view (the cursor names a position in the previous
+   * filter's stream).
    */
   useEffect(() => {
     let cancelled = false;
@@ -466,7 +520,13 @@ export function RoleboxLogsPanel(props: RoleboxLogsPanelProps) {
 
     /** One poll. Never throws, never overlaps another, never sets state when stale. */
     const poll = async (): Promise<void> => {
-      if (cancelled || busyRef.current) return;
+      if (cancelled) return;
+      if (busyRef.current) {
+        // Not a second request and not a dropped wake-up: exactly ONE poll is
+        // remembered, and whichever request is in flight runs it on settling.
+        pendingPollRef.current = true;
+        return;
+      }
       busyRef.current = true;
       setLoading(true);
       try {
@@ -503,23 +563,60 @@ export function RoleboxLogsPanel(props: RoleboxLogsPanelProps) {
       } finally {
         busyRef.current = false;
         if (!cancelled) setLoading(false);
+        // The deferred wake-up runs HERE, after the request settled: one more
+        // poll, never an overlapping one — and through the LIVE run's poll, not
+        // this closure's. A run this request no longer belongs to (a manual
+        // refresh, a filter change, a pause) is what recorded the wake-up, and
+        // draining it into a cancelled closure would lose it until the fallback
+        // interval. `pollRef` is null only while the pane is paused or hidden,
+        // where no poll may run at all.
+        if (pendingPollRef.current) {
+          pendingPollRef.current = false;
+          const next = pollRef.current;
+          if (next !== null) void next();
+        }
       }
     };
 
-    // A PAUSED or HIDDEN pane does not poll at all — not even once. The check
-    // comes before the immediate poll on purpose: otherwise pressing Pause
-    // would fire one more request, and a tab being hidden would fetch on its way
-    // out, which is exactly what "the interval is gone" is supposed to mean.
+    // A PAUSED or HIDDEN pane does not poll at all — not even once — and opens
+    // no channel. The check comes before the immediate poll on purpose:
+    // otherwise pressing Pause would fire one more request, and a tab being
+    // hidden would fetch on its way out, which is exactly what "the interval is
+    // gone" is supposed to mean.
     if (paused || !visible) {
+      pollRef.current = null;
       return () => {
         cancelled = true;
       };
     }
+    pollRef.current = poll;
     void poll();
     const timer = setInterval(() => void poll(), POLL_MS);
+
+    // The change channel: the host pushes "something moved" and this panel
+    // answers with one poll. It is the PRIMARY trigger; the interval above is
+    // the safety net, and it stays in charge when the platform has no
+    // `EventSource` (this guard) or the connection drops.
+    let channel: { close: () => void } | null = null;
+    if (typeof EventSource !== "undefined") {
+      const source = new EventSource(EVENTS_ENDPOINT);
+      source.onmessage = (event: MessageEvent) => {
+        // ANY `changed` frame polls, whatever `reason` it carries: the channel
+        // coalesces a burst and keeps only the LAST reason, so filtering on one
+        // would silently drop wake-ups. Malformed frames are ignored.
+        if (isChangedFrame(event.data)) void poll();
+      };
+      // A dropped channel reconnects itself; there is nothing to retry and
+      // nothing to report — the interval is in charge until it does, so an
+      // error never throws and never stops the fallback.
+      source.onerror = () => undefined;
+      channel = source;
+    }
+
     return () => {
       cancelled = true;
       clearInterval(timer);
+      channel?.close();
     };
   }, [filterKey, paused, visible, refreshToken, props.sessionId]);
 
@@ -601,8 +698,10 @@ export function RoleboxLogsPanel(props: RoleboxLogsPanelProps) {
                 paused
                   ? "Polling is paused — Resume continues from the same cursor."
                   : visible
-                    ? "The view polls every " + String(POLL_MS / 1000) + "s while this tab is visible."
-                    : "This tab is hidden — polling stops until it is visible again."
+                    ? "The view refreshes when the log source changes; while this tab is visible it also re-reads every " +
+                      String(POLL_MS / 1000) +
+                      "s as a fallback."
+                    : "This tab is hidden — refreshing stops until it is visible again."
               }
             >
               <span className={logsClass.liveDot + " " + liveModifier} aria-hidden="true" />
