@@ -96,8 +96,8 @@ describe("service health coverage", () => {
   });
 
   it("every registered service exposes a callable health() probe", () => {
-    for (const [name, ctor] of Object.entries(REGISTERED_SERVICES)) {
-      const svc = new ctor();
+    for (const name of Object.values(SERVICE_NAMES)) {
+      const svc = new REGISTERED_SERVICES[name]();
       expect(svc.name).toBe(name);
       expect(typeof svc.health).toBe("function");
     }

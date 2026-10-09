@@ -162,15 +162,19 @@
 // ADDENDUM (Stage 2, logging platform). `tests/log/**/*.ts` joins the include
 // array below: the suite was written beside src/log/** and had never been gated
 // by anything, so a kernel change could break it without a single command
-// noticing. The widened program added no diagnostic of its own — but it does NOT
-// exit 0, and this comment states the measurement rather than the intention.
+// noticing. The widened program added no diagnostic of its own. This comment
+// states the measurement rather than the intention.
 //
 // TODAY'S MEASUREMENT, on the bytes this config gates:
 //
-//   bun run typecheck:tests 2>&1 | grep -c 'error TS'   # 1
-//   bun run typecheck:tests; echo $?                    # 2
+//   bun run typecheck:tests 2>&1 | grep -c 'error TS'   # 0
+//   bun run typecheck:tests; echo "exit=$?"             # exit=0
 //
-// The gate's ENTIRE diagnostic output is this one, and it is not in tests/log:
+// The gate's ENTIRE diagnostic output is now empty: the run prints the script
+// line `$ tsc -p tsconfig.tests.json` and no diagnostic line at all, the
+// counting command prints 0, and the exit status is 0.
+//
+// THE ONE DIAGNOSTIC THIS BLOCK USED TO RECORD IS REPAIRED. It was:
 //
 //   tests/core/service-health-coverage.test.ts(101,29): error TS2769:
 //   No overload matches this call.
@@ -180,22 +184,29 @@
 //       'ServiceName'.
 //     (Overload 2 of 2 repeats the identical complaint.)
 //
-// Its subject is `expect(svc.name).toBe(name)` (line 101, in "every registered
-// service exposes a callable health() probe"): the loop iterates
-// `Object.entries(REGISTERED_SERVICES)`, so `name` is `string`, while the
-// matcher is declared over `ServiceName`.
+// Its subject was `expect(svc.name).toBe(name)` (line 101, in "every
+// registered service exposes a callable health() probe"): the loop iterated
+// `Object.entries(REGISTERED_SERVICES)`, which widens the record's
+// `Record<ServiceName, ...>` key annotation to `string`, so `name` was
+// `string` while both `svc.name` and the matcher are declared over the closed
+// `ServiceName` union (src/core/service-names.ts). The value was right at
+// runtime; the type information was lost at the iteration.
 //
-// IT IS NEITHER THIS ROUND'S NOR tests/log'S. The file is byte-identical to HEAD
-// (`git diff -- tests/core/service-health-coverage.test.ts` is empty), so no
-// edit here introduced or repaired it, and not one diagnostic under tests/log
-// appears in the output at all. It arrived with commit 423355b ("feat(core): add
-// health probes to five services", 2026-10-08) — AFTER c3ee393, the round whose
-// probe measured 0 diagnostics in tests/**; the AFTER paragraph above is that
-// round's history on that round's bytes, not today's count. tests/core/** has
-// been in the include array since the widening, so the case is gated and fails
-// the gate as a pre-existing diagnostic; repairing it is a test-side change
-// outside the logging platform, and the honest gate claim is "the logging
-// platform's bytes add no diagnostic", not "the gate exits 0".
+// IT WAS NOT THIS ROUND'S AND NOT tests/log'S. The case arrived with commit
+// 423355b ("feat(core): add health probes to five services", 2026-10-08) —
+// AFTER c3ee393, the round whose probe measured 0 diagnostics in tests/**; the
+// AFTER paragraph above is that round's history on that round's bytes, not
+// this count. tests/core/** has been in the include array since the widening,
+// so the case was gated and failed the gate as a pre-existing diagnostic.
+//
+// The repair corrects the type relationship instead of widening production to
+// fit the test, and it adds no suppression: the loop now iterates
+// `Object.values(SERVICE_NAMES)`, whose values ARE the closed `ServiceName`
+// union, and constructs `new REGISTERED_SERVICES[name]()`. Because the record
+// is annotated `Record<ServiceName, ...>`, its key set is provably the
+// SERVICE_NAMES value set — which is what the sibling assertion at line 95
+// states — so every registered class is still probed. It is test-side only:
+// `git diff -- src/` is empty, no production annotation was touched.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
