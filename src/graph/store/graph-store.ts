@@ -703,7 +703,10 @@ export class GraphStore {
   ): GraphStore {
     const db = connection.db;
     try {
-      db.exec("PRAGMA busy_timeout = 5000");
+      // Two hosts may sweep and raise approvals in the same workspace. On a
+      // loaded runner, a writer can hold or repeatedly reacquire SQLite's
+      // single write lock beyond five seconds; wait for the committed turn.
+      db.exec("PRAGMA busy_timeout = 20000");
       if (initialize) initializeStore(db, filePath, storeId);
       verifyStore(db, filePath);
       verifyConnectionFile(connection, filePath);
