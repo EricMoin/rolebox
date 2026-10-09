@@ -48,14 +48,25 @@
 //                   counted only the writing process's own bytes produced copies
 //                   at 2.3x the limit (three writers, 1 KB limit) — this check is
 //                   what fails if that gate comes back;
-//   follower        the real `rolebox logs --follow --json` process delivered
-//                   every announced record exactly once and no malformed line.
-//                   The stream's per-writer ORDER is reported beside it: the
-//                   follower delivers a poll in `time` order, but a file a
-//                   concurrent rotation renamed past its walk can arrive one
-//                   poll late, so reordering is measured and bounded by
-//                   FOLLOWER_LATE_RECORD_LIMIT rather than assumed away —
-//                   losing or repeating a record is what fails.
+//   follower-complete
+//                   the real `rolebox logs --follow --json` process delivered at
+//                   least as many records as the writers announced;
+//   follower-missing
+//                   every (writer, seq) pair the writers announced came out of
+//                   the follower;
+//   follower-duplicates
+//                   no announced (writer, seq) pair came out of the follower
+//                   more than once;
+//   follower-malformed
+//                   every line the follower printed was one parseable record of
+//                   this probe;
+//   follower-order
+//                   the stream's per-writer ORDER: the follower delivers a poll
+//                   in `time` order, but a file a concurrent rotation renamed
+//                   past its walk can arrive one poll late, so reordering is
+//                   measured and bounded by FOLLOWER_LATE_RECORD_LIMIT rather
+//                   than assumed away — losing or repeating a record is what
+//                   fails.
 //
 // USAGE
 //   bun scripts/log-multiprocess-probe.ts [--records 400] [--max-bytes 4096]

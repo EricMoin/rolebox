@@ -81,7 +81,24 @@ export function watchRoleboxState(dir: string, onChange: () => void): () => void
     const target = sub === "" ? root : join(root, sub);
     if (!existsSync(target)) continue;
     try {
-      watchers.push(watch(target, { persistent: false }, schedule));
+      const watcher = watch(target, { persistent: false }, schedule);
+      // AN FSWatcher IS AN EVENTEMITTER, AND AN `error` EVENT WITH NO LISTENER
+      // IS THROWN — it is not returned to the caller and not merely logged: it
+      // is thrown in whichever process holds the watcher. `fs.watch` reports
+      // the ordinary life of a watched state directory that way (the directory
+      // removed while it was being watched, a permission error, an exhausted
+      // watch budget), so an unlistened watcher turns a routine file-system
+      // condition into a crash of whatever process hosts the run console. The
+      // contract above already says a watcher that cannot report degrades to
+      // "no file signal" with the console still correct on its other edges, so
+      // the error is absorbed here.
+      //
+      // Absorbed SILENTLY rather than logged: this edge exists so that state
+      // writes reach the console, and a failure path that wrote a record of
+      // itself would be feeding the very edge that just failed; the contract
+      // above already makes a missing signal invisible.
+      watcher.on("error", () => {});
+      watchers.push(watcher);
     } catch {
       // Unsupported platform / exhausted inotify watches / permissions: this
       // edge simply does not report, and the console stays correct.

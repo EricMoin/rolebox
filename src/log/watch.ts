@@ -121,7 +121,23 @@ export function watchLogSource(
   // is what notices the directory appearing.
   if (existsSync(target)) {
     try {
-      watchers.push(watch(target, { persistent: false }, schedule));
+      const watcher = watch(target, { persistent: false }, schedule);
+      // AN FSWatcher IS AN EVENTEMITTER, AND AN `error` EVENT WITH NO LISTENER
+      // IS THROWN — it is not returned to the caller and not merely logged: it
+      // is thrown in whichever process holds the watcher. `fs.watch` reports
+      // the ordinary life of a watched log directory that way (the directory
+      // removed or rotated away while it was being watched, a permission error,
+      // an exhausted watch budget), so an unlistened watcher turns a routine
+      // file-system condition into a process-level crash of whatever host
+      // embedded this edge. The contract above already says a watcher that
+      // cannot report is simply SILENT with the caller's fallback poll in
+      // charge, so the error is absorbed here.
+      //
+      // Absorbed SILENTLY rather than logged: this watcher watches the log
+      // directory, so writing a log record from inside its own failure path is
+      // a feedback loop into the very edge that just failed.
+      watcher.on("error", () => {});
+      watchers.push(watcher);
     } catch {
       // Unsupported platform / exhausted watch budget / permissions: this edge
       // simply does not report, and the caller's fallback poll stays in charge.
