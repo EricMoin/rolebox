@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -702,9 +702,13 @@ describe("read failure degradation", () => {
 
 describe("hygiene", () => {
   it("never writes into the workspace while this suite runs", () => {
-    expect(existsSync(join(process.cwd(), ".rolebox", "logs"))).toBe(true); // the repo keeps its own dir
+    // A fresh checkout has no .rolebox/ at all (CI does not create one), so the
+    // guarantee is that this suite never RESOLVES to the workspace's dir — not
+    // that the workspace has one.
+    const workspaceDir = join(process.cwd(), ".rolebox", "logs");
     expect(dir.startsWith(tmpdir())).toBe(true);
     expect(resolveLogSource().path).toBe(dir);
+    expect(resolveLogSource().path).not.toBe(workspaceDir);
   });
 });
 

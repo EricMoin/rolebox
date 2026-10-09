@@ -29,7 +29,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 
 import { LOG_EVENTS } from "../../src/log/index.ts";
 import { SENSITIVE_KEY_TERMS, isSensitiveFieldKey, redactFields } from "../../src/log/redact.ts";
@@ -158,7 +158,7 @@ function callSites(): { sites: CallSite[]; variableCode: number; noFields: numbe
         continue;
       }
       const { keys, opaque } = objectLiteralKeys(text, rest);
-      sites.push({ file: relative(SRC_DIR, file), line: lineAt(text, match.index), code, keys, opaque });
+      sites.push({ file: relative(SRC_DIR, file).split(sep).join("/"), line: lineAt(text, match.index), code, keys, opaque });
     }
   }
   return { sites, variableCode, noFields };

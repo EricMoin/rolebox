@@ -612,13 +612,6 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   // (writer, seq) the children announced must come out of the follower.
   const followerKeys = new Set(followerSeen.keys());
   const followerMissing = expectedKeys.filter((key) => !followerKeys.has(key)).length;
-  const followerStreamOk =
-    followerMissing === 0 &&
-    followerDuplicates === 0 &&
-    followerMalformed === 0 &&
-    followerRecords.length >= expectedKeys.length &&
-    followerLateRecords <= Math.floor(expectedKeys.length * FOLLOWER_LATE_RECORD_LIMIT);
-
   const childrenOk = children.every((child) => child.exitCode === 0 && child.records === records);
   const checks: Record<string, boolean> = {
     children: childrenOk,
@@ -628,7 +621,11 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
     "merged-order": mergedOrderOk,
     rotation: rotationOk,
     "rotation-bound": rotationBoundOk,
-    follower: followerStreamOk,
+    "follower-complete": followerRecords.length >= expectedKeys.length,
+    "follower-missing": followerMissing === 0,
+    "follower-duplicates": followerDuplicates === 0,
+    "follower-malformed": followerMalformed === 0,
+    "follower-order": followerLateRecords <= Math.floor(expectedKeys.length * FOLLOWER_LATE_RECORD_LIMIT),
   };
 
   return {

@@ -55,7 +55,11 @@ describe("multi-process log writes", () => {
         "merged-order": true,
         rotation: true,
         "rotation-bound": true,
-        follower: true,
+        "follower-complete": true,
+        "follower-missing": true,
+        "follower-duplicates": true,
+        "follower-malformed": true,
+        "follower-order": true,
       });
       expect(run.expected).toBe(360);
       expect(run.observed).toBe(360);
@@ -71,7 +75,7 @@ describe("multi-process log writes", () => {
       // may cause, and the observed reordering is reported beside them: a file
       // a rotation renamed past the follower's walk can arrive one poll late
       // (bounded by scripts/log-multiprocess-probe.ts's late-record limit), and
-      // the probe's `follower` check fails if that turns into a scramble.
+      // the probe's `follower-order` check fails if that turns into a scramble.
       expect(run.followerMissing).toBe(0);
       expect(run.followerDuplicateRecords).toBe(0);
     } finally {
