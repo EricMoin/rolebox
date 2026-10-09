@@ -52,6 +52,7 @@ import {
   type LogsStore,
 } from "./logs";
 import type { LogRecord } from "../log/types";
+import { watchLogSource } from "../log/watch.ts";
 import { isLogsViewLive, nextView, type TuiView } from "./logic";
 
 import { foldGraphSignals } from "./events";
@@ -464,6 +465,22 @@ export function createSidebarRenderer(workspaceDir: string) {
       refresh();
       const timer = setInterval(refresh, 1000);
 
+      // ── The Logs pane's change edge ──────────────────────────────────────
+      // An append to the log source wakes the pane directly, so a record lands
+      // in about the watcher's debounce instead of up to a full second later.
+      // The 1s tick above STAYS: pollLogs() is cursor-based, so a tick with
+      // nothing new costs one incremental scan and no publication, and it is
+      // the only safety net on a platform without fs.watch (where
+      // watchLogSource degrades to a no-op disposer).
+      //
+      // NO EXPLICIT SOURCE, deliberately: readLogView resolves the location
+      // through resolveLogSource, and the store's filters.logDir is empty
+      // in-tree (no UI path sets it), so the watcher observes exactly what the
+      // store reads. The bound is that a programmatically overridden
+      // logsStore.filters.logDir is NOT watched — that view falls back to the
+      // 1s tick.
+      const disposeLogWatch = watchLogSource(undefined, () => pollLogs());
+
       _refreshRef = refresh;
       _toggleMetricsRef = () => setShowMetrics((v) => !v);
       _toggleFilterRef = () => {
@@ -511,6 +528,7 @@ export function createSidebarRenderer(workspaceDir: string) {
       onCleanup(() => {
         canceled = true;
         clearInterval(timer);
+        disposeLogWatch();
         _refreshRef = null;
         _toggleMetricsRef = null;
         _toggleFilterRef = null;
