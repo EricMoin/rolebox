@@ -93,7 +93,8 @@ describe("runNonInteractive --primary-only — Windows-shaped entries", () => {
   afterEach(() => {
     console.log = origLog;
     console.error = origError;
-    process.exitCode = origExitCode;
+    // Bun keeps the prior exit code when assigned undefined.
+    process.exitCode = origExitCode ?? 0;
   });
 
   it("resolves the primary and reports all files already using the model", async () => {

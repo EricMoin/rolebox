@@ -11,6 +11,7 @@ let origCwd: typeof process.cwd;
 let origExit: typeof process.exit;
 let origPrompt: PromptFn | undefined;
 let origIsTTY: boolean | undefined;
+let origExitCode: typeof process.exitCode;
 
 type PromptFn = (message?: string, _default?: string) => string | null;
 
@@ -20,6 +21,7 @@ beforeEach(() => {
   origCwd = process.cwd;
   process.cwd = (() => tmpDir) as typeof process.cwd;
   origExit = process.exit;
+  origExitCode = process.exitCode;
   // Stub the blocking `prompt()` global so tests never read real stdin.
   origPrompt = globalThis.prompt as PromptFn | undefined;
   globalThis.prompt = (() => null) as PromptFn;
@@ -31,7 +33,9 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   process.exit = origExit;
-  process.exitCode = undefined;
+  // Bun does not clear `process.exitCode` when it is assigned `undefined`, so
+  // the restore must write a number (the captured value, or 0 when unset).
+  process.exitCode = origExitCode ?? 0;
   if (origPrompt === undefined) {
     delete (globalThis as { prompt?: PromptFn }).prompt;
   } else {

@@ -42,7 +42,9 @@ beforeEach(() => {
 afterEach(() => {
   setLogEnv("ROLEBOX_LOG_RETAIN", originalRetain);
   setLogEnv("ROLEBOX_LOG_FILE", originalLogFile);
-  process.exitCode = exitCode;
+  // Bun does not clear `process.exitCode` when it is assigned `undefined`, so
+  // the restore must write a number (the captured value, or 0 when unset).
+  process.exitCode = exitCode ?? 0;
   rmSync(dir, { recursive: true, force: true });
 });
 

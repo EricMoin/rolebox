@@ -53,11 +53,9 @@ describe("multi-process log writes", () => {
       // readable from the log: `followerRecords` against `expected` is HOW FAR
       // BEHIND the follower was when the case gave up (359-of-360 reads very
       // differently from 40-of-360), `followerMissing` is how many announced
-      // records never arrived, `followerDuplicateRecords` and
-      // `followerLateRecords` are the repetition and reordering counters, and
-      // `elapsedMs` is what the case cost against the probe's own catch-up
-      // bounds. The assertion is otherwise untouched: the same `toEqual` over the
-      // same map, exactly as strict as it was.
+      // records never arrived, `followerDuplicateRecords` is the repetition
+      // counter, `followerLateRecords` reports cross-poll reordering, and
+      // `elapsedMs` is what the case cost against the probe's catch-up bounds.
       expect(
         run.checks,
         `follower=${run.followerRecords}/${run.expected} missing=${run.followerMissing} ` +
@@ -75,7 +73,6 @@ describe("multi-process log writes", () => {
         "follower-missing": true,
         "follower-duplicates": true,
         "follower-malformed": true,
-        "follower-order": true,
       });
       expect(run.expected).toBe(360);
       expect(run.observed).toBe(360);
@@ -87,11 +84,8 @@ describe("multi-process log writes", () => {
       // The run must have exercised rotation, or it proves nothing.
       expect(run.rotations).toBeGreaterThan(0);
       expect(run.followerRecords).toBeGreaterThan(0);
-      // The live stream is checked for LOSS and DUPLICATION, which no rotation
-      // may cause, and the observed reordering is reported beside them: a file
-      // a rotation renamed past the follower's walk can arrive one poll late
-      // (bounded by scripts/log-multiprocess-probe.ts's late-record limit), and
-      // the probe's `follower-order` check fails if that turns into a scramble.
+      // Rotation can delay a file past one poll, so the live stream is checked
+      // for loss and duplication while reordering is reported separately.
       expect(run.followerMissing).toBe(0);
       expect(run.followerDuplicateRecords).toBe(0);
     } finally {

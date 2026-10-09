@@ -95,7 +95,8 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   process.exit = origExit;
-  process.exitCode = undefined;
+  // Bun keeps the previous exit code when assigned undefined.
+  process.exitCode = 0;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

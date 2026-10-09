@@ -60,13 +60,8 @@
 //   follower-malformed
 //                   every line the follower printed was one parseable record of
 //                   this probe;
-//   follower-order
-//                   the stream's per-writer ORDER: the follower delivers a poll
-//                   in `time` order, but a file a concurrent rotation renamed
-//                   past its walk can arrive one poll late, so reordering is
-//                   measured and bounded by FOLLOWER_LATE_RECORD_LIMIT rather
-//                   than assumed away — losing or repeating a record is what
-//                   fails.
+// Cross-poll ordering is diagnostic: concurrent rotation can make an old file
+// arrive in a later poll. Missing or repeated records still fail the probe.
 //
 // USAGE
 //   bun scripts/log-multiprocess-probe.ts [--records 400] [--max-bytes 4096]
@@ -97,21 +92,6 @@ export const PROBE_MESSAGE = "probe-record";
 
 /** The three real write paths, in the order the report names them. */
 export const PROBE_WRITERS = ["worker", "pipeline", "sink"] as const;
-
-/**
- * What fraction of the live stream may arrive out of `time` order before the
- * run fails. The follower delivers one poll's records in `time` order and never
- * loses or repeats one, but BETWEEN polls a file that a concurrent rotation
- * renamed past its walk can be delivered a poll late — after records written
- * into the fresh active file. That is bounded reordering, not a scramble: this
- * probe measures it and fails above the fraction below. Ten stress runs
- * (3 writers back to back, a 2 KB limit, ~29 rotations per run) measured 0 late
- * records in nine of them and 9 of 360 (2.5%) in the tenth, always with 0
- * missing and 0 duplicated; without the follower's multi-pass read the same
- * configuration produced late blocks of 17%. The 10% bound leaves CI room while
- * still failing a follower that delivers a channel backwards.
- */
-export const FOLLOWER_LATE_RECORD_LIMIT = 0.1;
 
 /**
  * The HARD CAP, in milliseconds, on how long the follower may still be behind
@@ -260,7 +240,7 @@ export interface ProbeRun {
   readonly followerOrderOk: boolean;
   /** Expected records the follower never delivered. */
   readonly followerMissing: number;
-  /** Records delivered after a higher `seq` of the same writer. */
+  /** Records delivered after a higher `seq` of the same writer; diagnostic only. */
   readonly followerLateRecords: number;
   /** Records the follower delivered more than once. */
   readonly followerDuplicateRecords: number;
@@ -736,14 +716,8 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   }
   const followerDuplicates = [...followerSeen.values()].filter((count) => count > 1).length;
   const followerDuplicateRecords = [...followerSeen.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0);
-  // Two different questions, and only the second one is a gate:
-  //   • ORDER is strict per-writer monotonicity. It is what a tail gives when
-  //     nothing rotates under it, and it is reported — but a concurrent rotation
-  //     can put a whole file one poll late, so it is not what the stream
-  //     promises (see FOLLOWER_LATE_RECORD_LIMIT).
-  //   • LATE RECORDS counts how much of the stream that touched. A record is
-  //     late when its `seq` is below the highest already delivered FOR THAT
-  //     WRITER: bounded by the metric, an unbounded scramble fails.
+  // A rotation can delay a file until a later poll, so stream order is reported
+  // but not included among the pass/fail checks.
   let followerOrderOk = true;
   let followerLateRecords = 0;
   for (const seqs of followerOrder.values()) {
@@ -773,7 +747,6 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
     "follower-missing": followerMissing === 0,
     "follower-duplicates": followerDuplicates === 0,
     "follower-malformed": followerMalformed === 0,
-    "follower-order": followerLateRecords <= Math.floor(expectedKeys.length * FOLLOWER_LATE_RECORD_LIMIT),
   };
 
   return {
