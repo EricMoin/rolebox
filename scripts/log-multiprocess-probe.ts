@@ -114,18 +114,45 @@ export const PROBE_WRITERS = ["worker", "pipeline", "sink"] as const;
 export const FOLLOWER_LATE_RECORD_LIMIT = 0.1;
 
 /**
- * How long, in milliseconds, the follower may still be behind AFTER the writers
- * finished before the probe stops waiting and SIGINTs it. The follower is a
- * 250 ms poll loop, so under the load of a whole CI suite it can need longer
- * than a fixed grace to deliver the tail of the stream: a fixed `Bun.sleep(800)`
+ * The HARD CAP, in milliseconds, on how long the follower may still be behind
+ * AFTER the writers finished before the probe stops waiting and SIGINTs it. The
+ * follower is a 250 ms poll loop, so under the load of a whole CI suite it can
+ * need real time to deliver the tail of the stream: a fixed `Bun.sleep(800)`
  * here reported a healthy follower that had simply not caught up yet as LOSS
  * (macOS CI: `follower-complete` false with `follower-missing` false, i.e.
- * records still arriving). The wait is on the condition the probe actually
- * needs — every announced record delivered — and this deadline is what keeps it
- * BOUNDED: it says when to STOP waiting, so a follower that truly loses records
- * still fails, and fails promptly. It never changes what the checks count.
+ * records still arriving), and a 5 s cap did exactly the same on a Windows
+ * runner 4-7x slower than its predecessor (that case: 6780 ms,
+ * `follower-complete` false and `follower-missing` false once more — a backlog,
+ * not a loss). This cap carries headroom over that worst observation: 30 s is
+ * six times the deadline that failed and half the multi-process case's own 60 s
+ * budget, and the writers, the file scan and the two CLI calls still fit inside
+ * what is left. The second, much smaller bound is
+ * {@link FOLLOWER_STALL_WINDOW_MS}: a follower that stops delivering is stopped
+ * in seconds rather than burning this cap.
+ *
+ * IT IS NOT A PASS/FAIL THRESHOLD. It says when to STOP waiting, and the wait is
+ * on the condition the probe actually needs — every announced record delivered;
+ * what the checks count is still the whole stream read afterwards, including
+ * everything that arrived after the writers stopped. Raising it cannot let a
+ * losing follower pass and lowering it cannot make a complete one fail.
  */
-export const FOLLOWER_CATCH_UP_DEADLINE_MS = 5_000;
+export const FOLLOWER_CATCH_UP_DEADLINE_MS = 30_000;
+
+/**
+ * The STALL WINDOW, in milliseconds: how long the catch-up wait tolerates NO new
+ * probe record from the follower, while the count is still short, before it
+ * stops waiting and SIGINTs it. The follower polls every 250 ms
+ * (`DEFAULT_FOLLOW_POLL_MS`) and delivers each poll's records in one batch, so a
+ * healthy follower that is merely starved of CPU still produces records between
+ * polls; 5 s is twenty poll intervals of continuous silence, which is what a
+ * follower that STOPPED produces and a slow one does not. It exists so the hard
+ * cap above is not the only way out: a follower that delivered a few records and
+ * went quiet fails in seconds — with the check that broke, the real missing
+ * count and the rest of its counters — instead of holding the case for the whole
+ * cap. Like the cap, it only decides when to stop waiting; the checks still count
+ * the whole stream, so it cannot excuse a loss.
+ */
+export const FOLLOWER_STALL_WINDOW_MS = 5_000;
 
 /**
  * The floor on "one record" in the rotated-copy bound, in bytes. The probe's own
@@ -435,6 +462,11 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   // classification the end-of-run parse applies (this channel, a numeric `seq`).
   // No check reads this number: it only decides when waiting is over.
   let followerStreamed = 0;
+  // When the last of those records arrived. The catch-up wait below measures
+  // SILENCE from here, so a follower that stopped delivering is stopped inside
+  // the stall window instead of holding the case for the whole hard cap. 0 means
+  // nothing has arrived yet, and the wait then measures from when it started.
+  let followerLastRecordAt = 0;
   // Set when the stream reaches end-of-stream, i.e. when no further record can
   // arrive and waiting longer could not change the answer.
   let followerStreamClosed = false;
@@ -453,7 +485,10 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
           if (line.trim().length === 0) continue;
           try {
             const record = JSON.parse(line) as Partial<LogRecord>;
-            if (record.channel === PROBE_CHANNEL && typeof record.fields?.seq === "number") followerStreamed += 1;
+            if (record.channel === PROBE_CHANNEL && typeof record.fields?.seq === "number") {
+              followerStreamed += 1;
+              followerLastRecordAt = Date.now();
+            }
           } catch {
             // Not a record at all: the end-of-run parse counts it as malformed.
           }
@@ -521,15 +556,34 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   // of a full CI run it can still be behind when the last writer exits. Waiting
   // a FIXED grace here reported exactly that as LOSS — the macOS run failed
   // `follower-complete` with `follower-missing` still 0, i.e. records were
-  // arriving, not lost. Wait instead on the condition the probe needs: the
-  // follower has delivered as many probe records as the writers announced
-  // (`expectedKeys.length`, counted as the stream arrived above), and keep
-  // reading until that is true OR the bounded deadline expires OR the stream
-  // itself ends. The deadline decides only WHEN the follower is stopped; what
-  // the checks count is still the full stream read below, including whatever
-  // arrives after the writers stopped.
-  const catchUpDeadline = Date.now() + FOLLOWER_CATCH_UP_DEADLINE_MS;
-  while (!followerStreamClosed && followerStreamed < expectedKeys.length && Date.now() < catchUpDeadline) {
+  // arriving, not lost — and a short bounded deadline did the same on a Windows
+  // runner 4-7x slower than its predecessor. Wait instead on the condition the
+  // probe needs: the follower has delivered as many probe records as the writers
+  // announced (`expectedKeys.length`, counted as the stream arrived above), and
+  // keep reading until that is true, or the stream itself ends, or one of the two
+  // bounds below stops the wait:
+  //
+  //   • the STALL window (FOLLOWER_STALL_WINDOW_MS) — no new probe record for
+  //     that long while the count is still short. A follower that is not
+  //     progressing says so in seconds;
+  //   • the HARD CAP (FOLLOWER_CATCH_UP_DEADLINE_MS) — the most the wait may
+  //     cost even while records keep trickling in.
+  //
+  // Both decide only WHEN the follower is stopped; what the checks count is still
+  // the full stream read below, including whatever arrives after the writers
+  // stopped. Neither can turn a losing follower into a passing one.
+  const catchUpStartedAt = Date.now();
+  const catchUpDeadline = catchUpStartedAt + FOLLOWER_CATCH_UP_DEADLINE_MS;
+  // Silence is measured from the last record the follower delivered, or from the
+  // start of the wait when it has not delivered one yet.
+  const followerStalled = (): boolean =>
+    Date.now() - Math.max(followerLastRecordAt, catchUpStartedAt) >= FOLLOWER_STALL_WINDOW_MS;
+  while (
+    !followerStreamClosed &&
+    followerStreamed < expectedKeys.length &&
+    Date.now() < catchUpDeadline &&
+    !followerStalled()
+  ) {
     await Bun.sleep(25);
   }
   follower.kill("SIGINT");

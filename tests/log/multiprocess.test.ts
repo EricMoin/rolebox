@@ -46,8 +46,24 @@ describe("multi-process log writes", () => {
     try {
       const run = await runOnce({ dir, records: 120, maxBytes: 2_048, retain: 4_096, delayMs: 0 });
 
-      // Every check by name, so a failure says WHICH invariant broke.
-      expect(run.checks).toEqual({
+      // Every check by name, so a failure says WHICH invariant broke — and the
+      // second `expect` argument prints the probe's own follower counters beside
+      // it. The name alone cannot separate a runner too slow to drain the stream
+      // from a follower that really LOST records, and that distinction has to be
+      // readable from the log: `followerRecords` against `expected` is HOW FAR
+      // BEHIND the follower was when the case gave up (359-of-360 reads very
+      // differently from 40-of-360), `followerMissing` is how many announced
+      // records never arrived, `followerDuplicateRecords` and
+      // `followerLateRecords` are the repetition and reordering counters, and
+      // `elapsedMs` is what the case cost against the probe's own catch-up
+      // bounds. The assertion is otherwise untouched: the same `toEqual` over the
+      // same map, exactly as strict as it was.
+      expect(
+        run.checks,
+        `follower=${run.followerRecords}/${run.expected} missing=${run.followerMissing} ` +
+          `duplicateRecords=${run.followerDuplicateRecords} late=${run.followerLateRecords} ` +
+          `elapsedMs=${run.elapsedMs}`,
+      ).toEqual({
         children: true,
         "exactly-once": true,
         "raw-lines": true,
