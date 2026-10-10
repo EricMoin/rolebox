@@ -72,15 +72,37 @@ function boundaryBlock(boundary: DshWorkerCommandBoundary): string {
 }
 
 /**
+ * State the directory every command of THIS attempt runs in. The runner spawns
+ * each `graph_worker_exec` command with the attempt's worker workspace as its
+ * child `cwd`, so the prompt names that fact instead of leaving the model to
+ * discover it — or to prefix every command with a `cd` into a directory it
+ * already starts in.
+ */
+function workspaceBlock(workspace: string): string {
+  return `Worker working directory: every graph_worker_exec command runs with ${workspace} as its current directory, ` +
+    "and a relative path in the command resolves against it. Each call is a fresh shell, so a `cd` is not needed to reach " +
+    "this workspace — use one only to run in a different directory.";
+}
+
+/**
  * Copy only this role's resource bundles into its attempt's sandbox-readable
  * input directory, and assemble the worker's system prompt.
+ *
+ * `workspace` is the directory every `graph_worker_exec` command of THIS attempt
+ * runs in: the attempt's worker workspace, which the prompt states so the worker
+ * neither has to discover it nor re-enter it on each call. It is REQUIRED and
+ * validated here — a blank or relative path is a caller defect, never a reason to
+ * fall back to this process's own working directory.
  *
  * `declaredTools` is the EXECUTING NODE's own grant (the v3 `tools?: string[]`
  * beyond the baseline), which the caller resolves for THIS attempt. Omitting it
  * — or passing the empty list — states the baseline restriction, which is what
  * an undeclared node keeps.
  */
-export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[]): string {
+export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, workspace: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[]): string {
+  if (typeof workspace !== "string" || workspace.trim().length === 0 || !isAbsolute(workspace)) {
+    throw new Error(`The 'workspace' argument must be a non-blank absolute path: ${JSON.stringify(workspace)}`);
+  }
   const agent = findGraphWorkerRole(roles, agentId);
   if (!agent) throw new Error(`Graph worker agent is not resolved: ${agentId}`);
   mkdirSync(inputDirectory, { recursive: true, mode: 0o700 });
@@ -127,6 +149,7 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
         "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
       buildGraphWorkerToolGrantBlock(declaredTools),
       boundaryBlock(boundary),
+      workspaceBlock(workspace),
 
       buildGraphWorkerRolePrompt(agent, { skills, references, resourceTool: "graph_worker_exec" }),
     ].filter(Boolean).join("\n\n");

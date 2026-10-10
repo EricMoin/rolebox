@@ -1652,13 +1652,13 @@ export async function apply(
         // states the mode the host resolves for the request (its deployment default);
         // each command's own result carries the authoritative mode and enforcement.
         //
-        // THE FIFTH ARGUMENT IS THE EXECUTING NODE'S OWN GRANT, resolved from the
+        // THE SIXTH ARGUMENT IS THE EXECUTING NODE'S OWN GRANT, resolved from the
         // plan by the runtime and carried on the request
         // (`OutcomeDispatchRequest.declaredTools`). It reaches the prompt HERE —
         // the same value the start request's tool filter is built from below, so
         // the sentence a worker reads and the face it holds state one grant. An
         // absent declaration stays absent and the prompt states the baseline.
-        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory,
+        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
           resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
           request.declaredTools);
         return workerBoundary!.start(label, start, prompt);

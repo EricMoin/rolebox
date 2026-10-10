@@ -51,6 +51,8 @@ export type DshWorkerCommandEnforcement = "full" | "partial" | "unconfined";
 export interface DshWorkerCommandResult {
   exitCode: number | null;
   output: string;
+  /** The directory the command actually ran in: the attempt's worker workspace. */
+  cwd: string;
   mode: DshWorkerCommandMode;
   enforcement: DshWorkerCommandEnforcement;
   denialSignatures: readonly string[];
@@ -138,7 +140,7 @@ export async function executeDshWorkerCommand(options: {
   if (mode === "danger-full-access") {
     const result = await executeGraphWorkerCommand({ argv, workspace: options.workspace,
       signal: options.signal, timeoutMs: options.timeoutMs });
-    return { ...result, mode, enforcement: "unconfined", denialSignatures: [] };
+    return { ...result, cwd: options.workspace, mode, enforcement: "unconfined", denialSignatures: [] };
   }
   if (!sandbox) {
     throw new Error(`Graph worker commands require the host's confinement service (@deepseek-ai/dsh-sandbox) for a ${mode} session; refusing to run the command unconfined.`);
@@ -162,7 +164,7 @@ export async function executeDshWorkerCommand(options: {
   }
   const result = await executeGraphWorkerCommand({ argv: confined.argv, workspace: options.workspace,
     signal: options.signal, timeoutMs: options.timeoutMs });
-  return { ...result, mode, enforcement: confined.enforcement,
+  return { ...result, cwd: options.workspace, mode, enforcement: confined.enforcement,
     denialSignatures: confined.enforcement === "partial" && Array.isArray(confined.denialSignatures)
       ? [...confined.denialSignatures] : [] };
 }

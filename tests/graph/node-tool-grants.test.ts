@@ -628,6 +628,7 @@ describe("the worker prompt states the node's grant", () => {
   });
 
   it("reaches the assembled dsh worker prompt for a declaring node", () => {
+    const workspace = makeTmpDir("node-tool-grants-workspace-");
     const boundary = {
       kind: "confined",
       mode: "workspace-write",
@@ -637,6 +638,7 @@ describe("the worker prompt states the node's grant", () => {
       [WORKER_ROLE],
       WORKER_ROLE.id,
       makeTmpDir("node-tool-grants-prompt-"),
+      workspace,
       boundary,
       ["computer_*"],
     );
@@ -648,6 +650,7 @@ describe("the worker prompt states the node's grant", () => {
       [WORKER_ROLE],
       WORKER_ROLE.id,
       makeTmpDir("node-tool-grants-prompt-"),
+      workspace,
       boundary,
     );
     expect(baseline).toContain("this node declares no extra host tools");

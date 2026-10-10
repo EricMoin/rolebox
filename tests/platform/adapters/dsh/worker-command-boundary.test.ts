@@ -73,6 +73,7 @@ describe("dsh worker command boundary", () => {
     expect(result.mode).toBe("workspace-write");
     expect(result.enforcement).toBe("partial");
     expect(result.denialSignatures).toEqual(["sandbox: file-write*"]);
+    expect(result.cwd).toBe(root);
   });
 
   it("confines a read-only session and reports the host's full enforcement", async () => {
@@ -90,6 +91,7 @@ describe("dsh worker command boundary", () => {
     expect(result.mode).toBe("read-only");
     expect(result.enforcement).toBe("full");
     expect(result.denialSignatures).toEqual([]);
+    expect(result.cwd).toBe(root);
   });
 
   it("runs a danger-full-access session without calling confine and reports unconfined", async () => {
@@ -111,6 +113,7 @@ describe("dsh worker command boundary", () => {
     expect(result.mode).toBe("danger-full-access");
     expect(result.enforcement).toBe("unconfined");
     expect(result.denialSignatures).toEqual([]);
+    expect(result.cwd).toBe(root);
   });
 
   it("refuses instead of spawning when a service is missing or fails", async () => {
@@ -172,5 +175,6 @@ describe("dsh worker command boundary", () => {
     expect(reported.mode).toBe("danger-full-access");
     expect(reported.enforcement).toBe("unconfined");
     expect(reported.denialSignatures).toEqual([]);
+    expect(reported.cwd).toBe(root);
   });
 });
