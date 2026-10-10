@@ -1195,6 +1195,9 @@ describe("RoleboxLogsPanel", () => {
     });
 
     it("announces the poll outcome in one live region, not many", () => {
+      // Render the panel this test asserts on rather than inheriting whichever
+      // render a sibling test happened to leave in the harness's shared tree.
+      mountPanel();
       expect(byClass("rolebox-logs-status")).toHaveLength(1);
       expect(statusSeat().props.role).toBe("status");
     });
