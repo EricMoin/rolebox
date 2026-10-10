@@ -131,7 +131,10 @@ export function createComputerScreenshotTool() {
       "Capture the screen, one window or one region as a PNG and return it as an image attachment. " +
       "The file is written under <worktree>/.rolebox/computer/ unless path is given. " +
       "macOS uses screencapture, Linux X11 import/scrot, Windows PowerShell System.Drawing. " +
-      "window_id and region are mutually exclusive; use computer_windows to find a window id. " +
+      "window_id, region and display are mutually exclusive; use computer_windows to find a window id. " +
+      "On macOS a region is exclusive with display too: a region is in global screen coordinates and already selects its own display, and screencapture ignores -D when -R is given. " +
+      "A capture with no target covers ONE display (macOS: the main display), never a stitched image of every screen. " +
+      "A retina capture is in device pixels: the result reports their ratio as metadata.pixel_scale, so divide image pixels by it before computer_click or computer_move, which take screen coordinates. " +
       "dry_run returns the exact command without executing it.",
     args: {
       window_id: z.number().int().positive().optional().describe("One window id from computer_windows"),
@@ -149,7 +152,7 @@ export function createComputerScreenshotTool() {
         .int()
         .min(0)
         .optional()
-        .describe("The OS's own display identifier (macOS -D, X11 screen number, Windows AllScreens index)"),
+        .describe("Which display to capture: macOS -D is 1-based (1 = the main display, 2 the next), an X11 screen number, or a Windows AllScreens index"),
       path: z
         .string()
         .min(1)

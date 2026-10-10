@@ -68,9 +68,22 @@ limits it does not hide.
 - **The desktop is shared.** Another person or process can move it between two
   calls, so a result must be verified from fresh state, never assumed.
 - **Permissions belong to the application that launched the host.** On macOS,
-  Screen Recording and Accessibility are granted to the terminal or agent
-  process — not to rolebox — and installing the package grants neither
-  (`src/computer/drivers/darwin.ts:40-44`).
+  Screen Recording, Accessibility and Automation for System Events are granted
+  to the terminal or agent process — not to rolebox — and installing the package
+  grants none of them (`src/computer/drivers/darwin.ts:53-57`).
+- **It does not convert coordinates for the caller.** A capture reports the
+  ratio of device pixels to screen points the file itself states, as
+  `metadata.pixel_scale` plus one text sentence when it is above 1
+  (`src/computer/capture.ts:66-106`); the family never rewrites a coordinate, so
+  a caller that read a pixel position off a screenshot must divide it by that
+  scale before `computer_click` or `computer_move`, which take screen
+  coordinates.
+- **A window capture carries no screen origin.** `screencapture -l` with `-o`
+  returns exactly the window's frame in device pixels, so a pixel in that image
+  cannot be turned into a screen coordinate without the window's own bounds,
+  which the result does not report; it is for reading content. Use a full-screen
+  or `region` capture when the goal is to compute a click position
+  (`src/computer/drivers/darwin.ts:5-21`).
 - **Linux is X11 only.** A Wayland session is an explicit refusal — `scrot`,
   `import` and `xdotool` cannot inject through a Wayland compositor, and
   rolebox declares no Wayland driver (`src/computer/drivers/linux.ts:36-43`) —
@@ -101,6 +114,6 @@ limits it does not hide.
 - **The Linux and Windows drivers are unit-tested here, not exercised against a
   live desktop.** Every tool test that does not capture the screen runs through
   `dry_run` and asserts the plan the driver built; on macOS two tests perform one
-  real, input-free screenshot (`tests/computer/capture-darwin.test.ts:44-66`,
-  `:68-77`). No test synthesizes real mouse or keyboard input
+  real, input-free screenshot (`tests/computer/capture-darwin.test.ts:45-86`,
+  `:88-97`). No test synthesizes real mouse or keyboard input
   (`src/computer/tools.ts:12-15`).

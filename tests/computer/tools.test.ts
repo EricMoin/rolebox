@@ -14,9 +14,9 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureDirectory, captureFilePath, captureResult, ensureCaptureDirectory } from "../../src/computer/capture.ts";
+import { captureDirectory, captureFilePath, captureResult, ensureCaptureDirectory, readPixelScale } from "../../src/computer/capture.ts";
 import { helperAvailable, spawnVectorFor } from "../../src/computer/exec.ts";
-import { PNG_SIGNATURE, hasPngSignature, readPngSize } from "../../src/computer/png.ts";
+import { PNG_SIGNATURE, hasPngSignature, readPngResolution, readPngSize } from "../../src/computer/png.ts";
 import {
   createComputerClickTool,
   createComputerKeyTool,
@@ -63,8 +63,12 @@ function makeContext(worktree: string): CanonicalToolContext {
   };
 }
 
-/** One valid PNG whose IHDR the tool can read (chunk CRCs are not read). */
-function tinyPng(width: number, height: number): Buffer {
+/**
+ * One valid PNG whose IHDR the tool can read (chunk CRCs are not read). A `dpi`
+ * additionally writes the pHYs density chunk a real capture carries: the same
+ * pixels per metre on both axes, unit 1, the way screencapture tags a 2x screen.
+ */
+function tinyPng(width: number, height: number, dpi?: number): Buffer {
   const chunk = (type: string, data: Buffer): Buffer => {
     const out = Buffer.alloc(8 + data.length + 4);
     out.writeUInt32BE(data.length, 0);
@@ -77,13 +81,27 @@ function tinyPng(width: number, height: number): Buffer {
   header.writeUInt32BE(height, 4);
   header[8] = 8;
   header[9] = 6;
-  return Buffer.concat([
-    Buffer.from([...PNG_SIGNATURE]),
-    chunk("IHDR", header),
+  const chunks = [chunk("IHDR", header)];
+  if (dpi !== undefined) {
+    const density = Buffer.alloc(9);
+    const perMetre = Math.round(dpi / 0.0254);
+    density.writeUInt32BE(perMetre, 0);
+    density.writeUInt32BE(perMetre, 4);
+    density[8] = 1;
+    chunks.push(chunk("pHYs", density));
+  }
+  chunks.push(
     chunk("IDAT", Buffer.from([0x78, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01])),
     chunk("IEND", Buffer.alloc(0)),
-  ]);
+  );
+  return Buffer.concat([Buffer.from([...PNG_SIGNATURE]), ...chunks]);
 }
+
+/**
+ * The byte offset of the pHYs chunk's 9-byte data in a `tinyPng`: 8 signature +
+ * 25 IHDR chunk (8 header + 13 data + 4 CRC) + 8 pHYs header.
+ */
+const PHYS_DATA_OFFSET = 8 + 25 + 8;
 
 function parseReport(result: unknown): Record<string, any> {
   expect(typeof result).toBe("object");
@@ -292,6 +310,8 @@ describe("screenshot files and attachments", () => {
     const result = captureResult(path, "darwin", "screencapture") as any;
     expect(result.output).toBe(`[image: image/png, ${bytes.byteLength} bytes]\n${path}`);
     expect(result.output).not.toContain("base64");
+    // No pHYs: the file states no scale, so nothing is invented for it.
+    expect("pixel_scale" in result.metadata).toBe(false);
     expect(result.metadata).toEqual({
       platform: "darwin",
       driver: "screencapture",
@@ -333,6 +353,80 @@ describe("screenshot files and attachments", () => {
     expect(readPngSize(bytes)).toEqual({ width: 7, height: 9 });
     expect(readPngSize(Buffer.from("nope"))).toBeNull();
     expect(readPngSize(Buffer.alloc(24, 0))).toBeNull();
+  });
+
+  it("reports the pixel scale a capture states, with the division it implies", () => {
+    const worktree = makeWorktree();
+    const directory = captureDirectory(worktree);
+    ensureCaptureDirectory(directory);
+    const path = captureFilePath(worktree, new Date("2026-10-09T12:12:55.123Z"), 2);
+    const bytes = tinyPng(120, 80, 144);
+    writeFileSync(path, bytes);
+
+    const result = captureResult(path, "darwin", "screencapture") as any;
+    expect(result.metadata.pixel_scale).toBe(2);
+    const lines = result.output.split("\n");
+    expect(lines[0]).toBe(`[image: image/png, ${bytes.byteLength} bytes]`);
+    expect(lines[1]).toBe(path);
+    expect(lines).toHaveLength(3);
+    expect(lines[2]).toContain("120x80 pixels");
+    expect(lines[2]).toContain("pixel_scale 2");
+    expect(lines[2]).toContain("60x40 in screen coordinates");
+    expect(lines[2]).toContain("computer_click and computer_move take screen coordinates");
+    expect(lines[2]).toContain("divide any pixel coordinate read off this image by 2");
+    // Still the bytes themselves, and still never base64 in the text.
+    expect(Buffer.from(result.attachments[0].url.split(",")[1], "base64").equals(bytes)).toBe(true);
+    expect(result.output).not.toContain("base64");
+  });
+
+  it("reports a 1:1 capture as pixel_scale 1 and adds no sentence for it", () => {
+    const worktree = makeWorktree();
+    const directory = captureDirectory(worktree);
+    ensureCaptureDirectory(directory);
+    const path = captureFilePath(worktree, new Date("2026-10-09T12:12:55.123Z"), 3);
+    const bytes = tinyPng(120, 80, 72);
+    writeFileSync(path, bytes);
+
+    const result = captureResult(path, "darwin", "screencapture") as any;
+    expect(result.metadata.pixel_scale).toBe(1);
+    expect(result.output).toBe(`[image: image/png, ${bytes.byteLength} bytes]\n${path}`);
+  });
+
+  it("reads a pHYs density, and answers null for every one it cannot trust", () => {
+    const scaled = tinyPng(7, 9, 144);
+    expect(readPngResolution(scaled)).toEqual({ xPixelsPerMetre: 5669, yPixelsPerMetre: 5669, unit: 1 });
+    expect(readPixelScale(scaled)).toBe(2);
+    expect(readPixelScale(tinyPng(7, 9, 72))).toBe(1);
+
+    // No pHYs at all: a scale is not invented.
+    expect(readPngResolution(tinyPng(7, 9))).toBeNull();
+    expect(readPixelScale(tinyPng(7, 9))).toBeNull();
+
+    // A truncated file: the pHYs data is cut off before its CRC.
+    expect(readPngResolution(scaled.subarray(0, PHYS_DATA_OFFSET + 6))).toBeNull();
+
+    // A bad signature is not a PNG, whatever follows it.
+    const badSignature = Buffer.from(scaled);
+    badSignature[1] = 0x00;
+    expect(readPngResolution(badSignature)).toBeNull();
+
+    // Unit 0 states an aspect ratio rather than a density.
+    const aspectOnly = Buffer.from(scaled);
+    aspectOnly[PHYS_DATA_OFFSET + 8] = 0;
+    expect(readPngResolution(aspectOnly)).toEqual({ xPixelsPerMetre: 5669, yPixelsPerMetre: 5669, unit: 0 });
+    expect(readPixelScale(aspectOnly)).toBeNull();
+
+    // A density that disagrees with itself on the two axes is not a scale.
+    const skewed = Buffer.from(scaled);
+    skewed.writeUInt32BE(2835, PHYS_DATA_OFFSET);
+    expect(readPixelScale(skewed)).toBeNull();
+
+    // A density between two whole scales (5.5x) is not one either: the 1% rule.
+    const between = Buffer.from(scaled);
+    const fiveAndAHalf = Math.round((72 / 0.0254) * 5.5);
+    between.writeUInt32BE(fiveAndAHalf, PHYS_DATA_OFFSET);
+    between.writeUInt32BE(fiveAndAHalf, PHYS_DATA_OFFSET + 4);
+    expect(readPixelScale(between)).toBeNull();
   });
 });
 

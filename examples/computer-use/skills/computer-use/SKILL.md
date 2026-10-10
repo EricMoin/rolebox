@@ -27,9 +27,19 @@ when you are unsure.
 - `computer_windows({app?})` lists the visible windows with the id this OS
   uses. Pass `app` to narrow the list.
 - `computer_screenshot({window_id?, region?, display?})` captures the screen,
-  one window or one rectangle as a PNG. The image comes back to you on an
-  image-capable route and is also saved under `.rolebox/computer/` in the
-  workspace.
+  one window or one rectangle as a PNG. Pass at most one target: `window_id`,
+  `region` and `display` are mutually exclusive, and on macOS a `region` cannot
+  be combined with `display` (macOS counts displays from 1). The image comes
+  back to you on an image-capable route and is also saved under
+  `.rolebox/computer/` in the workspace.
+
+The screenshot is in **device pixels**, which are not the coordinates the input
+tools take: a 2x retina capture of a 1512x982 screen comes back 3024x1964 px
+with `metadata.pixel_scale` 2, and the result's text repeats the scale. **Divide
+any x/y you read off the image by `pixel_scale`** before `computer_click` or
+`computer_move` — an unconverted pixel coordinate lands at twice the intended
+offset. When you need to compute a click position, prefer a full-screen or
+`region` capture: a `window_id` capture is a cropped frame with no screen origin.
 
 Read what the screenshot actually shows. Do not plan a click from memory of an
 earlier screenshot.
@@ -37,9 +47,11 @@ earlier screenshot.
 **2. Act.** Use the smallest gesture that moves the task forward.
 
 - `computer_click({x, y, button?, clicks?, window_id?})` — one button at one
-  point. `window_id` targets one X11 window; macOS and Windows send input to
-  the focused window instead.
-- `computer_move({x, y})` — move the pointer without clicking.
+  point in screen coordinates, so divide the pixel coordinates you read off a
+  screenshot by its `pixel_scale` first. `window_id` targets one X11 window;
+  macOS and Windows send input to the focused window instead.
+- `computer_move({x, y})` — move the pointer to a screen coordinate without
+  clicking.
 - `computer_type({text, window_id?})` — type text into the focused window. A
   newline presses Return. The text is never echoed back into the transcript.
 - `computer_key({keys, window_id?})` — press one key with optional modifiers,

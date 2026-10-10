@@ -3,15 +3,28 @@
  * already ships.
  *
  * Capture is `/usr/sbin/screencapture`, whose own flags choose the target:
- * `-l <windowid>` captures exactly one window, `-R x,y,w,h` one rectangle,
- * `-D <display>` one display, and no target flag the whole virtual screen.
- * `-x` suppresses the shutter sound; screencapture leaves the pointer OUT
- * unless `-C` is passed, so every plan here is cursor-free.
+ * `-l <windowid>` captures exactly one window (always with `-o`, so the image is
+ * the window's own frame — without it the drop shadow is included and image pixel
+ * (0,0) is not the window's top-left), `-R x,y,w,h` one rectangle,
+ * `-D <display>` one display, and no target flag ONE display — the main one,
+ * never a stitched image of every screen. `-R` is in global screen coordinates
+ * and therefore already selects its own display: screencapture ignores `-D` when
+ * `-R` is given, so the two are refused together. `-x` suppresses the shutter
+ * sound; screencapture leaves the pointer OUT unless `-C` is passed, so every
+ * plan here is cursor-free.
+ *
+ * A capture and the input that follows it are in different coordinate spaces,
+ * and this file must not blur them: the image is in DEVICE PIXELS at the captured
+ * screen's backing scale — 3024x1964 for a 1512x982-point 2x display — while
+ * every plan below is in SCREEN POINTS, because System Events `click at` and
+ * `cliclick` both measure in points. A pixel coordinate read off a capture is
+ * therefore divided by the capture's own scale before anything here may click it.
  *
  * Input is `/usr/bin/osascript` driving System Events: `click at {x, y}`,
  * `keystroke`, `key code`, and window enumeration. macOS grants that only to a
- * process the user has trusted with Accessibility, which is why every input
- * plan carries {@link ComputerPlan.permissionHint}.
+ * process the user has trusted with Accessibility, and scripting System Events
+ * needs its own Automation grant on top, which is why every input plan carries
+ * {@link ComputerPlan.permissionHint}.
  *
  * Two gestures System Events has no primitive for — moving the pointer, and a
  * right or middle click — are built on the `cliclick` helper rather than faked
@@ -37,8 +50,8 @@ const OSASCRIPT = "/usr/bin/osascript";
 const CLICLICK = "cliclick";
 
 /** Appended to every failure of a plan that needs a macOS privacy grant. */
-const ACCESSIBILITY_HINT =
-  "macOS gives input control only to a process the user has trusted with Accessibility permission (System Settings > Privacy & Security > Accessibility); grant it to the terminal or agent process and restart that process.";
+const INPUT_PERMISSION_HINT =
+  "macOS gives input control only to a process the user has trusted with Accessibility (System Settings > Privacy & Security > Accessibility) to synthesize input and with Automation for System Events (System Settings > Privacy & Security > Automation) to script it, and grants both to the process that launched the host, which must be restarted after granting.";
 
 const SCREEN_RECORDING_HINT =
   "macOS needs Screen Recording permission for screencapture to include window contents (System Settings > Privacy & Security > Screen Recording); without it the PNG contains only the desktop wallpaper.";
@@ -141,7 +154,7 @@ function osascriptPlan(script: string): ComputerPlan {
     script,
     requires: [OSASCRIPT],
     driver: "osascript",
-    permissionHint: ACCESSIBILITY_HINT,
+    permissionHint: INPUT_PERMISSION_HINT,
   };
 }
 
@@ -151,7 +164,7 @@ function cliclickPlan(commands: readonly string[]): ComputerPlan {
     windowsVerbatimArguments: false,
     requires: [CLICLICK],
     driver: "cliclick",
-    permissionHint: ACCESSIBILITY_HINT,
+    permissionHint: INPUT_PERMISSION_HINT,
   };
 }
 
@@ -167,12 +180,19 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
   if (request.windowId !== undefined && request.display !== undefined) {
     return "a single-window capture does not select a display; pass window_id or display.";
   }
+  if (request.region !== undefined && request.display !== undefined) {
+    return "screencapture ignores -D when -R is given: a region is expressed in global screen coordinates and therefore already selects its own display, so pass region or display, not both.";
+  }
+  if (request.display !== undefined && request.display < 1) {
+    return "macOS counts displays from 1 (1 is the main display, 2 the next), so pass a display of 1 or more.";
+  }
   const args = ["-x"];
   if (request.windowId !== undefined) {
     if (!usableWindowId(request.windowId)) {
       return "a window id must be a positive whole number (macOS window numbers come from computer_windows).";
     }
-    args.push("-l", String(request.windowId));
+    // -o drops the window shadow, so the image is exactly the window's frame.
+    args.push("-o", "-l", String(request.windowId));
   } else if (request.region !== undefined) {
     const region = wholeRegion(request.region);
     if (region === null) return REGION_REFUSAL;

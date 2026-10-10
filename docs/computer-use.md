@@ -42,7 +42,7 @@ image route receives the MCP image diagnostic
 
 Rolebox ships its **own** tool family instead — `src/computer/` — built from the
 same canonical tool factory as every other rolebox tool
-(`createComputerTools`, `src/computer/tools.ts:426-435`). Its seven tools are
+(`createComputerTools`, `src/computer/tools.ts:429-438`). Its seven tools are
 `computer_screenshot`, `computer_windows`, `computer_click`, `computer_move`,
 `computer_type`, `computer_key` and `computer_permissions`, and each one resolves
 its command through the facts its own OS declares
@@ -80,25 +80,30 @@ provider off and use rolebox's family — not both.
 
 The argument shapes are the tools' own zod schemas (`src/computer/tools.ts`).
 
-- **`computer_screenshot`** — `window_id` and `region` are mutually exclusive
-  (`src/computer/drivers/darwin.ts:164-166`, `src/computer/drivers/linux.ts:48-50`),
-  and a single-window capture selects no display (`darwin.ts:167-169`).
-  `display` is the OS's own display identifier: macOS `-D`, an X11 screen
-  number, a Windows `Screen.AllScreens` index — it is passed through, never
-  renumbered (`src/platform/system/types.ts:98-104`). `timeout_ms` stops one
-  capture (default `15000`, `src/computer/exec.ts:23`).
+- **`computer_screenshot`** — `window_id`, `region` and `display` are mutually
+  exclusive (`src/computer/drivers/darwin.ts:177-179`,
+  `src/computer/drivers/linux.ts:48-50`), a single-window capture selects no
+  display (`darwin.ts:180-182`), and on macOS a `region` is refused together with
+  `display` (`darwin.ts:183-185`): a region is in global screen coordinates and
+  therefore already selects its own display, and `screencapture` ignores `-D`
+  when `-R` is given. `display` is the OS's own display identifier: macOS `-D`,
+  which counts **from 1** — 1 is the main display, 2 the next, and a value below
+  1 is refused (`darwin.ts:186-188`) — an X11 screen number, a Windows
+  `Screen.AllScreens` index. It is passed through, never renumbered
+  (`src/platform/system/types.ts:98-104`). `timeout_ms` stops one capture
+  (default `15000`, `src/computer/exec.ts:23`).
 - **`computer_windows`** — one line per window: the id, the process or owner and
   the title. The id is the OS's own — the macOS window number that
   `screencapture -l` takes, an X11 window id, or a Windows `MainWindowHandle`
-  (`src/computer/tools.ts:236-243`). On macOS this reads through System Events
+  (`src/computer/tools.ts:239-246`). On macOS this reads through System Events
   and therefore needs Accessibility permission.
 - **`computer_click`** — `button` is `left` (default), `right` or `middle`, and
   `clicks` is `1` (default) or `2`. `window_id` targets one X11 window;
   macOS and Windows send input to the focused window and refuse a `window_id`
-  instead of silently ignoring it (`src/computer/drivers/darwin.ts:158-161`).
+  instead of silently ignoring it (`src/computer/drivers/darwin.ts:172-175`).
 - **`computer_move`** — moves the real cursor; it takes no window.
 - **`computer_type`** — the text is never echoed back in the result, because it
-  may be a password (`src/computer/tools.ts:222-224`); a newline presses Return.
+  may be a password (`src/computer/tools.ts:226-228`); a newline presses Return.
 - **`computer_key`** — `keys` is modifiers first and exactly one final key:
   `["cmd", "shift", "t"]`, `["ctrl", "c"]`, `["Return"]`. A modifier in the
   final position, or a second normal key, is refused rather than serialized into
@@ -109,7 +114,7 @@ The argument shapes are the tools' own zod schemas (`src/computer/tools.ts`).
 Every tool takes `dry_run: true`. It returns the **exact spawn vector** the tool
 would use as JSON — `{argv, windowsVerbatimArguments, script?}` — with
 `metadata.dry_run` set, and executes nothing
-(`src/computer/tools.ts:82-95`; the vector comes from the same resolver the real
+(`src/computer/tools.ts:83-95`; the vector comes from the same resolver the real
 run uses, `src/computer/exec.ts:91-93`). This is the safe way to see what a
 gesture would do — which coordinates, which window id, which button, which
 helper binary — before it does anything. Use it first for any input you cannot
@@ -119,13 +124,28 @@ take back.
 
 A capture is written under **`<worktree>/.rolebox/computer/`** as
 `<timestamp>-<seq>.png` unless `path` names another file, and the directory is
-created `0700` (`src/computer/capture.ts:18-21`, `:42-49`, `:52-58`). The result
+created `0700` (`src/computer/capture.ts:22-26`, `:46-54`, `:56-64`). The result
 carries the PNG twice: as a `data:image/png;base64,...` attachment for an
 image-capable model route, and as plain text — `[image: image/png, N bytes]`
-plus the saved path — for the transcript (`src/computer/capture.ts:99-119`). The
+plus the saved path — for the transcript (`src/computer/capture.ts:160-172`). The
 `metadata` records the PNG's own width, height and byte count, read from its
 IHDR, so a helper that wrote a different image cannot make the tool report one
-it did not take (`src/computer/capture.ts:69-98`).
+it did not take (`src/computer/capture.ts:116-146`).
+
+**A capture is in device pixels, input is in screen coordinates.** macOS
+`screencapture` writes the pixels of the captured screen's backing scale — a
+3024x1964 PNG for a 1512x982-point 2x display — and tags the file with that
+density. The result reports it as `metadata.pixel_scale` (`2` on that display),
+and when it is above 1 the text adds one sentence with the size in pixels, the
+scale and the same size in screen coordinates. `computer_click` and
+`computer_move` take screen coordinates, so a pixel coordinate read off the
+image must be divided by `pixel_scale` before it is clicked
+(`src/computer/capture.ts:66-106`). Two further facts follow from the same
+flags: a window capture drops the shadow (`screencapture -o`), so its image is
+exactly the window frame rather than a frame plus a margin whose pixel (0,0) is
+not the window's top-left, and a capture with no target covers **one display**
+(on macOS the main display), never a stitched image of every screen
+(`src/computer/drivers/darwin.ts:5-21`).
 
 A failure is never a thrown exception and never a silent no-op: the text is one
 sentence that starts with `Error:` and names the cause and what to do about it
@@ -287,23 +307,29 @@ transport, and each host does it differently:
 ### macOS
 
 Screenshots use `/usr/sbin/screencapture` and input uses `/usr/bin/osascript`
-driving System Events (`src/computer/drivers/darwin.ts:1-24`). Two grants are
+driving System Events (`src/computer/drivers/darwin.ts:1-37`). Three grants are
 needed, and they are granted to the **application that launched the host** — the
 terminal or agent process — not to rolebox, and not by `npm install`:
 
 - **Screen Recording** for `screencapture` to include window contents; without
   it the PNG contains only the desktop wallpaper
-  (`src/computer/drivers/darwin.ts:43-44`).
-- **Accessibility** for System Events input; every input plan carries that
-  remediation sentence (`src/computer/drivers/darwin.ts:40-41`, `:144`, `:154`).
+  (`src/computer/drivers/darwin.ts:56-57`).
+- **Accessibility** (System Settings > Privacy & Security > Accessibility) for
+  System Events to synthesize input.
+- **Automation for System Events** (System Settings > Privacy & Security >
+  Automation) to script it. It is a grant *separate* from Accessibility, so an
+  application trusted for one can still fail the other; every input plan carries
+  a single remediation sentence naming both
+  (`src/computer/drivers/darwin.ts:53-54`, `:157`, `:167`), and the process must
+  be restarted after the grant.
 
 Moving the pointer and a right or middle click use the `cliclick` helper, which
 is **not** part of macOS; when it is missing the tool refuses and names the
 install command (`brew install cliclick`,
-`src/computer/drivers/darwin.ts:16-20`, `:279-281`). `computer_permissions`
+`src/computer/drivers/darwin.ts:29-33`, `:300-301`). `computer_permissions`
 reads the Accessibility status (`UI elements enabled`) and returns the
-remediation text when it is off (`src/computer/drivers/darwin.ts:288-290`,
-`src/computer/tools.ts:401-410`).
+remediation text when it is off (`src/computer/drivers/darwin.ts:308-310`,
+`src/computer/tools.ts:404-413`).
 
 ### Linux
 

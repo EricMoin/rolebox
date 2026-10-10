@@ -14,8 +14,9 @@ export {
   captureTimestamp,
   ensureCaptureDirectory,
   nextCaptureSequence,
+  readPixelScale,
 } from "./capture.ts";
-export { hasPngSignature, PNG_SIGNATURE, readPngSize } from "./png.ts";
+export { hasPngSignature, PNG_SIGNATURE, readPngResolution, readPngSize } from "./png.ts";
 export { darwinComputerUse } from "./drivers/darwin.ts";
 export { linuxComputerUse } from "./drivers/linux.ts";
 export { win32ComputerUse } from "./drivers/win32.ts";

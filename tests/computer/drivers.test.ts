@@ -46,8 +46,9 @@ describe("darwin computer-use plans", () => {
   });
 
   it("captures one window, one region or one display with the OS's own flags", () => {
+    // -o: the image is the window frame itself, not the frame plus its shadow.
     expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, windowId: 12345 }, {})).argv).toEqual([
-      "/usr/sbin/screencapture", "-x", "-l", "12345", CAPTURE.path,
+      "/usr/sbin/screencapture", "-x", "-o", "-l", "12345", CAPTURE.path,
     ]);
     expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 10, y: 20, w: 300, h: 200 } }, {})).argv).toEqual([
       "/usr/sbin/screencapture", "-x", "-R", "10,20,300,200", CAPTURE.path,
@@ -67,6 +68,20 @@ describe("darwin computer-use plans", () => {
     expect(refusal).toContain("not both");
     expect(refusalOf(darwinComputerUse.capturePlan({ ...CAPTURE, windowId: 7, display: 1 }, {}))).toContain("does not select a display");
     expect(refusalOf(darwinComputerUse.capturePlan({ ...CAPTURE, windowId: -3 }, {}))).toContain("positive whole number");
+  });
+
+  it("refuses a region together with a display, and a display macOS does not number", () => {
+    // screencapture ignores -D when -R is given, so accepting both would
+    // silently capture a different display than the one that was asked for.
+    const both = refusalOf(
+      darwinComputerUse.capturePlan({ ...CAPTURE, region: { x: 0, y: 0, w: 5, h: 5 }, display: 2 }, {}),
+    );
+    expect(both).toContain("global screen coordinates");
+    expect(both).toContain("ignores -D when -R is given");
+
+    // macOS counts displays from 1; 0 is not a display it will accept.
+    expect(refusalOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 0 }, {}))).toContain("counts displays from 1");
+    expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 1 }, {})).argv).toContain("-D");
   });
 
   it("clicks through System Events and moves/right-clicks through cliclick", () => {

@@ -15,6 +15,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PNG_SIGNATURE, hasPngSignature, readPngSize } from "../../src/computer/png.ts";
+import { readPixelScale } from "../../src/computer/capture.ts";
 import { createComputerScreenshotTool } from "../../src/computer/tools.ts";
 import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
@@ -63,6 +64,25 @@ describe("darwin capture", () => {
     expect(size!.height).toBe(result.metadata.height);
     expect(size!.width).toBeGreaterThan(0);
     expect(size!.height).toBeGreaterThan(0);
+
+    // The scale a real capture states is the one this host's file records, and
+    // the result may only claim a scale the bytes actually support: absent, or a
+    // whole number of device pixels per screen point.
+    const stated = readPixelScale(bytes);
+    expect(result.metadata.pixel_scale ?? null).toBe(stated);
+    if (stated !== null) {
+      expect(Number.isInteger(stated)).toBe(true);
+      expect(stated).toBeGreaterThanOrEqual(1);
+    }
+
+    // The conversion sentence appears exactly when the image is not in screen
+    // coordinates: one extra line for a scale above 1, and never otherwise.
+    const lines = (result.output as string).split("\n");
+    expect(lines).toHaveLength(stated !== null && stated > 1 ? 3 : 2);
+    if (stated !== null && stated > 1) {
+      expect(lines[2]).toContain(`pixel_scale ${stated}`);
+      expect(lines[2]).toContain("divide");
+    }
   });
 
   it.skipIf(!onDarwin)("creates the capture directory owner-only", () => {
