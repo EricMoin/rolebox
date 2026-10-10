@@ -150,6 +150,22 @@ export interface NodeDeclarationV3 {
    * never reads "the latest result of some type" at run time.
    */
   inputs?: InputDeclarationV3[];
+  /**
+   * EXTRA HOST TOOLS this node's worker may use beyond the worker baseline.
+   *
+   * The grammar is: `tools?: string[]` — extra host tool names or
+   * trailing-star prefixes (for example `computer_*`) this node may use beyond
+   * the worker baseline `graph_submit_outcome` and `graph_worker_exec`;
+   * absent means baseline only. Entries are trimmed, unique and sorted by the
+   * front-end, so two spellings of one grant compare equal.
+   *
+   * A DECLARED GRANT IS A NARROWING OF WHAT THE NODE MAY DO, never a widening of
+   * the graph face: these are HOST tools (a browser, a device, a network
+   * client), while the graph face a dispatched worker holds — and the refusal
+   * every other graph tool receives — is unchanged. An undeclared node keeps
+   * exactly the baseline restriction.
+   */
+  tools?: string[];
 }
 
 // ── Edges ───────────────────────────────────────────────────────────────────
@@ -359,6 +375,9 @@ function isNodeDeclarationV3(value: unknown): boolean {
   ) {
     return false;
   }
+  // Shape level only, like the input list above: a non-array can never be a
+  // host-tool grant, while what an ENTRY may say is the front-end's refusal.
+  if (value.tools !== undefined && !Array.isArray(value.tools)) return false;
   if (typeof value.agent !== "string") return false;
   if (typeof value.prompt !== "string") return false;
   if (!Array.isArray(value.outcomes)) return false;

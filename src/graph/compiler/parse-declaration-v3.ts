@@ -159,6 +159,7 @@ const NODE_KEYS = [
   "join",
   "budget",
   "inputs",
+  "tools",
 ] as const;
 const INPUT_KEYS = ["from", "outcome", "when"] as const;
 const OUTCOME_KEYS = ["id", "data", "acceptance"] as const;
@@ -365,13 +366,18 @@ function readNode(
         log,
         (entry, entryPath) => readInput(entry, entryPath, log),
       );
+  const tools =
+    record.tools === undefined
+      ? undefined
+      : readNodeTools(record.tools, `${path}.tools`, log);
 
   if (
     id === undefined ||
     agent === undefined ||
     prompt === undefined ||
     outcomes === undefined ||
-    (record.inputs !== undefined && inputs === undefined)
+    (record.inputs !== undefined && inputs === undefined) ||
+    (record.tools !== undefined && tools === undefined)
   ) {
     return undefined;
   }
@@ -386,7 +392,102 @@ function readNode(
     ...(join === undefined ? {} : { join }),
     ...(budget === undefined ? {} : { budget }),
     ...(inputs === undefined ? {} : { inputs }),
+    ...(tools === undefined ? {} : { tools }),
   };
+}
+
+/**
+ * The most host tools one node may declare: a grant stays a list a reader can
+ * state, not an unbounded second tool policy.
+ */
+const MAX_NODE_TOOLS = 32;
+
+/**
+ * Read the OPTIONAL node `tools` list — the grammar's `tools?: string[]`: extra
+ * host tool names, or trailing-star prefixes such as `computer_*`, this node's
+ * worker may use beyond the worker baseline `graph_submit_outcome` and
+ * `graph_worker_exec`.
+ *
+ * ABSENT IS THE BASELINE, and the reader preserves that absence as absence
+ * rather than inventing an empty grant, so every declaration written before
+ * this field existed keeps exactly the baseline restriction. An EMPTY array is
+ * refused instead of read as "no tools": a field that says nothing is a
+ * misspelling of the absence, not a grant.
+ *
+ * The retained value is the grant as the boundary matches on it: each entry is
+ * TRIMMED to the name it names, then de-duplicated and sorted in code-unit
+ * order, so two spellings of one node compare equal. The refusals are the
+ * grammar's own — a non-array, a non-string entry, a blank entry, more than
+ * {@link MAX_NODE_TOOLS} entries, and the empty array above.
+ */
+function readNodeTools(
+  value: unknown,
+  path: string,
+  log: IssueLog,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!isArrayValue(value)) {
+    log.issues.push(
+      issue(
+        "wrong-type",
+        `${path} must be an array of host tool names, received ${describeValue(value)}`,
+        path,
+      ),
+    );
+    return undefined;
+  }
+  if (value.length === 0) {
+    log.issues.push(
+      issue(
+        "invalid-value",
+        `${path} must name at least one tool when present — omit the field to keep the worker baseline`,
+        path,
+      ),
+    );
+    return undefined;
+  }
+  if (value.length > MAX_NODE_TOOLS) {
+    log.issues.push(
+      issue(
+        "invalid-value",
+        `${path} declares ${value.length} tools, more than the ${MAX_NODE_TOOLS} a node may name`,
+        path,
+      ),
+    );
+    return undefined;
+  }
+  const names = new Set<string>();
+  let ok = true;
+  for (let index = 0; index < value.length; index++) {
+    const entry = value[index];
+    const entryPath = `${path}[${index}]`;
+    if (typeof entry !== "string") {
+      log.issues.push(
+        issue(
+          "wrong-type",
+          `${entryPath} must be a host tool name, received ${describeValue(entry)}`,
+          entryPath,
+        ),
+      );
+      ok = false;
+      continue;
+    }
+    const name = entry.trim();
+    if (name.length === 0) {
+      log.issues.push(
+        issue(
+          "invalid-value",
+          `${entryPath} must not be blank — it names a host tool`,
+          entryPath,
+        ),
+      );
+      ok = false;
+      continue;
+    }
+    names.add(name);
+  }
+  if (!ok) return undefined;
+  return [...names].sort(compareText);
 }
 
 /**

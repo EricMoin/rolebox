@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { buildGraphWorkerRolePrompt, findGraphWorkerRole } from "../../../prompt/graph-worker.ts";
+import {
+  buildGraphWorkerRolePrompt,
+  buildGraphWorkerToolGrantBlock,
+  findGraphWorkerRole,
+} from "../../../prompt/graph-worker.ts";
 import type { ResolvedRole } from "../../../types.ts";
 import type { DshWorkerCommandBoundary } from "./graph-worker.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
@@ -67,8 +71,16 @@ function boundaryBlock(boundary: DshWorkerCommandBoundary): string {
     `(${boundary.reason}), so every graph_worker_exec command is refused rather than run without the boundary the session authorized. ${shell}`;
 }
 
-/** Copy only this role's resource bundles into its attempt's sandbox-readable input directory. */
-export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, boundary: DshWorkerCommandBoundary): string {
+/**
+ * Copy only this role's resource bundles into its attempt's sandbox-readable
+ * input directory, and assemble the worker's system prompt.
+ *
+ * `declaredTools` is the EXECUTING NODE's own grant (the v3 `tools?: string[]`
+ * beyond the baseline), which the caller resolves for THIS attempt. Omitting it
+ * — or passing the empty list — states the baseline restriction, which is what
+ * an undeclared node keeps.
+ */
+export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[]): string {
   const agent = findGraphWorkerRole(roles, agentId);
   if (!agent) throw new Error(`Graph worker agent is not resolved: ${agentId}`);
   mkdirSync(inputDirectory, { recursive: true, mode: 0o700 });
@@ -98,14 +110,22 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
       ...ref,
       filePath: deliver(ref.filePath, referenceRoot(ref.filePath)),
     }));
+    // The sentence names the tools the boundary will actually grant: the two
+    // baseline entries alone when the node declares none, and the node's
+    // declared host tools as well when it does.
+    const toolsSentence =
+      declaredTools === undefined || declaredTools.length === 0
+        ? "Your tools are graph_worker_exec and graph_submit_outcome. "
+        : "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares. ";
     return [
       "You are a graph worker assigned to the role below. Complete only the dispatched task. " +
-        "Your tools are graph_worker_exec and graph_submit_outcome. Use graph_worker_exec for all file reads, commands and permitted edits. " +
+        toolsSentence + "Use graph_worker_exec for all file reads, commands and permitted edits. " +
         "You cannot dispatch agents or inspect/control graph state. Resource paths below are private copies for this attempt. " +
         "Submit only a declared outcome using the host handoff; an accepted submission settles your attempt. A prose answer does not settle it. " +
         "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
         "{\"outcome_id\": \"<an outcome this node declares>\", \"data\": <the outcome payload>, \"evidence_refs\": [\"<path>\"]} " +
         "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
+      buildGraphWorkerToolGrantBlock(declaredTools),
       boundaryBlock(boundary),
 
       buildGraphWorkerRolePrompt(agent, { skills, references, resourceTool: "graph_worker_exec" }),

@@ -124,6 +124,7 @@ import type {
   HostExecutionObservationPort,
 } from "../../../graph/host/outcome-host.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
+import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
 import type { DeliveredInputView } from "../../../graph/host/input-view.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
@@ -195,7 +196,30 @@ export type DshOutcomeSettlement =
   };
 
 export interface DshOutcomeDeliveryOptions {
+  /**
+   * THE BASELINE ALLOW-LIST, used when no per-request resolver answers: the
+   * worker's own delivery channel (`graph_submit_outcome` and, on dsh,
+   * `graph_worker_exec`). It is deliberately STATIC and unconditional — this is
+   * the surface every worker keeps, and nothing a caller passes can widen it.
+   */
   readonly workerTools?: readonly string[];
+  /**
+   * THE ALLOW-LIST FOR ONE REQUEST, resolved by the entry that owns the host
+   * tool registry: the baseline PLUS the executing node's declared host tools,
+   * each intersected with the tools the host actually registered
+   * ({@link resolveDshWorkerToolAllowList}).
+   *
+   * WHY PER REQUEST. The node's declared grant rides ON the request
+   * ({@link OutcomeDispatchRequest.declaredTools}), so the allow-list is a
+   * property of the attempt, not of the adapter: one delivery may start a
+   * worker with `computer_*` and the next the baseline alone.
+   *
+   * FAIL CLOSED ON EVERY UNCERTAINTY. An answer of `undefined`, a resolver the
+   * entry did not install, and a resolver that THROWS all fall back to
+   * {@link DshOutcomeDeliveryOptions.workerTools} — the static baseline. A
+   * missing answer is never read as a grant.
+   */
+  readonly workerToolsOf?: (request: OutcomeDispatchRequest) => readonly string[] | undefined;
   readonly readExecutionEvents?: (id: string) => Promise<readonly DshSessionEventLike[] | undefined>;
   readonly startWorker?: (label: string, start: () => Promise<DshSubagentRun>, request: OutcomeDispatchRequest) => Promise<DshSubagentRun>;
   readonly subscribeExecutionEvents?: (id: string, listener: (events: readonly DshSessionEventLike[]) => void) => (() => void);
@@ -239,6 +263,73 @@ export interface DshOutcomeDeliveryOptions {
   readonly cancelConfirmTimeoutMs?: number;
   /** Optional logger name override. */
   readonly loggerName?: string;
+}
+
+/**
+ * THE ALLOW-LIST ONE ATTEMPT'S START REQUEST CARRIES.
+ *
+ * The list becomes `toolFilter.allow`, which the harness applies as a scoped
+ * `tools.restrict()` in the child's creation window: it is the child's only
+ * VISIBLE and EXECUTABLE tool set, and `restrict()` THROWS on a name the host
+ * does not resolve. The list therefore has to name tools that actually exist,
+ * and it must never name one the node did not declare.
+ *
+ * THREE INPUTS, ONE FAIL-CLOSED RULE:
+ *
+ *   - the BASELINE — the worker's delivery channel, granted unconditionally
+ *     (still filtered by `isRegistered` so an unregistered name cannot make
+ *     `restrict()` throw and abort the start);
+ *   - the node's DECLARED entries, matched with the ONE matcher the worker
+ *     boundary itself uses ({@link declaredToolsAllow}), so the start filter and
+ *     the per-call refusal cannot disagree; that matcher never admits a name in
+ *     the graph face's own reserved namespace, so a declaration cannot re-open
+ *     the face through this door either;
+ *   - the CANDIDATE names this host composed, each verified by `isRegistered`.
+ *
+ * THE INTERSECTION IS THE POINT. A declared name the host did not register is
+ * not granted: it could not be called, and naming it would throw inside
+ * `restrict()`. An undeclared node, an absent declaration, and a declaration
+ * whose every entry fails the intersection all produce the registered baseline
+ * alone — exactly the surface this delivery had before the field existed.
+ *
+ * AN EXACT ENTRY IS ALSO PROBED BY NAME, so a HOST-owned tool this build did not
+ * compose remains grantable; a prefix entry is expanded over the candidates,
+ * which is the only enumeration available without asking the registry to list
+ * itself.
+ *
+ * TOTAL AND NARROWING: the inputs are a list and a predicate, a predicate that
+ * throws answers "not registered", and no input can add a name the intersection
+ * did not produce.
+ */
+export function resolveDshWorkerToolAllowList(options: {
+  readonly baseline: readonly string[];
+  readonly declared?: readonly string[] | undefined;
+  readonly candidates: readonly string[];
+  readonly isRegistered: (name: string) => boolean;
+}): readonly string[] {
+  const registered = (name: string): boolean => {
+    try {
+      return options.isRegistered(name) === true;
+    } catch {
+      return false;
+    }
+  };
+  const allow = new Set<string>();
+  for (const name of options.baseline) {
+    if (registered(name)) allow.add(name);
+  }
+  const declared = options.declared;
+  if (declared === undefined || declared.length === 0) return Object.freeze([...allow]);
+  for (const name of options.candidates) {
+    if (allow.has(name)) continue;
+    if (declaredToolsAllow(name, declared) && registered(name)) allow.add(name);
+  }
+  for (const entry of declared) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.endsWith("*")) continue;
+    if (allow.has(entry)) continue;
+    if (declaredToolsAllow(entry, declared) && registered(entry)) allow.add(entry);
+  }
+  return Object.freeze([...allow]);
 }
 
 /**
@@ -778,6 +869,17 @@ export class DshOutcomeDelivery {
     }
 
     const controller = new AbortController();
+    // THE PER-REQUEST ALLOW-LIST (the node's declared grant, intersected with
+    // the tools this host actually registered). A resolver that THROWS or
+    // answers nothing has not granted anything: the delivery falls back to the
+    // static baseline rather than starting a worker under a list nobody
+    // resolved. Never wider, only narrower.
+    let workerTools: readonly string[] | undefined;
+    try {
+      workerTools = this.opts.workerToolsOf?.(request) ?? this.opts.workerTools;
+    } catch {
+      workerTools = this.opts.workerTools;
+    }
     const startRequest: DshSubagentStartRequest = {
       // THE STABLE IDEMPOTENCY KEY IS THE CREATE CALL'S LABEL (P2 item 5). The
       // key — `graphId + "/dispatch:" + attemptId`, derived by the one function
@@ -794,11 +896,11 @@ export class DshOutcomeDelivery {
       // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff
       // and the input view the host materialized beside it. The view's file
       // paths are the worker's own copies, verified before this call.
-      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request, inputView) + (this.opts.workerTools ? "\nUse graph_worker_exec for all workspace commands, file reads, edits and tests." : "") }],
+      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request, inputView) + (workerTools ? "\nUse graph_worker_exec for all workspace commands, file reads, edits and tests." : "") }],
       parent,
       signal: controller.signal,
       sessionId: parentSessionId,
-      ...(this.opts.workerTools ? { toolFilter: { allow: [...this.opts.workerTools] } } : {}),
+      ...(workerTools ? { toolFilter: { allow: [...workerTools] } } : {}),
     };
     // The start itself is a promise; the delivery contract is synchronous. A
     // rejection is reported as a failed start (nothing was observed running).

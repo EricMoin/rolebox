@@ -134,6 +134,17 @@ export interface CompiledNode {
    * what the acceptance RECORDED, never from the reference's path.
    */
   readonly inputs?: readonly CompiledInputRef[];
+  /**
+   * The EXTRA HOST TOOLS this node's worker may use beyond the worker baseline
+   * `graph_submit_outcome` and `graph_worker_exec` — the declaration's
+   * `tools?: string[]`, normalized by the front-end (trimmed, unique, sorted).
+   *
+   * ABSENT IS THE BASELINE: a node that declares nothing keeps exactly the
+   * baseline restriction, which is why an absent field is preserved as absence
+   * rather than compiled into an empty grant. The field lives in the plan body,
+   * so `planRevision` covers it: a grant cannot be edited under a running plan.
+   */
+  readonly tools?: readonly string[];
 }
 
 /**
@@ -490,6 +501,40 @@ export function nodeBindingsOf(
     entries.push([node.id, { ...ref }]);
   }
   return Object.fromEntries(entries);
+}
+
+/**
+ * The declared HOST-tool grant of one plan node, or `undefined`.
+ *
+ * The reader is DEFENSIVE because its input is a persisted row: a plan that is
+ * not an object, a `nodes` list that is not an array, a node that is not an
+ * object, no node with that id, an absent `tools`, or an entry that is not a
+ * non-empty string all answer `undefined` — which callers read as
+ * BASELINE ONLY. A grant this build cannot read is never widened into "allow".
+ *
+ * The returned list is a copy, so a caller cannot mutate the plan it read.
+ */
+export function declaredNodeTools(
+  plan: unknown,
+  nodeId: string,
+): readonly string[] | undefined {
+  if (typeof plan !== "object" || plan === null || Array.isArray(plan)) return undefined;
+  const nodes = (plan as Record<string, unknown>)["nodes"];
+  if (!Array.isArray(nodes)) return undefined;
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null || Array.isArray(node)) continue;
+    const entry = node as Record<string, unknown>;
+    if (entry["id"] !== nodeId) continue;
+    const tools = entry["tools"];
+    if (!Array.isArray(tools)) return undefined;
+    const names: string[] = [];
+    for (const tool of tools) {
+      if (typeof tool !== "string" || tool.length === 0) return undefined;
+      names.push(tool);
+    }
+    return names.length === 0 ? undefined : Object.freeze(names);
+  }
+  return undefined;
 }
 
 // ── Plan-level invariants (B7; the rule set is B9's) ────────────────────────

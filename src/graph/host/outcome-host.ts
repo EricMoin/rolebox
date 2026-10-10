@@ -1,4 +1,5 @@
 import { HostGraphRuntimes, type RunningGraphRuntime } from "./graph-runtimes.ts";
+import { declaredNodeTools } from "../compiler/plan.ts";
 import { WORKER_GRANTED_GRAPH_TOOLS, bindOutcomeToolInvocation, reportControlContinuation } from "./tool-binding.ts";
 import type { OutcomeWorkerPrincipal } from "./tool-binding.ts";
 import { applyGraphControl, type GraphControlResult } from "../control/application.ts";
@@ -16,7 +17,7 @@ import { join } from "node:path";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { logEvent, withLogScope } from "../../log/index.ts";
-import { describeStoreVerdict } from "../persistence/declared-record.ts";
+import { describeStoreVerdict, readStoredDefinition } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import type {
@@ -2671,6 +2672,12 @@ export class OutcomeHost {
       workerBoundary: {
         granted: WORKER_GRANTED_GRAPH_TOOLS,
         principalOf: (sessionId: string) => this.workerPrincipalOf(sessionId),
+        // THE NODE'S OWN GRANT, PER PRINCIPAL: the baseline above is the graph
+        // face; the host tools the executing node declared are resolved from
+        // the principal this host bound, and an unresolved grant leaves the
+        // worker with the baseline alone.
+        declaredToolsOf: (principal: OutcomeWorkerPrincipal) =>
+          this.workerDeclaredToolsOf(principal),
       },
       ...(getEffectiveAgent === undefined ? {} : { getEffectiveAgent }),
     });
@@ -2910,6 +2917,45 @@ export class OutcomeHost {
     const remembered = this.workerPrincipals.get(sessionId);
     if (remembered !== undefined) return remembered;
     return this.dispatchedWorkerPrincipalOf(sessionId);
+  }
+
+  /**
+   * THE NODE'S DECLARED HOST-TOOL GRANT for the worker this principal names, or
+   * `undefined`.
+   *
+   * This is the ONE new fact the worker-tool boundary needs to judge a name
+   * outside the baseline: the v3 node declaration's `tools?: string[]` — extra
+   * HOST tool names or trailing-star prefixes such as `computer_*` — read from
+   * the SAME durable facts every other binding is read from:
+   *
+   *   - the NODE comes from the attempt's own dispatch binding (this process's
+   *     cache, else the host's durable record), never from the caller and never
+   *     from a node lookup by list order;
+   *   - the GRANT comes from the persisted, verified compiled plan of that
+   *     graph ({@link readStoredDefinition}), so an edited declaration cannot
+   *     move a grant under a running plan.
+   *
+   * FAIL CLOSED, and TOTAL: a principal that is not bound to an attempt, an
+   * absent/unreadable/refused store, a graph with no definition, an unknown
+   * node, an absent field, or any malformed value answers `undefined` — which
+   * the boundary reads as BASELINE ONLY. Nothing here throws and nothing here
+   * widens a grant on an uncertainty.
+   */
+  workerDeclaredToolsOf(
+    principal: OutcomeWorkerPrincipal,
+  ): readonly string[] | undefined {
+    try {
+      const binding = this.bridgeFor(principal.graphId).bindingFor({
+        graphId: principal.graphId,
+        attemptId: principal.attemptId,
+      });
+      if (binding === undefined) return undefined;
+      const reading = readStoredDefinition(this.storeRoot, principal.graphId);
+      if (reading.kind !== "ok") return undefined;
+      return declaredNodeTools(reading.declared.plan, binding.nodeId);
+    } catch {
+      return undefined;
+    }
   }
 
   /**

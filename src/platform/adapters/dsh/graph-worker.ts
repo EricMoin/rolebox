@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { OutcomeHost } from "../../../graph/host/outcome-host.ts";
+import {
+  declaredToolsAllow,
+  type OutcomeWorkerPrincipal,
+} from "../../../graph/host/tool-binding.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../types.ts";
 import { executeGraphWorkerCommand } from "../../sandbox/worker-exec.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
@@ -209,8 +213,20 @@ export interface DshGraphWorkerRegistry {
   guard?(guard: (execution: { readonly name: string; readonly agent?: WorkerAgent }) => string | undefined): () => void;
 }
 
+/**
+ * The host facts this boundary judges a worker's tool NAME by: which session is a
+ * worker, and the HOST tools the executing node declared beyond the baseline.
+ *
+ * `workerDeclaredToolsOf` is OPTIONAL BY DESIGN. A host that cannot resolve a
+ * node's declared grant (an older assembly, a store this process cannot read)
+ * leaves every worker at the baseline rather than allowing a name it cannot
+ * substantiate, and a host that never declares extra tools is unaffected.
+ */
+export type DshGraphWorkerGrantHost = Pick<OutcomeHost, "workerPrincipalOf"> &
+  Partial<Pick<OutcomeHost, "workerDeclaredToolsOf">>;
+
 /** Protect the execution pipeline too: Code Mode transports are outside toolFilter. */
-export function installDshGraphWorkerBoundary(host: Pick<OutcomeHost, "workerPrincipalOf">, tools: DshGraphWorkerRegistry,
+export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, tools: DshGraphWorkerRegistry,
   subscribe: (event: string, listener: (...args: unknown[]) => unknown) => (() => void) | void) {
   const labels = new Set<string>();
   const presentations = new WeakSet<object>();
@@ -225,8 +241,43 @@ export function installDshGraphWorkerBoundary(host: Pick<OutcomeHost, "workerPri
     return agent.session?.events?.some(event => event.type === "subagent/descriptor" && event.data !== null && typeof event.data === "object" &&
       "label" in event.data && typeof event.data.label === "string" && labels.has(event.data.label)) ?? false;
   };
-  const guard = tools.guard?.(execution => isWorker(execution.agent) && !DSH_GRAPH_WORKER_TOOLS.includes(execution.name)
-    ? "Graph workers may only submit their own outcome or use the sandbox command tool" : undefined);
+  /**
+   * The declared HOST tools of the node THIS agent's worker executes, or
+   * `undefined`.
+   *
+   * Resolved through the worker PRINCIPAL the host bound the session as, exactly
+   * like {@link isWorker} — never from the tool name, a caller argument or a
+   * process-wide setting. FAIL CLOSED: an unbound session, a host without the
+   * accessor, a throwing accessor and a value that is not an array all answer
+   * `undefined`, which the predicate below reads as baseline only.
+   */
+  const declaredToolsOf = (agent?: WorkerAgent): readonly string[] | undefined => {
+    if (!agent) return undefined;
+    const sessionId = agent.session?.id ?? agent.id ?? "";
+    if (sessionId.length === 0) return undefined;
+    const principal: OutcomeWorkerPrincipal | undefined = host.workerPrincipalOf(sessionId);
+    if (principal === undefined) return undefined;
+    const lookup = host.workerDeclaredToolsOf;
+    if (lookup === undefined) return undefined;
+    try {
+      const declared = lookup(principal);
+      return Array.isArray(declared) ? declared : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * THE GRANT: the two baseline tools, or a name the executing node declared —
+   * an exact name or a trailing-star prefix such as `computer_*`. The baseline
+   * check runs FIRST, so a baseline call never reaches the store, and every
+   * unresolved grant answers "not granted".
+   */
+  const grantedToWorker = (execution: { readonly name: string; readonly agent?: WorkerAgent }): boolean => {
+    if (DSH_GRAPH_WORKER_TOOLS.includes(execution.name)) return true;
+    return declaredToolsAllow(execution.name, declaredToolsOf(execution.agent));
+  };
+  const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution)
+    ? "Graph workers may only use their node's granted tools: the baseline graph_submit_outcome and graph_worker_exec, plus any host tools the node declares" : undefined);
   if (guard) disposers.push(guard);
   const prepare = (agent?: WorkerAgent, admitted = false) => {
     if (agent && (admitted || isWorker(agent)) && !presentations.has(agent)) {

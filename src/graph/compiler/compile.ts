@@ -593,6 +593,14 @@ function compileNode(
     );
   }
 
+  // THE DECLARED HOST-TOOL GRANT TRAVELS WITH THE NODE (A21 / §3.3). The
+  // front-end has already normalized it (trimmed, unique, sorted) when the
+  // declaration came through `parseGraphDeclarationV3`; this reader is the
+  // COMPILER's own shape check, so a hand-authored declaration that reaches
+  // `compileGraph` directly can never put a non-string entry into a plan the
+  // worker boundary matches tool names against.
+  const tools = readDeclaredTools(node.tools, `${base}.tools`, log);
+
   return {
     id: node.id,
     agent: node.agent,
@@ -603,7 +611,52 @@ function compileNode(
     ...(join === null ? {} : { join }),
     ...(budget === null ? {} : { budget }),
     ...(inputs === undefined ? {} : { inputs }),
+    ...(tools === undefined ? {} : { tools }),
   };
+}
+
+/**
+ * Read one node's declared HOST-tool grant as the PLAN carries it.
+ *
+ * The front-end owns the grammar's exact refusals (the cap, the empty array,
+ * the blank entry) and the normalization (trim, de-duplicate, sort); this
+ * reader is the compiler's own shape check over an already-structural value, so
+ * a declaration handed straight to `compileGraph` cannot smuggle a non-string
+ * entry into a persisted grant. A malformed list is REFUSED rather than
+ * narrowed: running a node under a smaller grant than it declared would be a
+ * silent policy change.
+ */
+function readDeclaredTools(
+  raw: unknown,
+  path: string,
+  log: IssueLog,
+): readonly string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    log.errors.push(
+      issue(
+        "malformed-declaration",
+        `tools at ${path} is not a non-empty array of host tool names`,
+        path,
+      ),
+    );
+    return undefined;
+  }
+  const names = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
+      log.errors.push(
+        issue(
+          "malformed-declaration",
+          `tools at ${path} carries an entry that is not a non-blank host tool name`,
+          path,
+        ),
+      );
+      return undefined;
+    }
+    names.add(entry.trim());
+  }
+  return [...names].sort(compareText);
 }
 
 /** Every node a declared edge path can reach `start` FROM (its ancestors). */

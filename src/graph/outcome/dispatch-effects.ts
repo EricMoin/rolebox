@@ -58,6 +58,31 @@ export interface OutcomeDispatchRequest extends OutcomeDispatchTarget {
    * credential (or copied it); it does not prove the original worker is asking.
    */
   readonly credential: string;
+  /**
+   * THE EXECUTING NODE'S DECLARED HOST-TOOL GRANT — the v3 node field
+   * `tools?: string[]` (extra HOST tool names or trailing-star prefixes such as
+   * `computer_*`), resolved from the run's own plan for THIS attempt.
+   *
+   * WHY IT TRAVELS WITH THE REQUEST. The grant is plan provenance exactly like
+   * the agent and the prompt, and the delivery is where it has to be USED: the
+   * platform start request's tool filter and the worker's prompt must state the
+   * same grant the worker boundary enforces. Carrying it here means the
+   * delivery never re-derives it from anything a caller supplied.
+   *
+   * PRESENCE, AND WHAT ABSENCE MEANS. Present on a dispatch this build
+   * creates for a node that DECLARES the field; ABSENT — never an invented empty
+   * list — for a node that declares none, which every delivery reads as exactly
+   * today's baseline restriction. A grant this build cannot resolve from the
+   * plan is likewise absent, so an unresolvable declaration can only ever
+   * NARROW the worker's surface, never widen it.
+   *
+   * NOT ON THE PERSISTED TARGET. The dispatch effect payload stays
+   * credential-free AND grant-free (see {@link OutcomeDispatchTarget}): the
+   * grant is re-resolved from the plan on every launch, so a recovery delivers
+   * the grant of the plan revision it is actually running, and an edited
+   * declaration can never move a grant under a running plan.
+   */
+  readonly declaredTools?: readonly string[];
 }
 
 /**
