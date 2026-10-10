@@ -6,6 +6,7 @@ import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import { readGraphView, type GraphView } from "../query/graph-query.ts";
 import { GraphStore, type TerminalExecutionObservation } from "../store/graph-store.ts";
 import { GRAPH_STORE_TABLES } from "../store/schema.ts";
+import { describeOutcomeStop } from "../outcome/state-codec.ts";
 import type { OutcomeGraphState } from "../outcome/state-model.ts";
 
 const EFFECT_KIND = "graph-notification";
@@ -50,27 +51,102 @@ function currentDispatchedAttempt(run: Run, attemptId: string | undefined): bool
     run.nodes.some(node => node.status === "dispatched" && node.attemptId === attemptId);
 }
 
+/**
+ * The PENDING nodes of a run: the work still standing, named even when the stop
+ * record itself is not the thing being read.
+ *
+ * A terminal stop notice says only WHY the run ended, and the reason is the one
+ * thing an operator needs to act on — an abandoned node the report does not
+ * name is an abandoned node nobody can find. The nodes are read from the
+ * current state, so the notice agrees with `graph_status`. The same reader names
+ * them for a body that says `complete` over work it never finished: a
+ * `complete` claim is honest only when this returns nothing.
+ */
+function strandedNodeNames(run: Run): readonly string[] {
+  const names: string[] = [];
+  for (const node of run.nodes) {
+    if (node.status === "pending") names.push(node.nodeId);
+  }
+  return names;
+}
+
+function terminalStopReason(run: Run): string {
+  const stop = run.stop;
+  if (stop === undefined) return "stopped";
+  if (stop.reason !== "unreachable-pending-node") return stop.reason;
+  const pending = strandedNodeNames(run);
+  const detail = pending.length === 0
+    ? "no node is pending in the current state"
+    : `pending and unreachable: ${pending.join(", ")}`;
+  return `${stop.reason}: ${describeOutcomeStop(stop)} — ${detail}`;
+}
+
 function notices(
   run: Run,
   phase: OutcomeGraphState["phase"] | undefined,
   readObservation: (executionId: string) => TerminalExecutionObservation | undefined,
 ): Notice[] {
+  // The PHASE read here is the whole vocabulary, not this build's: a body an
+  // OLDER build wrote is still readable, and one of those can say `complete`
+  // while holding pending nodes (the very shape this file now reports instead
+  // of hiding). Narrowing to the current build's written set would make that
+  // case unreachable in the type system and invisible in the store.
+  const recordedPhase: string | undefined = phase;
   // A retry annotates the previous run as stopped without undoing its terminal outcome.
   if (run.control !== undefined && run.control.command !== "retry") {
     return [{ key: "terminal", kind: "stopped", reason: `${run.control.command}: ${run.control.reason}` }];
   }
-  if (run.stop !== undefined) return [{ key: "terminal", kind: "stopped", reason: run.stop.reason }];
-  if (phase === "complete") {
-    return [{ key: "terminal", kind: "complete", reason: "All activated graph work completed." }];
+  if (run.stop !== undefined) {
+    return [{ key: "terminal", kind: "stopped", reason: terminalStopReason(run) }];
+  }
+  // ── A BODY THAT SAYS COMPLETE OVER PENDING NODES IS NOT A COMPLETION ────
+  //
+  // The phase read here is the whole vocabulary, not this build's: a body an
+  // OLDER build wrote can say `complete` while still holding PENDING nodes —
+  // the exact shape that used to be announced as finished work. The condition
+  // is therefore decided BEFORE the completion return, and what is announced is
+  // a `stopped` notice naming the nodes, because the run did not finish them.
+  //
+  // Two properties of that notice are load-bearing. Its key is its own
+  // (`pending:<nodes>`, not `terminal`), so it is a NEW durable effect that a
+  // store which already recorded (and sent) the old build's `terminal`
+  // completion still produces. And its kind is deliberately NOT `attention`:
+  // `obsolete()` discards an attention notice for a run the view already calls
+  // `complete`, and a completion the run never earned must survive exactly that
+  // filter. The genuine `complete` notice is returned only when nothing is
+  // pending, so a run that really finished is still announced once.
+  if (recordedPhase === "complete") {
+    const stranded = strandedNodeNames(run);
+    if (stranded.length === 0) {
+      return [{ key: "terminal", kind: "complete", reason: "All activated graph work completed." }];
+    }
+    return [{
+      key: `pending:${stranded.join(",")}`,
+      kind: "stopped",
+      reason:
+        `This run is recorded as complete, but ${stranded.length} node(s) are still ` +
+        `pending: ${stranded.join(", ")} — the run did not finish that work.`,
+    }];
   }
   if (run.control?.command === "retry") return [];
-  const pending: Notice[] = run.approvals.filter(approval => approval.status !== "approved" &&
-    run.nodes.some(node => node.status === "dispatched" && node.attemptId === approval.attemptId)).map(approval => ({
-    key: `approval:${approval.attemptId}:${approval.status}`,
-    kind: "attention", nodeId: approval.nodeId, attemptId: approval.attemptId,
-    approvalStatus: approval.status,
-    reason: `Approval ${approval.status}: ${approval.decisionReason ?? approval.reason}`,
-  }));
+  // ── A RUN THAT STILL HOLDS WORK SAYS SO ─────────────────────────────────
+  //
+  // `complete` is the only terminal state a RUN reaches by itself, and the
+  // reducer refuses it while a node is pending — so reaching this line means the
+  // run is executing an attempt, and its remaining work is reported by the
+  // attempt-scoped notices below. A body that says `complete` over pending nodes
+  // never reaches here: it was decided above, as the stopped run it is.
+  const pending: Notice[] = [];
+  for (const approval of run.approvals) {
+    if (approval.status === "approved") continue;
+    if (!run.nodes.some(node => node.status === "dispatched" && node.attemptId === approval.attemptId)) continue;
+    pending.push({
+      key: `approval:${approval.attemptId}:${approval.status}`,
+      kind: "attention", nodeId: approval.nodeId, attemptId: approval.attemptId,
+      approvalStatus: approval.status,
+      reason: `Approval ${approval.status}: ${approval.decisionReason ?? approval.reason}`,
+    });
+  }
   for (const node of run.nodes) {
     if (!node.inputRefusals?.length) continue;
     const reason = JSON.stringify(node.inputRefusals);

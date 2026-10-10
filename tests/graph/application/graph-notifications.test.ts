@@ -301,3 +301,95 @@ describe("durable graph notifications", () => {
     expect(await check()).toEqual([]);
   });
 });
+
+// ── A RECORDED `complete` OVER PENDING NODES IS NOT A COMPLETION ────────────
+//
+// A version-9 body stays readable and one of those can say `complete` while the
+// run still holds PENDING nodes — the shape that used to be announced as "All
+// activated graph work completed.". The notice now names the nodes with kind
+// `stopped`, and it is a NEW effect (`pending:<nodes>`), so a store where the
+// old build already recorded (and sent) its `terminal` completion still
+// surfaces it: `obsolete()` discards an `attention` notice for a run the view
+// already calls `complete`, and this notice is deliberately not one.
+
+const LEGACY_GRAPH_ID = "legacy-complete-over-pending";
+
+/**
+ * The shape a previous build wrote a version-9 `complete` body for: `entry`
+ * settles its declared TERMINAL `failed`, which binds no edge, so `verify` and
+ * `ship` are still pending when the run ends.
+ */
+function legacyCompleteOverPendingDeclaration() {
+  return {
+    version: 3,
+    name: LEGACY_GRAPH_ID,
+    nodes: [
+      { id: "entry", agent: "worker", prompt: "Entry", outcomes: [{ id: "done" }, { id: "failed" }], completion: { mode: "explicit" } },
+      { id: "verify", agent: "verifier", prompt: "Verify", outcomes: [{ id: "pass" }], completion: { mode: "explicit" }, inputs: [{ from: "entry", outcome: "done" }] },
+      { id: "ship", agent: "shipper", prompt: "Ship", outcomes: [{ id: "shipped" }], completion: { mode: "explicit" }, inputs: [{ from: "verify", outcome: "pass" }] },
+    ],
+    edges: [
+      { from: "entry", to: "verify", outcome: "done" },
+      { from: "verify", to: "ship", outcome: "pass" },
+    ],
+  };
+}
+
+describe("a body that says complete while nodes are still pending", () => {
+  it("announces it as a stopped run naming the pending nodes instead of a completion", async () => {
+    const f = fixture();
+    await f.call("graph_declare", { declaration: legacyCompleteOverPendingDeclaration() });
+    const { request, effect } = f.requests[0]!;
+    f.app.host.confirmExecution(effect, { executionId: "entry-worker" });
+    const settled = await f.call("graph_submit_outcome", {
+      graph_id: LEGACY_GRAPH_ID, node_id: "entry", outcome_id: "failed", credential: request.credential,
+    }, "entry-worker");
+    expect(settled.decision).toBe("accepted");
+    // This build already reports that shape honestly; this case is about the
+    // body the PREVIOUS build persisted, so start from the notices it produced.
+    await f.app.notifications!.flush();
+    const before = f.received.map(notification => notification.id);
+
+    // REWRITE the persisted run state into the version-9 body the previous
+    // build wrote: phase `complete`, no stop record, nodes still pending.
+    const store = GraphStore.openFile(f.storeRoot); closers.push(store);
+    const record = store.readGraphState(LEGACY_GRAPH_ID)!;
+    const body = record.body as { phase: string; nodes: { nodeId: string; status: string }[] };
+    expect(body.phase).toBe("stopped");
+    // Plan order is by node id, so the stranded nodes read `ship`, `verify`.
+    expect(body.nodes.filter(node => node.status === "pending").map(node => node.nodeId).sort())
+      .toEqual(["ship", "verify"]);
+    // The previous build's body carried no stop record at all: the key is
+    // DROPPED rather than written as `undefined`, which the ledger refuses.
+    const legacyBody: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(body)) {
+      if (key !== "stop") legacyBody[key] = value;
+    }
+    legacyBody.bodyVersion = 9;
+    legacyBody.phase = "complete";
+    store.writeGraphState({ ...record, body: legacyBody });
+    await f.app.notifications!.flush();
+
+    const legacy = f.received.filter(notification => !before.includes(notification.id));
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]).toMatchObject({ kind: "stopped", graphId: LEGACY_GRAPH_ID, sessionId: "parent" });
+    expect(legacy[0]!.reason).toContain("recorded as complete");
+    expect(legacy[0]!.reason).toContain("verify");
+    expect(legacy[0]!.reason).toContain("ship");
+    // NOT re-announced as finished work, on this flush or a later one.
+    expect(f.received.filter(notification => notification.kind === "complete")).toEqual([]);
+    await f.app.notifications!.flush();
+    expect(f.received.filter(notification => notification.kind === "complete")).toEqual([]);
+    expect(f.received.map(notification => notification.id)).toEqual([...before, legacy[0]!.id]);
+  });
+
+  it("still announces genuine completion when no node is pending", async () => {
+    const f = fixture();
+    await f.declare();
+    await f.settle(0);
+    await f.settle(1);
+    await f.app.notifications!.flush();
+    expect(f.received.map(notification => notification.kind)).toEqual(["complete"]);
+    expect(f.received[0]!.reason).toBe("All activated graph work completed.");
+  });
+});

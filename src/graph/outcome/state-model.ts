@@ -45,11 +45,15 @@ export type OutcomeGraphPhase =
   | "complete"
   | "stopped";
 
-export type OutcomeStopReason = "loop-exhausted" | "progress-stalled";
+export type OutcomeStopReason =
+  | "loop-exhausted"
+  | "progress-stalled"
+  | "unreachable-pending-node";
 
 export const OUTCOME_STOP_REASONS: readonly OutcomeStopReason[] = Object.freeze([
   "loop-exhausted",
   "progress-stalled",
+  "unreachable-pending-node",
 ]);
 
 export interface OutcomeLoopExhaustedStop {
@@ -96,7 +100,34 @@ export interface OutcomeProgressStalledStop {
   readonly stoppedAt: number;
 }
 
-export type OutcomeStop = OutcomeLoopExhaustedStop | OutcomeProgressStalledStop;
+/**
+ * The run stopped because a node it still holds can NEVER be dispatched.
+ *
+ * This is the one stop that is not about a declared limit: nothing was
+ * attempted and nothing is in flight, yet at least one node is still `pending`
+ * and every feeder its join waits for has already settled without routing to
+ * it — a feeder settled on an outcome that binds no edge to the node, or a
+ * declared input whose producer never arrived. Waiting longer cannot change
+ * that: no future advance can arm the node, so reporting the run complete would
+ * announce work that was never done.
+ *
+ * `blockedNodes` names each stranded node and, for each, the feeder(s) that can
+ * never arrive, so the abandonment is legible from the state itself rather than
+ * re-derived by a reader.
+ */
+export interface OutcomeUnreachablePendingNodeStop {
+  readonly reason: "unreachable-pending-node";
+
+  /** Each stranded PENDING node, and the feeder(s) of it that can never arrive. */
+  readonly blockedNodes: Readonly<Record<string, readonly string[]>>;
+
+  readonly stoppedAt: number;
+}
+
+export type OutcomeStop =
+  | OutcomeLoopExhaustedStop
+  | OutcomeProgressStalledStop
+  | OutcomeUnreachablePendingNodeStop;
 
 export interface OutcomeGraphState {
 
@@ -135,5 +166,15 @@ export const OUTCOME_STATE_BODY_V8 = 8 as const;
 
 export const OUTCOME_STATE_BODY_V9 = 9 as const;
 
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V9;
+/**
+ * Version 10 adds the `unreachable-pending-node` stop record: a run that still
+ * holds a node no advance can ever arm records WHY instead of announcing
+ * completion over it. The node, phases and progress layouts are unchanged, so a
+ * version-9 body is read by the version-9 reader installed beside this one; it
+ * is not ADVANCED, because a body version names the vocabulary its writer could
+ * produce and a version-9 writer could not produce this stop.
+ */
+export const OUTCOME_STATE_BODY_V10 = 10 as const;
+
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V10;
 

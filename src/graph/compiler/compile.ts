@@ -38,6 +38,7 @@ import {
   type CompletionPolicyRegistry,
   type CompletionPolicySnapshot,
 } from "../policy/completion-policy.ts";
+import { entryNodesOf, feederSourcesOf, joinSatisfiedBy } from "../outcome/join-state.ts";
 import {
   createCompiledPlan,
   inspectCompiledTopology,
@@ -88,7 +89,8 @@ export type CompileErrorCode =
   | "unresolved-contract"
   | "contract-digest-mismatch"
   | "unsupported-validator"
-  | "completion-policy-denied";
+  | "completion-policy-denied"
+  | "unsatisfiable-join";
 
 /**
  * Stable non-blocking warning codes.
@@ -454,7 +456,134 @@ function compileDeclaration(
     );
   }
 
+  // A JOIN THAT CAN NEVER BE SATISFIED IS REFUSED HERE, not compiled into a
+  // run that silently strands the node (see `unsatisfiableJoinsOf`).
+  const unsatisfiable = unsatisfiableJoinsOf(body);
+  if (unsatisfiable.length > 0) {
+    return failed(unsatisfiable, log.warnings);
+  }
+
   return succeeded(createCompiledPlan(body), log.warnings);
+}
+
+/**
+ * Every node whose JOIN can never be satisfied, as `unsatisfiable-join` issues.
+ *
+ * EXPORTED for the same reason `inspectCompiledTopology` is: the rule has one
+ * owner, and a reader that needs to re-check a plan against it (a test here, a
+ * load gate later) calls this rather than restating the reachability rule.
+ * `compileGraph` is still the only WRITER that refuses on it.
+ *
+ * The runtime's own join reader decides which nodes a consumer waits for
+ * (`feederSourcesOf`, imported rather than restated), and this compiler asks the
+ * one question the declaration can be WRONG about: can every one of those
+ * feeders be dispatched BEFORE it? The closure below is the runtime's own
+ * dispatch order — the entry nodes run at start (their joins are never
+ * consulted), then a node runs once a predecessor settled AND every feeder its
+ * join waits for settled. A feeder outside that closure can only run AFTER the
+ * node it feeds, so its arrival can never come, no advance ever arms the node,
+ * and the run would hold a pending node that nothing can dispatch. That is a
+ * declaration defect, so it is refused at `graph_declare` instead of deadlocking
+ * at run time.
+ *
+ * BENIGN SHAPES KEEP COMPILING. A feeder an entry node or an earlier round can
+ * reach is in the closure, so a join that merely waits on a later round still
+ * compiles, a loop continuation edge is still not a feeder, and a node with no
+ * feeder is never waited for.
+ */
+/**
+ * The nodes a plan dispatches before `targetId`: its ENTRY nodes, then the
+ * transitive closure of the runtime's own arm rule — a node runs once a
+ * predecessor OTHER than `targetId` has settled AND its join is satisfied by
+ * the nodes that ran before it.
+ *
+ * `targetId` is excluded from the result, and as a predecessor, because it must
+ * run after every feeder it waits for: it can never be the reason one of them
+ * ran first. That is the whole question this answers — nothing reachable only
+ * THROUGH the node under test is dispatchable before it.
+ */
+function dispatchableBefore(
+  plan: CompiledPlan,
+  entries: readonly CompiledNode[],
+  targetId: string,
+): Set<string> {
+  const runnable = new Set<string>();
+  const queue: string[] = [];
+  for (const entry of entries) {
+    if (entry.id === targetId || runnable.has(entry.id)) continue;
+    runnable.add(entry.id);
+    queue.push(entry.id);
+  }
+  for (let round = 0; round <= plan.nodes.length; round += 1) {
+    let grew = false;
+    for (const candidate of plan.nodes) {
+      if (candidate.id === targetId || runnable.has(candidate.id)) continue;
+      const reachedBy = plan.edges.some(
+        (edge) => edge.to === candidate.id && edge.from !== targetId && runnable.has(edge.from),
+      );
+      if (!reachedBy) continue;
+      if (
+        !joinSatisfiedBy(
+          candidate,
+          runnable,
+          feederSourcesOf(plan, candidate.id),
+        )
+      ) {
+        continue;
+      }
+      runnable.add(candidate.id);
+      grew = true;
+    }
+    if (!grew) break;
+  }
+  return runnable;
+}
+
+export function unsatisfiableJoinsOf(body: CompiledPlanBody): CompileIssue[] {
+  const joinView: CompiledPlan = Object.assign(Object.create(null), {
+    nodes: body.nodes,
+    edges: body.edges,
+    loopGroups: body.loopGroups,
+  });
+  const entries = entryNodesOf(joinView);
+  const entryIds = new Set(entries.map((node) => node.id));
+  const issues: CompileIssue[] = [];
+  for (const node of body.nodes) {
+    if (entryIds.has(node.id)) continue;
+    const feeders = feederSourcesOf(joinView, node.id);
+    if (feeders.length === 0) continue;
+    // The nodes this declaration can DISPATCH BEFORE the node under test — the
+    // closure the runtime's own arm rule computes: the entry nodes run at start,
+    // and a node runs next only once its predecessor has settled AND every
+    // feeder of its join has settled. A feeder outside that closure can never
+    // arrive before the join it feeds, so the join can never be satisfied and
+    // the node can never be armed. This is the declaration-level form of the
+    // runtime's own "nothing is dispatched and a pending node's feeder already
+    // settled" condition, decided BEFORE the run instead of during it.
+    // The node under test is EXCLUDED from the closure, but it is never removed
+    // from the graph: it must run after every feeder its join waits for, so it
+    // cannot be the reason a feeder runs first, and a feeder that only this node
+    // would reach is not dispatchable first either.
+    const runnable = dispatchableBefore(joinView, entries, node.id);
+    if (joinSatisfiedBy(node, runnable, feeders)) continue;
+    for (const feeder of feeders) {
+      if (runnable.has(feeder)) continue;
+      issues.push(
+        issue(
+          "unsatisfiable-join",
+          `node ${JSON.stringify(node.id)} waits for the accepted result of ` +
+          `${JSON.stringify(feeder)}, but no declared edge reaches that node on a path from ` +
+          `the entry node(s) [${entries.map((entry) => entry.id).join(", ")}] once ` +
+          `${JSON.stringify(node.id)} itself is excluded — the feeder can only run AFTER ` +
+          `this node, so its arrival can never come and the join can never be satisfied; ` +
+          `a loop continuation edge (the group's back-edge) is not a feeder, and a ` +
+          `consumer's join must be satisfied by nodes the graph can dispatch first`,
+          nodePath(node.id) + ".inputs",
+        ),
+      );
+    }
+  }
+  return issues;
 }
 
 // ── Nodes ───────────────────────────────────────────────────────────────────

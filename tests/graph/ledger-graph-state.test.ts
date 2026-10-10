@@ -54,6 +54,7 @@ import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3
 import {
   CURRENT_OUTCOME_STATE_BODY,
   DEFAULT_OUTCOME_STATE_BODY_REGISTRY,
+  OUTCOME_STATE_BODY_V10,
   OUTCOME_STOP_REASONS,
   OUTCOME_STATE_BODY_V1,
   OUTCOME_STATE_BODY_V2,
@@ -1260,7 +1261,11 @@ describe("outcome state body — versioned capability, no silent trimming", () =
   });
 
   it("keeps the stop vocabulary closed", () => {
-    expect(OUTCOME_STOP_REASONS).toEqual(["loop-exhausted", "progress-stalled"]);
+    expect(OUTCOME_STOP_REASONS).toEqual([
+      "loop-exhausted",
+      "progress-stalled",
+      "unreachable-pending-node",
+    ]);
     const error = refusalOf(() =>
       readOutcomeGraphState(
         stopRecord(
@@ -1774,8 +1779,14 @@ describe("outcome state body — the progress record is a declared comparison", 
 
 describe("current state format boundary", () => {
   it("installs only the current reader and refuses every older version without mutating the input", () => {
-    expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map(reader => reader.format)).toEqual([CURRENT_OUTCOME_STATE_BODY]);
-    for (let version = 1; version < CURRENT_OUTCOME_STATE_BODY; version++) {
+    // Version 10 is the current format; version 9 stays READABLE (the layouts
+    // are identical) but is not advanced, so the registry carries both and
+    // every version BELOW 9 is still refused.
+    expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map(reader => reader.format)).toEqual([
+      OUTCOME_STATE_BODY_V9,
+      CURRENT_OUTCOME_STATE_BODY,
+    ]);
+    for (let version = 1; version < OUTCOME_STATE_BODY_V9; version++) {
       const body = version === 1 ? stateBodyFixtureV1() : version === 2 ? stateBodyFixtureV2() : stateBodyFixtureAt(version);
       const before = JSON.stringify(body);
       const error = refusalOf(() => readOutcomeGraphState(recordOf(body), STATE_BODY_PLAN));

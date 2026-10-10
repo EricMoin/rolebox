@@ -1,6 +1,6 @@
 # Graph engine v3 operations
 
-This page is the operator's guide to the shipped Graph engine v3: the run-level execution ceiling, the per-node resource budgets, the host-installed configuration that authorizes approvals, completion and command checks, the identity of the on-disk store with the recovery rules that follow from it, and the repeatable checks that verify an installation. The declaration grammar and the acceptance semantics it produces are documented in [Graph outcome protocol (engine v3)](graph-outcome-protocol.md); the orientation and ownership map is in [Graph engine architecture](graph-engine-architecture.md). The capabilities this page configures are installed by an operator: a graph declaration may request a capability, never install or authorize one.
+This page is the operator's guide to the shipped Graph engine v3: the run-level execution ceiling, the per-node resource budgets, the host-installed configuration that authorizes approvals, completion and command checks, the identity of the on-disk store with the recovery rules that follow from it, and the repeatable checks that verify an installation. The declaration grammar, the join and completion semantics it produces and the run phases that follow from them are documented in [Graph outcome protocol (engine v3)](graph-outcome-protocol.md); the orientation and ownership map is in [Graph engine architecture](graph-engine-architecture.md). The capabilities this page configures are installed by an operator: a graph declaration may request a capability, never install or authorize one.
 
 ## Run-level execution limit
 
@@ -47,6 +47,31 @@ A node's `budget` declares resource ceilings for that node's attempts. Four keys
 Every key is optional, and an absent key means the declaration declared no ceiling for that dimension — it does not mean zero, and it is not an unlimited default this build supplied. Recorded usage is compared against the declared ceiling, and an overrun is reported as the actual `used - limit`, never clamped and never rounded away; usage exactly at the ceiling is not an overrun. What the ceiling stops is the next dispatch: a claim is authorized only while recorded usage plus outstanding reservations stays below it. No overrun cancels work that already started — stopping a run for the budget's sake is the explicit `budget-stop` control, whose answer carries the run's budget report.
 
 `max_retries` is reserved syntax this build does not implement: automatic retry has no semantics here, so the parser, the compiler and the runtime all reject the key, including the value `0`. It cannot be used as a substitute for the run-level execution limit.
+
+## What an operator does with a stopped run
+
+A run that stops records why. Two of the three reasons come from a declared
+limit — `loop-exhausted` (a loop group's hard traversal cap) and
+`progress-stalled` (a declared progress policy's stagnation threshold) — and the
+third, `unreachable-pending-node`, means the run still holds nodes nothing can
+dispatch: a pending node whose every feeder has settled without routing to it,
+because an upstream settled an outcome that never reached it. The stop record
+names each stranded node and the feeder of each that can never arrive, and the
+notification says the same thing, so `graph_status` answers "what was abandoned"
+directly rather than leaving it to be inferred from a phase.
+
+`complete` is the one phase that claims every declared node settled. A run that
+reached a declared terminal outcome while other nodes stood pending is NOT
+complete: it stops and names the nodes the exit never reached.
+
+**A stopped run takes no further step, and a node-scoped `retry` is refused on
+one.** Naming a node is rejected with `run-stopped`: a successor attempt minted
+in place could never settle, because a stopped run accepts no submission. The
+way forward is a RUN-wide `retry` — the command that names no node — which
+re-executes the graph as a successor run and dispatches its entry node again,
+under the ordinary re-execution rule that the previous run is terminal and its
+external effects are accounted for. Recovering the abandoned work therefore
+means re-executing the run, not nudging one stranded node.
 
 ## Host-granted approval authority
 

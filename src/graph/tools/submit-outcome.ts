@@ -190,6 +190,14 @@ export interface GraphSubmitOutcomeResult {
   readonly stop?: SubmitOutcomeStop;
 }
 
+/** One stranded pending node of an `unreachable-pending-node` stop. */
+export interface SubmitOutcomeBlockedNode {
+  /** The pending node that can never be dispatched. */
+  readonly node_id: string;
+  /** The feeder(s) its join waits for that can never arrive. */
+  readonly blocked_feeders: readonly string[];
+}
+
 /**
  * One stop as the tool reports it, in the tool's snake_case surface.
  *
@@ -201,14 +209,23 @@ export interface GraphSubmitOutcomeResult {
  */
 export interface SubmitOutcomeStop {
   readonly reason: string;
-  /** The declared loop group whose cap or progress policy binds. */
-  readonly loop_group_id: string;
+  /**
+   * `unreachable-pending-node` only: one entry per stranded pending node, with
+   * the feeder(s) of it that can never arrive. Present (and the four id fields
+   * below absent) exactly for that reason.
+   */
+  readonly blocked_nodes?: readonly SubmitOutcomeBlockedNode[];
+  /**
+   * The declared loop group whose cap or progress policy binds. Absent on an
+   * `unreachable-pending-node` stop, which is about no group.
+   */
+  readonly loop_group_id?: string;
   /** The node whose accepted outcome could not continue. */
-  readonly node_id: string;
+  readonly node_id?: string;
   /** The continuation outcome that asked for the refused round. */
-  readonly outcome_id: string;
+  readonly outcome_id?: string;
   /** The attempt of `node_id` that the outcome settled. */
-  readonly attempt_id: string;
+  readonly attempt_id?: string;
   /** `loop-exhausted` only: continuations the group took, equal to the cap. */
   readonly traversals?: number;
   /** `loop-exhausted` only: the declared hard cap the round would have exceeded. */
@@ -831,6 +848,27 @@ function renderResult(
 
 /** Project one persisted stop into the model-facing shape, per reason. */
 function stopOf(stop: OutcomeStop): SubmitOutcomeStop {
+  // A stop about a declared limit names the group, the outcome and the attempt
+  // that asked for the refused round; a stop about STRANDED WORK names none of
+  // them (no round was refused, no outcome is at fault), so its fields are
+  // absent rather than filled with invented ids.
+  if (stop.reason === "unreachable-pending-node") {
+    const blocked_nodes = Object.freeze(
+      Object.keys(stop.blockedNodes)
+        .sort()
+        .map((nodeId) =>
+          Object.freeze({
+            node_id: nodeId,
+            blocked_feeders: stop.blockedNodes[nodeId] ?? Object.freeze([]),
+          }),
+        ),
+    );
+    return Object.freeze({
+      reason: stop.reason,
+      blocked_nodes,
+      stopped_at: stop.stoppedAt,
+    });
+  }
   const base = {
     loop_group_id: stop.loopGroupId,
     node_id: stop.nodeId,

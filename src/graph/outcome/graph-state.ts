@@ -24,13 +24,13 @@ import {
   type DownstreamInput, type ResolvedInput
 } from "./inputs.ts";
 
-import { type OutcomeNodeState, type OutcomeGraphPhase, type OutcomeProgressStalledStop, type OutcomeStop, type OutcomeGraphState, CURRENT_OUTCOME_STATE_BODY } from "./state-model.ts";
+import { type OutcomeNodeState, type OutcomeGraphPhase, type OutcomeProgressStalledStop, type OutcomeUnreachablePendingNodeStop, type OutcomeStop, type OutcomeGraphState, CURRENT_OUTCOME_STATE_BODY } from "./state-model.ts";
 import { describeOutcomeStop } from "./state-codec.ts";
-import { materializeArrivals, resolveArmSet, sameMembers } from "./join-state.ts";
+import { materializeArrivals, resolveArmSet, sameMembers, unsatisfiablePendingNodes } from "./join-state.ts";
 export * from "./state-model.ts";
 export * from "./state-codec.ts";
 export * from "./state-errors.ts";
-export { entryNodesOf } from "./join-state.ts";
+export { entryNodesOf, feederSourcesOf, unsatisfiablePendingNodes } from "./join-state.ts";
 
 const ADVANCEABLE_STATE_BODY_VERSIONS: readonly number[] = Object.freeze([CURRENT_OUTCOME_STATE_BODY]);
 
@@ -228,6 +228,14 @@ function describeProjectionBinding(projection: ProgressProjection): string {
     ", attempt " + JSON.stringify(binding.attemptId) +
     ", proposal " + JSON.stringify(binding.proposalDigest)
   );
+}
+
+/**
+ * Whether EVERY declared node has settled — the one shape in which a run may
+ * call itself complete.
+ */
+function settledEverywhere(nodes: readonly OutcomeNodeState[]): boolean {
+  return nodes.every((entry) => entry.status === "settled");
 }
 
 export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance {
@@ -544,16 +552,46 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     });
   }
 
+  // ── A RUN THAT STILL HOLDS A NODE IS NOT COMPLETE ───────────────────────
+  //
+  // `complete` is a claim about the WHOLE graph and the run may make it for one
+  // shape only: EVERY declared node has settled. The old formula said it for
+  // "nothing dispatched and something attempted", which is also the shape of a
+  // run that has STOPPED BEING ABLE TO MOVE with work still pending — and that
+  // is exactly how a pending node came to be announced as "All activated graph
+  // work completed.". It also masked a declared terminal outcome that left
+  // nodes unreached: reaching an exit is not the same fact as finishing every
+  // node the plan declares, and `graph_status` must not report the second when
+  // only the first happened.
+  //
+  // That shape is decided here and recorded as its own stop
+  // (`unreachable-pending-node`, naming the stranded nodes and the feeder of
+  // each that can never arrive) instead of being announced as completion. A run
+  // whose pending nodes can still be reached by an advance keeps EXECUTING: it
+  // is waiting for an attempt, and that is what `executing` means.
   const dispatched = nodes.some((entry) => entry.status === "dispatched");
   const attempted = nodes.some((entry) => entry.status !== "pending");
+  const complete = settledEverywhere(nodes);
+  if (stop === undefined && !dispatched && attempted && !complete) {
+    const blockedNodes = unsatisfiablePendingNodes(plan, nodes);
+    if (Object.keys(blockedNodes).length > 0) {
+      stop = Object.freeze({
+        reason: "unreachable-pending-node" as const,
+        blockedNodes,
+        stoppedAt: now,
+      });
+    }
+  }
   const phase: OutcomeGraphPhase =
     stop !== undefined
       ? "stopped"
       : dispatched
         ? "executing"
-        : attempted
+        : complete
           ? "complete"
-          : "ready";
+          : attempted
+            ? "executing"
+            : "ready";
   return Object.freeze({
     state: Object.freeze({
       bodyVersion: CURRENT_OUTCOME_STATE_BODY,

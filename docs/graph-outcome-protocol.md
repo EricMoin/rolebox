@@ -66,7 +66,7 @@ they live in different artifacts, and only some of them are ever compared.
 | Compiled plan revision | A content digest (no number) | The compiled plan and every record that pins it | The revision the attempt was bound to, and the digest the acceptance re-derives | Any version number |
 | Execution-protocol identity | `2` | The persisted graph definition, alongside the plan | The installed handler registry: a handler must declare the outcome protocol's completion source and ingress | The authoring tag, the storage format, the state-body version |
 | Storage format number | `9` | The format-version row of the store's metadata | The format this build writes: greater is refused as newer, smaller as older with no registered migration | The execution protocol, the state-body version |
-| Outcome-state body version | `9` | Every persisted run-state body | The state-body layouts this build reads; a body version with no reader is refused | The storage format (the two advance independently) |
+| Outcome-state body version | `10` | Every persisted run-state body | The state-body layouts this build reads and advances: 10 is what it writes, 9 stays readable but is never advanced; a body version with no reader is refused | The storage format (the two advance independently) |
 | Validator identity | e.g. `schema@1`, `artifact-reference@1`, `command-exit@1`, `principal-approval@1` | Pinned by the plan's acceptance requirements | The installed validator registry, at the same exact `(id, version)` | Any ordering: a version is an identity, never a minimum |
 | Contract identity | `(id, revision)`, with the contract body carried under its own content digest | Pinned by a node's contract reference; the plan carries the body snapshot and the identity index beside it | The installed contract registry, by identity and by digest | Any other graph's contracts |
 | Completion-policy identity | `(id, revision)` with a body digest | Requested by the declaration, pinned by the plan, installed from a host-authorized catalog | The installed completion-policy registry: the pinned body must hash to the pinned digest | Whether the policy is present in the repository — a catalog entry is not an authorization |
@@ -130,6 +130,23 @@ the failing path, and nothing is persisted.
 | `budget` | No | Per-node ceilings: `timeout_ms`, `max_input_tokens`, `max_output_tokens`, `max_cost_usd`. `max_retries` is refused by name. |
 | `inputs` | No | The accepted results this node consumes, each `{ from, outcome, when?: "triggered" }`. Resolved against declared nodes and outcomes at compile time. |
 
+**A join waits for FEEDERS, and a loop continuation edge is not one.** The nodes
+a `join` counts are the sources of the node's in-edges **minus the loop
+continuation edges of the declared loop groups those edges belong to**: an edge
+whose outcome is a declared group's `continuation_outcome` and whose two
+endpoints are BOTH members of that group is the group's own back-edge. It says
+"another round was asked for" — a routing fact — so it is not an arrival a
+consumer waits for, and it is the same edge class the engine already excludes
+when it decides which nodes are dispatched at start. Everything else counts as
+before: a repeated `(from, outcome)` pair counts once, an edge from outside the
+group counts, and `{ strategy: "all" }` waits for every feeder.
+
+That reading is what makes a join node which is *also* the target of its own
+group's continuation edge dispatchable at all. Counting the back-edge as a feeder
+would make the node wait for an arrival from a node it must itself run first: it
+could never be armed, the declared loop could never be traversed, and the run
+would hold a node that no advance can reach.
+
 ### Outcome fields
 
 | Field | Required | Type and meaning |
@@ -181,6 +198,13 @@ weaker than what was written. The rules that decide this:
 - **Loops declare their routes and their cap.** A group that leaves its traversal
   cap, continuation outcome or exit outcome open, or whose continuation edge
   leaves the group, is refused as a structural defect, not deferred to run time.
+- **A join must be satisfiable.** A non-entry node whose feeder can only run
+  AFTER it — a feeder reachable only through the node it feeds — can never be
+  armed, so the declaration is refused with `unsatisfiable-join`, naming the node
+  and the unreachable feeder. The check reads the same feeder set the runtime
+  does, so a loop continuation edge is not treated as a feeder here either, and
+  the benign shapes keep compiling: a feeder an entry node or an earlier round
+  can reach is reachable, and a node with no feeder is never waited for.
 - **Cycles must be contained.** A cycle that no declared loop group covers cannot
   be compiled; loop traversal is the engine's only bounded repetition.
 - **A graph must be able to terminate.** An outcome with no outbound edge is a
@@ -653,6 +677,43 @@ incomparable observation counts as neither improvement nor stagnation, so it
 never reaches the stagnation threshold itself and never lets a streak that spans
 it reach the threshold later.
 
+### When a run may say `complete`
+
+A run's phase is a claim about the WHOLE graph:
+
+| Phase | Meaning |
+| --- | --- |
+| `ready` | Nothing has been attempted yet. |
+| `executing` | An attempt is in flight, or a pending node can still be reached by an advance. |
+| `complete` | Every declared node has SETTLED. |
+| `stopped` | The run holds a stop record: a declared limit was reached, or work remains that nothing can dispatch. |
+
+`complete` is not "nothing is currently dispatched". The old reading made that
+equivalence, and it is the shape of two very different runs: one that finished,
+and one that stopped being able to move while still holding a node — which is how
+a pending node came to be announced as completed work. Reaching a declared
+terminal outcome does not make a run complete either: a terminal settles the node
+that produced it and routes nothing, so nodes the exit never reached would
+otherwise be reported as finished alongside it. They are not: such a run stops
+and names them.
+
+A stop records WHY the run can go no further. Three reasons are defined:
+
+| Reason | Condition |
+| --- | --- |
+| `loop-exhausted` | A declared loop group's hard traversal cap refused the round that would have exceeded it. |
+| `progress-stalled` | A group with a progress policy reached its declared stagnation threshold. |
+| `unreachable-pending-node` | Nothing is dispatched, and at least one PENDING node's every feeder has settled without routing to it — a declared input whose producer settled elsewhere, or a node whose upstream exit never reached it. The record names each stranded node and, for each, the feeder(s) that can never arrive. |
+
+The third is the one that describes abandoned work rather than a declared limit:
+no round was refused and no outcome is at fault, so its record carries the
+stranded nodes instead of a loop group, an outcome and an attempt. `graph_status`
+reports it, the run is terminal for re-execution, and a RUN-wide `retry` — the
+command that names no node — is the operator's way forward: it re-executes the
+graph as a successor run and dispatches its entry node again. A NODE-scoped
+`retry` is refused on a stopped run (`run-stopped`), because the run accepts no
+submission and an attempt minted in place could never settle.
+
 ## Natural completion and approval
 
 ### Natural completion
@@ -784,7 +845,15 @@ directory and a workspace hash, so a workspace's graphs, dispatch records,
 recovery and audit all address the same file.
 
 **Current format.** The storage format number is **9**, and the outcome-state
-body version is **9**. `graph-store.identity` sits beside the database and binds
+body version is **10**. A version-9 body stays READABLE — its layout is
+identical, so the version-9 reader installed beside this build's reader decodes
+it — but this build does not ADVANCE it: a submission for a run left on one is
+refused `unsupported-state-version`, so its position and history stay readable
+while nothing is applied and rewritten under the version-10 vocabulary. Such a
+run is continued by re-executing the graph as a NEW run with a run-scoped
+`retry` — subject to the ordinary rule that the previous run is terminal and its
+external effects are accounted for — never advanced in place.
+`graph-store.identity` sits beside the database and binds
 it to a random store id; it contains storage identity only, never graph state,
 attempts, receipts, credentials or policy.
 
@@ -1031,6 +1100,14 @@ execution.
   they apply, an approval status when the attention is an approval, and a reason.
   It contains no credential and no business payload: it directs the parent to
   `graph_status` for the committed result.
+- **Abandoned work is named, never hidden.** A run that stops because pending
+  nodes can never be dispatched notifies with `kind: "stopped"` and a reason
+  naming `unreachable-pending-node`, the stranded nodes and the feeder of each
+  that can never arrive, so the operator sees which work was abandoned instead of
+  a completion over it. A body an older build wrote that still says `complete`
+  while holding pending nodes is reported the same way — as a run that did not
+  finish that work — so a store written before this rule cannot keep hiding a
+  stranded node.
 - **A continuing run is not silent.** An attempt-scoped stop and a completed
   worker execution with no settled outcome each produce an `attention` notice
   naming the node, the attempt and the reason, so a run that continues with a

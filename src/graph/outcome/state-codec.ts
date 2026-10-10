@@ -20,9 +20,9 @@ import {
   type ResolvedInput
 } from "./inputs.ts";
 
-import { type OutcomeNodeStatus, type OutcomeNodeState, type OutcomeArrival, type OutcomeGraphPhase, type OutcomeStopReason, type OutcomeLoopExhaustedStop, type OutcomeProgressStalledStop, type OutcomeStop, type OutcomeGraphState, CURRENT_OUTCOME_STATE_BODY, OUTCOME_STOP_REASONS } from "./state-model.ts";
+import { type OutcomeNodeStatus, type OutcomeNodeState, type OutcomeArrival, type OutcomeGraphPhase, type OutcomeStopReason, type OutcomeLoopExhaustedStop, type OutcomeProgressStalledStop, type OutcomeUnreachablePendingNodeStop, type OutcomeStop, type OutcomeGraphState, CURRENT_OUTCOME_STATE_BODY, OUTCOME_STATE_BODY_V9, OUTCOME_STATE_BODY_V10, OUTCOME_STOP_REASONS } from "./state-model.ts";
 import { malformedState, OutcomeStateError } from "./state-errors.ts";
-import { verifyArrivals } from "./join-state.ts";
+import { feederSourcesOf, unsatisfiablePendingNodes, verifyArrivals } from "./join-state.ts";
 export type OutcomeStateBodyReading =
   | { readonly kind: "ok"; readonly state: OutcomeGraphState }
   | { readonly kind: "invalid"; readonly error: OutcomeStateError };
@@ -170,16 +170,30 @@ interface OutcomeStateLayout {
 
 }
 
-const OUTCOME_STATE_LAYOUT_V9: OutcomeStateLayout = Object.freeze({
-  version: CURRENT_OUTCOME_STATE_BODY,
-  bodyKeys: Object.freeze(["bodyVersion", "graphId", "planRevision", "phase", "nodes", "loopTraversals", "attemptSeq", "stop", "loopProgress"]),
-  phases: Object.freeze(["ready", "executing", "complete", "stopped"] as const),
-  keys: Object.freeze({
-    pending: Object.freeze(["nodeId", "status", "arrivals", "inputRefusals"]),
-    dispatched: Object.freeze(["nodeId", "status", "attemptId", "attemptSeq", "attemptCredentialDigest", "dispatchedAt", "arrivals", "dispatchIdentity", "inputs", "inputRefusals"]),
-    settled: Object.freeze(["nodeId", "status", "attemptId", "attemptSeq", "attemptCredentialDigest", "dispatchedAt", "settledAt", "outcomeId", "arrivals", "dispatchIdentity", "inputs", "inputRefusals"]),
-  }),
-});
+/**
+ * The BODY LAYOUT of one version: the fields a body of that version may carry.
+ *
+ * Versions 9 and 10 are structurally identical — version 10 differs only in the
+ * STOP REASON VOCABULARY its writer could produce (it can record
+ * `unreachable-pending-node`), which is why a version-9 body stays READABLE by
+ * the version-9 reader while only version 10 is written and advanced.
+ */
+function outcomeStateLayout(version: number): OutcomeStateLayout {
+  return Object.freeze({
+    version,
+    bodyKeys: Object.freeze(["bodyVersion", "graphId", "planRevision", "phase", "nodes", "loopTraversals", "attemptSeq", "stop", "loopProgress"]),
+    phases: Object.freeze(["ready", "executing", "complete", "stopped"] as const),
+    keys: Object.freeze({
+      pending: Object.freeze(["nodeId", "status", "arrivals", "inputRefusals"]),
+      dispatched: Object.freeze(["nodeId", "status", "attemptId", "attemptSeq", "attemptCredentialDigest", "dispatchedAt", "arrivals", "dispatchIdentity", "inputs", "inputRefusals"]),
+      settled: Object.freeze(["nodeId", "status", "attemptId", "attemptSeq", "attemptCredentialDigest", "dispatchedAt", "settledAt", "outcomeId", "arrivals", "dispatchIdentity", "inputs", "inputRefusals"]),
+    }),
+  });
+}
+
+const OUTCOME_STATE_LAYOUT_V9: OutcomeStateLayout = outcomeStateLayout(OUTCOME_STATE_BODY_V9);
+
+const OUTCOME_STATE_LAYOUT_V10: OutcomeStateLayout = outcomeStateLayout(CURRENT_OUTCOME_STATE_BODY);
 
 function rejectUnknownNodeFields(
   raw: Record<string, unknown>,
@@ -615,6 +629,8 @@ function readStop(
       return readLoopExhaustedStop(raw, where);
     case "progress-stalled":
       return readProgressStalledStop(raw, where);
+    case "unreachable-pending-node":
+      return readUnreachablePendingNodeStop(raw, where);
     default: {
       const unread: never = reason;
       throw malformedState(
@@ -752,6 +768,54 @@ function readProgressStalledStop(
   });
 }
 
+const OUTCOME_UNREACHABLE_PENDING_NODE_STOP_KEYS: readonly string[] = Object.freeze([
+  "reason",
+  "blockedNodes",
+  "stoppedAt",
+]);
+
+function readUnreachablePendingNodeStop(
+  raw: Record<string, unknown>,
+  where: string,
+): OutcomeUnreachablePendingNodeStop {
+  const at = where + ".stop";
+  for (const key of Object.keys(raw)) {
+    if (!OUTCOME_UNREACHABLE_PENDING_NODE_STOP_KEYS.includes(key)) {
+      throw malformedState(
+        at + " carries field " + JSON.stringify(key) +
+        ", which an unreachable-pending-node stop does not define — an unknown field is " +
+        "refused rather than dropped",
+      );
+    }
+  }
+  const blockedNodes = raw.blockedNodes;
+  if (!isRecord(blockedNodes)) {
+    throw malformedState(
+      at + ".blockedNodes is " + describeValue(blockedNodes) +
+      ", not the record of stranded node ids the stop reports",
+    );
+  }
+  const blocked: Record<string, readonly string[]> = {};
+  for (const [nodeId, value] of Object.entries(blockedNodes)) {
+    if (!Array.isArray(value)) {
+      throw malformedState(
+        at + ".blockedNodes[" + JSON.stringify(nodeId) + "] is " + describeValue(value) +
+        ", not the list of feeder ids that can never arrive",
+      );
+    }
+    blocked[nodeId] = Object.freeze([...value].sort());
+  }
+  const stoppedAt = readOptionalEpoch(raw, "stoppedAt", at);
+  if (stoppedAt === undefined) {
+    throw malformedState(at + " carries no stoppedAt timestamp");
+  }
+  return Object.freeze({
+    reason: "unreachable-pending-node" as const,
+    blockedNodes: Object.freeze(blocked),
+    stoppedAt,
+  });
+}
+
 function readNonEmptyId(value: unknown, where: string, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw malformedState(
@@ -783,6 +847,9 @@ function verifyStop(
       return;
     case "progress-stalled":
       verifyProgressStalledStop(plan, nodes, loopProgress, stop);
+      return;
+    case "unreachable-pending-node":
+      verifyUnreachablePendingNodeStop(plan, nodes, stop);
       return;
     default: {
       const unread: never = stop;
@@ -969,6 +1036,59 @@ function verifyProgressStalledStop(
   }
 }
 
+/**
+ * The stranded nodes are corroborated, never trusted: a stop that names a
+ * node the plan does not declare, names a node that is not PENDING, or names a
+ * set of nodes this state does not actually strand is refused.
+ */
+function verifyUnreachablePendingNodeStop(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+  stop: OutcomeUnreachablePendingNodeStop,
+): void {
+  const declared = new Set(plan.nodes.map((node) => node.id));
+  const pending = new Set(
+    nodes.filter((node) => node.status === "pending").map((node) => node.nodeId),
+  );
+  const expected = unsatisfiablePendingNodes(plan, nodes);
+  const recorded = Object.keys(stop.blockedNodes).sort();
+  const corroborated = Object.keys(expected).sort();
+  for (const nodeId of recorded) {
+    if (!declared.has(nodeId)) {
+      throw malformedState(
+        "the stop names node " + JSON.stringify(nodeId) +
+        ", which plan revision " + plan.planRevision + " does not declare",
+      );
+    }
+    if (!pending.has(nodeId)) {
+      throw malformedState(
+        "the stop names node " + JSON.stringify(nodeId) +
+        " as abandoned, but the node entries do not hold it PENDING — a stop no state " +
+        "corroborates is refused rather than trusted",
+      );
+    }
+  }
+  if (recorded.join("\u0000") !== corroborated.join("\u0000")) {
+    throw malformedState(
+      "the stop reports the stranded nodes [" + recorded.join(", ") +
+      "], but the node entries and the plan strand [" + corroborated.join(", ") +
+      "] — a stop is the state's own condition, so a disagreement is refused rather than " +
+      "corrected",
+    );
+  }
+  for (const nodeId of recorded) {
+    const feeders = Object.freeze([...feederSourcesOf(plan, nodeId)].sort());
+    const named = stop.blockedNodes[nodeId] ?? [];
+    if (named.join("\u0000") !== feeders.join("\u0000")) {
+      throw malformedState(
+        "the stop reports feeder(s) [" + named.join(", ") + "] that can never arrive at node " +
+        JSON.stringify(nodeId) + ", but the join of that node waits for [" +
+        feeders.join(", ") + "]",
+      );
+    }
+  }
+}
+
 function verifyProgress(
   plan: CompiledPlan,
   loopProgress: Readonly<Record<string, OutcomeLoopProgress>>,
@@ -1020,6 +1140,18 @@ export function describeOutcomeStop(stop: OutcomeStop): string {
         ", baseline " + JSON.stringify(stop.baseline) + ") at attempt " +
         JSON.stringify(stop.attemptId)
       );
+    case "unreachable-pending-node": {
+      const stranded = Object.keys(stop.blockedNodes).sort();
+      const detail = stranded
+        .map((nodeId) =>
+          nodeId + " (feeder(s) that can never arrive: " +
+          (stop.blockedNodes[nodeId] ?? []).join(", ") + ")",
+        )
+        .join("; ");
+      return (
+        stranded.length + " pending node(s) can never be dispatched: " + detail
+      );
+    }
     default: {
       const unread: never = stop;
       return "unrecognized stop " + describeValue(unread);
@@ -1125,12 +1257,14 @@ function stateBodyReader(
 }
 
 const OUTCOME_STATE_BODY_V9_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V9);
+const OUTCOME_STATE_BODY_V10_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V10);
 
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
     current: CURRENT_OUTCOME_STATE_BODY,
     formats: [
       OUTCOME_STATE_BODY_V9_READER,
+      OUTCOME_STATE_BODY_V10_READER,
     ],
   });
 
