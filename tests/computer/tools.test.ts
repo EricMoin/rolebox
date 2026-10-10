@@ -15,6 +15,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeF
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureDirectory, captureFilePath, captureResult, ensureCaptureDirectory, readPixelScale } from "../../src/computer/capture.ts";
+import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
 import { helperAvailable, spawnVectorFor } from "../../src/computer/exec.ts";
 import { PNG_SIGNATURE, hasPngSignature, readPngResolution, readPngSize } from "../../src/computer/png.ts";
 import {
@@ -26,6 +27,8 @@ import {
   createComputerTools,
   createComputerTypeTool,
   createComputerWindowsTool,
+  permissionRefusal,
+  permissionVerdict,
 } from "../../src/computer/tools.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { ROLE_SNAPSHOT_TOOL_KEYS, buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
@@ -150,9 +153,16 @@ describe("computer tools — dry runs", () => {
     expect(key.argv[0]).toBe("/usr/bin/osascript");
     expect(key.script).toContain("keystroke \"c\" using {command down}");
 
-    const permissions = parseReport(await createComputerPermissionsTool().execute({ dry_run: true }, context));
+    const permissionsResult = await createComputerPermissionsTool().execute({ dry_run: true }, context);
+    const permissions = parseReport(permissionsResult);
     expect(permissions.script).toContain("UI elements enabled");
     expect((permissions as any).metadata).toBeUndefined();
+    expect((permissionsResult as any).metadata).toEqual({
+      platform: "darwin",
+      driver: "osascript",
+      action: "permissions",
+      dry_run: true,
+    });
   });
 
   it("linux dry-runs the X11 helpers as argv", async () => {
@@ -280,6 +290,57 @@ describe("computer tools — refusals", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("cancelled");
+  });
+});
+
+// ── The permission verdict ───────────────────────────────────────────────────
+
+describe("the permission verdict", () => {
+  it("reads the answer each per-OS probe actually prints", () => {
+    // darwin: osascript prints the boolean `UI elements enabled` returns.
+    expect(permissionVerdict("true")).toBe(true);
+    expect(permissionVerdict("false")).toBe(false);
+    // linux and win32 print a sentence and report a refusal through a non-zero
+    // exit, which runComputerPlan turns into run.error before this rule is used.
+    expect(
+      permissionVerdict("X11 session: no per-application input permission is required, and xdotool is installed."),
+    ).toBe(true);
+    expect(
+      permissionVerdict(
+        "Windows input needs no per-application permission grant; this session is interactive and SendKeys is available.",
+      ),
+    ).toBe(true);
+  });
+
+  it("denies only the refusal tokens, so an empty or unexpected answer reads as granted", () => {
+    for (const denial of ["false", "no", "FALSE", "No", " no \n", "\tFalse"]) {
+      expect(permissionVerdict(denial)).toBe(false);
+    }
+    // The rule is a deny-list: a probe that prints nothing, or prints something
+    // this family has never seen, is not read as a refusal.
+    for (const other of ["", "   ", "true", "yes", "0", "permission denied"]) {
+      expect(permissionVerdict(other)).toBe(true);
+    }
+  });
+
+  it("builds the refusal sentence and metadata the permissions tool returns", () => {
+    setPlatformForTest("darwin");
+    const plan = darwinComputerUse.permissionProbe();
+    const refusal = permissionRefusal(plan.driver, plan.permissionHint);
+    expect(refusal.output.startsWith("Error: osascript reports that input is not permitted; macOS gives input")).toBe(
+      true,
+    );
+    expect(refusal.output).toBe(`Error: ${plan.driver} reports that input is not permitted; ${plan.permissionHint}`);
+    expect(refusal.title).toBe("permissions");
+    expect(refusal.metadata).toEqual({ platform: "darwin", driver: "osascript", action: "permissions", granted: false });
+  });
+
+  it("falls back to the generic remediation sentence when a plan carries no hint", () => {
+    setPlatformForTest("darwin");
+    const refusal = permissionRefusal("osascript", undefined);
+    expect(refusal.output).toBe(
+      "Error: osascript reports that input is not permitted; grant this process the permission its system requires and try again.",
+    );
   });
 });
 

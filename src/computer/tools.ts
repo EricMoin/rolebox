@@ -377,6 +377,36 @@ export function createComputerKeyTool() {
   });
 }
 
+/**
+ * Read the permission probe's own answer.
+ *
+ * The three probes answer in two different ways: `darwin` prints a bare boolean
+ * (`tell application "System Events" to return UI elements enabled`), while
+ * `linux` and `win32` print a prose sentence and report a refusal through a
+ * non-zero exit, which `runComputerPlan` turns into `run.error` before this rule
+ * is reached. Only the two refusal tokens therefore mean "not permitted"; every
+ * other answer — including an empty one — is read as a grant.
+ */
+export function permissionVerdict(output: string): boolean {
+  return !/^(false|no)$/i.test(output.trim());
+}
+
+/**
+ * The refusal the family returns when the probe reports no permission.
+ *
+ * `hint` is the plan's own remediation text ({@link ComputerPlan.permissionHint});
+ * the generic sentence stands in for a driver that declares none.
+ */
+export function permissionRefusal(driver: string, hint: string | undefined): ToolResult {
+  return {
+    title: "permissions",
+    output:
+      `Error: ${driver} reports that input is not permitted; ` +
+      (hint ?? "grant this process the permission its system requires and try again."),
+    metadata: { ...metadataFor("permissions", driver), granted: false },
+  };
+}
+
 /** `computer_permissions` — report whether this OS will accept input. */
 export function createComputerPermissionsTool() {
   return defineTool({
@@ -405,16 +435,8 @@ export function createComputerPermissionsTool() {
           metadata: { ...metadataFor("permissions", driver), granted: false },
         };
       }
-      const granted = !/^(false|no)$/i.test(run.output.trim());
-      if (!granted) {
-        return {
-          title: "permissions",
-          output:
-            `Error: ${driver} reports that input is not permitted; ` +
-            (prepared.plan.permissionHint ?? "grant this process the permission its system requires and try again."),
-          metadata: { ...metadataFor("permissions", driver), granted: false },
-        };
-      }
+      const granted = permissionVerdict(run.output);
+      if (!granted) return permissionRefusal(driver, prepared.plan.permissionHint);
       return {
         title: "permissions",
         output: run.output.length === 0 ? "Input is permitted on this system." : run.output,
