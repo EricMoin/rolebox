@@ -234,7 +234,10 @@ describe("computer-use gate — default OFF, one resolution point", () => {
 
 describe("computer-use grants — explicit per-role opt-in", () => {
   it("covers the seven registered tools, and no more", () => {
-    expect([...COMPUTER_TOOL_NAMES].sort()).toEqual(Object.keys(createComputerTools()).sort());
+    // Compared as string[]: the matcher's expected parameter is inferred from
+    // the received side, which the const annotation widens.
+    const declared: string[] = [...COMPUTER_TOOL_NAMES];
+    expect(declared.sort()).toEqual(Object.keys(createComputerTools()).sort());
     expect(isComputerToolName("computer_screenshot")).toBe(true);
     expect(isComputerToolName("computer_future_tool")).toBe(true);
     expect(isComputerToolName("hashline_read")).toBe(false);

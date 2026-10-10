@@ -1418,13 +1418,13 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         // take `revise` as its continuation, so its counter must not move.
         expect(overCap.kind).toBe("accepted");
         if (overCap.kind !== "accepted") return;
-        expect(overCap.stop?.loopGroupId).toBe("b-inner");
         expect(overCap.stop?.reason).toBe("loop-exhausted");
         // The stop union is discriminated by reason: narrow before reading the
         // fields a hard-cap stop alone defines.
         if (overCap.stop?.reason !== "loop-exhausted") {
           throw new Error("fixture: expected a loop-exhausted stop");
         }
+        expect(overCap.stop?.loopGroupId).toBe("b-inner");
         expect(overCap.stop.traversals).toBe(1);
         expect(overCap.stop.maxTraversals).toBe(1);
         expect(overCap.state.loopTraversals["b-inner"]).toBe(1);
@@ -1482,10 +1482,10 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         // continuation that re-enters two groups at once.
         expect(overCap.kind).toBe("accepted");
         if (overCap.kind !== "accepted") return;
-        expect(overCap.stop?.loopGroupId).toBe("a-tight");
         if (overCap.stop?.reason !== "loop-exhausted") {
           throw new Error("fixture: expected a loop-exhausted stop");
         }
+        expect(overCap.stop?.loopGroupId).toBe("a-tight");
         expect(overCap.stop.maxTraversals).toBe(1);
         expect(overCap.state.loopTraversals).toEqual({
           "a-tight": 1,
@@ -1541,6 +1541,11 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         expect(stopped.kind).toBe("accepted");
         if (stopped.kind !== "accepted") return;
         expect(stopped.state.phase).toBe("stopped");
+        // The stop union is discriminated by reason: narrow before reading the
+        // fields a loop-exhausted stop alone defines.
+        if (stopped.stop?.reason !== "loop-exhausted") {
+          throw new Error("fixture: expected a loop-exhausted stop");
+        }
         expect(stopped.stop?.loopGroupId).toBe("revise-loop");
         expect(stopped.stop?.attemptId).toBe("review#5");
         // THE CHOICE, OBSERVED: the independent branch is exactly where it was —
@@ -2309,6 +2314,11 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         if (stopped.kind !== "accepted") return;
         expect(stopped.state.phase).toBe("stopped");
         expect(stopped.stop?.reason).toBe("progress-stalled");
+        // The stop union is discriminated by reason: narrow before reading the
+        // fields a progress-stalled stop alone defines.
+        if (stopped.stop?.reason !== "progress-stalled") {
+          throw new Error("fixture: expected a progress-stalled stop");
+        }
         expect(stopped.stop?.attemptId).toBe("review#5");
         // The independent branch is exactly where it was: in flight on the
         // attempt it was dispatched with, never settled by an outcome nobody

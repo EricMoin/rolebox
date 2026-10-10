@@ -39,7 +39,10 @@ import {
   createPersistedCompiledPlan,
   declaredNodeTools,
 } from "../../src/graph/compiler/plan.ts";
-import { parseGraphDeclarationV3 } from "../../src/graph/compiler/parse-declaration-v3.ts";
+import {
+  parseGraphDeclarationV3,
+  type DeclarationV3ErrorCode,
+} from "../../src/graph/compiler/parse-declaration-v3.ts";
 import {
   OutcomeHost,
   WORKER_GRANTED_GRAPH_TOOLS,
@@ -165,7 +168,7 @@ describe("the v3 node `tools` grammar", () => {
   });
 
   it("refuses an empty array, a blank entry, a non-string entry and a non-array", () => {
-    const cases: Array<{ readonly extra: Record<string, unknown>; readonly code: string; readonly path: string }> = [
+    const cases: Array<{ readonly extra: Record<string, unknown>; readonly code: DeclarationV3ErrorCode; readonly path: string }> = [
       { extra: { tools: [] }, code: "invalid-value", path: "$.nodes[0].tools" },
       { extra: { tools: ["   "] }, code: "invalid-value", path: "$.nodes[0].tools[0]" },
       { extra: { tools: ["computer_*", 7] }, code: "wrong-type", path: "$.nodes[0].tools[1]" },

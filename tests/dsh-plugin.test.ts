@@ -1120,6 +1120,9 @@ describe("dsh plugin apply()", () => {
       const workerContexts: string[] = [];
       disposer = await applyTracked(fixture.ctx, {
         roleboxDir: tmpDir,
+        // The GATE stays OFF, spelled out: `computerUse` is a defaulted boolean
+        // on the schema, so `DshPluginConfig` declares it required.
+        computerUse: false,
         onSpawn: async (_definition, request) => {
           const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: { presentAs: () => () => {} } } };
           fixture.ctx.emit("agent/created", { agent: worker });

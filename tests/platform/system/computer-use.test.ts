@@ -67,14 +67,20 @@ describe("descriptor computer-use facts", () => {
   });
 
   it("builds the plan of the system it describes, whatever host runs the test", () => {
-    const darwinPlan = planOf(descriptor("darwin").computerUse.supported
-      ? descriptor("darwin").computerUse.capturePlan({ path: "/tmp/x.png" }, {})
+    // Each system's facts are bound once and the `supported` test narrows THAT
+    // binding: a test on a repeated `descriptor(...).computerUse` call does not
+    // reach the plan call below it.
+    const darwinFacts = descriptor("darwin").computerUse;
+    const darwinPlan = planOf(darwinFacts.supported
+      ? darwinFacts.capturePlan({ path: "/tmp/x.png" }, {})
       : "");
-    const linuxPlan = planOf(descriptor("linux").computerUse.supported
-      ? descriptor("linux").computerUse.capturePlan({ path: "/tmp/x.png" }, {})
+    const linuxFacts = descriptor("linux").computerUse;
+    const linuxPlan = planOf(linuxFacts.supported
+      ? linuxFacts.capturePlan({ path: "/tmp/x.png" }, {})
       : "");
-    const windowsPlan = planOf(descriptor("win32").computerUse.supported
-      ? descriptor("win32").computerUse.capturePlan({ path: "C:\\x.png" }, {})
+    const windowsFacts = descriptor("win32").computerUse;
+    const windowsPlan = planOf(windowsFacts.supported
+      ? windowsFacts.capturePlan({ path: "C:\\x.png" }, {})
       : "");
 
     expect(darwinPlan.argv[0]).toBe("/usr/sbin/screencapture");
@@ -84,11 +90,13 @@ describe("descriptor computer-use facts", () => {
     // Selecting another system never rewrites a descriptor's own facts.
     setPlatformForTest("linux");
     expect(getSystem().id).toBe("linux");
-    expect(planOf(descriptor("darwin").computerUse.supported
-      ? descriptor("darwin").computerUse.capturePlan({ path: "/tmp/x.png" }, {})
+    const darwinStill = descriptor("darwin").computerUse;
+    expect(planOf(darwinStill.supported
+      ? darwinStill.capturePlan({ path: "/tmp/x.png" }, {})
       : "").argv[0]).toBe("/usr/sbin/screencapture");
-    expect(planOf(getSystem().computerUse.supported
-      ? getSystem().computerUse.capturePlan({ path: "/tmp/x.png" }, { XDG_SESSION_TYPE: "x11" })
+    const active = getSystem().computerUse;
+    expect(planOf(active.supported
+      ? active.capturePlan({ path: "/tmp/x.png" }, { XDG_SESSION_TYPE: "x11" })
       : "").driver).toBe("import");
   });
 
@@ -102,14 +110,17 @@ describe("descriptor computer-use facts", () => {
 
   it("keeps the input plans of each system independent of the others", () => {
     const request = { action: "click", x: 1, y: 2, button: "left", clicks: 1 } as const;
-    const darwin = planOf(descriptor("darwin").computerUse.supported
-      ? descriptor("darwin").computerUse.inputPlan(request, {})
+    const darwinInputFacts = descriptor("darwin").computerUse;
+    const darwin = planOf(darwinInputFacts.supported
+      ? darwinInputFacts.inputPlan(request, {})
       : "");
-    const linux = planOf(descriptor("linux").computerUse.supported
-      ? descriptor("linux").computerUse.inputPlan(request, { XDG_SESSION_TYPE: "x11" })
+    const linuxInputFacts = descriptor("linux").computerUse;
+    const linux = planOf(linuxInputFacts.supported
+      ? linuxInputFacts.inputPlan(request, { XDG_SESSION_TYPE: "x11" })
       : "");
-    const windows = planOf(descriptor("win32").computerUse.supported
-      ? descriptor("win32").computerUse.inputPlan(request, {})
+    const windowsInputFacts = descriptor("win32").computerUse;
+    const windows = planOf(windowsInputFacts.supported
+      ? windowsInputFacts.inputPlan(request, {})
       : "");
     expect(darwin.argv[0]).toBe("/usr/bin/osascript");
     expect(linux.argv[0]).toBe("xdotool");

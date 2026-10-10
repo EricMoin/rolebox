@@ -41,6 +41,7 @@ import { GraphApplication } from "../../src/graph/application/graph-application.
 import type { GraphNotification } from "../../src/graph/application/graph-notifications.ts";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { compileGraph, unsatisfiableJoinsOf } from "../../src/graph/compiler/compile.ts";
+import { createCompiledPlan } from "../../src/graph/compiler/plan.ts";
 import type {
   CompiledNode,
   CompiledPlan,
@@ -355,6 +356,36 @@ function minimalNodeOf(
   } as CompiledNode;
 }
 
+/**
+ * The minimal compiled BODY the synthetic refusal below is read from: the plan
+ * contract's pinned fields plus the three the join readers actually consult
+ * (`unsatisfiableJoinsOf`, `entryNodesOf` and `feederSourcesOf`), which is why
+ * the parameter states exactly that contract.
+ *
+ * The contract and policy indexes are the canonical EMPTY values because this
+ * fixture binds no contract to snapshot or identify. `terminalOutcomes` is
+ * empty, and TRULY so: every (node, outcome) pair of the body carries an
+ * outbound edge, which is exactly why the declaration deadlocks. `executability`
+ * is the only honest value for a body nothing unresolved was found in, and no
+ * consumer reads it.
+ */
+function minimalBody(
+  body: Pick<CompiledPlanBody, "nodes" | "edges" | "loopGroups">,
+): CompiledPlanBody {
+  return {
+    graphId: "severed-join",
+    declarationVersion: 3,
+    contractSnapshots: {},
+    contractIdentities: {},
+    completionPolicySnapshots: {},
+    completionPolicyIdentities: {},
+    completionAuthorizations: [],
+    terminalOutcomes: [],
+    executability: { kind: "executable" },
+    ...body,
+  };
+}
+
 // ── Harness ─────────────────────────────────────────────────────────────────
 
 interface Harness {
@@ -521,7 +552,10 @@ describe("join feeders — a loop continuation edge is a routing edge, not a fee
     // including the one whose join node is also its group's continuation
     // target, which the OLD feeder reader refused to arm at run time.
     for (const declaration of [r2ShapeDeclaration(), diamondDeclaration()]) {
-      expect(compileGraph(declaration).kind).toBe("executable");
+      const compiled = compileGraph(declaration);
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) throw new Error("the satisfiable declaration was refused");
+      expect(compiled.kind).toBe("executable");
     }
 
     // THE INVARIANT, computed the way the checker computes it: from the entry
@@ -554,7 +588,7 @@ describe("join feeders — a loop continuation edge is a routing edge, not a fee
     // `y` is reachable only through `x` (`x --done--> y` is its only in-edge),
     // so `x` waits for a node that can only run after it — the declaration
     // defect `unsatisfiable-join` names.
-    const severed = {
+    const body = minimalBody({
       nodes: [
         minimalNodeOf("p", "go"),
         minimalNodeOf("x", "done", { join: true, inputs: ["p", "y"] }),
@@ -574,9 +608,13 @@ describe("join feeders — a loop continuation edge is a routing edge, not a fee
           exitOutcome: "stop",
         },
       ],
-    } as CompiledPlanBody;
-    expect(entryNodesOf(severed as CompiledPlan).map((node) => node.id)).toEqual(["p"]);
-    expect(feederSourcesOf(severed as CompiledPlan, "x")).toEqual(["p", "y"]);
+    });
+    // The two readers below are declared over `CompiledPlan`, and production's
+    // own builder is what names a body with the revision it carries — so the
+    // fixture body is handed over without a cast.
+    const severed = createCompiledPlan(body);
+    expect(entryNodesOf(severed).map((node) => node.id)).toEqual(["p"]);
+    expect(feederSourcesOf(severed, "x")).toEqual(["p", "y"]);
     const issues = unsatisfiableJoinsOf(severed);
     expect(issues.map((entry) => entry.code)).toEqual([
       "unsatisfiable-join",
@@ -614,7 +652,10 @@ describe("join feeders — a loop continuation edge is a routing edge, not a fee
     // The refusal is about SATISFIABILITY, not about the shape: moving the
     // continuation outcome onto the back-edge makes `y` a routing edge into
     // `x` instead of a feeder of it, and the declaration compiles.
-    expect(compileGraph(satisfiableJoinTwinDeclaration()).kind).toBe("executable");
+    const twin = compileGraph(satisfiableJoinTwinDeclaration());
+    expect(twin.ok).toBe(true);
+    if (!twin.ok) throw new Error("the satisfiable twin was refused");
+    expect(twin.kind).toBe("executable");
   });
 });
 
