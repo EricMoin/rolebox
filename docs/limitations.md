@@ -54,3 +54,53 @@ Codex drives rolebox purely over MCP instead of the PluginCore service stack, so
 - **A batch is not a cross-file transaction**: temp files for all members are staged first and then committed. Hardlinked (in-place) members are written in the COMMIT phase after all temp files are staged, so a staging failure leaves zero writes; a commit-phase (rename) failure can still leave earlier files updated and later files untouched. In-place writes remain non-atomic. Writes are not fsync-durable; they protect against torn/partial writes within the process, not power loss. On a write failure, the error names the failed file and states which files were and were not written.
 - **All `hashline_edit` failure results start with `Error:` and identify the affected file** — including pre-write re-check I/O errors such as `EISDIR` — so a caller never has to guess which file or phase a failure came from.
 - **Ambiguous fuzzy anchor corrections are rejected, not silently resolved**: when multiple hash-equal candidate lines carry *differing* content (a width-2 hash collision), the edit fails with an explicit re-read error instead of picking the nearest line; same-position collisions remain accepted by the position+hash anchor contract.
+
+## Computer use
+
+Rolebox's `computer_*` family drives the real desktop. It is off by default
+(see [compatibility.md](compatibility.md#computer-use)), and these are the
+limits it does not hide.
+
+- **No rollback of delivered input.** A click, a keystroke or a typed string
+  that reached an application is already part of the desktop's state; there is
+  no undo call (`deepseek-harness/docs/subsystems/computer-use.md`). Use
+  `dry_run` to see the exact command before a gesture you cannot take back.
+- **The desktop is shared.** Another person or process can move it between two
+  calls, so a result must be verified from fresh state, never assumed.
+- **Permissions belong to the application that launched the host.** On macOS,
+  Screen Recording and Accessibility are granted to the terminal or agent
+  process — not to rolebox — and installing the package grants neither
+  (`src/computer/drivers/darwin.ts:40-44`).
+- **Linux is X11 only.** A Wayland session is an explicit refusal — `scrot`,
+  `import` and `xdotool` cannot inject through a Wayland compositor, and
+  rolebox declares no Wayland driver (`src/computer/drivers/linux.ts:36-43`) —
+  and a missing `import`/`scrot`/`xdotool` is an explicit refusal naming the
+  install (`src/computer/drivers/linux.ts:30-34`,
+  `src/computer/exec.ts:112-119`).
+- **Codex has no permission prompt and no role.** On the MCP transport
+  `context.ask()` is a documented no-op (see
+  [Codex (MCP) parity](#codex-mcp-parity)) and no rolebox role is active
+  (`src/entries/codex.ts:10-22`), so the global `computerUse` gate is the whole
+  policy there: there is no per-call approval and no per-role grant to fall back
+  on.
+- **A screenshot needs an image-capable model route.** Each host translates the
+  image attachment its own way
+  ([computer-use.md](computer-use.md#image-transport-per-host)); on dsh the bytes
+  must be committed through the host attachment service, and with no attachment
+  service wired the model gets the text line plus the saved path under
+  `.rolebox/computer/` instead of an image.
+- **Registration is host-side.** dsh, Pi and Codex register the seven tools
+  themselves (`src/entries/dsh.ts:2237-2246`, `src/entries/pi.ts:1244`,
+  `src/entries/codex.ts:138`); the two opencode entries enforce the gate and the
+  per-role grant as agent-config tool rules
+  (`src/prompt/agent-config.ts:119-144`). A host that registers no `computer_*`
+  tool shows none to any role, whatever that role's `tools:` map says.
+- **Windows needs PowerShell and an interactive session**, and an unlisted
+  platform is refused outright
+  (`src/computer/drivers/win32.ts:14-17`, `src/computer/drivers/unsupported.ts:13-17`).
+- **The Linux and Windows drivers are unit-tested here, not exercised against a
+  live desktop.** Every tool test that does not capture the screen runs through
+  `dry_run` and asserts the plan the driver built; on macOS two tests perform one
+  real, input-free screenshot (`tests/computer/capture-darwin.test.ts:44-66`,
+  `:68-77`). No test synthesizes real mouse or keyboard input
+  (`src/computer/tools.ts:12-15`).

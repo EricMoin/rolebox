@@ -56,15 +56,16 @@ describe("End-to-end", () => {
   // ── Discovery ──────────────────────────────────────────────
 
   describe("role discovery", () => {
-    it("discovers both example roles from examples/", async () => {
+    it("discovers every example role under examples/", async () => {
       const roles = await discoverRoles(examplesDir);
 
-      expect(roles.size).toBe(5);
+      expect(roles.size).toBe(6);
       expect(roles.has("code-reviewer")).toBe(true);
       expect(roles.has("tech-writer")).toBe(true);
       expect(roles.has("team-lead")).toBe(true);
       expect(roles.has("review-team")).toBe(true);
       expect(roles.has("review-team-custom")).toBe(true);
+      expect(roles.has("computer-use")).toBe(true);
     });
 
     it("returns an empty Map for a non-existent directory", async () => {

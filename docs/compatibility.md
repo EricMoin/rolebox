@@ -83,9 +83,38 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | lsp_* (32 tools) | ✓ | ✓ | — (not over MCP) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
+| computer_* (seven tools: computer_screenshot / computer_windows / computer_click / computer_move / computer_type / computer_key / computer_permissions) | — (not registered; the gate only emits deny rules) | ✓ (opt-in) | ✓ (opt-in) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
 The graph tools ship with every host that owns an outcome capability layer — dsh, Pi, and both opencode entries (1.x and v2). opencode registers no `graph_worker_exec` equivalent; dsh additionally registers it for a session it has confirmed as a graph worker. A dispatched worker's granted graph face is `graph_submit_outcome`, plus `graph_worker_exec` on dsh, and a call outside that grant is refused with the stable code `worker-tool-forbidden`.
+
+## Computer use
+
+Rolebox's computer-use family — `computer_screenshot`, `computer_windows`,
+`computer_click`, `computer_move`, `computer_type`, `computer_key` and
+`computer_permissions` — is assembled by the shared `buildCanonicalTools`, which
+merges it only when the host asked for it (`src/platform/tool-assembly.ts:146-151`).
+It is **off by default** on every host, so the 15-tool Codex surface and the
+shared opencode/Pi surface are exactly what they were for a host that never asks
+for it; switching it on adds the seven tools (22 over MCP on Codex).
+
+The switch is one shared resolution (`src/loader/computer-use-gate.ts`): the
+family is enabled only when a source holds the boolean `true` — the host plugin
+option `computerUse` (the dsh plugin `Config`, the Codex MCP entry's options),
+`computerUse: true` in `~/.config/rolebox/config.yaml`, or `computerUse: true` in
+`{workspace}/.rolebox/config.json`. On the hosts whose transport carries a role
+— dsh and Pi — a role must ADDITIONALLY grant the tools in its `role.yaml`
+`tools` map, by exact name or with the family wildcard `computer_*`. Codex is
+the exception: its MCP transport carries no role and no permission prompt
+(`src/entries/codex.ts:125-131`, `:159-161`), so the gate is the whole policy
+there — with the gate on, all seven tools are registered and callable with no
+role opt-in. On dsh, `enabledNamespaces` is only a filter over the tools that
+were already assembled, so `["*"]` does not enable computer use by itself
+(`src/platform/adapters/dsh/role-tool-policy.ts:96-112`). Neither opencode entry
+registers the family — a role's `computer_*` grant only emits opencode deny
+rules for it and changes nothing about the tools that appear. The family, its
+per-host image transport and its platform requirements are documented in
+[computer-use.md](computer-use.md).
 
 Remaining platform-inherent gaps (hot reload, extensions, recovery engine, TUI) are explicit non-goals on Pi and Codex — see [limitations.md](limitations.md).
