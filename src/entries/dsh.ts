@@ -86,6 +86,11 @@ import type {
 import { DshHookProvider } from "../platform/adapters/dsh/hook-provider.ts";
 import { DshRoleSwitcher, createActiveRoleRef } from "../platform/adapters/dsh/role-switcher.ts";
 import { ActiveRoleStore } from "../platform/adapters/dsh/active-role-store.ts";
+import {
+  installDshComputerUsePolicy,
+  isComputerUseRegistrationAllowed,
+} from "../platform/adapters/dsh/role-tool-policy.ts";
+import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
 import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/system-prompt.ts";
 import {
@@ -122,8 +127,10 @@ import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import {
   DshOutcomeDelivery,
+  resolveDshWorkerToolAllowList,
   type DshOutcomeSubagentRuntime,
 } from "../platform/adapters/dsh/outcome-dispatch.ts";
+import type { OutcomeDispatchRequest } from "../graph/outcome/dispatch-effects.ts";
 import { GraphApplication } from "../graph/application/graph-application.ts";
 import {
   COMPLETION_POLICY_AUTHORIZATION_ENV,
@@ -163,6 +170,17 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
  *   - `skillsDir`         — override the global skills directory (default:
  *                           `{dsh home}/skills`)
  *   - `defaultRole`       — role id (directory name) promoted to primary
+ *   - `computerUse`       — opt IN to rolebox's computer-use family
+ *                           (`computer_screenshot` … `computer_permissions`).
+ *                           Default `false`: absent registers NOTHING. The
+ *                           family is registered only when this resolves true
+ *                           (it is also enabled by `computerUse: true` in
+ *                           `~/.config/rolebox/config.yaml` or
+ *                           `{cwd}/.rolebox/config.json`), and a role must STILL
+ *                           grant each tool in its `role.yaml` `tools:` map
+ *                           (`computer_screenshot: true`, or the family
+ *                           wildcard `computer_*: true`) — the boot-time guard
+ *                           denies every call that role does not grant.
  *   - `enabledNamespaces` — allow-list of tool names / namespace prefixes,
  *                           composable with `!` exclusions (e.g.
  *                           `["*", "!web"]`); `"*"` or absent registers every
@@ -196,6 +214,12 @@ export const Config = z.object({
     .string()
     .optional()
     .describe("Role id (directory name) to promote to primary"),
+  computerUse: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Enable rolebox's computer-use family (computer_screenshot, computer_windows, computer_click, computer_move, computer_type, computer_key, computer_permissions). Default false: absent registers NO computer_* tool at all. A host option can only ASSERT enablement (a schema default makes false indistinguishable from unset), so computerUse: true in ~/.config/rolebox/config.yaml or {cwd}/.rolebox/config.json also enables it; a role must still grant the tools in role.yaml tools: (computer_screenshot: true, or the family wildcard computer_*: true) or the boot-time guard denies every call.",
+    ),
   enabledNamespaces: z
     .array(z.string())
     .optional()
@@ -333,6 +357,19 @@ export interface DshPluginContext {
    * the `inject` roster — an optional service must not gate plugin activation.
    */
   sandboxPolicy?: DshSandboxPolicyService;
+  /**
+   * The host's durable image-attachment service (`@deepseek-ai/dsh-attachment`
+   * `AttachmentStore`, structural subset — see {@link DshAttachmentService}).
+   * dsh `ContentBlock`s reference a stored image instead of carrying bytes, so
+   * the dsh tool factory needs this service to turn a canonical base64
+   * attachment into a real `ImageBlock`; without it the compiled tools keep
+   * their text-only output. Present only in a profile that mounts the
+   * attachment store, so the property is absent on a headless / test-double
+   * host and the plugin degrades instead of failing to load (see
+   * {@link probeAttachments}). Never injected via the `inject` roster — an
+   * optional service must not gate plugin activation.
+   */
+  attachments?: unknown;
   /**
    * Resolve a cordis service by name (optional-service seam). The dsh host
    * context resolves any registered service; this plugin probes for
@@ -1068,6 +1105,70 @@ export function probeSandboxPolicy(ctx: DshPluginContext): DshSandboxPolicyServi
 }
 
 /**
+ * Structural mirror of the host's image-attachment service.
+ *
+ * THE OWNING MODULE IS `src/platform/adapters/dsh/attachment.ts` (the
+ * media-transport node). This LOCAL declaration is deliberate: the entry
+ * declares the seam it consumes so this file compiles and is reviewable on its
+ * own, instead of depending on a module another node writes in parallel. The
+ * shape mirrors the agreed contract — `saveImage({ data, mediaType, name? })`
+ * resolves to `{ attachmentId, mediaType, bytes, width, height, name? }` — and
+ * is consumed STRUCTURALLY (duck typed on `saveImage`), never value-imported,
+ * exactly like `ctx.agents` / `ctx.sandbox`.
+ */
+export interface DshAttachmentService {
+  saveImage(input: {
+    data: Uint8Array;
+    mediaType: string;
+    name?: string;
+  }): Promise<{
+    attachmentId: string;
+    mediaType: string;
+    bytes: number;
+    width: number;
+    height: number;
+    name?: string;
+  }>;
+}
+
+/**
+ * Structurally probe the cordis ctx for the host's image-attachment service
+ * (structural subset — see {@link DshAttachmentService}), with the same
+ * optional-service discipline as {@link probeSandbox}: not in the `inject`
+ * roster, a direct property read (which can throw before the dependency is
+ * injected, and does throw for a service mounted by a SIBLING plugin fiber),
+ * then the named-service resolver. Both spellings are probed — `attachments`
+ * (the harness service name) and `attachment` — because the mounted property
+ * and the service id must agree with whatever the profile registered; every
+ * read is duck typed on `saveImage`, so a missing `get`, a throw, or a
+ * non-conforming value all resolve to "absent" and the tool factory keeps its
+ * text-only output instead of failing the boot.
+ */
+export function probeAttachments(ctx: DshPluginContext): DshAttachmentService | undefined {
+  const reads: Array<() => unknown> = [
+    () => ctx.attachments,
+    () => (typeof ctx.get === "function" ? ctx.get("attachments") : undefined),
+    () => (typeof ctx.get === "function" ? ctx.get("attachment") : undefined),
+  ];
+  for (const read of reads) {
+    let service: unknown;
+    try {
+      service = read();
+    } catch {
+      service = undefined;
+    }
+    if (
+      service !== undefined &&
+      service !== null &&
+      typeof (service as { saveImage?: unknown }).saveImage === "function"
+    ) {
+      return service as DshAttachmentService;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Structurally probe the cordis ctx for the dsh llm service
  * (`ctx.llm`, `@deepseek-ai/dsh-llm`).
  *
@@ -1170,6 +1271,25 @@ export async function apply(
     configDir: dirs.configDir,
   });
 
+  // 1a. Resolve the GLOBAL computer-use gate — ONCE, before any tool is
+  // assembled, and OFF unless a surface explicitly says otherwise (see
+  // src/loader/computer-use-gate.ts). The plugin option is an assertion of
+  // enablement only: its schema default makes `false` indistinguishable from
+  // "unset", so the config-file surfaces can still opt in. The resolved reason
+  // is logged unconditionally, so a boot that does NOT expose the family states
+  // why instead of leaving an operator to guess.
+  const computerUseGate = resolveComputerUseGate({
+    hostOverride: config.computerUse === true ? true : undefined,
+    workspaceDir: process.cwd(),
+  });
+  log.info("Computer use gate resolved", {
+    enabled: computerUseGate.enabled,
+    host: computerUseGate.host,
+    globalConfig: computerUseGate.globalConfig,
+    projectConfig: computerUseGate.projectConfig,
+    reason: computerUseGate.reason,
+  });
+
   // 2. Discover + resolve roles; sync agents into ctx.subagents.
   //
   // The per-session active-role holder is created FIRST and shared by BOTH
@@ -1189,6 +1309,26 @@ export async function apply(
   const activeRoleStore = new ActiveRoleStore(process.cwd());
   const activeRole = createActiveRoleRef(activeRoleStore);
   let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary> | undefined;
+  /**
+   * EVERY CANONICAL TOOL NAME THIS BOOT COMPOSED — the candidate set a node's
+   * declared grant may name (`tools: ["computer_*"]` becomes the registered
+   * computer_* names), intersected per delivery with the host's own lookup.
+   *
+   * WHY A CANDIDATE SET IS NEEDED AT ALL: the start request's `toolFilter.allow`
+   * is a list of CONCRETE names, and a declared PREFIX has to be expanded
+   * against something. The composed record is that something, and it is a
+   * SUPERSET: nothing is granted by being here — the per-delivery intersection
+   * with `ctx.tools.get` is what decides, so a name this boot did not actually
+   * register (namespace-filtered, gate-filtered, skipped on collision) is never
+   * named to `restrict()`.
+   *
+   * PUBLISHED AFTER THE BOOT'S TWO REGISTRATION GENERATIONS RUN, which is after
+   * the sessions restored at boot may already have opened their graph runtimes:
+   * a delivery that happens in that early window (a boot-window recovery) sees
+   * the empty set and therefore delivers the registered baseline alone — the
+   * fail-closed answer, never a name the host cannot resolve.
+   */
+  let workerToolCandidates: readonly string[] = Object.freeze([]);
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -1276,6 +1416,26 @@ export async function apply(
     ctx,
     activeRole,
     onActiveRoleChanged: () => refreshSkillCatalog(),
+  });
+
+  // 3b. Computer-use policy: ONE boot-time monotonic guard on `ctx.tools.guard`
+  // that denies every `computer_*` call whose session's ACTIVE ROLE does not
+  // grant it (the grant is read from role.yaml `tools:` at call time, so a role
+  // reload is observed). The guard reads the SAME per-session holder the
+  // switcher writes. FAIL CLOSED: when this host exposes no `guard` seam the
+  // policy refuses (`allowRegistration: false`) and logs one explicit reason —
+  // an ungoverned screen-control surface is never registered.
+  const computerUsePolicy = installDshComputerUsePolicy({
+    tools: ctx.tools,
+    enabled: computerUseGate.enabled,
+    activeRoleOf: (sessionId) => activeRole.get(sessionId),
+    roles: () => resolvedRoles,
+  });
+  const computerUseEnabled = computerUseGate.enabled && computerUsePolicy.allowRegistration;
+  log.info("Computer use policy", {
+    gateEnabled: computerUseGate.enabled,
+    guardInstalled: computerUsePolicy.guardInstalled,
+    registrationAllowed: computerUseEnabled,
   });
 
   // Optional host webServer seam — probe ONCE here. The composed `/rolebox`
@@ -1415,7 +1575,13 @@ export async function apply(
   const sessionAdapter = new DshSessionAdapter(ctx.sessions, {
     ...(promptInjector ? { promptInjector } : {}),
   });
-  const factory = new DshToolFactory();
+  // Optional host attachment seam (`ctx.attachments` / `ctx.get('attachments')`)
+  // — probed structurally, exactly like ctx.agents / ctx.sandbox, and handed to
+  // the factory so a canonical image attachment (a screenshot) is committed to
+  // the host store and reaches the model as a real image block instead of a
+  // text line. Absent → the factory keeps its text-only output.
+  const attachments = probeAttachments(ctx);
+  const factory = new DshToolFactory(attachments === undefined ? {} : { attachments });
 
   // ── dsh dispatch path (subtask 8) ────────────────────────────────────────
   //
@@ -1485,11 +1651,43 @@ export async function apply(
         // The worker's own session does not exist at prompt-assembly time, so this
         // states the mode the host resolves for the request (its deployment default);
         // each command's own result carries the authoritative mode and enforcement.
+        //
+        // THE FIFTH ARGUMENT IS THE EXECUTING NODE'S OWN GRANT, resolved from the
+        // plan by the runtime and carried on the request
+        // (`OutcomeDispatchRequest.declaredTools`). It reaches the prompt HERE —
+        // the same value the start request's tool filter is built from below, so
+        // the sentence a worker reads and the face it holds state one grant. An
+        // absent declaration stays absent and the prompt states the baseline.
         const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory,
-          resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)));
+          resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
+          request.declaredTools);
         return workerBoundary!.start(label, start, prompt);
       },
+      // THE BASELINE the delivery falls back to: the static two-tool surface, used
+      // when the per-request resolver below is not installed (a host with no tool
+      // lookup) or answers nothing. It is never widened from here.
       workerTools: DSH_GRAPH_WORKER_TOOLS,
+      // (b) THE PER-REQUEST ALLOW-LIST: the baseline PLUS the node's declared
+      // entries intersected with the tools the host actually registered. The
+      // declared list is read from the request (runtime provenance), never from a
+      // caller; the intersection is computed here, where the registry is. A host
+      // without `ctx.tools.get` cannot substantiate registration at all, so the
+      // option is not installed and the static baseline above stands.
+      ...(typeof ctx.tools.get !== "function" ? {} : {
+        workerToolsOf: (request: OutcomeDispatchRequest) =>
+          resolveDshWorkerToolAllowList({
+            baseline: DSH_GRAPH_WORKER_TOOLS,
+            declared: request.declaredTools,
+            candidates: workerToolCandidates,
+            isRegistered: (name: string) => {
+              try {
+                return ctx.tools.get?.(name) !== undefined;
+              } catch {
+                return false;
+              }
+            },
+          }),
+      }),
       subagents: ctx.subagents,
       parentResolver: (sid) => agentRegistry?.get(sid),
       onStartFailed: (_request, effect, reason) => {
@@ -1893,8 +2091,16 @@ export async function apply(
     const compiled = factory.compileAll(buildRoleSnapshotTools(roles));
     let registered = 0;
     for (const [key, def] of Object.entries(compiled)) {
-      // Order: the namespace filter (CANONICAL names) first, then the
-      // collision probe — a filtered tool is never probed and never renamed.
+      // Order: the computer-use gate FIRST, then the namespace filter
+      // (CANONICAL names), then the collision probe. The gate is checked
+      // independently of — and before — `enabledNamespaces`, because a profile
+      // that declares `["*"]` matches the `computer_` namespace prefix like any
+      // other and must never turn screen control on. Only the resolved gate can,
+      // and a refused name is reported exactly like a namespace-filter drop.
+      if (!isComputerUseRegistrationAllowed(key, computerUseEnabled)) {
+        filteredTools.add(key);
+        continue;
+      }
       if (!isNamespaceEnabled(key, config.enabledNamespaces)) {
         filteredTools.add(key);
         continue;
@@ -2033,21 +2239,34 @@ export async function apply(
       directory: process.cwd(),
       sessionClient: sessionAdapter,
       capabilities: dshCapabilities(),
+      // The resolved global gate. FALSE (the default) registers nothing from
+      // the computer-use family; TRUE registers it, and the guard installed
+      // above still denies every call an active role does not grant.
+      computerUse: computerUseEnabled,
     }),
     ...graphTools,
     ...loopTools,
   };
   const compiled = factory.compileAll(tools);
 
-  const toolDisposers: Array<() => void> = [() => workerBoundary.dispose()];
+  const toolDisposers: Array<() => void> = [
+    () => workerBoundary.dispose(),
+    () => computerUsePolicy.dispose(),
+  ];
   let registeredTools = 0;
   for (const [key, def] of Object.entries(compiled)) {
     // The role-snapshot tools are registered as their own disposition-managed
     // generation below — never here, or the host's duplicate-name rejection
     // would throw on boot.
     if (key in ROLE_SNAPSHOT_TOOL_KEYS) continue;
-    // Order: the namespace filter (CANONICAL names) first, then the collision
-    // probe — a filtered tool is never probed and never renamed.
+    // Order: the computer-use gate FIRST, then the namespace filter (CANONICAL
+    // names), then the collision probe — the same order as the role-snapshot
+    // path above, and for the same reason: `enabledNamespaces: ["*"]` must not
+    // be able to enable the computer_ namespace.
+    if (!isComputerUseRegistrationAllowed(key, computerUseEnabled)) {
+      filteredTools.add(key);
+      continue;
+    }
     if (!isNamespaceEnabled(key, config.enabledNamespaces)) {
       filteredTools.add(key);
       continue;
@@ -2071,6 +2290,15 @@ export async function apply(
   // Initial generation: the same four tools, registered through the reload
   // seam so a later re-registration replaces them cleanly.
   registeredTools += registerRoleSnapshotTools(resolvedRoles);
+
+  // THE CANDIDATE SET IS PUBLISHED NOW (item 1b): every canonical name this boot
+  // composed is a name a node's declared grant may name, and the per-delivery
+  // intersection with the host lookup decides which of them are real. A name the
+  // namespace filter or the computer-use gate dropped is NOT registered, so the
+  // intersection excludes it — the list is a superset of candidates, never a
+  // grant. `graph_*` names are in it too; the declared-grant matcher refuses the
+  // graph namespace outright, so they can never be granted by a declaration.
+  workerToolCandidates = Object.freeze([...new Set(Object.keys(tools))]);
 
   // 5. Mount hooks (rolebox hook kinds onto dsh extension points).
   const hookProvider = new DshHookProvider(ctx, {});
@@ -2107,6 +2335,7 @@ export async function apply(
     skipped,
     registeredTools,
     registeredAgents,
+    computerUse: computerUseEnabled,
     filteredTools: [...filteredTools].sort(),
   });
   if (discovered === 0) {

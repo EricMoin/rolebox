@@ -9,7 +9,13 @@
  *
  * Tool surface (deliberately NOT expanded here): the canonical intersection set
  * that buildCanonicalTools() assembles for a harness with no session client and
- * no dispatch backend, plus load_role_skill. There are no session_* tools (the
+ * no dispatch backend, plus load_role_skill, plus rolebox's computer-use family
+ * ONLY when it was explicitly enabled (`computerUse: true` through the options
+ * below, `~/.config/rolebox/config.yaml`, or `{cwd}/.rolebox/config.json`).
+ * This transport has no role and no permission prompt (docs/limitations.md: it
+ * carries no `context.ask` callback), so the computer-use gate here is the
+ * GLOBAL one only — a per-role grant cannot be resolved on stdio MCP, and none
+ * is invented. There are no session_* tools (the
  * stdio transport exposes no rolebox session client) and no dispatch_/loop_/
  * task_/graph_* tools — orchestration needs a dispatch backend, which this
  * entry does not construct, so buildCanonicalTools() registers no graph_* tools
@@ -36,6 +42,7 @@ import {
 import { installProtocolStdoutGuard } from "../platform/adapters/codex/stdout-guard.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import { buildCanonicalTools } from "../platform/tool-assembly.ts";
+import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import type { CanonicalToolContext } from "../platform/types.ts";
 import { roleFunctionsMap } from "../resolver/registry.ts";
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
@@ -92,7 +99,16 @@ function resolvePackageVersion(): string {
  * logging to process.stdout would otherwise corrupt the protocol stream.
  */
 export async function startCodexMcpServer(
-  options: { output?: NodeJS.WritableStream } = {},
+  options: {
+    output?: NodeJS.WritableStream;
+    /**
+     * The host's own computer-use switch (see the module docstring). `true`
+     * asserts enablement; `false`/absent asserts nothing, so the config-file
+     * surfaces can still opt in. Absent everywhere → the family is not
+     * registered at all.
+     */
+    computerUse?: boolean;
+  } = {},
 ): Promise<CodexMcpServer> {
   const workingDir = process.cwd();
   configureLogDirectory(workingDir);
@@ -106,11 +122,20 @@ export async function startCodexMcpServer(
 
   syncSkillSymlinks(resolvedRoles, dirs.globalSkillsDir);
 
+  // The GLOBAL computer-use gate — default OFF. This transport carries no role
+  // and no permission prompt (see the module docstring), so the global gate is
+  // the whole policy here: ON registers the family, OFF registers nothing.
+  const computerUseGate = resolveComputerUseGate({
+    hostOverride: options.computerUse === true ? true : undefined,
+    workspaceDir: workingDir,
+  });
+
   const tools = buildCanonicalTools({
     resolvedRoles,
     directory: workingDir,
     capabilities: codexCapabilities(),
     extraTools: { load_role_skill: createLoadRoleSkillTool(resolvedRoles) },
+    computerUse: computerUseGate.enabled,
   });
 
   // The context factory closes over the server so it can read the clientInfo
@@ -152,6 +177,8 @@ export async function startCodexMcpServer(
     resolved,
     skipped,
     tools: Object.keys(tools).length,
+    computerUse: computerUseGate.enabled,
+    computerUseReason: computerUseGate.reason,
     roleboxDir: dirs.roleboxDir,
     globalSkillsDir: dirs.globalSkillsDir,
   });

@@ -3,6 +3,13 @@
  */
 
 export { DshAgentRegistrar, DshSpawnNotWiredError } from "./agent-registrar.ts";
+export { DSH_IMAGE_MEDIA_TYPES, isDshImageMediaType } from "./attachment.ts";
+export type {
+  DshAttachmentService,
+  DshImageAttachmentRef,
+  DshImageMediaType,
+} from "./attachment.ts";
+export type { DshToolFactoryOptions } from "./tool-factory.ts";
 export { DshEventBridge, mapDshEventType } from "./event-bridge.ts";
 export { DshDispatchAdapter } from "./dispatch.ts";
 export { DshRoleSwitcher } from "./role-switcher.ts";

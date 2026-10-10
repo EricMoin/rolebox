@@ -44,20 +44,52 @@ function zodShapeToJsonSchema(shape: z.ZodRawShape): Record<string, unknown> {
 }
 
 /**
+ * Pi's model-facing content-block vocabulary for tool results
+ * (`@earendil-works/pi-ai/dist/types.d.ts:256-260`): text plus a base64 image.
+ * `data` is the bare base64 payload — Pi adds the data-URI header itself from
+ * `mimeType`. `AgentToolResult.content` is exactly this union
+ * (`pi-agent-core/dist/types.d.ts:337-341`).
+ */
+type PiContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+/**
+ * Base64 image data URI, `data:<image/*>;base64,<payload>`. Anything else — a
+ * non-data URL, a non-base64 encoding, a non-image media type — is not
+ * convertible to a Pi image block and is skipped. Same narrow boundary as the
+ * codex adapter's MCP projection (src/platform/adapters/codex/tool-factory.ts).
+ */
+const IMAGE_DATA_URI = /^data:(image\/[^;,]+);base64,([A-Za-z0-9+/=]+)$/;
+
+/**
  * Map a canonical ToolResult to Pi's { content, details } format.
  * Canonical results can be either a plain string or a structured object
  * with output, metadata, and attachments.
+ *
+ * Image attachments become Pi `image` content blocks AFTER the text block, so
+ * a fetched picture or a screenshot reaches the model as an image instead of
+ * the bare `[image: ...]` text line. The conversion boundary is deliberately
+ * narrow: only a `type: "file"` attachment whose `mime` starts with `image/`
+ * AND whose `url` is a base64 `data:` URI is converted. Every other attachment
+ * — PDFs included, which keep arriving as their existing text line — and every
+ * malformed data URI is skipped silently. `metadata` never rides the text; it
+ * stays in `details`.
  */
 function toPiResult(
   result: ToolResult,
-): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
+): { content: PiContentBlock[]; details: Record<string, unknown> } {
   if (typeof result === "string") {
     return { content: [{ type: "text", text: result }], details: {} };
   }
-  return {
-    content: [{ type: "text", text: result.output }],
-    details: result.metadata ?? {},
-  };
+  const content: PiContentBlock[] = [{ type: "text", text: result.output }];
+  for (const attachment of result.attachments ?? []) {
+    if (attachment.type !== "file" || !attachment.mime.startsWith("image/")) continue;
+    const match = IMAGE_DATA_URI.exec(attachment.url);
+    if (!match) continue;
+    content.push({ type: "image", data: match[2], mimeType: match[1] });
+  }
+  return { content, details: result.metadata ?? {} };
 }
 
 /**
@@ -190,7 +222,7 @@ export class PiToolFactory implements IToolFactory {
         signal: AbortSignal,
         onUpdate: (msg: string) => void,
         ctx: Record<string, unknown>,
-      ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
+      ): Promise<{ content: PiContentBlock[]; details: Record<string, unknown> }> {
         const context = toCanonicalContext(toolCallId, signal, onUpdate, ctx);
         // Subtask S9 — tool-execution interceptor: run the shared
         // handleToolBefore pipeline (strict zod validation, deprecated

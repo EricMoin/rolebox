@@ -16,17 +16,26 @@
  */
 
 import { posix, win32 } from "node:path";
+import { darwinComputerUse } from "../../computer/drivers/darwin.ts";
+import { linuxComputerUse } from "../../computer/drivers/linux.ts";
+import { unsupportedComputerUse } from "../../computer/drivers/unsupported.ts";
+import { win32ComputerUse } from "../../computer/drivers/win32.ts";
 import type { SystemDescriptor, SystemId } from "./types.ts";
 
 /**
- * Linux-family facts. `linux` and the `posix` fallback differ only in id and
- * label: an unlisted platform answers with these facts under its OWN descriptor
+ * Linux-family facts. `linux` and the `posix` fallback share these path, shell
+ * and environment facts and differ in id, label and computer-use driver: the
+ * `posix` fallback declares NO screen driver, so an unlisted platform answers
+ * with these facts under its own descriptor and is told rolebox cannot drive it
  * rather than being silently reported as Linux.
  */
 function posixFamilyDescriptor(id: SystemId, label: string): SystemDescriptor {
   return {
     id,
     label,
+    // `linux` gets the X11 driver; every other POSIX-family id is a platform
+    // rolebox declares no driver for and says so instead of guessing.
+    computerUse: id === "linux" ? linuxComputerUse : unsupportedComputerUse(id, label),
     canSyncDirectoryEntries: true,
     browserCaches(home) {
       return {
@@ -52,6 +61,7 @@ function posixFamilyDescriptor(id: SystemId, label: string): SystemDescriptor {
 const darwinDescriptor: SystemDescriptor = {
   id: "darwin",
   label: "macOS",
+  computerUse: darwinComputerUse,
   canSyncDirectoryEntries: true,
   browserCaches(home) {
     return {
@@ -85,6 +95,7 @@ const darwinDescriptor: SystemDescriptor = {
 const win32Descriptor: SystemDescriptor = {
   id: "win32",
   label: "Windows",
+  computerUse: win32ComputerUse,
   canSyncDirectoryEntries: false,
   browserCaches(home) {
     return {

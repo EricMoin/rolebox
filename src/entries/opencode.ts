@@ -15,12 +15,17 @@ import { roleFunctionsMap } from "../resolver/registry.ts";
 export { roleFunctionsMap } from "../resolver/registry.ts";
 import { loadProjectConfig, applyProjectConfig } from "../project-config.ts";
 import { PLUGIN_ID } from "../constants.ts";
+import { setAgentConfigWorkspace } from "../prompt/agent-config.ts";
 import { createSubLogger, formatError, getLogFilePath, configureLogDirectory } from "../logger.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import { opencodeCapabilities } from "../platform/capabilities.ts";
 
 const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
   configureLogDirectory(ctx.directory);
+  // The workspace this plugin context serves — the project config the
+  // computer-use gate reads lives at `{ctx.directory}/.rolebox/config.json`,
+  // which is not guaranteed to be the process cwd.
+  setAgentConfigWorkspace(ctx.directory);
 
   const dirs = resolveRoleboxDirectories({
     workingDir: ctx.directory,

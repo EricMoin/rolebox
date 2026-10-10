@@ -46,7 +46,15 @@ import { realpathSync } from "node:fs";
 import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
 import { DshEventBridge, mapDshEventType } from "../src/platform/adapters/dsh/event-bridge.ts";
-import { apply, name, inject, Config, buildAgentPromptInjector } from "../src/entries/dsh.ts";
+import {
+  apply,
+  name,
+  inject,
+  Config,
+  buildAgentPromptInjector,
+  probeAttachments,
+} from "../src/entries/dsh.ts";
+import type { DshAttachmentService } from "../src/entries/dsh.ts";
 import type {
   DshPluginContext,
   DshPluginDisposer,
@@ -63,6 +71,8 @@ import type {
   DshToolPresentation,
 } from "../src/platform/adapters/dsh/tool-factory.ts";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
+import { DSH_GRAPH_WORKER_TOOLS } from "../src/platform/adapters/dsh/graph-worker.ts";
+import { COMPUTER_TOOL_NAMES } from "../src/loader/computer-grants.ts";
 import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import type {
   DshSpawnDelegate,
@@ -945,6 +955,130 @@ describe("dsh plugin apply()", () => {
       disposer?.();
       if (priorApprovalPolicy === undefined) delete process.env.ROLEBOX_GRAPH_APPROVAL_POLICY;
       else process.env.ROLEBOX_GRAPH_APPROVAL_POLICY = priorApprovalPolicy;
+      process.chdir(cwd);
+    }
+  });
+
+  it("hands a node's declared tools to the dispatch delivery: per-request toolFilter + prompt (item 1)", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    const INVOKING_SESSION = "declared-tools-session";
+    const parent = { id: "live-parent", inject: () => undefined };
+    const fixture = createFakeCtx({ agents: { get: () => parent } });
+    const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
+    // The fake service DELEGATES to the registered rolebox provider, exactly as
+    // the real dsh subagent service does, so the provider's own composition runs
+    // INSIDE the graph worker's start scope and the worker prompt it reads
+    // (`graphWorkerPrompt()`) is the delivered one. `onSpawn` then captures the
+    // final request: the tool filter the delivery composed AND the prompt the
+    // worker would actually receive.
+    const requests: DshSubagentStartRequest[] = [];
+    runtime.start = async (agent, request) =>
+      fixture.providers.get(agent)!.start({ ...request, descriptor: {} });
+
+    const cwd = process.cwd();
+    process.chdir(tmpDir);
+    const workspace = join(tmpDir, "declared-tools-workspace");
+    mkdirSync(workspace);
+    let disposer: DshPluginDisposer | undefined;
+    try {
+      // THE GATE IS ON, so the family is genuinely REGISTERED in this boot: a
+      // declared `computer_*` grant must intersect with real tool names, which
+      // is the half the r2 evidence never exercised.
+      disposer = await applyTracked(fixture.ctx, {
+        roleboxDir: tmpDir,
+        computerUse: true,
+        onSpawn: async (_definition, request) => {
+          const id = "worker-" + requests.length;
+          const worker = {
+            id,
+            session: { id, events: [] },
+            ctx: { tools: { presentAs: () => () => {} } },
+          };
+          fixture.ctx.emit("agent/created", { agent: worker });
+          requests.push(request);
+          return {
+            id,
+            result: Promise.resolve({ stopReason: "completed", output: [] }),
+            dispose: async () => {},
+          };
+        },
+      } as DshPluginConfig);
+      const byName = new Map(fixture.tools.registeredTools.map((t) => [t.name, t]));
+      const exec = {
+        signal: new AbortController().signal,
+        callId: "declared-tools-call-1",
+        deferContext: () => {},
+        concludeTurn: () => {},
+        agent: {
+          id: INVOKING_SESSION,
+          session: { id: INVOKING_SESSION, header: { cwd: workspace } },
+        },
+      };
+
+      // ONE graph, TWO entry nodes: `shooter` declares the family wildcard,
+      // `plain` declares nothing. A single start dispatches both, so ONE
+      // delivery must widen the start request and the other must stay the
+      // baseline — the per-attempt property a static option cannot express.
+      const declared = (await byName.get("graph_declare")!.execute(
+        {
+          declaration: {
+            version: 3,
+            name: "declared-tools-graph",
+            nodes: [
+              {
+                id: "shooter",
+                agent: "tester",
+                prompt: "shoot",
+                tools: ["computer_*"],
+                outcomes: [{ id: "done" }],
+              },
+              { id: "plain", agent: "tester", prompt: "plain", outcomes: [{ id: "done" }] },
+            ],
+            edges: [],
+          },
+        },
+        exec,
+      )) as { graph_id: string };
+      expect(declared.graph_id).toBe("declared-tools-graph");
+
+      for (let i = 0; i < 50 && requests.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(requests).toHaveLength(2);
+
+      const requestOf = (node: string): DshSubagentStartRequest =>
+        requests.find((request) => (request.label ?? "").includes(node + "#"))!;
+      const promptText = (request: DshSubagentStartRequest): string =>
+        request.prompt.map((block) => block.text ?? "").join("\n\n");
+      const shooter = requestOf("shooter");
+      const plain = requestOf("plain");
+
+      // (b) THE ALLOW-LIST: the node's declared entries INTERSECTED with the
+      // tools the host actually registered, on top of the static baseline.
+      expect(shooter.toolFilter?.allow).toEqual([
+        ...DSH_GRAPH_WORKER_TOOLS,
+        ...COMPUTER_TOOL_NAMES,
+      ]);
+      // …and the undeclared node keeps exactly the registered baseline.
+      expect(plain.toolFilter?.allow).toEqual([...DSH_GRAPH_WORKER_TOOLS]);
+
+      // (a) THE DELIVERED PROMPT states the SAME grant: the declared node is
+      // told about its host tools, the undeclared node is told the baseline.
+      expect(promptText(shooter)).toContain(
+        "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares.",
+      );
+      expect(promptText(shooter)).toContain("this node declares the host tools computer_*");
+      expect(promptText(shooter)).not.toContain("declares no extra host tools");
+      // The composed worker prompt is the one the provider prepends, ahead of
+      // the plan prompt and the attempt handoff.
+      expect(promptText(shooter)).toContain("shoot");
+      expect(promptText(plain)).toContain("declares no extra host tools");
+      expect(promptText(plain)).toContain(
+        "Your tools are graph_worker_exec and graph_submit_outcome.",
+      );
+    } finally {
+      disposer?.();
       process.chdir(cwd);
     }
   });
@@ -2368,6 +2502,160 @@ describe("dsh plugin apply()", () => {
 
     disposer();
     baselineDisposer();
+  });
+});
+
+// ── Computer-use gate: registration ────────────────────────────────────────
+//
+// The family is OFF unless a surface explicitly enabled it, and a wildcard
+// `enabledNamespaces` must never be the thing that turns it on. These boots pin
+// both halves of that: with the gate off the seven names are absent even under
+// `["*"]`, with the gate on (host option OR config file) they register, and a
+// host without the `ctx.tools.guard` seam gets nothing at all (fail closed).
+
+describe("dsh computer-use gate — registration", () => {
+  /**
+   * Boot under an ISOLATED global config directory, so a developer's own
+   * `~/.config/rolebox/config.yaml` can never decide one of these outcomes.
+   * The callback may write `config.yaml` into the returned directory to opt in.
+   */
+  async function withIsolatedConfigDir<T>(
+    run: (configDir: string) => Promise<T>,
+  ): Promise<T> {
+    const prior = process.env.ROLEBOX_CONFIG_DIR;
+    const configDir = mkdtempSync(join(tmpdir(), "rolebox-computer-use-config-"));
+    process.env.ROLEBOX_CONFIG_DIR = configDir;
+    try {
+      return await run(configDir);
+    } finally {
+      if (prior === undefined) delete process.env.ROLEBOX_CONFIG_DIR;
+      else process.env.ROLEBOX_CONFIG_DIR = prior;
+      removeTempTree(configDir);
+    }
+  }
+
+  it('registers no computer_* tool with the gate off, even under enabledNamespaces ["*"]', async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await withIsolatedConfigDir(() =>
+      applyTracked(ctx, {
+        roleboxDir: tmpDir,
+        enabledNamespaces: ["*"],
+      } as DshPluginConfig),
+    );
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    // The wildcard still registers the rest of the surface — it simply cannot
+    // enable screen control, which only the resolved gate can.
+    expect(keys).toContain("hashline_read");
+    expect(keys.filter((key) => key.startsWith("computer_"))).toEqual([]);
+
+    disposer();
+  });
+
+  it("registers the family when the host option enables the gate", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await withIsolatedConfigDir(() =>
+      applyTracked(ctx, {
+        roleboxDir: tmpDir,
+        enabledNamespaces: ["*"],
+        computerUse: true,
+      } as DshPluginConfig),
+    );
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys.filter((key) => key.startsWith("computer_")).sort()).toEqual(
+      [...COMPUTER_TOOL_NAMES].sort(),
+    );
+
+    disposer();
+  });
+
+  it("registers the family when the global config.yaml enables the gate", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+
+    const disposer = await withIsolatedConfigDir(async (configDir) => {
+      writeFileSync(join(configDir, "config.yaml"), "computerUse: true\nregistries: []\n", "utf-8");
+      return applyTracked(ctx, {
+        roleboxDir: tmpDir,
+        enabledNamespaces: ["*"],
+      } as DshPluginConfig);
+    });
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys).toEqual(expect.arrayContaining([...COMPUTER_TOOL_NAMES]));
+
+    disposer();
+  });
+
+  it("FAILS CLOSED — a host without ctx.tools.guard registers nothing", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx, tools } = createFakeCtx();
+    // A host generation (or double) with no guard seam: the per-role grant
+    // cannot be enforced, so an ungoverned screen-control surface is not
+    // registered at all.
+    Reflect.deleteProperty(ctx.tools, "guard");
+
+    const disposer = await withIsolatedConfigDir(() =>
+      applyTracked(ctx, {
+        roleboxDir: tmpDir,
+        enabledNamespaces: ["*"],
+        computerUse: true,
+      } as DshPluginConfig),
+    );
+    const keys = tools.registeredTools.map((t) => t.name);
+
+    expect(keys.filter((key) => key.startsWith("computer_"))).toEqual([]);
+    expect(keys).toContain("hashline_read");
+
+    disposer();
+  });
+});
+
+// ── Attachment seam probe ──────────────────────────────────────────────────
+//
+// The image-attachment service is an OPTIONAL host service (the harness mounts
+// it only in a profile that has a durable attachment store), so the entry
+// probes for it structurally — never through a host import — and hands it to
+// the tool factory. An absent service must degrade to "no attachments", not
+// fail the boot.
+
+describe("dsh attachment seam probe", () => {
+  const service: DshAttachmentService = {
+    async saveImage() {
+      return { attachmentId: "a1", mediaType: "image/png", bytes: 3, width: 1, height: 1 };
+    },
+  };
+
+  /** Only the two fields probeAttachments reads; the rest of ctx is unused. */
+  const ctxWith = (fields: Record<string, unknown>): DshPluginContext =>
+    ({ get: () => undefined, ...fields }) as unknown as DshPluginContext;
+
+  it("resolves a mounted service from the ctx property", () => {
+    expect(probeAttachments(ctxWith({ attachments: service }))).toBe(service);
+  });
+
+  it("falls back to the named-service resolver for both spellings", () => {
+    const named = (id: string): DshPluginContext =>
+      ({ get: (name: string) => (name === id ? service : undefined) }) as unknown as DshPluginContext;
+    expect(probeAttachments(named("attachments"))).toBe(service);
+    expect(probeAttachments(named("attachment"))).toBe(service);
+  });
+
+  it("answers absent for a missing or non-conforming service (never a throw)", () => {
+    expect(probeAttachments(ctxWith({}))).toBeUndefined();
+    expect(probeAttachments(ctxWith({ attachments: {} }))).toBeUndefined();
+    expect(probeAttachments(ctxWith({ attachments: { saveImage: "nope" } }))).toBeUndefined();
+    const throwing = {
+      get() {
+        throw new Error("cannot get property without inject");
+      },
+    } as unknown as DshPluginContext;
+    expect(probeAttachments(throwing)).toBeUndefined();
   });
 });
 

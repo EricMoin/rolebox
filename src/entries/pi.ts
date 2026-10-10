@@ -37,6 +37,8 @@ import {
 import { wireRoleSwitcher } from "../platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "../platform/adapters/pi/active-agent.ts";
 import type { ToolInterceptorHooks } from "../platform/adapters/pi/tool-interceptor.ts";
+import { createComputerTools } from "../computer/index.ts";
+import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import { piCapabilities } from "../platform/capabilities.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type {
@@ -1206,6 +1208,22 @@ export default async function(pi: any): Promise<void> {
     lspClientManager = new LspClientManager(process.cwd());
     lspDocManager = new LspDocumentManager();
 
+    // ── Computer use (global gate, default OFF) ────────────────────────────
+    //
+    // The family is registered ONLY when the resolved gate is on
+    // (`computerUse: true` in ~/.config/rolebox/config.yaml or
+    // {cwd}/.rolebox/config.json). It rides the SAME extraTools channel the
+    // platform extras use, so the stack's own buildCanonicalTools call stays
+    // untouched; a role must still GRANT each tool in role.yaml tools:
+    // (`computer_screenshot: true`, or the family wildcard `computer_*: true`),
+    // and the interceptor's computer-use policy (wired below) denies every call
+    // an active role does not grant.
+    const computerUseGate = resolveComputerUseGate({ workspaceDir: process.cwd() });
+    log.info("Computer use gate resolved", {
+      enabled: computerUseGate.enabled,
+      reason: computerUseGate.reason,
+    });
+
     const extraTools = {
       memory_update: createMemoryUpdateTool(),
       function_graph: createFunctionGraphTool(resolvedRoles),
@@ -1222,6 +1240,8 @@ export default async function(pi: any): Promise<void> {
       // LspService.getTools() (lsp_diagnostics / lsp_hover /
       // lsp_find_references / lsp_rename / lsp_servers, …).
       ...createAllLspTools(lspClientManager, lspDocManager),
+      // Computer use — the canonical family, present ONLY when the gate is on.
+      ...(computerUseGate.enabled ? createComputerTools() : {}),
     };
 
     // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
@@ -1314,6 +1334,15 @@ export default async function(pi: any): Promise<void> {
     // these — every Pi tool execute runs the shared handleToolBefore pipeline.
     interceptorHooks.state = hookPipeline.state;
     interceptorHooks.deps = hookPipeline.deps;
+    // Computer-use enforcement seam: Pi carries the acting role in its shared
+    // active-agent ref (never in the tool context), so the entry supplies the
+    // lookup. With the gate off the seam is inert and nothing about the
+    // existing pipeline changes.
+    interceptorHooks.computerUse = {
+      enabled: computerUseGate.enabled,
+      activeRoleFor: () => activeAgent.get() ?? null,
+      roles: () => resolvedRoles,
+    };
 
     // ── 5. Tool registration via PiLightweightServiceStack ──────────────
     //

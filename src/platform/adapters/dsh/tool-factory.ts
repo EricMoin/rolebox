@@ -46,6 +46,20 @@
  * to the `json` node (unconstrained lossless JSON) — documented, never
  * rejected.
  *
+ * ── Image transport ───────────────────────────────────────────────────────
+ * dsh content blocks reference a stored image instead of carrying bytes
+ * (`ImageBlock = { type: 'image'; attachment: ImageAttachmentRef }`,
+ * `dsh-llm/lib/types/types.d.ts:54-58`), so a canonical attachment — a base64
+ * `data:` URI — can never be rendered as-is. When the factory is constructed
+ * WITH an attachment service (`DshToolFactoryOptions.attachments`, the
+ * structural port in ./attachment.ts), the compiled `execute` commits every
+ * canonical image attachment through it and parks the durable refs on the
+ * returned value, and the pure `output.render` emits `[text, image, ...]` —
+ * the same block order the harness `read_image` tool returns
+ * (packages/fs/tool-fs/src/read-image.ts). When the service is absent the
+ * adapter's output stays EXACTLY its text-only behavior: no throw, no
+ * placeholder, no fabricated ref.
+ *
  * ── Imports ────────────────────────────────────────────────────────────────
  * `@deepseek-ai/dsh-tools` IS a declared devDependency of this repo
  * (`package.json`), so its TYPES may be imported type-only — such an import
@@ -69,6 +83,8 @@
 
 import { z } from "zod";
 import type { IToolFactory } from "../../ports/tool-factory.ts";
+import { isDshImageMediaType } from "./attachment.ts";
+import type { DshAttachmentService, DshImageAttachmentRef } from "./attachment.ts";
 import type { DshContentBlock } from "./agent-registrar.ts";
 import type {
   CanonicalToolDef,
@@ -611,6 +627,130 @@ function toTextContent(value: unknown): DshContentBlock[] {
 }
 
 /**
+ * The own key under which the compiled `execute` parks the durable refs of the
+ * image attachments it saved, so the PURE, synchronous `output.render` can
+ * rebuild the identical content during live streaming AND on session-log
+ * replay. Additive and non-canonical — `output.schema` stays the
+ * annotation-only `{}` — and no other adapter reads it. Absent whenever no
+ * image was saved (no service, no image attachment, or every attachment
+ * malformed), so a value without it renders exactly today's text.
+ */
+export const DSH_IMAGE_ATTACHMENT_REFS_KEY = "imageAttachments";
+
+/**
+ * Base64 image data URI, `data:<image/*>;base64,<payload>`. Anything else — a
+ * non-data URL, a non-base64 encoding, a non-image media type — is not
+ * convertible to a dsh `ImageBlock` and is skipped. Same narrow boundary as
+ * the codex adapter's MCP projection
+ * (src/platform/adapters/codex/tool-factory.ts `toMcpResult`).
+ */
+const IMAGE_DATA_URI = /^data:(image\/[^;,]+);base64,([A-Za-z0-9+/=]+)$/;
+
+/**
+ * Structural validation of a ref before it may become an `ImageBlock`: dsh's
+ * `ImageBlock.attachment` is a harness `ImageAttachmentRef` whose `mediaType`
+ * is one of the four accepted raster types, so a replay-restored or
+ * hand-written ref that is not one is dropped rather than emitted as a block
+ * the client cannot resolve.
+ */
+function isImageAttachmentRef(value: unknown): value is DshImageAttachmentRef {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const ref = value as Partial<DshImageAttachmentRef>;
+  return (
+    typeof ref.attachmentId === "string" &&
+    ref.attachmentId.length > 0 &&
+    typeof ref.mediaType === "string" &&
+    isDshImageMediaType(ref.mediaType) &&
+    typeof ref.bytes === "number" &&
+    typeof ref.width === "number" &&
+    typeof ref.height === "number" &&
+    (ref.name === undefined || typeof ref.name === "string")
+  );
+}
+
+/** The image refs a compiled `execute` parked on a structured result value. */
+function imageRefsFromValue(value: unknown): DshImageAttachmentRef[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+  const refs = (value as Record<string, unknown>)[DSH_IMAGE_ATTACHMENT_REFS_KEY];
+  return Array.isArray(refs) ? refs.filter(isImageAttachmentRef) : [];
+}
+
+/**
+ * Render a structured result as its canonical text content followed by one dsh
+ * `ImageBlock` per saved ref — `[{type:"text",…},{type:"image",attachment},…]`,
+ * the same block order and shape the harness `read_image` tool uses
+ * (`packages/fs/tool-fs/src/read-image.ts` `imageReadContent`). Only used when
+ * an attachment service is configured; without one `render` stays text-only,
+ * so no value can ever fabricate an image block.
+ */
+function toContentWithImages(value: unknown): DshContentBlock[] {
+  const content = toTextContent(value);
+  for (const ref of imageRefsFromValue(value)) {
+    content.push({ type: "image", attachment: ref });
+  }
+  return content;
+}
+
+/** The canonical `attachments` array of a structured ToolResult (defensive). */
+function canonicalAttachmentsFromValue(value: unknown): unknown[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+  const attachments = (value as { attachments?: unknown }).attachments;
+  return Array.isArray(attachments) ? attachments : [];
+}
+
+/**
+ * Persist every canonical image attachment of a structured ToolResult through
+ * the mounted attachment service and return the durable refs, in order.
+ *
+ * The conversion boundary mirrors the pi and codex adapters: only a
+ * `type: "file"` attachment whose `mime` starts with `image/` AND whose `url`
+ * is a base64 `data:` URI is saved, and the URI's own media type must be one
+ * of the four raster types the harness store accepts — `image/svg+xml` and
+ * friends are skipped, never guessed at. Every other attachment — PDFs
+ * included, which keep their existing text line — and every malformed data URI
+ * is skipped silently.
+ *
+ * A rejection from the service PROPAGATES: the canonical text already promises
+ * an image, and silently dropping it would leave the model believing it saw a
+ * picture that never entered durable history. The host surfaces the rejection
+ * as the tool call's failure.
+ */
+async function saveImageAttachments(
+  service: DshAttachmentService,
+  value: unknown,
+): Promise<DshImageAttachmentRef[]> {
+  const refs: DshImageAttachmentRef[] = [];
+  for (const entry of canonicalAttachmentsFromValue(value)) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const attachment = entry as {
+      type?: unknown;
+      mime?: unknown;
+      url?: unknown;
+      filename?: unknown;
+    };
+    if (attachment.type !== "file") continue;
+    if (typeof attachment.mime !== "string" || !attachment.mime.startsWith("image/")) continue;
+    if (typeof attachment.url !== "string") continue;
+    const match = IMAGE_DATA_URI.exec(attachment.url);
+    if (!match) continue;
+    const mediaType = match[1];
+    if (!isDshImageMediaType(mediaType)) continue;
+    const name =
+      typeof attachment.filename === "string" && attachment.filename.length > 0
+        ? attachment.filename
+        : undefined;
+    refs.push(
+      await service.saveImage({
+        data: Buffer.from(match[2], "base64"),
+        mediaType,
+        ...(name === undefined ? {} : { name }),
+      }),
+    );
+  }
+  return refs;
+}
+
+/**
  * Build a CanonicalToolContext from the dsh ToolRunContext.
  *
  * The canonical contract's `abort` is backed by the REQUIRED `exec.signal`
@@ -835,6 +975,22 @@ function presentTerminalCall(args: unknown): DshToolCallView | undefined {
     : { card: "generic", title, kind: "execute" };
 }
 
+/**
+ * Pure `presentCall` for the screenshot tool: a generic card titled with the
+ * capture target — the explicit `path` when one is given (plus a follow-along
+ * location on that file), otherwise the window id, otherwise the whole screen.
+ */
+function presentScreenshotCall(args: unknown): DshToolCallView {
+  const a = args as { path?: unknown; window_id?: unknown };
+  if (typeof a.path === "string" && a.path.length > 0) {
+    return { card: "generic", title: `Screenshot ${a.path}`, locations: [{ path: a.path }] };
+  }
+  if (typeof a.window_id === "number") {
+    return { card: "generic", title: `Screenshot window ${a.window_id}` };
+  }
+  return { card: "generic", title: "Screenshot the screen" };
+}
+
 /** One tool's optional native-presentation / execution-classifier surface. */
 export interface DshToolPresentation {
   presentCall?(args: unknown): DshToolCallView | undefined;
@@ -877,6 +1033,21 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   // mutated, so overlap is safe even though they carry no custom card.
   asset_inspect: { isConcurrencySafe: () => true },
   asset_validate: { isConcurrencySafe: () => true },
+  // Computer use (src/computer/tools.ts, merged only when the host sets
+  // `computerUse: true`). `computer_screenshot` writes a PNG and returns it as
+  // an image attachment, so its pending card names the target it will capture.
+  // The two read-only probes below touch no rolebox-owned state, so they may
+  // join a parallel group. The four INPUT tools deliberately declare NOTHING:
+  // they synthesize shared pointer/keyboard input, so overlapping calls would
+  // interleave real user-visible actions — they must never be classified
+  // concurrency-safe.
+  computer_screenshot: { presentCall: presentScreenshotCall },
+  computer_windows: { isConcurrencySafe: () => true },
+  computer_permissions: { isConcurrencySafe: () => true },
+  computer_click: {},
+  computer_move: {},
+  computer_type: {},
+  computer_key: {},
 };
 
 // ── Factory ──────────────────────────────────────────────────────────────────
@@ -888,13 +1059,39 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
  * (`DshToolDefinition`, the structural mirror of the harness `ToolDefinition`
  * register input — NOT `defineTool()` options): zod args → standard JSON
  * Schema `parameters`, the raw annotation-only `{}` for `output.schema`, a
- * text render, and an execute that maps `exec.signal` → `context.abort` and
- * returns the canonical ToolResult.
+ * render that emits the canonical text and (when an attachment service is
+ * configured) one `ImageBlock` per saved image ref, and an execute that maps
+ * `exec.signal` → `context.abort`, returns the canonical ToolResult, and
+ * commits image attachments through that service.
  *
  * Prefer compileAll() over compile(): dsh tool definitions require a `name`,
  * which only the record key provides (same constraint as the Pi adapter).
  */
+export interface DshToolFactoryOptions {
+  /**
+   * The mounted harness image-attachment service, in the structural shape of
+   * {@link DshAttachmentService} (the dsh entry passes the host's
+   * `ctx.get('attachments')`). When present, `execute` saves every canonical
+   * image attachment through `saveImage` and `output.render` emits one dsh
+   * `ImageBlock` per saved ref; when absent the adapter keeps its text-only
+   * output exactly — no throw, no placeholder, no fabricated ref.
+   */
+  attachments?: DshAttachmentService;
+}
+
 export class DshToolFactory implements IToolFactory {
+  /**
+   * Optional durable image-attachment service (see
+   * {@link DshToolFactoryOptions.attachments}). Captured once at construction:
+   * the compiled definitions are plain objects the dsh host registers
+   * directly, so there is no per-call seam to resolve it later.
+   */
+  readonly #attachments: DshAttachmentService | undefined;
+
+  constructor(options: DshToolFactoryOptions = {}) {
+    this.#attachments = options.attachments;
+  }
+
   compile<Args extends z.ZodRawShape>(def: CanonicalToolDef<Args>): unknown {
     // compile() receives no name (CanonicalToolDef carries none); compileAll()
     // supplies it from the record key. "" marks "name unknown to the factory".
@@ -934,6 +1131,10 @@ export class DshToolFactory implements IToolFactory {
     // are spread individually so an entry declaring only some of them never
     // emits the others as `undefined` placeholders.
     const presentation = DSH_TOOL_PRESENTATION[name];
+    // Image transport: captured per compile, because the returned execute and
+    // render closures run on the registered definition object, where `this` is
+    // not the factory.
+    const attachments = this.#attachments;
 
     return {
       name,
@@ -949,7 +1150,13 @@ export class DshToolFactory implements IToolFactory {
         // unsupported raw type — that rejection blocks a clean `dsh` boot
         // (observed in the packaging subtask's live boot test).
         schema: {},
-        render: (_args, value) => toTextContent(value),
+        // Text-only without an attachment service — byte-identical to the
+        // behavior before image transport existed. With one, the same text
+        // blocks come first, followed by an `ImageBlock` per ref the execute
+        // saved (never a ref the value does not actually carry).
+        render: attachments
+          ? (_args, value) => toContentWithImages(value)
+          : (_args, value) => toTextContent(value),
         ...(presentation?.presentationMeta
           ? { presentationMeta: presentation.presentationMeta }
           : {}),
@@ -995,6 +1202,7 @@ export class DshToolFactory implements IToolFactory {
         // array, scalar, or an object already carrying `output`) passes
         // through unchanged. Confined to the dsh adapter: src/graph/tools/
         // index.ts `json()` is untouched because opencode/Pi render it as text.
+        let value: unknown = result;
         if (typeof result === "string") {
           try {
             const parsed = JSON.parse(result) as unknown;
@@ -1004,13 +1212,27 @@ export class DshToolFactory implements IToolFactory {
               !Array.isArray(parsed) &&
               !Object.prototype.hasOwnProperty.call(parsed, "output")
             ) {
-              return { output: result, ...(parsed as Record<string, unknown>) };
+              value = { output: result, ...(parsed as Record<string, unknown>) };
             }
           } catch {
             // Not JSON — pass the original string through unchanged.
           }
         }
-        return result; // canonical ToolResult — lossless JSON
+        // Image transport: with a mounted attachment service, commit every
+        // canonical image attachment NOW — the ref must exist before the host
+        // appends the result — and park the refs on the value for the pure
+        // render above. Without a service, or with no saveable image, the value
+        // is returned exactly as today (no extra key, no fabricated ref).
+        if (attachments !== undefined) {
+          const refs = await saveImageAttachments(attachments, value);
+          if (refs.length > 0) {
+            return {
+              ...(value as Record<string, unknown>),
+              [DSH_IMAGE_ATTACHMENT_REFS_KEY]: refs,
+            };
+          }
+        }
+        return value; // canonical ToolResult — lossless JSON
       },
     };
   }

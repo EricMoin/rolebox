@@ -29,6 +29,7 @@ import { createAssetSearchTool } from "../asset/asset-search.ts";
 import { createAssetInspectTool } from "../asset/asset-inspect.ts";
 import { createAssetValidateTool } from "../asset/asset-validate.ts";
 import { createReferenceSearchTool } from "../utils/reference-search.ts";
+import { createComputerTools } from "../computer/tools.ts";
 import {
   createSessionListTool,
   createSessionSearchTool,
@@ -72,6 +73,18 @@ export interface BuildToolsOptions {
    * would be a second execution path the outcome protocol does not serve.
    */
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
+  /**
+   * Whether this host wants rolebox's own computer-use family
+   * (`computer_screenshot`, `computer_windows`, `computer_click`,
+   * `computer_move`, `computer_type`, `computer_key`, `computer_permissions`).
+   *
+   * DEFAULT OFF: absent (or false) registers nothing, so a host that never
+   * asked for screen control assembles exactly the tool set it assembled
+   * before this family existed. A host that wants it opts in explicitly,
+   * because driving the user's screen is a capability the user grants, not one
+   * a tool surface assumes.
+   */
+  computerUse?: boolean;
 }
 
 /**
@@ -129,6 +142,13 @@ export function buildCanonicalTools(
   tools.interactive_terminal = createInteractiveTerminalTool();
 
   Object.assign(tools, buildRoleSnapshotTools(opts.resolvedRoles));
+
+  // 1b. The computer-use family — registered only when the host opted in. The
+  // computer_* keys share no namespace with any other tool, so this merge
+  // cannot override one; extraTools/loopToolsOverride still win over it.
+  if (opts.computerUse === true) {
+    Object.assign(tools, createComputerTools());
+  }
 
   // 2. Session tools (if sessionClient provided)
   if (opts.sessionClient) {

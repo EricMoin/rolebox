@@ -61,6 +61,7 @@ import { roleFunctionsMap } from "../resolver/registry.ts";
 import { loadProjectConfig, applyProjectConfig } from "../project-config.ts";
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
 import { PLUGIN_ID } from "../constants.ts";
+import { setAgentConfigWorkspace } from "../prompt/agent-config.ts";
 import { createSubLogger, formatError, getLogFilePath, configureLogDirectory } from "../logger.ts";
 import {
   resolveRoleboxDirectories,
@@ -464,6 +465,10 @@ export function createOpencode2Plugin(
     async setup(ctx: Opencode2Plugin.Context): Promise<Opencode2Plugin.Cleanup> {
       const directory = ctx.location.directory;
       configureLogDirectory(directory);
+      // The workspace this plugin context serves — the project config the
+      // computer-use gate reads lives at `{directory}/.rolebox/config.json`,
+      // which is not guaranteed to be the process cwd.
+      setAgentConfigWorkspace(directory);
 
       const dirs = resolveRoleboxDirectories({ workingDir: directory, platformId: "opencode" });
       const log = createSubLogger("opencode2-entry");
