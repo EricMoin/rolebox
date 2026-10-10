@@ -26,8 +26,9 @@
  *    node that compiles is neither reachable only through its own feeder nor
  *    dependent on a node it must precede.
  *
- * Every case runs in its own mkdtemp directory and removes it in a finally
- * block; nothing here writes outside a temp dir.
+ * Every case runs in its own mkdtemp directory and closes the application it
+ * opened before the afterEach pass removes that directory; nothing here writes
+ * outside a temp dir.
  *
  * @module
  */
@@ -60,7 +61,11 @@ import { POLICY_BODY, POLICY_ID } from "./helpers/host-graph-fixture.ts";
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 const roots: string[] = [];
+const apps: GraphApplication[] = [];
 afterEach(() => {
+  // The host is the last long-lived borrower of the store's connection, so the
+  // close comes first: Windows refuses to remove a directory whose database is open.
+  for (const app of apps.splice(0)) app.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -430,6 +435,7 @@ function fixture(): Harness {
       },
     },
   });
+  apps.push(app);
   const tools = app.createTools();
   const call = async (name: string, args: Record<string, unknown>, sessionID = "parent") => {
     const context: CanonicalToolContext = {

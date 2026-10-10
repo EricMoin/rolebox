@@ -284,8 +284,12 @@ describe("computer tools — refusals", () => {
     const { runComputerPlan } = await import("../../src/computer/exec.ts");
     const controller = new AbortController();
     controller.abort();
+    // `runComputerPlan` checks helper availability before the caller's signal, so
+    // a plan declaring `/bin/sh` — absent on Windows — would mask the cancellation
+    // path this case pins. With no declared requirement, the abort check is the
+    // first refusal this plan can produce on every platform; nothing is spawned.
     const result = await runComputerPlan(
-      { argv: ["/bin/sh", "-c", "true"], windowsVerbatimArguments: false, requires: ["/bin/sh"], driver: "sh" },
+      { argv: ["/bin/sh", "-c", "true"], windowsVerbatimArguments: false, requires: [], driver: "sh" },
       { signal: controller.signal },
     );
     expect(result.ok).toBe(false);
