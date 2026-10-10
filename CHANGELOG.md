@@ -10,6 +10,8 @@
 
 - **A role installed from one source is no longer mistaken for another source's copy** — the lock-file lookup ignored the source, so a `source:role` spec matched whichever entry happened to come first: `rolebox install other:role` reported "already installed" for a role that source had never provided, and `uninstall`/`info` acted on the wrong copy. Lookups now match role and source (`findInLock(role, registry)` plus `findAllInLock` for the whole set), `uninstall` and `info` refuse to guess when a role is installed from more than one source and name the `source:role` specs that disambiguate, `update` updates every copy and names the source in each success line, and the per-source registry caches are keyed by URL and resolved branch so two sources sharing a name can no longer read each other's cached manifest.
 
+- **`rolebox uninstall` stops unsyncing every other role** — removing a role used to unlink every symlink it found in each sync target (opencode, pi, dsh, codex), so one uninstall silently dropped the deployed links of every other role, and on a target where two sources had installed the same role id, whichever link was there. It now removes exactly the links whose destination is the copy being removed: another role's links, another source's still-installed copy of the same role id, a hand-made link pointing elsewhere and a real directory at a target path are all left alone, while a dangling link that still belongs to the removed copy is cleaned up with it.
+
 ## 2.0.0-alpha.1
 
 ### Breaking Changes

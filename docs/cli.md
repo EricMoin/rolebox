@@ -65,7 +65,7 @@ After installing, run `rolebox sync opencode` to deploy the role.
 
 ### `uninstall [role]`
 
-Remove an installed role and clean up any symlinks.
+Remove an installed role and the sync links that point to it, in every sync target; links belonging to other roles, or a real directory at a target path, are left untouched.
 
 ```bash
 rolebox uninstall software-architect

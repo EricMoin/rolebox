@@ -211,8 +211,9 @@ session client and no dispatch backend, plus `load_role_skill` — 15 tools:
 ## Removing the integration
 
 - `rolebox uninstall <role>` removes an installed role, then sweeps every registered
-  sync target — including `{codexHome}/rolebox` — and unlinks each entry that is a
-  symlink. The sweep is best-effort and never touches a real directory or file.
+  sync target — including `{codexHome}/rolebox` — and removes the links that point at
+  that role. Links belonging to other roles are left alone, and the sweep is
+  best-effort: it never touches a real directory or file.
 - The generated bundle and the managed block are removed by
   `removeCodexPluginBundle(codexHome)` (removes `{codexHome}/rolebox-marketplace`) and
   `unregisterCodexPlugin(configPath)` (removes every managed block — a hand-edited

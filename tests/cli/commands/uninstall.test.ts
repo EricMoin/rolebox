@@ -225,3 +225,149 @@ describe("uninstall across sources", () => {
     await expect(uninstall("custom:my-role")).rejects.toThrow(/not installed/);
   });
 });
+
+describe("uninstall symlink scoping", () => {
+  it("keeps every other role's links resolving when one role is uninstalled", async () => {
+    const rolePath = await installRole("my-role", "my-registry", "1.0.0");
+    const otherPaths = [
+      await installRole("other-role-a", "my-registry", "1.0.0"),
+      await installRole("other-role-b", "my-registry", "1.0.0"),
+    ];
+
+    mkdirSync(syncTargetDir(), { recursive: true });
+    createDirSymlink(rolePath, join(syncTargetDir(), "my-role"));
+    createDirSymlink(otherPaths[0], join(syncTargetDir(), "other-role-a"));
+    createDirSymlink(otherPaths[1], join(syncTargetDir(), "other-role-b"));
+
+    const { uninstall } = await importUninstall();
+    await uninstall("my-role");
+
+    expect(existsSync(join(syncTargetDir(), "my-role"))).toBe(false);
+    for (const [index, name] of ["other-role-a", "other-role-b"].entries()) {
+      const linkPath = join(syncTargetDir(), name);
+      expect(isSymlink(linkPath)).toBe(true);
+      expect(realpathSync(linkPath)).toBe(realpathSync(otherPaths[index]));
+    }
+  });
+
+  it("keeps another source's copy of the same role id and removes only that copy's link", async () => {
+    const rolePathA = await installRole("my-role", "oh-my-role", "1.0.0");
+    const rolePathB = await installRole("my-role", "custom", "2.0.0");
+
+    // Both sources sync to the same link name; this link points at the copy that
+    // is NOT being removed, so it must survive the uninstall and still resolve.
+    mkdirSync(syncTargetDir(), { recursive: true });
+    const linkPath = join(syncTargetDir(), "my-role");
+    createDirSymlink(rolePathB, linkPath);
+
+    const { uninstall } = await importUninstall();
+    await uninstall("oh-my-role:my-role");
+
+    expect(existsSync(rolePathA)).toBe(false);
+    expect(isSymlink(linkPath)).toBe(true);
+    expect(realpathSync(linkPath)).toBe(realpathSync(rolePathB));
+
+    // Uninstalling the second copy afterwards does remove its own link.
+    await uninstall("custom:my-role");
+    expect(isSymlink(linkPath)).toBe(false);
+  });
+
+  it("removes a dangling link that pointed at the removed role directory", async () => {
+    // The role directory is already gone; only the lock entry and the (now
+    // dangling) sync link are left behind.
+    const rolePath = await installRole("my-role", "my-registry", "1.0.0", false);
+
+    mkdirSync(syncTargetDir(), { recursive: true });
+    const linkPath = join(syncTargetDir(), "my-role");
+    createDirSymlink(rolePath, linkPath);
+
+    expect(isSymlink(linkPath)).toBe(true);
+    expect(existsSync(linkPath)).toBe(false);
+
+    const { uninstall } = await importUninstall();
+    await uninstall("my-role");
+
+    expect(isSymlink(linkPath)).toBe(false);
+    const { findInLock } = await import("../../../src/cli/config.ts");
+    expect(findInLock("my-role")).toBeUndefined();
+  });
+
+  it("leaves symlinks that point outside the roles tree alone", async () => {
+    await installRole("my-role", "my-registry", "1.0.0");
+
+    const outsideDir = mkdtempSync(join(tmpdir(), "rolebox-outside-"));
+    const handMadeTarget = join(outsideDir, "hand-made");
+    mkdirSync(handMadeTarget, { recursive: true });
+
+    mkdirSync(syncTargetDir(), { recursive: true });
+    const handMadeLink = join(syncTargetDir(), "hand-made");
+    createDirSymlink(handMadeTarget, handMadeLink);
+    // A link to the registry directory that CONTAINS the removed role points
+    // outside the role directory, not inside it.
+    const containerLink = join(syncTargetDir(), "registry-dir");
+    createDirSymlink(join(dataDir(), "roles", "my-registry"), containerLink);
+
+    const { uninstall } = await importUninstall();
+    await uninstall("my-role");
+
+    expect(isSymlink(handMadeLink)).toBe(true);
+    expect(realpathSync(handMadeLink)).toBe(realpathSync(handMadeTarget));
+    expect(isSymlink(containerLink)).toBe(true);
+
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("removes the role's link in every sync target and keeps an unrelated role's link", async () => {
+    const rolePath = await installRole("my-role", "my-registry", "1.0.0");
+    const otherPath = await installRole("other-role", "my-registry", "1.0.0");
+
+    const { getSyncTarget } = await import("../../../src/cli/paths.ts");
+    const targets = ["opencode", "pi", "dsh", "codex"] as const;
+    for (const target of targets) {
+      const targetDir = getSyncTarget(target);
+      mkdirSync(targetDir, { recursive: true });
+      createDirSymlink(rolePath, join(targetDir, "my-role"));
+      createDirSymlink(otherPath, join(targetDir, "other-role"));
+    }
+
+    const { uninstall } = await importUninstall();
+    await uninstall("my-role");
+
+    for (const target of targets) {
+      const targetDir = getSyncTarget(target);
+      expect(isSymlink(join(targetDir, "my-role"))).toBe(false);
+      const otherLink = join(targetDir, "other-role");
+      expect(isSymlink(otherLink)).toBe(true);
+      expect(realpathSync(otherLink)).toBe(realpathSync(otherPath));
+    }
+  });
+
+  it("removes a link that points inside the removed role directory", async () => {
+    const rolePath = await installRole("my-role", "my-registry", "1.0.0");
+    mkdirSync(join(rolePath, "skills"), { recursive: true });
+
+    mkdirSync(syncTargetDir(), { recursive: true });
+    const linkPath = join(syncTargetDir(), "my-role-skills");
+    createDirSymlink(join(rolePath, "skills"), linkPath);
+
+    const { uninstall } = await importUninstall();
+    await uninstall("my-role");
+
+    expect(isSymlink(linkPath)).toBe(false);
+  });
+
+  it("does not delete a real directory sitting at the removed role's target path", async () => {
+    const rolePath = await installRole("my-role", "my-registry", "1.0.0");
+
+    const manualPath = join(syncTargetDir(), "my-role");
+    mkdirSync(manualPath, { recursive: true });
+    writeFileSync(join(manualPath, "role.yaml"), "name: my-role\n");
+
+    const { uninstall } = await importUninstall();
+    await uninstall("my-role");
+
+    expect(existsSync(manualPath)).toBe(true);
+    expect(existsSync(join(manualPath, "role.yaml"))).toBe(true);
+    expect(existsSync(rolePath)).toBe(false);
+  });
+});

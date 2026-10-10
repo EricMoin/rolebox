@@ -4,8 +4,16 @@ import { findInLock, findAllInLock, removeFromLock } from "../config.ts";
 import { parseRoleSpec } from "../role-spec.ts";
 import type { LockEntry } from "../types.ts";
 import { getRolePath, getSyncTarget } from "../paths.ts";
-import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  rmSync,
+  lstatSync,
+  unlinkSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+} from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { SYNC_TARGET_VALUES } from "../../constants.ts";
 import { assertInteractiveContext, pickInstalledRole } from "../pick.ts";
 import type { PromptApi } from "../pick.ts";
@@ -41,6 +49,121 @@ export async function uninstallInteractive(prompts: PromptApi = clack): Promise<
   return true;
 }
 
+/**
+ * Whether `candidate` is `parent` itself or lies inside it. Both arguments must
+ * be of the same kind (both realpath-resolved, or both absolute-normalized):
+ * an equal-or-inside test on two different normalizations would compare apples
+ * to oranges and could attribute a link to the wrong copy.
+ */
+function isSameOrInside(candidate: string, parent: string): boolean {
+  return candidate === parent || candidate.startsWith(parent + sep);
+}
+
+/** Strip the `\\?\` prefix Windows junctions store in front of an absolute target. */
+function stripWindowsPrefix(target: string): string {
+  return target.startsWith("\\\\?\\") ? target.slice(4) : target;
+}
+
+/**
+ * Whether the link at `linkPath` belongs to the role copy installed at
+ * `rolePath` — i.e. whether its destination IS that directory or lies inside it.
+ *
+ * Identity is the destination, never the link's name: each sync target holds one
+ * link per installed role, and the same role id can be installed from several
+ * sources, so two links may share a name while pointing at different copies.
+ * Resolving both sides first also keeps this honest on Windows, where
+ * `createDirSymlink` creates a junction that stores an absolute native target
+ * (see src/utils/symlink.ts): realpath reports where such a link actually points,
+ * whereas the stored string alone would not be a reliable identity.
+ *
+ * Only a link that no longer resolves — its destination is already gone — falls
+ * back to the target it stores, with the `\\?\` prefix junctions carry stripped,
+ * so a dangling link still attributable to the removed copy is cleaned up
+ * instead of being left behind.
+ *
+ * Every fs call is guarded: an unreadable link is left alone, never thrown on.
+ */
+function linkPointsAtRole(linkPath: string, rolePath: string): boolean {
+  let linkReal: string | undefined;
+  let roleReal: string | undefined;
+  try {
+    linkReal = realpathSync(linkPath);
+  } catch {
+    linkReal = undefined;
+  }
+  try {
+    roleReal = realpathSync(rolePath);
+  } catch {
+    roleReal = undefined;
+  }
+
+  if (linkReal !== undefined) {
+    // A live link is attributable only when the role directory it would have to
+    // belong to is still there. A live link to another role — or to another
+    // source's still-installed copy of the same role id — must survive.
+    if (roleReal === undefined) return false;
+    return isSameOrInside(linkReal, roleReal);
+  }
+
+  // Dangling link: compare the target it stores, resolved against the link's own
+  // directory, with the (no longer existing) role directory.
+  let stored: string;
+  try {
+    stored = readlinkSync(linkPath);
+  } catch {
+    return false;
+  }
+  return isSameOrInside(resolve(dirname(linkPath), stripWindowsPrefix(stored)), rolePath);
+}
+
+/**
+ * Collect every sync link across the supported targets (opencode / pi / dsh /
+ * codex) whose destination is `rolePath` or lies inside it.
+ *
+ * This must run BEFORE the role directory is removed: a link's identity is its
+ * destination, and once the directory is gone a live-looking link becomes
+ * dangling and can no longer be attributed reliably. A missing target directory
+ * and an unknown target are both skipped, never errors — cleanup is best-effort.
+ */
+function collectRoleLinks(rolePath: string): string[] {
+  const links: string[] = [];
+
+  for (const target of SYNC_TARGET_VALUES) {
+    let syncTarget: string;
+    try {
+      syncTarget = getSyncTarget(target);
+    } catch {
+      // Unknown target — nothing to scan.
+      continue;
+    }
+
+    let names: string[];
+    try {
+      names = readdirSync(syncTarget);
+    } catch {
+      // Target directory missing or unreadable — nothing to scan.
+      continue;
+    }
+
+    for (const name of names) {
+      const linkPath = join(syncTarget, name);
+      try {
+        // Only symlinks are ours; a real directory or file at a target path is
+        // the user's (or another tool's) and is never touched.
+        if (!lstatSync(linkPath).isSymbolicLink()) continue;
+      } catch {
+        // Unreadable entry — leave it alone.
+        continue;
+      }
+      if (linkPointsAtRole(linkPath, rolePath)) {
+        links.push(linkPath);
+      }
+    }
+  }
+
+  return links;
+}
+
 export async function uninstall(spec: string): Promise<void> {
   const parsed = parseRoleSpec(spec);
   const roleId = parsed.roleId;
@@ -66,31 +189,22 @@ export async function uninstall(spec: string): Promise<void> {
   const { registry, version } = entry;
   const rolePath = getRolePath(registry, roleId, version);
 
+  // Resolve the links belonging to THIS copy while it is still on disk — a
+  // destination can only be attributed reliably while it exists — across every
+  // supported target platform (opencode / pi / dsh / codex), since the role may
+  // have been synced to any of them.
+  const links = collectRoleLinks(rolePath);
+
   if (existsSync(rolePath)) {
     rmSync(rolePath, { recursive: true, force: true });
   }
 
-  // Clean up sync symlinks across every supported target platform
-  // (opencode / pi / dsh / codex) — the role may have been synced to any of
-  // them.
-  for (const target of SYNC_TARGET_VALUES) {
+  // Best-effort per link: a failed cleanup warns and never aborts the uninstall.
+  for (const linkPath of links) {
     try {
-      const syncTarget = getSyncTarget(target);
-      if (existsSync(syncTarget)) {
-        const entries = readdirSync(syncTarget);
-        for (const entry of entries) {
-          const fullPath = join(syncTarget, entry);
-          try {
-            if (lstatSync(fullPath).isSymbolicLink()) {
-              unlinkSync(fullPath);
-            }
-          } catch {
-            console.warn("Warning: Failed to clean up symlink:", fullPath);
-          }
-        }
-      }
+      unlinkSync(linkPath);
     } catch {
-      // Best-effort — symlink cleanup should not crash uninstall
+      console.warn("Warning: Failed to clean up symlink:", linkPath);
     }
   }
 
