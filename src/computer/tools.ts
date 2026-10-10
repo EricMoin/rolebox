@@ -238,8 +238,12 @@ export function createComputerWindowsTool() {
     description:
       "List the visible windows with the id this OS uses for window capture and input: " +
       "the macOS window number, an X11 window id, or a Windows MainWindowHandle. " +
-      "One line per window: id, process or owner, title. Uses the Accessibility permission on macOS. " +
-      "dry_run returns the exact command without executing it.",
+      "One line per window: on macOS and Windows id, process or owner, title; on X11 the id and the title. " +
+      "On macOS this reads the window server's own list, so the ids are real CGWindowIDs that screencapture -l " +
+      "accepts, with no Accessibility grant; window titles need Screen Recording and are empty without it. " +
+      "The app filter is a case-insensitive substring of the owner's name on macOS, the title on X11 or the " +
+      "process name or title on Windows; a filter that matches nothing is an error on macOS and an empty " +
+      "listing elsewhere. dry_run returns the exact command without executing it.",
     args: {
       app: z.string().min(1).optional().describe("Only windows whose application name matches this text"),
       dry_run: DRY_RUN_ARG,

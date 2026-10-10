@@ -25,7 +25,14 @@ when you are unsure.
 **1. Observe.** Find the target before you touch anything.
 
 - `computer_windows({app?})` lists the visible windows with the id this OS
-  uses. Pass `app` to narrow the list.
+  uses. Pass `app` to narrow the list — it matches a case-insensitive substring
+  of the window owner's name on macOS, of the window title on X11, and of the
+  process name or the title on Windows. On macOS a filter that matches nothing is
+  an error, not an empty list; on X11 and Windows it lists nothing, so an empty
+  answer there means the filter matched no window. On macOS the ids come from the
+  window server, so they are real CGWindowIDs that
+  `computer_screenshot({window_id})` accepts; the titles need Screen Recording
+  and are empty without it.
 - `computer_screenshot({window_id?, region?, display?})` captures the screen,
   one window or one rectangle as a PNG. Pass at most one target: `window_id`,
   `region` and `display` are mutually exclusive, and on macOS a `region` cannot
@@ -87,8 +94,10 @@ synthesized input right now and names the grant to fix when it will not.
 
 - On macOS, call it before your first gesture. Input goes through System Events
   and needs **Accessibility** permission for the terminal or agent process that
-  launched the host; screenshots need **Screen Recording**. Installing rolebox
-  with npm grants neither.
+  launched the host; screenshots — and the window *titles* in
+  `computer_windows` — need **Screen Recording**. The window list itself needs
+  neither: its ids come from the window server. Installing rolebox with npm
+  grants none of these.
 - Follow the remediation text the tool returns verbatim — it names the exact
   System Settings pane and the process that must be granted.
 - If a gesture fails with a permission error, call `computer_permissions` and

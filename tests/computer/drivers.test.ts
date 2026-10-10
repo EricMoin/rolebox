@@ -135,13 +135,48 @@ describe("darwin computer-use plans", () => {
     expect(refusalOf(darwinComputerUse.inputPlan({ action: "key", keys: ["cmd"] }, {}))).toContain("cannot be the key of a press");
   });
 
-  it("lists windows through System Events, reading the CGWindow number", () => {
+  it("lists windows from the window server, passing the app filter as argv and never as script text", () => {
     const plan = planOf(darwinComputerUse.inputPlan({ action: "windows" }, {}));
-    expect(plan.script).toContain("AXWindowNumber");
-    expect(plan.script).toContain("every application process whose visible is true");
+    // -l JavaScript: the listing is JXA, and the script is one argv element of
+    // its own, so the plan carries it both as argv and as `script`.
+    expect(plan.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", plan.script]);
+    expect(plan.script).toContain("ObjC.import('CoreGraphics')");
+    // The filter arrives in run(argv) and is never interpolated into the script.
+    expect(plan.script).toContain("function run(argv)");
+    expect(plan.script).toContain("String(argv[0]).toLowerCase()");
+    expect(plan.script).toContain("CGWindowListCopyWindowInfo");
+    expect(plan.script).toContain("kCGWindowListOptionOnScreenOnly");
+    expect(plan.script).toContain("kCGWindowListExcludeDesktopElements");
+    // Only layer 0 is a window: the desktop picture, menu bar and Dock are not.
+    expect(plan.script).toContain("kCGWindowLayer");
+    // The id is read where macOS keeps it, so it is a real CGWindowID.
+    expect(plan.script).toContain("kCGWindowNumber");
+    // The bridge returns CFArrayRef's count as a string, so it is coerced
+    // rather than type-checked: a bare typeof check never passes there.
+    expect(plan.script).toContain("Number(list.count)");
+    // Not System Events, and no window attribute that current macOS lacks.
+    expect(plan.script).not.toContain("System Events");
+    expect(plan.script).not.toContain("AXWindowNumber");
+    expect(plan.driver).toBe("osascript");
+    expect(plan.requires).toEqual(["/usr/bin/osascript"]);
+    expect(plan.windowsVerbatimArguments).toBe(false);
+    // Listing windows is not input, so it asks for no Accessibility grant —
+    // only for Screen Recording, and only for the title column.
+    expect(plan.permissionHint).toContain("no Accessibility grant");
+    expect(plan.permissionHint).not.toContain("Privacy & Security > Accessibility");
+    expect(plan.permissionHint).toContain("window server");
+    expect(plan.permissionHint).toContain("Screen Recording");
+
+    // A filter is the trailing argv element the script reads, never script text.
     const filtered = planOf(darwinComputerUse.inputPlan({ action: "windows", app: "Safari" }, {}));
-    expect(filtered.script).toContain('every application process whose name is "Safari"');
-    expect(filtered.script).toContain("no running process is named");
+    expect(filtered.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", plan.script, "Safari"]);
+    expect(filtered.script).toBe(plan.script);
+    // The app name is never script text, so a quoted name needs no escaping.
+    expect(filtered.script).not.toContain("Safari");
+    // Case-insensitive substring of the owner name, and a filter that matches
+    // nothing is an error naming it rather than an empty list.
+    expect(filtered.script).toContain("toLowerCase().indexOf(filter)");
+    expect(filtered.script).toContain("no visible window belongs to a process whose name contains");
   });
 
   it("probes the Accessibility grant with one read-only System Events property", () => {

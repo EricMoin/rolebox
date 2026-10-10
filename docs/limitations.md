@@ -70,7 +70,9 @@ limits it does not hide.
 - **Permissions belong to the application that launched the host.** On macOS,
   Screen Recording, Accessibility and Automation for System Events are granted
   to the terminal or agent process — not to rolebox — and installing the package
-  grants none of them (`src/computer/drivers/darwin.ts:53-57`).
+  grants none of them (`src/computer/drivers/darwin.ts:59-63`). The window list
+  is the exception: it reads the window server's own list and needs no grant at
+  all, though its title column stays empty without Screen Recording.
 - **It does not convert coordinates for the caller.** A capture reports the
   ratio of device pixels to screen points the file itself states, as
   `metadata.pixel_scale` plus one text sentence when it is above 1

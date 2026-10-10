@@ -21,10 +21,16 @@
  * therefore divided by the capture's own scale before anything here may click it.
  *
  * Input is `/usr/bin/osascript` driving System Events: `click at {x, y}`,
- * `keystroke`, `key code`, and window enumeration. macOS grants that only to a
- * process the user has trusted with Accessibility, and scripting System Events
- * needs its own Automation grant on top, which is why every input plan carries
+ * `keystroke` and `key code`. macOS grants that only to a process the user has
+ * trusted with Accessibility, and scripting System Events needs its own
+ * Automation grant on top, which is why every input plan carries
  * {@link ComputerPlan.permissionHint}.
+ *
+ * Window enumeration is the one command here that does not touch System Events:
+ * it runs `osascript -l JavaScript` against the window server's own list, so the
+ * ids it prints are the real CGWindowIDs `screencapture -l` accepts and it needs
+ * no Accessibility grant. A window title macOS withholds prints as an empty
+ * column.
  *
  * Two gestures System Events has no primitive for — moving the pointer, and a
  * right or middle click — are built on the `cliclick` helper rather than faked
@@ -55,6 +61,13 @@ const INPUT_PERMISSION_HINT =
 
 const SCREEN_RECORDING_HINT =
   "macOS needs Screen Recording permission for screencapture to include window contents (System Settings > Privacy & Security > Screen Recording); without it the PNG contains only the desktop wallpaper.";
+
+/**
+ * Appended to every failure of the window listing. It is the one macOS plan
+ * that needs no privacy grant at all: listing windows is not input.
+ */
+const WINDOW_LIST_PERMISSION_HINT =
+  "the macOS window list comes from the window server and needs no Accessibility grant; the title column is empty when macOS withholds window names (control that under System Settings > Privacy & Security > Screen Recording).";
 
 /** Quote one string as an AppleScript literal: backslash and quote escaped. */
 export function escapeAppleScript(text: string): string {
@@ -210,47 +223,82 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
 }
 
 /**
- * The AppleScript that lists one line per visible window: window number, the
- * owning process and the title, tab-separated. The window number is the CGWindow
- * id `screencapture -l` takes, which is why it is read from the AXWindowNumber
- * attribute rather than from System Events' own window index.
+ * The JXA script that lists one line per visible window: window number, the
+ * owning process and the title, tab-separated.
+ *
+ * The window number is the CGWindowID `screencapture -l` takes, and the window
+ * server's own list (`CGWindowListCopyWindowInfo`) is the only place macOS
+ * exposes it: System Events' window attributes carry no `AXWindowNumber` on
+ * current macOS at all, so reading the id through AppleScript left every window
+ * with the -1 placeholder. `ObjC.castRefToObject` is what makes the returned
+ * CFArrayRef readable — `ObjC.deepUnwrap` and a bare `.js` on the ref itself do
+ * not work, while a per-value `.js` does.
+ *
+ * The bridge hands a CFArrayRef's `count` back as a string, so the script
+ * coerces it with `Number` rather than trusting its type; anything that is not a
+ * non-negative number is the unreadable-list error.
+ *
+ * The optional owner filter arrives as `run(argv)[0]` and is never interpolated
+ * into this script, so an application name with quotes or backslashes needs no
+ * escaping. Only layer 0 is listed: the desktop picture, the menu bar and the
+ * Dock live in other layers and are not windows a caller can capture or click.
+ * A filter that matches nothing is an error naming the filter, not an empty
+ * list, because an empty list is indistinguishable from a broken listing.
  */
-function windowListingScript(app: string | null): string {
-  const targets =
-    app === null
-      ? "every application process whose visible is true"
-      : `(every application process whose name is "${escapeAppleScript(app)}")`;
-  const guard =
-    app === null
-      ? ""
-      : `  if (count of targets) is 0 then error "no running process is named \\"${escapeAppleScript(app)}\\""\n`;
+function windowListingScript(): string {
   return [
-    'tell application "System Events"',
-    '  set out to ""',
-    `  set targets to ${targets}`,
-    guard.trimEnd(),
-    "  repeat with p in targets",
-    "    set pname to name of p",
-    "    repeat with w in (every window of p)",
-    "      set wid to -1",
-    "      try",
-    '        set wid to value of attribute "AXWindowNumber" of w',
-    "      end try",
-    "      set out to out & wid & tab & pname & tab & (name of w) & linefeed",
-    "    end repeat",
-    "  end repeat",
-    "  return out",
-    "end tell",
-  ]
-    .filter(line => line.length > 0)
-    .join("\n");
+    "ObjC.import('CoreGraphics');",
+    "function value(dict, key) { var o = dict.objectForKey(key); return (o === undefined || o === null) ? undefined : o.js; }",
+    "function run(argv) {",
+    "  var filter = (argv && argv.length > 0) ? String(argv[0]).toLowerCase() : '';",
+    "  var opts = $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements;",
+    "  var list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(opts, $.kCGNullWindowID));",
+    "  if (list === undefined || list === null) {",
+    "    throw new Error('the window server did not return a window list this script can read');",
+    "  }",
+    "  var count = Number(list.count);",
+    "  if (!(count >= 0)) {",
+    "    throw new Error('the window server did not return a window list this script can read');",
+    "  }",
+    "  var out = [];",
+    "  for (var i = 0; i < count; i++) {",
+    "    var d = list.objectAtIndex(i);",
+    "    if (value(d, 'kCGWindowLayer') !== 0) continue;",
+    "    var owner = String(value(d, 'kCGWindowOwnerName') || '');",
+    "    if (filter.length > 0 && owner.toLowerCase().indexOf(filter) === -1) continue;",
+    "    var name = value(d, 'kCGWindowName');",
+    "    out.push(value(d, 'kCGWindowNumber') + '\\t' + owner + '\\t' + ((name === undefined || name === null) ? '' : String(name)));",
+    "  }",
+    "  if (out.length === 0 && filter.length > 0) {",
+    "    throw new Error('no visible window belongs to a process whose name contains \"' + filter + '\"');",
+    "  }",
+    "  return out.join('\\n');",
+    "}",
+  ].join("\n");
+}
+
+/**
+ * The window-listing plan: `osascript -l JavaScript` with the script as its own
+ * `-e` argument and the owner filter as the trailing argv element the script
+ * reads, so a filter never becomes script text.
+ */
+function windowListingPlan(app: string | null): ComputerPlan {
+  const script = windowListingScript();
+  return {
+    argv: [OSASCRIPT, "-l", "JavaScript", "-e", script, ...(app === null ? [] : [app])],
+    windowsVerbatimArguments: false,
+    script,
+    requires: [OSASCRIPT],
+    driver: "osascript",
+    permissionHint: WINDOW_LIST_PERMISSION_HINT,
+  };
 }
 
 function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
   switch (request.action) {
     case "windows": {
       const app = request.app === undefined || request.app.trim().length === 0 ? null : request.app.trim();
-      return osascriptPlan(windowListingScript(app));
+      return windowListingPlan(app);
     }
     case "click": {
       if (request.windowId !== undefined) return windowTargetingRefusal("click");

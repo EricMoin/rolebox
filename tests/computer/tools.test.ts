@@ -129,7 +129,9 @@ describe("computer tools — dry runs", () => {
 
     const windows = parseReport(await createComputerWindowsTool().execute({ dry_run: true }, context));
     expect(windows.argv[0]).toBe("/usr/bin/osascript");
-    expect(windows.script).toContain("AXWindowNumber");
+    expect(windows.argv.slice(1, 5)).toEqual(["-l", "JavaScript", "-e", windows.script]);
+    expect(windows.script).toContain("CGWindowListCopyWindowInfo");
+    expect(windows.script).not.toContain("AXWindowNumber");
 
     const click = parseReport(
       await createComputerClickTool().execute({ x: 10, y: 20, button: "left", clicks: 2, dry_run: true }, context),

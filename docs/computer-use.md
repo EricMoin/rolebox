@@ -42,7 +42,7 @@ image route receives the MCP image diagnostic
 
 Rolebox ships its **own** tool family instead — `src/computer/` — built from the
 same canonical tool factory as every other rolebox tool
-(`createComputerTools`, `src/computer/tools.ts:429-438`). Its seven tools are
+(`createComputerTools`, `src/computer/tools.ts:455-464`). Its seven tools are
 `computer_screenshot`, `computer_windows`, `computer_click`, `computer_move`,
 `computer_type`, `computer_key` and `computer_permissions`, and each one resolves
 its command through the facts its own OS declares
@@ -81,26 +81,41 @@ provider off and use rolebox's family — not both.
 The argument shapes are the tools' own zod schemas (`src/computer/tools.ts`).
 
 - **`computer_screenshot`** — `window_id`, `region` and `display` are mutually
-  exclusive (`src/computer/drivers/darwin.ts:177-179`,
+  exclusive (`src/computer/drivers/darwin.ts:190-192`,
   `src/computer/drivers/linux.ts:48-50`), a single-window capture selects no
-  display (`darwin.ts:180-182`), and on macOS a `region` is refused together with
-  `display` (`darwin.ts:183-185`): a region is in global screen coordinates and
+  display (`darwin.ts:193-195`), and on macOS a `region` is refused together with
+  `display` (`darwin.ts:196-198`): a region is in global screen coordinates and
   therefore already selects its own display, and `screencapture` ignores `-D`
   when `-R` is given. `display` is the OS's own display identifier: macOS `-D`,
   which counts **from 1** — 1 is the main display, 2 the next, and a value below
-  1 is refused (`darwin.ts:186-188`) — an X11 screen number, a Windows
+  1 is refused (`darwin.ts:199-201`) — an X11 screen number, a Windows
   `Screen.AllScreens` index. It is passed through, never renumbered
   (`src/platform/system/types.ts:98-104`). `timeout_ms` stops one capture
   (default `15000`, `src/computer/exec.ts:23`).
-- **`computer_windows`** — one line per window: the id, the process or owner and
-  the title. The id is the OS's own — the macOS window number that
-  `screencapture -l` takes, an X11 window id, or a Windows `MainWindowHandle`
-  (`src/computer/tools.ts:239-246`). On macOS this reads through System Events
-  and therefore needs Accessibility permission.
+- **`computer_windows`** — one line per window, tab-separated. The id is the
+  OS's own — the macOS window number that `screencapture -l` takes, an X11
+  window id, or a Windows `MainWindowHandle` (`src/computer/tools.ts:236-266`).
+  On macOS and Windows a line is id, process or owner, title; an X11 line is the
+  id and the title alone, because that is all `xdotool getwindowname` returns
+  (`src/computer/drivers/linux.ts:189-195`). On macOS the listing comes from the
+  **window server's own list**, read through `osascript -l JavaScript`
+  (`src/computer/drivers/darwin.ts:225-295`), so its ids are real CGWindowIDs
+  `screencapture -l` accepts and it needs **no** Accessibility grant: only the
+  title column depends on Screen Recording, and it stays empty when macOS
+  withholds a window name. `app` narrows the list by platform: on macOS a
+  case-insensitive substring of the window **owner's** name
+  (`src/computer/drivers/darwin.ts:267-268`), on X11 a match against the window
+  **title** (`xdotool search --name`, case-insensitive unless `--case` is given:
+  `src/computer/drivers/linux.ts:187`), and on Windows a match against the
+  **process name or the title** (`src/computer/drivers/win32.ts:295`). Only macOS
+  turns a filter that matches no visible window into an error naming it
+  (`src/computer/drivers/darwin.ts:272-274`); on X11 and Windows it lists
+  nothing, and the tool answers with the empty listing
+  (`src/computer/tools.ts:258-262`).
 - **`computer_click`** — `button` is `left` (default), `right` or `middle`, and
   `clicks` is `1` (default) or `2`. `window_id` targets one X11 window;
   macOS and Windows send input to the focused window and refuse a `window_id`
-  instead of silently ignoring it (`src/computer/drivers/darwin.ts:172-175`).
+  instead of silently ignoring it (`src/computer/drivers/darwin.ts:185-187`).
 - **`computer_move`** — moves the real cursor; it takes no window.
 - **`computer_type`** — the text is never echoed back in the result, because it
   may be a password (`src/computer/tools.ts:226-228`); a newline presses Return.
@@ -306,30 +321,39 @@ transport, and each host does it differently:
 
 ### macOS
 
-Screenshots use `/usr/sbin/screencapture` and input uses `/usr/bin/osascript`
-driving System Events (`src/computer/drivers/darwin.ts:1-37`). Three grants are
-needed, and they are granted to the **application that launched the host** — the
-terminal or agent process — not to rolebox, and not by `npm install`:
+Screenshots use `/usr/sbin/screencapture`, input uses `/usr/bin/osascript`
+driving System Events, and the window list runs `osascript -l JavaScript`
+against the window server (`src/computer/drivers/darwin.ts:1-43`). Every grant
+goes to the **application that launched the host** — the terminal or agent
+process — not to rolebox, and not by `npm install`. Which capability needs which
+grant:
 
 - **Screen Recording** for `screencapture` to include window contents; without
   it the PNG contains only the desktop wallpaper
-  (`src/computer/drivers/darwin.ts:56-57`).
+  (`src/computer/drivers/darwin.ts:62-63`). It also decides the window *titles*
+  `computer_windows` reports: without it the ids and owner names still list and
+  the title column is empty.
 - **Accessibility** (System Settings > Privacy & Security > Accessibility) for
-  System Events to synthesize input.
+  **input only** — it is what lets the process synthesize a click, a keystroke or
+  a pointer move, through System Events or the `cliclick` helper.
 - **Automation for System Events** (System Settings > Privacy & Security >
   Automation) to script it. It is a grant *separate* from Accessibility, so an
   application trusted for one can still fail the other; every input plan carries
   a single remediation sentence naming both
-  (`src/computer/drivers/darwin.ts:53-54`, `:157`, `:167`), and the process must
+  (`src/computer/drivers/darwin.ts:59-60`, `:170`, `:180`), and the process must
   be restarted after the grant.
+
+`computer_windows` needs **none** of the three: it reads the window server's own
+list, which is not System Events and not input
+(`src/computer/drivers/darwin.ts:225-295`).
 
 Moving the pointer and a right or middle click use the `cliclick` helper, which
 is **not** part of macOS; when it is missing the tool refuses and names the
 install command (`brew install cliclick`,
-`src/computer/drivers/darwin.ts:29-33`, `:300-301`). `computer_permissions`
+`src/computer/drivers/darwin.ts:35-39`, `:348-349`). `computer_permissions`
 reads the Accessibility status (`UI elements enabled`) and returns the
-remediation text when it is off (`src/computer/drivers/darwin.ts:308-310`,
-`src/computer/tools.ts:404-413`).
+remediation text when it is off (`src/computer/drivers/darwin.ts:356-358`,
+`src/computer/tools.ts:400-407`).
 
 ### Linux
 
