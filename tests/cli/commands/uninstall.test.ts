@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { rmSync, mkdirSync, existsSync, writeFileSync, mkdtempSync } from "node:fs";
+import {
+  rmSync,
+  mkdirSync,
+  existsSync,
+  writeFileSync,
+  mkdtempSync,
+  realpathSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createDirSymlink } from "../../helpers/symlink.ts";
+import { createDirSymlink, isSymlink } from "../../helpers/symlink.ts";
 
 async function importUninstall() {
   // Cache-bust so each call re-evaluates the command module against the mocks
@@ -176,5 +183,45 @@ describe("uninstall", () => {
 
     // Nothing should have been deleted outside the roles dir.
     expect(existsSync(join(tmpdir(), "evil"))).toBe(false);
+  });
+});
+
+describe("uninstall across sources", () => {
+  it("removes only the copy selected by a registry:role spec", async () => {
+    const rolePathA = await installRole("my-role", "oh-my-role", "1.0.0");
+    const rolePathB = await installRole("my-role", "custom", "2.0.0");
+
+    const { uninstall } = await importUninstall();
+    await uninstall("custom:my-role");
+
+    expect(existsSync(rolePathB)).toBe(false);
+    expect(existsSync(rolePathA)).toBe(true);
+
+    const { findAllInLock } = await import("../../../src/cli/config.ts");
+    expect(findAllInLock("my-role").map((entry) => entry.registry)).toEqual(["oh-my-role"]);
+  });
+
+  it("refuses to guess when the role is installed from more than one source", async () => {
+    const rolePathA = await installRole("my-role", "oh-my-role", "1.0.0");
+    const rolePathB = await installRole("my-role", "custom", "2.0.0");
+
+    const { uninstall } = await importUninstall();
+    const error = await uninstall("my-role").catch((err: Error) => err);
+
+    expect(error.message).toContain(
+      "Role 'my-role' is installed from more than one source: oh-my-role, custom",
+    );
+    expect(error.message).toContain("rolebox uninstall oh-my-role:my-role");
+
+    // Nothing was removed: the choice is the user's.
+    expect(existsSync(rolePathA)).toBe(true);
+    expect(existsSync(rolePathB)).toBe(true);
+  });
+
+  it("treats a spec naming a source with no installed copy as not installed", async () => {
+    await installRole("my-role", "oh-my-role", "1.0.0");
+
+    const { uninstall } = await importUninstall();
+    await expect(uninstall("custom:my-role")).rejects.toThrow(/not installed/);
   });
 });

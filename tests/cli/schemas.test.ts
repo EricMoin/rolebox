@@ -130,6 +130,24 @@ describe("parseConfig", () => {
       parseConfig({ registries: [{ name: "x", url: "https://x", default: "yes" }] })
     ).toThrow("registries[0].default must be a boolean");
   });
+
+  it("parses an optional ref and leaves it absent when not given", () => {
+    const result = parseConfig({
+      registries: [
+        { name: "pinned", url: "https://pinned.example.com", ref: "v2" },
+        { name: "loose", url: "https://loose.example.com" },
+      ],
+    });
+
+    expect(result.registries[0].ref).toBe("v2");
+    expect(result.registries[1].ref).toBeUndefined();
+  });
+
+  it("throws when ref is not a string", () => {
+    expect(() =>
+      parseConfig({ registries: [{ name: "x", url: "https://x", ref: 5 }] })
+    ).toThrow("registries[0].ref must be a string");
+  });
 });
 
 // ── parseLockFile ─────────────────────────────────────────────────
@@ -255,6 +273,17 @@ registries:
     expect(result.registries).toHaveLength(1);
     expect(result.registries[0].name).toBe("hub");
     expect(result.registries[0].default).toBe(true);
+  });
+
+  it("parseConfigFromYaml keeps a per-source ref", () => {
+    const yaml = `
+registries:
+  - name: hub
+    url: https://hub.example.com
+    ref: next
+`;
+    const result = parseConfigFromYaml(yaml);
+    expect(result.registries[0].ref).toBe("next");
   });
 
   it("parseLockFileFromYaml parses valid YAML", () => {

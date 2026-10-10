@@ -1,6 +1,8 @@
 import { defineCommand } from "citty";
 import * as clack from "@clack/prompts";
-import { findInLock, removeFromLock } from "../config.ts";
+import { findInLock, findAllInLock, removeFromLock } from "../config.ts";
+import { parseRoleSpec } from "../role-spec.ts";
+import type { LockEntry } from "../types.ts";
 import { getRolePath, getSyncTarget } from "../paths.ts";
 import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -39,12 +41,27 @@ export async function uninstallInteractive(prompts: PromptApi = clack): Promise<
   return true;
 }
 
-export async function uninstall(roleId: string): Promise<void> {
-  const entry = findInLock(roleId);
+export async function uninstall(spec: string): Promise<void> {
+  const parsed = parseRoleSpec(spec);
+  const roleId = parsed.roleId;
 
-  if (!entry) {
+  // A `registry:role` spec selects that source's copy; a bare role selects the
+  // only installed copy and refuses to guess when several sources provide one.
+  const entries = parsed.registry
+    ? [findInLock(roleId, parsed.registry)].filter((e): e is LockEntry => e !== undefined)
+    : findAllInLock(roleId);
+
+  if (entries.length === 0) {
     throw new Error(`Role '${roleId}' is not installed`);
   }
+
+  if (entries.length > 1) {
+    throw new Error(
+      `Role '${roleId}' is installed from more than one source: ${entries.map((e) => e.registry).join(", ")} — specify one, e.g. 'rolebox uninstall ${entries[0].registry}:${roleId}'`,
+    );
+  }
+
+  const entry = entries[0];
 
   const { registry, version } = entry;
   const rolePath = getRolePath(registry, roleId, version);

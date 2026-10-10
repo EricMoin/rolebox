@@ -330,3 +330,91 @@ describe("update", () => {
     expect(logs.some((c) => c.includes("not found in config"))).toBe(true);
   });
 });
+
+describe("update across sources", () => {
+  const customManifest: RegistryManifest = {
+    name: "custom",
+    description: "Custom registry",
+    url: "https://github.com/custom/registry",
+    roles: {
+      "software-architect": {
+        version: "3.0.0",
+        description: "Software architect role",
+        tags: ["architecture"],
+      },
+    },
+  };
+
+  function twoSources(): void {
+    setupConfig([
+      { name: "oh-my-role", url: "https://github.com/EricMoin/oh-my-role", default: true },
+      { name: "custom", url: "https://github.com/custom/registry" },
+    ]);
+  }
+
+  function lockPath(): string {
+    return join(tmpConfigDir, "rolebox", "rolebox.lock");
+  }
+
+  function versionsBySource(): Record<string, string> {
+    const parsed = load(readFileSync(lockPath(), "utf-8")) as any;
+    return Object.fromEntries(parsed.roles.map((r: any) => [r.registry, r.version]));
+  }
+
+  it("updates every installed copy when a bare role is named", async () => {
+    twoSources();
+    setupLock([
+      { role: "software-architect", registry: "oh-my-role", version: "1.0.0" },
+      { role: "software-architect", registry: "custom", version: "2.0.0" },
+    ]);
+
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "custom" ? customManifest : sampleManifest,
+    );
+    mockDownloadRole.mockImplementation(async () => createMockExtractedDir("software-architect"));
+    mockComputeIntegrity.mockImplementation(async () => "sha256-abc123");
+
+    const { update } = await importUpdate();
+    const { logs, run } = captureLogs(async () => {
+      await update("software-architect", false);
+    });
+    await run();
+
+    expect(
+      logs.some((l) => l.includes("✓ Updated software-architect (oh-my-role) from 1.0.0 to 2.0.0")),
+    ).toBe(true);
+    expect(
+      logs.some((l) => l.includes("✓ Updated software-architect (custom) from 2.0.0 to 3.0.0")),
+    ).toBe(true);
+
+    expect(versionsBySource()).toEqual({ "oh-my-role": "2.0.0", custom: "3.0.0" });
+    expect(
+      existsSync(join(tmpDataDir, "rolebox", "roles", "custom", "software-architect@3.0.0")),
+    ).toBe(true);
+  });
+
+  it("updates only the copy named by a registry:role spec", async () => {
+    twoSources();
+    setupLock([
+      { role: "software-architect", registry: "oh-my-role", version: "1.0.0" },
+      { role: "software-architect", registry: "custom", version: "2.0.0" },
+    ]);
+
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "custom" ? customManifest : sampleManifest,
+    );
+    mockDownloadRole.mockImplementation(async () => createMockExtractedDir("software-architect"));
+    mockComputeIntegrity.mockImplementation(async () => "sha256-abc123");
+
+    const { update } = await importUpdate();
+    const { logs, run } = captureLogs(async () => {
+      await update("custom:software-architect", false);
+    });
+    await run();
+
+    expect(logs.some((l) => l.includes("✓ Updated software-architect (custom) from 2.0.0 to 3.0.0"))).toBe(true);
+    expect(logs.some((l) => l.includes("Updated 1 roles"))).toBe(true);
+
+    expect(versionsBySource()).toEqual({ "oh-my-role": "1.0.0", custom: "3.0.0" });
+  });
+});

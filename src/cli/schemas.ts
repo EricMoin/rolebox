@@ -100,10 +100,17 @@ export function parseConfig(data: unknown): RoleboxConfig {
       throw new Error(`Config: registries[${index}] must have a string 'url'`);
     }
 
-    const result: { name: string; url: string; default?: boolean } = {
+    const result: { name: string; url: string; ref?: string; default?: boolean } = {
       name: entry.name,
       url: entry.url,
     };
+
+    if (entry.ref !== undefined) {
+      if (!isString(entry.ref)) {
+        throw new Error(`Config: registries[${index}].ref must be a string`);
+      }
+      result.ref = entry.ref;
+    }
 
     if (entry.default !== undefined) {
       if (!isBoolean(entry.default)) {

@@ -2,7 +2,7 @@ import { describe, it, expect, mock, beforeEach, afterEach, beforeAll } from "bu
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { load } from "js-yaml";
+import { dump, load } from "js-yaml";
 import type { RegistryManifest } from "../../../src/cli/types.ts";
 
 const mockFetchManifest = mock();
@@ -99,6 +99,18 @@ function captureLogs(fn: () => Promise<void>): { logs: string[]; run: () => Prom
     logs,
     run: async () => {
       try { await fn(); } finally { console.log = origLog; }
+    },
+  };
+}
+
+function captureWarnings(fn: () => Promise<void>): { warnings: string[]; run: () => Promise<void> } {
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: any[]) => { warnings.push(args.join(" ")); origWarn.apply(console, args as any); };
+  return {
+    warnings,
+    run: async () => {
+      try { await fn(); } finally { console.warn = origWarn; }
     },
   };
 }
@@ -327,5 +339,178 @@ describe("install", () => {
 
     const { install } = await importInstall();
     await expect(install("missing-role@1.0.0")).rejects.toThrow(/not found/);
+  });
+});
+
+describe("install across sources", () => {
+  function writeRegistries(
+    registries: Array<{ name: string; url: string; default?: boolean; ref?: string }>,
+  ): void {
+    const configDir = join(tmpConfigDir, "rolebox");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.yaml"), dump({ registries }), "utf-8");
+  }
+
+  function twoSources(): void {
+    writeRegistries([
+      { name: "oh-my-role", url: "https://github.com/EricMoin/oh-my-role", default: true },
+      { name: "custom", url: "https://github.com/custom/registry" },
+    ]);
+  }
+
+  function customManifest(roleIds: string[]): RegistryManifest {
+    return {
+      name: "custom",
+      description: "Custom registry",
+      url: "https://github.com/custom/registry",
+      roles: Object.fromEntries(
+        roleIds.map((roleId) => [
+          roleId,
+          { version: "3.0.0", description: `${roleId} role`, tags: [] },
+        ]),
+      ),
+    };
+  }
+
+  function lockPath(): string {
+    return join(tmpConfigDir, "rolebox", "rolebox.lock");
+  }
+
+  it("installs a role published only by a non-default source", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "custom" ? customManifest(["custom-role"]) : sampleManifest,
+    );
+    mockResolveVersion.mockImplementation(() => "3.0.0");
+    mockDownloadRole.mockImplementation(async () => createMockExtractedDir("custom-role"));
+    mockComputeIntegrity.mockImplementation(async () => "sha256-custom");
+    // The doubles accumulate calls across tests in this file.
+    mockFetchManifest.mockClear();
+
+    const { install } = await importInstall();
+    await install("custom-role");
+
+    expect(existsSync(join(tmpDataDir, "rolebox", "roles", "custom", "custom-role@3.0.0"))).toBe(true);
+
+    const parsed = load(readFileSync(lockPath(), "utf-8")) as any;
+    expect(parsed.roles).toHaveLength(1);
+    expect(parsed.roles[0].registry).toBe("custom");
+
+    // The default source was consulted first, then the one that publishes it.
+    expect(mockFetchManifest.mock.calls.map((call: any[]) => call[0].name)).toEqual([
+      "oh-my-role",
+      "custom",
+    ]);
+  });
+
+  it("prefers the default source when both publish the role", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "custom"
+        ? customManifest(["software-architect"])
+        : sampleManifest,
+    );
+    mockResolveVersion.mockImplementation(() => "1.0.0");
+    mockDownloadRole.mockImplementation(async () => createMockExtractedDir("software-architect"));
+    mockComputeIntegrity.mockImplementation(async () => "sha256-abc123");
+    // The doubles accumulate calls across tests in this file.
+    mockFetchManifest.mockClear();
+    mockDownloadRole.mockClear();
+
+    const { install } = await importInstall();
+    await install("software-architect");
+
+    expect(mockFetchManifest).toHaveBeenCalledTimes(1);
+    expect(mockDownloadRole.mock.calls[0][0]).toMatchObject({ name: "oh-my-role" });
+
+    const parsed = load(readFileSync(lockPath(), "utf-8")) as any;
+    expect(parsed.roles[0].registry).toBe("oh-my-role");
+  });
+
+  it("warns about a source it could not reach when another one answers", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) => {
+      if (registry.name === "oh-my-role") throw new Error("offline");
+      return customManifest(["custom-role"]);
+    });
+    mockResolveVersion.mockImplementation(() => "3.0.0");
+    mockDownloadRole.mockImplementation(async () => createMockExtractedDir("custom-role"));
+    mockComputeIntegrity.mockImplementation(async () => "sha256-custom");
+
+    const { install } = await importInstall();
+    const { warnings, run } = captureWarnings(async () => {
+      await install("custom-role");
+    });
+    await run();
+
+    // The skipped source is reported, not swallowed: the lookup was partial.
+    expect(warnings.some((w) => w.includes('could not fetch registry "oh-my-role"'))).toBe(true);
+    expect(warnings.some((w) => w.includes("offline"))).toBe(true);
+
+    // ... and the role still installed from the source that answered.
+    const parsed = load(readFileSync(lockPath(), "utf-8")) as any;
+    expect(parsed.roles).toHaveLength(1);
+    expect(parsed.roles[0].registry).toBe("custom");
+  });
+
+  it("names the searched sources when no source publishes the role", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async () => customManifest([]));
+
+    const { install } = await importInstall();
+    await expect(install("ghost-role")).rejects.toThrow(
+      /not found in any configured registry \(searched: oh-my-role, custom\)/,
+    );
+  });
+
+  it("names the source it could not reach when another answered", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) => {
+      if (registry.name === "custom") throw new Error("offline");
+      return customManifest([]);
+    });
+
+    const { install } = await importInstall();
+    await expect(install("ghost-role")).rejects.toThrow(
+      /not found in any configured registry \(searched: oh-my-role\); could not reach: custom \(offline\)/,
+    );
+  });
+
+  it("reports every unreachable source when none can be reached", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async () => {
+      throw new Error("offline");
+    });
+
+    const { install } = await importInstall();
+    await expect(install("ghost-role")).rejects.toThrow(
+      /no configured registry could be reached \(oh-my-role: offline, custom: offline\)/,
+    );
+  });
+
+  it("still installs from B when the role is already installed from A", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "custom"
+        ? customManifest(["software-architect"])
+        : sampleManifest,
+    );
+    mockResolveVersion.mockImplementation(() => "1.0.0");
+    mockDownloadRole.mockImplementation(async () => createMockExtractedDir("software-architect"));
+    mockComputeIntegrity.mockImplementation(async () => "sha256-abc123");
+
+    const { install } = await importInstall();
+    await install("software-architect");
+
+    const { logs, run } = captureLogs(async () => {
+      await install("custom:software-architect");
+    });
+    await run();
+
+    expect(logs.some((l) => l.includes("already installed"))).toBe(false);
+    expect(existsSync(join(tmpDataDir, "rolebox", "roles", "custom", "software-architect@1.0.0"))).toBe(true);
+
+    const parsed = load(readFileSync(lockPath(), "utf-8")) as any;
+    expect(parsed.roles.map((r: any) => r.registry).sort()).toEqual(["custom", "oh-my-role"]);
   });
 });

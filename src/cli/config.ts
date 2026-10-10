@@ -4,16 +4,11 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { getConfigDir } from "./paths.ts";
 import { ensureWritableDir } from "./fs-utils.ts";
 import { parseConfigFromYaml, parseLockFileFromYaml } from "./schemas.ts";
+import { BUILTIN_REGISTRY } from "./sources.ts";
 import type { RoleboxConfig, LockFile, LockEntry } from "./types.ts";
 
 const DEFAULT_CONFIG: RoleboxConfig = {
-  registries: [
-    {
-      name: "oh-my-role",
-      url: "https://github.com/EricMoin/oh-my-role",
-      default: true,
-    },
-  ],
+  registries: [{ ...BUILTIN_REGISTRY }],
 };
 
 export function getConfigPath(): string {
@@ -110,10 +105,19 @@ export function removeFromLock(roleId: string, registry: string): LockFile {
 }
 
 /**
- * Find a role entry in the lock file by role ID (checked across all registries).
- * Returns the LockEntry if found, undefined otherwise.
+ * Find a role entry in the lock file by role ID. Without a registry the first
+ * match wins (a role may be installed from several sources); with one, both the
+ * role and its source must match.
  */
-export function findInLock(roleId: string): LockEntry | undefined {
+export function findInLock(roleId: string, registry?: string): LockEntry | undefined {
   const lock = loadLock();
-  return lock.roles.find((r) => r.role === roleId);
+  return lock.roles.find(
+    (r) => r.role === roleId && (registry === undefined || r.registry === registry),
+  );
+}
+
+/** Every lock entry for a role ID, in lock order (one per source). */
+export function findAllInLock(roleId: string): LockEntry[] {
+  const lock = loadLock();
+  return lock.roles.filter((r) => r.role === roleId);
 }

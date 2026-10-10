@@ -1,6 +1,8 @@
 import { defineCommand } from "citty";
-import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
+import { loadConfig, loadLock, addToLock, findInLock, findAllInLock } from "../config.ts";
 import { fetchRegistryManifest, downloadRole, computeIntegrity } from "../registry-client.ts";
+import { parseRoleSpec } from "../role-spec.ts";
+import { effectiveRegistries } from "../sources.ts";
 import { DownloadProgress } from "../download-progress.ts";
 import { getRolePath } from "../paths.ts";
 import type { LockEntry } from "../types.ts";
@@ -37,17 +39,23 @@ export async function update(specificRole: string | undefined, noCache: boolean,
   const out = (msg: string) => { if (!opts.quiet) console.log(msg); };
   const config = loadConfig();
   const lock = loadLock();
+  const sources = new Map(effectiveRegistries(config).map((r) => [r.name, r]));
 
   let updated = 0;
   let upToDate = 0;
 
-  const rolesToUpdate = specificRole
-    ? [findInLock(specificRole)].filter(Boolean) as LockEntry[]
+  // A `registry:role` spec selects that source's copy; a bare role updates
+  // EVERY installed copy, one source at a time.
+  const parsed = specificRole ? parseRoleSpec(specificRole) : undefined;
+  const rolesToUpdate: LockEntry[] = parsed
+    ? (parsed.registry
+        ? [findInLock(parsed.roleId, parsed.registry)].filter((e): e is LockEntry => e !== undefined)
+        : findAllInLock(parsed.roleId))
     : lock.roles;
 
   if (rolesToUpdate.length === 0) {
-    if (specificRole) {
-      out(`Role '${specificRole}' is not installed.`);
+    if (parsed) {
+      out(`Role '${parsed.roleId}' is not installed.`);
     } else {
       out("No roles installed. Nothing to update.");
     }
@@ -55,7 +63,7 @@ export async function update(specificRole: string | undefined, noCache: boolean,
   }
 
   for (const entry of rolesToUpdate) {
-    const registryConfig = config.registries.find(r => r.name === entry.registry);
+    const registryConfig = sources.get(entry.registry);
     if (!registryConfig) {
       console.warn(`Warning: registry '${entry.registry}' not found in config, skipping '${entry.role}'`);
       continue;
@@ -64,7 +72,7 @@ export async function update(specificRole: string | undefined, noCache: boolean,
     let manifest;
     progress.phaseStart("resolving", entry.role);
     try {
-      manifest = await fetchRegistryManifest(registryConfig, undefined, { noCache });
+      manifest = await fetchRegistryManifest(registryConfig, registryConfig.ref, { noCache });
     } catch (err) {
       progress.phaseFail("resolving", { asset: `${entry.role}@${entry.version}`, reason: (err as Error).message, attempt: 1, maxAttempts: 1 });
       console.warn(`Warning: could not fetch registry '${entry.registry}': ${(err as Error).message}. Check your network connection, or verify the registry URL with: rolebox registry list`);
@@ -143,7 +151,7 @@ export async function update(specificRole: string | undefined, noCache: boolean,
 
       progress.phaseStart("done", `${entry.role}@${latestVersion}`);
       progress.phaseComplete("done", `${entry.role}@${latestVersion}`);
-      out(`✓ Updated ${entry.role} from ${entry.version} to ${latestVersion}`);
+      out(`✓ Updated ${entry.role} (${entry.registry}) from ${entry.version} to ${latestVersion}`);
       updated++;
     } catch (err) {
       console.warn(`Warning: failed to update '${entry.role}': ${(err as Error).message}`);

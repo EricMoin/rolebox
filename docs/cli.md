@@ -39,17 +39,26 @@ rolebox init my-role -t subagents     # Use a specific template
 
 ### `install [role]`
 
-Install a role from a registry. The role specifier can be in several formats:
+Install a role from a role source. The role specifier can be in several formats:
 
-- `rolebox install software-architect` — install latest version from default registry
+- `rolebox install software-architect` — install latest version, resolved across every configured source
 - `rolebox install software-architect@1.0.0` — install specific version
-- `rolebox install my-registry:custom-role` — install from named registry
-- `rolebox install my-registry:role@2.0.0` — install specific version from named registry
+- `rolebox install my-registry:custom-role` — install from a named source
+- `rolebox install my-registry:role@2.0.0` — install specific version from a named source
+
+An unprefixed role is looked up in the default source first and then in the remaining
+sources in config order; the first source that publishes the role provides both the
+version and the tarball, and the lock file records it. A source that cannot be
+fetched is skipped with a `Warning:` line and the lookup continues with the next one.
+When no source publishes the role the error names the sources that were searched (and
+any that could not be reached). When several sources publish the same role,
+`rolebox search` prints a note with the `source:role` specs to choose from —
+`install` itself takes the default source's copy.
 
 Omit the role specifier to pick a role interactively:
 
 ```bash
-rolebox install        # Select a registry (if multiple) and a role to install
+rolebox install        # Select a source (if multiple) and a role to install
 ```
 
 After installing, run `rolebox sync opencode` to deploy the role.
@@ -60,8 +69,13 @@ Remove an installed role and clean up any symlinks.
 
 ```bash
 rolebox uninstall software-architect
+rolebox uninstall my-registry:software-architect   # One copy when several sources provide it
 rolebox uninstall     # Select an installed role to remove (asks for confirmation)
 ```
+
+A role installed from more than one source must be disambiguated with
+`source:role`; a bare role then fails with the list of sources instead of picking
+one arbitrarily.
 
 ### `sync <target>`
 
@@ -102,35 +116,66 @@ rolebox list --json   # JSON output for scripting
 
 ### `search [query]`
 
-Search available roles across all configured registries.
+Search available roles across all configured sources.
 
 ```bash
-rolebox search               # List all available roles
-rolebox search react         # Search for roles matching "react"
-rolebox search --no-cache    # Bypass registry cache
+rolebox search                        # List all available roles
+rolebox search react                  # Search for roles matching "react"
+rolebox search --registry community   # Search one source (comma-separated names allowed)
+rolebox search --no-cache             # Bypass registry cache
 ```
 
-Matches against role names, descriptions, and tags (case-insensitive).
+Matches against role names, descriptions, and tags (case-insensitive). Each source is
+reported under its own `Results from <source>:` heading, with a per-source warning
+when it could not be fetched. When a role is published by more than one selected
+source, a note names the `source:role` specs to choose from; when every selected
+source failed, the result is reported as unknown rather than empty.
 
 ### `update [role]`
 
-Update installed roles to the latest versions available in their registries.
+Update installed roles to the latest versions available in their sources.
 
 ```bash
 rolebox update                         # Update all installed roles
-rolebox update software-architect      # Update a specific role
+rolebox update software-architect      # Update every installed copy of a role
+rolebox update my-registry:software-architect   # Update one source's copy
 rolebox update --no-cache              # Bypass registry cache
 ```
 
+A bare role updates every copy (one per source) and each success line names the
+source it came from; `source:role` narrows the update to that copy.
+
 ### `registry <subcommand>`
 
-Manage registry sources.
+Manage role sources. The built-in source (`oh-my-role`) is always available; custom
+sources are added on top of it, so searching and installing span every configured
+source instead of replacing a single one.
 
 ```bash
-rolebox registry list                    # Show all configured registries
-rolebox registry add https://github.com/user/my-roles  # Add a registry
-rolebox registry remove my-roles         # Remove a registry (not the default)
+rolebox registry list                     # Show every effective source
+rolebox registry list --json              # JSON output for scripting
+rolebox registry add https://github.com/user/my-roles
+                                          # Add a source (name defaults to the repo name)
+rolebox registry add https://github.com/user/my-roles --name mine --ref v2
+                                          # Custom name, and a branch/tag to read
+rolebox registry add https://github.com/user/my-roles --default
+                                          # Make it the default source
+rolebox registry remove my-roles          # Remove a custom source
+rolebox registry default my-roles         # Make an existing source the default
 ```
+
+`list` marks each source: `(ref: <branch>)` when a branch or tag is pinned,
+`(default)` for the source an unprefixed role spec resolves from first, and
+`(built-in)` for the source that ships with rolebox. The built-in source cannot be
+removed — `rolebox registry default oh-my-role` makes it the default again. Removing a
+source that still has installed roles warns and names the
+`rolebox uninstall <source>:<role>` command that removes them.
+
+Adding a source validates its `registry.yaml` with a single fetch at the requested
+`--ref` before anything is written. A name that is already configured is rejected
+(pass `--name` to choose another one); a manifest that declares a different name than
+the source only produces a warning, as does a URL another source already uses (which
+is how one repository is pinned to two branches).
 
 ### `info [role]`
 
@@ -250,5 +295,27 @@ legacy `opencode` field retained for backward compatibility.
 
 The CLI stores its state in two files:
 
-- `~/.config/rolebox/config.yaml` — registry configuration (default registry: oh-my-role)
+- `~/.config/rolebox/config.yaml` — role sources (the built-in `oh-my-role` source plus any you add)
 - `~/.config/rolebox/rolebox.lock` — installed role manifest with version and integrity tracking
+
+```yaml
+registries:
+  - name: oh-my-role
+    url: https://github.com/EricMoin/oh-my-role
+    default: true
+  - name: mine
+    url: https://github.com/user/my-roles
+    ref: v2          # optional: branch or tag for registry.yaml and the role tarballs
+```
+
+The built-in `oh-my-role` source is available even when the file does not list it, and
+an entry that does list it keeps its own `url` and `ref`. A custom source with
+`default: true` takes over the default slot; otherwise the built-in is the default.
+An unprefixed `rolebox install <role>` consults the sources in that order — default
+first, then the order in the file; `rolebox update` works from the lock file instead
+(see above). `registries: []` opts out entirely, the built-in included:
+`rolebox registry list` reports that no source is configured, `rolebox install` and
+the interactive pickers stop with `No registries configured`, and a search has no
+source to look in — it reports that it found no roles rather than falling back to
+the built-in silently. See [registry.md](registry.md) for the
+per-source `ref` and resolution rules.

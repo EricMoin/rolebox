@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { getDataDir } from "./paths.ts";
 import { parseRegistryManifestFromYaml } from "./schemas.ts";
-import type { RegistryManifest } from "./types.ts";
+import type { RegistryEntry, RegistryManifest } from "./types.ts";
 import { DEFAULT_GIT_BRANCH, REGISTRY_CACHE_TTL_MS } from "../constants.ts";
 import type { DownloadProgress, Phase } from "./download-progress.ts";
 
@@ -63,17 +63,37 @@ export function resolveVersion(manifest: RegistryManifest, roleId: string): stri
 
 // ── Registry Manifest Fetching ────────────────────────────────────
 
+/**
+ * Filesystem-safe form of a source name. Names come from user config (or the
+ * repo basename), so they are sanitized before being used as a path component.
+ */
+function safeCacheName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40) || "registry";
+}
 
+/**
+ * Cache directory for one source+branch pair. The digest covers the URL and the
+ * resolved branch, so two sources that share a name — or one repo pinned to two
+ * branches — never read each other's cached manifest.
+ */
+function registryCacheDir(registry: RegistryEntry, branch: string): string {
+  const digest = createHash("sha256").update(`${registry.url}\n${branch}`).digest("hex").slice(0, 8);
+  return join(getDataDir(), "cache", `${safeCacheName(registry.name)}-${digest}`);
+}
 
 /**
  * Fetch a registry manifest from a GitHub raw content URL with caching.
+ *
+ * The branch is `ref`, else the entry's own `ref`, else DEFAULT_GIT_BRANCH; an
+ * explicitly passed ref always wins.
  */
 export async function fetchRegistryManifest(
-  registry: { name: string; url: string },
+  registry: RegistryEntry,
   ref?: string,
   options?: { noCache?: boolean }
 ): Promise<RegistryManifest> {
-  const cacheDir = join(getDataDir(), "cache", registry.name);
+  const branch = ref ?? registry.ref ?? DEFAULT_GIT_BRANCH;
+  const cacheDir = registryCacheDir(registry, branch);
   const cacheFile = join(cacheDir, "registry.yaml");
   const timestampFile = join(cacheDir, ".timestamp");
 
@@ -95,7 +115,6 @@ export async function fetchRegistryManifest(
 
   // Build URL
   const { owner, repo } = parseGitHubUrl(registry.url);
-  const branch = ref || DEFAULT_GIT_BRANCH;
   const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/registry.yaml`;
 
   // Prepare headers
@@ -187,9 +206,12 @@ export interface DownloadRoleOptions {
 
 /**
  * Download a role from a GitHub registry tarball and extract it.
+ *
+ * The branch is `ref`, else the entry's own `ref`, else DEFAULT_GIT_BRANCH; an
+ * explicitly passed ref always wins.
  */
 export async function downloadRole(
-  registry: { name: string; url: string },
+  registry: RegistryEntry,
   roleId: string,
   _version: string,
   ref?: string,
@@ -208,7 +230,7 @@ export async function downloadRole(
   };
 
   const { owner, repo } = parseGitHubUrl(registry.url);
-  const branch = ref || DEFAULT_GIT_BRANCH;
+  const branch = ref ?? registry.ref ?? DEFAULT_GIT_BRANCH;
   const url = `https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
 
   const headers: Record<string, string> = {};

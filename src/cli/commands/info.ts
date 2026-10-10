@@ -3,7 +3,9 @@ import * as clack from "@clack/prompts";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import yaml from "js-yaml";
-import { loadLock, findInLock } from "../config.ts";
+import { loadLock, findInLock, findAllInLock } from "../config.ts";
+import { parseRoleSpec } from "../role-spec.ts";
+import type { LockEntry } from "../types.ts";
 import { getSyncTarget, getRolePath, getTargetConfigDir } from "../paths.ts";
 import { computeIntegrity } from "../registry-client.ts";
 import { assertInteractiveContext, pickInstalledRole } from "../pick.ts";
@@ -65,11 +67,27 @@ interface InfoJson {
   integrityCheck?: { passed: boolean; expected: string; actual: string };
 }
 
-export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: boolean): Promise<void> {
-  const entry = findInLock(roleId);
-  if (!entry) {
+export async function info(spec: string, jsonOutput: boolean, checkIntegrity: boolean): Promise<void> {
+  const parsed = parseRoleSpec(spec);
+  const roleId = parsed.roleId;
+
+  // A `registry:role` spec selects that source's copy; a bare role selects the
+  // only installed copy and refuses to guess when several sources provide one.
+  const entries = parsed.registry
+    ? [findInLock(roleId, parsed.registry)].filter((e): e is LockEntry => e !== undefined)
+    : findAllInLock(roleId);
+
+  if (entries.length === 0) {
     throw new Error(`Role "${roleId}" is not installed. Run \`rolebox list\` to see installed roles.`);
   }
+
+  if (entries.length > 1) {
+    throw new Error(
+      `Role '${roleId}' is installed from more than one source: ${entries.map((e) => e.registry).join(", ")} — specify one, e.g. 'rolebox info ${entries[0].registry}:${roleId}'`,
+    );
+  }
+
+  const entry = entries[0];
 
   const rolePath = getRolePath(entry.registry, entry.role, entry.version);
   const roleYamlPath = join(rolePath, ROLE_YAML);

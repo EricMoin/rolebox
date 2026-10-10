@@ -218,3 +218,152 @@ describe("search", () => {
     expect(logs.some((l) => l.includes("community"))).toBe(true);
   });
 });
+
+describe("search source selection", () => {
+  const communityManifest: RegistryManifest = {
+    name: "community",
+    description: "Community registry",
+    url: "https://github.com/community/roles",
+    roles: {
+      "react-expert": {
+        version: "3.0.0",
+        description: "React expert role",
+        tags: ["react", "frontend"],
+      },
+    },
+  };
+
+  function writeRegistries(
+    registries: Array<{ name: string; url: string; default?: boolean; ref?: string }>,
+  ): void {
+    const configDir = join(tmpConfigDir, "rolebox");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.yaml"), dump({ registries }), "utf-8");
+  }
+
+  function twoSources(): void {
+    writeRegistries([
+      { name: "oh-my-role", url: "https://github.com/EricMoin/oh-my-role", default: true },
+      { name: "community", url: "https://github.com/community/roles" },
+    ]);
+  }
+
+  it("--registry fetches only the selected source", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "community" ? communityManifest : sampleManifest,
+    );
+    mockFetchManifest.mockClear();
+
+    const { search } = await importSearch();
+    const { logs, run } = captureOutput(async () => {
+      await search(undefined, false, "community");
+    });
+    await run();
+
+    expect(logs.some((l) => l.includes("react-expert"))).toBe(true);
+    expect(logs.some((l) => l.includes("software-architect"))).toBe(false);
+    expect(mockFetchManifest).toHaveBeenCalledTimes(1);
+    expect(mockFetchManifest.mock.calls[0][0]).toMatchObject({ name: "community" });
+  });
+
+  it("--registry accepts a comma-separated list", async () => {
+    twoSources();
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "community" ? communityManifest : sampleManifest,
+    );
+    mockFetchManifest.mockClear();
+
+    const { search } = await importSearch();
+    const { logs, run } = captureOutput(async () => {
+      await search(undefined, false, "oh-my-role, community");
+    });
+    await run();
+
+    expect(logs.some((l) => l.includes("software-architect"))).toBe(true);
+    expect(logs.some((l) => l.includes("react-expert"))).toBe(true);
+    expect(mockFetchManifest).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws for an unknown --registry and names the configured sources", async () => {
+    mockFetchManifest.mockClear();
+
+    const { search } = await importSearch();
+
+    await expect(search(undefined, false, "nope")).rejects.toThrow(/Registry 'nope' not found/);
+    const error = await search(undefined, false, "nope").catch((err: Error) => err);
+    expect(error.message).toContain("oh-my-role");
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+  });
+
+  it("notes a role published by more than one selected source", async () => {
+    writeRegistries([
+      { name: "oh-my-role", url: "https://github.com/EricMoin/oh-my-role", default: true },
+      { name: "community", url: "https://github.com/community/roles" },
+    ]);
+    mockFetchManifest.mockImplementation(async (registry: { name: string }) =>
+      registry.name === "community"
+        ? {
+            ...communityManifest,
+            roles: {
+              ...communityManifest.roles,
+              "software-architect": {
+                version: "9.0.0",
+                description: "Software architect role",
+                tags: ["architecture"],
+              },
+            },
+          }
+        : sampleManifest,
+    );
+
+    const { search } = await importSearch();
+    const { logs, run } = captureOutput(async () => {
+      await search("software", false);
+    });
+    await run();
+
+    expect(
+      logs.some((l) =>
+        l.startsWith(
+          "Note: 'software-architect' is published by 2 sources (oh-my-role, community)",
+        ),
+      ),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("rolebox install oh-my-role:software-architect"))).toBe(true);
+  });
+
+  it("warns that an all-failed search is unknown, not empty", async () => {
+    mockFetchManifest.mockImplementation(async () => {
+      throw new Error("network error");
+    });
+
+    const { search } = await importSearch();
+    const { logs, warnings, run } = captureOutput(async () => {
+      await search(undefined, false);
+    });
+    await run();
+
+    expect(warnings.some((w) => w.includes("could not fetch any configured registry (1/1)"))).toBe(true);
+    expect(warnings.some((w) => w.includes("result is unknown, not empty"))).toBe(true);
+    expect(logs.some((l) => l.includes("No roles found in any registry."))).toBe(true);
+  });
+
+  it("keeps the empty-result message for a reachable but empty source", async () => {
+    mockFetchManifest.mockImplementation(async () => ({
+      name: "empty-registry",
+      description: "Empty",
+      url: "https://example.com",
+      roles: {},
+    }));
+
+    const { search } = await importSearch();
+    const { logs, warnings, run } = captureOutput(async () => {
+      await search(undefined, false);
+    });
+    await run();
+
+    expect(logs.some((l) => l.includes("No roles found in any registry."))).toBe(true);
+    expect(warnings.some((w) => w.includes("result is unknown"))).toBe(false);
+  });
+});

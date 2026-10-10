@@ -646,3 +646,167 @@ describe("integration", () => {
     expect(Object.keys(result.roles).length).toBeGreaterThan(0);
   });
 });
+
+// ── ref resolution and cache isolation ────────────────────────────
+
+describe("registry-client ref resolution", () => {
+  function captureFetchUrl(response: Response): { url: () => string } {
+    let fetchedUrl = "";
+    globalThis.fetch = Object.assign(
+      mock((input: Parameters<typeof fetch>[0]) => {
+        fetchedUrl = input instanceof Request ? input.url : String(input);
+        return Promise.resolve(response);
+      }),
+      { preconnect: () => {} },
+    );
+    return { url: () => fetchedUrl };
+  }
+
+  it("uses the entry's ref when no explicit ref is passed", async () => {
+    const seen = captureFetchUrl(new Response(validYaml, { status: 200 }));
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
+    setMockDataDir(tmpDir);
+
+    const result = await fetchRegistryManifest({
+      name: "community",
+      url: "https://github.com/example/registry",
+      ref: "develop",
+    });
+
+    expect(result.name).toBe("community");
+    expect(seen.url()).toContain("/develop/registry.yaml");
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("lets an explicit ref win over the entry's ref", async () => {
+    const seen = captureFetchUrl(new Response(validYaml, { status: 200 }));
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
+    setMockDataDir(tmpDir);
+
+    await fetchRegistryManifest(
+      { name: "community", url: "https://github.com/example/registry", ref: "main" },
+      "release",
+      { noCache: true },
+    );
+
+    expect(seen.url()).toContain("/release/registry.yaml");
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("downloads the entry's ref when no explicit ref is passed", async () => {
+    const seen = captureFetchUrl(new Response("Not Found", { status: 404 }));
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/registry", ref: "develop" },
+        "code-reviewer",
+        "1.0.0",
+      ),
+    ).rejects.toThrow(/not found/);
+
+    expect(seen.url()).toContain("/tarball/develop");
+  });
+
+  it("lets an explicit ref win when downloading", async () => {
+    const seen = captureFetchUrl(new Response("Not Found", { status: 404 }));
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/registry", ref: "main" },
+        "code-reviewer",
+        "1.0.0",
+        "release",
+      ),
+    ).rejects.toThrow(/not found/);
+
+    expect(seen.url()).toContain("/tarball/release");
+  });
+
+  it("keeps sources that share a name but differ in url or ref in separate cache dirs", async () => {
+    const callCount = { value: 0 };
+    globalThis.fetch = Object.assign(
+      mock(() => {
+        callCount.value++;
+        return Promise.resolve(new Response(validYaml, { status: 200 }));
+      }),
+      { preconnect: () => {} },
+    );
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
+    setMockDataDir(tmpDir);
+
+    // Same url and resolved branch, spelled with and without an explicit ref:
+    // one cache entry, one fetch.
+    await fetchRegistryManifest({ name: "community", url: "https://github.com/example/registry" });
+    await fetchRegistryManifest({
+      name: "community",
+      url: "https://github.com/example/registry",
+      ref: "main",
+    });
+    expect(callCount.value).toBe(1);
+
+    // A different branch and a different repo are different sources: two more
+    // fetches, two more cache dirs.
+    await fetchRegistryManifest({
+      name: "community",
+      url: "https://github.com/example/registry",
+      ref: "next",
+    });
+    await fetchRegistryManifest({ name: "community", url: "https://github.com/other/registry" });
+
+    expect(callCount.value).toBe(3);
+    const dirs = readdirSync(join(tmpDir, "cache"));
+    expect(dirs).toHaveLength(3);
+    expect(dirs.every((dir) => dir.startsWith("community-"))).toBe(true);
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("sanitizes the name and suffixes a url+ref digest", async () => {
+    globalThis.fetch = Object.assign(
+      mock(() => Promise.resolve(new Response(validYaml, { status: 200 }))),
+      { preconnect: () => {} },
+    );
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
+    setMockDataDir(tmpDir);
+
+    await fetchRegistryManifest(
+      { name: "my registry/bad", url: "https://github.com/example/registry" },
+      undefined,
+      { noCache: true },
+    );
+
+    const dirs = readdirSync(join(tmpDir, "cache"));
+    expect(dirs).toHaveLength(1);
+    expect(dirs[0]).toMatch(/^my_registry_bad-[0-9a-f]{8}$/);
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("truncates an over-long name to a safe prefix", async () => {
+    globalThis.fetch = Object.assign(
+      mock(() => Promise.resolve(new Response(validYaml, { status: 200 }))),
+      { preconnect: () => {} },
+    );
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
+    setMockDataDir(tmpDir);
+
+    await fetchRegistryManifest(
+      { name: "x".repeat(120), url: "https://github.com/example/registry" },
+      undefined,
+      { noCache: true },
+    );
+
+    const dirs = readdirSync(join(tmpDir, "cache"));
+    expect(dirs).toHaveLength(1);
+    expect(dirs[0]).toMatch(/^x{40}-[0-9a-f]{8}$/);
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+});

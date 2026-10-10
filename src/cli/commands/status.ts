@@ -10,6 +10,8 @@ import {
   getTargetSkillsDir,
 } from "../paths.ts";
 import { fetchRegistryManifest } from "../registry-client.ts";
+import { effectiveRegistries } from "../sources.ts";
+import type { ResolvedRegistry } from "../sources.ts";
 import { compareVersions } from "./update.ts";
 import {
   PLATFORM_REGISTRY,
@@ -53,7 +55,7 @@ interface TargetStatus {
 interface StatusJson {
   version: string;
   config: { path: string; exists: boolean };
-  registries: Array<{ name: string; url: string; default?: boolean }>;
+  registries: Array<{ name: string; url: string; ref?: string; default?: boolean; builtin?: boolean }>;
   roles: Array<{
     role: string;
     registry: string;
@@ -120,6 +122,9 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
   const config = loadConfig();
   const lock = loadLock();
   const configPath = getConfigPath();
+  // Every source rolebox can resolve a role from: the built-in one plus whatever
+  // the user added on top of it.
+  const registries = effectiveRegistries(config);
 
   // Compute sync status for EVERY registered platform (opencode, pi, dsh, and
   // any future harness) — the CLI iterates the registry rather than naming
@@ -144,14 +149,14 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
 
   let latestVersions: Record<string, string> = {};
   if (checkUpdates) {
-    latestVersions = await fetchLatestVersions(config, lock.roles.map((r) => ({ role: r.role, registry: r.registry })));
+    latestVersions = await fetchLatestVersions(registries, lock.roles.map((r) => ({ role: r.role, registry: r.registry })));
   }
 
   if (jsonOutput) {
     const output: StatusJson = {
       version: pkg.version,
       config: { path: configPath, exists: existsSync(configPath) },
-      registries: config.registries,
+      registries,
       roles: roleStatuses.map((r) => ({
         role: r.role,
         registry: r.registry,
@@ -179,7 +184,7 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
   // Configuration
   printHeader("Configuration");
   printField("Config", shortenPath(configPath));
-  printField("Registries", config.registries.map((r) => r.name + (r.default ? dim(" (default)") : "")).join(", "));
+  printField("Registries", registries.map((r) => r.name + (r.default ? dim(" (default)") : "")).join(", "));
 
   // Installed Roles
   printHeader("Installed Roles");
@@ -294,11 +299,11 @@ function findPackageJson(): string {
 }
 
 async function fetchLatestVersions(
-  config: { registries: Array<{ name: string; url: string }> },
+  registries: ResolvedRegistry[],
   roles: Array<{ role: string; registry: string }>,
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
-  const registryMap = new Map(config.registries.map((r) => [r.name, r]));
+  const registryMap = new Map(registries.map((r) => [r.name, r]));
 
   const registriesToFetch = new Set(roles.map((r) => r.registry));
 
@@ -307,7 +312,7 @@ async function fetchLatestVersions(
     if (!reg) continue;
 
     try {
-      const manifest = await fetchRegistryManifest(reg);
+      const manifest = await fetchRegistryManifest(reg, reg.ref);
       for (const role of roles) {
         if (role.registry !== registryName) continue;
         const roleManifest = manifest.roles[role.role];

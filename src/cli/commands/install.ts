@@ -6,7 +6,10 @@ import type { PromptApi } from "../pick.ts";
 import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.ts";
 import { DownloadProgress } from "../download-progress.ts";
 import { getRolePath } from "../paths.ts";
-import type { LockEntry } from "../types.ts";
+import { parseRoleSpec } from "../role-spec.ts";
+import { findRegistry, effectiveRegistries, resolveRoleSource } from "../sources.ts";
+import type { ResolvedRegistry } from "../sources.ts";
+import type { LockEntry, RegistryManifest } from "../types.ts";
 import { existsSync, rmSync } from "node:fs";
 import { moveDir, ensureWritableDir } from "../fs-utils.ts";
 import { join } from "node:path";
@@ -19,32 +22,9 @@ export interface InstallOptions {
   noProgress?: boolean;  // force degraded line-based progress
 }
 
-/**
- * Parse a role specifier like:
- *   "software-architect"          → roleId="software-architect"
- *   "software-architect@1.0.0"   → roleId="software-architect", version="1.0.0"
- *   "my-registry:custom-role"    → registry="my-registry", roleId="custom-role"
- *   "my-registry:role@2.0.0"     → registry="my-registry", roleId="role", version="2.0.0"
- */
-export function parseRoleSpec(spec: string): { roleId: string; registry?: string; version?: string } {
-  let remaining = spec;
-  let registry: string | undefined;
-  let version: string | undefined;
-
-  const colonIdx = remaining.indexOf(":");
-  if (colonIdx !== -1) {
-    registry = remaining.slice(0, colonIdx);
-    remaining = remaining.slice(colonIdx + 1);
-  }
-
-  const atIdx = remaining.lastIndexOf("@");
-  if (atIdx !== -1) {
-    version = remaining.slice(atIdx + 1);
-    remaining = remaining.slice(0, atIdx);
-  }
-
-  return { roleId: remaining, registry, version };
-}
+// Specifier parsing lives in ../role-spec.ts so every command shares it; it is
+// re-exported here for callers that import it from this module.
+export { parseRoleSpec } from "../role-spec.ts";
 
 /**
  * Interactive flow for `rolebox install` without a role specifier: pick a
@@ -93,32 +73,68 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   // 1. Parse role spec
   const parsed = parseRoleSpec(spec);
 
-  // 2. Load config to find registry URL
+  // 2. Load config to find the configured sources
   const config = loadConfig();
 
-  // 3. Determine registry
-  let registryName: string;
+  // 3. Resolve the source and its manifest. An explicit `registry:role` spec
+  //    pins one source; an unprefixed spec walks the sources in resolution order
+  //    (default source first, then config order) and takes the first that
+  //    publishes the role.
+  progress.phaseStart("resolving", parsed.roleId);
+
+  let source: ResolvedRegistry;
+  let manifest: RegistryManifest;
+
   if (parsed.registry) {
-    registryName = parsed.registry;
-    const found = config.registries.find((r) => r.name === registryName);
+    const found = findRegistry(config, parsed.registry);
     if (!found) {
-      throw new Error(`Registry '${registryName}' not found`);
+      const configured = effectiveRegistries(config).map((r) => r.name).join(", ") || "(none)";
+      throw new Error(`Registry '${parsed.registry}' not found. Configured registries: ${configured}`);
     }
+    source = found;
+    manifest = await fetchRegistryManifest(source, source.ref);
   } else {
-    const defaultRegistry = config.registries.find((r) => r.default) ?? config.registries[0];
-    if (!defaultRegistry) {
+    if (effectiveRegistries(config).length === 0) {
       throw new Error("No registries configured. Run 'rolebox registry add' to add one.");
     }
-    registryName = defaultRegistry.name;
+
+    const lookup = await resolveRoleSource(parsed.roleId, config, {
+      fetchManifest: fetchRegistryManifest,
+    });
+
+    if (!lookup.match) {
+      if (lookup.failures.length > 0 && lookup.searched.length === 0) {
+        // Every source failed: the role is unknown, not absent.
+        throw new Error(
+          `role "${parsed.roleId}" not found: no configured registry could be reached (${lookup.failures.map((f) => `${f.registry.name}: ${f.message}`).join(", ")})`,
+        );
+      }
+      const unreachable = lookup.failures
+        .map((f) => `${f.registry.name} (${f.message})`)
+        .join(", ");
+      const suffix = unreachable ? `; could not reach: ${unreachable}` : "";
+      throw new Error(
+        `role "${parsed.roleId}" not found in any configured registry (searched: ${lookup.searched.join(", ")})${suffix}`,
+      );
+    }
+
+    // A source that could not be reached is skipped, never silently: a later
+    // source may answer, but the reason the earlier one did not belongs in the
+    // output. The no-match path above names the same sources in its error.
+    for (const failure of lookup.failures) {
+      console.warn(
+        `Warning: could not fetch registry "${failure.registry.name}": ${failure.message}`,
+      );
+    }
+
+    source = lookup.match.registry;
+    manifest = lookup.match.manifest;
   }
 
-  const registryEntry = config.registries.find((r) => r.name === registryName)!;
+  const registryName = source.name;
 
-  // 4. Fetch registry manifest
-  progress.phaseStart("resolving", parsed.roleId);
-  const manifest = await fetchRegistryManifest(registryEntry);
-
-  // 5. Resolve version
+  // 4. Resolve version. The manifest that proved the role exists is reused —
+  //    the source is never fetched twice.
   let version: string;
   if (parsed.version) {
     version = parsed.version;
@@ -131,22 +147,24 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   }
   progress.phaseComplete("resolving");
 
-  // 6. Check lock file — if already installed at same version, print and exit
-  const existing = findInLock(parsed.roleId);
+  // 5. Check lock file — if this source already provides the same version,
+  //    print and exit. A copy installed from another source is a different
+  //    install and is not treated as satisfying this request.
+  const existing = findInLock(parsed.roleId, registryName);
   if (existing && existing.version === version) {
     out(`Role "${parsed.roleId}@${version}" is already installed from ${existing.registry}`);
     return;
   }
 
-  // 7. Download, extract, and verify into a TEMP location FIRST. The
+  // 6. Download, extract, and verify into a TEMP location FIRST. The
   //    previously-installed version is NOT touched until the new artifact is
   //    fully downloaded, extracted, integrity-checked, and atomically swapped
   //    into place (rollback safety). On any failure before the swap, the
   //    previous version remains intact and the error propagates with
   //    partial-state context.
-  const extractedDir = await downloadRole(registryEntry, parsed.roleId, version, undefined, undefined, { progress });
+  const extractedDir = await downloadRole(source, parsed.roleId, version, undefined, undefined, { progress });
 
-  // 8. Compute + verify integrity on the temp artifact BEFORE swapping it in.
+  // 7. Compute + verify integrity on the temp artifact BEFORE swapping it in.
   const integrity = await computeIntegrity(extractedDir);
   const expectedIntegrity = manifest.roles[parsed.roleId]?.integrity;
   if (expectedIntegrity) {
@@ -165,7 +183,7 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
     }
   }
 
-  // 9. Atomic swap into {rolesDir}/{registry}/{roleId}@{version}/ — stage into a
+  // 8. Atomic swap into {rolesDir}/{registry}/{roleId}@{version}/ — stage into a
   //    sibling dir, then rename over the target so the previously-installed
   //    version is replaced atomically rather than deleted before the new one is
   //    ready.
@@ -189,7 +207,7 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   }
   progress.phaseComplete("installing");
 
-  // 10. Remove the old version's directory now that the new version is safely
+  // 9. Remove the old version's directory now that the new version is safely
   //     in place and verified. This must NOT happen before the download+verify.
   if (existing) {
     const oldPath = getRolePath(existing.registry, existing.role, existing.version);
@@ -198,7 +216,7 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
     }
   }
 
-  // 11. Update lock file
+  // 10. Update lock file
   const entry: LockEntry = {
     role: parsed.roleId,
     registry: registryName,
@@ -208,12 +226,12 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   };
   addToLock(entry);
 
-  // 12. Print success
+  // 11. Print success
   progress.phaseStart("done", `${parsed.roleId}@${version}`);
   progress.phaseComplete("done", `${parsed.roleId}@${version}`);
   out(`✓ Installed ${parsed.roleId}@${version} from ${registryName}`);
 
-  // 13. Print hint
+  // 12. Print hint
   out(`Run \`rolebox sync opencode\` to deploy`);
 }
 

@@ -2,6 +2,7 @@ import * as clack from "@clack/prompts";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, loadLock } from "./config.ts";
+import { defaultRegistry, effectiveRegistries } from "./sources.ts";
 import { fetchRegistryManifest } from "./registry-client.ts";
 import { getSyncTarget } from "./paths.ts";
 import { PLATFORM_REGISTRY } from "../platform/registry.ts";
@@ -167,18 +168,18 @@ export async function pickRegistryAndRole(
   prompts: PromptApi = realPrompts,
 ): Promise<{ registry?: string; roleId: string } | null> {
   const config = loadConfig();
-  if (config.registries.length === 0) {
+  const registries = effectiveRegistries(config);
+  if (registries.length === 0) {
     throw new Error("No registries configured. Run 'rolebox registry add' to add one.");
   }
 
-  const defaultRegistry =
-    config.registries.find((r) => r.default) ?? config.registries[0];
+  const defaultSource = defaultRegistry(config) ?? registries[0];
 
-  let registry = defaultRegistry;
-  if (config.registries.length > 1) {
+  let registry = defaultSource;
+  if (registries.length > 1) {
     const picked = await prompts.select({
       message: "Select a registry:",
-      options: config.registries.map((r) => ({
+      options: registries.map((r) => ({
         value: r.name,
         label: r.name,
         hint: r.url,
@@ -187,14 +188,14 @@ export async function pickRegistryAndRole(
       maxItems: 12,
     });
     if (isCancelled(picked, prompts)) return null;
-    registry = config.registries.find((r) => r.name === picked) ?? registry;
+    registry = registries.find((r) => r.name === picked) ?? registry;
   }
 
   const spinner = prompts.spinner();
   spinner.start(`Fetching roles from ${registry.name}…`);
   let manifest;
   try {
-    manifest = await fetchRegistryManifest(registry);
+    manifest = await fetchRegistryManifest(registry, registry.ref);
   } catch (err) {
     spinner.stop("Fetch failed");
     throw err;
@@ -222,7 +223,7 @@ export async function pickRegistryAndRole(
   // Only prefix the registry when it is NOT the default — keeps the spec short
   // (`roleId`) in the common single/default-registry case.
   const registryNeeded =
-    config.registries.length > 1 && registry.name !== defaultRegistry.name;
+    registries.length > 1 && registry.name !== defaultSource.name;
 
   return { registry: registryNeeded ? registry.name : undefined, roleId };
 }

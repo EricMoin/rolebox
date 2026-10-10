@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Features
+
+- **Role sources are genuinely multi-source, and the `rolebox registry` command family is complete** — `config.yaml`'s `registries` list used to be the whole story: it was consulted verbatim, so a config that listed only custom sources had no built-in source at all, and an unprefixed `rolebox install <role>` resolved in the default source alone. The built-in source is now always available — an entry that names it keeps its own `url`/`ref`, a file without such an entry gets it prepended, and this effective list is what `search`, `install`, `update`, `uninstall`, `info`, the pickers, `status` and `registry list --json` all resolve through (`src/cli/sources.ts`). Sources are consulted default first and then in config order, an unprefixed `rolebox install <role>` takes the first source that publishes it and warns about any source it could not fetch instead of swallowing the reason, and `rolebox search` notes a role published by several sources together with the `source:role` spec that selects one. `rolebox registry` gains the missing pieces: `add --name` (defaulting to the repo basename), `add --ref` (a branch or tag pinned per source, for both the manifest and the tarball), `add --default` plus the `registry default <name>` subcommand that switches the default, and `list --json`; the built-in source can no longer be removed, and `registries: []` stays the explicit "no sources at all" opt-out. Reference: [docs/cli.md](docs/cli.md#registry-subcommand); source model and resolution order: [docs/registry.md](docs/registry.md#sources).
+
+### Bug Fixes
+
+- **A role installed from one source is no longer mistaken for another source's copy** — the lock-file lookup ignored the source, so a `source:role` spec matched whichever entry happened to come first: `rolebox install other:role` reported "already installed" for a role that source had never provided, and `uninstall`/`info` acted on the wrong copy. Lookups now match role and source (`findInLock(role, registry)` plus `findAllInLock` for the whole set), `uninstall` and `info` refuse to guess when a role is installed from more than one source and name the `source:role` specs that disambiguate, `update` updates every copy and names the source in each success line, and the per-source registry caches are keyed by URL and resolved branch so two sources sharing a name can no longer read each other's cached manifest.
+
 ## 2.0.0-alpha.1
 
 ### Breaking Changes

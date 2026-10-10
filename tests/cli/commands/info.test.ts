@@ -227,3 +227,63 @@ describe("info", () => {
     expect(allOutput).toContain("Not synced");
   });
 });
+
+describe("info across sources", () => {
+  it("refuses to guess when the role is installed from more than one source", async () => {
+    createRoleDir("oh-my-role", "shared-role", "1.0.0", { name: "Shared" });
+    createRoleDir("custom", "shared-role", "2.0.0", { name: "Shared" });
+    createLockFile([
+      {
+        role: "shared-role",
+        registry: "oh-my-role",
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00Z",
+        integrity: "sha256-a",
+      },
+      {
+        role: "shared-role",
+        registry: "custom",
+        version: "2.0.0",
+        installedAt: "2024-01-01T00:00:00Z",
+        integrity: "sha256-b",
+      },
+    ]);
+
+    const { info } = await importInfo();
+    const error = await info("shared-role", false, false).catch((err: Error) => err);
+
+    expect(error.message).toContain(
+      "Role 'shared-role' is installed from more than one source: oh-my-role, custom",
+    );
+    expect(error.message).toContain("rolebox info oh-my-role:shared-role");
+  });
+
+  it("inspects the copy selected by a registry:role spec", async () => {
+    createRoleDir("oh-my-role", "shared-role", "1.0.0", { name: "Shared" });
+    createRoleDir("custom", "shared-role", "2.0.0", { name: "Shared" });
+    createLockFile([
+      {
+        role: "shared-role",
+        registry: "oh-my-role",
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00Z",
+        integrity: "sha256-a",
+      },
+      {
+        role: "shared-role",
+        registry: "custom",
+        version: "2.0.0",
+        installedAt: "2024-01-01T00:00:00Z",
+        integrity: "sha256-b",
+      },
+    ]);
+
+    const { info } = await importInfo();
+    const { logs, run } = captureLogs(() => info("custom:shared-role", false, false));
+    await run();
+
+    const allOutput = logs.join("\n");
+    expect(allOutput).toContain("2.0.0");
+    expect(allOutput).toContain("custom");
+  });
+});

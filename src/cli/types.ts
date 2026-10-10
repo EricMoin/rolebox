@@ -13,6 +13,8 @@ export interface RegistryManifest {
 export interface RegistryEntry {
   name: string;
   url: string;
+  /** Git branch or tag the manifest and tarball are read from. Defaults to DEFAULT_GIT_BRANCH. */
+  ref?: string;
   default?: boolean;
 }
 
