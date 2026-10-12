@@ -43,7 +43,7 @@ export const WORKER_TOOL_FORBIDDEN_CODE = "worker-tool-forbidden" as const;
  * ({@link declaredToolsAllow}) — a grant is a narrowing of what HOST tools the
  * node may use, never a second route to the face this boundary withholds.
  */
-export const WORKER_GRANTED_GRAPH_TOOLS: readonly string[] = Object.freeze([
+export const WORKER_GRANTED_GRAPH_TOOLS: readonly GraphToolName[] = Object.freeze([
   "graph_submit_outcome",
 ]);
 
@@ -78,7 +78,7 @@ export interface OutcomeWorkerToolBoundary {
    * face refuses a worker unless the node that worker executes declares it
    * through {@link OutcomeWorkerToolBoundary.declaredToolsOf}.
    */
-  readonly granted: readonly string[];
+  readonly granted: readonly GraphToolName[];
   /** The attempt one session is the confirmed worker of, or `undefined`. */
   readonly principalOf: (sessionId: string) => OutcomeWorkerPrincipal | undefined;
   /**
@@ -145,6 +145,53 @@ export const GRAPH_TOOL_NAME_PREFIX = "graph_" as const;
  */
 export function isGraphFaceToolName(toolName: string): boolean {
   return toolName.startsWith(GRAPH_TOOL_NAME_PREFIX);
+}
+
+/**
+ * THE CLOSED VOCABULARY of graph face tool names: the ONE list every face that
+ * grants, exposes or judges a graph tool is written against.
+ *
+ * Each face used to spell its own membership as a bare string literal, so
+ * `includes`/`has` accepted any string: a renamed or newly added tool changed
+ * no face's compile, and the in-process boundary, the remote worker channel and
+ * the dsh execution guard could disagree silently. Deriving
+ * {@link GraphToolName} from this list makes each face's membership a fact the
+ * compiler checks, and {@link isGraphToolName} is the one runtime narrowing a
+ * face uses to ask whether a name it only knows as a `string` belongs to the
+ * namespace at all.
+ *
+ * THIS IS THE SHIPPED SURFACE, NOT ONE FACE'S GRANT. A face that grants fewer
+ * names than the vocabulary (a dispatched worker's baseline) keeps its own list
+ * of them, typed by this union.
+ */
+export const GRAPH_TOOL_NAMES = Object.freeze([
+  /** The declaration ingress: build and persist a declared graph. */
+  "graph_declare",
+  /** The delivery channel every dispatched worker holds. */
+  "graph_submit_outcome",
+  /** The authoritative store's inventory. */
+  "graph_audit",
+  /** The authoritative store's status query. */
+  "graph_status",
+  /** The trusted lifecycle control entry. */
+  "graph_control",
+  /** dsh's worker command entry, shipped beside the graph face on that host. */
+  "graph_worker_exec",
+] as const);
+
+/** One tool name in the graph face's closed vocabulary. */
+export type GraphToolName = (typeof GRAPH_TOOL_NAMES)[number];
+
+/**
+ * Whether ONE caller-supplied string is a graph face tool name.
+ *
+ * The narrowing every face uses before it looks a name up in its own typed
+ * membership: a bare `string` is not assignable to {@link GraphToolName}, so an
+ * unchecked `includes`/`has` call is exactly what the compiler now refuses. A
+ * NAME TEST, not a lookup — it answers for a name no tool definition exists for.
+ */
+export function isGraphToolName(toolName: string): toolName is GraphToolName {
+  return GRAPH_TOOL_NAMES.some((name) => name === toolName);
 }
 
 /**
@@ -231,7 +278,7 @@ function workerToolRefusal(
   sessionId: string | undefined,
 ): string | undefined {
   if (boundary === undefined) return undefined;
-  if (boundary.granted.includes(toolName)) return undefined;
+  if (isGraphToolName(toolName) && boundary.granted.includes(toolName)) return undefined;
   if (sessionId === undefined || sessionId.length === 0) return undefined;
   const principal = boundary.principalOf(sessionId);
   if (principal === undefined) return undefined;

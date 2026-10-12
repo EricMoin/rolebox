@@ -1,5 +1,10 @@
 import { JoinStrategy } from "../../constants.ts";
-import type { CompiledEdge, CompiledNode, CompiledPlan } from "../compiler/plan.ts";
+import type {
+  CompiledEdge,
+  CompiledNode,
+  CompiledPlan,
+  JoinTopology,
+} from "../compiler/plan.ts";
 import { readQuorum, resolveJoinStrategy } from "../join-strategy.ts";
 import type { OutcomeArrival, OutcomeNodeState } from "./state-model.ts";
 import { malformedState } from "./state-errors.ts";
@@ -13,7 +18,7 @@ import { malformedState } from "./state-errors.ts";
  * back-edge: the route a member takes to ask for another round, not an
  * upstream result a consumer waits for.
  */
-function loopContinuationEdgesOf(plan: CompiledPlan): ReadonlySet<string> {
+function loopContinuationEdgesOf(plan: JoinTopology): ReadonlySet<string> {
   const loopEdges = new Set<string>();
   for (const group of plan.loopGroups) {
     const members = new Set(group.nodes);
@@ -30,7 +35,12 @@ function loopContinuationEdgesOf(plan: CompiledPlan): ReadonlySet<string> {
   return loopEdges;
 }
 
-export function entryNodesOf(plan: CompiledPlan): readonly CompiledNode[] {
+/**
+ * Declared over {@link JoinTopology}, not the whole plan: this reader and
+ * {@link feederSourcesOf} read only the topology, so a rule that reaches for a
+ * fourth plan field must widen the parameter instead of reading `undefined`.
+ */
+export function entryNodesOf(plan: JoinTopology): readonly CompiledNode[] {
   const loopEdges = loopContinuationEdgesOf(plan);
   const targeted = new Set<string>();
   for (const edge of plan.edges) {
@@ -58,7 +68,7 @@ export function entryNodesOf(plan: CompiledPlan): readonly CompiledNode[] {
  * non-membership edge counts, and `join: "all"` still waits for every feeder
  * this function returns.
  */
-export function feederSourcesOf(plan: CompiledPlan, targetId: string): readonly string[] {
+export function feederSourcesOf(plan: JoinTopology, targetId: string): readonly string[] {
   const loopEdges = loopContinuationEdgesOf(plan);
   const sources: string[] = [];
   const seen = new Set<string>();

@@ -87,13 +87,29 @@ export type BudgetLimitKind =
   | "output_tokens"
   | "cost_usd";
 
-/** Every authorized limit dimension, in canonical order. */
-export const BUDGET_LIMIT_KINDS: readonly BudgetLimitKind[] = Object.freeze([
+/**
+ * Compile-time completeness assertion: `Missing` is the set of keys the list it
+ * is instantiated with omits, so anything but `never` fails to compile here.
+ */
+type MissingKeysAreNever<Missing extends never> = Missing;
+
+/**
+ * Every authorized limit dimension, in canonical order.
+ *
+ * The list had no consumer; the completeness assertion below is what keeps it
+ * honest, so adding a dimension to the union without adding it here fails to
+ * compile instead of leaving a third, silently short enumeration.
+ */
+export const BUDGET_LIMIT_KINDS = Object.freeze([
   "duration_ms",
   "input_tokens",
   "output_tokens",
   "cost_usd",
-]);
+] as const satisfies readonly BudgetLimitKind[]);
+
+type _BudgetLimitKindsComplete = MissingKeysAreNever<
+  Exclude<BudgetLimitKind, (typeof BUDGET_LIMIT_KINDS)[number]>
+>;
 
 /**
  * The declared ceilings of ONE node, as the compiled plan authorizes them.
@@ -193,21 +209,74 @@ export type BudgetLimitReading =
   | { readonly kind: "ok"; readonly limits: NodeBudgetLimits }
   | { readonly kind: "refused"; readonly refusal: BudgetLimitRefusal };
 
-/** The budget keys the v3 grammar declares, and which of them this build reads. */
-const AUTHORIZED_BUDGET_KEYS: ReadonlySet<string> = new Set([
-  "max_input_tokens",
-  "max_output_tokens",
-  "max_cost_usd",
-  "timeout_ms",
-]);
-
-/** Per-node resource ceilings. */
-const LIMIT_KEYS: ReadonlyMap<string, BudgetLimitKind> = new Map([
+/**
+ * The budget keys the v3 grammar declares, and which of them this build reads,
+ * as ONE list of key → limit-dimension pairs.
+ *
+ * `satisfies` refuses a key the model does not declare (minus the retired
+ * `max_retries`) and the completeness assertion beside it refuses a model key
+ * this list omits, so the authorized set and the dimension lookup below can
+ * never disagree: a ceiling that is accepted is always a ceiling this build can
+ * enforce. EXPORTED so `tests/graph/compiler-vocabulary-type-guards.test.ts`
+ * pins the same link.
+ */
+export const BUDGET_KEY_DIMENSIONS = [
   ["max_input_tokens", "input_tokens"],
   ["max_output_tokens", "output_tokens"],
   ["max_cost_usd", "cost_usd"],
   ["timeout_ms", "duration_ms"],
-]);
+] as const satisfies readonly (readonly [
+  keyof Omit<NodeBudgetSpec, "max_retries">,
+  BudgetLimitKind,
+])[];
+
+type _BudgetKeysComplete = MissingKeysAreNever<
+  Exclude<keyof Omit<NodeBudgetSpec, "max_retries">, (typeof BUDGET_KEY_DIMENSIONS)[number][0]>
+>;
+
+/**
+ * Every limit dimension and the `NodeBudgetLimits` / `BudgetUsageAmounts` field
+ * that carries it, as ONE list in canonical reporting order.
+ *
+ * Both readers of a dimension use this list: `budgetOverrunsOf` compares each
+ * dimension's declared ceiling against its recorded usage, and
+ * `nodeBudgetLimitsOf` writes a ceiling into the field its dimension owns.
+ * Before this list each reader spelled the four dimensions out by hand — four
+ * `compare` calls, and an if/else whose final `else` claimed `cost_usd` — so a
+ * fifth `BudgetLimitKind` would have been compared nowhere and recorded as
+ * `cost_usd`. The completeness assertion below makes either a compile error
+ * instead. EXPORTED so `tests/graph/compiler-vocabulary-type-guards.test.ts`
+ * pins the same link.
+ */
+export const BUDGET_LIMIT_FIELDS = [
+  ["duration_ms", "durationMs"],
+  ["input_tokens", "inputTokens"],
+  ["output_tokens", "outputTokens"],
+  ["cost_usd", "costUsd"],
+] as const satisfies readonly (readonly [
+  BudgetLimitKind,
+  keyof NodeBudgetLimits & keyof BudgetUsageAmounts,
+])[];
+
+type _BudgetLimitFieldsComplete = MissingKeysAreNever<
+  Exclude<BudgetLimitKind, (typeof BUDGET_LIMIT_FIELDS)[number][0]>
+>;
+
+/** The budget keys this build enforces, derived from the one list above. */
+const AUTHORIZED_BUDGET_KEYS: ReadonlySet<string> = new Set<string>(
+  BUDGET_KEY_DIMENSIONS.map(([key]) => key),
+);
+
+/** Per-node resource ceilings, derived from the one list above. */
+const LIMIT_KEYS: ReadonlyMap<string, BudgetLimitKind> = new Map<string, BudgetLimitKind>(
+  BUDGET_KEY_DIMENSIONS.map(([key, dimension]): [string, BudgetLimitKind] => [key, dimension]),
+);
+
+/** The ceiling field each dimension is carried by, derived from the list above. */
+const LIMIT_FIELDS: ReadonlyMap<BudgetLimitKind, keyof NodeBudgetLimits> = new Map<
+  BudgetLimitKind,
+  keyof NodeBudgetLimits
+>(BUDGET_LIMIT_FIELDS.map(([kind, field]): [BudgetLimitKind, keyof NodeBudgetLimits] => [kind, field]));
 
 /**
  * Read one node's declared ceilings, or refuse the spec by name.
@@ -268,10 +337,9 @@ export function nodeBudgetLimitsOf(
         "recorded usage exists — nothing was dispatched under it",
       );
     }
-    if (dimension === "duration_ms") limits.durationMs = value;
-    else if (dimension === "input_tokens") limits.inputTokens = value;
-    else if (dimension === "output_tokens") limits.outputTokens = value;
-    else limits.costUsd = value;
+    const field = LIMIT_FIELDS.get(dimension);
+    if (field === undefined) continue;
+    limits[field] = value;
   }
   return Object.freeze({ kind: "ok", limits: Object.freeze(limits) });
 }
@@ -321,10 +389,9 @@ export function budgetOverrunsOf(
       Object.freeze({ nodeId, kind, limit, used: value, overBy: value - limit }),
     );
   };
-  compare("duration_ms", limits.durationMs, used.durationMs);
-  compare("input_tokens", limits.inputTokens, used.inputTokens);
-  compare("output_tokens", limits.outputTokens, used.outputTokens);
-  compare("cost_usd", limits.costUsd, used.costUsd);
+  for (const [kind, field] of BUDGET_LIMIT_FIELDS) {
+    compare(kind, limits[field], used[field]);
+  }
   return Object.freeze(out);
 }
 

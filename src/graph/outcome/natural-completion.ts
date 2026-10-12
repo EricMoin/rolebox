@@ -96,20 +96,21 @@ export function readNaturalCompletionDelivery(
     }
     // Read each field EXACTLY ONCE into a local, so an accessor-backed record
     // cannot answer one value to the check and another to the construction.
-    const nodeId = typeof record.nodeId === "string" ? record.nodeId : "";
+    const rawNodeId = record.nodeId;
+    const nodeId = typeof rawNodeId === "string" ? rawNodeId : "";
     if (nodeId.length === 0) {
       malformed(
         "$.nodeId",
-        "nodeId is " + describeValue(record.nodeId) + ", not a non-empty node id",
+        "nodeId is " + describeValue(rawNodeId) + ", not a non-empty node id",
       );
     }
-    const attemptId =
-      typeof record.attemptId === "string" ? record.attemptId : "";
+    const rawAttemptId = record.attemptId;
+    const attemptId = typeof rawAttemptId === "string" ? rawAttemptId : "";
     if (attemptId.length === 0) {
       malformed(
         "$.attemptId",
         "attemptId is " +
-        describeValue(record.attemptId) +
+        describeValue(rawAttemptId) +
         ", not a non-empty attempt id",
       );
     }

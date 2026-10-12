@@ -260,7 +260,25 @@ export class GraphNotifications {
     let captured = false;
     for (const graphId of this.store.invocationOriginGraphIds()) {
       if (this.store.readDefinition(graphId) === undefined) continue;
-      const origin = this.store.readInvocationOrigin(graphId)!;
+      const origin = this.store.readInvocationOrigin(graphId);
+      if (origin === undefined) {
+        // BOTH READS RUN ON ONE SYNCHRONOUS CONNECTION, so a listed graph id with
+        // no origin row means the store answered inconsistently. `{ ...origin }`
+        // would spread `undefined` — legal JavaScript — and persist a durable
+        // notification whose required `sessionId` is absent, with no throw and no
+        // diagnostic; the capture skips the graph and reports it instead. The
+        // once-per-unreadable-stretch memory is shared with the view failure
+        // below, so an inconsistent graph is named when it appears, not on every
+        // pass.
+        if (!this.unreadableGraphs.has(graphId)) {
+          withLogScope({ graphId }, () =>
+            logEvent("notifications.source-unreadable", {
+              error: "the store lists this graph's invocation origin but answered no origin record",
+            }));
+          this.unreadableGraphs.add(graphId);
+        }
+        continue;
+      }
       let graph: GraphView;
       try {
         graph = readGraphView(this.store, graphId);

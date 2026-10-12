@@ -170,9 +170,13 @@ export function createSchemaValidator(
           "the compiled plan declares no data contract for this outcome, so a required schema gate has nothing to check — an undeclared contract is not a passing one",
       };
     }
+    // Narrow ONCE into a local: `Number.isSafeInteger` is not a type guard, so
+    // the `typeof` check is what keeps the comparisons below checked.
+    const contractVersion = contract.version;
     if (
-      !Number.isSafeInteger(contract.version) ||
-      (contract.version as number) <= 0
+      typeof contractVersion !== "number" ||
+      !Number.isSafeInteger(contractVersion) ||
+      contractVersion <= 0
     ) {
       return {
         kind: "indeterminate",
@@ -183,7 +187,7 @@ export function createSchemaValidator(
       };
     }
     const registration = installed.get(
-      schemaKey(contract.schema, contract.version as number),
+      schemaKey(contract.schema, contractVersion),
     );
     if (registration === undefined) {
       return {
@@ -917,19 +921,27 @@ function readCommandBinding(
   if (cwd === undefined) {
     return problem("a trusted command binding needs a working directory (cwd)");
   }
+  // Each field is read into a local and narrowed with `typeof` / `Array.isArray`
+  // before use: `Number.isSafeInteger` is not a type guard, so a cast would be
+  // the only thing left checking that the comparison below sees a number.
+  const rawArgv = record.argv;
   if (
-    !Array.isArray(record.argv) ||
-    record.argv.length === 0 ||
-    !record.argv.every((part) => nonEmptyString(part) !== undefined)
+    !Array.isArray(rawArgv) ||
+    rawArgv.length === 0 ||
+    !rawArgv.every((part) => nonEmptyString(part) !== undefined)
   ) {
     return problem("argv must be a non-empty array of non-empty strings");
   }
   const timeoutMs = record.timeout_ms;
-  if (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) <= 0) {
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs <= 0
+  ) {
     return problem("timeout_ms must be a positive safe integer");
   }
   const expectExitCode = record.expect_exit_code;
-  if (!Number.isSafeInteger(expectExitCode)) {
+  if (typeof expectExitCode !== "number" || !Number.isSafeInteger(expectExitCode)) {
     return problem("expect_exit_code must be a safe integer");
   }
   const rawRefs = record.artifact_refs;
@@ -946,11 +958,11 @@ function readCommandBinding(
     graphId,
     nodeId,
     outcome,
-    argv: Object.freeze((record.argv as readonly string[]).map((part) => String(part))),
+    argv: Object.freeze(rawArgv.map((part) => String(part))),
     cwd,
-    timeoutMs: timeoutMs as number,
-    expectExitCode: expectExitCode as number,
-    artifactRefs: Object.freeze((rawRefs as readonly string[]).map((ref) => String(ref))),
+    timeoutMs,
+    expectExitCode,
+    artifactRefs: Object.freeze(rawRefs.map((ref) => String(ref))),
   });
   try {
     assertCommandBinding(binding);

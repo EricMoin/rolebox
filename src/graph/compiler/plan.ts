@@ -405,6 +405,16 @@ export interface CompiledPlan extends CompiledPlanBody {
   readonly planRevision: string;
 }
 
+/**
+ * The plan TOPOLOGY a join-satisfiability reader reads: the three body fields
+ * every entry/feeder rule touches, and nothing else.
+ *
+ * A rule that needs a fourth field must widen THIS type, so it fails to compile
+ * at every call site instead of reading `undefined` off a value that only
+ * pretends to be a whole plan.
+ */
+export type JoinTopology = Pick<CompiledPlanBody, "nodes" | "edges" | "loopGroups">;
+
 // ── Construction ────────────────────────────────────────────────────────────
 
 /**

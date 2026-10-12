@@ -58,6 +58,7 @@ import {
   type CompiledTopologyIssueCode,
   type CompiledUnauthorizedCompletion,
   type CompiledUnresolvedRequirement,
+  type JoinTopology,
 } from "./plan.ts";
 
 // ── Issues ──────────────────────────────────────────────────────────────────
@@ -503,7 +504,7 @@ function compileDeclaration(
  * THROUGH the node under test is dispatchable before it.
  */
 function dispatchableBefore(
-  plan: CompiledPlan,
+  plan: JoinTopology,
   entries: readonly CompiledNode[],
   targetId: string,
 ): Set<string> {
@@ -539,18 +540,13 @@ function dispatchableBefore(
   return runnable;
 }
 
-export function unsatisfiableJoinsOf(body: CompiledPlanBody): CompileIssue[] {
-  const joinView: CompiledPlan = Object.assign(Object.create(null), {
-    nodes: body.nodes,
-    edges: body.edges,
-    loopGroups: body.loopGroups,
-  });
-  const entries = entryNodesOf(joinView);
+export function unsatisfiableJoinsOf(body: JoinTopology): CompileIssue[] {
+  const entries = entryNodesOf(body);
   const entryIds = new Set(entries.map((node) => node.id));
   const issues: CompileIssue[] = [];
   for (const node of body.nodes) {
     if (entryIds.has(node.id)) continue;
-    const feeders = feederSourcesOf(joinView, node.id);
+    const feeders = feederSourcesOf(body, node.id);
     if (feeders.length === 0) continue;
     // The nodes this declaration can DISPATCH BEFORE the node under test — the
     // closure the runtime's own arm rule computes: the entry nodes run at start,
@@ -564,7 +560,7 @@ export function unsatisfiableJoinsOf(body: CompiledPlanBody): CompileIssue[] {
     // from the graph: it must run after every feeder its join waits for, so it
     // cannot be the reason a feeder runs first, and a feeder that only this node
     // would reach is not dispatchable first either.
-    const runnable = dispatchableBefore(joinView, entries, node.id);
+    const runnable = dispatchableBefore(body, entries, node.id);
     if (joinSatisfiedBy(node, runnable, feeders)) continue;
     for (const feeder of feeders) {
       if (runnable.has(feeder)) continue;
@@ -696,6 +692,16 @@ function compileNode(
     // rewrite of the declared policy: the plan carries the request and the
     // caller is told exactly what is missing.
     authorizeCompletion(node.id, completion.outcome, base, policyContext, log);
+  } else if (completion.kind === "absent" || completion.kind === "explicit") {
+    // Nothing to check: an absent policy leaves the plan's completion open and
+    // an explicit policy needs no mapping. Named here so the guard below is the
+    // last arm — a new CompletionReading member fails to compile instead of
+    // falling through and compiling with no completion policy.
+  } else {
+    const unhandled: never = completion;
+    throw new Error(
+      `completion reading ${JSON.stringify(unhandled)} has no compiler handling`,
+    );
   }
 
   const contractRef = bindContract(node, options, log, snapshots, identities);
@@ -1305,7 +1311,13 @@ function readCompletionPolicy(raw: unknown): CompletionReading {
   return { kind: "invalid" };
 }
 
-/** Project a valid completion reading into the plan's policy. */
+/**
+ * Project a valid completion reading into the plan's policy.
+ *
+ * EVERY member is named, and the last arm consumes `never`: a reading added to
+ * the union fails to compile here instead of falling into a swallowing
+ * `default` and silently compiling a node with no completion policy.
+ */
 function toPlanCompletion(
   reading: CompletionReading,
 ): CompiledCompletionPolicy | undefined {
@@ -1314,8 +1326,16 @@ function toPlanCompletion(
       return { mode: "explicit" };
     case "natural":
       return { mode: "natural", outcome: reading.outcome };
-    default:
+    case "absent":
+    case "invalid":
+    case "duplicate-natural":
+      // `absent` leaves the policy open; the two malformed readings are
+      // already refused by `compileNode` and carry no plan policy.
       return undefined;
+    default: {
+      const unhandled: never = reading;
+      return unhandled;
+    }
   }
 }
 

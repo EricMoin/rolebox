@@ -223,18 +223,46 @@ export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freez
  * approval commands, which pause and resolve an attempt rather than end it.
  *
  * WHY ONE OWNER. The store's own conditional INSERT refuses a second STOPPING
- * command on one attempt with exactly this set (and so this list is
- * membership-identical to that SQL literal), the acceptance guard refuses a
+ * command on one attempt with exactly this set (the store's SQL list is
+ * GENERATED from this constant, so the two cannot drift), the acceptance guard
+ * refuses a
  * batch for an attempt the set names, and the launch decision refuses to
  * (re-)create a stopped attempt's execution. Three readers of one rule, so the
  * classification is stated once and cannot drift: an attempt carries at most
  * one stopping fact, whichever of a command and an acceptance commits first.
  */
-export const STOPPING_CONTROL_COMMANDS: readonly ControlCommandName[] = Object.freeze([
+/**
+ * The STOPPING commands as CLOSED LITERALS — the one list both the export below
+ * and the completeness assertion under it are derived from.
+ *
+ * It is kept apart from the export because the export's consumers ask
+ * `includes(aControlCommand)`, which a literal tuple would narrow to these four
+ * members; the tuple is the SOURCE and the export is the widened view of it.
+ */
+const STOPPING_CONTROL_COMMAND_LITERALS = [
   "failure",
   "timeout",
   "cancel",
   "budget-stop",
+] as const satisfies readonly ControlCommandName[];
+
+/** One command that stops an attempt, derived from the literals above. */
+export type StoppingControlCommand =
+  (typeof STOPPING_CONTROL_COMMAND_LITERALS)[number];
+
+/**
+ * COMPLETENESS: every command the list carries is a member of the control
+ * vocabulary. The `satisfies` above rejects a member the union does not define,
+ * and this assertion names the link so a future edit that widens one without
+ * the other fails at the declaration instead of in a store guard.
+ */
+type AssertNever<T extends never> = T;
+type _EveryStoppingCommandIsAControlCommand = AssertNever<
+  Exclude<StoppingControlCommand, ControlCommandName>
+>;
+
+export const STOPPING_CONTROL_COMMANDS: readonly ControlCommandName[] = Object.freeze([
+  ...STOPPING_CONTROL_COMMAND_LITERALS,
 ]);
 
 /**

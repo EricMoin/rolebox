@@ -67,7 +67,8 @@ import { encodeJsonBody } from "./json.ts";
 import { LedgerTables } from "./ledger-tables.ts";
 import {
   GRAPH_STORE_FORMAT_VERSION,
-  GRAPH_STORE_TABLES
+  GRAPH_STORE_TABLES,
+  STOPPING_CONTROL_COMMAND_SQL
 } from "./schema.ts";
 import type { HostExecutionRefusal } from "../host/execution-index.ts";
 import type {
@@ -2154,7 +2155,7 @@ export class GraphStore {
                 decided_by_session, decided_by_agent, successor_attempt_id
          FROM ${GRAPH_STORE_TABLES.controlDecisions}
          WHERE graph_id = ? AND attempt_id = ?
-           AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+           AND command IN (${STOPPING_CONTROL_COMMAND_SQL})
          ORDER BY decided_at LIMIT 1`,
       )
       .get(graphId, attemptId);
@@ -2310,11 +2311,11 @@ export class GraphStore {
            WHERE graph_id = ? AND attempt_id = ?
          )
          AND NOT (
-           ? IN ('failure', 'cancel', 'timeout', 'budget-stop')
+           ? IN (${STOPPING_CONTROL_COMMAND_SQL})
            AND EXISTS (
              SELECT 1 FROM ${GRAPH_STORE_TABLES.controlDecisions}
              WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
-               AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+               AND command IN (${STOPPING_CONTROL_COMMAND_SQL})
                AND command <> ?
            )
          )`,
@@ -2445,7 +2446,7 @@ export class GraphStore {
                 decided_by_session, decided_by_agent, successor_attempt_id
          FROM ${GRAPH_STORE_TABLES.controlDecisions}
          WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
-           AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+           AND command IN (${STOPPING_CONTROL_COMMAND_SQL})
            AND command <> ?
          ORDER BY decided_at, rowid LIMIT 1`,
       )

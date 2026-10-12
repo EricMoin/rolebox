@@ -10,6 +10,7 @@ import type {
   BudgetReleaseInput,
   BudgetReleaseResult,
   BudgetReservationRecord,
+  BudgetReservationStatus,
   BudgetReserveInput,
   BudgetReserveResult,
   BudgetUsageInput,
@@ -19,8 +20,30 @@ import { GraphStoreWriteError } from "./errors.ts";
 import { malformedRow } from "./format.ts";
 import { GRAPH_STORE_TABLES } from "./schema.ts";
 
-/** The statuses a reservation row can carry, as the table's CHECK declares. */
-const RESERVATION_STATUSES = ["reserved", "reconciled", "released"] as const;
+/**
+ * Every status a reservation row can carry, as the table's CHECK declares.
+ *
+ * KEYED BY THE UNION, so an omission fails to compile: the record is the one
+ * enumeration and `BudgetReservationStatus` owns it, rather than a local tuple
+ * related to the union only by a cast. The set below is the reader's membership
+ * index over an untyped column value, and {@link isReservationStatus} is the
+ * total test that lets `toReservation` narrow instead of asserting.
+ */
+const RESERVATION_STATUS_BY_NAME = Object.freeze({
+  reserved: true,
+  reconciled: true,
+  released: true,
+} as const satisfies Readonly<Record<BudgetReservationStatus, true>>);
+
+/** The statuses above, as the membership index the reader tests against. */
+const RESERVATION_STATUSES: ReadonlySet<string> = new Set(
+  Object.keys(RESERVATION_STATUS_BY_NAME),
+);
+
+/** Total membership test for one persisted reservation status. */
+function isReservationStatus(value: unknown): value is BudgetReservationStatus {
+  return typeof value === "string" && RESERVATION_STATUSES.has(value);
+}
 
 /**
  * One limit dimension, as the three column families of the budget table.
@@ -39,60 +62,209 @@ interface BudgetDimension {
   readonly limitOf: (limits: NodeBudgetLimits) => number | undefined;
 }
 
-const DIMENSIONS: readonly BudgetDimension[] = Object.freeze([
-  {
-    kind: "duration_ms" as const,
+/**
+ * The limit-dimension catalog, KEYED BY THE UNION.
+ *
+ * The record spelling makes `BudgetLimitKind` the owner of this list: a
+ * dimension added to the union with no entry here fails to compile, so the
+ * statement that enforces it and the queries that read it cannot silently omit
+ * it. The ordered list below holds the same entries.
+ */
+const DIMENSIONS = Object.freeze({
+  duration_ms: {
+    kind: "duration_ms",
     checkedColumn: "checked_duration_ms",
     reservedColumn: "reserved_duration_ms",
     usedColumn: "used_duration_ms",
     limitOf: (limits: NodeBudgetLimits): number | undefined => limits.durationMs,
   },
-  {
-    kind: "input_tokens" as const,
+  input_tokens: {
+    kind: "input_tokens",
     checkedColumn: "checked_input_tokens",
     reservedColumn: "reserved_input_tokens",
     usedColumn: "used_input_tokens",
     limitOf: (limits: NodeBudgetLimits): number | undefined => limits.inputTokens,
   },
-  {
-    kind: "output_tokens" as const,
+  output_tokens: {
+    kind: "output_tokens",
     checkedColumn: "checked_output_tokens",
     reservedColumn: "reserved_output_tokens",
     usedColumn: "used_output_tokens",
     limitOf: (limits: NodeBudgetLimits): number | undefined => limits.outputTokens,
   },
-  {
-    kind: "cost_usd" as const,
+  cost_usd: {
+    kind: "cost_usd",
     checkedColumn: "checked_cost_usd",
     reservedColumn: "reserved_cost_usd",
     usedColumn: "used_cost_usd",
     limitOf: (limits: NodeBudgetLimits): number | undefined => limits.costUsd,
   },
-]);
+} as const satisfies Readonly<Record<BudgetLimitKind, BudgetDimension>>);
+
+/**
+ * The same catalog in canonical order, for the code that iterates it.
+ *
+ * `Object.values` preserves the literal's order, which is the order the
+ * generated INSERT, the reader and the schema gate already expect.
+ */
+const BUDGET_DIMENSIONS: readonly BudgetDimension[] = Object.freeze(Object.values(DIMENSIONS));
 
 /** The accounting fields of one usage reading, in the port's own names. */
 type UsageField = keyof Omit<BudgetUsageAmounts, "executions">;
 
+/**
+ * The accounting field of each dimension, in the port's own names.
+ *
+ * KEYED BY THE UNION like {@link DIMENSIONS}: the sums query and the reader of
+ * the declared ceilings each address one column per dimension, so a dimension
+ * the union gains must be given a field here or its arithmetic is silently
+ * omitted — the literal would not type-check instead.
+ */
+const AMOUNT_FIELD_BY_KIND = Object.freeze({
+  duration_ms: "durationMs",
+  input_tokens: "inputTokens",
+  output_tokens: "outputTokens",
+  cost_usd: "costUsd",
+} as const satisfies Readonly<Record<BudgetLimitKind, UsageField>>);
+
+/** The fields above paired with their dimension, in the catalog's order. */
 const USAGE_FIELDS: readonly {
   readonly field: UsageField;
   readonly limitKind: BudgetLimitKind;
-}[] = Object.freeze([
-  { field: "durationMs", limitKind: "duration_ms" },
-  { field: "inputTokens", limitKind: "input_tokens" },
-  { field: "outputTokens", limitKind: "output_tokens" },
-  { field: "costUsd", limitKind: "cost_usd" },
-]);
+}[] = Object.freeze(
+  BUDGET_DIMENSIONS.map((dimension) => ({
+    field: AMOUNT_FIELD_BY_KIND[dimension.kind],
+    limitKind: dimension.kind,
+  })),
+);
 
-/** One column of the budget table, by dimension and family. */
+/**
+ * One column of the budget table, by dimension and family.
+ *
+ * A direct lookup rather than a search with an unreachable refusal: the catalog
+ * is keyed by `BudgetLimitKind`, so every argument has an entry by construction.
+ */
 function columnOf(kind: BudgetLimitKind, family: "reserved" | "used"): string {
-  for (const dimension of DIMENSIONS) {
-    if (dimension.kind !== kind) continue;
-    return family === "reserved" ? dimension.reservedColumn : dimension.usedColumn;
+  const dimension = DIMENSIONS[kind];
+  return family === "reserved" ? dimension.reservedColumn : dimension.usedColumn;
+}
+
+/** One value the reservation statement binds: an identifier, a ceiling or a count. */
+export type BudgetSqlValue = string | number | null;
+
+/** What {@link reserveDispatchStatement} needs: the row it claims and the clock. */
+export interface ReserveDispatchStatementInput {
+  readonly table: string;
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly effectId: string;
+  readonly at: number;
+  readonly limits: NodeBudgetLimits;
+  readonly maxExecutions: number | undefined;
+}
+
+/**
+ * The INSERT that claims one dispatch, PAIRED with the values it binds.
+ *
+ * THE COLUMNS AND THE BINDINGS COME FROM ONE ITERATION. The `checked_*` column
+ * list, its placeholders and their four bindings are all emitted by the same
+ * pass over {@link BUDGET_DIMENSIONS}, and the `reserved_*` column list comes
+ * from that pass too — so a fifth dimension grows the statement and the
+ * bindings together
+ * instead of shifting every later value into a column it does not belong to. The
+ * placeholder count is asserted against the binding count before the statement
+ * can be run at all: `unknown[]` erases that pairing, and this is the cheap
+ * total check that reports it instead of silently writing wrong arithmetic.
+ *
+ * WHY THE SQL IS HALF GENERATED. For each dimension the declared ceiling and
+ * what is LEFT of it are read by subqueries over the rows the WHERE below
+ * approved in the SAME statement, so the values written are the values that
+ * passed the gate.
+ */
+export function reserveDispatchStatement(
+  input: ReserveDispatchStatementInput,
+): { readonly sql: string; readonly params: readonly BudgetSqlValue[] } {
+  const {
+    table,
+    graphId,
+    runId,
+    nodeId,
+    attemptId,
+    effectId,
+    at,
+    limits,
+    maxExecutions,
+  } = input;
+  const remainingOf = (dimension: BudgetDimension): string =>
+    `CASE WHEN ? IS NULL THEN 0 ELSE ? - ` +
+    `COALESCE((SELECT SUM(${dimension.usedColumn}) FROM ${table} ` +
+    `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reconciled'), 0) - ` +
+    `COALESCE((SELECT SUM(${dimension.reservedColumn}) FROM ${table} ` +
+    `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reserved'), 0) END`;
+
+  const headroomOf = (dimension: BudgetDimension): string =>
+    `(? IS NULL OR (` +
+    `COALESCE((SELECT SUM(${dimension.usedColumn}) FROM ${table} ` +
+    `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reconciled'), 0) + ` +
+    `COALESCE((SELECT SUM(${dimension.reservedColumn}) FROM ${table} ` +
+    `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reserved'), 0)` +
+    `) < ?)`;
+
+  const checkedColumns: string[] = [];
+  const checkedPlaceholders: string[] = [];
+  const reservedColumns: string[] = [];
+  const params: BudgetSqlValue[] = [graphId, runId, nodeId, attemptId, effectId];
+  for (const dimension of BUDGET_DIMENSIONS) {
+    checkedColumns.push(dimension.checkedColumn);
+    checkedPlaceholders.push("?");
+    reservedColumns.push(dimension.reservedColumn);
+    params.push(dimension.limitOf(limits) ?? null);
   }
-  throw new GraphStoreWriteError(
-    "invalid-record",
-    "graph-store: " + JSON.stringify(kind) + " is not an authorized budget dimension",
-  );
+  params.push(1); // reserved_executions: exactly one armed dispatch.
+  for (const dimension of BUDGET_DIMENSIONS) {
+    const limit = dimension.limitOf(limits) ?? null;
+    params.push(limit, limit, graphId, runId, nodeId, graphId, runId, nodeId);
+  }
+  params.push(at);
+  params.push(graphId, runId, nodeId, attemptId);
+  for (const dimension of BUDGET_DIMENSIONS) {
+    const limit = dimension.limitOf(limits) ?? null;
+    params.push(limit, graphId, runId, nodeId, graphId, runId, nodeId, limit);
+  }
+  params.push(maxExecutions ?? null, graphId, runId, maxExecutions ?? null);
+
+  const sql =
+    `INSERT INTO ${table} (
+       graph_id, run_id, node_id, attempt_id, effect_id, status,
+       ${checkedColumns.join(", ")},
+       reserved_executions, ${reservedColumns.join(", ")},
+       reserved_at
+     )
+     SELECT ?, ?, ?, ?, ?, 'reserved',
+            ${checkedPlaceholders.join(", ")},
+            ?, ${BUDGET_DIMENSIONS.map(remainingOf).join(", ")},
+            ?
+     WHERE NOT EXISTS (
+       SELECT 1 FROM ${table}
+       WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
+     )
+       AND ${BUDGET_DIMENSIONS.map(headroomOf).join("\n       AND ")}
+       AND (? IS NULL OR (SELECT COUNT(*) FROM ${table}
+         WHERE graph_id = ? AND run_id = ?) < ?)`;
+  const placeholders = sql.split("?").length - 1;
+  if (placeholders !== params.length) {
+    throw new GraphStoreWriteError(
+      "invalid-record",
+      "graph-store: the budget reservation statement has " +
+        placeholders +
+        " placeholders but " +
+        params.length +
+        " bindings — refusing to run a claim whose columns and values are not a matched pair",
+    );
+  }
+  return Object.freeze({ sql, params: Object.freeze(params) });
 }
 
 /** Name what was received for a diagnostic, without throwing on the value. */
@@ -371,62 +543,18 @@ export class BudgetTables {
     return this.join(() => {
       this.lockWrite(graphId);
       this.requireRunId(graphId, runId);
-      // ── The claim amounts ───────────────────────────────────────────────
-      //
-      // For each dimension: the declared ceiling, and what is LEFT of it. The
-      // subqueries read the rows the WHERE below approved in the same statement,
-      // so the values written are the values that passed the gate.
-      const remainingOf = (dimension: BudgetDimension): string =>
-        `CASE WHEN ? IS NULL THEN 0 ELSE ? - ` +
-        `COALESCE((SELECT SUM(${dimension.usedColumn}) FROM ${table} ` +
-        `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reconciled'), 0) - ` +
-        `COALESCE((SELECT SUM(${dimension.reservedColumn}) FROM ${table} ` +
-        `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reserved'), 0) END`;
-
-      const headroomOf = (dimension: BudgetDimension): string =>
-        `(? IS NULL OR (` +
-        `COALESCE((SELECT SUM(${dimension.usedColumn}) FROM ${table} ` +
-        `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reconciled'), 0) + ` +
-        `COALESCE((SELECT SUM(${dimension.reservedColumn}) FROM ${table} ` +
-        `WHERE graph_id = ? AND run_id = ? AND node_id = ? AND status = 'reserved'), 0)` +
-        `) < ?)`;
-
-      const params: unknown[] = [graphId, runId, nodeId, attemptId, effectId];
-      for (const dimension of DIMENSIONS) params.push(dimension.limitOf(limits) ?? null);
-      params.push(1); // reserved_executions: exactly one armed dispatch.
-      for (const dimension of DIMENSIONS) {
-        const limit = dimension.limitOf(limits) ?? null;
-        params.push(limit, limit, graphId, runId, nodeId, graphId, runId, nodeId);
-      }
-      params.push(at);
-      params.push(graphId, runId, nodeId, attemptId);
-      for (const dimension of DIMENSIONS) {
-        const limit = dimension.limitOf(limits) ?? null;
-        params.push(limit, graphId, runId, nodeId, graphId, runId, nodeId, limit);
-      }
-      params.push(maxExecutions ?? null, graphId, runId, maxExecutions ?? null);
-
-      this.db.run(
-        `INSERT INTO ${table} (
-           graph_id, run_id, node_id, attempt_id, effect_id, status,
-           checked_duration_ms, checked_input_tokens, checked_output_tokens, checked_cost_usd,
-           reserved_executions, reserved_duration_ms, reserved_input_tokens,
-           reserved_output_tokens, reserved_cost_usd,
-           reserved_at
-         )
-         SELECT ?, ?, ?, ?, ?, 'reserved',
-                ?, ?, ?, ?,
-                ?, ${DIMENSIONS.map(remainingOf).join(", ")},
-                ?
-         WHERE NOT EXISTS (
-           SELECT 1 FROM ${table}
-           WHERE graph_id = ? AND run_id = ? AND node_id = ? AND attempt_id = ?
-         )
-           AND ${DIMENSIONS.map(headroomOf).join("\n           AND ")}
-           AND (? IS NULL OR (SELECT COUNT(*) FROM ${table}
-             WHERE graph_id = ? AND run_id = ?) < ?)`,
-        ...params,
-      );
+      const statement = reserveDispatchStatement({
+        table,
+        graphId,
+        runId,
+        nodeId,
+        attemptId,
+        effectId,
+        at,
+        limits,
+        maxExecutions,
+      });
+      this.db.run(statement.sql, ...statement.params);
       if (this.changes() === 1) {
         const reservation = this.readReservationIn(graphId, attemptId, runId);
         if (reservation === undefined) {
@@ -482,7 +610,7 @@ export class BudgetTables {
         message: `run ${JSON.stringify(runId)} has reserved ${committed} executions against max_executions ${maxExecutions}`,
       }));
     }
-    for (const dimension of DIMENSIONS) {
+    for (const dimension of BUDGET_DIMENSIONS) {
       const limit = dimension.limitOf(limits);
       if (limit === undefined) continue;
       const committed = this.committedOf(graphId, runId, nodeId, dimension);
@@ -928,10 +1056,7 @@ export class BudgetTables {
   private toReservation(row: Record<string, unknown>): BudgetReservationRecord {
     const table = GRAPH_STORE_TABLES.budgetReservations;
     const status = row["status"];
-    if (
-      typeof status !== "string" ||
-      !RESERVATION_STATUSES.includes(status as (typeof RESERVATION_STATUSES)[number])
-    ) {
+    if (!isReservationStatus(status)) {
       throw malformedRow(
         this.filePath,
         table,
@@ -944,13 +1069,10 @@ export class BudgetTables {
       outputTokens?: number;
       costUsd?: number;
     } = {};
-    for (const dimension of DIMENSIONS) {
+    for (const dimension of BUDGET_DIMENSIONS) {
       const ceiling = readOptionalAmount(row, dimension.checkedColumn, this.filePath, table);
       if (ceiling === undefined) continue;
-      if (dimension.kind === "duration_ms") checked.durationMs = ceiling;
-      else if (dimension.kind === "input_tokens") checked.inputTokens = ceiling;
-      else if (dimension.kind === "output_tokens") checked.outputTokens = ceiling;
-      else checked.costUsd = ceiling;
+      checked[AMOUNT_FIELD_BY_KIND[dimension.kind]] = ceiling;
     }
     const settled = status === "reconciled";
     return Object.freeze({
@@ -959,7 +1081,7 @@ export class BudgetTables {
       nodeId: readText(row, "node_id", this.filePath, table),
       attemptId: readText(row, "attempt_id", this.filePath, table),
       effectId: readText(row, "effect_id", this.filePath, table),
-      status: status as BudgetReservationRecord["status"],
+      status,
       checked: Object.freeze(checked),
       reserved: Object.freeze({
         executions: readCount(row, "reserved_executions", this.filePath, table),
@@ -1001,7 +1123,7 @@ const RESERVATION_COLUMNS = [
   "attempt_id",
   "effect_id",
   "status",
-  ...DIMENSIONS.flatMap((dimension) => [
+  ...BUDGET_DIMENSIONS.flatMap((dimension) => [
     dimension.checkedColumn,
     dimension.reservedColumn,
     dimension.usedColumn,

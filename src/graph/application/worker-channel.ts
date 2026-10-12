@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { GraphStore } from "../store/graph-store.ts";
+import { isGraphToolName, type GraphToolName } from "../host/tool-binding.ts";
 import { z } from "zod";
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 
@@ -13,7 +14,35 @@ export interface WorkerChannelGrant {
   readonly routeFile?: string;
 }
 
-const allowedTools = new Set(["graph_submit_outcome", "graph_status", "graph_audit"]);
+/**
+ * THE GRAPH FACE THIS REMOTE CHANNEL EXPOSES to the worker process it serves.
+ *
+ * The list is the channel's own access decision (`allowedTools` below) AND the
+ * set the Pi worker process registers as model-facing tools
+ * (`src/platform/adapters/pi/graph-worker.ts`), so the two are one declaration:
+ * the face a worker process is handed and the face the channel will serve
+ * cannot drift apart. Typed by the closed vocabulary
+ * ({@link GraphToolName}), so a misspelled or renamed entry is a compile error
+ * rather than a 403 a worker only discovers at runtime.
+ *
+ * THE MEMBERSHIP DIVERGES FROM THE IN-PROCESS WORKER BASELINE ON PURPOSE, AND
+ * THE DIVERGENCE IS RECORDED RATHER THAN UNIFIED. `graph_status` and
+ * `graph_audit` read the authoritative store, which
+ * `src/graph/host/tool-binding.ts` reserves to the declaring principal, so the
+ * in-process face refuses them to a dispatched worker
+ * ({@link WORKER_GRANTED_GRAPH_TOOLS} — the delivery channel alone). This
+ * remote channel exposes the pair to the worker process it serves today, and
+ * narrowing it would withdraw a capability the audit did not authorize
+ * changing; the choice is a product decision, so the lists stay typed and
+ * comparable instead of being silently reconciled. Widening the in-process
+ * face would be the same unauthorized change in the other direction.
+ */
+export const WORKER_CHANNEL_GRAPH_TOOLS: readonly GraphToolName[] = Object.freeze([
+  "graph_submit_outcome",
+  "graph_status",
+  "graph_audit",
+]);
+const allowedTools: ReadonlySet<GraphToolName> = new Set(WORKER_CHANNEL_GRAPH_TOOLS);
 const tokenDigest = (token: string) => createHash("sha256").update(token).digest("hex");
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
@@ -56,7 +85,11 @@ export async function openGraphWorkerChannel(
       }
       const input: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       const envelope = z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()) }).strict().parse(input);
-      const tool = allowedTools.has(envelope.tool) ? tools[envelope.tool] : undefined;
+      // The name arrives as an unchecked `string`: it is narrowed into the
+      // closed vocabulary FIRST, so the typed membership below is a real check
+      // and a name outside the face cannot reach a tool definition at all.
+      const tool = isGraphToolName(envelope.tool) && allowedTools.has(envelope.tool)
+        ? tools[envelope.tool] : undefined;
       if (!tool) { reply(403, { error: "This worker channel does not expose that tool" }); return; }
       const args = z.object(tool.args).strict().parse(envelope.args);
       const context: CanonicalToolContext = {

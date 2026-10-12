@@ -221,15 +221,29 @@ export function bindingOf(
   });
 }
 
+/**
+ * The binding fields the staleness gate compares, in the order a difference is
+ * reported — the ONE list both {@link bindingsEqual} and {@link staleRefusal}
+ * read. `satisfies` rejects a name that is not a field, and the assertion below
+ * rejects a field that is missing, so a new binding field cannot escape the
+ * comparison by being forgotten at one of the two sites.
+ */
+const VALIDATION_BINDING_FIELDS = [
+  "graphId",
+  "attemptId",
+  "submissionId",
+  "planRevision",
+  "proposalDigest",
+] as const satisfies readonly (keyof ValidationBinding)[];
+
+type AssertNever<T extends never> = T;
+type _EveryValidationBindingFieldIsCompared = AssertNever<
+  Exclude<keyof ValidationBinding, (typeof VALIDATION_BINDING_FIELDS)[number]>
+>;
+
 /** Whether two bindings describe the same proposal, plan revision and execution. */
 export function bindingsEqual(a: ValidationBinding, b: ValidationBinding): boolean {
-  return (
-    a.graphId === b.graphId &&
-    a.attemptId === b.attemptId &&
-    a.submissionId === b.submissionId &&
-    a.planRevision === b.planRevision &&
-    a.proposalDigest === b.proposalDigest
-  );
+  return VALIDATION_BINDING_FIELDS.every((field) => a[field] === b[field]);
 }
 
 /** What {@link validateSubmission} answered. */
@@ -919,14 +933,7 @@ function staleRefusal(
     };
   }
   const differences: string[] = [];
-  const fields: readonly (keyof ValidationBinding)[] = [
-    "graphId",
-    "attemptId",
-    "submissionId",
-    "planRevision",
-    "proposalDigest",
-  ];
-  for (const field of fields) {
+  for (const field of VALIDATION_BINDING_FIELDS) {
     if (recorded[field] !== live[field]) {
       differences.push(
         `${field} ${JSON.stringify(recorded[field])} -> ${JSON.stringify(live[field])}`,

@@ -45,16 +45,19 @@ export type OutcomeGraphPhase =
   | "complete"
   | "stopped";
 
-export type OutcomeStopReason =
-  | "loop-exhausted"
-  | "progress-stalled"
-  | "unreachable-pending-node";
-
-export const OUTCOME_STOP_REASONS: readonly OutcomeStopReason[] = Object.freeze([
+/**
+ * The stop reasons this build defines, in canonical order — the ONE source the
+ * union and the reader share, so a reason cannot be declared without being
+ * readable, nor readable without being declared.
+ */
+export const OUTCOME_STOP_REASONS = Object.freeze([
   "loop-exhausted",
   "progress-stalled",
   "unreachable-pending-node",
-]);
+] as const);
+
+/** One reason a run stopped, derived from {@link OUTCOME_STOP_REASONS}. */
+export type OutcomeStopReason = (typeof OUTCOME_STOP_REASONS)[number];
 
 export interface OutcomeLoopExhaustedStop {
   readonly reason: "loop-exhausted";
@@ -128,6 +131,19 @@ export type OutcomeStop =
   | OutcomeLoopExhaustedStop
   | OutcomeProgressStalledStop
   | OutcomeUnreachablePendingNodeStop;
+
+/**
+ * The list and the arms cannot drift: every listed reason must have an arm, and
+ * every arm's reason must be listed. A member added to one side alone is a
+ * compile error here rather than a persisted state the reader refuses.
+ */
+type AssertNever<T extends never> = T;
+type _EveryStopReasonHasAnArm = AssertNever<
+  Exclude<OutcomeStopReason, OutcomeStop["reason"]>
+>;
+type _EveryStopArmIsAStopReason = AssertNever<
+  Exclude<OutcomeStop["reason"], OutcomeStopReason>
+>;
 
 export interface OutcomeGraphState {
 

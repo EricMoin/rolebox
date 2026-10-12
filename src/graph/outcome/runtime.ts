@@ -856,14 +856,18 @@ export class OutcomeGraphRuntime {
         ? {}
         : {
           inFlight: new Set(
-            state.nodes
-              .filter((node) => node.status === "dispatched" && node.attemptId !== undefined)
-              .map((node) => node.attemptId as string),
+            state.nodes.flatMap((node) =>
+              node.status === "dispatched" && node.attemptId !== undefined
+                ? [node.attemptId]
+                : [],
+            ),
           ),
           settled: new Set(
-            state.nodes
-              .filter((node) => node.status === "settled" && node.attemptId !== undefined)
-              .map((node) => node.attemptId as string),
+            state.nodes.flatMap((node) =>
+              node.status === "settled" && node.attemptId !== undefined
+                ? [node.attemptId]
+                : [],
+            ),
           ),
         }),
     });

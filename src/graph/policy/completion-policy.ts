@@ -437,14 +437,30 @@ export type CompletionAuthorizationIssueCode =
   /** The policy resolved but does not grant this mapping. */
   | "completion-policy-ungranted";
 
-/** The draft-reason vocabulary, in canonical order. */
-export const COMPLETION_AUTHORIZATION_ISSUE_CODES: readonly CompletionAuthorizationIssueCode[] =
-  Object.freeze([
-    "completion-policy-unavailable",
-    "completion-policy-unknown",
-    "completion-policy-unknown-revision",
-    "completion-policy-ungranted",
-  ]);
+/**
+ * The draft-reason vocabulary, in canonical order.
+ *
+ * LINKED to the union it mirrors: `satisfies` refuses a code the union does not
+ * declare and the completeness assertion below refuses a union member this list
+ * omits, so the reader that admits a persisted reason and the union that names
+ * it cannot drift apart. EXPORTED so
+ * `tests/graph/compiler-vocabulary-type-guards.test.ts` pins the same link.
+ */
+export const COMPLETION_AUTHORIZATION_ISSUE_CODES = Object.freeze([
+  "completion-policy-unavailable",
+  "completion-policy-unknown",
+  "completion-policy-unknown-revision",
+  "completion-policy-ungranted",
+] as const satisfies readonly CompletionAuthorizationIssueCode[]);
+
+/**
+ * Compile-time completeness assertion: `Missing` is the set of codes the list
+ * above omits, so anything but `never` fails to compile here.
+ */
+type MissingKeysAreNever<Missing extends never> = Missing;
+type _CompletionIssueCodesComplete = MissingKeysAreNever<
+  Exclude<CompletionAuthorizationIssueCode, (typeof COMPLETION_AUTHORIZATION_ISSUE_CODES)[number]>
+>;
 
 /** Read one draft-reason code, or `undefined` when it is not in the vocabulary. */
 export function readCompletionAuthorizationIssueCode(

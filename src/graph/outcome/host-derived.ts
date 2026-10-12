@@ -177,40 +177,41 @@ export function readHostDerivedCompletionFact(
     }
     // Read each field EXACTLY ONCE into a local, so an accessor-backed record
     // cannot answer one value to the check and another to the construction.
-    const nodeId = typeof record.nodeId === "string" ? record.nodeId : "";
+    const rawNodeId = record.nodeId;
+    const nodeId = typeof rawNodeId === "string" ? rawNodeId : "";
     if (nodeId.length === 0) {
       malformed(
         "$.nodeId",
-        "nodeId is " + describeValue(record.nodeId) + ", not a non-empty node id",
+        "nodeId is " + describeValue(rawNodeId) + ", not a non-empty node id",
       );
     }
-    const attemptId =
-      typeof record.attemptId === "string" ? record.attemptId : "";
+    const rawAttemptId = record.attemptId;
+    const attemptId = typeof rawAttemptId === "string" ? rawAttemptId : "";
     if (attemptId.length === 0) {
       malformed(
         "$.attemptId",
         "attemptId is " +
-          describeValue(record.attemptId) +
+          describeValue(rawAttemptId) +
           ", not a non-empty attempt id",
       );
     }
-    const executionId =
-      typeof record.executionId === "string" ? record.executionId : "";
+    const rawExecutionId = record.executionId;
+    const executionId = typeof rawExecutionId === "string" ? rawExecutionId : "";
     if (executionId.length === 0) {
       malformed(
         "$.executionId",
         "executionId is " +
-          describeValue(record.executionId) +
+          describeValue(rawExecutionId) +
           ", not the non-empty host execution id the platform named",
       );
     }
-    const outcomeId =
-      typeof record.outcomeId === "string" ? record.outcomeId : "";
+    const rawOutcomeId = record.outcomeId;
+    const outcomeId = typeof rawOutcomeId === "string" ? rawOutcomeId : "";
     if (outcomeId.length === 0) {
       malformed(
         "$.outcomeId",
         "outcomeId is " +
-          describeValue(record.outcomeId) +
+          describeValue(rawOutcomeId) +
           ", not the outcome id the worker's own last turn declared",
       );
     }

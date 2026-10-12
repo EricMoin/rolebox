@@ -116,19 +116,20 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
     }
     // Read each field EXACTLY ONCE into a local, so an accessor-backed record
     // cannot answer one value to the check and another to the construction.
-    const nodeId = typeof record.nodeId === "string" ? record.nodeId : "";
+    const rawNodeId = record.nodeId;
+    const nodeId = typeof rawNodeId === "string" ? rawNodeId : "";
     if (nodeId.length === 0) {
       malformed(
         "$.nodeId",
-        `nodeId is ${describeValue(record.nodeId)}, not a non-empty node id`,
+        `nodeId is ${describeValue(rawNodeId)}, not a non-empty node id`,
       );
     }
-    const outcomeId =
-      typeof record.outcomeId === "string" ? record.outcomeId : "";
+    const rawOutcomeId = record.outcomeId;
+    const outcomeId = typeof rawOutcomeId === "string" ? rawOutcomeId : "";
     if (outcomeId.length === 0) {
       malformed(
         "$.outcomeId",
-        `outcomeId is ${describeValue(record.outcomeId)}, not a non-empty outcome id`,
+        `outcomeId is ${describeValue(rawOutcomeId)}, not a non-empty outcome id`,
       );
     }
     let credential: string | undefined;

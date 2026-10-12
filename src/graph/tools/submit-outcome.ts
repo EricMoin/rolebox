@@ -917,20 +917,44 @@ function settledNodesOf(state: OutcomeGraphState): readonly string[] {
   );
 }
 
-/** The ledger's own reason for a NOT-COMMITTED verdict, when it carries one. */
+/**
+ * The ledger's own reason for a NOT-COMMITTED verdict, when it carries one.
+ *
+ * EVERY member is named, and the `default` arm is the guard that makes a NEW
+ * verdict kind a compile error here instead of a silently dropped reason: the
+ * not-committed branch carries `conflict` and `settled` (`runtime.ts`), and
+ * every other non-writing verdict carries the ledger's own recorded reason.
+ */
 function notCommittedReason(verdict: CommitResult): string | undefined {
   switch (verdict.kind) {
     case "conflict":
     case "settled":
     case "controlled":
     case "attempt-stopped":
+    case "superseded":
+    case "run-superseded":
+    case "approval-blocked":
       return verdict.reason;
-    default:
+    case "committed":
+    case "replayed":
+      // A WRITING verdict is never NOT-COMMITTED: `committed` and `replayed`
+      // are exactly the two answers that mean something was written, so this
+      // projection cannot be reached with one.
       return undefined;
+    default: {
+      const never: never = verdict;
+      return never;
+    }
   }
 }
 
-/** The refusal code a NOT-COMMITTED verdict renders as, in the ledger's vocabulary. */
+/**
+ * The refusal code a NOT-COMMITTED verdict renders as, in the ledger's
+ * vocabulary.
+ *
+ * EVERY member is named, so a new verdict kind fails to compile here instead of
+ * rendering as a code that names none of them.
+ */
 function notCommittedCode(verdict: CommitResult["kind"]): string {
   switch (verdict) {
     case "conflict":
@@ -941,8 +965,22 @@ function notCommittedCode(verdict: CommitResult["kind"]): string {
       return "submission-controlled";
     case "attempt-stopped":
       return "submission-attempt-stopped";
-    default:
+    case "superseded":
+      return "submission-superseded";
+    case "run-superseded":
+      return "submission-run-superseded";
+    case "approval-blocked":
+      return "submission-approval-blocked";
+    case "committed":
+    case "replayed":
+      // A WRITING verdict is never NOT-COMMITTED, so no caller reaches this
+      // code with one; the generic code is what this projection answered for
+      // every other verdict before the vocabulary was enumerated.
       return "submission-not-committed";
+    default: {
+      const never: never = verdict;
+      return never;
+    }
   }
 }
 

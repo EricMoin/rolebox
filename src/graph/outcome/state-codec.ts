@@ -167,20 +167,28 @@ interface OutcomeStateLayout {
 
   readonly phases: readonly OutcomeGraphPhase[];
 
+  readonly stopReasons: readonly OutcomeStopReason[];
 
 }
 
 /**
  * The BODY LAYOUT of one version: the fields a body of that version may carry.
  *
- * Versions 9 and 10 are structurally identical — version 10 differs only in the
- * STOP REASON VOCABULARY its writer could produce (it can record
- * `unreachable-pending-node`), which is why a version-9 body stays READABLE by
- * the version-9 reader while only version 10 is written and advanced.
+ * Versions 9 and 10 are structurally identical except for the STOP REASON
+ * VOCABULARY their writer could produce — version 10 adds
+ * `unreachable-pending-node` — so the vocabulary is part of the layout and the
+ * version-9 reader keeps refusing a reason a version-9 writer could not record,
+ * while only version 10 is written and advanced. The vocabulary is passed in at
+ * each construction site rather than derived from the `number`, so the version
+ * distinction the readers rely on is stated where the layouts are declared.
  */
-function outcomeStateLayout(version: number): OutcomeStateLayout {
+function outcomeStateLayout(
+  version: number,
+  stopReasons: readonly OutcomeStopReason[],
+): OutcomeStateLayout {
   return Object.freeze({
     version,
+    stopReasons,
     bodyKeys: Object.freeze(["bodyVersion", "graphId", "planRevision", "phase", "nodes", "loopTraversals", "attemptSeq", "stop", "loopProgress"]),
     phases: Object.freeze(["ready", "executing", "complete", "stopped"] as const),
     keys: Object.freeze({
@@ -191,9 +199,22 @@ function outcomeStateLayout(version: number): OutcomeStateLayout {
   });
 }
 
-const OUTCOME_STATE_LAYOUT_V9: OutcomeStateLayout = outcomeStateLayout(OUTCOME_STATE_BODY_V9);
+/** The two reasons a version-9 writer could record, and only those. */
+const OUTCOME_STATE_STOP_REASONS_V9: readonly OutcomeStopReason[] = Object.freeze([
+  "loop-exhausted",
+  "progress-stalled",
+] as const);
 
-const OUTCOME_STATE_LAYOUT_V10: OutcomeStateLayout = outcomeStateLayout(CURRENT_OUTCOME_STATE_BODY);
+const OUTCOME_STATE_LAYOUT_V9: OutcomeStateLayout = outcomeStateLayout(
+  OUTCOME_STATE_BODY_V9,
+  OUTCOME_STATE_STOP_REASONS_V9,
+);
+
+/** Version 10 is the current vocabulary, so it carries every declared reason. */
+const OUTCOME_STATE_LAYOUT_V10: OutcomeStateLayout = outcomeStateLayout(
+  CURRENT_OUTCOME_STATE_BODY,
+  OUTCOME_STOP_REASONS,
+);
 
 function rejectUnknownNodeFields(
   raw: Record<string, unknown>,
@@ -603,8 +624,8 @@ function rejectUnknownBodyFields(
 function readStop(
   raw: unknown,
   phase: OutcomeGraphPhase,
-  layout: OutcomeStateLayout,
   where: string,
+  layout: OutcomeStateLayout,
 ): OutcomeStop | undefined {
   if (phase !== "stopped") {
     if (raw !== undefined) {
@@ -623,7 +644,7 @@ function readStop(
       "reason unrecorded",
     );
   }
-  const reason = readStopReason(raw.reason, where);
+  const reason = readStopReason(raw.reason, where, layout);
   switch (reason) {
     case "loop-exhausted":
       return readLoopExhaustedStop(raw, where);
@@ -640,13 +661,17 @@ function readStop(
   }
 }
 
-function readStopReason(value: unknown, where: string): OutcomeStopReason {
-  const declared = OUTCOME_STOP_REASONS.find((candidate) => candidate === value);
+function readStopReason(
+  value: unknown,
+  where: string,
+  layout: OutcomeStateLayout,
+): OutcomeStopReason {
+  const declared = layout.stopReasons.find((candidate) => candidate === value);
   if (declared === undefined) {
     throw malformedState(
-      where + ".stop.reason is " + describeValue(value) + ", not a stop reason this build " +
-      "defines — the vocabulary is closed and every member is a condition decided from the " +
-      "plan and the state [" + OUTCOME_STOP_REASONS.join(", ") + "]",
+      where + ".stop.reason is " + describeValue(value) + ", not a stop reason body version " +
+      layout.version + " defines — the vocabulary is closed and every member is a condition " +
+      "decided from the plan and the state [" + layout.stopReasons.join(", ") + "]",
     );
   }
   return declared;
@@ -803,7 +828,11 @@ function readUnreachablePendingNodeStop(
         ", not the list of feeder ids that can never arrive",
       );
     }
-    blocked[nodeId] = Object.freeze([...value].sort());
+    const feeders: string[] = [];
+    for (const [index, feeder] of value.entries()) {
+      feeders.push(readNonEmptyId(feeder, at + ".blockedNodes[" + JSON.stringify(nodeId) + "]", String(index)));
+    }
+    blocked[nodeId] = Object.freeze(feeders.sort());
   }
   const stoppedAt = readOptionalEpoch(raw, "stoppedAt", at);
   if (stoppedAt === undefined) {
@@ -1193,7 +1222,7 @@ function readStateBody(
       " — the phase vocabulary of body version " + layout.version + " is closed",
     );
   }
-  const stop = readStop(body.stop, phase, layout, "the body");
+  const stop = readStop(body.stop, phase, "the body", layout);
   const attemptSeq = body.attemptSeq;
   if (
     typeof attemptSeq !== "number" ||

@@ -1,7 +1,60 @@
 import { readRunBudget } from "../domain/budget.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { contractDigest, contractRefsEqual, isContractRef, type ContractRef } from "../contracts/contract-definition.ts";
-import { inspectCompiledTopology, NON_EXECUTABLE_PLAN_CODE, readPlanExecutability } from "./plan.ts";
+import {
+  inspectCompiledTopology,
+  NON_EXECUTABLE_PLAN_CODE,
+  readPlanExecutability,
+  type CompiledPlanBody,
+} from "./plan.ts";
+
+/**
+ * Compile-time completeness assertion: `Missing` is the set of keys the list it
+ * is instantiated with omits, so anything but `never` fails to compile here.
+ */
+type MissingKeysAreNever<Missing extends never> = Missing;
+
+/**
+ * The compiled plan body's field list, restated by the verifier because the
+ * digest input has to be rebuilt from the persisted record. `satisfies` refuses
+ * a key the model does not declare; the assertion beside it refuses a model key
+ * this list omits — so the restatement cannot drift from `CompiledPlanBody` in
+ * silence. A field added to the model fails to compile HERE instead of making
+ * every persisted plan fail its `planRevision` check.
+ *
+ * EXPORTED so `tests/graph/compiler-vocabulary-type-guards.test.ts` pins the
+ * same link.
+ */
+export const BODY_KEYS = [
+  "graphId",
+  "declarationVersion",
+  "budget",
+  "nodes",
+  "edges",
+  "loopGroups",
+  "contractSnapshots",
+  "contractIdentities",
+  "completionPolicySnapshots",
+  "completionPolicyIdentities",
+  "completionAuthorizations",
+  "terminalOutcomes",
+  "executability",
+] as const satisfies readonly (keyof CompiledPlanBody)[];
+type _BodyKeysComplete = MissingKeysAreNever<
+  Exclude<keyof CompiledPlanBody, (typeof BODY_KEYS)[number]>
+>;
+
+/**
+ * The digest input the verifier rebuilds from the persisted record: every key
+ * {@link BODY_KEYS} names, values left `unknown` because they are persisted
+ * data. `budget` is optional because the producer omits it when the declaration
+ * declares no budget.
+ */
+type PersistedPlanBodyInput = Omit<
+  { readonly [K in (typeof BODY_KEYS)[number]]: unknown },
+  "budget"
+> & { readonly budget?: unknown };
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 export type PlanBindingVerdict =
@@ -347,7 +400,7 @@ export function verifyPersistedCompiledPlan(
     let bodyDigest: string;
     try {
       readRunBudget(value.budget);
-      bodyDigest = contractDigest({
+      const persistedBody: PersistedPlanBodyInput = {
         graphId: recordGraphId,
         declarationVersion: value.declarationVersion,
         ...(value.budget === undefined ? {} : { budget: value.budget }),
@@ -361,7 +414,8 @@ export function verifyPersistedCompiledPlan(
         completionAuthorizations: value.completionAuthorizations,
         terminalOutcomes: value.terminalOutcomes,
         executability: value.executability,
-      });
+      };
+      bodyDigest = contractDigest(persistedBody);
     } catch (err) {
       return contractCorrupt(
         `compiled plan body was rejected by contractDigest: ${errorText(err)}`,

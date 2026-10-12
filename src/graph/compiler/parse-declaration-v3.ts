@@ -139,8 +139,15 @@ export function parseGraphDeclarationV3(
  * The keys each grammar level declares. The grammar is CLOSED: any own key
  * outside its level's list is `unknown-key`, so a misspelled field is a
  * refusal instead of a silently ignored one.
+ *
+ * Every list is LINKED to the declaration type it mirrors: `satisfies` refuses
+ * a key the type does not declare (a stale entry), and the completeness
+ * assertion beside the block refuses a key the type declares and its list omits
+ * — so a field added to the grammar, or removed from it, fails to compile until
+ * the list that guards its level is brought back in step. EXPORTED so
+ * `tests/graph/compiler-vocabulary-type-guards.test.ts` pins the same link.
  */
-const ROOT_KEYS = [
+export const ROOT_KEYS = [
   "budget",
   "version",
   "name",
@@ -148,8 +155,8 @@ const ROOT_KEYS = [
   "edges",
   "loop_groups",
   "completion_policy",
-] as const;
-const NODE_KEYS = [
+] as const satisfies readonly (keyof GraphDeclarationV3)[];
+export const NODE_KEYS = [
   "id",
   "agent",
   "prompt",
@@ -160,36 +167,63 @@ const NODE_KEYS = [
   "budget",
   "inputs",
   "tools",
-] as const;
-const INPUT_KEYS = ["from", "outcome", "when"] as const;
-const OUTCOME_KEYS = ["id", "data", "acceptance"] as const;
-const OUTCOME_DATA_KEYS = ["schema", "version"] as const;
-const ACCEPTANCE_KEYS = ["validator", "version"] as const;
-const EDGE_KEYS = ["from", "to", "outcome"] as const;
-const LOOP_GROUP_KEYS = [
+] as const satisfies readonly (keyof NodeDeclarationV3)[];
+export const INPUT_KEYS = ["from", "outcome", "when"] as const satisfies readonly (keyof InputDeclarationV3)[];
+export const OUTCOME_KEYS = ["id", "data", "acceptance"] as const satisfies readonly (keyof OutcomeDeclarationV3)[];
+export const OUTCOME_DATA_KEYS = ["schema", "version"] as const satisfies readonly (keyof OutcomeDataV3)[];
+export const ACCEPTANCE_KEYS = ["validator", "version"] as const satisfies readonly (keyof AcceptanceRequirementV3)[];
+export const EDGE_KEYS = ["from", "to", "outcome"] as const satisfies readonly (keyof EdgeDeclarationV3)[];
+export const LOOP_GROUP_KEYS = [
   "id",
   "nodes",
   "max_traversals",
   "continuation_outcome",
   "exit_outcome",
   "progress",
-] as const;
-const PROGRESS_KEYS = [
+] as const satisfies readonly (keyof LoopGroupDeclarationV3)[];
+export const PROGRESS_KEYS = [
   "evaluator",
   "version",
   "subject",
   "max_unchanged",
-] as const;
-const CONTRACT_REF_KEYS = ["id", "revision", "digest"] as const;
-const COMPLETION_POLICY_REQUEST_KEYS = ["id", "revision"] as const;
-const JOIN_KEYS = ["strategy", "quorum"] as const;
-const BUDGET_KEYS = [
+] as const satisfies readonly (keyof ProgressPolicyV3)[];
+export const CONTRACT_REF_KEYS = ["id", "revision", "digest"] as const satisfies readonly (keyof ContractRef)[];
+export const COMPLETION_POLICY_REQUEST_KEYS = ["id", "revision"] as const satisfies readonly (keyof CompletionPolicyRequestV3)[];
+export const JOIN_KEYS = ["strategy", "quorum"] as const satisfies readonly DeclaredKeys<JoinConfig>[];
+export const BUDGET_KEYS = [
   "max_input_tokens",
   "max_output_tokens",
   "max_cost_usd",
   "timeout_ms",
   "max_retries",
-] as const;
+] as const satisfies readonly (keyof NodeBudgetSpec)[];
+
+/**
+ * Every key ANY member of a discriminated declaration union declares:
+ * `keyof (A | B)` is only the keys the members SHARE, which would hide a
+ * variant-only key such as `JoinConfig`'s `quorum` from the closed grammar.
+ */
+type DeclaredKeys<T> = T extends unknown ? keyof T : never;
+
+/**
+ * Compile-time completeness assertion: `Missing` is the set of keys the list it
+ * is instantiated with omits, so anything but `never` fails to compile here.
+ */
+type MissingKeysAreNever<Missing extends never> = Missing;
+
+type _RootKeysComplete = MissingKeysAreNever<Exclude<keyof GraphDeclarationV3, (typeof ROOT_KEYS)[number]>>;
+type _NodeKeysComplete = MissingKeysAreNever<Exclude<keyof NodeDeclarationV3, (typeof NODE_KEYS)[number]>>;
+type _InputKeysComplete = MissingKeysAreNever<Exclude<keyof InputDeclarationV3, (typeof INPUT_KEYS)[number]>>;
+type _OutcomeKeysComplete = MissingKeysAreNever<Exclude<keyof OutcomeDeclarationV3, (typeof OUTCOME_KEYS)[number]>>;
+type _OutcomeDataKeysComplete = MissingKeysAreNever<Exclude<keyof OutcomeDataV3, (typeof OUTCOME_DATA_KEYS)[number]>>;
+type _AcceptanceKeysComplete = MissingKeysAreNever<Exclude<keyof AcceptanceRequirementV3, (typeof ACCEPTANCE_KEYS)[number]>>;
+type _EdgeKeysComplete = MissingKeysAreNever<Exclude<keyof EdgeDeclarationV3, (typeof EDGE_KEYS)[number]>>;
+type _LoopGroupKeysComplete = MissingKeysAreNever<Exclude<keyof LoopGroupDeclarationV3, (typeof LOOP_GROUP_KEYS)[number]>>;
+type _ProgressKeysComplete = MissingKeysAreNever<Exclude<keyof ProgressPolicyV3, (typeof PROGRESS_KEYS)[number]>>;
+type _ContractRefKeysComplete = MissingKeysAreNever<Exclude<keyof ContractRef, (typeof CONTRACT_REF_KEYS)[number]>>;
+type _CompletionPolicyRequestKeysComplete = MissingKeysAreNever<Exclude<keyof CompletionPolicyRequestV3, (typeof COMPLETION_POLICY_REQUEST_KEYS)[number]>>;
+type _JoinKeysComplete = MissingKeysAreNever<Exclude<DeclaredKeys<JoinConfig>, (typeof JOIN_KEYS)[number]>>;
+type _BudgetKeysComplete = MissingKeysAreNever<Exclude<keyof NodeBudgetSpec, (typeof BUDGET_KEYS)[number]>>;
 
 /** Mutable issue accumulator for one parse pass. */
 interface IssueLog {

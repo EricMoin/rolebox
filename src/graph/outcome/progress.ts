@@ -16,9 +16,22 @@ import type { ValidationBinding } from "./acceptance.ts";
 export const PROGRESS_EVALUATOR_REVISION_TOKEN = "revision-token" as const;
 
 /** The evaluator identities this build implements, in canonical order. */
-export const PROGRESS_EVALUATORS: readonly string[] = Object.freeze([
+export const PROGRESS_EVALUATORS = Object.freeze([
   PROGRESS_EVALUATOR_REVISION_TOKEN,
-]);
+] as const);
+
+/** One evaluator identity this build implements, derived from the list. */
+export type ProgressEvaluator = (typeof PROGRESS_EVALUATORS)[number];
+
+/**
+ * The declared token is one of the identities the list carries — a build that
+ * renamed the constant without listing the new name fails here rather than at
+ * the runtime refusal in {@link projectProgress}.
+ */
+type AssertNever<T extends never> = T;
+type _RevisionTokenIsImplemented = AssertNever<
+  Exclude<typeof PROGRESS_EVALUATOR_REVISION_TOKEN, ProgressEvaluator>
+>;
 
 /**
  * The longest revision token a projection carries, in UTF-16 code units.

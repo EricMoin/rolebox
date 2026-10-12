@@ -993,7 +993,7 @@ export class OutcomeDispatchRecovery {
       if (error instanceof OutcomeAdvanceRefusedError) {
         return {
           refusal: {
-            code: error.code as OutcomeRuntimeRefusal["code"],
+            code: error.code,
             path: "$.attemptCredentialDigest",
             message: error.message,
           },

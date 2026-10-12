@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { LEDGER_FORMAT_VERSION } from "../ledger/types.ts";
+import { LEDGER_FORMAT_VERSION, STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import { workspaceHash } from "../../utils/state-paths.ts";
 
 // ── File and format identity ────────────────────────────────────────────────
@@ -117,6 +117,22 @@ export const GRAPH_STORE_LEDGER_TABLES = Object.freeze({
   pendingEffects: GRAPH_STORE_TABLES.pendingEffects,
   graphState: GRAPH_STORE_TABLES.graphState,
 });
+
+/**
+ * The STOPPING control commands as the SQL `IN` list the store's guards spell.
+ *
+ * THE LIST IS DERIVED, NOT RE-SPELLED. {@link STOPPING_CONTROL_COMMANDS} is the
+ * one owner of the classification, but SQL cannot import a TypeScript array, so
+ * the literal is generated here ONCE from that owner and interpolated at every
+ * guard site. A command added to the classification therefore reaches every
+ * guard in the same edit; a second hand-written list is exactly how a store
+ * ends up committing contradictory terminal facts about one attempt. The
+ * members are closed literals of the control vocabulary, so the interpolation
+ * cannot carry anything a submission supplied.
+ */
+export const STOPPING_CONTROL_COMMAND_SQL: string = STOPPING_CONTROL_COMMANDS
+  .map((command) => `'${command}'`)
+  .join(", ");
 
 /**
  * One DDL statement per table, in creation order.

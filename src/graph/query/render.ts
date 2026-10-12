@@ -2,6 +2,7 @@ import { mkdirSync, renameSync, writeFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
+import type { OutcomeNodeStatus } from "../outcome/state-model.ts";
 import type { GraphNodeView, GraphQueryResult, GraphView } from "./graph-query.ts";
 
 export interface GraphStatusArgs {
@@ -12,7 +13,7 @@ export interface GraphStatusArgs {
   scope?: "session" | "persisted" | "all";
   format?: "summary" | "tree" | "json";
   query?: string;
-  status?: string;
+  status?: OutcomeNodeStatus;
   agent?: string;
   from_date?: string;
   to_date?: string;
@@ -132,21 +133,25 @@ export function renderGraphQuery(query: GraphQueryResult, args: GraphStatusArgs,
     if (query.refused.length > 0) throw new Error(`Target unresolved: unreadable graphs ${query.refused.map((item) => item.graphId).join(", ")}`);
     throw new Error("Unknown graph in the selected scope");
   }
-  const views = graphs.map((graph) => snapshot(graph, args));
+  // THE PAIR IS BUILT ONCE. The tree render needs BOTH the graph (its
+  // declaration edges) and the snapshot of it, so carrying them together is
+  // what keeps the two facts associated: an index shared between two passes
+  // would silently break the day a filter is added between them.
+  const entries = graphs.map((graph) => ({ graph, view: snapshot(graph, args) }));
   let text: string;
   if (args.group_by) {
     const groups = new Map<string, number>();
-    for (const view of views) for (const node of view.nodes) {
+    for (const { view } of entries) for (const node of view.nodes) {
       if (node.status !== "settled" || node.settledAt === undefined) continue;
       const key = args.group_by === "agent" ? node.agent : new Date(node.settledAt).toISOString().slice(0, args.group_by === "day" ? 10 : 13);
       groups.set(key, (groups.get(key) ?? 0) + 1);
     }
     text = JSON.stringify({ groups: [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, count]) => ({ key, count })) }, null, 2);
   } else if (args.format === "json") {
-    text = JSON.stringify(args.graph_id || args.node_id || args.loop_id ? views[0] : { graphs: views, refused: query.refused }, null, 2);
+    text = JSON.stringify(args.graph_id || args.node_id || args.loop_id ? entries[0]?.view : { graphs: entries.map(({ view }) => view), refused: query.refused }, null, 2);
   } else {
-    text = views.map((view, index) => {
-      const rows = args.format === "tree" ? tree(graphs[index]!, args, view) : view.nodes.map((node) => `  ${node.node_id} [${node.status}] ${node.agent}`).join("\n");
+    text = entries.map(({ graph, view }) => {
+      const rows = args.format === "tree" ? tree(graph, args, view) : view.nodes.map((node) => `  ${node.node_id} [${node.status}] ${node.agent}`).join("\n");
       // A run with no control fact names the attempts a node-scoped stop ended;
       // a run that carries one (and a run with no stopping decision at all)
       // renders exactly as it did before.

@@ -13,6 +13,7 @@ import {
   type RunControlRecord,
   type SubmissionKey,
 } from "../ledger/types.ts";
+import { isArtifactId } from "./artifacts.ts";
 import { GraphStoreWriteError } from "./errors.ts";
 import {
   encodeAcceptedData,
@@ -20,9 +21,13 @@ import {
   encodePayload,
   encodeStateBody,
 } from "./json.ts";
-import type { AcceptedData, JsonValue } from "../domain/model.ts";
+import type {
+  AcceptedArtifact,
+  AcceptedData,
+  JsonValue,
+} from "../domain/model.ts";
 import { malformedRow } from "./format.ts";
-import { GRAPH_STORE_TABLES } from "./schema.ts";
+import { GRAPH_STORE_TABLES, STOPPING_CONTROL_COMMAND_SQL } from "./schema.ts";
 import type { AcceptedResultRecord, GraphAcceptanceBatch } from "./records.ts";
 
 // ── Row model ───────────────────────────────────────────────────────────────
@@ -221,6 +226,129 @@ function hasExactKeys(
   );
 }
 
+/** The fields one retained-artifact element defines, exactly. */
+const RETAINED_ARTIFACT_KEYS: readonly string[] = Object.freeze([
+  "ref",
+  "artifactId",
+  "digest",
+  "size",
+]);
+
+/** The digest a content identity is built from, as this store publishes it. */
+const RETAINED_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+
+/** What reading one element of the `artifacts` column produced. */
+type RetainedArtifactReading =
+  | { readonly kind: "read"; readonly artifact: AcceptedArtifact }
+  | { readonly kind: "refused"; readonly detail: string };
+
+/**
+ * Read one element of the accepted-results `artifacts` column.
+ *
+ * THE ELEMENT SHAPE IS PART OF THE FORMAT. `ref` is the provenance a consumer
+ * reports, `artifactId` is the content identity
+ * {@link GraphStore.readAcceptedArtifact} resolves, and `digest`/`size` are the
+ * bytes that identity was read as — so a value that is anything but exactly
+ * those four fields, or that carries an identity this store could not have
+ * published, is MALFORMED and its caller refuses it by name. The alternative
+ * (asserting the declared `readonly AcceptedArtifact[]` over `JSON.parse`) hands
+ * a fabricated revision to every downstream consumer and lets a bare
+ * `TypeError` escape a store method whose contract is "every way this can fail
+ * is a problem".
+ */
+function readRetainedArtifactElement(value: unknown): RetainedArtifactReading {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    !hasExactKeys(value as Record<string, unknown>, RETAINED_ARTIFACT_KEYS)
+  ) {
+    return {
+      kind: "refused",
+      detail:
+        `is ${describeValue(value)}, not the { ${RETAINED_ARTIFACT_KEYS.join(", ")} } ` +
+        "record a retained artifact revision is",
+    };
+  }
+  const record = value as Record<string, unknown>;
+  const ref = record["ref"];
+  const artifactId = record["artifactId"];
+  const digest = record["digest"];
+  const size = record["size"];
+  if (typeof ref !== "string" || ref.length === 0) {
+    return {
+      kind: "refused",
+      detail: "carries a ref that is not a non-empty string",
+    };
+  }
+  if (!isArtifactId(artifactId)) {
+    return {
+      kind: "refused",
+      detail:
+        `carries artifactId ${describeValue(artifactId)}, not the sha256:<hex> ` +
+        "content identity a retained revision is stored under",
+    };
+  }
+  if (typeof digest !== "string" || !RETAINED_DIGEST_PATTERN.test(digest)) {
+    return {
+      kind: "refused",
+      detail:
+        `carries digest ${describeValue(digest)}, not 64 lowercase hex characters`,
+    };
+  }
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) {
+    return {
+      kind: "refused",
+      detail:
+        `carries size ${describeValue(size)}, not a non-negative safe integer`,
+    };
+  }
+  return {
+    kind: "read",
+    artifact: Object.freeze({ ref, artifactId, digest, size }),
+  };
+}
+
+/**
+ * Read the accepted-results `artifacts` column as the retained revisions this
+ * format writes, or `undefined` when the row retained none.
+ *
+ * ABSENT IS NOT AN EMPTY LIST, and both are preserved exactly as stored:
+ * `undefined` is the field's documented "this acceptance retained nothing",
+ * while `[]` is a list of zero revisions. The column is decoded ONCE and every
+ * element is checked, mirroring {@link readAcceptedData} one function above — a
+ * `payload` that is not the envelope, or an `artifacts` value that is not the
+ * array of elements this format writes, is refused by name rather than handed
+ * outward as a value the declared type promises.
+ */
+function readRetainedArtifacts(
+  row: Record<string, unknown>,
+  path: string,
+  table: string,
+): readonly AcceptedArtifact[] | undefined {
+  if (row["artifacts"] === null || row["artifacts"] === undefined) {
+    return undefined;
+  }
+  const body = readJsonBody(row, "artifacts", path, table);
+  if (!Array.isArray(body)) {
+    throw malformedRow(
+      path,
+      table,
+      `artifacts is ${describeValue(body)}, not an array of retained artifact revisions`,
+    );
+  }
+  const elements: readonly unknown[] = body;
+  const artifacts: AcceptedArtifact[] = [];
+  elements.forEach((element, index) => {
+    const reading = readRetainedArtifactElement(element);
+    if (reading.kind === "refused") {
+      throw malformedRow(path, table, `artifacts[${index}] ${reading.detail}`);
+    }
+    artifacts.push(reading.artifact);
+  });
+  return Object.freeze(artifacts);
+}
+
 function toReceipt(
   row: Record<string, unknown>,
   path: string,
@@ -293,21 +421,13 @@ function toAcceptedResult(
   path: string,
 ): AcceptedResultRecord {
   const table = GRAPH_STORE_TABLES.acceptedResults;
+  const artifacts = readRetainedArtifacts(row, path, table);
   return {
     graphId: readText(row, "graph_id", path, table),
     attemptId: readText(row, "attempt_id", path, table),
     planRevision: readText(row, "plan_revision", path, table),
     payload: readAcceptedData(row, path, table),
-    ...(row["artifacts"] === null || row["artifacts"] === undefined
-      ? {}
-      : {
-        artifacts: readJsonBody(
-          row,
-          "artifacts",
-          path,
-          table,
-        ) as AcceptedResultRecord["artifacts"],
-      }),
+    ...(artifacts === undefined ? {} : { artifacts }),
     acceptedAt: readEpoch(row, "accepted_at", path, table),
   };
 }
@@ -345,6 +465,32 @@ function requireEpoch(
       `acceptance-ledger: ${field} is ${describeValue(value)}, not epoch milliseconds (a safe integer) — ${consequence}`,
     );
   }
+}
+
+/**
+ * Refuse a retained-artifact list this store could not read back.
+ *
+ * The READER's element rule is the format's, so the SAME rule runs at the write
+ * boundary: a caller cannot commit a row that fails closed on the next read,
+ * and the refusal names the offending element while the transaction can still
+ * roll back. The list is returned unchanged — this validates, it does not
+ * rebuild — so the encoder remains the only thing that turns it into text.
+ */
+function requireRetainedArtifacts(
+  artifacts: readonly AcceptedArtifact[],
+  attemptId: string,
+): readonly AcceptedArtifact[] {
+  artifacts.forEach((artifact, index) => {
+    const reading = readRetainedArtifactElement(artifact);
+    if (reading.kind === "refused") {
+      throw new GraphStoreWriteError(
+        "invalid-record",
+        `acceptance-ledger: acceptedResult.artifacts[${index}] ${reading.detail} — the ` +
+        `accepted result of attempt ${JSON.stringify(attemptId)} was not written`,
+      );
+    }
+  });
+  return artifacts;
 }
 
 /**
@@ -758,9 +904,8 @@ export class LedgerTables {
    * read through the store that owns the control table. Injected for the same
    * reason the fact above is: the acceptance core needs the row inside the
    * transaction that refuses the batch, and the SQL of
-   * `graph_control_decisions` keeps ONE owner. It names the same commands as
-   * `STOPPING_CONTROL_COMMANDS`, whose membership is exactly the SQL literal
-   * below.
+   * `graph_control_decisions` keeps ONE owner. Its command list is GENERATED
+   * from `STOPPING_CONTROL_COMMANDS`, the one owner of the classification.
    */
   private readonly readStoppingDecision: (
     graphId: string,
@@ -1057,7 +1202,7 @@ export class LedgerTables {
          AND NOT EXISTS (
            SELECT 1 FROM ${GRAPH_STORE_TABLES.controlDecisions}
            WHERE graph_id = ? AND attempt_id = ?
-             AND command IN ('failure', 'cancel', 'timeout', 'budget-stop')
+             AND command IN (${STOPPING_CONTROL_COMMAND_SQL})
          )`,
         receipt.graphId,
         receipt.attemptId,
@@ -1077,8 +1222,8 @@ export class LedgerTables {
         receipt.graphId,
         receipt.attemptId,
         // The stopping guard: the attempt's own stopping decision, if any. Its
-        // command list is the store's own literal, and the same membership as
-        // `STOPPING_CONTROL_COMMANDS`.
+        // command list is generated from `STOPPING_CONTROL_COMMANDS`, the one
+        // owner of the classification.
         receipt.graphId,
         receipt.attemptId,
       );
@@ -1439,7 +1584,7 @@ export class LedgerTables {
         record.artifacts === undefined
           ? null
           : encodeJsonBody(
-            record.artifacts,
+            requireRetainedArtifacts(record.artifacts, record.attemptId),
             `the retained artifacts of attempt ${record.attemptId}`,
             "unrepresentable-record",
           ),

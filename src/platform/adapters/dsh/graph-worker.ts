@@ -3,13 +3,39 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { OutcomeHost } from "../../../graph/host/outcome-host.ts";
 import {
   declaredToolsAllow,
+  isGraphToolName,
+  type GraphToolName,
   type OutcomeWorkerPrincipal,
 } from "../../../graph/host/tool-binding.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../types.ts";
 import { executeGraphWorkerCommand } from "../../sandbox/worker-exec.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
 
-export const DSH_GRAPH_WORKER_TOOLS = ["graph_submit_outcome", "graph_worker_exec"];
+/**
+ * THE GRAPH FACE A DSH WORKER'S OWN CALLS ARE JUDGED BY: the delivery channel
+ * every dispatched worker holds plus dsh's worker command entry, which this
+ * host ships inside the reserved `graph_` namespace. Typed by the closed
+ * vocabulary ({@link GraphToolName}), so a misspelled or renamed entry is a
+ * compile error instead of a guard that silently stops admitting the worker's
+ * only delivery channel.
+ *
+ * THE MEMBERSHIP DIVERGES FROM THE IN-PROCESS BASELINE ON PURPOSE:
+ * `graph_worker_exec` is dsh's own command tool and belongs to no other host.
+ */
+export const DSH_GRAPH_WORKER_GRANT: readonly GraphToolName[] = Object.freeze([
+  "graph_submit_outcome",
+  "graph_worker_exec",
+]);
+
+/**
+ * THE SAME ARRAY, WIDENED for the callers that compare these names against a
+ * HOST tool name they only know as a `string`: the dsh entry's collision probe
+ * (`src/entries/dsh.ts`) and the dispatch request's baseline both read this
+ * binding, and neither can be narrowed where it sits. It cannot drift from the
+ * typed membership above — it IS that array — so the widening buys a caller
+ * nothing but the parameter type it already needs.
+ */
+export const DSH_GRAPH_WORKER_TOOLS: readonly string[] = DSH_GRAPH_WORKER_GRANT;
 
 /**
  * The host's process-confinement seam (`@deepseek-ai/dsh-sandbox`), consumed
@@ -275,7 +301,7 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
    * unresolved grant answers "not granted".
    */
   const grantedToWorker = (execution: { readonly name: string; readonly agent?: WorkerAgent }): boolean => {
-    if (DSH_GRAPH_WORKER_TOOLS.includes(execution.name)) return true;
+    if (isGraphToolName(execution.name) && DSH_GRAPH_WORKER_GRANT.includes(execution.name)) return true;
     return declaredToolsAllow(execution.name, declaredToolsOf(execution.agent));
   };
   const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution)

@@ -6,10 +6,11 @@ import { join } from "node:path";
 
 import { errorText } from "../../utils/error-text.ts";
 import {
-  describeOutcomeStop, type OutcomeStop
+  describeOutcomeStop, type OutcomeGraphPhase, type OutcomeStop, type OutcomeStopReason
 } from "../outcome/graph-state.ts";
 import { ledgerFilePath } from "../ledger/sqlite-ledger.ts";
 import type {
+  ControlCommandName,
   EffectStatus,
   PendingEffectRecord,
   RunControlRecord,
@@ -46,6 +47,21 @@ export type DrainAuditBlockerCode =
   | "state-version-unsupported"
   | "state-malformed"
   | "state-unreadable";
+
+/**
+ * The blocker codes ONE graph's own classification can decide — the per-entry
+ * subset of {@link DrainAuditBlockerCode}.
+ *
+ * The four store-level codes are decided ONCE for the whole store, before any
+ * definition is classified, and the store path is what names their axis
+ * (`storage`) and their detail. No per-entry projection receives one, and
+ * spelling that as a type is what lets {@link blockerDimensionFor} and
+ * {@link describeEntryBlocker} place every remaining member explicitly.
+ */
+export type DrainAuditEntryBlockerCode = Exclude<
+  DrainAuditBlockerCode,
+  "state-store-unreadable" | "retired-state-record" | "corrupt-record" | "unsupported-version"
+>;
 
 /** The axis a blocker belongs to, when one owns it. */
 export type DrainAuditBlockerDimension =
@@ -167,7 +183,7 @@ export interface DrainAuditEffect {
 
 /** The persisted stop an outcome run ended on. */
 export interface DrainAuditStop {
-  readonly reason: string;
+  readonly reason: OutcomeStopReason;
   /** The one shared formatter's description of the stop. */
   readonly summary: string;
 }
@@ -182,7 +198,7 @@ export interface DrainAuditStop {
  * nothing moves the record again without a new command.
  */
 export interface DrainAuditControl {
-  readonly command: string;
+  readonly command: ControlCommandName;
   readonly reason: string;
   /** Epoch milliseconds the stopping command was decided at. */
   readonly decidedAt: number;
@@ -198,7 +214,7 @@ export interface DrainAuditEntry {
   readonly protocol: DrainAuditProtocol;
   readonly classification: DrainAuditClassification;
   /** The persisted phase, exactly as recorded. */
-  readonly phase?: string;
+  readonly phase?: OutcomeGraphPhase;
   /** The definition's own content-addressed plan revision. */
   readonly planRevision?: string;
   /** Outcome only: nodes the run state records as in flight. */
@@ -229,7 +245,7 @@ export interface DrainAuditEntry {
    */
   readonly staleness?: DrainAuditStalenessFacts;
   /** Every blocker code observed for this entry, in report order. */
-  readonly blockerCodes: readonly DrainAuditBlockerCode[];
+  readonly blockerCodes: readonly DrainAuditEntryBlockerCode[];
 }
 
 /** The store-level reading the report is built on. */
@@ -354,7 +370,7 @@ function blocker(
 /** A blocked entry: a definition the audit could not classify. */
 function blockedEntry(
   graphId: string,
-  codes: readonly DrainAuditBlockerCode[],
+  codes: readonly DrainAuditEntryBlockerCode[],
 ): DrainAuditEntry {
   return Object.freeze({
     graphId,
@@ -416,7 +432,7 @@ interface EntryBody {
   readonly graph?: GraphView;
   readonly protocol: DrainAuditProtocol;
   readonly classification: DrainAuditClassification;
-  readonly phase?: string;
+  readonly phase?: OutcomeGraphPhase;
   readonly planRevision?: string;
   readonly armed?: readonly DrainAuditArmedNode[];
   readonly unsettledEffects?: readonly DrainAuditEffect[];
@@ -428,7 +444,7 @@ interface EntryBody {
   readonly lastUpdatedAt?: number;
   /** The record's queue, when it holds one. Internal — never reported as-is. */
   readonly queue?: EntryQueue;
-  readonly blockerCodes: readonly DrainAuditBlockerCode[];
+  readonly blockerCodes: readonly DrainAuditEntryBlockerCode[];
   /**
    * Per-code detail that OVERRIDES the generic sentence, for a blocker whose
    * concrete cause (a contained error's text, say) is evidence the caller
@@ -541,7 +557,7 @@ function entryForDefinition(
   graphId: string,
   decoded: ReturnType<typeof decodeStoredDefinition>,
   store: GraphStore | undefined,
-  storeBlocker: DrainAuditBlockerCode | undefined,
+  storeBlocker: DrainAuditEntryBlockerCode | undefined,
   now: number,
   staleAfterMs: number,
 ): {
@@ -599,26 +615,38 @@ function entryForDefinition(
   };
 }
 
-/** The axis a per-entry blocker code belongs to, when one owns it. */
+/**
+ * The axis a per-entry blocker code belongs to.
+ *
+ * EVERY member owns one, and the `default` arm is the guard that makes a code
+ * added to the entry vocabulary a compile error here until it is placed — the
+ * store-level codes carry `storage` in the store path and are not members of
+ * this function's parameter.
+ */
 function blockerDimensionFor(
-  code: DrainAuditBlockerCode,
-): DrainAuditBlockerDimension | undefined {
-  if (code === "ledger-refused" || code === "ledger-unreadable") return "ledger";
-  if (code === "unrunnable-definition") return "contract";
-  if (
-    code === "state-plan-mismatch" ||
-    code === "state-version-unsupported" ||
-    code === "state-malformed" ||
-    code === "state-unreadable"
-  ) {
-    return "outcome-state";
+  code: DrainAuditEntryBlockerCode,
+): DrainAuditBlockerDimension {
+  switch (code) {
+    case "ledger-refused":
+    case "ledger-unreadable":
+      return "ledger";
+    case "unrunnable-definition":
+      return "contract";
+    case "state-plan-mismatch":
+    case "state-version-unsupported":
+    case "state-malformed":
+    case "state-unreadable":
+      return "outcome-state";
+    default: {
+      const never: never = code;
+      return never;
+    }
   }
-  return undefined;
 }
 
 /** One honest sentence for a per-entry blocker, derived from its code. */
 function describeEntryBlocker(
-  code: DrainAuditBlockerCode,
+  code: DrainAuditEntryBlockerCode,
   graphId: string,
 ): string {
   switch (code) {
@@ -663,10 +691,14 @@ function describeEntryBlocker(
         " has a run-state row the strict reader could not process (an " +
         "unexpected error was contained)"
       );
-    default:
-      // The store-level codes carry their own verdict text in the blocker
-      // detail; this path is not reachable for them.
-      return "graph " + JSON.stringify(graphId) + ": " + code;
+    default: {
+      // EVERY entry-level code has its sentence above; the store-level codes
+      // carry their own verdict text and `storage` dimension in the store path
+      // and are not members of this function's parameter, so a code that
+      // reaches this arm is one the entry vocabulary gained without a sentence.
+      const never: never = code;
+      return never;
+    }
   }
 }
 
@@ -751,7 +783,7 @@ export async function auditGraphStore(
   const loaded: GraphStoreLoadResult = loadGraphStoreSync(storeDirectory);
   let store: GraphStore | undefined;
   let ledgerStatus: DrainAuditLedgerStatus;
-  let storeBlocker: DrainAuditBlockerCode | undefined;
+  let storeBlocker: DrainAuditEntryBlockerCode | undefined;
   if (loaded.kind === "valid") {
     store = loaded.value;
     ledgerStatus = "opened";
