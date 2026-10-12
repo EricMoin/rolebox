@@ -15,6 +15,10 @@ import {
   type DeclaredCapabilityIssue,
 } from "../compiler/capability-set.ts";
 import type {
+  OutcomeEffectDivergence,
+  OutcomeRuntimeRefusal,
+} from "../outcome/runtime.ts";
+import type {
   AcceptanceCapabilitySet,
   ValidatorRegistry,
 } from "../outcome/validators.ts";
@@ -78,16 +82,59 @@ export interface GraphDeclareArgs {
   // a host dependency (GraphToolSetDeps), never a tool argument.
 }
 
+/**
+ * What `graph_declare_and_start`'s start attempt reported, discriminated on
+ * `kind`.
+ *
+ * Each arm carries exactly what its `kind` means and nothing else: `refused`
+ * always names the runtime's refusals, `blocked` always names the reason the
+ * start could not be ordered, and the `started`/`resumed` arm carries the phase,
+ * the attempts it dispatched, its refusals and its divergences. `saved` is the
+ * deliberate absence of a start — the declaration is durable and no run was
+ * ordered.
+ *
+ * The fields an arm does not define are declared `never` rather than omitted, so
+ * a reader that reads one through the union still type-checks and answers
+ * `undefined`, exactly as an absent field does.
+ */
+export type GraphDeclareStartResult =
+  | {
+    readonly kind: "saved";
+    readonly reason?: never;
+    readonly phase?: never;
+    readonly dispatched?: never;
+    readonly refusals?: never;
+    readonly divergences?: never;
+  }
+  | {
+    readonly kind: "blocked";
+    /** Why no run could be ordered; the declaration itself is durable. */
+    readonly reason: string;
+    readonly phase?: never;
+    readonly dispatched?: never;
+    readonly refusals?: never;
+    readonly divergences?: never;
+  }
+  | {
+    readonly kind: "refused";
+    readonly refusals: readonly OutcomeRuntimeRefusal[];
+    readonly reason?: never;
+    readonly phase?: never;
+    readonly dispatched?: never;
+    readonly divergences?: never;
+  }
+  | {
+    readonly kind: "started" | "resumed";
+    readonly phase: string;
+    readonly dispatched: readonly { nodeId: string; attemptId: string }[];
+    readonly refusals: readonly OutcomeRuntimeRefusal[];
+    readonly divergences: readonly OutcomeEffectDivergence[];
+    readonly reason?: never;
+  };
+
 /** What a successful `graph_declare` reports. */
 export interface GraphDeclareResult {
-  start?: {
-    readonly kind: "saved" | "started" | "resumed" | "refused" | "blocked";
-    readonly phase?: string;
-    readonly reason?: string;
-    readonly dispatched?: readonly { nodeId: string; attemptId: string }[];
-    readonly refusals?: readonly import("../outcome/runtime.ts").OutcomeRuntimeRefusal[];
-    readonly divergences?: readonly import("../outcome/runtime.ts").OutcomeEffectDivergence[];
-  };
+  start?: GraphDeclareStartResult;
   /** The graph id the plan is bound to (the declaration's own name). */
   graph_id: string;
   /** The compiled plan's content-addressed revision. */

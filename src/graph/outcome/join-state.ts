@@ -6,7 +6,11 @@ import type {
   JoinTopology,
 } from "../compiler/plan.ts";
 import { readQuorum, resolveJoinStrategy } from "../join-strategy.ts";
-import type { OutcomeArrival, OutcomeNodeState } from "./state-model.ts";
+import type {
+  OutcomeArrival,
+  OutcomeNodeState,
+  OutcomeNodeStatus,
+} from "./state-model.ts";
 import { malformedState } from "./state-errors.ts";
 
 /**
@@ -200,6 +204,27 @@ export function resolveArmSet(
 }
 
 /**
+ * The node-progress projection {@link unsatisfiablePendingNodes} reads: each
+ * entry's identity and status, plus the settled facts its callers may carry
+ * beside them. Declared over this projection rather than the full
+ * {@link OutcomeNodeState} union so a reader that reaches for a field outside
+ * it must widen the parameter instead of reading `undefined` — the same
+ * discipline {@link entryNodesOf} applies to the plan topology.
+ */
+export interface OutcomeNodeProgress {
+
+  readonly nodeId: string;
+
+  readonly status: OutcomeNodeStatus;
+
+  readonly attemptId?: string;
+
+  readonly outcomeId?: string;
+
+  readonly arrivals?: readonly OutcomeArrival[];
+}
+
+/**
  * The nodes a RUN can still reach: the ones already in flight, plus every node
  * some node still in play can still route to.
  *
@@ -213,7 +238,7 @@ export function resolveArmSet(
  */
 function stillReachableNodes(
   plan: CompiledPlan,
-  nodes: readonly OutcomeNodeState[],
+  nodes: readonly OutcomeNodeProgress[],
 ): ReadonlySet<string> {
   const statusOf = new Map<string, OutcomeNodeState["status"]>();
   for (const entry of nodes) statusOf.set(entry.nodeId, entry.status);
@@ -256,7 +281,7 @@ function stillReachableNodes(
  */
 export function unsatisfiablePendingNodes(
   plan: CompiledPlan,
-  nodes: readonly OutcomeNodeState[],
+  nodes: readonly OutcomeNodeProgress[],
 ): Readonly<Record<string, readonly string[]>> {
   const statusOf = new Map<string, OutcomeNodeState["status"]>();
   for (const entry of nodes) statusOf.set(entry.nodeId, entry.status);

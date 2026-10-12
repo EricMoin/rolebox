@@ -287,7 +287,7 @@ function readNodeState(
     return Object.freeze({
       nodeId: expected.id,
       status: "pending" as const,
-      ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+      arrivals: recordedArrivals,
       ...(inputRefusals === undefined ? {} : { inputRefusals }),
     });
   }
@@ -305,7 +305,7 @@ function readNodeState(
       where + ".attemptSeq is " + describeValue(attemptSeq) + ", not a positive safe integer",
     );
   }
-  let credentialDigest: string | undefined;
+  let credentialDigest: string;
   {
     if (!isAttemptCredentialDigest(attemptCredentialDigest)) {
       throw malformedState(
@@ -337,14 +337,12 @@ function readNodeState(
       status: "settled" as const,
       attemptId,
       attemptSeq,
-      ...(credentialDigest === undefined
-        ? {}
-        : { attemptCredentialDigest: credentialDigest }),
+      attemptCredentialDigest: credentialDigest,
       ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
       outcomeId,
       dispatchedAt,
       settledAt,
-      ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+      arrivals: recordedArrivals,
       ...(boundInputs === undefined ? {} : { inputs: boundInputs }),
       ...(inputRefusals === undefined ? {} : { inputRefusals }),
     });
@@ -359,12 +357,10 @@ function readNodeState(
     status: "dispatched" as const,
     attemptId,
     attemptSeq,
-    ...(credentialDigest === undefined
-      ? {}
-      : { attemptCredentialDigest: credentialDigest }),
+    attemptCredentialDigest: credentialDigest,
     ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     dispatchedAt,
-    ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+    arrivals: recordedArrivals,
     ...(boundInputs === undefined ? {} : { inputs: boundInputs }),
     ...(inputRefusals === undefined ? {} : { inputRefusals }),
   });
@@ -1190,11 +1186,9 @@ export function describeOutcomeStop(stop: OutcomeStop): string {
 
 function describeNodeEntry(entry: OutcomeNodeState | undefined): string {
   if (entry === undefined) return "none";
-  return (
-    entry.status +
-    (entry.attemptId === undefined ? "" : " on " + entry.attemptId) +
-    (entry.outcomeId === undefined ? "" : " by " + entry.outcomeId)
-  );
+  if (entry.status === "pending") return entry.status;
+  const outcome = entry.status === "settled" ? " by " + entry.outcomeId : "";
+  return entry.status + " on " + entry.attemptId + outcome;
 }
 
 function readStateBody(

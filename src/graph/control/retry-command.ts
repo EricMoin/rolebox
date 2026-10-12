@@ -88,7 +88,7 @@ export function applyRetryCommand(ctx: ControlCommandContext<"retry">): GraphCon
     );
     if (repeated !== undefined) return replayedRetry(ctx, repeated);
   }
-  if (node.attemptId === undefined) {
+  if (node.status === "pending") {
     return refuse(
       graphId,
       "attempt-absent",
@@ -526,7 +526,7 @@ function orderReexecution(
   const inFlight = new Set<string>();
   const settledAttempts = new Set<string>();
   for (const node of state.nodes) {
-    if (node.attemptId === undefined) continue;
+    if (node.status === "pending") continue;
     if (node.status === "dispatched") inFlight.add(node.attemptId);
     if (node.status === "settled") settledAttempts.add(node.attemptId);
   }

@@ -321,18 +321,19 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
   nodes[position] = Object.freeze({
     nodeId: current.nodeId,
     status: "settled" as const,
-    ...(current.attemptId === undefined ? {} : { attemptId: current.attemptId }),
-    ...(current.attemptSeq === undefined ? {} : { attemptSeq: current.attemptSeq }),
+    attemptId: current.attemptId,
+    attemptSeq: current.attemptSeq,
     ...(current.inputs === undefined ? {} : { inputs: current.inputs }),
-    ...(current.attemptCredentialDigest === undefined
-      ? {}
-      : { attemptCredentialDigest: current.attemptCredentialDigest }),
+    attemptCredentialDigest: current.attemptCredentialDigest,
     ...(current.dispatchIdentity === undefined
       ? {}
       : { dispatchIdentity: current.dispatchIdentity }),
     outcomeId: decision.outcomeId,
-    ...(current.dispatchedAt === undefined ? {} : { dispatchedAt: current.dispatchedAt }),
+    dispatchedAt: current.dispatchedAt,
     settledAt: now,
+    // A settled node keeps the arrival list its dispatch recorded; the
+    // canonicalisation below re-derives it for every node before the write.
+    arrivals: current.arrivals,
   });
 
   let loopTraversals = state.loopTraversals;

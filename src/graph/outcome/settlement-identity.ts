@@ -1,6 +1,10 @@
 import type { CompiledPlan } from "../compiler/plan.ts";
 import { attemptCredentialDigest } from "./attempt-credential.ts";
-import type { OutcomeGraphState, OutcomeNodeState } from "./graph-state.ts";
+import type {
+  DispatchedNodeState,
+  OutcomeGraphState,
+  SettledNodeState,
+} from "./graph-state.ts";
 import { hostIdentityCheckRefusal, type HostIdentityReading } from "./host-identity.ts";
 import { readOutcomeProposal } from "./proposal.ts";
 import type { HostCompletionExecution } from "./runtime-contract.ts";
@@ -119,7 +123,11 @@ export function resolveSettlementIdentity(
       };
     }
     const recorded = stateNodeOf(state, reading.proposal.nodeId);
-    if (recorded === undefined || recorded.attemptId !== expectedAttemptId) {
+    const recordedAttemptId =
+      recorded === undefined || recorded.status === "pending"
+        ? undefined
+        : recorded.attemptId;
+    if (recorded === undefined || recordedAttemptId !== expectedAttemptId) {
       return {
         kind: "refused",
         refusal: {
@@ -131,9 +139,9 @@ export function resolveSettlementIdentity(
             " of node " +
             JSON.stringify(reading.proposal.nodeId) +
             " finished, but the persisted state records " +
-            (recorded === undefined || recorded.attemptId === undefined
+            (recordedAttemptId === undefined
               ? "no attempt for that node"
-              : "attempt " + JSON.stringify(recorded.attemptId)) +
+              : "attempt " + JSON.stringify(recordedAttemptId)) +
             " — a completion fact is never re-bound to the node's current attempt",
         },
       };
@@ -194,8 +202,9 @@ export function resolveSettlementIdentity(
   // verifier", never "does it equal a stored copy of itself". It is never an
   // index into the node the proposal happens to name.
   const presented = attemptCredentialDigest(credential);
-  let holder: OutcomeNodeState | undefined;
+  let holder: DispatchedNodeState | SettledNodeState | undefined;
   for (const node of state.nodes) {
+    if (node.status === "pending") continue;
     if (node.attemptCredentialDigest === presented) {
       holder = node;
       break;

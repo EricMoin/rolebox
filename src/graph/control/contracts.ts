@@ -40,28 +40,42 @@ export interface GraphControlRetryCapability {
   readonly mintCredential?: AttemptCredentialSource;
 }
 
-/** One control command a trusted principal asked for. */
-export interface GraphControlRequest {
-  /** Host-only authority, corroborated against the attempt's durable execution binding. */
-  readonly hostFailure?: { readonly executionId: string; readonly taskId?: string };
-  readonly approvalPolicy?: ApprovalPolicy;
+/**
+ * The fields every control request carries, whatever command it names.
+ *
+ * `retry` and `approval` live here as OPTIONAL fields because the runtime reads
+ * each one only for the command that defines it and IGNORES it everywhere else:
+ * `applyRetryCommand` reads `retry`, `applyApprovalCommand` reads `approval`,
+ * and a value carried by any other command changes nothing. Each is made
+ * REQUIRED by the one arm whose handler refuses its absence.
+ */
+export interface GraphControlRequestBase {
   readonly graphId: string;
-  /** The command, from the durable closed vocabulary. */
-  readonly command: ControlCommandName;
-  /** The node the command names, for a node-scoped command. */
-  readonly nodeId?: string;
-  /** The attempt the command names, when the caller knows it. */
-  readonly attemptId?: string;
   readonly reason: string;
   /** The trusted invocation. A request without one is refused, never guessed. */
   readonly principal: GraphControlPrincipal | undefined;
   /** Epoch milliseconds. Time is an explicit input, like every protocol write. */
   readonly at: number;
+  readonly approvalPolicy?: ApprovalPolicy;
   /**
-   * What a `retry` needs to mint its successor attempt's credential. Absent
-   * means this process cannot mint one, and a retry is refused
-   * `credential-isolation-unavailable` — never applied without a usable
-   * credential.
+   * What a `retry` needs to mint its successor attempt's CREDENTIAL (P3 item 2).
+   *
+   * WHY THE CONTROL PATH NEEDS A HOST CAPABILITY AT ALL. A retry mints a new
+   * attempt, and an attempt is only usable with the bearer credential its worker
+   * will present. This build persists only the credential's DIGEST, so the VALUE
+   * has to be adopted by the host's protected store INSIDE the same transaction
+   * that records the digest — exactly as the run path's own dispatch does — or the
+   * attempt could never be delivered after a restart. A process without a readable
+   * version-3 store refuses the command by name rather than writing an attempt
+   * nobody can settle.
+   *
+   * THE SOURCE IS INJECTABLE for the same reason the run path's is: a test pins
+   * the credential value deterministically, while production uses the platform
+   * CSPRNG. Omitting it is NOT "no credential" — it is the shipped source.
+   *
+   * REQUIRED by {@link GraphControlNodeRetryRequest}, whose handler refuses a
+   * node-scoped retry that cannot adopt a credential
+   * (`credential-isolation-unavailable`); a RUN-SCOPED retry never reads it.
    */
   readonly retry?: GraphControlRetryCapability;
   /**
@@ -69,10 +83,154 @@ export interface GraphControlRequest {
    * and the deadline it expires at (P3 item 3). Required for that command — a
    * request with no named approver would let the declaring principal's control
    * authority imply approval authority, and a request with no deadline would be
-   * a pause nothing can end on its own. Ignored by every other command.
+   * a pause nothing can end on its own.
+   *
+   * REQUIRED by {@link GraphControlApprovalRequestCommand}, whose handler refuses
+   * a raise that lacks either (`approval-request-malformed`). Every other
+   * command's handler never reads it.
    */
   readonly approval?: ApprovalRequestSpec;
 }
+
+/**
+ * A node-scoped stop: the attempt of ONE named node failed.
+ *
+ * `nodeId` is REQUIRED and `attemptId` optional because that is what the handler
+ * resolves — `resolveNodeTarget` refuses a command that names no node
+ * (`unknown-node`) and uses the run's current attempt when none is named.
+ * `hostFailure` is the host-only corroboration a `failure` may carry;
+ * `application.ts` refuses it on every command but `failure`.
+ */
+export interface GraphControlFailureRequest extends GraphControlRequestBase {
+  readonly command: "failure";
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  /** Host-only authority, corroborated against the attempt's durable execution binding. */
+  readonly hostFailure?: { readonly executionId: string; readonly taskId?: string };
+}
+
+/** A node-scoped stop: the attempt of ONE named node exceeded its declared time. */
+export interface GraphControlTimeoutRequest extends GraphControlRequestBase {
+  readonly command: "timeout";
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  /** `application.ts` refuses a host failure carried by any command but `failure`. */
+  readonly hostFailure?: never;
+}
+
+/**
+ * A run-wide stop: every attempt still in flight is cancelled.
+ *
+ * A run-wide command names no node and no attempt — `stop-command.ts` refuses a
+ * `cancel` that carries either — so both fields are declared `never`: they stay
+ * addressable (and `undefined`) across the union while a request that CARRIES
+ * one is a compile error.
+ */
+export interface GraphControlCancelRequest extends GraphControlRequestBase {
+  readonly command: "cancel";
+  readonly nodeId?: never;
+  readonly attemptId?: never;
+  readonly hostFailure?: never;
+}
+
+/** A run-wide stop: the declared budget is spent, so the run ends. */
+export interface GraphControlBudgetStopRequest extends GraphControlRequestBase {
+  readonly command: "budget-stop";
+  readonly nodeId?: never;
+  readonly attemptId?: never;
+  readonly hostFailure?: never;
+}
+
+/**
+ * A RUN-SCOPED retry: re-execute a terminal run as a new one.
+ *
+ * The handler answers this form BEFORE it reads a credential capability
+ * (`retry-command.ts`: a request that names no node orders a re-execution), so
+ * `retry` stays optional here. `attemptId` does too: the handler refuses a
+ * run-scoped retry that names an attempt, and that refusal is the one the tool
+ * entry forwards.
+ */
+export interface GraphControlRunRetryRequest extends GraphControlRequestBase {
+  readonly command: "retry";
+  readonly nodeId?: never;
+  readonly attemptId?: string;
+  readonly hostFailure?: never;
+}
+
+/**
+ * A NODE-SCOPED retry: supersede one node's attempt with a freshly minted one.
+ *
+ * `nodeId` is required and `retry` is required with it: only this process can
+ * adopt the successor's credential into the host's protected store, and the
+ * handler refuses `credential-isolation-unavailable` when no readable
+ * capability is carried (`retry-command.ts`).
+ */
+export interface GraphControlNodeRetryRequest extends GraphControlRequestBase {
+  readonly command: "retry";
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  readonly hostFailure?: never;
+  readonly retry: GraphControlRetryCapability;
+}
+
+/** A raise: pause ONE named attempt until the named approver decides it. */
+export interface GraphControlApprovalRequestCommand extends GraphControlRequestBase {
+  readonly command: "approval-request";
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  readonly hostFailure?: never;
+  readonly approval: ApprovalRequestSpec;
+}
+
+/** A decision: approve the pending request of ONE named attempt. */
+export interface GraphControlApproveRequest extends GraphControlRequestBase {
+  readonly command: "approve";
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  readonly hostFailure?: never;
+}
+
+/** A decision: reject the pending request of ONE named attempt. */
+export interface GraphControlRejectRequest extends GraphControlRequestBase {
+  readonly command: "reject";
+  readonly nodeId: string;
+  readonly attemptId?: string;
+  readonly hostFailure?: never;
+}
+
+/**
+ * One control command a trusted principal asked for, discriminated on `command`.
+ *
+ * EVERY ARM MIRRORS A HANDLER'S OWN CHECKS, so a request the runtime refuses is
+ * refused by the compiler first: `stop-command.ts` refuses a run-wide
+ * `cancel`/`budget-stop` that names a node or an attempt; `resolveNodeTarget`
+ * refuses a node-scoped command that names none; `approval-command.ts` refuses
+ * an `approval-request` with no specification; `retry-command.ts` refuses a
+ * `retry` with no credential-isolation capability; and `application.ts` refuses
+ * a `hostFailure` carried by any command but `failure`. A field a command
+ * merely IGNORES stays optional (see {@link GraphControlRequestBase}): the
+ * runtime accepts it and does nothing with it.
+ */
+export type GraphControlRequest =
+  | GraphControlFailureRequest
+  | GraphControlTimeoutRequest
+  | GraphControlCancelRequest
+  | GraphControlBudgetStopRequest
+  | GraphControlRunRetryRequest
+  | GraphControlNodeRetryRequest
+  | GraphControlApprovalRequestCommand
+  | GraphControlApproveRequest
+  | GraphControlRejectRequest;
+
+type AssertNever<T extends never> = T;
+/**
+ * The union and the closed vocabulary cannot drift: every command must have an
+ * arm, so a command added to {@link ControlCommandName} alone is a compile
+ * error here rather than a request the runtime's switch cannot name.
+ */
+type _EveryControlCommandHasAnArm = AssertNever<
+  Exclude<ControlCommandName, GraphControlRequest["command"]>
+>;
 
 // ── The answer ──────────────────────────────────────────────────────────────
 
@@ -299,74 +457,143 @@ export interface GraphControlApproval {
   readonly replayed: boolean;
 }
 
+/**
+ * The fields every APPLIED answer carries, whatever command it named.
+ *
+ * The command-specific fields are NOT here: `reexecution` belongs to a
+ * run-scoped `retry`, `approval` to an approval command and `budget` to a
+ * `budget-stop`. Each arm below carries exactly the one its command reports,
+ * and declares the others `never`, so a consumer holding the arm for a command
+ * cannot read a payload that command never produces and an answer carrying one
+ * is a compile error. A `never` field stays addressable (and `undefined`)
+ * across the union, exactly as the request arms' exclusions do.
+ */
+export interface GraphControlAppliedBase {
+  readonly kind: "applied";
+  readonly graphId: string;
+  readonly runId: string;
+  /**
+   * What the command acted on: `attempt` for a node-scoped command (it names
+   * attempts of one node — including a `retry`, which supersedes one), `run`
+   * for a command that acts on the run itself (a cancel, and a run-scoped
+   * `retry`, which orders a new run).
+   */
+  readonly scope: "attempt" | "run";
+  /**
+   * The attempts a `retry` MINTED, in node order; empty for every other
+   * command. A replay of an earlier retry reports the successor THAT decision
+   * recorded — the same attempt, never a second one.
+   */
+  readonly minted: readonly GraphControlMintedAttempt[];
+  /** The decisions THIS call recorded or replayed, in plan node order. */
+  readonly decided: readonly GraphControlAttemptDecision[];
+  /**
+   * The run's control fact AFTER this call. It is the FIRST command recorded
+   * for the run, so a later command reports the one that actually stopped
+   * it — never this call's candidate. ABSENT when the run carries none and
+   * this command did not claim one (a retry supersedes an attempt; it does
+   * not stop the run).
+   */
+  readonly runControl?: RunControlRecord;
+  /**
+   * In-flight attempts this call did not decide, because they had already
+   * settled through the acceptance core, or — for a run-wide command — because
+   * they already carry another control command and are never re-labelled.
+   */
+  readonly skipped: readonly GraphControlSkippedAttempt[];
+  /** Every effect of the run still pending or started. */
+  readonly unsettledEffects: readonly PendingEffectRecord[];
+  /** Every execution row of those attempts the host has not confirmed. */
+  readonly unconfirmedExecutions: readonly GraphControlUnconfirmedExecution[];
+  /**
+   * Every approval request this call EXPIRED. A command issued under the
+   * graph's DECLARING authority (a stop, a retry, an `approval-request`) runs
+   * the graph-wide deadline sweep first and then, when it stops the run, the
+   * pending requests of that run. A DECISION command sweeps nothing: it
+   * materializes at most ITS OWN request's expiry, and reports that through
+   * the `approval-expired` refusal instead. Present for EVERY applied command
+   * and empty when nothing was due, so an expiry is never inferred from a
+   * silence: the answer names the rows whose status changed (P3 item 3).
+   */
+  readonly expiredApprovals: readonly ApprovalRequestRecord[];
+}
+
+/**
+ * An applied `failure`, `timeout` or `cancel`.
+ *
+ * The command is the only thing this arm adds to the base: `stop-command.ts`
+ * never reports a re-execution, an approval request or a budget for any of the
+ * three, so each is declared `never`.
+ */
+export interface GraphControlStopApplied extends GraphControlAppliedBase {
+  readonly command: "failure" | "timeout" | "cancel";
+  readonly reexecution?: never;
+  readonly approval?: never;
+  readonly budget?: never;
+}
+
+/**
+ * An applied `budget-stop`: the run's BUDGET state, present exactly for this
+ * command (P3 item 3) — the declared limits, the recorded usage, the
+ * outstanding reservations and, recomputed from the rows, every ACTUAL
+ * overrun. It is the evidence the stop answers to, so a delayed platform bill
+ * is visible in the very answer that stops the run instead of being reported
+ * as "nothing was overspent".
+ *
+ * ABSENT when the plan's ceilings or the budget rows could not be read, which
+ * is the one legitimate absence the contract documents (`budgetReportField`).
+ * Holding THIS arm, that absence is the only thing an absent field can mean.
+ */
+export interface GraphControlBudgetStopApplied extends GraphControlAppliedBase {
+  readonly command: "budget-stop";
+  readonly reexecution?: never;
+  readonly approval?: never;
+  readonly budget?: BudgetReport;
+}
+
+/**
+ * An applied `retry`: the RUN-SCOPED form records a re-execution, the
+ * NODE-SCOPED form mints a successor attempt. `reexecution` is present exactly
+ * for the run-scoped form (`retry-command.ts`).
+ */
+export interface GraphControlRetryApplied extends GraphControlAppliedBase {
+  readonly command: "retry";
+  readonly reexecution?: GraphControlReexecution;
+  readonly approval?: never;
+  readonly budget?: never;
+}
+
+/**
+ * An applied approval command. `approval` is REQUIRED: every applied
+ * `approval-request`, `approve` and `reject` names the request it raised or
+ * decided (`approval-command.ts`).
+ */
+export interface GraphControlApprovalApplied extends GraphControlAppliedBase {
+  readonly command: "approval-request" | "approve" | "reject";
+  readonly approval: GraphControlApproval;
+  readonly reexecution?: never;
+  readonly budget?: never;
+}
+
+/** What one applied control command did, discriminated on the command it names. */
+export type GraphControlAppliedResult =
+  | GraphControlStopApplied
+  | GraphControlBudgetStopApplied
+  | GraphControlRetryApplied
+  | GraphControlApprovalApplied;
+
+/**
+ * The union and the closed vocabulary cannot drift: every command must have an
+ * applied arm, so a command added to {@link ControlCommandName} alone is a
+ * compile error here rather than an answer no consumer can narrow.
+ */
+type _EveryControlCommandHasAnAppliedArm = AssertNever<
+  Exclude<ControlCommandName, GraphControlAppliedResult["command"]>
+>;
+
 /** What one control command did. */
 export type GraphControlResult =
-  | {
-    readonly kind: "applied";
-    readonly graphId: string;
-    readonly runId: string;
-    readonly command: ControlCommandName;
-    /**
-     * What the command acted on: `attempt` for a node-scoped command (it names
-     * attempts of one node — including a `retry`, which supersedes one), `run`
-     * for a command that acts on the run itself (a cancel, and a run-scoped
-     * `retry`, which orders a new run).
-     */
-    readonly scope: "attempt" | "run";
-    /**
-     * The attempts a `retry` MINTED, in node order; empty for every other
-     * command. A replay of an earlier retry reports the successor THAT decision
-     * recorded — the same attempt, never a second one.
-     */
-    readonly minted: readonly GraphControlMintedAttempt[];
-    /**
-     * The run-level re-execution a RUN-SCOPED `retry` recorded, present exactly
-     * for that command.
-     */
-    readonly reexecution?: GraphControlReexecution;
-    /** The decisions THIS call recorded or replayed, in plan node order. */
-    readonly decided: readonly GraphControlAttemptDecision[];
-    /**
-     * The run's control fact AFTER this call. It is the FIRST command recorded
-     * for the run, so a later command reports the one that actually stopped
-     * it — never this call's candidate. ABSENT when the run carries none and
-     * this command did not claim one (a retry supersedes an attempt; it does
-     * not stop the run).
-     */
-    readonly runControl?: RunControlRecord;
-    /**
-     * In-flight attempts this call did not decide, because they had already
-     * settled through the acceptance core, or — for a run-wide command — because
-     * they already carry another control command and are never re-labelled.
-     */
-    readonly skipped: readonly GraphControlSkippedAttempt[];
-    /** Every effect of the run still pending or started. */
-    readonly unsettledEffects: readonly PendingEffectRecord[];
-    /** Every execution row of those attempts the host has not confirmed. */
-    readonly unconfirmedExecutions: readonly GraphControlUnconfirmedExecution[];
-    /**
-     * Every approval request this call EXPIRED. A command issued under the
-     * graph's DECLARING authority (a stop, a retry, an `approval-request`) runs
-     * the graph-wide deadline sweep first and then, when it stops the run, the
-     * pending requests of that run. A DECISION command sweeps nothing: it
-     * materializes at most ITS OWN request's expiry, and reports that through
-     * the `approval-expired` refusal instead. Present for EVERY applied command
-     * and empty when nothing was due, so an expiry is never inferred from a
-     * silence: the answer names the rows whose status changed (P3 item 3).
-     */
-    readonly expiredApprovals: readonly ApprovalRequestRecord[];
-    /** The request directly raised or decided by an approval command. */
-    readonly approval?: GraphControlApproval;
-    /**
-     * The run's BUDGET state, present exactly for an applied `budget-stop`
-     * whose plan's ceilings could be read (P3 item 3): the declared limits, the
-     * recorded usage, the outstanding reservations and — recomputed from the
-     * rows — every ACTUAL overrun. It is the evidence the stop answers to, so
-     * a delayed platform bill is visible in the very answer that stops the run
-     * instead of being reported as "nothing was overspent".
-     */
-    readonly budget?: BudgetReport;
-  }
+  | GraphControlAppliedResult
   | {
     readonly kind: "refused";
     readonly graphId: string;

@@ -977,7 +977,7 @@ export class OutcomeDispatchRecovery {
           const nodes = state.nodes.map((entry, index) =>
             index === position
               ? Object.freeze({
-                ...entry,
+                ...current,
                 attemptCredentialDigest: attemptCredentialDigest(minted),
               })
               : entry,

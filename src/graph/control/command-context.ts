@@ -23,7 +23,7 @@ export interface ControlCommandContext<C extends ControlCommandName> {
   readonly run: StoredRunIdentity;
   readonly state: OutcomeGraphState;
   readonly settled: ReadonlySet<string>;
-  readonly request: GraphControlRequest & { readonly command: C };
+  readonly request: Extract<GraphControlRequest, { readonly command: C }>;
   readonly principal: GraphControlPrincipal;
   readonly expiredApprovals: readonly ApprovalRequestRecord[];
 }
@@ -50,6 +50,96 @@ export function principalOf(
   return Object.freeze({ sessionId: principal.sessionId, agentId: principal.agentId });
 }
 
+/**
+ * The refusal a NODE-SCOPED command that names no node is answered with.
+ *
+ * `resolveNodeTarget` applies this rule below for a direct caller; the tool
+ * entry applies the SAME rule before it can name a command arm, because the
+ * union makes `nodeId` required on every node-scoped arm (and must not: the
+ * handler refuses a request that names none). The wording lives here once, so
+ * both callers answer identically.
+ */
+export function nodeScopedCommandMissingNodeRefusal(
+  graphId: string,
+  command: ControlCommandName,
+): GraphControlRefused {
+  return refuse(
+    graphId,
+    "unknown-node",
+    "$.node_id",
+    "graph-control refused [unknown-node]: command " +
+    JSON.stringify(command) +
+    " names the attempt it applies to, so node_id is required and was not supplied",
+  );
+}
+
+/**
+ * The refusal a `retry` that cannot mint its successor's credential is answered
+ * with.
+ *
+ * `retry-command.ts` applies this rule when the request carries no capability
+ * (or one whose store is unreadable); the tool entry applies the SAME rule when
+ * its host holds none, because the union makes `retry` required on the retry
+ * arm. The wording is the handler's, verbatim.
+ */
+export function missingRetryCapabilityRefusal(graphId: string): GraphControlRefused {
+  return refuse(
+    graphId,
+    "credential-isolation-unavailable",
+    "$.retry",
+    "graph-control refused [credential-isolation-unavailable]: a retry mints a NEW " +
+    "attempt, and this process holds no readable version-3 credential-isolation " +
+    "capability to adopt the attempt's credential into the host's protected store — an " +
+    "attempt whose credential the host never held could never be delivered or " +
+    "settled, so nothing was written",
+  );
+}
+
+/**
+ * The refusal an `approval-request` that names neither approver nor deadline is
+ * answered with.
+ *
+ * `approval-command.ts` applies this rule when the request carries no
+ * specification at all; the tool entry applies the SAME rule when the caller
+ * supplied neither argument, because the union makes `approval` required on the
+ * raise arm. The wording is the handler's, verbatim.
+ */
+export function approvalRequestSpecAbsentRefusal(graphId: string): GraphControlRefused {
+  return refuse(
+    graphId,
+    "approval-request-malformed",
+    "$.approval",
+    "graph-control refused [approval-request-malformed]: an approval request must carry " +
+    "the session that may decide it and the deadline it expires at, and this call " +
+    "carried neither — a request no decision could legitimately resolve is a strand, " +
+    "so nothing was written",
+  );
+}
+
+/**
+ * The refusal a RUN-WIDE command that names a node or an attempt is answered
+ * with.
+ *
+ * `stop-command.ts` applies this rule inside its transaction; the tool entry
+ * applies the SAME rule before it can name a command arm, because the union
+ * cannot represent a run-wide request carrying a node (and must not: the
+ * handler refuses one). The wording is the handler's, verbatim.
+ */
+export function runWideCommandNamedNodeRefusal(
+  graphId: string,
+  command: ControlCommandName,
+): GraphControlRefused {
+  return refuse(
+    graphId,
+    "unknown-node",
+    "$.node_id",
+    "graph-control refused [unknown-node]: command " +
+    JSON.stringify(command) +
+    " applies to the whole run and names no node; pass neither node_id nor " +
+    "attempt_id, or use a node-scoped command",
+  );
+}
+
 type NodeTargetResult =
   | { readonly kind: "resolved"; readonly nodeId: string; readonly attemptId: string }
   | { readonly kind: "refused"; readonly result: GraphControlRefused };
@@ -69,14 +159,7 @@ export function resolveNodeTarget(args: {
   if (nodeId === undefined) {
     return {
       kind: "refused",
-      result: refuse(
-        graphId,
-        "unknown-node",
-        "$.node_id",
-        "graph-control refused [unknown-node]: command " +
-        JSON.stringify(command) +
-        " names the attempt it applies to, so node_id is required and was not supplied",
-      ),
+      result: nodeScopedCommandMissingNodeRefusal(graphId, command),
     };
   }
   const node = state.nodes.find((entry) => entry.nodeId === nodeId);

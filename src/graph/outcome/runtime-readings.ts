@@ -1,6 +1,7 @@
 import { errorText } from "../../utils/error-text.ts";
 import type { OutcomeDispatchTarget } from "./dispatch-effects.ts";
 import type {
+  DispatchedNodeState,
   OutcomeGraphPhase,
   OutcomeGraphState,
   OutcomeNodeState,
@@ -48,13 +49,14 @@ export type OutcomeReading<T> =
   | { readonly kind: "refused"; readonly refusal: OutcomeRuntimeRefusal };
 
 /**
- * Every in-flight attempt a submission can actually settle, plus a per-attempt
- * refusal for each in-flight attempt it cannot.
+ * Every in-flight attempt a submission can settle, plus the per-attempt refusal
+ * list this report's callers read.
  *
- * An attempt whose persisted entry carries no credential (a body version that
- * predates credentials) is NOT reported as armed: recovery must refuse it, not
- * offer it as a node awaiting an outcome, because no submission can ever settle
- * it. It is reported in `refusals` instead, with the field that is missing.
+ * A DISPATCHED entry always carries an attempt-credential digest: the state
+ * readers require one of every non-pending node (`state-codec.ts`) and
+ * `DispatchedNodeState` mirrors that requirement, so an entry this build can
+ * produce or read is always one a submission can settle. The list stays in the
+ * report shape its callers read; nothing is refused here today.
  *
  * The credential ITSELF is never part of either report — the armed entry names
  * the node and attempt only, so a recovery report never becomes a second
@@ -66,22 +68,8 @@ export function armedReading(state: OutcomeGraphState): {
 } {
   const armed: OutcomeArmedNode[] = [];
   const refusals: OutcomeRuntimeRefusal[] = [];
-  state.nodes.forEach((node, index) => {
-    if (node.status !== "dispatched" || node.attemptId === undefined) return;
-    if (node.attemptCredentialDigest === undefined) {
-      refusals.push({
-        code: "credential-missing",
-        path: "$.nodes[" + index + "].attemptCredentialDigest",
-        message:
-          "outcome-runtime: node " +
-          JSON.stringify(node.nodeId) +
-          " is recorded as in flight on attempt " +
-          JSON.stringify(node.attemptId) +
-          " but its persisted state entry carries no attempt-credential digest — " +
-          "so no submission can settle it and it is reported as refused rather than armed",
-      });
-      return;
-    }
+  state.nodes.forEach((node) => {
+    if (node.status !== "dispatched") return;
     armed.push(Object.freeze({ nodeId: node.nodeId, attemptId: node.attemptId }));
   });
   return {
@@ -179,7 +167,7 @@ export class ReexecutionRacedError extends Error {
 export function dispatchedNodeOf(
   state: OutcomeGraphState,
   nodeId: string,
-): OutcomeNodeState | undefined {
+): DispatchedNodeState | undefined {
   const node = stateNodeOf(state, nodeId);
   return node?.status === "dispatched" ? node : undefined;
 }

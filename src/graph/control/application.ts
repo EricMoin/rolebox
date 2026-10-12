@@ -25,6 +25,7 @@ export type {
   GraphControlMintedAttempt,
   GraphControlReexecution,
   GraphControlApproval,
+  GraphControlAppliedResult,
   GraphControlResult,
 } from "./contracts.ts";
 
@@ -200,21 +201,24 @@ function applyInTransaction(
       ? Object.freeze([])
       : sweepApprovals(tx, graphId, request.at),
   };
-  const command = request.command;
-  switch (command) {
+  // The switch is on the REQUEST's own discriminant: each handler then receives
+  // the arm the union declares for its command, so the payload it reads is the
+  // one the compiler related to `command` — not a spread whose `command` the
+  // compiler could no longer tie to the fields beside it.
+  switch (request.command) {
     case "retry":
-      return applyRetryCommand({ ...context, request: { ...request, command } });
+      return applyRetryCommand({ ...context, request });
     case "approval-request":
     case "approve":
     case "reject":
-      return applyApprovalCommand({ ...context, request: { ...request, command } });
+      return applyApprovalCommand({ ...context, request });
     case "failure":
     case "timeout":
     case "cancel":
     case "budget-stop":
-      return applyStopCommand({ ...context, request: { ...request, command } });
+      return applyStopCommand({ ...context, request });
     default: {
-      const unsupported: never = command;
+      const unsupported: never = request;
       throw new Error("graph-control: unsupported command " + String(unsupported));
     }
   }

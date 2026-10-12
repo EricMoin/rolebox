@@ -233,6 +233,28 @@ export function applyStopCommand(ctx: ControlCommandContext<StopCommandName>): G
         "), so the approval pause it carried can never be answered",
       );
 
+  // THE COMMAND DECIDES THE ARM (contracts.ts): a `budget-stop` is the one stop
+  // that reports the run's budget, and only when its plan's ceilings could be
+  // read. Each branch builds the arm its command declares instead of spreading
+  // a budget onto a shape the other stops must not carry; the fields, their
+  // order, and therefore the answer stay the ones this command always produced.
+  if (request.command === "budget-stop") {
+    return Object.freeze({
+      kind: "applied" as const,
+      graphId,
+      runId: run.runId,
+      command: "budget-stop" as const,
+      scope: RUN_WIDE_COMMANDS.has(request.command) ? ("run" as const) : ("attempt" as const),
+      minted: Object.freeze([]),
+      decided: Object.freeze(decided),
+      runControl,
+      expiredApprovals: Object.freeze([...expiredApprovals, ...stoppedApprovals]),
+      skipped: Object.freeze(skipped),
+      unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
+      unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
+      ...budgetReportField(tx, plan, graphId, run.runId),
+    });
+  }
   return Object.freeze({
     kind: "applied" as const,
     graphId,
@@ -246,8 +268,5 @@ export function applyStopCommand(ctx: ControlCommandContext<StopCommandName>): G
     skipped: Object.freeze(skipped),
     unsettledEffects: Object.freeze(tx.pendingEffects(graphId, run.runId)),
     unconfirmedExecutions: unconfirmedExecutionsOf(tx, state),
-    ...(request.command === "budget-stop"
-      ? budgetReportField(tx, plan, graphId, run.runId)
-      : {}),
   });
 }

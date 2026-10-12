@@ -4,6 +4,12 @@ import {
   applyGraphControl,
   type GraphControlResult,
 } from "../control/application.ts";
+import {
+  approvalRequestSpecAbsentRefusal,
+  missingRetryCapabilityRefusal,
+  nodeScopedCommandMissingNodeRefusal,
+  runWideCommandNamedNodeRefusal,
+} from "../control/command-context.ts";
 import type { AttemptCredentialSource } from "../outcome/attempt-credential.ts";
 import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import { GraphStoreFormatError } from "../store/errors.ts";
@@ -131,44 +137,138 @@ export function runGraphControlEntry(
     throw error;
   }
   try {
-    return applyGraphControl(store, {
+    const principal =
+      invokingSessionId === undefined || invokingSessionId.length === 0
+        ? undefined
+        : Object.freeze({
+          sessionId: invokingSessionId,
+          ...(agent === undefined || agent.length === 0 ? {} : { agentId: agent }),
+        });
+    const base = {
       graphId,
-      command: args.command,
-      ...(args.node_id === undefined ? {} : { nodeId: args.node_id }),
-      ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
       reason: args.reason,
-      principal:
-        invokingSessionId === undefined || invokingSessionId.length === 0
-          ? undefined
-          : Object.freeze({
-            sessionId: invokingSessionId,
-            ...(agent === undefined || agent.length === 0 ? {} : { agentId: agent }),
-          }),
+      principal,
       at: deps.now ?? Date.now(),
       approvalPolicy: deps.approvalPolicy,
-      // WHAT AN APPROVAL REQUEST MUST CARRY. Passed through verbatim, never
-      // inferred: no default approver, no default deadline. The service refuses
-      // a raise that lacks either (or names a deadline already past) by name,
-      // so "omitted" can never become "the declarer may decide".
-      ...(args.approver_session_id === undefined && args.expires_at === undefined
-        ? {}
-        : {
-          approval: Object.freeze({
-            approverSessionId: args.approver_session_id ?? "",
-            expiresAt: args.expires_at ?? 0,
-          }),
-        }),
-      ...(deps.credentialIsolation === undefined
-        ? {}
-        : {
+    };
+    // THE COMMAND DECIDES THE ARM. `GraphControlRequest` is a discriminated
+    // union whose arms carry each handler's own call-shape rule: a node-scoped
+    // command REQUIRES its node, a run-wide one FORBIDS one, a `retry` REQUIRES
+    // the credential-isolation capability it mints with, and a raise REQUIRES
+    // the approver and deadline it pauses on. This entry therefore applies those
+    // rules HERE — answering each refused call-shape with the handler's own
+    // refusal value — instead of building a request the handler would refuse.
+    // Everything that depends on the store (the principal check, the graph, its
+    // declaration, the authorization and the run) still runs inside
+    // `applyGraphControl`, in the order it always did.
+    switch (args.command) {
+      case "cancel":
+        if (args.node_id !== undefined || args.attempt_id !== undefined) {
+          return runWideCommandNamedNodeRefusal(graphId, "cancel");
+        }
+        return applyGraphControl(store, { ...base, command: "cancel" });
+      case "budget-stop":
+        if (args.node_id !== undefined || args.attempt_id !== undefined) {
+          return runWideCommandNamedNodeRefusal(graphId, "budget-stop");
+        }
+        return applyGraphControl(store, { ...base, command: "budget-stop" });
+      case "failure": {
+        const nodeId = args.node_id;
+        if (nodeId === undefined) return nodeScopedCommandMissingNodeRefusal(graphId, "failure");
+        return applyGraphControl(store, {
+          ...base,
+          command: "failure",
+          nodeId,
+          ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
+        });
+      }
+      case "timeout": {
+        const nodeId = args.node_id;
+        if (nodeId === undefined) return nodeScopedCommandMissingNodeRefusal(graphId, "timeout");
+        return applyGraphControl(store, {
+          ...base,
+          command: "timeout",
+          nodeId,
+          ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
+        });
+      }
+      case "approve": {
+        const nodeId = args.node_id;
+        if (nodeId === undefined) return nodeScopedCommandMissingNodeRefusal(graphId, "approve");
+        return applyGraphControl(store, {
+          ...base,
+          command: "approve",
+          nodeId,
+          ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
+        });
+      }
+      case "reject": {
+        const nodeId = args.node_id;
+        if (nodeId === undefined) return nodeScopedCommandMissingNodeRefusal(graphId, "reject");
+        return applyGraphControl(store, {
+          ...base,
+          command: "reject",
+          nodeId,
+          ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
+        });
+      }
+      case "retry": {
+        const nodeId = args.node_id;
+        // THE RUN-SCOPED FORM NAMES NO NODE, so no node is resolved and no
+        // credential is minted: the handler orders the re-execution before it
+        // reads a capability, and a run-scoped retry that names an attempt is
+        // still answered by the handler's own refusal.
+        if (nodeId === undefined) {
+          return applyGraphControl(store, {
+            ...base,
+            command: "retry",
+            ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
+          });
+        }
+        const capability = deps.credentialIsolation;
+        if (capability === undefined) return missingRetryCapabilityRefusal(graphId);
+        return applyGraphControl(store, {
+          ...base,
+          command: "retry",
+          nodeId,
+          ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
           retry: Object.freeze({
-            credentialIsolation: deps.credentialIsolation,
+            credentialIsolation: capability,
             ...(deps.mintCredential === undefined
               ? {}
               : { mintCredential: deps.mintCredential }),
           }),
-        }),
-    });
+        });
+      }
+      case "approval-request": {
+        const nodeId = args.node_id;
+        if (nodeId === undefined) {
+          return nodeScopedCommandMissingNodeRefusal(graphId, "approval-request");
+        }
+        // WHAT AN APPROVAL REQUEST MUST CARRY. Passed through verbatim, never
+        // inferred: no default approver, no default deadline. A raise that
+        // carried NEITHER is refused by name here; one that carried only half
+        // reaches the handler's own `approvalSpecProblem`, which names the
+        // missing half — the same refusal, from the same rule.
+        if (args.approver_session_id === undefined && args.expires_at === undefined) {
+          return approvalRequestSpecAbsentRefusal(graphId);
+        }
+        return applyGraphControl(store, {
+          ...base,
+          command: "approval-request",
+          nodeId,
+          approval: Object.freeze({
+            approverSessionId: args.approver_session_id ?? "",
+            expiresAt: args.expires_at ?? 0,
+          }),
+          ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
+        });
+      }
+      default: {
+        const unhandled: never = args.command;
+        throw new Error("graph-control: unsupported command " + String(unhandled));
+      }
+    }
   } finally {
     store.close();
   }

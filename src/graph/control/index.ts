@@ -1,5 +1,6 @@
 export {
   applyGraphControl,
+  type GraphControlAppliedResult,
   type GraphControlApproval,
   type GraphControlAttemptDecision,
   type GraphControlMintedAttempt,

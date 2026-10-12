@@ -2021,8 +2021,9 @@ export class OutcomeGraphRuntime {
         reported = state;
       }
     }
-    // The armed report is credential-free by construction; an in-flight attempt
-    // the state cannot corroborate with a credential is reported as refused.
+    // The armed report is credential-free by construction: a dispatched entry
+    // always carries the credential digest its state requires, so every
+    // in-flight attempt is reported as armed.
     const readable = armedReading(reported);
     return {
       kind: "resumed",

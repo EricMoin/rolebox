@@ -4,31 +4,125 @@ import type { DownstreamInputRefusal, ResolvedInput } from "./inputs.ts";
 
 export type OutcomeNodeStatus = "pending" | "dispatched" | "settled";
 
-export interface OutcomeNodeState {
+/**
+ * A node that was never dispatched. It carries no attempt identity, no
+ * credential digest, no host binding, no outcome and no timestamp: the fields
+ * body versions 9 and 10 define for a `pending` node, and none of the ones they
+ * refuse for it. `arrivals` is required of EVERY node — `readNodeState` reads
+ * the arrival list unconditionally and refuses a body that omits it
+ * (`nodes[i].arrivals is undefined, not the predecessor arrival list …`), so a
+ * pending node records the empty list too.
+ *
+ * The refused fields are declared `never` rather than omitted so that a read
+ * through the union still type-checks — and answers `undefined`, exactly as an
+ * absent field does today — while a value that CARRIES one is a compile error,
+ * which is what the codec does at `rejectUnknownNodeFields`.
+ */
+export interface PendingNodeState {
 
   readonly nodeId: string;
-  readonly status: OutcomeNodeStatus;
 
-  readonly attemptId?: string;
+  readonly status: "pending";
 
-  readonly attemptSeq?: number;
+  readonly arrivals: readonly OutcomeArrival[];
 
-  readonly attemptCredentialDigest?: string;
+  readonly inputRefusals?: readonly DownstreamInputRefusal[];
+
+  readonly attemptId?: never;
+
+  readonly attemptSeq?: never;
+
+  readonly attemptCredentialDigest?: never;
+
+  readonly dispatchIdentity?: never;
+
+  readonly outcomeId?: never;
+
+  readonly dispatchedAt?: never;
+
+  readonly settledAt?: never;
+
+  readonly inputs?: never;
+}
+
+/**
+ * A node whose attempt is in flight. `attemptId`, `attemptSeq`,
+ * `attemptCredentialDigest`, `dispatchedAt` and `arrivals` are the dispatch
+ * facts `readNodeState` requires of every non-pending node — a dispatched body
+ * that omits any of them is refused on the next read — so they are required
+ * here too. The remaining fields are the ones a dispatched body may record
+ * beside them. The outcome and settlement timestamp a settled body owns are
+ * declared `never` here, because a dispatched node that carries either is
+ * refused by the codec.
+ */
+export interface DispatchedNodeState {
+
+  readonly nodeId: string;
+
+  readonly status: "dispatched";
+
+  readonly attemptId: string;
+
+  readonly attemptSeq: number;
+
+  readonly attemptCredentialDigest: string;
 
   readonly dispatchIdentity?: HostInvocationIdentity;
 
-  readonly outcomeId?: string;
+  readonly dispatchedAt: number;
 
-  readonly dispatchedAt?: number;
+  readonly arrivals: readonly OutcomeArrival[];
 
-  readonly settledAt?: number;
+  readonly inputs?: readonly ResolvedInput[];
 
-  readonly arrivals?: readonly OutcomeArrival[];
+  readonly inputRefusals?: readonly DownstreamInputRefusal[];
+
+  readonly outcomeId?: never;
+
+  readonly settledAt?: never;
+}
+
+/**
+ * A node whose attempt settled: it keeps every dispatch fact the reader
+ * requires (`attemptId`, `attemptSeq`, `attemptCredentialDigest`,
+ * `dispatchedAt`, `arrivals`) and adds the outcome that settled it and the
+ * settlement timestamp.
+ */
+export interface SettledNodeState {
+
+  readonly nodeId: string;
+
+  readonly status: "settled";
+
+  readonly attemptId: string;
+
+  readonly attemptSeq: number;
+
+  readonly attemptCredentialDigest: string;
+
+  readonly dispatchIdentity?: HostInvocationIdentity;
+
+  readonly outcomeId: string;
+
+  readonly dispatchedAt: number;
+
+  readonly settledAt: number;
+
+  readonly arrivals: readonly OutcomeArrival[];
 
   readonly inputs?: readonly ResolvedInput[];
 
   readonly inputRefusals?: readonly DownstreamInputRefusal[];
 }
+
+/**
+ * One node's progress, discriminated on `status`. The arms mirror the
+ * per-status field sets body versions 9 and 10 define (`state-codec.ts`): the
+ * fields a status requires are required, the ones it may carry beside them are
+ * optional, and the ones the codec refuses for it are `never` — so a state the
+ * reader would refuse is refused by the compiler first.
+ */
+export type OutcomeNodeState = PendingNodeState | DispatchedNodeState | SettledNodeState;
 
 export interface OutcomeArrival {
 
@@ -161,7 +255,7 @@ export interface OutcomeGraphState {
 
   readonly stop?: OutcomeStop;
 
-  readonly loopProgress?: Readonly<Record<string, OutcomeLoopProgress>>;
+  readonly loopProgress: Readonly<Record<string, OutcomeLoopProgress>>;
 }
 
 export const OUTCOME_STATE_BODY_V1 = 1 as const;

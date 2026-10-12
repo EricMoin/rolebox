@@ -20,6 +20,7 @@ import {
 import type {
   OutcomeGraphState,
   OutcomeStop,
+  OutcomeStopReason,
 } from "../outcome/graph-state.ts";
 import {
   credentialIsolationRefusal,
@@ -199,52 +200,119 @@ export interface SubmitOutcomeBlockedNode {
 }
 
 /**
- * One stop as the tool reports it, in the tool's snake_case surface.
- *
- * `reason` comes from the closed vocabulary `graph-state.ts` owns
- * (`OUTCOME_STOP_REASONS`) — a condition decided from the plan and the state,
- * never a judgement about the work. The fields a reason does not define are
- * ABSENT rather than reported as zero: a hard cap stop has no baseline, and a
- * progress stop has no traversal count, so neither invents the other numbers.
+ * One `loop-exhausted` stop as the tool reports it: the declared hard cap the
+ * continuation would have exceeded, and the round it had reached.
  */
-export interface SubmitOutcomeStop {
-  readonly reason: string;
-  /**
-   * `unreachable-pending-node` only: one entry per stranded pending node, with
-   * the feeder(s) of it that can never arrive. Present (and the four id fields
-   * below absent) exactly for that reason.
-   */
-  readonly blocked_nodes?: readonly SubmitOutcomeBlockedNode[];
-  /**
-   * The declared loop group whose cap or progress policy binds. Absent on an
-   * `unreachable-pending-node` stop, which is about no group.
-   */
-  readonly loop_group_id?: string;
+export interface SubmitOutcomeLoopExhaustedStop {
+  readonly reason: "loop-exhausted";
+  /** The declared loop group whose cap binds. */
+  readonly loop_group_id: string;
   /** The node whose accepted outcome could not continue. */
-  readonly node_id?: string;
+  readonly node_id: string;
   /** The continuation outcome that asked for the refused round. */
-  readonly outcome_id?: string;
+  readonly outcome_id: string;
   /** The attempt of `node_id` that the outcome settled. */
-  readonly attempt_id?: string;
-  /** `loop-exhausted` only: continuations the group took, equal to the cap. */
-  readonly traversals?: number;
-  /** `loop-exhausted` only: the declared hard cap the round would have exceeded. */
-  readonly max_traversals?: number;
-  /** `progress-stalled` only: consecutive unchanged comparisons, equal to the threshold. */
-  readonly unchanged?: number;
-  /** `progress-stalled` only: the declared stagnation threshold. */
-  readonly max_unchanged?: number;
-  /** `progress-stalled` only: the comparison semantics the baseline was recorded under. */
-  readonly evaluator?: string;
-  /** `progress-stalled` only: the exact version of that evaluator. */
-  readonly evaluator_version?: number;
-  /** `progress-stalled` only: the comparison object (an outcome-data field). */
-  readonly subject?: string;
-  /** `progress-stalled` only: the bounded revision token the run stood still on. */
-  readonly baseline?: string;
+  readonly attempt_id: string;
+  /** Continuations the group took, equal to the cap. */
+  readonly traversals: number;
+  /** The declared hard cap the round would have exceeded. */
+  readonly max_traversals: number;
   /** Epoch milliseconds the stop was committed at. */
   readonly stopped_at: number;
+  /** A reason this one does not define carries NOTHING: `progress-stalled`'s baseline is absent here. */
+  readonly blocked_nodes?: never;
+  readonly unchanged?: never;
+  readonly max_unchanged?: never;
+  readonly evaluator?: never;
+  readonly evaluator_version?: never;
+  readonly subject?: never;
+  readonly baseline?: never;
 }
+
+/**
+ * One `progress-stalled` stop as the tool reports it: the bounded comparison the
+ * run stood still on, and the threshold it reached.
+ */
+export interface SubmitOutcomeProgressStalledStop {
+  readonly reason: "progress-stalled";
+  readonly loop_group_id: string;
+  readonly node_id: string;
+  readonly outcome_id: string;
+  readonly attempt_id: string;
+  /** Consecutive unchanged comparisons, equal to the threshold. */
+  readonly unchanged: number;
+  /** The declared stagnation threshold. */
+  readonly max_unchanged: number;
+  /** The comparison semantics the baseline was recorded under. */
+  readonly evaluator: string;
+  /** The exact version of that evaluator. */
+  readonly evaluator_version: number;
+  /** The comparison object (an outcome-data field). */
+  readonly subject: string;
+  /** The bounded revision token the run stood still on. */
+  readonly baseline: string;
+  readonly stopped_at: number;
+  /** A reason this one does not define carries NOTHING: a traversal count is absent here. */
+  readonly blocked_nodes?: never;
+  readonly traversals?: never;
+  readonly max_traversals?: never;
+}
+
+/**
+ * One `unreachable-pending-node` stop as the tool reports it: each stranded
+ * pending node and the feeder(s) of it that can never arrive.
+ *
+ * It names no group, no outcome and no attempt — no round was refused and no
+ * outcome is at fault — so those fields are `never` here rather than filled
+ * with invented ids.
+ */
+export interface SubmitOutcomeUnreachablePendingNodeStop {
+  readonly reason: "unreachable-pending-node";
+  /** Each stranded PENDING node, and the feeder(s) of it that can never arrive. */
+  readonly blocked_nodes: readonly SubmitOutcomeBlockedNode[];
+  /** Epoch milliseconds the stop was committed at. */
+  readonly stopped_at: number;
+  readonly loop_group_id?: never;
+  readonly node_id?: never;
+  readonly outcome_id?: never;
+  readonly attempt_id?: never;
+  readonly traversals?: never;
+  readonly max_traversals?: never;
+  readonly unchanged?: never;
+  readonly max_unchanged?: never;
+  readonly evaluator?: never;
+  readonly evaluator_version?: never;
+  readonly subject?: never;
+  readonly baseline?: never;
+}
+
+/**
+ * One stop as the tool reports it, in the tool's snake_case surface,
+ * discriminated on `reason`.
+ *
+ * It MIRRORS `OutcomeStop` (`state-model.ts`), the 3-member union the run state
+ * itself persists: the fields a reason defines are REQUIRED on its arm, and the
+ * ones it does not define are `never` — declared rather than omitted so a
+ * consumer that reads one through the union still type-checks and answers
+ * `undefined`, exactly as an absent field does — so a projection the tool never
+ * produces cannot be written. `reason` comes from the closed vocabulary
+ * `OUTCOME_STOP_REASONS` owns; the fields a reason does not define are ABSENT
+ * rather than reported as zero, and the arms say so.
+ */
+export type SubmitOutcomeStop =
+  | SubmitOutcomeLoopExhaustedStop
+  | SubmitOutcomeProgressStalledStop
+  | SubmitOutcomeUnreachablePendingNodeStop;
+
+type AssertNever<T extends never> = T;
+/** The projection and the persisted union cannot drift: every reason has an arm. */
+type _EveryStopReasonHasAProjection = AssertNever<
+  Exclude<OutcomeStopReason, SubmitOutcomeStop["reason"]>
+>;
+/** …and every arm's reason is one the persisted union defines. */
+type _EveryProjectionIsAStopReason = AssertNever<
+  Exclude<SubmitOutcomeStop["reason"], OutcomeStopReason>
+>;
 
 // ── Refusals at the tool boundary ───────────────────────────────────────────
 

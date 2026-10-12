@@ -3,7 +3,11 @@ import { mkdtempSync } from "node:fs";
 import { removeTempTrees } from "../helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyGraphControl, type GraphControlRequest } from "../../../src/graph/control/application.ts";
+import {
+  applyGraphControl,
+  type GraphControlPrincipal,
+  type GraphControlRequest,
+} from "../../../src/graph/control/application.ts";
 import type { GraphDeclarationV3 } from "../../../src/graph/compiler/declaration-v3.ts";
 import { SqliteAcceptanceLedger } from "../../../src/graph/ledger/sqlite-ledger.ts";
 import { OutcomeGraphRuntime, type OutcomeDispatchRequest } from "../../../src/graph/outcome/runtime.ts";
@@ -20,6 +24,22 @@ afterEach(() => {
   // throws must not leave the directory queued for the next sweep.
   removeTempTrees(roots);
 });
+
+/**
+ * One case's request, as the cases below name it: the ARM its command declares,
+ * minus the fields the fixture's base supplies (`graphId`, `reason`,
+ * `principal`, `at`, `approvalPolicy`, `retry` — the last four overridable).
+ * Distributing over the arms keeps each command's own required payload
+ * required, so a case can no more name a shape the runtime refuses than
+ * production can.
+ */
+type ControlRequestCall<T = GraphControlRequest> = T extends GraphControlRequest
+  ? Omit<T, "graphId" | "reason" | "principal" | "at" | "approvalPolicy" | "retry"> & {
+    readonly reason?: string;
+    readonly principal?: GraphControlPrincipal;
+    readonly at?: number;
+  }
+  : never;
 
 async function fixture(declaration: GraphDeclarationV3 = plainDeclaration()) {
   const root = mkdtempSync(join(tmpdir(), "control-quality-"));
@@ -43,8 +63,7 @@ async function fixture(declaration: GraphDeclarationV3 = plainDeclaration()) {
   };
   return {
     store, runtime, graphId: graph.graphId, requests,
-    control: (request: Pick<GraphControlRequest, "command"> & Partial<GraphControlRequest>) =>
-      applyGraphControl(store, { ...base, ...request }),
+    control: (request: ControlRequestCall) => applyGraphControl(store, { ...base, ...request }),
     close: () => { ledger.close(); store.close(); },
   };
 }
@@ -95,10 +114,16 @@ describe("control transaction outcomes", () => {
     } finally { f.close(); }
   });
 
+  // EVERY SHAPE HERE IS ONE THE UNION STILL REPRESENTS AND THE RUNTIME STILL
+  // REFUSES AT THIS BOUNDARY. A `cancel` naming a node and an `approval-request`
+  // with no specification are no longer *expressible* as a request (F-17): the
+  // tool entry answers them with the handler's own refusal before the
+  // transaction opens, so there is no sweep to roll back and nothing to assert
+  // here — their refusal is pinned by `request-union-type-guards.test.ts`.
   it.each([
-    { command: "cancel", nodeId: "work" },
     { command: "retry", nodeId: "missing" },
-    { command: "approval-request", nodeId: "work" },
+    { command: "retry", attemptId: "work#1" },
+    { command: "failure", nodeId: "missing" },
   ] as const)("rolls back the deadline sweep when $command is refused", async (request) => {
     const f = await fixture();
     try {
@@ -163,11 +188,15 @@ describe("control transaction outcomes", () => {
 });
 
 describe("approval command boundaries", () => {
-  it("refuses a null approval specification as a value", async () => {
+  it("refuses a malformed approval specification as a value", async () => {
     const f = await fixture();
     try {
+      // A spec that names no approver and no usable deadline is a VALUE the
+      // runtime refuses. A `null` one is no longer expressible: F-17 requires
+      // the raise arm's `approval`, and `request-union-type-guards.test.ts`
+      // pins that the unrepresentable value cannot be written.
       expect(f.control({ command: "approval-request", nodeId: "work",
-        approval: null as unknown as GraphControlRequest["approval"],
+        approval: { approverSessionId: "", expiresAt: 0 },
       })).toMatchObject({ kind: "refused", refusals: [{ code: "approval-request-malformed" }] });
       expect(f.store.approvals.approvalRequestsOf(f.graphId)).toEqual([]);
     } finally { f.close(); }
