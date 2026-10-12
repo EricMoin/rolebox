@@ -11,6 +11,7 @@ import { dispatchIdempotencyKeyOf } from "../outcome/dispatch-effects.ts";
 import type { HostInvocationIdentity } from "../outcome/host-identity.ts";
 import {
   HostExecutionIndex,
+  executionCacheKeyOf,
   hostExecutionNotCreated,
   type HostExecutionClaim,
   type HostExecutionConfirmation,
@@ -427,7 +428,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
    * PLATFORM says it created.
    */
   namedExecutionOf(effect: OutcomeDispatchEffectKey): HostExecutionIdentity | undefined {
-    return this.platformExecutions.get(effectKeyOf(effect));
+    return this.platformExecutions.get(executionCacheKeyOf(effect));
   }
 
   /**
@@ -566,7 +567,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     effect: OutcomeDispatchEffectKey,
     execution: HostExecutionIdentity,
   ): void {
-    this.platformExecutions.set(effectKeyOf(effect), execution);
+    this.platformExecutions.set(executionCacheKeyOf(effect), execution);
   }
 
   /**
@@ -584,7 +585,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     effect: OutcomeDispatchEffectKey,
     execution: HostExecutionIdentity,
   ): void {
-    const key = effectKeyOf(effect);
+    const key = executionCacheKeyOf(effect);
     // AT MOST ONE ATTEMPT PER EFFECT PER PROCESS. A refused conditional write
     // records a durable refusal on the row, and that record exists to diagnose a
     // STALE CONFIRMATION — not to be raised again by every lookup the sweep and
@@ -611,11 +612,6 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
       }),
     );
   }
-}
-
-/** One effect's map key, spelled the same way the registry spells it. */
-function effectKeyOf(effect: OutcomeDispatchEffectKey): string {
-  return effect.graphId + "\u0000" + effect.effectId;
 }
 
 /** One caught value, described without quoting host text wholesale. */

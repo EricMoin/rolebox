@@ -178,7 +178,7 @@ export class HostCredentialVault {
         JSON.stringify(identity.attemptId),
       );
     }
-    this.entries.set(entryKey(identity), credential);
+    this.entries.set(credentialCacheKeyOf(identity), credential);
     this.graphStore.rememberCredential(
       identity,
       this.retainValues ? "retained" : "not-retained",
@@ -193,12 +193,12 @@ export class HostCredentialVault {
    * The runtime reports an effect it cannot resolve instead of launching it.
    */
   resolve(identity: CredentialStoreIdentity): string | undefined {
-    return this.entries.get(entryKey(identity));
+    return this.entries.get(credentialCacheKeyOf(identity));
   }
 
   /** Whether this vault holds a credential for exactly that attempt. */
   has(identity: CredentialStoreIdentity): boolean {
-    return this.entries.has(entryKey(identity));
+    return this.entries.has(credentialCacheKeyOf(identity));
   }
 
   /**
@@ -222,7 +222,7 @@ export class HostCredentialVault {
    * deleted too.
    */
   forget(identity: CredentialStoreIdentity): void {
-    this.entries.delete(entryKey(identity));
+    this.entries.delete(credentialCacheKeyOf(identity));
     this.graphStore.forgetCredential(identity);
   }
 
@@ -316,14 +316,20 @@ export class HostCredentialVault {
           ") — refusing the whole store rather than dropping one attempt's credential",
         );
       }
-      this.entries.set(entryKey(entry.identity), entry.credential);
+      this.entries.set(credentialCacheKeyOf(entry.identity), entry.credential);
     }
   }
 }
 
 // ── Primitives ──────────────────────────────────────────────────────────────
 
-/** The vault's map key: the runtime's own attempt identity, joined unambiguously. */
-function entryKey(identity: CredentialStoreIdentity): string {
+/**
+ * The vault's map key: the runtime's own attempt identity, joined unambiguously.
+ *
+ * THE ONE SPELLING (F-08) of this three-part identity. Exported so a second map
+ * that ever keys the same credential identity composes this derivation instead
+ * of spelling the join again; the bytes are unchanged.
+ */
+export function credentialCacheKeyOf(identity: CredentialStoreIdentity): string {
   return identity.graphId + "\u0000" + identity.nodeId + "\u0000" + identity.attemptId;
 }

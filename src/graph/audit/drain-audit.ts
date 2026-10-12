@@ -307,9 +307,13 @@ export interface DrainAuditReport {
   /** Every blocker, store-level and per-entry, in report order. */
   readonly blockers: readonly DrainAuditBlocker[];
   readonly totals: DrainAuditTotals;
+  /**
+   * THE ONE AUTHORITY for the drain decision (F-08). `drained` used to be a
+   * second encoding of this fact on the same object, so the two could disagree;
+   * the public `graph_audit` JSON still carries `drained`, projected from this
+   * field at the tool edge where a reader expects it.
+   */
   readonly verdict: DrainAuditVerdict;
-  /** `true` exactly when the verdict is `drained`. */
-  readonly drained: boolean;
 }
 
 /** Inputs for {@link auditGraphStore}. */
@@ -939,6 +943,5 @@ export async function auditGraphStore(
       blockersByCode: Object.freeze(blockersByCode),
     }),
     verdict,
-    drained: verdict === "drained",
   });
 }

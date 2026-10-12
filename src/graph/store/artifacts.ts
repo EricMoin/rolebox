@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { AcceptedArtifact } from "../domain/model.ts";
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -8,19 +9,14 @@ export const ARTIFACT_STORE_DIR = "artifacts";
 /**
  * One retained artifact, named by its content.
  *
- * `ref` is the reference the proposal declared — PROVENANCE, for an operator
- * reading the record, never a path a consumer resolves again.
+ * AN ALIAS OF THE DOMAIN'S ONE DECLARATION (F-08). `ref` is the reference the
+ * proposal declared — PROVENANCE, for an operator reading the record, never a
+ * path a consumer resolves again. NOTE: no reader in src/, tests/ or docs/
+ * references THIS name today — the deposit path returns `ArtifactDeposit` and
+ * `ArtifactObjectRead` — so it is kept only as the alias a deposit-side reader
+ * would reach for, not as a consumer's type.
  */
-export interface RetainedArtifact {
-  /** The reference exactly as the proposal declared it. */
-  readonly ref: string;
-  /** The content identity: `sha256:<hex>`. What an accepted result names. */
-  readonly artifactId: string;
-  /** The SHA-256 hex of the retained bytes. */
-  readonly digest: string;
-  /** The retained byte length. */
-  readonly size: number;
-}
+export type RetainedArtifact = AcceptedArtifact;
 
 /** The object one successful deposit published. */
 export interface ArtifactDeposit {

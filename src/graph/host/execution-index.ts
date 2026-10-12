@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { logEvent, withLogScope } from "../../log/index.ts";
 import type {
   OutcomeDispatchEffectKey,
+  OutcomeExecutionIdentity,
   OutcomeExecutionLookup,
 } from "../outcome/dispatch-effects.ts";
 import { GraphStore } from "../store/graph-store.ts";
@@ -29,17 +30,14 @@ export type HostExecutionState = "pending" | "creating" | "created";
 /**
  * What the HOST's platform named the execution it started.
  *
- * A dsh subagent run id, a Pi dispatch task id — the token a recovery can ask
- * the platform about. It is required for `created`: a state that says "the
- * execution exists" without naming it would be a claim the host could not
- * substantiate.
+ * AN ALIAS OF THE ONE DECLARATION (F-08): the outcome contract's
+ * `OutcomeExecutionIdentity` owns the shape, and the runtime contract's
+ * `HostCompletionExecution` aliases it as well, so a field added there reaches
+ * every host registry that names an execution. It is required for `created`: a
+ * state that says "the execution exists" without naming it would be a claim the
+ * host could not substantiate.
  */
-export interface HostExecutionIdentity {
-  /** The platform's own id for the started execution. */
-  readonly executionId: string;
-  /** The platform's task id, when it names the execution and the task apart. */
-  readonly taskId?: string;
-}
+export type HostExecutionIdentity = OutcomeExecutionIdentity;
 
 /** What one registry row refused to do, and who asked. */
 export type HostExecutionRefusalKind =
@@ -308,7 +306,7 @@ export class HostExecutionIndex {
       this.leaseMs,
     );
     if (outcome.kind === "held") return heldClaim(outcome.row);
-    this.claims.set(claimKeyOf(effect), outcome.generation);
+    this.claims.set(executionCacheKeyOf(effect), outcome.generation);
     return Object.freeze({
       kind: "claimed" as const,
       ownerId: outcome.ownerId,
@@ -332,7 +330,7 @@ export class HostExecutionIndex {
    * become this claim's `creating` row.
    */
   markCreating(effect: OutcomeDispatchEffectKey, ownerId: string): boolean {
-    const key = claimKeyOf(effect);
+    const key = executionCacheKeyOf(effect);
     const generation = this.claims.get(key);
     if (generation === undefined || ownerId !== this.ownerId) return false;
     const marked = this.store.markExecutionCreating(
@@ -374,7 +372,7 @@ export class HostExecutionIndex {
     effect: OutcomeDispatchEffectKey,
     execution: HostExecutionIdentity,
   ): HostExecutionConfirmation {
-    const generation = this.claims.get(claimKeyOf(effect)) ?? NO_CLAIM_GENERATION;
+    const generation = this.claims.get(executionCacheKeyOf(effect)) ?? NO_CLAIM_GENERATION;
     const verdict = this.store.confirmExecution(
       effect,
       this.ownerId,
@@ -427,7 +425,7 @@ export class HostExecutionIndex {
     ownerId: string,
     proof?: HostExecutionNotCreated,
   ): boolean {
-    const key = claimKeyOf(effect);
+    const key = executionCacheKeyOf(effect);
     const generation = this.claims.get(key) ?? NO_CLAIM_GENERATION;
     if (proof === undefined) {
       this.store.recordUnprovenFailure(effect, ownerId, generation, this.now());
@@ -467,7 +465,7 @@ export class HostExecutionIndex {
       proof,
       this.now(),
     );
-    if (released) this.claims.delete(claimKeyOf(effect));
+    if (released) this.claims.delete(executionCacheKeyOf(effect));
     return released;
   }
 
@@ -576,9 +574,31 @@ export class HostExecutionIndex {
  */
 export const HOST_EXECUTION_TABLE = GRAPH_STORE_TABLES.executions;
 
-/** The in-process key of one effect's claim: graph and effect, never the node. */
-function claimKeyOf(effect: OutcomeDispatchEffectKey): string {
+/**
+ * The in-process cache key of one dispatch effect: graph and effect, NEVER the
+ * node (a loop round reuses a node id).
+ *
+ * THE ONE SPELLING (F-08). This join used to be written twice — once here and
+ * once in dispatch-host.ts — with the key typed `string` on both maps, so a
+ * change to the separator or the field order in one builder silently missed the
+ * other map and the miss was diagnosed as an ownership race.
+ */
+export function executionCacheKeyOf(effect: OutcomeDispatchEffectKey): string {
   return effect.graphId + "\u0000" + effect.effectId;
+}
+
+/**
+ * The in-process cache key of one attempt: graph and attempt.
+ *
+ * THE ONE SPELLING (F-08) for the completion bridge's binding map; the vault's
+ * three-part credential identity has its own derivation
+ * (`credentialCacheKeyOf`).
+ */
+export function attemptCacheKeyOf(identity: {
+  readonly graphId: string;
+  readonly attemptId: string;
+}): string {
+  return identity.graphId + "\u0000" + identity.attemptId;
 }
 
 /** Whether a confirmation's verdict means the row now reads `created`. */

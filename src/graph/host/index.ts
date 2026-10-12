@@ -58,6 +58,9 @@ export {
   type InputDeliveryLocation,
   type InputDeliveryRefusal,
   type InputDeliveryRefusalCode,
+  type InputViewManifest,
+  type InputViewManifestFile,
+  type InputViewManifestInput,
   type InputViewMaterialization,
   type MaterializeInputViewOptions,
 } from "./input-view.ts";

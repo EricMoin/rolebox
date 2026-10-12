@@ -4,7 +4,7 @@ import type {
   BudgetUsageAmounts,
   NodeBudgetLimits,
 } from "../domain/budget.ts";
-import type { AcceptedData } from "../domain/model.ts";
+import type { AcceptedArtifact, AcceptedData } from "../domain/model.ts";
 
 // ── Format identity ─────────────────────────────────────────────────────────
 
@@ -1237,15 +1237,11 @@ export type EffectTransition =
 /**
  * One artifact revision an acceptance RETAINED, as a consumer sees it.
  *
- * Declared here, in the ledger port's own leaf, so a substrate can answer what
- * it retained without the port importing the store's record types.
+ * AN ALIAS OF THE DOMAIN'S ONE DECLARATION (F-08): `AcceptedArtifact` in
+ * ../domain/model.ts owns the shape, so a substrate answers what it retained
+ * without the port growing a second spelling that could drift.
  */
-export interface RetainedArtifactRef {
-  readonly ref: string;
-  readonly artifactId: string;
-  readonly digest: string;
-  readonly size: number;
-}
+export type RetainedArtifactRef = AcceptedArtifact;
 
 /**
  * One settled attempt's accepted result, as a consumer asks the ledger for it.

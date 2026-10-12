@@ -13,6 +13,7 @@ import type { ProgressReport } from "../outcome/progress.ts";
 import type { ReceiptRecord } from "../ledger/types.ts";
 import type { HostAttemptBinding, HostCompletionBindingSink } from "./dispatch-host.ts";
 import { HostCredentialVault } from "./credential-vault.ts";
+import { attemptCacheKeyOf, type HostExecutionIdentity } from "./execution-index.ts";
 
 // ── The runtime seam ────────────────────────────────────────────────────────
 
@@ -56,10 +57,7 @@ export interface HostCompletionBindingSource {
  * — the platform's own execution id, plus its task id when the platform names
  * the two apart.
  */
-export interface HostCompletionExecutionRecord {
-  readonly executionId: string;
-  readonly taskId?: string;
-}
+export type HostCompletionExecutionRecord = HostExecutionIdentity;
 
 /**
  * THE HOST'S OWN FACT ABOUT THE EXECUTION IT CREATED (P2 item 7).
@@ -233,7 +231,7 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
    * without parsing the attempt id.
    */
   bind(binding: HostAttemptBinding): void {
-    this.bindings.set(bindingKey(binding.graphId, binding.attemptId), binding);
+    this.bindings.set(attemptCacheKeyOf(binding), binding);
   }
 
   /**
@@ -245,7 +243,7 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
    * nothing here can delete a delivery the host recorded.
    */
   forget(attempt: HostCompletionAttempt): void {
-    this.bindings.delete(bindingKey(attempt.graphId, attempt.attemptId));
+    this.bindings.delete(attemptCacheKeyOf(attempt));
   }
 
   /**
@@ -271,7 +269,7 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
    * with no invocation in effect.
    */
   bindingFor(attempt: HostCompletionAttempt): HostAttemptBinding | undefined {
-    const local = this.bindings.get(bindingKey(attempt.graphId, attempt.attemptId));
+    const local = this.bindings.get(attemptCacheKeyOf(attempt));
     if (local !== undefined) return local;
     // THE DURABLE HALF (P2 item 6). A completion that arrives after the process
     // which dispatched the attempt exited has no entry in the map above, so the
@@ -506,7 +504,3 @@ function reportSettlement(
   }
 }
 
-/** One binding's map key: graph + attempt, joined unambiguously. */
-function bindingKey(graphId: string, attemptId: string): string {
-  return graphId + "\u0000" + attemptId;
-}

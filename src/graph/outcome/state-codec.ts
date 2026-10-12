@@ -27,9 +27,17 @@ export type OutcomeStateBodyReading =
   | { readonly kind: "ok"; readonly state: OutcomeGraphState }
   | { readonly kind: "invalid"; readonly error: OutcomeStateError };
 
-export interface OutcomeStateBodyReader {
+/**
+ * One body version's reader.
+ *
+ * `format` is the version the reader READS, as the layout's own literal type
+ * when the reader was built from a layout (F-08): the registry factory below
+ * then derives `current` from the readers it is handed, so a version that has
+ * no reader cannot be declared.
+ */
+export interface OutcomeStateBodyReader<V extends number = number> {
 
-  readonly format: number;
+  readonly format: V;
 
   read(body: Record<string, unknown>, plan: CompiledPlan): OutcomeStateBodyReading;
 }
@@ -41,15 +49,18 @@ export interface OutcomeStateBodyRegistry {
   readonly formats: readonly OutcomeStateBodyReader[];
 }
 
-export interface OutcomeStateBodyRegistryInput {
-
-  readonly current: number;
-
-  readonly formats: readonly OutcomeStateBodyReader[];
-}
-
-export function createOutcomeStateBodyRegistry(
-  input: OutcomeStateBodyRegistryInput,
+/**
+ * Build the registry from the readers this build installs.
+ *
+ * `current` is TYPED AS THE READERS' OWN VERSION UNION (F-08), so
+ * `{ current: 10, formats: [nineOnlyReader] }` does not compile: the runtime
+ * throw below stays as the second gate, and the input twin that merely copied
+ * the registry's own shape is gone.
+ */
+export function createOutcomeStateBodyRegistry<
+  const T extends readonly OutcomeStateBodyReader[],
+>(
+  input: { readonly current: T[number]["format"]; readonly formats: T },
 ): OutcomeStateBodyRegistry {
   const installed = new Set<number>();
   for (const format of input.formats) {
@@ -157,9 +168,9 @@ function readNodeInputRefusals(
   return reading.refusals;
 }
 
-interface OutcomeStateLayout {
+interface OutcomeStateLayout<V extends number = number> {
 
-  readonly version: number;
+  readonly version: V;
 
   readonly keys: Readonly<Record<OutcomeNodeStatus, readonly string[]>>;
 
@@ -182,10 +193,10 @@ interface OutcomeStateLayout {
  * each construction site rather than derived from the `number`, so the version
  * distinction the readers rely on is stated where the layouts are declared.
  */
-function outcomeStateLayout(
-  version: number,
+function outcomeStateLayout<V extends number>(
+  version: V,
   stopReasons: readonly OutcomeStopReason[],
-): OutcomeStateLayout {
+): OutcomeStateLayout<V> {
   return Object.freeze({
     version,
     stopReasons,
@@ -205,13 +216,13 @@ const OUTCOME_STATE_STOP_REASONS_V9: readonly OutcomeStopReason[] = Object.freez
   "progress-stalled",
 ] as const);
 
-const OUTCOME_STATE_LAYOUT_V9: OutcomeStateLayout = outcomeStateLayout(
+const OUTCOME_STATE_LAYOUT_V9 = outcomeStateLayout(
   OUTCOME_STATE_BODY_V9,
   OUTCOME_STATE_STOP_REASONS_V9,
 );
 
 /** Version 10 is the current vocabulary, so it carries every declared reason. */
-const OUTCOME_STATE_LAYOUT_V10: OutcomeStateLayout = outcomeStateLayout(
+const OUTCOME_STATE_LAYOUT_V10 = outcomeStateLayout(
   CURRENT_OUTCOME_STATE_BODY,
   OUTCOME_STOP_REASONS,
 );
@@ -1258,9 +1269,9 @@ function readStateBody(
   });
 }
 
-function stateBodyReader(
-  layout: OutcomeStateLayout,
-): OutcomeStateBodyReader {
+function stateBodyReader<V extends number>(
+  layout: OutcomeStateLayout<V>,
+): OutcomeStateBodyReader<V> {
   return Object.freeze({
     format: layout.version,
     read(

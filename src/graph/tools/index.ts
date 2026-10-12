@@ -361,7 +361,12 @@ function createGraphAuditTool(toolset: GraphToolSet): CanonicalToolDef {
     args: {},
     async execute() {
       try {
-        return json(await toolset.graph_audit());
+        // The PUBLIC JSON keeps its `drained` field (F-08): it is PROJECTED
+        // here from the report's one authority, `verdict`, so a caller sees the
+        // same bytes as before while the internal report can no longer carry
+        // two encodings of the same decision.
+        const report = await toolset.graph_audit();
+        return json({ ...report, drained: report.verdict === "drained" });
       } catch (err) {
         return `graph_audit failed: ${errorText(err)}`;
       }

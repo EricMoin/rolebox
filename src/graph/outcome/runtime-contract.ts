@@ -36,7 +36,8 @@ import {
 import {
   type OutcomeDispatchAdapter,
   type OutcomeDispatchEffectKey,
-  type OutcomeDispatchRequest
+  type OutcomeDispatchRequest,
+  type OutcomeExecutionIdentity
 } from "./dispatch-effects.ts";
 import {
   type CompletionPolicyRegistry
@@ -1124,16 +1125,14 @@ export interface OutcomeGraphRuntimeOptions {
 /**
  * One attempt's CONFIRMED host execution, as the host's own record holds it.
  *
- * Structural on purpose: the shipped record is the execution index's
- * HostExecutionIdentity (src/graph/host/execution-index.ts), and this module
- * must not import the host layer. The execution id is the platform's own id —
- * the token a recovery can ask the platform about — so a completion fact is
- * never authenticated against a locally invented identifier.
+ * AN ALIAS OF THE ONE DECLARATION (F-08): `OutcomeExecutionIdentity` in
+ * ./dispatch-effects.ts owns the shape, and the host registry's
+ * `HostExecutionIdentity` aliases it too, so the three cannot drift. This
+ * module still imports no host layer: the execution id is the platform's own
+ * id — the token a recovery can ask the platform about — so a completion fact
+ * is never authenticated against a locally invented identifier.
  */
-export interface HostCompletionExecution {
-  readonly executionId: string;
-  readonly taskId?: string;
-}
+export type HostCompletionExecution = OutcomeExecutionIdentity;
 
 
 /** The attempt one host-completion question is about. */

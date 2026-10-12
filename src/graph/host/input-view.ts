@@ -549,24 +549,47 @@ function publishManifest(path: string, text: string): PublicationResult {
 
 // ── The manifest ────────────────────────────────────────────────────────────
 
+/**
+ * One delivered revision as the manifest records it: the DELIVERED view's own
+ * fields, minus the absolute `path`.
+ *
+ * DERIVED, NOT RESTATED (F-08). The manifest records the copy's NAME inside the
+ * consumer's directory (`file`) and deliberately not `path`, so the manifest
+ * stays true if the tree is moved; because this type is the delivered view's
+ * own field set, a field added to {@link DeliveredInputFile} is part of the
+ * manifest type, and the rest spread that drops `path` carries it into the
+ * manifest with no edit here — the omission a hand-written restatement could
+ * never be caught making.
+ */
+export type InputViewManifestFile = Omit<DeliveredInputFile, "path">;
+
+/** One accepted upstream result as the manifest records it. */
+export type InputViewManifestInput = Omit<DeliveredInput, "artifacts"> & {
+  readonly artifacts: readonly InputViewManifestFile[];
+};
+
 /** The manifest one consumer's directory carries, in a fixed field order. */
-interface InputViewManifest {
-  readonly version: number;
-  readonly graphId: string;
-  readonly attemptId: string;
-  readonly inputs: readonly {
-    readonly from: string;
-    readonly outcome: string;
-    readonly attemptId: string;
-    readonly payload: AcceptedData;
-    readonly artifacts: readonly {
-      readonly ref: string;
-      readonly artifactId: string;
-      readonly digest: string;
-      readonly size: number;
-      readonly file: string;
-    }[];
-  }[];
+export interface InputViewManifest {
+  /** The literal version constant, so the file and its marker cannot disagree. */
+  readonly version: typeof INPUT_VIEW_VERSION;
+  readonly graphId: MaterializeInputViewOptions["graphId"];
+  readonly attemptId: MaterializeInputViewOptions["attemptId"];
+  readonly inputs: readonly InputViewManifestInput[];
+}
+
+/**
+ * One delivered revision WITHOUT its absolute `path`: the manifest records the
+ * copy's NAME inside the consumer's directory, so it stays true if the tree is
+ * moved (F-08).
+ *
+ * The rest spread is what keeps the two models one: a field added to
+ * {@link DeliveredInputFile} — required or optional — is part of the result
+ * with no edit here, and the same projection never touches a `path` key inside
+ * an accepted payload.
+ */
+function withoutPath(file: DeliveredInputFile): InputViewManifestFile {
+  const { path: _absolutePath, ...manifestFile } = file;
+  return manifestFile;
 }
 
 /**
@@ -576,6 +599,10 @@ interface InputViewManifest {
  * a repeated delivery recognize its own manifest and reuse it instead of
  * rewriting it. Paths are the copies' NAMES inside the directory, so the
  * manifest stays true if the tree is moved.
+ *
+ * The entries are the DELIVERED view with `path` dropped, never a field-by-field
+ * restatement (F-08): a restatement silently omitted whatever the delivered
+ * view gained, and no excess/missing-key check could fire.
  */
 function manifestText(
   options: MaterializeInputViewOptions,
@@ -586,17 +613,8 @@ function manifestText(
     graphId: options.graphId,
     attemptId: options.attemptId,
     inputs: entries.map((entry) => ({
-      from: entry.from,
-      outcome: entry.outcome,
-      attemptId: entry.attemptId,
-      payload: entry.payload,
-      artifacts: entry.artifacts.map((artifact) => ({
-        ref: artifact.ref,
-        artifactId: artifact.artifactId,
-        digest: artifact.digest,
-        size: artifact.size,
-        file: artifact.file,
-      })),
+      ...entry,
+      artifacts: entry.artifacts.map(withoutPath),
     })),
   };
   return JSON.stringify(manifest, null, 2) + "\n";

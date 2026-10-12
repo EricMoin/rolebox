@@ -82,13 +82,15 @@ export type NodeAttempt = OutcomeNodeState;
 /**
  * One artifact revision an acceptance RETAINED, named by its content.
  *
- * Structurally the artifact primitive's own `ArtifactEvidence`: the reference
- * the proposal declared (PROVENANCE, never resolved again), the content identity
- * `sha256:<hex>` the bytes are stored under, that digest, and the size.
+ * The reference the proposal declared (PROVENANCE, never resolved again), the
+ * content identity `sha256:<hex>` the bytes are stored under, that digest, and
+ * the size.
  *
- * It is restated here so the domain model stays free of any store or validator
- * import while still owning the shape every writer and reader shares — the
- * compiler checks the two are structurally identical at every assignment.
+ * THE ONE DECLARATION (F-08). The validator primitive's `ArtifactEvidence`, the
+ * ledger port's `RetainedArtifactRef` and the store's deposit-side
+ * `RetainedArtifact` are all aliases of this type, so a field added here reaches
+ * every writer, reader and deposit path at once instead of leaving three
+ * restatements to drift apart.
  */
 export interface AcceptedArtifact {
   readonly ref: string;

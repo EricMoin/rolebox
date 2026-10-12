@@ -636,14 +636,7 @@ export function validateSubmission(
           // submission carried.
           ...(outcome.data === undefined
             ? {}
-            : {
-              dataContract: {
-                schema: outcome.data.schema,
-                ...(outcome.data.version === undefined
-                  ? {}
-                  : { version: outcome.data.version }),
-              },
-            }),
+            : { dataContract: outcome.data }),
           now: request.now,
         });
       } catch (error) {

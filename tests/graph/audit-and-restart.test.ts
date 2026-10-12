@@ -196,7 +196,6 @@ describe("auditGraphStore — the surviving store evidence", () => {
     // The retired container is a BLOCKER even though every stored graph reads
     // cleanly: "nothing looked non-terminal" is not "nothing left to account for".
     expect(report.verdict).toBe("blocked");
-    expect(report.drained).toBe(false);
     const retired = report.blockers.find((entry) => entry.code === "retired-state-record");
     expect(retired?.file).toBe("engine-audit.legacy.json");
 
@@ -257,8 +256,14 @@ describe("auditGraphStore — the surviving store evidence", () => {
         ask: async () => {},
       } as never,
     );
-    const parsed = JSON.parse(String(output)) as DrainAuditReport;
+    const parsed = JSON.parse(String(output)) as DrainAuditReport & {
+      readonly drained: boolean;
+    };
     expect(parsed.totals.inFlight).toBe(1);
+    // The public JSON still carries `drained` (F-08), projected at the tool edge
+    // from the report's one authority; the internal report no longer states it.
+    expect(parsed.drained).toBe(false);
+    expect(parsed.drained).toBe(parsed.verdict === "drained");
 
     const toolset = createGraphToolSet({ stateDir: dir });
     const direct = await toolset.graph_audit();

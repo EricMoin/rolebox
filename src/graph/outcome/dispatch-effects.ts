@@ -124,8 +124,10 @@ export interface OutcomeDispatchEffectKey {
  * can ask the platform about, re-subscribe to, or observe. Declared here
  * STRUCTURALLY rather than imported from the host registry: this module is the
  * outcome-side contract and stays a dependency leaf, and the host's own
- * `HostExecutionIdentity` has exactly this shape, so either value satisfies
- * the other without a conversion.
+ * `HostExecutionIdentity` satisfies this shape. Declared ONCE (F-08): the host
+ * registry's `HostExecutionIdentity` and the runtime contract's
+ * `HostCompletionExecution` are ALIASES of this type rather than restatements,
+ * so a field added here reaches both consumers and neither can drift.
  */
 export interface OutcomeExecutionIdentity {
   /** The platform's own id for the started execution. */

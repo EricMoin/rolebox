@@ -3,8 +3,9 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
 import type { NormalizedOutcomeProposal } from "./proposal.ts";
+import { readValidatorVersion, type CompiledOutcomeData } from "../compiler/plan.ts";
+import type { AcceptedArtifact } from "../domain/model.ts";
 import { artifactIdOf, putArtifact } from "../store/artifacts.ts";
-import { readValidatorVersion } from "../compiler/plan.ts";
 
 // ── Validator identity ──────────────────────────────────────────────────────
 
@@ -115,16 +116,13 @@ export interface ValidatorRequest {
  * The data contract one compiled outcome declares: a schema identity and, when
  * the schema is versioned, the exact version.
  *
- * Structurally the plan's own `CompiledOutcomeData`, restated here so this
- * module stays a dependency leaf (it imports no compiler module) while the
- * acceptance core can pass the plan's value through unchanged.
+ * ONE DECLARATION (F-08): the compiler's `CompiledOutcomeData` owns the shape,
+ * and this module selects the two fields the validator contract is made of.
+ * Restating them by hand let a field the plan's contract gained never reach a
+ * validator with nothing to report the omission; the acceptance core now hands
+ * the plan's own value through, unchanged.
  */
-export interface ValidatorDataContract {
-  /** Schema identity, e.g. a shipped structural schema. */
-  readonly schema: string;
-  /** Exact schema version; matching is identity, never ordering. */
-  readonly version?: number;
-}
+export type ValidatorDataContract = Pick<CompiledOutcomeData, "schema" | "version">;
 
 /** One validator implementation: a pure function of its request. */
 export type ValidatorImplementation = (
@@ -251,7 +249,7 @@ export interface AcceptanceCapabilitySet {
 /** Whether the host installed this EXACT schema identity (matching is identity, never ordering). */
 export function substantiatesSchema(
   set: AcceptanceCapabilitySet,
-  contract: { readonly schema: string; readonly version?: number },
+  contract: ValidatorDataContract,
 ): boolean {
   if (readValidatorVersion(contract.version) === undefined) return false;
   return set.schemas.some(
@@ -281,20 +279,14 @@ export const ARTIFACT_REFERENCE_VALIDATOR_ID = "artifact-reference";
 /** The shipped artifact-reference validator's exact version. */
 export const ARTIFACT_REFERENCE_VALIDATOR_VERSION = 1;
 
-/** What one evidence reference resolved to: the artifact as it was READ. */
-export interface ArtifactEvidence {
-  /**
-   * The reference exactly as the proposal declared it. PROVENANCE: it is
-   * recorded for an operator and is NEVER resolved again by a consumer.
-   */
-  readonly ref: string;
-  /** The content identity `sha256:<hex>` — what an accepted result names. */
-  readonly artifactId: string;
-  /** SHA-256 hex of the bytes read from the artifact. */
-  readonly digest: string;
-  /** The byte length of those bytes. */
-  readonly size: number;
-}
+/**
+ * What one evidence reference resolved to: the artifact as it was READ.
+ *
+ * AN ALIAS OF THE DOMAIN'S ONE DECLARATION (F-08): `AcceptedArtifact` in
+ * ../domain/model.ts owns the four fields, so the evidence a gate reports and
+ * the revision an acceptance retains cannot drift apart.
+ */
+export type ArtifactEvidence = AcceptedArtifact;
 
 /** The outcome of reading one evidence reference. */
 export type ArtifactRead =
