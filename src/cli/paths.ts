@@ -226,6 +226,16 @@ export function assertSafePathSegment(value: string, label: string): void {
   if (value.trim() === "") {
     throw new Error(`${label} is empty; refusing to use it in a filesystem path`);
   }
+  // Control characters (including NUL and the escape that starts an ANSI/OSC
+  // sequence) come from remote manifest text: they must not reach a directory
+  // name or a terminal line.
+  const control = value.match(/[\u0000-\u001f\u007f]/);
+  if (control) {
+    const code = control[0]!.codePointAt(0)!.toString(16).padStart(2, "0");
+    throw new Error(
+      `${label} contains a control character (U+${code.toUpperCase()}); refusing to use it in a filesystem path`,
+    );
+  }
 }
 
 // ── Pi Paths ───────────────────────────────────────────────────────

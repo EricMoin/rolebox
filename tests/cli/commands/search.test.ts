@@ -73,6 +73,12 @@ beforeEach(() => {
 
   mock.module("../../../src/cli/registry-client", () => ({
     fetchRegistryManifest: mockFetchManifest,
+    // The real helper the command prints through; the stub mirrors it so the
+    // assertions see the same output the shipped code produces.
+    escapeForDisplay: (value: unknown) =>
+      String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) =>
+        `\\x${ch.codePointAt(0)!.toString(16).padStart(2, "0").toUpperCase()}`,
+      ),
   }));
 
   mockFetchManifest.mockImplementation(async () => sampleManifest);
@@ -290,9 +296,9 @@ describe("search source selection", () => {
 
     const { search } = await importSearch();
 
-    await expect(search(undefined, false, "nope")).rejects.toThrow(/Registry 'nope' not found/);
-    const error = await search(undefined, false, "nope").catch((err: Error) => err);
-    expect(error.message).toContain("oh-my-role");
+    await expect(search(undefined, false, "nope")).rejects.toThrow(
+      /Registry 'nope' not found.*oh-my-role/,
+    );
     expect(mockFetchManifest).not.toHaveBeenCalled();
   });
 

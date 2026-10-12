@@ -1,13 +1,13 @@
 import { defineCommand } from "citty";
 import { loadConfig, loadLock, addToLock, findInLock, findAllInLock } from "../config.ts";
-import { fetchRegistryManifest, downloadRole, computeIntegrity } from "../registry-client.ts";
+import { fetchRegistryManifest, downloadRole, computeIntegrity, escapeForDisplay } from "../registry-client.ts";
 import { parseRoleSpec } from "../role-spec.ts";
 import { effectiveRegistries } from "../sources.ts";
 import { DownloadProgress } from "../download-progress.ts";
 import { getRolePath } from "../paths.ts";
 import type { LockEntry } from "../types.ts";
 import { existsSync, rmSync } from "node:fs";
-import { moveDir, ensureWritableDir } from "../fs-utils.ts";
+import { moveDir, ensureWritableDir, removeTreeBestEffort } from "../fs-utils.ts";
 import { join } from "node:path";
 
 export interface UpdateOptions {
@@ -98,7 +98,11 @@ export async function update(specificRole: string | undefined, noCache: boolean,
       // version is never removed until the new artifact is fully downloaded,
       // extracted, integrity-checked, and atomically swapped into place
       // (rollback safety). On failure, the previously-installed version stays.
-      const extractedDir = await downloadRole(registryConfig, entry.role, latestVersion, undefined, undefined, { progress });
+      const extractedDir = await downloadRole(registryConfig, entry.role, latestVersion, undefined, undefined, {
+        progress,
+        // A manifest may declare where the role archive lives (HTTP sources).
+        archivePath: roleInfo.archive,
+      });
 
       // Compute + verify integrity on the temp artifact BEFORE swapping it in.
       const integrity = await computeIntegrity(extractedDir);
@@ -133,8 +137,11 @@ export async function update(specificRole: string | undefined, noCache: boolean,
         moveDir(staging, targetDir);
       } catch (err) {
         // The previously-installed version (if any) is left intact; report
-        // partial state clearly.
+        // partial state clearly. The downloaded tree belongs to this call until
+        // it lands in the roles directory, so a failure to place it must not
+        // leave it (or the staging copy) behind in the temp directory.
         try { rmSync(staging, { recursive: true, force: true }); } catch { /* best-effort */ }
+        removeTreeBestEffort(extractedDir);
         throw new Error(
           `failed to place the updated version for "${entry.role}@${latestVersion}"; the previously-installed version is left intact: ${(err as Error).message}`,
         );
@@ -151,7 +158,9 @@ export async function update(specificRole: string | undefined, noCache: boolean,
 
       progress.phaseStart("done", `${entry.role}@${latestVersion}`);
       progress.phaseComplete("done", `${entry.role}@${latestVersion}`);
-      out(`✓ Updated ${entry.role} (${entry.registry}) from ${entry.version} to ${latestVersion}`);
+      out(
+        `✓ Updated ${escapeForDisplay(entry.role)} (${escapeForDisplay(entry.registry)}) from ${escapeForDisplay(entry.version)} to ${escapeForDisplay(latestVersion)}`,
+      );
       updated++;
     } catch (err) {
       console.warn(`Warning: failed to update '${entry.role}': ${(err as Error).message}`);

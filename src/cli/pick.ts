@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, loadLock } from "./config.ts";
 import { defaultRegistry, effectiveRegistries } from "./sources.ts";
-import { fetchRegistryManifest } from "./registry-client.ts";
+import { fetchRegistryManifest, escapeForDisplay, redactUrlForDisplay } from "./registry-client.ts";
 import { getSyncTarget } from "./paths.ts";
 import { PLATFORM_REGISTRY } from "../platform/registry.ts";
 
@@ -65,7 +65,7 @@ export async function pickInstalledRole(
     options: roles.map((entry) => ({
       value: entry.role,
       label: entry.role,
-      hint: `${entry.version} · ${entry.registry}`,
+      hint: `${escapeForDisplay(entry.version)} · ${escapeForDisplay(entry.registry)}`,
     })),
     maxItems: 12,
   });
@@ -182,7 +182,7 @@ export async function pickRegistryAndRole(
       options: registries.map((r) => ({
         value: r.name,
         label: r.name,
-        hint: r.url,
+        hint: redactUrlForDisplay(r.url),
       })),
       initialValue: registry.name,
       maxItems: 12,
@@ -213,7 +213,7 @@ export async function pickRegistryAndRole(
     options: entries.map(([roleId, info]) => ({
       value: roleId,
       label: roleId,
-      hint: [info.version, info.description].filter(Boolean).join(" · ") || undefined,
+      hint: [info.version, info.description].filter(Boolean).map(escapeForDisplay).join(" · ") || undefined,
     })),
     maxItems: 12,
   });

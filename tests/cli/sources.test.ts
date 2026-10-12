@@ -6,12 +6,24 @@ import {
   effectiveRegistries,
   findRegistry,
   isBuiltinName,
+  isGitLabUrl,
   lookupOrder,
   resolveRoleSource,
 } from "../../src/cli/sources.ts";
 import type { RegistryEntry, RegistryManifest, RoleboxConfig } from "../../src/cli/types.ts";
 
 const BUILTIN_URL = "https://github.com/EricMoin/oh-my-role";
+
+/**
+ * The manifest-fetch callback `resolveRoleSource` takes. Declaring it here means
+ * a mock typed with it records all three arguments, so assertions on the ref and
+ * the options are type-checked against the real call shape.
+ */
+type FetchManifest = (
+  registry: RegistryEntry,
+  ref: string | undefined,
+  options: { noCache?: boolean },
+) => Promise<RegistryManifest>;
 
 function manifest(name: string, roleIds: string[] = []): RegistryManifest {
   return {
@@ -165,7 +177,7 @@ describe("resolveRoleSource", () => {
       { name: "custom", url: "https://github.com/acme/custom", default: true },
     ]);
     const customManifest = manifest("custom", ["shared-role"]);
-    const fetchManifest = mock(async (registry: RegistryEntry) =>
+    const fetchManifest = mock<FetchManifest>(async (registry) =>
       registry.name === "custom"
         ? customManifest
         : manifest(BUILTIN_REGISTRY_NAME, ["shared-role"]),
@@ -233,7 +245,7 @@ describe("resolveRoleSource", () => {
   it("passes the entry's ref, falling back to the default branch", async () => {
     // The source under test claims the default, so it is consulted first and
     // matches: one fetch per lookup.
-    const fetchManifest = mock(async (registry: RegistryEntry) => manifest(registry.name, ["r"]));
+    const fetchManifest = mock<FetchManifest>(async (registry) => manifest(registry.name, ["r"]));
 
     await resolveRoleSource("r", config([{ name: "pinned", url: "u", ref: "v2", default: true }]), {
       fetchManifest,
@@ -256,5 +268,24 @@ describe("resolveRoleSource", () => {
     expect(result.failures).toEqual([]);
     expect(result.searched).toEqual([]);
     expect(fetchManifest).not.toHaveBeenCalled();
+  });
+});
+
+describe("isGitLabUrl", () => {
+  it("recognizes gitlab.com and self-hosted GitLab projects", () => {
+    expect(isGitLabUrl("https://gitlab.com/group/repo")).toBe(true);
+    expect(isGitLabUrl("https://code.example.com/group/repo/-/tree/main")).toBe(true);
+    expect(isGitLabUrl("https://gitlab.example.com/group/repo")).toBe(true);
+  });
+
+  it("does not claim github or plain http sources", () => {
+    expect(isGitLabUrl("https://github.com/owner/repo")).toBe(false);
+    expect(isGitLabUrl("https://roles.example.com/acme/registry.yaml")).toBe(false);
+  });
+
+  it("returns false rather than throwing for an unreadable URL", () => {
+    expect(isGitLabUrl("")).toBe(false);
+    expect(isGitLabUrl("not-a-url")).toBe(false);
+    expect(isGitLabUrl("ftp://host/repo")).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { DEFAULT_GIT_BRANCH } from "../constants.ts";
+import { parseRegistryUrl } from "./source-url.ts";
 import type { RegistryEntry, RegistryManifest, RoleboxConfig } from "./types.ts";
 
 /**
@@ -69,6 +70,19 @@ export function findRegistry(config: RoleboxConfig, name: string): ResolvedRegis
 /** Whether `name` is the built-in source's name. */
 export function isBuiltinName(name: string): boolean {
   return name === BUILTIN_REGISTRY_NAME;
+}
+
+/**
+ * Whether a source URL is served by GitLab (gitlab.com or a self-hosted
+ * instance). Uses the same detection `registry add` and the client use; an
+ * unparseable URL is not a GitLab URL.
+ */
+export function isGitLabUrl(url: string): boolean {
+  try {
+    return parseRegistryUrl(url).kind === "gitlab";
+  } catch {
+    return false;
+  }
 }
 
 /**

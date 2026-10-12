@@ -1,13 +1,23 @@
+/** One role published by a registry manifest. */
+export interface RegistryManifestRole {
+  version: string;
+  description: string;
+  tags: string[];
+  /** Optional digest (e.g. "sha256-<hex>") the installed tree is verified against. */
+  integrity?: string;
+  /**
+   * Optional archive location for this role. Absolute http(s) URLs are used
+   * as-is; a relative path resolves against the manifest URL. Honored by
+   * `http` sources, which have no hosting API to fall back on.
+   */
+  archive?: string;
+}
+
 export interface RegistryManifest {
   name: string;
   description: string;
   url: string;
-  roles: Record<string, {
-    version: string;
-    description: string;
-    tags: string[];
-    integrity?: string;
-  }>;
+  roles: Record<string, RegistryManifestRole>;
 }
 
 export interface RegistryEntry {

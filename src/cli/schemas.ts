@@ -1,5 +1,11 @@
 import { load } from "js-yaml";
-import type { RegistryManifest, RoleboxConfig, LockFile, LockEntry } from "./types.ts";
+import type {
+  RegistryManifest,
+  RegistryManifestRole,
+  RoleboxConfig,
+  LockFile,
+  LockEntry,
+} from "./types.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -16,6 +22,9 @@ function isStringArray(value: unknown): value is string[] {
 function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
 }
+
+/** Upper bound on the roles one registry manifest may declare. */
+const MAX_MANIFEST_ROLES = 10_000;
 
 export function parseRegistryManifest(data: unknown): RegistryManifest {
   if (!isRecord(data)) {
@@ -38,9 +47,28 @@ export function parseRegistryManifest(data: unknown): RegistryManifest {
     throw new Error("Registry manifest: 'roles' must be an object");
   }
 
-  const roles: Record<string, { version: string; description: string; tags: string[]; integrity?: string }> = {};
+  // The byte cap on the manifest body is the first bound on a hostile
+  // manifest; this is the second, so a huge role table is refused before the
+  // client copies it entry by entry.
+  const roleIds = Object.keys(data.roles);
+  if (roleIds.length > MAX_MANIFEST_ROLES) {
+    throw new Error(
+      `Registry manifest: 'roles' declares ${roleIds.length} roles, more than the ${MAX_MANIFEST_ROLES}-role limit; refusing to parse it`,
+    );
+  }
+
+  // A null-prototype map: an own key like `__proto__` on a normal object
+  // literal would replace the map's prototype instead of adding an entry, and
+  // a lookup like `roles["toString"]` would find Object.prototype. Reserved
+  // prototype keys are refused up front so the shape is explicit.
+  const roles = Object.create(null) as Record<string, RegistryManifestRole>;
 
   for (const [roleId, roleEntry] of Object.entries(data.roles)) {
+    if (roleId === "__proto__" || roleId === "constructor" || roleId === "prototype") {
+      throw new Error(
+        `Registry manifest: role id '${roleId}' is reserved; refusing to publish a role under a prototype key`,
+      );
+    }
     if (!isRecord(roleEntry)) {
       throw new Error(`Registry manifest: role '${roleId}' must be an object`);
     }
@@ -60,7 +88,7 @@ export function parseRegistryManifest(data: unknown): RegistryManifest {
     // Optional manifest-declared integrity digest (e.g. "sha256-<hex>"). When
     // present, install/update verify the computed digest against it; when
     // absent, the computed digest is surfaced and recorded without a check.
-    const role: { version: string; description: string; tags: string[]; integrity?: string } = {
+    const role: RegistryManifestRole = {
       version: roleEntry.version,
       description: roleEntry.description,
       tags: roleEntry.tags,
@@ -70,6 +98,16 @@ export function parseRegistryManifest(data: unknown): RegistryManifest {
         throw new Error(`Registry manifest: role '${roleId}' 'integrity' must be a string if present`);
       }
       role.integrity = roleEntry.integrity;
+    }
+
+    // Optional per-role archive location: `http` sources read the role from it
+    // (absolute, else relative to the manifest URL) instead of the conventional
+    // `roles/<roleId>@<version>.tar.gz` path.
+    if (roleEntry.archive !== undefined) {
+      if (!isString(roleEntry.archive)) {
+        throw new Error(`Registry manifest: role '${roleId}' 'archive' must be a string if present`);
+      }
+      role.archive = roleEntry.archive;
     }
 
     roles[roleId] = role;
@@ -104,6 +142,14 @@ export function parseConfig(data: unknown): RoleboxConfig {
       name: entry.name,
       url: entry.url,
     };
+
+    // `kind` was an explicit override; the source kind is detected from `url`
+    // now, so a leftover key is refused with the migration rather than ignored.
+    if (entry.kind !== undefined) {
+      throw new Error(
+        `Config: registries[${index}].kind is no longer supported — the source kind is detected from 'url' (a GitLab project URL with '/-/', or a .yaml manifest URL)`,
+      );
+    }
 
     if (entry.ref !== undefined) {
       if (!isString(entry.ref)) {

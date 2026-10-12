@@ -3,7 +3,7 @@ import * as clack from "@clack/prompts";
 import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
 import { assertInteractiveContext, pickRegistryAndRole } from "../pick.ts";
 import type { PromptApi } from "../pick.ts";
-import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.ts";
+import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity, escapeForDisplay } from "../registry-client.ts";
 import { DownloadProgress } from "../download-progress.ts";
 import { getRolePath } from "../paths.ts";
 import { parseRoleSpec } from "../role-spec.ts";
@@ -11,7 +11,7 @@ import { findRegistry, effectiveRegistries, resolveRoleSource } from "../sources
 import type { ResolvedRegistry } from "../sources.ts";
 import type { LockEntry, RegistryManifest } from "../types.ts";
 import { existsSync, rmSync } from "node:fs";
-import { moveDir, ensureWritableDir } from "../fs-utils.ts";
+import { moveDir, ensureWritableDir, removeTreeBestEffort } from "../fs-utils.ts";
 import { join } from "node:path";
 
 export interface InstallOptions {
@@ -162,7 +162,11 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   //    into place (rollback safety). On any failure before the swap, the
   //    previous version remains intact and the error propagates with
   //    partial-state context.
-  const extractedDir = await downloadRole(source, parsed.roleId, version, undefined, undefined, { progress });
+  const extractedDir = await downloadRole(source, parsed.roleId, version, undefined, undefined, {
+    progress,
+    // A manifest may declare where the role archive lives (HTTP sources).
+    archivePath: manifest.roles[parsed.roleId]?.archive,
+  });
 
   // 7. Compute + verify integrity on the temp artifact BEFORE swapping it in.
   const integrity = await computeIntegrity(extractedDir);
@@ -199,8 +203,11 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
     moveDir(staging, targetDir);
   } catch (err) {
     // The previously-installed version (if any) is left intact; report partial
-    // state clearly rather than masking it.
+    // state clearly rather than masking it. The downloaded tree is owned by this
+    // call until it lands in the roles directory, so a failure to place it must
+    // not leave it (or the staging copy) behind in the temp directory.
     try { rmSync(staging, { recursive: true, force: true }); } catch { /* best-effort */ }
+    removeTreeBestEffort(extractedDir);
     throw new Error(
       `install failed for role "${parsed.roleId}@${version}" while placing the new version; the previously-installed version (if any) is left intact: ${(err as Error).message}`,
     );
@@ -229,7 +236,7 @@ export async function install(spec: string, opts: InstallOptions = {}): Promise<
   // 11. Print success
   progress.phaseStart("done", `${parsed.roleId}@${version}`);
   progress.phaseComplete("done", `${parsed.roleId}@${version}`);
-  out(`✓ Installed ${parsed.roleId}@${version} from ${registryName}`);
+  out(`✓ Installed ${escapeForDisplay(parsed.roleId)}@${escapeForDisplay(version)} from ${escapeForDisplay(registryName)}`);
 
   // 12. Print hint
   out(`Run \`rolebox sync opencode\` to deploy`);

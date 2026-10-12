@@ -78,6 +78,46 @@ describe("parseRegistryManifest", () => {
     };
     expect(() => parseRegistryManifest(input)).toThrow("role 'bad' must have a string 'description'");
   });
+
+  it("preserves the optional integrity and archive of a role entry", () => {
+    const input = {
+      name: "test",
+      description: "test",
+      url: "https://example.com",
+      roles: {
+        "role-a": {
+          version: "1.0.0",
+          description: "A role",
+          tags: ["tag"],
+          integrity: "sha256-abc",
+          archive: "roles/role-a@1.0.0.tar.gz",
+        },
+        "role-b": {
+          version: "1.0.0",
+          description: "Another role",
+          tags: [],
+        },
+      },
+    };
+
+    const result = parseRegistryManifest(input);
+    expect(result.roles["role-a"].integrity).toBe("sha256-abc");
+    expect(result.roles["role-a"].archive).toBe("roles/role-a@1.0.0.tar.gz");
+    expect(result.roles["role-b"].integrity).toBeUndefined();
+    expect(result.roles["role-b"].archive).toBeUndefined();
+  });
+
+  it("throws when a role entry's archive is not a string", () => {
+    const input = {
+      name: "test",
+      description: "test",
+      url: "https://example.com",
+      roles: {
+        bad: { version: "1.0.0", description: "A role", tags: [], archive: 5 },
+      },
+    };
+    expect(() => parseRegistryManifest(input)).toThrow("role 'bad' 'archive' must be a string if present");
+  });
 });
 
 // ── parseConfig ───────────────────────────────────────────────────
@@ -147,6 +187,36 @@ describe("parseConfig", () => {
     expect(() =>
       parseConfig({ registries: [{ name: "x", url: "https://x", ref: 5 }] })
     ).toThrow("registries[0].ref must be a string");
+  });
+
+  it("rejects a config entry that still carries kind, and names the migration", () => {
+    const message =
+      "Config: registries[0].kind is no longer supported — the source kind is detected from 'url' (a GitLab project URL with '/-/', or a .yaml manifest URL)";
+
+    expect(() =>
+      parseConfig({
+        registries: [{ name: "x", url: "https://roles.example.com/acme/registry.yaml", kind: "http" }],
+      })
+    ).toThrow(message);
+    // Any leftover key is refused, whatever its value.
+    expect(() =>
+      parseConfig({ registries: [{ name: "x", url: "https://github.com/owner/repo", kind: 5 }] })
+    ).toThrow(message);
+  });
+
+  it("parses an entry with no kind field", () => {
+    const result = parseConfig({
+      registries: [
+        { name: "auto", url: "https://github.com/owner/repo" },
+        { name: "plain", url: "https://roles.example.com/acme/registry.yaml" },
+      ],
+    });
+
+    expect(result.registries[0]).toEqual({ name: "auto", url: "https://github.com/owner/repo" });
+    expect(result.registries[1]).toEqual({
+      name: "plain",
+      url: "https://roles.example.com/acme/registry.yaml",
+    });
   });
 });
 
@@ -304,5 +374,33 @@ roles:
   it("propagates parse errors from YAML input", () => {
     const yaml = `name: 123`; // name should be a string but YAML still loads
     expect(() => parseRegistryManifestFromYaml(yaml)).toThrow();
+  });
+});
+
+describe("parseRegistryManifest prototype keys", () => {
+  it("refuses a role published under a prototype key", () => {
+    const yaml = [
+      "name: x",
+      "description: d",
+      "url: u",
+      "roles:",
+      "  __proto__:",
+      "    version: '9.9.9'",
+      "    description: PWNED",
+      "    tags: []",
+      "",
+    ].join("\n");
+    expect(() => parseRegistryManifestFromYaml(yaml)).toThrow(/is reserved; refusing to publish a role under a prototype key/);
+  });
+
+  it("returns a roles map with no inherited lookups", () => {
+    const manifest = parseRegistryManifestFromYaml(
+      "name: x\ndescription: d\nurl: u\nroles:\n  a: {version: '1', description: d, tags: []}\n",
+    );
+    // A role named after an Object.prototype member must not resolve to it.
+    expect(manifest.roles["toString"]).toBeUndefined();
+    expect(manifest.roles["constructor"]).toBeUndefined();
+    expect(manifest.roles["hasOwnProperty"]).toBeUndefined();
+    expect(manifest.roles["a"]?.version).toBe("1");
   });
 });

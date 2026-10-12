@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../config.ts";
-import { fetchRegistryManifest } from "../registry-client.ts";
+import { fetchRegistryManifest, escapeForDisplay } from "../registry-client.ts";
 import { effectiveRegistries } from "../sources.ts";
 import type { RegistryManifest } from "../types.ts";
 
@@ -64,8 +64,8 @@ export async function search(
     console.log(`Results from ${registry.name}:`);
     for (const [roleId, info] of filtered) {
       displayed.add(roleId);
-      const padded = roleId.padEnd(24);
-      console.log(`  ${padded} ${info.version}  ${info.description}`);
+      const padded = escapeForDisplay(roleId).padEnd(24);
+      console.log(`  ${padded} ${escapeForDisplay(info.version)}  ${escapeForDisplay(info.description)}`);
     }
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
@@ -39,16 +39,24 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
 
   mock.module("../../../src/cli/registry-client", () => ({
-    parseGitHubUrl: (url: string) => {
-      let m = url.match(
-        /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/,
-      );
-      if (m) return { owner: m[1], repo: m[2] };
-      m = url.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/);
-      if (m) return { owner: m[1], repo: m[2] };
-      throw new Error(`invalid GitHub URL: "${url}"`);
-    },
     fetchRegistryManifest: mockFetchManifest,
+    // The real helpers the command prints through; the stub mirrors them so the
+    // assertions see the same output the shipped code produces.
+    redactUrlForDisplay: (url: string) => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.username === "" && parsed.password === "") return url;
+        parsed.username = "***";
+        parsed.password = "";
+        return parsed.toString();
+      } catch {
+        return url;
+      }
+    },
+    escapeForDisplay: (value: unknown) =>
+      String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) =>
+        `\\x${ch.codePointAt(0)!.toString(16).padStart(2, "0").toUpperCase()}`,
+      ),
   }));
 });
 
@@ -96,6 +104,16 @@ function capture(
       }
     },
   };
+}
+
+/** The rejection message of `fn`; fails the test when the call resolves instead. */
+async function rejectionOf(fn: () => Promise<void>): Promise<string> {
+  try {
+    await fn();
+  } catch (err) {
+    return (err as Error).message;
+  }
+  throw new Error("expected the call to reject");
 }
 
 function configDir(): string {
@@ -149,6 +167,7 @@ describe("registry add", () => {
   it("rejects an invalid GitHub URL", async () => {
     const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await expect(registryAddFn("not-a-url")).rejects.toThrow(/Invalid GitHub URL/);
+    expect(mockFetchManifest).not.toHaveBeenCalled();
   });
 
   it("rejects a duplicate registry name", async () => {
@@ -162,6 +181,7 @@ describe("registry add", () => {
   it("rejects when no URL provided", async () => {
     const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
     await expect(registryAddFn("")).rejects.toThrow(/Invalid GitHub URL/);
+    expect(mockFetchManifest).not.toHaveBeenCalled();
   });
 
   it("validates the URL by fetching registry.yaml", async () => {
@@ -321,6 +341,94 @@ describe("registry add options", () => {
   });
 });
 
+describe("registry add source kinds", () => {
+  beforeEach(() => {
+    mockFetchManifest.mockReset();
+    mockFetchManifest.mockImplementation(async () => sampleManifest);
+  });
+
+  it("accepts a GitLab project URL (nested group) and names it after the repo", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    const c = capture(async () => registryAddFn("https://gitlab.com/group/sub/my-roles"));
+    await c.run();
+
+    expect(c.out.some((l) => l.includes("Added") && l.includes("my-roles"))).toBe(true);
+
+    const parsed = load(readFileSync(configPath(), "utf-8")) as any;
+    const entry = parsed.registries.find((r: any) => r.name === "my-roles");
+    expect(entry).toMatchObject({ url: "https://gitlab.com/group/sub/my-roles" });
+    // Detected from the URL: nothing about the kind is written.
+    expect("kind" in entry).toBe(false);
+  });
+
+  it("accepts a direct registry.yaml URL and names it after the base path", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    const c = capture(async () => registryAddFn("https://roles.example.com/acme/registry.yaml"));
+    await c.run();
+
+    expect(c.out.some((l) => l.includes("Added") && l.includes("acme"))).toBe(true);
+
+    const parsed = load(readFileSync(configPath(), "utf-8")) as any;
+    const entry = parsed.registries.find((r: any) => r.name === "acme");
+    expect(entry).toMatchObject({ url: "https://roles.example.com/acme/registry.yaml" });
+    expect("kind" in entry).toBe(false);
+  });
+
+  it("routes an ssh URL to the detector's message, not the historical one", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    const message = await rejectionOf(() =>
+      registryAddFn("ssh://git@gitlab.com/group/repo.git"),
+    );
+
+    expect(message).toContain('unsupported scheme "ssh"');
+    expect(message).not.toContain("Invalid GitHub URL");
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+    expect(existsSync(configPath())).toBe(false);
+  });
+
+  it("routes an ftp URL to the detector's message, not the historical one", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    await expect(registryAddFn("ftp://host/repo")).rejects.toThrow(/unsupported scheme "ftp"/);
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+    expect(existsSync(configPath())).toBe(false);
+  });
+
+  it("routes a host-less URL to the detector's message, not the historical one", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    const message = await rejectionOf(() => registryAddFn("https://"));
+
+    expect(message).toMatch(/expected an absolute http\(s\) URL/);
+    expect(message).not.toContain("Invalid GitHub URL");
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+    expect(existsSync(configPath())).toBe(false);
+  });
+
+  it("routes file and mailto schemes to the detector's message too", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    await expect(registryAddFn("file:///etc/passwd")).rejects.toThrow(/unsupported scheme "file"/);
+    await expect(registryAddFn("mailto:x@y")).rejects.toThrow(/unsupported scheme "mailto"/);
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+    expect(existsSync(configPath())).toBe(false);
+  });
+
+  it("refuses a bare URL the detector cannot classify, and fetches nothing", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    await expect(registryAddFn("https://roles.example.com/acme")).rejects.toThrow(
+      'unrecognized source URL "https://roles.example.com/acme": expected a GitHub or GitLab project URL, or a registry.yaml URL (for example https://host/path/registry.yaml)',
+    );
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+    expect(existsSync(configPath())).toBe(false);
+  });
+
+  it("refuses a pasted GitHub web-UI URL with the detector's message, and fetches nothing", async () => {
+    const { registryAddFn } = await import("../../../src/cli/commands/registry.ts");
+    await expect(
+      registryAddFn("https://github.com/o/r/blob/main/registry.yaml"),
+    ).rejects.toThrow(/unrecognized source URL "https:\/\/github\.com\/o\/r\/blob\/main\/registry\.yaml"/);
+    expect(mockFetchManifest).not.toHaveBeenCalled();
+  });
+});
+
 describe("registry list output", () => {
   it("marks ref, default and built-in separately", async () => {
     mkdirSync(configDir(), { recursive: true });
@@ -383,6 +491,60 @@ describe("registry list output", () => {
     expect(parsed[0].builtin).toBe(true);
     expect(parsed[0].default).toBe(true);
     expect(parsed[1]).toMatchObject({ builtin: false, ref: "dev" });
+  });
+
+  it("marks the source kind for non-github sources only", async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      configPath(),
+      dump({
+        registries: [
+          { name: "oh-my-role", url: "https://github.com/EricMoin/oh-my-role" },
+          { name: "gl-roles", url: "https://gitlab.com/group/sub/repo" },
+          { name: "plain-roles", url: "https://roles.example.com/acme/registry.yaml" },
+          { name: "legacy-roles", url: "https://github.com/acme/legacy" },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const { registryListFn } = await import("../../../src/cli/commands/registry.ts");
+    const c = capture(async () => registryListFn());
+    await c.run();
+
+    const glLine = c.out.find((l) => l.includes("gl-roles")) ?? "";
+    const plainLine = c.out.find((l) => l.includes("plain-roles")) ?? "";
+    const legacyLine = c.out.find((l) => l.includes("legacy-roles")) ?? "";
+    const builtinLine = c.out.find((l) => l.includes("oh-my-role")) ?? "";
+
+    expect(glLine).toContain(" (gitlab)");
+    expect(plainLine).toContain(" (http)");
+    expect(legacyLine).not.toContain("(gitlab)");
+    expect(legacyLine).not.toContain("(http)");
+    expect(builtinLine).not.toContain("(gitlab)");
+    expect(builtinLine).not.toContain("(http)");
+  });
+
+  it("carries the configured url through --json with no kind field", async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      configPath(),
+      dump({
+        registries: [
+          { name: "plain-roles", url: "https://roles.example.com/acme/registry.yaml" },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const { registryListFn } = await import("../../../src/cli/commands/registry.ts");
+    const c = capture(async () => registryListFn(true));
+    await c.run();
+
+    const parsed = JSON.parse(c.out[0]) as any[];
+    const entry = parsed.find((r) => r.name === "plain-roles");
+    expect(entry.url).toBe("https://roles.example.com/acme/registry.yaml");
+    expect(entry.kind).toBeUndefined();
   });
 
   it("prints the opt-out hint when no source is configured", async () => {

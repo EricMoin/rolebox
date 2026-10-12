@@ -250,12 +250,13 @@ describe("info across sources", () => {
     ]);
 
     const { info } = await importInfo();
-    const error = await info("shared-role", false, false).catch((err: Error) => err);
 
-    expect(error.message).toContain(
-      "Role 'shared-role' is installed from more than one source: oh-my-role, custom",
+    await expect(info("shared-role", false, false)).rejects.toThrow(
+      /Role 'shared-role' is installed from more than one source: oh-my-role, custom/,
     );
-    expect(error.message).toContain("rolebox info oh-my-role:shared-role");
+    await expect(info("shared-role", false, false)).rejects.toThrow(
+      /rolebox info oh-my-role:shared-role/,
+    );
   });
 
   it("inspects the copy selected by a registry:role spec", async () => {

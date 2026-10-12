@@ -353,3 +353,14 @@ describe.skipIf(process.platform === "win32")("ensureWritableDir (writability pr
     }
   });
 });
+
+describe("assertSafePathSegment control characters", () => {
+  it("refuses a segment carrying a control character", () => {
+    // Remote manifest text reaches these segments: a newline or ESC could
+    // otherwise create a directory name that forges output or drives a terminal.
+    expect(() => assertSafePathSegment("1.0.0\n✓ Installed other", "version")).toThrow(/control character/);
+    expect(() => assertSafePathSegment("1.0.0\u001b]0;pwned", "version")).toThrow(/control character/);
+    expect(() => assertSafePathSegment("1.0\u00000", "version")).toThrow(/control character/);
+    expect(() => assertSafePathSegment("1.0.0", "version")).not.toThrow();
+  });
+});

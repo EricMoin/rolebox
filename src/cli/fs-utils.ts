@@ -1,4 +1,52 @@
-import { renameSync, rmSync, cpSync, mkdirSync, accessSync, constants, lstatSync } from "node:fs";
+import { renameSync, rmSync, cpSync, mkdirSync, accessSync, constants, lstatSync, chmodSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Make a tree removable by its owner. A tree that came out of an archive can
+ * contain a directory at mode 0500 (or worse), which makes a plain recursive
+ * `rmSync` fail with EACCES while it is walking the tree.
+ */
+function makeTreeRemovable(dir: string): void {
+  let entries: string[];
+  try {
+    // chmod first: a 0500 directory cannot be listed by its owner, so the
+    // entries have to be made reachable before they can be walked.
+    chmodSync(dir, 0o700);
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry);
+    try {
+      if (lstatSync(full).isDirectory()) makeTreeRemovable(full);
+    } catch {
+      // A vanished or unsupported entry cannot block the removal retry.
+    }
+  }
+}
+
+/**
+ * Remove a directory on a best-effort basis, repairing restrictive modes first.
+ *
+ * A leftover temporary tree is a resource leak a hostile archive can trigger
+ * (an extracted tree can be made read-only by construction), so a failed
+ * removal is retried once after making the tree writable rather than abandoned.
+ */
+export function removeTreeBestEffort(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+    return;
+  } catch {
+    // Retry after repairing modes.
+  }
+  makeTreeRemovable(dir);
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best-effort: never replace the caller's error with a cleanup error.
+  }
+}
 
 function notWritableHint(dir: string): string {
   return `directory ${dir} is not writable; set ROLEBOX_CONFIG_DIR / ROLEBOX_DATA_DIR or fix permissions`;
@@ -102,9 +150,11 @@ export function moveDir(src: string, dest: string): void {
     } catch (copyErr) {
       // The destination did not exist before this call, so everything under it
       // was created by the failed copy: remove it rather than leave it partial.
-      try { rmSync(dest, { recursive: true, force: true }); } catch { /* best-effort */ }
+      // A partly copied tree can carry the archive's restrictive modes, so the
+      // removal repairs them instead of abandoning the tree.
+      removeTreeBestEffort(dest);
       throw copyErr;
     }
-    rmSync(src, { recursive: true, force: true });
+    removeTreeBestEffort(src);
   }
 }

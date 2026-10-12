@@ -1,11 +1,44 @@
 import { defineCommand } from "citty";
 import { loadConfig, saveConfig, loadLock } from "../config.ts";
-import { parseGitHubUrl, fetchRegistryManifest } from "../registry-client.ts";
+import { fetchRegistryManifest, redactUrlForDisplay, escapeForDisplay } from "../registry-client.ts";
 import { assertSafePathSegment } from "../paths.ts";
 import { effectiveRegistries, isBuiltinName } from "../sources.ts";
+import { defaultRegistryName, parseRegistryUrl } from "../source-url.ts";
+import type { SourceKind } from "../source-url.ts";
 import type { RegistryEntry, RegistryManifest } from "../types.ts";
 
 const NAME_COLUMN = 18;
+
+/** `git@host:path` — the scp-like form, which `new URL` cannot parse. */
+const SCP_SOURCE_RE = /^git@[^/:\s]+:.+$/;
+
+/** `scheme://` — a URL scheme, including one `new URL` itself cannot finish parsing (`https://`). */
+const SCHEME_URL_RE = /^[A-Za-z][A-Za-z0-9+.\-]*:\/\//;
+
+/**
+ * Whether the value is shaped like a source URL at all — ANY scheme, not just
+ * http(s), plus the scp-like `git@host:path` form. This is a well-formedness
+ * predicate, not the detector's verdict, so the detector describes every value
+ * that at least looks like a URL: `new URL` parses `ssh://`, `ftp://`,
+ * `file://` and `mailto:` (and the detector rejects them by scheme), while
+ * `https://` carries a scheme yet fails to parse and must reach the detector
+ * too. Only input that is not a source URL in any recognizable form
+ * (`not-a-url`, `registry.yaml`, an empty value) keeps the historical
+ * `Invalid GitHub URL` message, which is otherwise false about both the host
+ * and the problem.
+ */
+function isSourceUrlShape(url: string): boolean {
+  if (typeof url !== "string") return false;
+  const raw = url.trim();
+  if (SCP_SOURCE_RE.test(raw)) return true;
+  if (SCHEME_URL_RE.test(raw)) return true;
+  try {
+    new URL(raw);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function registryListFn(json = false): void {
   const config = loadConfig();
@@ -23,12 +56,25 @@ export function registryListFn(json = false): void {
 
   console.log("Registries:");
   for (const reg of registries) {
+    // GitHub is the default kind, so only a non-github source is marked — the
+    // GitHub line stays byte-identical to before.
+    const kind = sourceKindOf(reg);
     const markers = [
+      kind && kind !== "github" ? ` (${kind})` : "",
       reg.ref ? ` (ref: ${reg.ref})` : "",
       reg.default ? " (default)" : "",
       reg.builtin ? " (built-in)" : "",
     ].join("");
     console.log(`  ${reg.name.padEnd(NAME_COLUMN)} ${reg.url}${markers}`);
+  }
+}
+
+/** The effective kind of a configured source, or `undefined` when its URL is unreadable. */
+function sourceKindOf(reg: RegistryEntry): SourceKind | undefined {
+  try {
+    return parseRegistryUrl(reg.url).kind;
+  } catch {
+    return undefined;
   }
 }
 
@@ -42,18 +88,28 @@ export interface RegistryAddOptions {
 }
 
 export async function registryAddFn(url: string, opts: RegistryAddOptions = {}): Promise<void> {
-  let repo: string;
+  // The URL alone decides the source kind. Anything shaped like a source URL —
+  // any scheme, including one the URL parser cannot finish (`https://`), or the
+  // scp-like form — keeps the detector's own, actionable error (`unsupported
+  // scheme "ssh"`, a hostname that is not a hostname, `expected an absolute
+  // http(s) URL`). Only input that is not a source URL in any recognizable form
+  // (for example `not-a-url`, `registry.yaml`, empty) keeps the historical
+  // message, which would otherwise be false about both the host and the problem.
+  let nameFromUrl: string;
   try {
-    ({ repo } = parseGitHubUrl(url));
-  } catch {
-    throw new Error("Invalid GitHub URL. Expected: https://github.com/owner/repo");
+    nameFromUrl = defaultRegistryName(url);
+  } catch (err) {
+    if (!isSourceUrlShape(url)) {
+      throw new Error("Invalid GitHub URL. Expected: https://github.com/owner/repo");
+    }
+    throw err;
   }
 
   const providedName = opts.name?.trim();
   // A blank --name is rejected instead of silently falling back to the repo
   // basename; the validator owns the message.
   if (providedName === "") assertSafePathSegment(providedName, "registry name");
-  const name = providedName || repo;
+  const name = providedName || nameFromUrl;
   assertSafePathSegment(name, "registry name");
 
   const ref = opts.ref?.trim() || undefined;
@@ -72,12 +128,14 @@ export async function registryAddFn(url: string, opts: RegistryAddOptions = {}):
   try {
     manifest = await fetchRegistryManifest(entry, ref, { noCache: true });
   } catch (err) {
-    throw new Error(`Could not validate registry at ${url}: ${(err as Error).message}`);
+    throw new Error(
+      `Could not validate registry at ${redactUrlForDisplay(url)}: ${(err as Error).message}`,
+    );
   }
 
   if (manifest.name !== name) {
     console.warn(
-      `Warning: the registry at ${url} declares the name '${manifest.name}', not '${name}'; keeping '${name}'. Pass --name to choose a different one.`,
+      `Warning: the registry at ${redactUrlForDisplay(url)} declares the name '${escapeForDisplay(manifest.name)}', not '${escapeForDisplay(name)}'; keeping '${escapeForDisplay(name)}'. Pass --name to choose a different one.`,
     );
   }
   if (effectiveRegistries(config).some((r) => r.url === url)) {
@@ -93,7 +151,7 @@ export async function registryAddFn(url: string, opts: RegistryAddOptions = {}):
   config.registries.push(entry);
   saveConfig(config);
   console.log(
-    `✓ Added registry '${name}' (${url})${opts.makeDefault ? " as the default source" : ""}`,
+    `✓ Added registry '${name}' (${redactUrlForDisplay(url)})${opts.makeDefault ? " as the default source" : ""}`,
   );
 }
 
@@ -153,7 +211,7 @@ const registryList = defineCommand({
 const registryAdd = defineCommand({
   meta: { name: "add", description: "Add a role source" },
   args: {
-    url: { type: "positional", description: "GitHub repository URL", required: true },
+    url: { type: "positional", description: "GitHub/GitLab project URL or registry.yaml URL", required: true },
     name: { type: "string", description: "Source name (defaults to the repository name)" },
     ref: { type: "string", description: "Git branch or tag to read the registry from" },
     default: { type: "boolean", description: "Make this the default source" },

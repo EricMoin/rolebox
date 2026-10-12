@@ -158,24 +158,36 @@ rolebox registry add https://github.com/user/my-roles
                                           # Add a source (name defaults to the repo name)
 rolebox registry add https://github.com/user/my-roles --name mine --ref v2
                                           # Custom name, and a branch/tag to read
+rolebox registry add https://gitlab.com/group/sub/my-roles
+                                          # GitLab project (nested groups work)
+rolebox registry add https://roles.example.com/acme/registry.yaml
+                                          # A plain HTTP server's registry.yaml
 rolebox registry add https://github.com/user/my-roles --default
                                           # Make it the default source
 rolebox registry remove my-roles          # Remove a custom source
 rolebox registry default my-roles         # Make an existing source the default
 ```
 
-`list` marks each source: `(ref: <branch>)` when a branch or tag is pinned,
-`(default)` for the source an unprefixed role spec resolves from first, and
-`(built-in)` for the source that ships with rolebox. The built-in source cannot be
-removed — `rolebox registry default oh-my-role` makes it the default again. Removing a
-source that still has installed roles warns and names the
-`rolebox uninstall <source>:<role>` command that removes them.
+`list` marks each source: `(gitlab)` or `(http)` for a non-GitHub source,
+`(ref: <branch>)` when a branch or tag is pinned, `(default)` for the source an
+unprefixed role spec resolves from first, and `(built-in)` for the source that ships
+with rolebox. The built-in source cannot be removed — `rolebox registry default
+oh-my-role` makes it the default again. Removing a source that still has installed
+roles warns and names the `rolebox uninstall <source>:<role>` command that removes
+them.
 
 Adding a source validates its `registry.yaml` with a single fetch at the requested
-`--ref` before anything is written. A name that is already configured is rejected
-(pass `--name` to choose another one); a manifest that declares a different name than
-the source only produces a warning, as does a URL another source already uses (which
-is how one repository is pinned to two branches).
+`--ref` before anything is written. The source kind is detected from the URL alone:
+a GitHub project (`https://github.com/owner/repo`), a GitLab project (gitlab.com or a
+`gitlab`-family host, nested groups included, and a pasted `/-/` route is normalized
+to the project root), or a plain HTTP server's `registry.yaml` URL. A URL that
+identifies none of those — a bare `owner/repo` on an unknown host, for example — is
+refused with a hint naming the recognizable forms; nothing is probed over the
+network. The inferred name is the project basename, or the base path of a direct
+`registry.yaml` URL. A name that is already configured is rejected (pass `--name` to
+choose another one); a manifest that declares a different name than the source only
+produces a warning, as does a URL another source already uses (which is how one
+repository is pinned to two branches).
 
 ### `info [role]`
 
@@ -306,7 +318,11 @@ registries:
   - name: mine
     url: https://github.com/user/my-roles
     ref: v2          # optional: branch or tag for registry.yaml and the role tarballs
+  - name: static-roles
+    url: https://roles.example.com/acme/registry.yaml   # a plain HTTP server's manifest
 ```
+
+A source's kind is detected from its `url`; there is no `kind` setting.
 
 The built-in `oh-my-role` source is available even when the file does not list it, and
 an entry that does list it keeps its own `url` and `ref`. A custom source with
@@ -318,4 +334,5 @@ first, then the order in the file; `rolebox update` works from the lock file ins
 the interactive pickers stop with `No registries configured`, and a search has no
 source to look in — it reports that it found no roles rather than falling back to
 the built-in silently. See [registry.md](registry.md) for the
-per-source `ref` and resolution rules.
+per-source `ref` and resolution rules, and for the GitHub/GitLab/HTTP source kinds
+and the layout a plain HTTP server must serve.
