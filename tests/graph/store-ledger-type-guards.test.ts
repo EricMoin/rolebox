@@ -33,6 +33,7 @@ import { join } from "node:path";
 
 import type { AcceptedArtifact } from "../../src/graph/domain/model.ts";
 import { STOPPING_CONTROL_COMMANDS } from "../../src/graph/ledger/types.ts";
+import { nodeBudgetLimitsOf, type NodeBudgetLimits } from "../../src/graph/domain/budget.ts";
 import {
   reserveDispatchStatement,
   type BudgetSqlValue,
@@ -263,6 +264,28 @@ describe("the accepted-results artifacts column is read, not asserted (F-01)", (
   });
 });
 
+/** The four ceilings a fixture may declare, in the reading's own field names. */
+type LimitFields = Pick<
+  NodeBudgetLimits,
+  "durationMs" | "inputTokens" | "outputTokens" | "costUsd"
+>;
+
+/**
+ * Fixture ceilings go through the reader production uses: the brand on
+ * `NodeBudgetLimits` (F-24) is written only by `nodeBudgetLimitsOf`, so a test
+ * literal is not a substitute for reading a declared spec.
+ */
+function limitsOf(fields: LimitFields): NodeBudgetLimits {
+  const reading = nodeBudgetLimitsOf({
+    ...(fields.durationMs === undefined ? {} : { timeout_ms: fields.durationMs }),
+    ...(fields.inputTokens === undefined ? {} : { max_input_tokens: fields.inputTokens }),
+    ...(fields.outputTokens === undefined ? {} : { max_output_tokens: fields.outputTokens }),
+    ...(fields.costUsd === undefined ? {} : { max_cost_usd: fields.costUsd }),
+  });
+  if (reading.kind !== "ok") throw new Error(reading.refusal.message);
+  return reading.limits;
+}
+
 describe("the reservation statement and its bindings are one value (F-19)", () => {
   /** The builder's input for one fully-specified claim. */
   function statementInput(): Parameters<typeof reserveDispatchStatement>[0] {
@@ -274,12 +297,12 @@ describe("the reservation statement and its bindings are one value (F-19)", () =
       attemptId: ATTEMPT,
       effectId: "dispatch:" + ATTEMPT,
       at: NOW,
-      limits: {
+      limits: limitsOf({
         durationMs: 1000,
         inputTokens: 2000,
         outputTokens: 3000,
         costUsd: 0.25,
-      },
+      }),
       maxExecutions: 4,
     };
   }
@@ -329,7 +352,7 @@ describe("the reservation statement and its bindings are one value (F-19)", () =
           nodeId: NODE,
           attemptId: ATTEMPT,
           effectId: "dispatch:" + ATTEMPT,
-          limits: { inputTokens: 1000 },
+          limits: limitsOf({ inputTokens: 1000 }),
           at: NOW + 1,
         });
       });
@@ -367,12 +390,12 @@ describe("the reservation statement and its bindings are one value (F-19)", () =
           nodeId: NODE,
           attemptId: ATTEMPT,
           effectId: "dispatch:" + ATTEMPT,
-          limits: {
+          limits: limitsOf({
             durationMs: 11,
             inputTokens: 22,
             outputTokens: 33,
             costUsd: 0.44,
-          },
+          }),
           at: NOW + 1,
         });
       });
@@ -381,12 +404,9 @@ describe("the reservation statement and its bindings are one value (F-19)", () =
       // Each ceiling lands in its OWN field: the checked columns are read back
       // through the dimension-to-field table, so a mis-mapping fails here
       // rather than silently reporting one dimension's ceiling as another's.
-      expect(result.reservation.checked).toEqual({
-        durationMs: 11,
-        inputTokens: 22,
-        outputTokens: 33,
-        costUsd: 0.44,
-      });
+      expect(result.reservation.checked).toEqual(
+        limitsOf({ durationMs: 11, inputTokens: 22, outputTokens: 33, costUsd: 0.44 }),
+      );
       expect(result.reservation.reserved).toEqual({
         executions: 1,
         durationMs: 11,

@@ -1,4 +1,5 @@
 import { existsSync, writeFileSync } from "node:fs";
+import { NO_BUDGET_LIMITS } from "../../../src/graph/domain/budget.ts";
 import { GraphStore } from "../../../src/graph/store/graph-store.ts";
 
 const [directory, attemptId, barrier] = process.argv.slice(2);
@@ -15,7 +16,7 @@ try {
   }
   const result = store.budget.reserveDispatch({
     graphId: "bounded", runId: "run", nodeId: attemptId.split("#")[0]!,
-    attemptId, effectId: `dispatch:${attemptId}`, limits: {}, maxExecutions: 1, at: 1,
+    attemptId, effectId: `dispatch:${attemptId}`, limits: NO_BUDGET_LIMITS, maxExecutions: 1, at: 1,
   });
   console.log(JSON.stringify({ kind: result.kind, attempts: store.budget.reservationsOf("bounded").map((r) => r.attemptId) }));
 } finally { store.close(); }

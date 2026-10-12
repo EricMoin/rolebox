@@ -164,6 +164,22 @@ function controlCommandArg(name: string): ControlCommandName {
   return found;
 }
 
+/**
+ * The control command this worker records on an ATTEMPT: every command but the
+ * successor-minting `retry`. A control-race command stops or pauses one attempt;
+ * `retry` would have to name the successor it minted, which this CLI does not
+ * supply, so it is refused by name instead of written half-formed.
+ */
+function attemptControlCommandArg(name: string): Exclude<ControlCommandName, "retry"> {
+  const command = controlCommandArg(name);
+  if (command === "retry") {
+    throw new Error(
+      `graph-store-xproc-worker: --${name} = retry mints a successor attempt and is not a control-race command`,
+    );
+  }
+  return command;
+}
+
 /** The value of `--name` as a safe integer, refused otherwise. */
 function numberArg(name: string): number {
   const value = Number(required(name));
@@ -624,7 +640,7 @@ async function controlRace(store: GraphStore): Promise<void> {
     return;
   }
 
-  const command = controlCommandArg("command");
+  const command = attemptControlCommandArg("command");
   const verdict = store.runs.writeControlDecision({
     decision: {
       graphId,
@@ -686,7 +702,7 @@ function applyControl(store: GraphStore): void {
   const graphId = required("graph");
   const nodeId = required("node");
   const attemptId = required("attempt");
-  const command = controlCommandArg("command");
+  const command = attemptControlCommandArg("command");
   const reason = required("reason");
   const at = numberArg("at");
   const sessionId = arg("session") ?? "session.declarer";

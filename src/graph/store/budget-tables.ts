@@ -1,5 +1,6 @@
 import type { DatabaseDriver } from "../../memory/db-driver.ts";
 import {
+  NO_BUDGET_LIMITS,
   type BudgetLimitKind,
   type BudgetUsageAmounts,
   type NodeBudgetLimits
@@ -502,6 +503,7 @@ export class BudgetTables {
   /** The declared ceilings, validated field by field, in the port's names. */
   private normalizedLimits(limits: NodeBudgetLimits): NodeBudgetLimits {
     return Object.freeze({
+      ...limits,
       ...(limits.durationMs === undefined
         ? {}
         : { durationMs: requireAmount(limits.durationMs, "budget.limits.durationMs") }),
@@ -1052,7 +1054,14 @@ export class BudgetTables {
     });
   }
 
-  /** One row as the port's record. */
+  /**
+   * One row as the port's record, built as the ARM its status names.
+   *
+   * The DDL's CHECKs already relate each status to its settlement time and its
+   * used amounts, and the reader keeps that relation rather than re-deriving it:
+   * `settled_at` is read exactly for a settled row and the used columns exactly
+   * for a reconciled one, so the discriminated variant is what a caller gets.
+   */
   private toReservation(row: Record<string, unknown>): BudgetReservationRecord {
     const table = GRAPH_STORE_TABLES.budgetReservations;
     const status = row["status"];
@@ -1074,15 +1083,16 @@ export class BudgetTables {
       if (ceiling === undefined) continue;
       checked[AMOUNT_FIELD_BY_KIND[dimension.kind]] = ceiling;
     }
-    const settled = status === "reconciled";
-    return Object.freeze({
+    const fields = {
       graphId: readText(row, "graph_id", this.filePath, table),
       runId: readText(row, "run_id", this.filePath, table),
       nodeId: readText(row, "node_id", this.filePath, table),
       attemptId: readText(row, "attempt_id", this.filePath, table),
       effectId: readText(row, "effect_id", this.filePath, table),
-      status,
-      checked: Object.freeze(checked),
+      // The brand comes from a reading: the four ceilings below are this
+      // reader's own validated columns, and `NO_BUDGET_LIMITS` is the value
+      // `nodeBudgetLimitsOf` returns for a node that declared none.
+      checked: Object.freeze({ ...NO_BUDGET_LIMITS, ...checked }),
       reserved: Object.freeze({
         executions: readCount(row, "reserved_executions", this.filePath, table),
         durationMs: readAmount(row, "reserved_duration_ms", this.filePath, table),
@@ -1090,21 +1100,30 @@ export class BudgetTables {
         outputTokens: readAmount(row, "reserved_output_tokens", this.filePath, table),
         costUsd: readAmount(row, "reserved_cost_usd", this.filePath, table),
       }),
-      ...(settled
-        ? {
-          used: Object.freeze({
-            executions: readCount(row, "used_executions", this.filePath, table),
-            durationMs: readAmount(row, "used_duration_ms", this.filePath, table),
-            inputTokens: readAmount(row, "used_input_tokens", this.filePath, table),
-            outputTokens: readAmount(row, "used_output_tokens", this.filePath, table),
-            costUsd: readAmount(row, "used_cost_usd", this.filePath, table),
-          }),
-        }
-        : {}),
-      reservedAt: readCount(row, "reserved_at", this.filePath, table),
-      ...(status === "reserved"
-        ? {}
-        : { settledAt: readCount(row, "settled_at", this.filePath, table) }),
+    };
+    const reservedAt = readCount(row, "reserved_at", this.filePath, table);
+    if (status === "reserved") {
+      // OUTSTANDING: no settlement time and no usage exist yet.
+      return Object.freeze({ ...fields, status, reservedAt });
+    }
+    const settledAt = readCount(row, "settled_at", this.filePath, table);
+    if (status === "released") {
+      // WITHDRAWN with the usage UNKNOWN — never a fabricated zero.
+      return Object.freeze({ ...fields, status, reservedAt, settledAt });
+    }
+    // RECONCILED: every used column is NOT NULL exactly here (the DDL's CHECK).
+    return Object.freeze({
+      ...fields,
+      status,
+      reservedAt,
+      settledAt,
+      used: Object.freeze({
+        executions: readCount(row, "used_executions", this.filePath, table),
+        durationMs: readAmount(row, "used_duration_ms", this.filePath, table),
+        inputTokens: readAmount(row, "used_input_tokens", this.filePath, table),
+        outputTokens: readAmount(row, "used_output_tokens", this.filePath, table),
+        costUsd: readAmount(row, "used_cost_usd", this.filePath, table),
+      }),
     });
   }
 }

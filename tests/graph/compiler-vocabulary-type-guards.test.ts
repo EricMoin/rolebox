@@ -177,6 +177,28 @@ describe("F-02 — a closed vocabulary names exactly the keys of the type it mir
 // actually consume the list — every dimension is compared, and each ceiling is
 // written into its own field rather than into the last `else` branch.
 
+/** The four ceilings a fixture may declare, in the reading's own field names. */
+type LimitFields = Pick<
+  NodeBudgetLimits,
+  "durationMs" | "inputTokens" | "outputTokens" | "costUsd"
+>;
+
+/**
+ * Fixture ceilings go through the reader production uses: the brand on
+ * `NodeBudgetLimits` (F-24) is written only by `nodeBudgetLimitsOf`, so a test
+ * literal is not a substitute for reading a declared spec.
+ */
+function limitsOf(fields: LimitFields): NodeBudgetLimits {
+  const reading = nodeBudgetLimitsOf({
+    ...(fields.durationMs === undefined ? {} : { timeout_ms: fields.durationMs }),
+    ...(fields.inputTokens === undefined ? {} : { max_input_tokens: fields.inputTokens }),
+    ...(fields.outputTokens === undefined ? {} : { max_output_tokens: fields.outputTokens }),
+    ...(fields.costUsd === undefined ? {} : { max_cost_usd: fields.costUsd }),
+  });
+  if (reading.kind !== "ok") throw new Error(reading.refusal.message);
+  return reading.limits;
+}
+
 describe("F-02 / C-05 — one dimension → field list drives ceiling reads and overruns", () => {
   it("pins the dimension list to both sides it maps", () => {
     expectTypeOf<(typeof BUDGET_LIMIT_FIELDS)[number][0]>().toEqualTypeOf<BudgetLimitKind>();
@@ -187,12 +209,12 @@ describe("F-02 / C-05 — one dimension → field list drives ceiling reads and 
   });
 
   it("reports every over-limit dimension, in canonical order", () => {
-    const limits: NodeBudgetLimits = {
+    const limits = limitsOf({
       durationMs: 10,
       inputTokens: 20,
       outputTokens: 30,
       costUsd: 40,
-    };
+    });
     const exact: BudgetUsageAmounts = {
       executions: 0,
       durationMs: 10,
@@ -229,7 +251,12 @@ describe("F-02 / C-05 — one dimension → field list drives ceiling reads and 
     });
     expect(reading).toEqual({
       kind: "ok",
-      limits: { durationMs: 10, inputTokens: 7, outputTokens: 8, costUsd: 9 },
+      limits: limitsOf({
+        durationMs: 10,
+        inputTokens: 7,
+        outputTokens: 8,
+        costUsd: 9,
+      }),
     });
   });
 });

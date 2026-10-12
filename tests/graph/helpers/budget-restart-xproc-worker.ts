@@ -39,10 +39,36 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  nodeBudgetLimitsOf,
+  type NodeBudgetLimits,
+} from "../../../src/graph/domain/budget.ts";
 import { OutcomeHost } from "../../../src/graph/host/outcome-host.ts";
 import { createValidatorRegistry } from "../../../src/graph/outcome/validators.ts";
 import { GraphStore } from "../../../src/graph/store/graph-store.ts";
 import { runGraphControlEntry } from "../../../src/graph/tools/control-entry.ts";
+
+/** The four ceilings a fixture may declare, in the reading's own field names. */
+type LimitFields = Pick<
+  NodeBudgetLimits,
+  "durationMs" | "inputTokens" | "outputTokens" | "costUsd"
+>;
+
+/**
+ * Fixture ceilings go through the reader production uses: the brand on
+ * `NodeBudgetLimits` (F-24) is written only by `nodeBudgetLimitsOf`, so a test
+ * literal is not a substitute for reading a declared spec.
+ */
+function limitsOf(fields: LimitFields): NodeBudgetLimits {
+  const reading = nodeBudgetLimitsOf({
+    ...(fields.durationMs === undefined ? {} : { timeout_ms: fields.durationMs }),
+    ...(fields.inputTokens === undefined ? {} : { max_input_tokens: fields.inputTokens }),
+    ...(fields.outputTokens === undefined ? {} : { max_output_tokens: fields.outputTokens }),
+    ...(fields.costUsd === undefined ? {} : { max_cost_usd: fields.costUsd }),
+  });
+  if (reading.kind !== "ok") throw new Error(reading.refusal.message);
+  return reading.limits;
+}
 
 /** The one graph this fixture drives: a BUDGETED entry node and a spare node. */
 export const BUDGET_RESTART_GRAPH = "budget.restart-xproc";
@@ -306,7 +332,7 @@ async function race(
       nodeId,
       attemptId,
       effectId: "dispatch:" + attemptId,
-      limits: { inputTokens: limit },
+      limits: limitsOf({ inputTokens: limit }),
       at: instant(),
     });
     report({

@@ -112,12 +112,30 @@ type _BudgetLimitKindsComplete = MissingKeysAreNever<
 >;
 
 /**
+ * The brand that makes a `NodeBudgetLimits` a READING rather than a shape.
+ *
+ * The four ceilings below are each optional and numeric, so without a mark a
+ * `Record<string, unknown>` — a raw persisted payload — was assignable to this
+ * type: `const limits: NodeBudgetLimits = raw` compiled, and the budget API
+ * could not require that {@link nodeBudgetLimitsOf}, the only reader that turns
+ * raw limits into checked ones, had run (F-24/A-10). The symbol is
+ * module-private and is never written at runtime, so the declared values and
+ * every comparison against them are unchanged; only the type states who
+ * produced one.
+ */
+declare const validatedBudgetLimits: unique symbol;
+
+/**
  * The declared ceilings of ONE node, as the compiled plan authorizes them.
  *
- * Every field is OPTIONAL and an absent field means the declaration declared no
- * ceiling for that dimension — it does NOT mean zero and it does NOT mean
+ * Every ceiling is OPTIONAL and an absent field means the declaration declared
+ * no ceiling for that dimension — it does NOT mean zero and it does NOT mean
  * unlimited-because-defaulted: absent is read as "nothing to enforce", which is
  * the declaration's own silence.
+ *
+ * A value of this type can only be obtained from {@link nodeBudgetLimitsOf} (or
+ * by extending a value it produced): the required brand below is the reader's
+ * output mark, so an arbitrary record is no longer a substitute for reading.
  */
 export interface NodeBudgetLimits {
   /** `timeout_ms` — the wall-clock ceiling for this node's attempt. */
@@ -128,7 +146,35 @@ export interface NodeBudgetLimits {
   readonly outputTokens?: number;
   /** `max_cost_usd`. */
   readonly costUsd?: number;
+  /** True only for the ceilings {@link nodeBudgetLimitsOf} read. */
+  readonly [validatedBudgetLimits]: true;
 }
+
+/** The `NodeBudgetLimits` field one limit dimension is carried by. */
+type BudgetLimitField = keyof NodeBudgetLimits & keyof BudgetUsageAmounts;
+
+/** The mutable vessel the reader fills in before the brand is applied. */
+type OpenNodeBudgetLimits = Partial<Record<BudgetLimitField, number>>;
+
+/**
+ * Apply the reader's provenance brand and freeze the reading.
+ *
+ * The brand is module-private and this is the only function that writes it, so
+ * this module is the single place a `NodeBudgetLimits` can come into existence:
+ * a caller may extend a reading (see {@link NO_BUDGET_LIMITS}) but cannot invent
+ * one from a raw record. It validates nothing of its own — the reader is
+ * {@link nodeBudgetLimitsOf}, and its checks are what make these values honest.
+ */
+function mintNodeBudgetLimits(limits: OpenNodeBudgetLimits): NodeBudgetLimits {
+  return Object.freeze(limits) as NodeBudgetLimits;
+}
+
+/**
+ * The ceilings of a node that declared none: exactly what the reader returns
+ * for an `undefined` spec. Exported for callers that must hand the budget API a
+ * value even when the node declared no ceiling.
+ */
+export const NO_BUDGET_LIMITS: NodeBudgetLimits = mintNodeBudgetLimits({});
 
 /**
  * Recorded usage along every dimension. Execution count is bounded per run.
@@ -273,13 +319,17 @@ const LIMIT_KEYS: ReadonlyMap<string, BudgetLimitKind> = new Map<string, BudgetL
 );
 
 /** The ceiling field each dimension is carried by, derived from the list above. */
-const LIMIT_FIELDS: ReadonlyMap<BudgetLimitKind, keyof NodeBudgetLimits> = new Map<
+const LIMIT_FIELDS: ReadonlyMap<BudgetLimitKind, BudgetLimitField> = new Map<
   BudgetLimitKind,
-  keyof NodeBudgetLimits
->(BUDGET_LIMIT_FIELDS.map(([kind, field]): [BudgetLimitKind, keyof NodeBudgetLimits] => [kind, field]));
+  BudgetLimitField
+>(BUDGET_LIMIT_FIELDS.map(([kind, field]): [BudgetLimitKind, BudgetLimitField] => [kind, field]));
 
 /**
  * Read one node's declared ceilings, or refuse the spec by name.
+ *
+ * The spec is UNTRUSTED until this reader has checked it — hence `unknown`, not
+ * a record that merely looks like a limit bag — and the reading it returns is
+ * the only branded `NodeBudgetLimits` there is.
  *
  * TOTAL and non-throwing: the caller gets either the four authorized ceilings or
  * a named refusal, so a plan whose budget this build cannot read exactly is
@@ -290,16 +340,11 @@ const LIMIT_FIELDS: ReadonlyMap<BudgetLimitKind, keyof NodeBudgetLimits> = new M
  * `Infinity` or a negative ceiling that would make the store's comparison
  * vacuous.
  */
-export function nodeBudgetLimitsOf(
-  spec: NodeBudgetSpec | undefined,
-): BudgetLimitReading {
-  const limits: {
-    durationMs?: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    costUsd?: number;
-  } = {};
-  if (spec === undefined) return Object.freeze({ kind: "ok", limits: Object.freeze(limits) });
+export function nodeBudgetLimitsOf(spec: unknown): BudgetLimitReading {
+  const limits: OpenNodeBudgetLimits = {};
+  if (spec === undefined) {
+    return Object.freeze({ kind: "ok", limits: mintNodeBudgetLimits(limits) });
+  }
   if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
     return refusedLimit(
       "budget-limit-invalid",
@@ -341,7 +386,7 @@ export function nodeBudgetLimitsOf(
     if (field === undefined) continue;
     limits[field] = value;
   }
-  return Object.freeze({ kind: "ok", limits: Object.freeze(limits) });
+  return Object.freeze({ kind: "ok", limits: mintNodeBudgetLimits(limits) });
 }
 
 /** One named budget-limit refusal. */

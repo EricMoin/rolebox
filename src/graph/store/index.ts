@@ -7,6 +7,7 @@ export {
   graphStoreFilePath,
   graphStoreRoot,
   type GraphStoreColumn,
+  type GraphStoreColumnName,
 } from "./schema.ts";
 export {
   GraphStoreClosedError,

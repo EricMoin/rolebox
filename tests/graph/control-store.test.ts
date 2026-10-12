@@ -33,6 +33,7 @@ import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";
 import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
 import type {
   ControlDecisionRecord,
+  NonRetryControlDecisionRecord,
   RunControlRecord,
 } from "../../src/graph/ledger/types.ts";
 
@@ -55,7 +56,7 @@ const RUN = "control.store@1";
 const PLAN = "plan.control-store";
 
 function decision(
-  overrides: Partial<ControlDecisionRecord> = {},
+  overrides: Partial<NonRetryControlDecisionRecord> = {},
 ): ControlDecisionRecord {
   return Object.freeze({
     graphId: GRAPH,

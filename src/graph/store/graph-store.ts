@@ -3242,31 +3242,49 @@ function readDecidedBy(
   return { decidedBy: Object.freeze({ sessionId: session }) };
 }
 
-/** Read one control-decision row. */
+/**
+ * Read one control-decision row.
+ *
+ * Each arm is BUILT with its own command, so the record this reader returns is
+ * the discriminated variant {@link ControlDecisionRecord} declares rather than
+ * a flat bag with a conditional field. The successor link is still validated
+ * against its command at the read: it is present EXACTLY for a retry (the DDL's
+ * CHECK says so), so a row that disagrees with its own command is refused
+ * rather than read approximately — a retry whose successor was lost could never
+ * answer which attempt it minted, and another command carrying one would name an
+ * attempt it never created.
+ */
 function readControlDecisionRow(
   row: Record<string, unknown>,
   path: string,
 ): ControlDecisionRecord {
   const table = GRAPH_STORE_TABLES.controlDecisions;
   const command = readControlCommand(row, "command", path, table);
-  // The successor link is present EXACTLY for a retry (the DDL's CHECK says so),
-  // so a row that disagrees with its own command is refused rather than read
-  // approximately: a retry whose successor was lost could never answer which
-  // attempt it minted, and another command carrying one would name an attempt it
-  // never created.
   const successor = row["successor_attempt_id"];
   const successorAttemptId =
     typeof successor === "string" && successor.length > 0 ? successor : undefined;
-  if (command === "retry" && successorAttemptId === undefined) {
-    throw new GraphStoreFormatError(
-      "malformed-row",
-      path,
-      `graph-store: a ${table} row of ${path} records a retry with no successor attempt — refusing to read it approximately`,
-      successor,
-      GRAPH_STORE_FORMAT_VERSION,
-    );
+  const fields = {
+    graphId: readStoreText(row, "graph_id", path, table),
+    runId: readStoreText(row, "run_id", path, table),
+    nodeId: readStoreText(row, "node_id", path, table),
+    attemptId: readStoreText(row, "attempt_id", path, table),
+    reason: readStoreText(row, "reason", path, table),
+    decidedAt: readStoreEpoch(row, "decided_at", path, table),
+    ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
+  };
+  if (command === "retry") {
+    if (successorAttemptId === undefined) {
+      throw new GraphStoreFormatError(
+        "malformed-row",
+        path,
+        `graph-store: a ${table} row of ${path} records a retry with no successor attempt — refusing to read it approximately`,
+        successor,
+        GRAPH_STORE_FORMAT_VERSION,
+      );
+    }
+    return Object.freeze({ ...fields, command, successorAttemptId });
   }
-  if (command !== "retry" && successor !== null && successor !== undefined) {
+  if (successor !== null && successor !== undefined) {
     throw new GraphStoreFormatError(
       "malformed-row",
       path,
@@ -3275,17 +3293,7 @@ function readControlDecisionRow(
       GRAPH_STORE_FORMAT_VERSION,
     );
   }
-  return Object.freeze({
-    graphId: readStoreText(row, "graph_id", path, table),
-    runId: readStoreText(row, "run_id", path, table),
-    nodeId: readStoreText(row, "node_id", path, table),
-    attemptId: readStoreText(row, "attempt_id", path, table),
-    command,
-    reason: readStoreText(row, "reason", path, table),
-    decidedAt: readStoreEpoch(row, "decided_at", path, table),
-    ...(successorAttemptId === undefined ? {} : { successorAttemptId }),
-    ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
-  });
+  return Object.freeze({ ...fields, command });
 }
 
 /**
@@ -3538,16 +3546,19 @@ function assertControlWriteShape(write: RunControlWrite): void {
   // THE SUCCESSOR LINK IS PART OF THE RETRY'S SHAPE (the DDL's CHECK says the
   // same): a retry that named no successor could never answer which attempt it
   // minted, and a successor on another command would name an attempt that
-  // command never created.
+  // command never created. The union makes both shapes unrepresentable to a
+  // typed caller; the writer keeps its own check for a caller it cannot see,
+  // and reads the link once so the two arms stay a matched pair.
+  const successorAttemptId: string | undefined = decision.successorAttemptId;
   if (decision.command === "retry") {
-    requireStoreIdentifier(decision.successorAttemptId, "control.successorAttemptId");
-  } else if (decision.successorAttemptId !== undefined) {
+    requireStoreIdentifier(successorAttemptId, "control.successorAttemptId");
+  } else if (successorAttemptId !== undefined) {
     throw new GraphStoreWriteError(
       "invalid-record",
       "graph-store: the control decision records command " +
       JSON.stringify(decision.command) +
       " with successor attempt " +
-      JSON.stringify(decision.successorAttemptId) +
+      JSON.stringify(successorAttemptId) +
       " — only a retry mints an attempt, so nothing was written",
     );
   }

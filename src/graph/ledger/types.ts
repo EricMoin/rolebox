@@ -361,6 +361,56 @@ export type RunReexecutionWriteResult =
   };
 
 /**
+ * The fields every control decision carries, whatever command recorded it.
+ *
+ * A decision is either a RETRY — the one command that MINTS a successor attempt
+ * — or one of the other commands, which mint none. {@link ControlDecisionRecord}
+ * discriminates on `command` so the successor link exists on exactly the arm
+ * that has one, which is what the store's own CHECK already makes
+ * unrepresentable in any other shape.
+ */
+export interface ControlDecisionRecordBase {
+  readonly graphId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly reason: string;
+  /** Epoch milliseconds, supplied by the caller. */
+  readonly decidedAt: number;
+  /** The trusted invocation that decided, when the host attributes one. */
+  readonly decidedBy?: ControlPrincipalRecord;
+}
+
+/**
+ * A `retry` decision: the attempt it MINTED in place of the superseded one
+ * (P3 item 2).
+ *
+ * The decision is recorded against the attempt it SUPERSEDES (which is what
+ * makes a repeated retry of that attempt a replay instead of a second attempt),
+ * so `successorAttemptId` is the durable link from the superseded attempt to its
+ * successor. It is the identity a replay answers with, and the reason a retried
+ * attempt can be named after the fact without reading the run state. REQUIRED
+ * here, because a retry without it could never answer which attempt it minted.
+ */
+export interface RetryControlDecisionRecord extends ControlDecisionRecordBase {
+  readonly command: "retry";
+  readonly successorAttemptId: string;
+}
+
+/**
+ * Every other control decision: a command that mints no successor attempt.
+ *
+ * `successorAttemptId` is declared `undefined` rather than omitted so it stays
+ * ADDRESSABLE (and `undefined`) across the union — which is what every existing
+ * reader sees — while a value that CARRIES one is a compile error: a successor
+ * on another command would name an attempt that command never created.
+ */
+export interface NonRetryControlDecisionRecord extends ControlDecisionRecordBase {
+  readonly command: Exclude<ControlCommandName, "retry">;
+  readonly successorAttemptId?: undefined;
+}
+
+/**
  * One durable TRUSTED CONTROL DECISION for one attempt (P3 item 1).
  *
  * Owns: which {@link ControlCommandName} a trusted principal applied to one
@@ -370,29 +420,15 @@ export type RunReexecutionWriteResult =
  * execution are unrepresentable rather than merely refused.
  * Writers: the control application service and ONLY it. A worker's submission
  * cannot reach this record: control is never derived from a submitted payload.
+ *
+ * DISCRIMINATED ON `command` (F-17, C-08): {@link RetryControlDecisionRecord}
+ * carries the successor link it mints, and {@link NonRetryControlDecisionRecord}
+ * cannot carry one. The persisted shape, the DDL's CHECK and the row reader are
+ * unchanged — the type states the relation the store already enforces.
  */
-export interface ControlDecisionRecord {
-  readonly graphId: string;
-  readonly runId: string;
-  readonly nodeId: string;
-  readonly attemptId: string;
-  readonly command: ControlCommandName;
-  readonly reason: string;
-  /** Epoch milliseconds, supplied by the caller. */
-  readonly decidedAt: number;
-  /** The trusted invocation that decided, when the host attributes one. */
-  readonly decidedBy?: ControlPrincipalRecord;
-  /**
-   * The attempt a `retry` MINTED in place of {@link attemptId} (P3 item 2).
-   * Present EXACTLY for a retry: the decision is recorded against the attempt it
-   * SUPERSEDES (which is what makes a repeated retry of that attempt a replay
-   * instead of a second attempt), so this field is the durable link from the
-   * superseded attempt to its successor. It is the identity a replay answers
-   * with, and the reason a retried attempt can be named after the fact without
-   * reading the run state.
-   */
-  readonly successorAttemptId?: string;
-}
+export type ControlDecisionRecord =
+  | RetryControlDecisionRecord
+  | NonRetryControlDecisionRecord;
 
 /**
  * The RUN-level control fact: the FIRST trusted command recorded for a run.
@@ -854,25 +890,81 @@ export type BudgetReservationStatus =
    */
   | "released";
 
-/** One dispatch's durable budget reservation and, later, its real usage. */
-export interface BudgetReservationRecord {
+/**
+ * The fields every reservation carries, in whatever state it stands.
+ *
+ * The three states below differ in exactly two facts — whether the REAL usage
+ * is known yet, and whether the claim has been settled — so those two live on
+ * the arms and the rest lives here.
+ */
+export interface BudgetReservationRecordBase {
   readonly graphId: string;
   readonly runId: string;
   readonly nodeId: string;
   readonly attemptId: string;
   /** The dispatch effect this reservation authorized. */
   readonly effectId: string;
-  readonly status: BudgetReservationStatus;
   /** The DECLARED ceilings the claim was checked against; absent = undeclared. */
   readonly checked: NodeBudgetLimits;
   /** What this dispatch claimed of each dimension when it was armed. */
   readonly reserved: BudgetUsageAmounts;
-  /** The REAL usage, present exactly once the row is `reconciled`. */
-  readonly used?: BudgetUsageAmounts;
   readonly reservedAt: number;
-  /** Epoch milliseconds the claim was reconciled or released at. */
-  readonly settledAt?: number;
 }
+
+/**
+ * An OUTSTANDING claim: the dispatch is authorized and its usage is not known.
+ *
+ * Neither `used` nor `settledAt` exists yet — declaring them `undefined` keeps
+ * them addressable (and `undefined`) across the union while making a value on
+ * this arm a compile error, exactly as the DDL's
+ * `CHECK ((status = 'reserved') = (settled_at IS NULL))` makes it
+ * unrepresentable in the store.
+ */
+export interface ReservedBudgetReservationRecord extends BudgetReservationRecordBase {
+  readonly status: "reserved";
+  readonly used?: undefined;
+  readonly settledAt?: undefined;
+}
+
+/**
+ * A RECONCILED claim: the REAL usage was reported and IS the fact.
+ *
+ * `used` is REQUIRED here, because a reconciled row without it could not say
+ * what the dispatch spent; the DDL's
+ * `CHECK ((status = 'reconciled') = (used_executions IS NOT NULL))` says the
+ * same for every used column.
+ */
+export interface ReconciledBudgetReservationRecord extends BudgetReservationRecordBase {
+  readonly status: "reconciled";
+  readonly used: BudgetUsageAmounts;
+  /** Epoch milliseconds the claim was reconciled at. */
+  readonly settledAt: number;
+}
+
+/**
+ * A RELEASED claim: the attempt ended with NO usage report, so the claim is
+ * WITHDRAWN and the usage stays UNKNOWN rather than becoming a fabricated zero.
+ * A late report still transitions the row to `reconciled`.
+ */
+export interface ReleasedBudgetReservationRecord extends BudgetReservationRecordBase {
+  readonly status: "released";
+  readonly used?: undefined;
+  /** Epoch milliseconds the claim was released at. */
+  readonly settledAt: number;
+}
+
+/**
+ * One dispatch's durable budget reservation and, later, its real usage.
+ *
+ * DISCRIMINATED ON `status` (F-17, C-08): each arm carries exactly the fields
+ * its status defines, so a reconciled reservation always has its usage and only
+ * a reconciled one does. The persisted shape, the DDL and the row reader are
+ * unchanged — the type states the relations the store already enforces.
+ */
+export type BudgetReservationRecord =
+  | ReservedBudgetReservationRecord
+  | ReconciledBudgetReservationRecord
+  | ReleasedBudgetReservationRecord;
 
 /** One dimension that had no room left for a dispatch, with the numbers. */
 export interface BudgetExhaustion {

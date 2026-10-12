@@ -1,6 +1,6 @@
 import type { CompiledPlan } from "../compiler/plan.ts";
 import {
-  buildBudgetReport, hasBudgetLimits, nodeBudgetLimitsOf, readRunBudget,
+  NO_BUDGET_LIMITS, buildBudgetReport, hasBudgetLimits, nodeBudgetLimitsOf, readRunBudget,
   type BudgetUsageAmounts, type NodeBudgetLimits,
 } from "../domain/budget.ts";
 import type { AcceptanceLedger, AcceptanceLedgerTx, BudgetUsageResult } from "../ledger/types.ts";
@@ -80,7 +80,9 @@ export class OutcomeRuntimeBudget {
   }
 
   private limitsOfNode(nodeId: string): NodeBudgetLimits {
-    return this.budgetLimits.get(nodeId) ?? Object.freeze({});
+    // A node that declared no ceiling still hands the budget API a reading:
+    // `NO_BUDGET_LIMITS` is exactly what `nodeBudgetLimitsOf(undefined)` returns.
+    return this.budgetLimits.get(nodeId) ?? NO_BUDGET_LIMITS;
   }
 
   /** Reserve before committing the attempt, effect and credential; a refusal rolls them all back. */

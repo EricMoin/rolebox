@@ -87,10 +87,32 @@ function openStoreWithRun(): { readonly store: GraphStore; readonly root: string
   return { store, root };
 }
 
+/** The four ceilings a fixture may declare, in the reading's own field names. */
+type LimitFields = Pick<
+  NodeBudgetLimits,
+  "durationMs" | "inputTokens" | "outputTokens" | "costUsd"
+>;
+
+/**
+ * Fixture ceilings go through the reader production uses: the brand on
+ * `NodeBudgetLimits` (F-24) is written only by `nodeBudgetLimitsOf`, so a test
+ * literal is not a substitute for reading a declared spec.
+ */
+function limitsOf(fields: LimitFields): NodeBudgetLimits {
+  const reading = nodeBudgetLimitsOf({
+    ...(fields.durationMs === undefined ? {} : { timeout_ms: fields.durationMs }),
+    ...(fields.inputTokens === undefined ? {} : { max_input_tokens: fields.inputTokens }),
+    ...(fields.outputTokens === undefined ? {} : { max_output_tokens: fields.outputTokens }),
+    ...(fields.costUsd === undefined ? {} : { max_cost_usd: fields.costUsd }),
+  });
+  if (reading.kind !== "ok") throw new Error(reading.refusal.message);
+  return reading.limits;
+}
+
 /** One reservation input, with the amounts the case cares about. */
 function reserveInput(
   attemptId: string,
-  limits: NodeBudgetLimits,
+  limits: LimitFields,
   at = NOW + 1,
 ): Parameters<GraphStore["budget"]["reserveDispatch"]>[0] {
   return {
@@ -99,7 +121,7 @@ function reserveInput(
     nodeId: "work",
     attemptId,
     effectId: "dispatch:" + attemptId,
-    limits,
+    limits: limitsOf(limits),
     at,
   };
 }
@@ -264,7 +286,7 @@ describe("the dispatch budget — the claim is the conditional write", () => {
       );
       expect(late.kind).toBe("recorded-late");
       if (late.kind !== "recorded-late") return;
-      expect(late.reservation.checked).toEqual({});
+      expect(late.reservation.checked).toEqual(limitsOf({}));
       expect(late.reservation.reserved.executions).toBe(0);
       expect(late.reservation.used?.inputTokens).toBe(5000);
       expect(late.reservation.used?.costUsd).toBe(12.5);
@@ -321,7 +343,7 @@ describe("the dispatch budget — the claim is the conditional write", () => {
         graphId: GRAPH,
         runId: RUN,
         planRevision: "plan-1",
-        nodes: [{ nodeId: "work", limits: { inputTokens: 1000 } }],
+        nodes: [{ nodeId: "work", limits: limitsOf({ inputTokens: 1000 }) }],
         usage: first,
       });
       expect(report.overruns.map((entry) => entry.overBy)).toEqual([600]);
@@ -405,7 +427,7 @@ describe("the dispatch budget — the claim is the conditional write", () => {
         runId: RUN,
         planRevision: "plan-1",
         nodes: [
-          { nodeId: "work", limits: { inputTokens: 1000, costUsd: 1, durationMs: 5000 } },
+          { nodeId: "work", limits: limitsOf({ inputTokens: 1000, costUsd: 1, durationMs: 5000 }) },
         ],
         usage: store.budget.budgetUsageOf(GRAPH, RUN),
       });
@@ -485,12 +507,9 @@ describe("the dispatch budget — which limits a plan authorizes", () => {
     });
     expect(reading.kind).toBe("ok");
     if (reading.kind !== "ok") return;
-    expect(reading.limits).toEqual({
-      inputTokens: 10,
-      outputTokens: 20,
-      costUsd: 0.5,
-      durationMs: 1000,
-    });
+    expect(reading.limits).toEqual(
+      limitsOf({ inputTokens: 10, outputTokens: 20, costUsd: 0.5, durationMs: 1000 }),
+    );
   });
 
   it("refuses a limit key the v3 grammar never authorizes instead of defaulting it", () => {

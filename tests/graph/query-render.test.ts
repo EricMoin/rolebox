@@ -69,7 +69,18 @@ function decision(
   attemptId = "work#1",
   nodeId = "work",
 ): ControlDecisionRecord {
-  return { graphId: GRAPH_ID, runId: RUN_ID, nodeId, attemptId, command, reason, decidedAt: DECIDED_AT };
+  const fields = {
+    graphId: GRAPH_ID,
+    runId: RUN_ID,
+    nodeId,
+    attemptId,
+    reason,
+    decidedAt: DECIDED_AT,
+  };
+  // A retry decision carries the successor it minted; no other command can.
+  return command === "retry"
+    ? { ...fields, command, successorAttemptId: nodeId + "#2" }
+    : { ...fields, command };
 }
 
 /** The run control fact ONLY a run-wide `cancel`/`budget-stop` claims. */
