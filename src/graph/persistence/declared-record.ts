@@ -6,7 +6,7 @@ import type { GraphDeclarationV3 } from "../compiler/declaration-v3.ts";
 import { parseGraphDeclarationV3 } from "../compiler/parse-declaration-v3.ts";
 import { contractDigest } from "../contracts/contract-definition.ts";
 import type { CompiledPlan, PersistedCompiledPlan } from "../compiler/plan.ts";
-import { verifyPersistedPlan } from "../compiler/verify-plan.ts";
+import { readPersistedCompiledPlan, verifyPersistedPlan } from "../compiler/verify-plan.ts";
 
 import {
   readOutcomeGraphState, type OutcomeGraphState
@@ -122,18 +122,37 @@ export function decodeStoredDefinition(
   }
   const plan = row.plan;
   const nodeIds = planNodeIds(plan);
-  const verdict = verifyPersistedPlan(plan, plan, row.graphId, nodeIds);
-  if (verdict.kind !== "verified") {
+  // READ, never asserted: the reader proves the topology, the contract indexes,
+  // the content address and the node fields a consumer reads, then hands the
+  // decoded column back as a `PersistedCompiledPlan`. A row it cannot
+  // substantiate is refused by name below.
+  const record = readPersistedCompiledPlan(plan, nodeIds);
+  if (record === undefined) {
+    // The reader answers a value or nothing; the verdict is what NAMES what the
+    // refusal found, and it is only consulted on this cold path.
+    const verdict = verifyPersistedPlan(plan, row.graphId, nodeIds);
     return refuse(
       "unrunnable-plan",
       "$.plan",
       `stored plan of graph ${JSON.stringify(row.graphId)} is not a runnable compiled plan: ` +
-      (verdict.kind === "absent"
-        ? "the row carries no plan at all"
-        : verdict.reason),
+      (verdict.kind === "verified"
+        ? "its nodes do not carry the agent and prompt a dispatch requires"
+        : verdict.kind === "absent"
+          ? "the row carries no plan at all"
+          : verdict.reason),
     );
   }
-  const record = plan as PersistedCompiledPlan;
+  // The reader proves the plan is a COMPILED plan, not that it is THIS graph's:
+  // its content address covers its own `graphId`, so a plan for another graph
+  // verifies on its own terms. The row names the graph, and the two must agree.
+  if (record.graphId !== row.graphId) {
+    return refuse(
+      "unrunnable-plan",
+      "$.plan",
+      `stored plan of graph ${JSON.stringify(row.graphId)} is not a runnable compiled plan: ` +
+      `compiled plan graphId ${JSON.stringify(record.graphId)} is not the persisted graphId ${JSON.stringify(row.graphId)}`,
+    );
+  }
   const binding: PlanBinding = {
     planRevision: record.planRevision,
     contractSnapshots: record.contractSnapshots,

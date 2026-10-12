@@ -133,8 +133,18 @@ export interface CredentialIsolationStore {
    * committed. A store that throws fails the whole mint — the state is not
    * written, because an attempt whose credential the host never held could
    * never be re-delivered.
+   *
+   * THE ANSWER IS DECLARED AS `undefined`, NOT `void`. `void` is the one return
+   * type that accepts ANY returned value, so an `async` implementation would
+   * satisfy this interface, the caller would drop the returned promise, and the
+   * state recording the digest would commit before — or without — the
+   * credential: exactly the permanently un-deliverable attempt this interface
+   * exists to prevent. `undefined` is the spelling that refuses that promise at
+   * the implementation site, where the error is actionable. `resolve` needs no
+   * such spelling — a `string | undefined` cannot be a promise — so the
+   * asymmetry between the two members is deliberate.
    */
-  remember(identity: CredentialStoreIdentity, credential: string): void;
+  remember(identity: CredentialStoreIdentity, credential: string): undefined;
   /**
    * The credential this store holds for one attempt, or `undefined` when it
    * cannot produce it (never held, lost with a restart, or pruned). The runtime
@@ -390,11 +400,23 @@ function readSharedDeclaration(raw: Record<string, unknown>):
 }
 
 /**
- * Read the version-2 store: exactly `{ remember, resolve }`, both functions.
+ * Read the version-2 store: exactly `{ remember, resolve }`, both functions,
+ * and a `remember` whose own answer cannot be a promise.
  *
  * The host's own store object may expose more than the capability needs; the
  * adapter is the CLOSED value this build reads, so a host wraps its store in
  * these two functions rather than handing over whatever else it has.
+ *
+ * THE ANSWER CHECK. `typeof … === "function"` alone accepts an `async`
+ * function, and an `async` `remember` answers a PROMISE. The interface's
+ * `undefined` return type refuses that at a TypeScript definition site, but a
+ * JavaScript host satisfies no type — and the runtime would drop the promise
+ * and commit state naming an attempt whose credential the store never received.
+ * An `async` (or generator) `remember` is therefore not a readable store, which
+ * makes the whole capability unreadable rather than partly trusted. `resolve`
+ * is deliberately not checked this way: its answer is read as a VALUE and
+ * validated as one, so a promise there is already refused instead of silently
+ * adopted.
  */
 function readStore(raw: unknown): CredentialIsolationStore | undefined {
   if (!isRecord(raw)) return undefined;
@@ -402,9 +424,26 @@ function readStore(raw: unknown): CredentialIsolationStore | undefined {
   if (typeof raw.remember !== "function" || typeof raw.resolve !== "function") {
     return undefined;
   }
+  if (isAsyncCallable(raw.remember)) return undefined;
   const remember = raw.remember as CredentialIsolationStore["remember"];
   const resolve = raw.resolve as CredentialIsolationStore["resolve"];
   return Object.freeze({ remember, resolve });
+}
+
+/**
+ * Whether a callable's OWN answer is a promise (async function) or an iterator
+ * (generator function) rather than the value its signature declares.
+ *
+ * `Object.prototype.toString` reports the callable KIND — `[object
+ * AsyncFunction]`, `[object GeneratorFunction]`, `[object Function]` for every
+ * plain function, arrow or bound — so this is the structural half of the answer
+ * check. It is not the whole of it: a plain function can still CONSTRUCT a
+ * promise and return it, which no structural check can see, so the mint also
+ * checks the answer of the one call it makes.
+ */
+function isAsyncCallable(callable: unknown): boolean {
+  const kind = Object.prototype.toString.call(callable);
+  return kind === "[object AsyncFunction]" || kind === "[object GeneratorFunction]";
 }
 
 /** Whether a value is a readable credential-isolation capability (either version). */

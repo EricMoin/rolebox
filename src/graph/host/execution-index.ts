@@ -556,11 +556,7 @@ export class HostExecutionIndex {
 
   /** How many effects this host has rows for. A count, never a listing. */
   get size(): number {
-    const row = this.store.get(
-      `SELECT COUNT(*) AS total FROM ${GRAPH_STORE_TABLES.executions}`,
-    );
-    const total = row?.["total"];
-    return typeof total === "number" ? total : 0;
+    return this.store.countExecutions();
   }
 
   /** Close the underlying store connection. Idempotent. */

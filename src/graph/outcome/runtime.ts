@@ -385,14 +385,38 @@ export class OutcomeGraphRuntime {
     this.credentialStore = readCredentialIsolationStore(options.credentialIsolation);
     this.credentialSource = (binding) => {
       const credential = mintAttemptCredential(this.mintCredential, binding);
-      this.credentialStore?.remember(
-        Object.freeze({
-          graphId: binding.graphId,
-          nodeId: binding.nodeId,
-          attemptId: binding.attemptId,
-        }),
-        credential,
-      );
+      const store = this.credentialStore;
+      if (store !== undefined) {
+        // THE ANSWER IS CHECKED, NOT DROPPED. `remember` is declared to answer
+        // `undefined` (see CredentialIsolationStore) and the reader refuses an
+        // `async` callable — but a PLAIN function that returns a promise is
+        // indistinguishable without calling it, and a JavaScript host satisfies
+        // no type at all. The call is therefore the last place the answer is
+        // observable: an answer that is not `undefined` means the write was only
+        // STARTED, and committing the digest now would name an attempt whose
+        // credential the store may never receive — the permanently
+        // un-deliverable attempt this source exists to prevent. The mint fails,
+        // so the enclosing transaction (state, effect and credential record)
+        // writes nothing. The answer is not quoted: this is the component that
+        // legitimately holds credentials.
+        const answer: unknown = store.remember(
+          Object.freeze({
+            graphId: binding.graphId,
+            nodeId: binding.nodeId,
+            attemptId: binding.attemptId,
+          }),
+          credential,
+        );
+        if (answer !== undefined) {
+          throw new Error(
+            "outcome-runtime: the host credential store's remember() answered a " +
+              typeof answer +
+              " instead of undefined — its write is not synchronous, so the state " +
+              "recording the credential's digest would commit before the credential " +
+              "exists. Refusing the mint; nothing was written",
+          );
+        }
+      }
       return credential;
     };
     this.hostIdentity = options.hostIdentity;

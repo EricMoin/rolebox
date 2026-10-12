@@ -362,11 +362,10 @@ export class OutcomeDispatchRecovery {
     let reissued = false;
     for (const effect of effects) {
       if (effect.kind !== "dispatch") continue;
-      const reading = readDispatchRequest(
-        effect.payload,
-        this.graphId,
-        this.planRevision,
-      );
+      const reading = readDispatchRequest(effect.payload, {
+        graphId: this.graphId,
+        planRevision: this.planRevision,
+      });
       if (reading.kind === "malformed") {
         refusals.push({
           code: "malformed-effect",

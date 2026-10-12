@@ -6,6 +6,7 @@ import {
   NON_EXECUTABLE_PLAN_CODE,
   readPlanExecutability,
   type CompiledPlanBody,
+  type PersistedCompiledPlan,
 } from "./plan.ts";
 
 /**
@@ -433,144 +434,170 @@ export function verifyPersistedCompiledPlan(
     );
   }
 }
+
+/**
+ * The whole persisted-plan gate: the record's integrity — topology,
+ * executability, contract content/identity indexes and the recomputed content
+ * address — AND the node fields its consumers read (see
+ * {@link readConsumerNodeIssue}).
+ *
+ * The gate used to take a second `planBinding` parameter and then run a
+ * 120-line agreement rule over the two. The store persists ONE plan record, its
+ * only production caller passed that same record for both parameters, and every
+ * comparison was therefore `x === x` — a rule that could never fire, with a
+ * node-binding loop that only walked the binding side (A-11). The parameter and
+ * the rule are gone: `planRevision`, the contract indexes and the node-binding
+ * projection are each held to their own rule by
+ * {@link verifyPersistedCompiledPlan}, which is where they belong.
+ */
 export function verifyPersistedPlan(
   compiledPlan: unknown,
-  planBinding: unknown,
   graphId: string,
   nodeIds: ReadonlySet<string>,
 ): PlanBindingVerdict {
-  const binding = verifyPersistedPlanBinding(planBinding, nodeIds);
-  if (binding.kind === "corrupt") return binding;
   const plan = verifyPersistedCompiledPlan(compiledPlan, graphId, nodeIds);
-  if (plan.kind === "corrupt") return plan;
-  if (plan.kind === "absent" || binding.kind === "absent") {
-    return plan.kind === "absent" ? binding : plan;
-  }
-  return verifyPersistedPlanAgreement(compiledPlan, planBinding);
+  if (plan.kind !== "verified") return plan;
+  const nodeIssue = readConsumerNodeIssue(compiledPlan);
+  if (nodeIssue !== undefined) return contractCorrupt(nodeIssue);
+  return { kind: "verified" };
 }
-function verifyPersistedPlanAgreement(
-  compiledPlan: unknown,
-  planBinding: unknown,
-): PlanBindingVerdict {
-  try {
-    if (!isPlainObject(compiledPlan) || !isPlainObject(planBinding)) {
-      return contractCorrupt(
-        "compiled plan and plan binding are both present but not comparable records",
-      );
-    }
-    const planRevision = compiledPlan.planRevision;
-    const bindingRevision = planBinding.planRevision;
-    if (bindingRevision !== planRevision) {
-      return contractCorrupt(
-        `plan binding planRevision ${JSON.stringify(bindingRevision)} does not equal the compiled plan planRevision ${JSON.stringify(planRevision)}`,
-      );
-    }
-    const planSnapshots = compiledPlan.contractSnapshots;
-    const bindingSnapshots = planBinding.contractSnapshots;
-    const planIdentities = compiledPlan.contractIdentities;
-    const bindingIdentities = planBinding.contractIdentities;
-    const planBindings = compiledPlan.nodeBindings;
-    const bindingBindings = planBinding.nodeBindings;
-    if (
-      !isPlainObject(planSnapshots) ||
-      !isPlainObject(bindingSnapshots) ||
-      !isPlainObject(planIdentities) ||
-      !isPlainObject(bindingIdentities) ||
-      !isPlainObject(planBindings) ||
-      !isPlainObject(bindingBindings)
-    ) {
-      return contractCorrupt(
-        "compiled plan and plan binding carry records the agreement check cannot compare",
-      );
-    }
-    // (b) Every digest the binding references, read from EVERY kind of
-    // reference — content keys, identity-index values and node binding refs: a
-    // binding that keeps content or an identity the plan does not pin is a
-    // projection that disagrees with its plan, whether or not a node still
-    // binds it.
-    const referenced = new Set<string>(Object.keys(bindingSnapshots));
-    for (const revisions of Object.values(bindingIdentities)) {
-      if (!isPlainObject(revisions)) continue;
-      for (const digest of Object.values(revisions)) {
-        if (typeof digest === "string" && digest.length > 0) {
-          referenced.add(digest);
-        }
-      }
-    }
-    for (const boundRef of Object.values(bindingBindings)) {
-      if (isContractRef(boundRef)) referenced.add(boundRef.digest);
-    }
-    for (const digest of [...referenced].sort()) {
-      if (!Object.prototype.hasOwnProperty.call(planSnapshots, digest)) {
-        return contractCorrupt(
-          `plan binding references contract digest ${JSON.stringify(digest)}, which the compiled plan contractSnapshots does not contain`,
-        );
-      }
-    }
-    // (b2) The two identity indexes must agree EXACTLY. The binding is a
-    // projection of the plan, so an identity only one of them maps is a
-    // disagreement (a stale or tampered projection), not a legal difference —
-    // and two identities sharing one digest still compare equal here.
-    for (const id of Object.keys(bindingIdentities).sort()) {
-      const bindingRevisions = bindingIdentities[id];
-      const planRevisions = planIdentities[id];
-      if (!isPlainObject(bindingRevisions) || !isPlainObject(planRevisions)) {
-        return contractCorrupt(
-          `plan binding contract identity ${JSON.stringify(id)} does not match the compiled plan identity index`,
-        );
-      }
-      for (const revision of Object.keys(bindingRevisions).sort()) {
-        const bindingDigest = bindingRevisions[revision];
-        if (planRevisions[revision] !== bindingDigest) {
-          return contractCorrupt(
-            `plan binding maps contract ${JSON.stringify(id)}@${JSON.stringify(revision)} to ${describeBindingValue(bindingDigest)}, but the compiled plan maps it to ${describeBindingValue(planRevisions[revision])}`,
-          );
-        }
-      }
-      for (const revision of Object.keys(planRevisions).sort()) {
-        if (!Object.prototype.hasOwnProperty.call(bindingRevisions, revision)) {
-          return contractCorrupt(
-            `compiled plan maps contract ${JSON.stringify(id)}@${JSON.stringify(revision)}, which the plan binding identity index does not carry`,
-          );
-        }
-      }
-    }
-    for (const id of Object.keys(planIdentities).sort()) {
-      if (!Object.prototype.hasOwnProperty.call(bindingIdentities, id)) {
-        return contractCorrupt(
-          `compiled plan carries contract identity ${JSON.stringify(id)}, which the plan binding identity index does not carry`,
-        );
-      }
-    }
-    // (c) The plan and the binding must bind each node to the same identity.
-    for (const nodeId of Object.keys(bindingBindings).sort()) {
-      const boundRef = bindingBindings[nodeId];
-      if (!isContractRef(boundRef)) {
-        return contractCorrupt(
-          `plan binding node binding ${JSON.stringify(nodeId)} is not a contract ref`,
-        );
-      }
-      const planRef = planBindings[nodeId];
-      if (planRef === undefined) {
-        return contractCorrupt(
-          `plan binding binds node ${JSON.stringify(nodeId)}, which the compiled plan does not bind`,
-        );
-      }
-      if (!isContractRef(planRef)) {
-        return contractCorrupt(
-          `compiled plan node binding ${JSON.stringify(nodeId)} is not a contract ref`,
-        );
-      }
-      if (!contractRefsEqual(planRef, boundRef)) {
-        return contractCorrupt(
-          `plan binding binds node ${JSON.stringify(nodeId)} to ${describeContractRef(boundRef)}, but the compiled plan binds it to ${describeContractRef(planRef)}`,
-        );
-      }
-    }
-    return { kind: "verified" };
-  } catch (err) {
-    return contractCorrupt(
-      `compiled plan / plan binding agreement check failed: ${errorText(err)}`,
-    );
+
+/**
+ * Read the node fields a CONSUMER reads — `agent` and `prompt` (copied into an
+ * `OutcomeDispatchIntent` whose fields are `string`), the declared host-tool
+ * grant `tools`, the consumed results `inputs` and the fan-in `join` — and name
+ * the first one a persisted plan cannot substantiate.
+ *
+ * WHY THIS EXISTS. The integrity rules deliberately read none of these fields:
+ * a node's prompt, budget, contract ref or any extra key is covered by the
+ * plan's content address, not by a plan-level rule (`inspectCompiledTopology`).
+ * But a content address proves a body is the body the row is keyed by, not that
+ * its nodes carry the shape its consumers hold. `outcome/graph-state.ts` copies
+ * `targetNode.agent`/`.prompt` into a dispatch intent, so an absent `agent`
+ * reaches dispatch as `undefined` while the compiler's type says it cannot —
+ * the one place a stored row was read approximately instead of being refused by
+ * name.
+ *
+ * IT IS THE COMPILER'S OWN SHAPE, NEVER A STRICTER ONE. The v3 grammar reads
+ * `agent` and `prompt` as strings of ANY length (an empty agent is legal), so
+ * this reader requires a string, not a non-empty one; `tools`, `inputs` and
+ * `join` are read exactly as the compiler writes them. Every plan this build
+ * compiles and persists passes, which is what keeps the reader from refusing a
+ * record its own producer wrote.
+ */
+function readConsumerNodeIssue(plan: unknown): string | undefined {
+  const rawNodes = isPlainObject(plan) ? plan.nodes : undefined;
+  if (!Array.isArray(rawNodes)) {
+    return "compiled plan nodes is not an array of compiled nodes";
   }
+  // `Array.isArray` narrows `unknown` to `any[]`; re-typing the elements as
+  // `unknown` keeps every later read checked instead of implicitly `any`.
+  const nodes: readonly unknown[] = rawNodes;
+  for (const raw of nodes) {
+    if (!isPlainObject(raw)) {
+      return "compiled plan carries a node that is not a record";
+    }
+    const id = raw.id;
+    if (typeof id !== "string" || id.length === 0) {
+      return "compiled plan carries a node with no non-empty id";
+    }
+    const agent = raw.agent;
+    if (typeof agent !== "string") {
+      return `compiled plan node ${JSON.stringify(id)} agent is ${describeBindingValue(agent)}, not the string its dispatch intent requires`;
+    }
+    const prompt = raw.prompt;
+    if (typeof prompt !== "string") {
+      return `compiled plan node ${JSON.stringify(id)} prompt is ${describeBindingValue(prompt)}, not the string its dispatch intent requires`;
+    }
+    const tools = raw.tools;
+    if (tools !== undefined) {
+      if (!Array.isArray(tools) || tools.length === 0) {
+        return `compiled plan node ${JSON.stringify(id)} tools is not a non-empty array of host tool names`;
+      }
+      const toolNames: readonly unknown[] = tools;
+      for (const tool of toolNames) {
+        if (typeof tool !== "string" || tool.length === 0) {
+          return `compiled plan node ${JSON.stringify(id)} tools carries ${describeBindingValue(tool)}, not a non-empty host tool name`;
+        }
+      }
+    }
+    const inputs = raw.inputs;
+    if (inputs !== undefined) {
+      if (!Array.isArray(inputs) || inputs.length === 0) {
+        return `compiled plan node ${JSON.stringify(id)} inputs is not a non-empty array of { from, outcome }`;
+      }
+      const inputRefs: readonly unknown[] = inputs;
+      for (const input of inputRefs) {
+        if (!isPlainObject(input)) {
+          return `compiled plan node ${JSON.stringify(id)} input is not a record of { from, outcome }`;
+        }
+        const from = input.from;
+        const outcome = input.outcome;
+        if (
+          typeof from !== "string" || from.length === 0 ||
+          typeof outcome !== "string" || outcome.length === 0
+        ) {
+          return `compiled plan node ${JSON.stringify(id)} input is not { from, outcome } with non-empty strings`;
+        }
+        if (input.when !== undefined && input.when !== "triggered") {
+          return `compiled plan node ${JSON.stringify(id)} input when is ${describeBindingValue(input.when)}, not "triggered"`;
+        }
+      }
+    }
+    const join = raw.join;
+    if (join !== undefined) {
+      if (!isPlainObject(join)) {
+        return `compiled plan node ${JSON.stringify(id)} join is not a JoinConfig`;
+      }
+      const strategy = join.strategy;
+      if (strategy === "quorum") {
+        const quorum = join.quorum;
+        if (typeof quorum !== "number" || !Number.isSafeInteger(quorum) || quorum < 1) {
+          return `compiled plan node ${JSON.stringify(id)} join quorum is ${describeBindingValue(quorum)}, not a positive integer`;
+        }
+      } else if (strategy !== "all" && strategy !== "any") {
+        return `compiled plan node ${JSON.stringify(id)} join strategy is ${describeBindingValue(strategy)}, not "all", "any" or "quorum"`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Read a decoded `plan` column as the value its consumers hold.
+ *
+ * `verifyPersistedPlan` proves the topology, the executability marker, the
+ * contract indexes, the node-binding projection, the consumer-visible node
+ * fields and the record's own content address before this reader hands back the
+ * SAME value, narrowed to {@link PersistedCompiledPlan}. A record that fails
+ * any of those answers `undefined`, which `decodeStoredDefinition` turns into
+ * its existing `unrunnable-plan` refusal — the row is refused by name instead
+ * of being asserted into a type its bytes do not carry.
+ *
+ * The reader COPIES nothing: the returned record is the decoded column itself,
+ * so a plan that verified before this change is still the same value with the
+ * same reach. The expected graph id is not a parameter because the caller
+ * addresses the plan by the row it already holds; `decodeStoredDefinition`
+ * compares the returned record's `graphId` to the row's own.
+ */
+export function readPersistedCompiledPlan(
+  value: unknown,
+  nodeIds: ReadonlySet<string>,
+): PersistedCompiledPlan | undefined {
+  return isRunnablePersistedPlan(value, nodeIds) ? value : undefined;
+}
+
+/**
+ * The predicate behind {@link readPersistedCompiledPlan}: the ONE place the
+ * verdict "verified" is allowed to narrow a decoded row to the plan type, and
+ * it narrows only what {@link verifyPersistedPlan} has read.
+ */
+function isRunnablePersistedPlan(
+  value: unknown,
+  nodeIds: ReadonlySet<string>,
+): value is PersistedCompiledPlan {
+  if (!isPlainObject(value)) return false;
+  const graphId = value.graphId;
+  if (typeof graphId !== "string" || graphId.length === 0) return false;
+  return verifyPersistedPlan(value, graphId, nodeIds).kind === "verified";
 }

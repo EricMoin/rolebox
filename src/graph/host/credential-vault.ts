@@ -164,8 +164,14 @@ export class HostCredentialVault {
    * the durable state can ever name. A value that is not a non-empty credential
    * is REFUSED: storing it would make the attempt permanently unsettleable
    * while reading as if it were deliverable.
+   *
+   * THE ANSWER IS DECLARED AS `undefined`, NOT `void`. The write below is
+   * synchronous and durable before this returns; `void` would also accept an
+   * `async` implementation, whose promise the runtime would drop — the state
+   * recording the digest would then commit without the credential, which is the
+   * permanently un-deliverable attempt this vault is the store half of.
    */
-  remember(identity: CredentialStoreIdentity, credential: string): void {
+  remember(identity: CredentialStoreIdentity, credential: string): undefined {
     if (!isAttemptCredential(credential)) {
       throw new Error(
         "host-credential-vault: refusing to store a non-credential for attempt " +
@@ -179,6 +185,7 @@ export class HostCredentialVault {
       this.retainValues ? credential : null,
       Date.now(),
     );
+    return undefined;
   }
 
   /**
@@ -241,7 +248,7 @@ export class HostCredentialVault {
    */
   get store(): CredentialIsolationStore {
     return Object.freeze({
-      remember: (identity: CredentialStoreIdentity, credential: string): void =>
+      remember: (identity: CredentialStoreIdentity, credential: string): undefined =>
         this.remember(identity, credential),
       resolve: (identity: CredentialStoreIdentity): string | undefined =>
         this.resolve(identity),

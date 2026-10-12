@@ -111,6 +111,23 @@ export interface WorkerChannelRecord {
   readonly agent: string;
 }
 
+/**
+ * One UNSETTLED notification effect, as the delivery drain addresses it.
+ *
+ * The `payload` is handed over as the stored TEXT, UNDECODED: the envelope is
+ * the drain's own format, so the store does not assert a shape over it. A
+ * payload column that is not text reads as `undefined` rather than throwing,
+ * because the drain's contract is to complete a row it cannot read instead of
+ * aborting delivery for the rest.
+ */
+export interface PendingNotificationEffect {
+  /** The row's own `rowid`: the address that survives an unreadable payload. */
+  readonly rowId: number;
+  readonly graphId: string;
+  readonly effectId: string;
+  readonly payload: string | undefined;
+}
+
 export interface GraphStoreTx extends AcceptanceLedgerTx {
   rememberExecutionObservation(executionId: string, observation: TerminalExecutionObservation): void;
   readExecutionObservation(executionId: string): TerminalExecutionObservation | undefined;
@@ -848,6 +865,57 @@ export class GraphStore {
     const row = this.get("SELECT changes() AS changed");
     const changed = row?.["changed"];
     return typeof changed === "number" ? changed : 0;
+  }
+
+  // ── Typed accessors for the two surfaces the raw bag used to serve ────────
+
+  /**
+   * How many execution binding rows this store holds. A count, never a listing.
+   *
+   * The host index used to read this off the raw `Row` bag and decide what a
+   * missing or non-numeric `total` meant; here the column is read by name and a
+   * value that is not a safe integer is refused like every other row.
+   */
+  countExecutions(): number {
+    this.assertOpen("countExecutions");
+    const table = GRAPH_STORE_TABLES.executions;
+    const row = this.db.query(`SELECT COUNT(*) AS total FROM ${table}`).get();
+    return readStoreInteger(asStoreRow(row, this.filePath, table), "total", this.filePath, table);
+  }
+
+  /**
+   * The UNSETTLED effects of one `kind`, oldest first.
+   *
+   * The drain is the ONE reader that needs its own kind's pending rows across
+   * graphs, and it needs the `payload` as the stored TEXT: the envelope belongs
+   * to the drain, so the store hands the bytes over undecoded instead of
+   * asserting a shape over `unknown`. A `payload` column that is not text is
+   * REPORTED as `undefined` — never coerced, never thrown — so the caller can
+   * complete a row it cannot read instead of aborting delivery for the rest.
+   */
+  readPendingNotificationEffects(kind: string): readonly PendingNotificationEffect[] {
+    this.assertOpen("readPendingNotificationEffects");
+    const table = GRAPH_STORE_TABLES.pendingEffects;
+    const rows = this.db
+      .query(
+        `SELECT rowid AS row_id, graph_id, effect_id, payload
+           FROM ${table}
+           WHERE kind = ? AND status IN ('pending', 'started')
+           ORDER BY created_at, rowid`,
+      )
+      .all(kind);
+    const effects: PendingNotificationEffect[] = [];
+    for (const row of rows) {
+      const entry = asStoreRow(row, this.filePath, table);
+      const payload = entry["payload"];
+      effects.push({
+        rowId: readStoreInteger(entry, "row_id", this.filePath, table),
+        graphId: readStoreText(entry, "graph_id", this.filePath, table),
+        effectId: readStoreText(entry, "effect_id", this.filePath, table),
+        payload: typeof payload === "string" ? payload : undefined,
+      });
+    }
+    return effects;
   }
 
   // ── The ONE transaction boundary ──────────────────────────────────────────

@@ -33,6 +33,18 @@ export function readGraphView(store: GraphStore, graphId: string) {
       ...run,
       phase: control === undefined ? state?.phase ?? "ready" : "stopped",
       updatedAt: Math.max(record?.updatedAt ?? run.startedAt, control?.decidedAt ?? 0),
+      // ── THE DECODED STATE'S OWN PHASE, BESIDE THE PROJECTION ────────────────
+      //
+      // `state` is the value `readOutcomeGraphState` just returned — the ONLY
+      // door to a versioned `GraphStateRecord.body`. A consumer that needs the
+      // body's phase (the notification drain decides whether a body CLAIMS
+      // `complete` over pending nodes) reads it HERE, so it never re-reads the
+      // row and re-asserts `unknown` to the decoded type. It is deliberately
+      // exposed as the phase and not the whole body: `phase` above projects a
+      // control fact to `stopped`, and the run objects are serialized by
+      // `graph_status`/`graph_audit`, which must not grow a second copy of the
+      // entire state.
+      ...(state === undefined ? {} : { recordedPhase: state.phase }),
       control,
       stop: state?.stop,
       attempts,

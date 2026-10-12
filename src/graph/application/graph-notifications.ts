@@ -4,7 +4,7 @@ import { logEvent, withLogScope } from "../../log/index.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { STOPPING_CONTROL_COMMANDS } from "../ledger/types.ts";
 import { readGraphView, type GraphView } from "../query/graph-query.ts";
-import { GraphStore, type TerminalExecutionObservation } from "../store/graph-store.ts";
+import { GraphStore, type PendingNotificationEffect, type TerminalExecutionObservation } from "../store/graph-store.ts";
 import { GRAPH_STORE_TABLES } from "../store/schema.ts";
 import { describeOutcomeStop } from "../outcome/state-codec.ts";
 import type { OutcomeGraphState } from "../outcome/state-model.ts";
@@ -40,6 +40,94 @@ interface Delivery {
   readonly retryAt: number;
   readonly owner?: string;
   readonly leaseUntil?: number;
+}
+
+/** Whether `value` is the non-empty text an identifier field of the envelope carries. */
+function deliveryIdentifier(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Whether `value` is a non-negative safe integer, as the envelope stores counts and instants. */
+function deliveryNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * One JSON object's fields, or `undefined` when the value is not a JSON object.
+ *
+ * The cast is to an UNTYPED bag, never to a domain type: every field the
+ * envelope reader below consumes is then read from `unknown` and checked by
+ * name, which is exactly what `JSON.parse(...) as Delivery` skipped.
+ */
+function jsonFields(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/**
+ * The DELIVERY ENVELOPE of one durable effect, decoded TOTALLY — or `undefined`.
+ *
+ * The payload is the ONLY durable record of a delivery's attempts and lease,
+ * and `JSON.parse` answers an untyped value: reading it `as Delivery` let a
+ * foreign or corrupt row throw a raw `TypeError` out of the drain, or compute
+ * `now + NaN` backoff from `delivery.attempts + 1`, and handed the transport a
+ * notice nobody had validated. Every field is therefore read from `unknown`,
+ * refused by name, and the returned envelope is REBUILT from the checked
+ * values — never spread from the parsed object — so no value a foreign row
+ * carries can reach `send`. `undefined` means "not this build's envelope": the
+ * caller completes the row and reports it instead of delivering it.
+ */
+function readDelivery(payload: string): Delivery | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return undefined;
+  }
+  const fields = jsonFields(parsed);
+  if (fields === undefined) return undefined;
+  const notice = jsonFields(fields["notification"]);
+  if (notice === undefined) return undefined;
+  const id = notice["id"];
+  const graphId = notice["graphId"];
+  const runId = notice["runId"];
+  const sessionId = notice["sessionId"];
+  const kind = notice["kind"];
+  const reason = notice["reason"];
+  if (!deliveryIdentifier(id) || !deliveryIdentifier(graphId) || !deliveryIdentifier(runId) || !deliveryIdentifier(sessionId)) {
+    return undefined;
+  }
+  if (kind !== "complete" && kind !== "stopped" && kind !== "attention") return undefined;
+  if (typeof reason !== "string") return undefined;
+  const agent = notice["agent"];
+  const nodeId = notice["nodeId"];
+  const attemptId = notice["attemptId"];
+  const approvalStatus = notice["approvalStatus"];
+  if (agent !== undefined && typeof agent !== "string") return undefined;
+  if (nodeId !== undefined && typeof nodeId !== "string") return undefined;
+  if (attemptId !== undefined && typeof attemptId !== "string") return undefined;
+  if (approvalStatus !== undefined && typeof approvalStatus !== "string") return undefined;
+  const attempts = fields["attempts"];
+  const retryAt = fields["retryAt"];
+  if (!deliveryNumber(attempts) || !deliveryNumber(retryAt)) return undefined;
+  const owner = fields["owner"];
+  const leaseUntil = fields["leaseUntil"];
+  if (owner !== undefined && typeof owner !== "string") return undefined;
+  if (leaseUntil !== undefined && !deliveryNumber(leaseUntil)) return undefined;
+  return {
+    notification: {
+      id, graphId, runId, sessionId, kind, reason,
+      ...(agent === undefined ? {} : { agent }),
+      ...(nodeId === undefined ? {} : { nodeId }),
+      ...(attemptId === undefined ? {} : { attemptId }),
+      ...(approvalStatus === undefined ? {} : { approvalStatus }),
+    },
+    attempts,
+    retryAt,
+    ...(owner === undefined ? {} : { owner }),
+    ...(leaseUntil === undefined ? {} : { leaseUntil }),
+  };
 }
 
 type Run = GraphView["runs"][number];
@@ -292,10 +380,12 @@ export class GraphNotifications {
         continue;
       }
       for (const run of graph.runs) {
-        const state = this.store.readGraphStateOf(graphId, run.runId)?.body as OutcomeGraphState | undefined;
+        // The phase is the run view's OWN decode of the persisted body — the
+        // versioned reader already ran inside `readGraphView` — so this loop
+        // never re-reads the row and asserts `GraphStateRecord.body` (F-03).
         for (const { key, ...notice } of notices(
           run,
-          state?.phase,
+          run.recordedPhase,
           executionId => this.store.readExecutionObservation(executionId),
         )) {
           const id = notificationId(graphId, run.runId, key);
@@ -335,19 +425,25 @@ export class GraphNotifications {
     do {
       this.queued = false;
       this.write(() => this.capture());
-      const rows = this.store.all(`SELECT graph_id, effect_id, payload FROM ${EFFECTS}
-        WHERE kind = ? AND status IN ('pending', 'started') ORDER BY created_at, rowid`, EFFECT_KIND);
-      for (const row of rows) {
+      for (const effect of this.store.readPendingNotificationEffects(EFFECT_KIND)) {
         if (this.closed) return;
-        const previous = String(row.payload);
-        const delivery = JSON.parse(previous) as Delivery;
+        const previous = effect.payload;
+        if (previous === undefined) {
+          this.refuseEffect(effect, "the payload column is not the TEXT this format writes");
+          continue;
+        }
+        const delivery = readDelivery(previous);
+        if (delivery === undefined) {
+          this.refuseEffect(effect, "the payload is not the delivery envelope this build writes");
+          continue;
+        }
         if (delivery.retryAt > this.now() || (delivery.leaseUntil ?? 0) > this.now()) continue;
         const claimed: Delivery = { ...delivery, owner: this.owner, leaseUntil: this.now() + LEASE_MS };
         let payload = JSON.stringify(claimed);
         const changed = this.write(() => {
           this.store.run(`UPDATE ${EFFECTS} SET status = 'started', payload = ?
             WHERE graph_id = ? AND effect_id = ? AND payload = ? AND status IN ('pending', 'started')`,
-          payload, row.graph_id, row.effect_id, previous);
+          payload, effect.graphId, effect.effectId, previous);
           return this.store.changes();
         });
         if (changed === 0) continue;
@@ -356,10 +452,10 @@ export class GraphNotifications {
           try {
             this.write(() => this.store.run(`UPDATE ${EFFECTS} SET payload = ?
               WHERE graph_id = ? AND effect_id = ? AND payload = ? AND status = 'started'`,
-            next, row.graph_id, row.effect_id, payload));
+            next, effect.graphId, effect.effectId, payload));
             payload = next;
           } catch (error) {
-            withLogScope({ graphId: String(row.graph_id), effectId: String(row.effect_id) }, () =>
+            withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
               logEvent("notifications.lease-renewal-failed", { error: errorText(error) }));
           }
         }, LEASE_MS / 3);
@@ -377,9 +473,36 @@ export class GraphNotifications {
           retryAt: delivered ? 0 : this.now() + Math.min(this.retryMs * 2 ** Math.min(attempts - 1, 6), 300_000) };
         this.write(() => this.store.run(`UPDATE ${EFFECTS} SET status = ?, payload = ?
           WHERE graph_id = ? AND effect_id = ? AND payload = ? AND status = 'started'`,
-        delivered ? "done" : "pending", JSON.stringify(next), row.graph_id, row.effect_id, payload));
+        delivered ? "done" : "pending", JSON.stringify(next), effect.graphId, effect.effectId, payload));
       }
     } while (this.queued && !this.closed);
+  }
+
+  /**
+   * COMPLETE one effect whose durable payload this build cannot read, REPORTING it.
+   *
+   * The payload is the ONLY durable record of a delivery's attempts and lease,
+   * so a refused row can never be retried honestly: a retry would invent an
+   * attempt count and a backoff from a shape nobody checked (that is the
+   * `NaN` this replaced). Completing it keeps the drain TOTAL — a row left
+   * `pending` would be re-read, and re-refused, on every pass forever — and the
+   * report names it, so the loss is visible instead of silent. The row is
+   * addressed by its own `rowid`, because the payload it is refused FOR is
+   * exactly what cannot be used as a key. The event code is the existing
+   * unreadable-source diagnostic: no code for a refused payload is registered,
+   * and the registry is outside this node's ownership.
+   */
+  private refuseEffect(effect: PendingNotificationEffect, reason: string): void {
+    const changed = this.write(() => {
+      this.store.run(`UPDATE ${EFFECTS} SET status = 'done'
+        WHERE rowid = ? AND status IN ('pending', 'started')`, effect.rowId);
+      return this.store.changes();
+    });
+    withLogScope({ graphId: effect.graphId, effectId: effect.effectId }, () =>
+      logEvent("notifications.source-unreadable", {
+        error: `the durable ${EFFECT_KIND} payload could not be read — ${reason}` +
+          (changed === 0 ? "; the effect was already settled by another owner" : "; the effect was completed instead of delivered"),
+      }));
   }
 
   private obsolete(notification: GraphNotification): boolean {
@@ -387,10 +510,9 @@ export class GraphNotifications {
     const graph = readGraphView(this.store, notification.graphId);
     const run = graph.current;
     if (run?.runId !== notification.runId || run.phase === "complete" || run.phase === "stopped") return true;
-    const state = this.store.readGraphStateOf(notification.graphId, run.runId)?.body as OutcomeGraphState | undefined;
     return !notices(
       run,
-      state?.phase,
+      run.recordedPhase,
       executionId => this.store.readExecutionObservation(executionId),
     ).some(notice => notificationId(notification.graphId, run.runId, notice.key) === notification.id);
   }

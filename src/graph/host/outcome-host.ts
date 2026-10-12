@@ -16,8 +16,14 @@ import { join } from "node:path";
 
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { errorText } from "../../utils/error-text.ts";
-import { logEvent, withLogScope } from "../../log/index.ts";
-import { describeStoreVerdict, readStoredDefinition } from "../persistence/declared-record.ts";
+import { createLogger, logEvent, withLogScope } from "../../log/index.ts";
+import {
+  decodeStoredDefinition,
+  describeStoreVerdict,
+  readStoredDefinition,
+  readStoredRunStateOf,
+  type StoredDeclaredGraph,
+} from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import type {
@@ -61,7 +67,7 @@ import type {
 } from "./dispatch-host.ts";
 import type { HostDispatchExecution } from "./execution-index.ts";
 import type {
-  OutcomeDispatchEffectKey, OutcomeExecutionProbe,
+  OutcomeDispatchEffectKey, OutcomeDispatchTarget, OutcomeExecutionProbe,
   OutcomeExecutionQuery
 } from "../outcome/dispatch-effects.ts";
 import {
@@ -79,6 +85,7 @@ import {
   dispatchEffectIdOf,
   dispatchEffectKeyOf,
 } from "../outcome/dispatch-effects.ts";
+import { readDispatchRequest } from "../outcome/runtime-readings.ts";
 import type {
   OutcomeEffectDivergence,
   OutcomeRuntimeRefusal,
@@ -111,6 +118,16 @@ import {
   type HostInvocationHolder,
   type HostWorkerSessionHolder,
 } from "./identity.ts";
+
+/**
+ * The host's own log channel.
+ *
+ * The registered events (`src/log/registry.ts`, emitted through `logEvent`)
+ * own every coded diagnostic; this is the same kernel facade, for a refusal
+ * the closed vocabulary has no code for yet. It never throws and a sink can
+ * never break the code it observes.
+ */
+const log = createLogger("graph:host");
 
 // ── Options and result shapes ───────────────────────────────────────────────
 
@@ -1825,7 +1842,12 @@ export class OutcomeHost {
               row = undefined;
             }
             if (row === undefined || row.state === "created") continue;
-            const nodeId = effectNodeIdOf(effect);
+            const reading = readDispatchRequest(effect.payload, {
+              graphId,
+              planRevision: result.state.planRevision,
+            });
+            const nodeId =
+              reading.kind === "ok" ? effectNodeIdOf(reading.target) : undefined;
             unconfirmed.push(
               Object.freeze({
                 graphId,
@@ -3140,6 +3162,18 @@ export class OutcomeHost {
         attemptId: attempt.attemptId,
       });
       if (row === undefined || row.attemptId !== attempt.attemptId) return undefined;
+      // THE STORED DEFINITION IS READ ONCE, THROUGH ITS OWN READER, and both
+      // halves of the binding are read against it: the dispatch payload must
+      // name this graph and this plan revision (F-05), and the recorded run
+      // state is decoded by the versioned state codec for the plan it belongs
+      // to (F-03). A definition this build cannot read names no binding — the
+      // run path cannot run such a graph either — so nothing is guessed from a
+      // row whose layout is not the one in hand.
+      const definition = store.readDefinition(attempt.graphId);
+      if (definition === undefined) return undefined;
+      const decoded = decodeStoredDefinition(definition);
+      if (decoded.kind !== "ok") return undefined;
+      const declared = decoded.declared;
       // THE NODE COMES FROM THE DISPATCH RECORD while the effect is
       // outstanding, and from the recorded RUN STATE once it is terminal: a
       // settled attempt's effect row is DONE and is deliberately not part of
@@ -3148,8 +3182,8 @@ export class OutcomeHost {
       // the SAME store, and the runtime re-checks the node/attempt pair against
       // the state it settles, so neither can re-aim a completion.
       const nodeId =
-        this.dispatchNodeOf(store, attempt.graphId, effectId, attempt.attemptId) ??
-        this.recordedNodeOf(store, attempt.graphId, attempt.attemptId);
+        this.dispatchNodeOf(store, declared, effectId, attempt.attemptId) ??
+        this.recordedNodeOf(store, declared, attempt.attemptId);
       if (nodeId === undefined) return undefined;
       return Object.freeze({
         graphId: attempt.graphId,
@@ -3164,69 +3198,80 @@ export class OutcomeHost {
   }
 
   /**
-   * The node one dispatch effect names, read from its persisted payload.
+   * The node one dispatch effect names, read from its persisted payload THROUGH
+   * THE RUNTIME'S OWN TOTAL READER (F-05).
    *
-   * The payload is the credential-free dispatch target the run path wrote, so
-   * its `nodeId` is runtime provenance; the attempt it names must be the one
-   * asked about, or the row is not this attempt's dispatch and answers
-   * `undefined`. Nothing here trusts a shape it cannot verify: a payload that
-   * is not a record, or carries no non-empty `nodeId`, is not a target.
+   * The payload is `unknown` — JSON the ledger stored verbatim — so it is not
+   * hand-read here: `readDispatchRequest` is the module that owns the dispatch
+   * request's shape, and it refuses a payload that names another graph, names
+   * another plan revision, carries a `credential` (never persisted on an
+   * effect), or is missing any non-empty field. A row the owning reader refuses
+   * is not a dispatch target of this graph at all: its `nodeId` never becomes
+   * the binding a restarted worker's declared host-tool grant is resolved from.
+   * The attempt it names must be the one asked about, or the row is not this
+   * attempt's dispatch and answers `undefined`.
    */
   private dispatchNodeOf(
     store: GraphStore,
-    graphId: string,
+    declared: StoredDeclaredGraph,
     effectId: string,
     attemptId: string,
   ): string | undefined {
-    for (const effect of store.pendingEffects(graphId)) {
+    for (const effect of store.pendingEffects(declared.graphId)) {
       if (effect.effectId !== effectId) continue;
-      const payload = effect.payload;
-      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-        return undefined;
-      }
-      const record = payload as Record<string, unknown>;
-      if (record.attemptId !== attemptId) return undefined;
-      const nodeId = record.nodeId;
-      return typeof nodeId === "string" && nodeId.length > 0 ? nodeId : undefined;
+      const reading = readDispatchRequest(effect.payload, {
+        graphId: declared.graphId,
+        planRevision: declared.plan.planRevision,
+      });
+      if (reading.kind !== "ok") return undefined;
+      return reading.target.attemptId === attemptId ? reading.target.nodeId : undefined;
     }
     return undefined;
   }
 
   /**
-   * The node the recorded RUN STATE attributes one attempt to, or an absent
-   * answer.
+   * The node the recorded RUN STATE attributes one attempt to, read THROUGH THE
+   * VERSIONED STATE CODEC (F-03), or an absent answer.
    *
-   * A DEFENSIVE SCAN OF A ROW THIS BUILD WROTE, not a decoder: the binding only
-   * needs the node id an entry carries beside the attempt, and a body that is
-   * not a record, carries no node list, or names the SAME attempt on more than
-   * one node is not an answer. Nothing here decides whether the attempt settled
-   * — the runtime does, against the state it settles — so a body that disagrees
-   * with the deployment's expectation is refused there rather than trusted
-   * here.
+   * The body is `unknown` — JSON the ledger stored verbatim — and its layout is
+   * versioned and owned by the state codec, so it is never hand-parsed here:
+   * `readStoredRunStateOf` classifies the body version, runs the reader
+   * registered for it, and answers with the decoded state or with the codec's
+   * own refusal. The binding then only needs the node id a decoded entry
+   * carries beside the attempt; nodes are typed state, so an entry that is not
+   * one cannot reach this scan.
+   *
+   * AN UNREADABLE BODY IS REPORTED, NEVER A SILENT MISS: a body this build
+   * cannot read is exactly the case a hand-parse used to answer with
+   * `undefined`, which made "the host holds no record of this attempt" a false
+   * report for every attempt it really created. Nothing here decides whether
+   * the attempt settled — the runtime does, against the state it settles — so
+   * the report says the record could not be read and the binding stays absent.
    */
   private recordedNodeOf(
     store: GraphStore,
-    graphId: string,
+    declared: StoredDeclaredGraph,
     attemptId: string,
   ): string | undefined {
-    const record = store.readGraphState(graphId);
-    const body = record?.body;
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    const reading = readStoredRunStateOf(store, declared);
+    if (reading.kind === "unstarted") return undefined;
+    if (reading.kind === "unreadable") {
+      withLogScope({ graphId: declared.graphId, attemptId }, () =>
+        log.warn(
+          "the recorded run state could not be read, so this attempt has no recorded node and " +
+          "stays unbound instead of being settled at a guessed one",
+          { reason: reading.reason },
+        ),
+      );
       return undefined;
     }
-    const nodes = (body as Record<string, unknown>)["nodes"];
-    if (!Array.isArray(nodes)) return undefined;
     let found: string | undefined;
-    for (const entry of nodes) {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
-      const node = entry as Record<string, unknown>;
-      if (node["attemptId"] !== attemptId) continue;
-      const nodeId = node["nodeId"];
-      if (typeof nodeId !== "string" || nodeId.length === 0) return undefined;
+    for (const node of reading.state.nodes) {
+      if (node.attemptId !== attemptId) continue;
       // TWO NODES ON ONE ATTEMPT IS NOT A BINDING — it is an ambiguity, and an
       // ambiguous answer is reported rather than resolved by list order.
-      if (found !== undefined && found !== nodeId) return undefined;
-      found = nodeId;
+      if (found !== undefined && found !== node.nodeId) return undefined;
+      found = node.nodeId;
     }
     return found;
   }
@@ -3299,22 +3344,19 @@ function cancelDeliveryEntry(
 }
 
 /**
- * The node one unsettled DISPATCH effect names, read from the effect's own
- * target record (P3 item 1).
+ * The node one unsettled DISPATCH effect names, taken from the READ dispatch
+ * TARGET the caller decoded with the runtime's own reader (P3 item 1, F-05).
  *
- * A DEFENSIVE READ of a record this build wrote, not a decoder: the sweep only
- * needs the node a controlled run's unconfirmed execution belongs to, and a
- * payload that is not a record or names no node simply contributes no node id —
- * the attempt and the effect still name the external work, so nothing is hidden
- * by the absence. The node is never inferred from an attempt id.
+ * The parameter is the target, not the effect: a payload is read ONCE, by
+ * `readDispatchRequest`, and everything downstream answers from that reading —
+ * so no second, laxer parse of the same row can disagree with it. The sweep
+ * only needs the node a controlled run's unconfirmed execution belongs to, and
+ * a payload the reader refused contributes no node id — the attempt and the
+ * effect still name the external work, so nothing is hidden by the absence. The
+ * node is never inferred from an attempt id.
  */
-function effectNodeIdOf(effect: PendingEffectRecord): string | undefined {
-  const payload = effect.payload;
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    return undefined;
-  }
-  const nodeId = (payload as Record<string, unknown>)["nodeId"];
-  return typeof nodeId === "string" && nodeId.length > 0 ? nodeId : undefined;
+function effectNodeIdOf(target: OutcomeDispatchTarget): string {
+  return target.nodeId;
 }
 
 /**

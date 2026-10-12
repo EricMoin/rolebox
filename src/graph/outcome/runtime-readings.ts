@@ -288,6 +288,19 @@ type DispatchPayloadReading =
   | { readonly kind: "malformed"; readonly message: string };
 
 /**
+ * The graph and plan revision one persisted dispatch payload must agree with.
+ *
+ * ONE OBJECT rather than two adjacent strings: both are plain ids, so a call
+ * site that transposed them would compile and would only be caught here, at
+ * run time, as a malformed payload. Naming the scope makes the two positions
+ * impossible to swap without a type error.
+ */
+interface DispatchRequestScope {
+  readonly graphId: string;
+  readonly planRevision: string;
+}
+
+/**
  * Read one dispatch effect's persisted payload as a dispatch TARGET.
  *
  * The payload is JSON the ledger stored verbatim, so it is UNTRUSTED here
@@ -300,9 +313,9 @@ type DispatchPayloadReading =
  */
 export function readDispatchRequest(
   payload: unknown,
-  graphId: string,
-  planRevision: string,
+  scope: DispatchRequestScope,
 ): DispatchPayloadReading {
+  const { graphId, planRevision } = scope;
   if (!isRecord(payload)) {
     return {
       kind: "malformed",

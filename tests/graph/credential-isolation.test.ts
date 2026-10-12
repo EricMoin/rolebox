@@ -346,7 +346,9 @@ describe("credential isolation is the outcome run path's enablement condition", 
     // THE STORE IS EXACTLY { remember, resolve }: the store object is frozen and
     // hands back the host's own functions.
     const store = {
-      remember: (): void => undefined,
+      // The write declares `undefined`, not `void`: the store the runtime
+      // adopts must answer synchronously (see credential-gate-type-guards).
+      remember: (): undefined => undefined,
       resolve: (): string | undefined => undefined,
     };
     const guarantees = { digestOnlyPersistedState: true, perAttemptDelivery: true };
