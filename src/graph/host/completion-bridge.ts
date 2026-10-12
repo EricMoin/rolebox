@@ -2,7 +2,11 @@ import type {
   OutcomeNaturalSettlementResult,
   OutcomeRuntimeRefusal,
 } from "../outcome/runtime.ts";
-import type { AcceptanceDecision } from "../outcome/acceptance.ts";
+import type {
+  AcceptanceDecision,
+  AcceptedDecision,
+  RejectedDecision,
+} from "../outcome/acceptance.ts";
 import type { NaturalCompletionSettlement } from "../outcome/natural-completion.ts";
 import type { OutcomeGraphState, OutcomeStop } from "../outcome/graph-state.ts";
 import type { ProgressReport } from "../outcome/progress.ts";
@@ -141,7 +145,7 @@ export type HostCompletionSettlement =
   | {
     readonly kind: "accepted";
     readonly completion: NaturalCompletionSettlement;
-    readonly decision: AcceptanceDecision;
+    readonly decision: AcceptedDecision;
     readonly receipt: ReceiptRecord;
     readonly state: OutcomeGraphState;
     readonly replayed: boolean;
@@ -151,7 +155,7 @@ export type HostCompletionSettlement =
   | {
     readonly kind: "rejected";
     readonly completion: NaturalCompletionSettlement;
-    readonly decision: AcceptanceDecision;
+    readonly decision: RejectedDecision;
     readonly receipt: ReceiptRecord;
   }
   | {

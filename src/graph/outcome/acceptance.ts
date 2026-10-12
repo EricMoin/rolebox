@@ -169,16 +169,14 @@ export interface RequirementEvaluation {
 }
 
 /**
- * The decision taken over one proposal, bound to the exact execution and plan
- * revision it was taken for.
+ * The fields every acceptance decision carries, whichever arm it is.
  *
- * `requirements` carries every gate's outcome, so a rejection explains itself
- * without re-running anything. An outcome with no acceptance requirements is
- * accepted: "every required gate passed" is vacuously true when nothing is
- * required.
+ * The split exists so the ARM is the only difference between the two
+ * decisions: each arm declares its own literal `kind`, which makes the pair a
+ * discriminated union the compiler narrows — and makes an accepted decision a
+ * type a contract can REQUIRE and a rejected one unable to satisfy.
  */
-export interface AcceptanceDecision {
-  readonly kind: "accepted" | "rejected";
+interface DecisionFields {
   /** The trusted execution the decision belongs to. */
   readonly identity: ExecutionIdentity;
   /** The plan revision the decision was taken under. */
@@ -192,6 +190,36 @@ export interface AcceptanceDecision {
   /** Every required gate, in the plan's declared order. */
   readonly requirements: readonly RequirementEvaluation[];
 }
+
+/**
+ * The decision EVERY required gate passed — the one decision a graph may
+ * advance on. An outcome with no acceptance requirements is accepted: "every
+ * required gate passed" is vacuously true when nothing is required.
+ */
+export interface AcceptedDecision extends DecisionFields {
+  readonly kind: "accepted";
+}
+
+/**
+ * The decision at least one required gate did not pass. It is a RECEIPT and
+ * never a settlement: no accepted event, no accepted result, no state advance,
+ * and no attempt it could settle.
+ */
+export interface RejectedDecision extends DecisionFields {
+  readonly kind: "rejected";
+}
+
+/**
+ * The decision taken over one proposal, bound to the exact execution and plan
+ * revision it was taken for.
+ *
+ * `requirements` carries every gate's outcome, so a rejection explains itself
+ * without re-running anything. The two arms are DISTINCT types: a caller that
+ * needs an accepted decision (an advance, the acceptance join) declares
+ * `AcceptedDecision` and the compiler refuses a rejected one, while a caller
+ * that carries either narrows on `kind`.
+ */
+export type AcceptanceDecision = AcceptedDecision | RejectedDecision;
 
 /**
  * The immutable binding a validation result carries: WHICH proposal content,
@@ -342,7 +370,7 @@ export interface AcceptanceJoinResult {
  */
 export type AcceptanceJoin = (
   tx: AcceptanceLedgerTx,
-  decision: AcceptanceDecision,
+  decision: AcceptedDecision,
 ) => AcceptanceJoinResult;
 
 // ── Step 1: the refusal gates ───────────────────────────────────────────────
@@ -634,15 +662,22 @@ export function validateSubmission(
   const accepted = requirements.every(
     (entry) => entry.outcome.kind === "pass",
   );
-  const decision: AcceptanceDecision = Object.freeze({
-    kind: accepted ? "accepted" : "rejected",
+  // THE ARM IS CONSTRUCTED, NEVER SELECTED BY A UNION-TYPED FIELD. `accepted`
+  // names which arm is built and each carries its own literal `kind`, so a
+  // rejected decision is a different TYPE from an accepted one: the advance
+  // contract and the acceptance join can require the accepted arm, and a caller
+  // that carries either holds a value the compiler narrows on `kind`.
+  const fields = {
     identity,
     planRevision,
     proposalDigest: digest,
     nodeId: node.id,
     outcomeId: outcome.id,
     requirements: Object.freeze(requirements),
-  });
+  };
+  const decision: AcceptanceDecision = accepted
+    ? Object.freeze({ kind: "accepted" as const, ...fields })
+    : Object.freeze({ kind: "rejected" as const, ...fields });
   if (!accepted) {
     return {
       kind: "validated",

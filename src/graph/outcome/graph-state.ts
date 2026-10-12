@@ -4,7 +4,7 @@
 import type {
   CompiledPlan
 } from "../compiler/plan.ts";
-import type { AcceptanceDecision } from "./acceptance.ts";
+import type { AcceptedDecision } from "./acceptance.ts";
 import {
   attemptCredentialBinding,
   attemptCredentialDigest, mintAttemptCredential,
@@ -86,7 +86,7 @@ export interface OutcomeAdvanceInput {
   readonly plan: CompiledPlan;
   readonly state: OutcomeGraphState;
 
-  readonly decision: AcceptanceDecision;
+  readonly decision: AcceptedDecision;
 
   readonly now: number;
 
@@ -125,7 +125,7 @@ function measureProgress(
   plan: CompiledPlan,
   groups: readonly CompiledPlan["loopGroups"][number][],
   recorded: Readonly<Record<string, OutcomeLoopProgress>>,
-  decision: AcceptanceDecision,
+  decision: AcceptedDecision,
   projections: readonly ProgressProjection[] | undefined,
   now: number,
 ): {
@@ -207,7 +207,7 @@ function measureProgress(
 
 function projectionMatchesDecision(
   plan: CompiledPlan,
-  decision: AcceptanceDecision,
+  decision: AcceptedDecision,
   projection: ProgressProjection,
 ): boolean {
   const binding = projection.binding;

@@ -85,6 +85,7 @@ import {
   bindingOf,
   commitSubmission,
   validateSubmission,
+  type AcceptedDecision,
   type AcceptanceDecision,
   type AcceptanceJoin,
   type AcceptanceJoinResult,
@@ -298,6 +299,50 @@ function withDeclaredNodeTools(
     },
     lookup: (effect: OutcomeDispatchEffectKey) => dispatch.lookup(effect),
   });
+}
+
+/**
+ * The decision a REPLAYED receipt answers with.
+ *
+ * A repeated submission's gates are re-evaluated, but a replay writes nothing:
+ * the PERSISTED receipt is the decision, so it selects the ARM while this
+ * call's evidence fields stay attached (`requirements` records what this
+ * delivery's gates answered, which nothing persisted). The arm is CONSTRUCTED,
+ * one literal `kind` per branch — never spread from a computed kind — so the
+ * arm each answer carries is the one its own `kind` names.
+ */
+function replayedDecision(
+  evaluated: AcceptanceDecision,
+  recorded: AcceptanceDecision["kind"],
+): AcceptanceDecision {
+  const fields = {
+    identity: evaluated.identity,
+    planRevision: evaluated.planRevision,
+    proposalDigest: evaluated.proposalDigest,
+    nodeId: evaluated.nodeId,
+    outcomeId: evaluated.outcomeId,
+    requirements: evaluated.requirements,
+  };
+  return recorded === "accepted"
+    ? Object.freeze({ kind: "accepted" as const, ...fields })
+    : Object.freeze({ kind: "rejected" as const, ...fields });
+}
+
+/**
+ * Whether one effect reading answered the inventory rather than a refusal.
+ *
+ * `OutcomeDispatchRecovery.unsettledEffectReading` still answers the legacy
+ * `records | refusal` union, whose type belongs to the recovery owner, so the
+ * runtime reads it through this ONE declared guard: a record list IS an array,
+ * which no refusal this build produces ever is. That is the value's own nature
+ * rather than a field the refusal happens to declare, and the predicate makes
+ * both arms explicit — every caller then narrows the {@link OutcomeReading} it
+ * produces on `.kind`.
+ */
+function isEffectInventory(
+  reading: readonly PendingEffectRecord[] | OutcomeRuntimeRefusal,
+): reading is readonly PendingEffectRecord[] {
+  return Array.isArray(reading);
 }
 
 /**
@@ -989,7 +1034,7 @@ export class OutcomeGraphRuntime {
     }
     this.recovery.launch(started.dispatched);
     const armed = armedReading(started.state);
-    const unsettled = this.recovery.unsettledEffectReading();
+    const unsettled = this.unsettledEffectsReading();
     return {
       kind: "reexecuted",
       runId: successorRunId,
@@ -1002,7 +1047,9 @@ export class OutcomeGraphRuntime {
       // committed: a failed launch leaves its effect unsettled and still listed,
       // so nothing this report omits was silently dropped.
       armed: armed.armed,
-      ...("code" in unsettled ? { unsettledEffects: Object.freeze([]) } : { unsettledEffects: unsettled }),
+      ...(unsettled.kind === "refused"
+        ? { unsettledEffects: Object.freeze([]) }
+        : { unsettledEffects: unsettled.value }),
     };
   }
 
@@ -1401,10 +1448,12 @@ export class OutcomeGraphRuntime {
     // content-addressed submission key can never be re-decided) or a rejection
     // for a settlement that did happen. The receipt's decision therefore
     // selects the result variant and `decision.kind`; `requirements` stays this
-    // delivery's re-evaluation evidence, which nothing persisted.
+    // delivery's re-evaluation evidence, which nothing persisted. The ARM is
+    // constructed, never spread from a computed kind: each branch names its own
+    // literal `kind`, so a replayed answer is the type it says it is.
     const decision: AcceptanceDecision =
       verdict.kind === "replayed" && verdict.receipt.decision !== evaluated.kind
-        ? Object.freeze({ ...evaluated, kind: verdict.receipt.decision })
+        ? replayedDecision(evaluated, verdict.receipt.decision)
         : evaluated;
     if (decision.kind === "rejected") {
       return { kind: "rejected", decision, receipt: verdict.receipt };
@@ -1836,8 +1885,8 @@ export class OutcomeGraphRuntime {
       const started = this.start(at);
       if (started.kind === "refused") return started;
       if (started.kind === "started") {
-        const effects = this.recovery.unsettledEffectReading();
-        if ("code" in effects) return refused([effects]);
+        const effects = this.unsettledEffectsReading();
+        if (effects.kind === "refused") return refused([effects.refusal]);
         const reading = armedReading(started.state);
         return {
           kind: "started",
@@ -1851,7 +1900,7 @@ export class OutcomeGraphRuntime {
           // local record and no host fact about one.
           divergences: Object.freeze([]),
           armed: reading.armed,
-          unsettledEffects: effects,
+          unsettledEffects: effects.value,
           refusals: reading.refusals,
         };
       }
@@ -1910,8 +1959,8 @@ export class OutcomeGraphRuntime {
     // converged.
     const control = runControl(this.ledger, this.graphId);
     if (control !== undefined) {
-      const stopped = this.recovery.unsettledEffectReading();
-      if ("code" in stopped) return refused([stopped]);
+      const stopped = this.unsettledEffectsReading();
+      if (stopped.kind === "refused") return refused([stopped.refusal]);
       return {
         kind: "resumed",
         state,
@@ -1919,7 +1968,7 @@ export class OutcomeGraphRuntime {
         reconciled: Object.freeze([]),
         divergences: Object.freeze([]),
         armed: Object.freeze([]),
-        unsettledEffects: stopped,
+        unsettledEffects: stopped.value,
         refusals: Object.freeze([
           ...controlledInFlightRefusals(state, control),
           ...(state.stop === undefined ? [] : stoppedInFlightRefusals(state)),
@@ -1936,8 +1985,8 @@ export class OutcomeGraphRuntime {
     // resume reports the same stop and dispatches nothing (the `started` effect
     // bookkeeping below is what would otherwise move a row).
     if (state.stop !== undefined) {
-      const effects = this.recovery.unsettledEffectReading();
-      if ("code" in effects) return refused([effects]);
+      const effects = this.unsettledEffectsReading();
+      if (effects.kind === "refused") return refused([effects.refusal]);
       return {
         kind: "resumed",
         state,
@@ -1948,7 +1997,7 @@ export class OutcomeGraphRuntime {
         reconciled: Object.freeze([]),
         divergences: Object.freeze([]),
         armed: Object.freeze([]),
-        unsettledEffects: effects,
+        unsettledEffects: effects.value,
         refusals: stoppedInFlightRefusals(state),
         stop: state.stop,
       };
@@ -1956,8 +2005,8 @@ export class OutcomeGraphRuntime {
 
     const resolved = this.recovery.reconcile(state, at);
     if ("refusal" in resolved) return refused([resolved.refusal]);
-    const effects = this.recovery.unsettledEffectReading();
-    if ("code" in effects) return refused([effects]);
+    const effects = this.unsettledEffectsReading();
+    if (effects.kind === "refused") return refused([effects.refusal]);
     // A RE-ISSUE REWROTE THE STATE, so the report carries the state that is
     // actually stored now: the pre-reconcile read differs from it in the
     // re-issued attempt's credential digest and in the record's timestamp, and
@@ -1982,7 +2031,7 @@ export class OutcomeGraphRuntime {
       reconciled: resolved.reconciled,
       divergences: resolved.divergences,
       armed: readable.armed,
-      unsettledEffects: effects,
+      unsettledEffects: effects.value,
       refusals: Object.freeze([...resolved.refusals, ...readable.refusals]),
     };
   }
@@ -2077,6 +2126,21 @@ export class OutcomeGraphRuntime {
     }
   }
 
+  /**
+   * The graph-wide inventory of effects still awaiting a launch decision, as a
+   * READING.
+   *
+   * The recovery owner's own answer is adapted here, at the runtime's one seam,
+   * so every operation that reports the inventory narrows on the declared
+   * `kind` instead of probing the value for a field only the refusal declares.
+   */
+  private unsettledEffectsReading(): OutcomeReading<readonly PendingEffectRecord[]> {
+    const reading = this.recovery.unsettledEffectReading();
+    return isEffectInventory(reading)
+      ? { kind: "ok", value: reading }
+      : { kind: "refused", refusal: reading };
+  }
+
   private executionCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
     return protocolCapabilityRefusal(this.protocols)
       ?? credentialIsolationRefusal(this.credentialIsolation)
@@ -2130,7 +2194,7 @@ export class OutcomeGraphRuntime {
    */
   private reduceInTransaction(
     tx: AcceptanceLedgerTx,
-    decision: AcceptanceDecision,
+    decision: AcceptedDecision,
     now: number,
     progress: readonly ProgressProjection[],
     dispatchIdentity: HostInvocationIdentity | undefined,

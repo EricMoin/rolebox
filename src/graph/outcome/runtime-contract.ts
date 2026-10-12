@@ -14,7 +14,8 @@ import {
   type ExecutionProtocolRegistry
 } from "../protocol/execution-protocol.ts";
 import {
-  type AcceptanceDecision, type SubmissionRefusalCode,
+  type AcceptanceDecision, type AcceptedDecision, type RejectedDecision,
+  type SubmissionRefusalCode,
   type SubmissionResult
 } from "./acceptance.ts";
 import {
@@ -571,7 +572,7 @@ export type OutcomeSubmissionResult =
    */
   | {
     readonly kind: "accepted";
-    readonly decision: AcceptanceDecision;
+    readonly decision: AcceptedDecision;
     readonly receipt: ReceiptRecord;
     readonly state: OutcomeGraphState;
     readonly dispatched: readonly OutcomeDispatchRequest[];
@@ -597,7 +598,7 @@ export type OutcomeSubmissionResult =
   /** A gate failed: the receipt records the rejection, the attempt stays open. */
   | {
     readonly kind: "rejected";
-    readonly decision: AcceptanceDecision;
+    readonly decision: RejectedDecision;
     readonly receipt: ReceiptRecord;
   }
   /** A conflict or a settlement: this submission's decision was not committed. */
@@ -635,7 +636,7 @@ export type OutcomeNaturalSettlementResult =
   | {
     readonly kind: "accepted";
     readonly completion: NaturalCompletionSettlement;
-    readonly decision: AcceptanceDecision;
+    readonly decision: AcceptedDecision;
     readonly receipt: ReceiptRecord;
     readonly state: OutcomeGraphState;
     readonly dispatched: readonly OutcomeDispatchRequest[];
@@ -651,7 +652,7 @@ export type OutcomeNaturalSettlementResult =
   | {
     readonly kind: "rejected";
     readonly completion: NaturalCompletionSettlement;
-    readonly decision: AcceptanceDecision;
+    readonly decision: RejectedDecision;
     readonly receipt: ReceiptRecord;
   }
   /**
@@ -696,7 +697,7 @@ export type OutcomeHostDerivedSettlementResult =
   | {
     readonly kind: "accepted";
     readonly completion: HostDerivedSettlement;
-    readonly decision: AcceptanceDecision;
+    readonly decision: AcceptedDecision;
     readonly receipt: ReceiptRecord;
     readonly state: OutcomeGraphState;
     readonly dispatched: readonly OutcomeDispatchRequest[];
@@ -712,7 +713,7 @@ export type OutcomeHostDerivedSettlementResult =
   | {
     readonly kind: "rejected";
     readonly completion: HostDerivedSettlement;
-    readonly decision: AcceptanceDecision;
+    readonly decision: RejectedDecision;
     readonly receipt: ReceiptRecord;
   }
   /**
