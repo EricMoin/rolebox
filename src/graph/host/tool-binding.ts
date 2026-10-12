@@ -1,4 +1,7 @@
+import { z } from "zod";
+
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
+import { readAppliedControl } from "../control/contracts.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { logEvent, withLogScope } from "../../log/index.ts";
 import {
@@ -374,15 +377,19 @@ export interface OutcomeToolAttribution {
  * (the dispatch that arms an attempt still reads the invocation holder inside
  * its own synchronous window).
  */
-export function bindOutcomeToolInvocation(
-  tools: Record<string, CanonicalToolDef>,
+export function bindOutcomeToolInvocation<Tools extends Record<string, CanonicalToolDef>>(
+  tools: Tools,
   attribution: OutcomeToolAttribution,
-): Record<string, CanonicalToolDef> {
+): Tools {
   const bound: Record<string, CanonicalToolDef> = {};
   for (const [name, def] of Object.entries(tools)) {
     bound[name] = withInvocation(name, def, attribution);
   }
-  return bound;
+  // THE RECORD'S OWN TYPE SURVIVES THE BIND. The wrapper below is generic over
+  // each entry's declared argument shape, so a caller holding a concretely typed
+  // record gets it back with `args`/`execute` intact instead of a
+  // `Record<string, CanonicalToolDef>` that erased them.
+  return Object.assign({ ...tools }, bound);
 }
 
 /**
@@ -423,18 +430,17 @@ export function reportControlContinuation(graphId: string, result: OutcomeResume
 /**
  * HAND A GRAPH'S CANCEL INTENTS TO THE PLATFORM AFTER A `graph_control` CALL (P3 cancel).
  */
-export function withCancelDelivery(
-  tools: Record<string, CanonicalToolDef>,
+export function withCancelDelivery<Tools extends Record<string, CanonicalToolDef>>(
+  tools: Tools,
   host: OutcomeHost,
-): Record<string, CanonicalToolDef> {
+): Tools {
   const control = tools["graph_control"];
   if (control === undefined) return tools;
   const inner = control.execute;
-  return {
-    ...tools,
+  return Object.assign({ ...tools }, {
     graph_control: {
       ...control,
-      async execute(args, context) {
+      async execute(args: Record<string, unknown>, context: CanonicalToolContext) {
         const result = await inner(args, context);
         // ONLY AN APPLIED COMMAND DELIVERS. The answer's own `kind` is the service's
         // verdict: a refusal (no attribution, a caller that is not the declarer, an
@@ -442,7 +448,7 @@ export function withCancelDelivery(
         // thrown store failure reached no platform either — neither has an intent to
         // hand over, and delivering on one would let an unauthorized caller make the
         // host ask a platform to stop a graph it does not own.
-        const applied = appliedControlAnswerOf(result);
+        const applied = readAppliedControl(requestedGraphIdOf(args), result);
         if (applied !== undefined) {
           try {
             reportCancelDelivery(await host.deliverCancelIntents(applied.graphId));
@@ -465,43 +471,20 @@ export function withCancelDelivery(
         return result;
       },
     },
-  };
+  });
 }
 
 /**
- * The graph id AND command of an APPLIED `graph_control` answer, or `undefined`.
+ * The graph ONE `graph_control` call named, or `""` when the call carries none.
  *
- * The tool body renders the control service's result as JSON; `kind: "applied"` is the
- * service's own verdict that the command wrote a durable fact, so it is the only answer a
- * platform delivery may follow. A refused answer (or an error string a thrown store failure
- * produced) names no applied command and is answered `undefined`: nothing is delivered.
- *
- * The COMMAND is read too (P3 item 2), because a retry leaves work this call must hand over —
- * the successor attempt's pending effect, or the order to mint a new run — while a stopping
- * command leaves only its cancel intents. A missing or non-string command is treated as an
- * answer this build cannot act on: the graph id alone still delivers cancel intents, and no
- * continuation is attempted.
+ * The command's own zod shape requires a non-empty `graph_id`, but this wrapper
+ * receives a record it did not parse itself: the graph the call named is read
+ * here so the answer is corroborated against it, and a call with no usable
+ * `graph_id` answers `""`, which the reader refuses.
  */
-function appliedControlAnswerOf(
-  result: unknown,
-): { readonly graphId: string; readonly command: string | undefined } | undefined {
-  if (typeof result !== "string") return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const answer = parsed as Record<string, unknown>;
-  if (answer["kind"] !== "applied") return undefined;
-  const graphId = answer["graphId"];
-  if (typeof graphId !== "string" || graphId.length === 0) return undefined;
-  const command = answer["command"];
-  return Object.freeze({
-    graphId,
-    command: typeof command === "string" && command.length > 0 ? command : undefined,
-  });
+function requestedGraphIdOf(args: Record<string, unknown>): string {
+  const graphId = args["graph_id"];
+  return typeof graphId === "string" ? graphId : "";
 }
 
 /**
@@ -521,16 +504,52 @@ function reportCancelDelivery(report: OutcomeCancelDeliveryReport): void {
 }
 
 
-/** The erased argument type one canonical tool's execute receives. */
-type ToolExecute = CanonicalToolDef["execute"];
-type ToolExecuteArgs = Parameters<ToolExecute>[0];
+/**
+ * The refusal a tool call with a MALFORMED ARGUMENT RECORD receives.
+ *
+ * THE ARGUMENT RECORD IS THE ONE UNVALIDATED VALUE ON THIS SEAM. The platform
+ * parses a tool's declared shape before it calls, but this wrapper is exported
+ * and receives whatever the platform hands it; re-labelling that value as the
+ * declared record (an `as`) merged "the platform validated this" and "an
+ * arbitrary object arrived" into one program. The wrapper therefore VALIDATES
+ * the record against the tool's OWN zod shape and answers this refusal instead
+ * of forwarding it. Stable identifier; wording is not API.
+ */
+export const TOOL_ARGUMENT_REFUSED_CODE = "tool-argument-malformed" as const;
 
-function withInvocation(
+/** Render one malformed-argument refusal as the machine-readable tool result. */
+function renderToolArgumentRefusal(toolName: string, issues: readonly string[]): string {
+  return JSON.stringify(
+    {
+      refused: true,
+      code: TOOL_ARGUMENT_REFUSED_CODE,
+      tool: toolName,
+      issues: [...issues],
+      message:
+        toolName +
+        " refused [" +
+        TOOL_ARGUMENT_REFUSED_CODE +
+        "]: the argument record this call carried does not satisfy the tool's own " +
+        "declared shape" +
+        (issues.length === 0 ? "" : " (" + issues.join(", ") + ")") +
+        " — nothing ran, because a tool body only ever receives a record its own " +
+        "schema accepted.",
+    },
+    null,
+    2,
+  );
+}
+
+function withInvocation<Args extends z.ZodRawShape>(
   name: string,
-  def: CanonicalToolDef,
+  def: CanonicalToolDef<Args>,
   attribution: OutcomeToolAttribution,
-): CanonicalToolDef {
+): CanonicalToolDef<Args> {
   const inner = def.execute;
+  // THE TOOL'S OWN SHAPE, KEPT AS A SCHEMA. `passthrough` so a record the
+  // platform enriched with keys the schema does not declare reaches the body
+  // exactly as it did before: only the DECLARED arguments are checked.
+  const schema = z.object(def.args).passthrough();
   return {
     ...def,
     async execute(args: unknown, context: CanonicalToolContext) {
@@ -559,7 +578,19 @@ function withInvocation(
           context?.sessionID,
         );
         if (refused !== undefined) return refused;
-        return await inner(args as ToolExecuteArgs, context);
+        // THE DECLARED SHAPE IS ENFORCED, NOT ASSERTED. `args` is the one value
+        // this wrapper did not parse; the tool's own schema is what turns it
+        // into the body's declared argument type. A record the platform already
+        // parsed satisfies the same schema, so a legitimate call is unchanged;
+        // anything else is refused BY NAME instead of being re-labelled.
+        const parsed = schema.safeParse(args);
+        if (!parsed.success) {
+          return renderToolArgumentRefusal(
+            name,
+            parsed.error.issues.map((issue) => issue.path.join(".") + ":" + issue.code),
+          );
+        }
+        return await inner(parsed.data, context);
       } finally {
         attribution.holder.clear();
         attribution.workerSession?.clear();

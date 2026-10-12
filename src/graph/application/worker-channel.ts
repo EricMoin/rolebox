@@ -6,7 +6,11 @@ import { join, dirname } from "node:path";
 import { GraphStore } from "../store/graph-store.ts";
 import { isGraphToolName, type GraphToolName } from "../host/tool-binding.ts";
 import { z } from "zod";
-import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
+import type {
+  CanonicalToolDef,
+  CanonicalToolContext,
+  ToolResult,
+} from "../../platform/types.ts";
 
 export interface WorkerChannelGrant {
   readonly endpoint: string;
@@ -46,9 +50,96 @@ const allowedTools: ReadonlySet<GraphToolName> = new Set(WORKER_CHANNEL_GRAPH_TO
 const tokenDigest = (token: string) => createHash("sha256").update(token).digest("hex");
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-/** A worker submits to its owning host; it never starts a second scheduler. */
-export async function openGraphWorkerChannel(
-  tools: Record<string, CanonicalToolDef>,
+/**
+ * THE TOOL ONE WORKER-CHANNEL NAME DENOTES, WITH THE DEFINITION'S OWN TYPES.
+ *
+ * The channel is handed a CALLER-SUPPLIED record (`T`), while the name it
+ * serves by arrives as runtime data. Resolving that name here is what keeps
+ * each definition's declared types attached all the way to the call: the answer
+ * is the record's own value type, so `args` stays the tool's zod shape and
+ * `execute` keeps the argument type its author declared — instead of the
+ * erased `z.ZodRawShape` / `{[k: string]: any}` an index signature over
+ * `Record<string, CanonicalToolDef>` answers, which accepted a call the tool
+ * never declared and only the runtime parse stood between.
+ *
+ * THE PRESENCE CHECK IS THE NARROWING, not an assertion: `hasOwnProperty` is
+ * expressed as a type predicate, so a name that is an own property of the
+ * record provably denotes a value of the record's own value type, and a name
+ * the record does not hold answers `undefined` for the caller to refuse.
+ */
+export function workerChannelToolOf<T extends Record<string, CanonicalToolDef>>(
+  tools: T,
+  name: string,
+): T[keyof T] | undefined {
+  return holdsWorkerChannelTool(tools, name) ? tools[name] : undefined;
+}
+
+function holdsWorkerChannelTool<T extends Record<string, CanonicalToolDef>>(
+  tools: T,
+  name: string,
+): tools is T & Record<string, T[keyof T]> {
+  return Object.prototype.hasOwnProperty.call(tools, name);
+}
+
+/**
+ * PARSE ONE CALL'S ARGUMENTS AGAINST THE TOOL'S OWN DECLARED SHAPE AND RUN IT.
+ *
+ * `Def` carries its `Args` from the definition itself, so the value `z.object`
+ * answers is exactly what `execute` declares and the two cannot drift apart: an
+ * argument object that does not match the tool's shape is refused by the parse,
+ * and the executed call is checked against the declared argument type rather than
+ * against an index signature. The `strict` parse is the worker face's argument
+ * rule and is unchanged — a call carrying a field the tool does not declare is
+ * refused, as before.
+ */
+async function invokeWorkerChannelTool<Def extends CanonicalToolDef>(
+  tool: Def,
+  rawArgs: unknown,
+  context: CanonicalToolContext,
+): Promise<ToolResult> {
+  const args = z.object(tool.args).strict().parse(rawArgs);
+  return tool.execute(args, context);
+}
+
+/**
+ * THE HOST'S RESPONSE ENVELOPE, READ RATHER THAN ASSERTED.
+ *
+ * `response.json()` is `any`, so the assertion this replaces manufactured the
+ * tool's `ToolResult` from the host's convention: a 200 carrying `{ error }`
+ * answered `undefined` TYPED as the tool's result, and the waiting worker could
+ * not tell a result from a protocol failure. The envelope is now validated — a
+ * string result, or the declared result object — so a response this protocol
+ * does not define is REFUSED BY NAME instead of becoming a fabricated result.
+ * A well-formed envelope is unchanged: `loose` objects keep the fields they
+ * carry, and the same bytes parse to the same `ToolResult`.
+ */
+const workerChannelToolResult: z.ZodType<ToolResult> = z.union([
+  z.string(),
+  z.object({
+    title: z.string().optional(),
+    output: z.string(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    attachments: z.array(z.object({
+      type: z.literal("file"),
+      mime: z.string(),
+      url: z.string(),
+      filename: z.string().optional(),
+    })).optional(),
+  }).loose(),
+]);
+const workerChannelEnvelope = z.object({ result: workerChannelToolResult }).loose();
+
+/**
+ * A worker submits to its owning host; it never starts a second scheduler.
+ *
+ * THE TOOL RECORD IS THE CALLER'S OWN TYPE. `T` is inferred from the record the
+ * host passes — the concrete definitions, each with its declared `Args` — so
+ * the face this channel serves keeps the tools' argument and result types
+ * (see {@link workerChannelToolOf}); a record whose values are not canonical
+ * tool definitions is refused at the call site rather than erased here.
+ */
+export async function openGraphWorkerChannel<T extends Record<string, CanonicalToolDef>>(
+  tools: T,
   directory: string,
   storeRoot: string,
 ) {
@@ -89,15 +180,14 @@ export async function openGraphWorkerChannel(
       // closed vocabulary FIRST, so the typed membership below is a real check
       // and a name outside the face cannot reach a tool definition at all.
       const tool = isGraphToolName(envelope.tool) && allowedTools.has(envelope.tool)
-        ? tools[envelope.tool] : undefined;
+        ? workerChannelToolOf(tools, envelope.tool) : undefined;
       if (!tool) { reply(403, { error: "This worker channel does not expose that tool" }); return; }
-      const args = z.object(tool.args).strict().parse(envelope.args);
       const context: CanonicalToolContext = {
         sessionID: caller.sessionId, agent: caller.agent, directory, worktree: directory,
         messageID: "worker-channel", abort: new AbortController().signal,
         metadata() { }, async ask() { throw new Error("Worker channel cannot approve permissions"); },
       };
-      reply(200, { result: await tool.execute(args, context) });
+      reply(200, { result: await invokeWorkerChannelTool(tool, envelope.args, context) });
     } catch {
       // Exceptions may contain caller data; the protocol deliberately returns no raw exception.
       reply(400, { error: "Worker invocation failed validation or execution" });
@@ -169,6 +259,14 @@ export async function invokeGraphWorkerChannel(grant: WorkerChannelGrant, tool: 
     }
   }
   if (!response.ok) throw new Error(`Graph host rejected the worker invocation (${response.status})`);
-  const body = await response.json() as { result: Awaited<ReturnType<CanonicalToolDef["execute"]>> };
-  return body.result;
+  const body: unknown = await response.json();
+  const envelope = workerChannelEnvelope.safeParse(body);
+  if (!envelope.success) {
+    throw new Error(
+      "Graph worker channel answered a malformed response envelope for " +
+        JSON.stringify(tool) +
+        ", so no tool result is fabricated",
+    );
+  }
+  return envelope.data.result;
 }

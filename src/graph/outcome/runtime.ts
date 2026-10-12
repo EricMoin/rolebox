@@ -25,6 +25,7 @@ import {
   readHostCompletionFact,
   reexecutionRunIdentityOf,
   runIdentityOf,
+  type OutcomeReading,
   type SettlementSource,
 } from "./runtime-readings.ts";
 import type {
@@ -1117,8 +1118,8 @@ export class OutcomeGraphRuntime {
       ]);
     }
     const stateReading = this.readPlanState(record);
-    if ("code" in stateReading) return refused([stateReading]);
-    const state = stateReading;
+    if (stateReading.kind === "refused") return refused([stateReading.refusal]);
+    const state = stateReading.value;
 
     const identity = resolveSettlementIdentity(
       {
@@ -1133,7 +1134,7 @@ export class OutcomeGraphRuntime {
       expectedAttemptId,
       hostCompletion,
     );
-    if ("refusal" in identity) return refused([identity.refusal]);
+    if (identity.kind === "refused") return refused([identity.refusal]);
     // A STOPPED ATTEMPT ACCEPTS NOTHING (P3 item 1). A trusted `failure`,
     // `timeout`, `cancel` or `budget-stop` that names THIS attempt ended it, so
     // nothing this submission carries can settle it — the attempt's result would
@@ -1156,7 +1157,7 @@ export class OutcomeGraphRuntime {
     // same decision inside it (verdict `attempt-stopped`, classified the same
     // way) and whichever of a stopping command and an acceptance commits first
     // is the fact that stands.
-    const stoppedAttempt = stoppingDecisionOf(this.ledger, this.graphId, identity.attemptId);
+    const stoppedAttempt = stoppingDecisionOf(this.ledger, this.graphId, identity.value.attemptId);
     if (stoppedAttempt !== undefined) {
       return refused([
         refusalForStoppingDecision(
@@ -1176,14 +1177,14 @@ export class OutcomeGraphRuntime {
     // ledger's own guarded INSERT re-reads the same row inside it (verdict
     // `approval-blocked`) and whichever of a raising command and an acceptance
     // commits first is the fact that stands.
-    const paused = this.ledger.approvals?.blockingApproval(this.graphId, identity.attemptId);
+    const paused = this.ledger.approvals?.blockingApproval(this.graphId, identity.value.attemptId);
     if (paused !== undefined) return refused([approvalBlockRefusal(paused)]);
 
     const submission = {
       plan: this.plan,
       ledger: this.ledger,
       submittedPlanRevision: this.planRevision,
-      identity,
+      identity: identity.value,
       proposal,
       validators: this.validators,
       artifactRoot: this.artifactRoot,
@@ -1202,7 +1203,7 @@ export class OutcomeGraphRuntime {
     const validation = validateSubmission(submission);
     let projections: readonly ProgressProjection[] = Object.freeze([]);
     if (validation.kind === "validated" && validation.decision.kind === "accepted") {
-      const projected = this.progressProjections(proposal, identity);
+      const projected = this.progressProjections(proposal, identity.value);
       if ("refusal" in projected) return refused([projected.refusal]);
       projections = projected;
     }
@@ -1890,8 +1891,8 @@ export class OutcomeGraphRuntime {
     }
 
     const stateReading = this.readPlanState(record);
-    if ("code" in stateReading) return refused([stateReading]);
-    const state = stateReading;
+    if (stateReading.kind === "refused") return refused([stateReading.refusal]);
+    const state = stateReading.value;
 
     // A RUN A RUN-WIDE TRUSTED CONTROL COMMAND STOPPED IS REPORTED, NOT
     // CONTINUED (P3 item 1). It is the same rule as the declared stop below,
@@ -2068,13 +2069,11 @@ export class OutcomeGraphRuntime {
    * build cannot read is reported as. A state that cannot be read is never
    * silently replaced by a fresh one — see {@link state}.
    */
-  private readPlanState(
-    record: GraphStateRecord,
-  ): OutcomeGraphState | OutcomeRuntimeRefusal {
+  private readPlanState(record: GraphStateRecord): OutcomeReading<OutcomeGraphState> {
     try {
-      return readOutcomeGraphState(record, this.plan);
+      return { kind: "ok", value: readOutcomeGraphState(record, this.plan) };
     } catch (error) {
-      return stateRefusal(this.graphId, error);
+      return { kind: "refused", refusal: stateRefusal(this.graphId, error) };
     }
   }
 

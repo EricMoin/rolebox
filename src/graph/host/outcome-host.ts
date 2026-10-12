@@ -46,6 +46,7 @@ import {
 import type { HostDerivedSettlement } from "../outcome/host-derived.ts";
 import type {
   CredentialIsolationCapability,
+  CredentialStoreIdentity,
   DurableCredentialStore,
 } from "../outcome/credential-isolation.ts";
 import type {
@@ -133,6 +134,45 @@ const log = createLogger("graph:host");
 
 /** How long the host's vault and execution index outlive the process. */
 export type OutcomeHostDurability = "file" | "memory";
+
+/**
+ * THE CREDENTIAL SURFACE THE HOST PUBLISHES — reading only, and scoped to the
+ * identity the CALLER owns.
+ *
+ * WHY IT IS NOT THE VAULT. {@link OutcomeHost} is handed to the tool face, the
+ * completion bridge and (as `readonly host`) to the exported
+ * {@link GraphApplication}, so its public type is a capability statement. The
+ * whole `HostCredentialVault` includes `mint`/`remember`/`forget`/`close` and
+ * the runtime's `{remember, resolve}` store — none of which a diagnostic caller
+ * needs — and its `resolve(identity)` answers the bearer for ANY identity the
+ * caller names. The host therefore publishes this reading instead: the three
+ * reads, and no write, no minting and no store.
+ *
+ * SCOPED BY THE HOST'S OWN BINDING, NOT BY THE CALLER. While a call is in
+ * flight from a session this host bound as a DISPATCHED WORKER
+ * ({@link OutcomeHost.workerPrincipalOf}), only the attempt that session is the
+ * worker of is readable; every other identity answers
+ * `undefined`/`false`/`undefined` exactly as an absent record would. A caller
+ * that is not a bound worker — the declaring principal, and every host-internal
+ * or out-of-invocation read — is unaffected.
+ */
+export interface HostCredentialReading {
+  /**
+   * The credential this host holds for exactly that attempt, or `undefined`.
+   * The runtime reports an effect it cannot resolve instead of launching it.
+   */
+  resolve(identity: CredentialStoreIdentity): string | undefined;
+  /** Whether this host holds a credential for exactly that attempt. */
+  has(identity: CredentialStoreIdentity): boolean;
+  /**
+   * What the durable store records for one attempt: `"retained"` (the value is
+   * on disk), `"not-retained"` (the attempt is recorded, the value is not), or
+   * `undefined` (no record at all). A DIAGNOSTIC — it never returns the value.
+   */
+  durableRecord(
+    identity: CredentialStoreIdentity,
+  ): "retained" | "not-retained" | undefined;
+}
 
 /** Inputs to {@link OutcomeHost.open}. */
 export interface OutcomeHostOptions {
@@ -854,6 +894,10 @@ export class OutcomeHost {
   private readonly inputDelivery: InputDeliveryLocation;
   private readonly clock: () => number;
   private readonly vault: HostCredentialVault;
+  /**
+   * The reading {@link credentials} publishes. Built once, scoped per call.
+   */
+  private readonly credentialReading: HostCredentialReading;
   private readonly executions: HostExecutionIndex;
   /**
    * The create-right fence a credential re-issue runs under (plan §3.3).
@@ -986,6 +1030,16 @@ export class OutcomeHost {
     });
     this.holder = createHostInvocationHolder();
     this.workerSessions = createHostWorkerSessionHolder();
+    this.credentialReading = Object.freeze({
+      resolve: (identity: CredentialStoreIdentity): string | undefined =>
+        this.credentialIsCallersToRead(identity) ? this.vault.resolve(identity) : undefined,
+      has: (identity: CredentialStoreIdentity): boolean =>
+        this.credentialIsCallersToRead(identity) && this.vault.has(identity),
+      durableRecord: (identity: CredentialStoreIdentity) =>
+        this.credentialIsCallersToRead(identity)
+          ? this.vault.durableRecord(identity)
+          : undefined,
+    });
     this.workerSessionOf = options.workerSessionOf;
     this.observeExecution = options.observeExecution;
     this.derivedOutcomeOf = options.derivedOutcomeOf;
@@ -1090,9 +1144,16 @@ export class OutcomeHost {
     return this.dispatchAdapter;
   }
 
-  /** The vault, exposed for tests and host reports. */
-  get credentials(): HostCredentialVault {
-    return this.vault;
+  /**
+   * The credential READING this host publishes, scoped to the caller's own
+   * identity — see {@link HostCredentialReading}.
+   *
+   * It is deliberately NOT the vault: the minting, destructive and store
+   * capabilities stay private to the host, and a dispatched worker's tool call
+   * can read exactly the attempt it is the bound worker of.
+   */
+  get credentials(): HostCredentialReading {
+    return this.credentialReading;
   }
 
   /** Move the invocation this host attributes to the current operation. */
@@ -2680,10 +2741,10 @@ export class OutcomeHost {
    * host's attribution of THAT invocation in effect for the call's duration and
    * clears it after (D9).
    */
-  bindTools(
-    tools: Record<string, CanonicalToolDef>,
+  bindTools<Tools extends Record<string, CanonicalToolDef>>(
+    tools: Tools,
     getEffectiveAgent?: (sessionID?: string) => string,
-  ): Record<string, CanonicalToolDef> {
+  ): Tools {
     return bindOutcomeToolInvocation(tools, {
       holder: this.holder,
       workerSession: this.workerSessions,
@@ -2939,6 +3000,37 @@ export class OutcomeHost {
     const remembered = this.workerPrincipals.get(sessionId);
     if (remembered !== undefined) return remembered;
     return this.dispatchedWorkerPrincipalOf(sessionId);
+  }
+
+  /**
+   * Whether ONE credential identity is the CALLER's to read.
+   *
+   * THE RULE IS THE HOST'S OWN BINDING, NEVER THE IDENTITY THE CALLER NAMES.
+   * When the operation in flight belongs to a session this host bound as the
+   * worker of a dispatched attempt, that worker owns exactly the attempt it was
+   * dispatched for: every other identity is answered as if no record existed, so
+   * a tool a worker calls can no longer obtain a settlement capability for an
+   * attempt it does not own. A session this host bound as NO worker's (the
+   * declaring principal, a host report, an out-of-invocation read) is
+   * unaffected: what it minted stays readable, and the reads that never had a
+   * caller identity (restart recovery, diagnostics) keep working.
+   *
+   * FAIL-OPEN ON AN UNREADABLE BINDING, DELIBERATELY: `workerPrincipalOf`
+   * already answers `undefined` for a session it cannot substantiate — a store
+   * it cannot read binds nobody — and turning an unreadable store into "nothing
+   * is readable" would break the very diagnostics that report it. The narrowing
+   * withholds a credential from a caller the host POSITIVELY bound elsewhere,
+   * which is the only case it can decide.
+   */
+  private credentialIsCallersToRead(identity: CredentialStoreIdentity): boolean {
+    const sessionId = this.workerSessions.currentSession();
+    if (sessionId === undefined) return true;
+    const principal = this.workerPrincipalOf(sessionId);
+    if (principal === undefined) return true;
+    return (
+      principal.graphId === identity.graphId &&
+      principal.attemptId === identity.attemptId
+    );
   }
 
   /**

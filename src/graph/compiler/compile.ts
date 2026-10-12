@@ -43,6 +43,7 @@ import {
   createCompiledPlan,
   inspectCompiledTopology,
   readCompiledProgressPolicy,
+  readValidatorVersion,
   terminalOutcomesOf,
   type CompiledCompletionAuthorization,
   type CompiledCompletionPolicy,
@@ -1129,7 +1130,7 @@ function readAcceptance(
       log.errors.push(
         issue(
           "malformed-declaration",
-          `acceptance requirement at ${path} is not { validator, version? } with a non-empty validator and a finite version`,
+          `acceptance requirement at ${path} is not { validator, version? } with a non-empty validator and a positive safe integer version`,
           path,
         ),
       );
@@ -1194,6 +1195,16 @@ function readAcceptance(
         );
         acceptance.push(requirement);
         break;
+      case "unreadable":
+        log.errors.push(
+          issue(
+            "unpinned-validator-version",
+            `validator ${describeValidator(requirement)} is declared at a version that is not a positive safe integer — a version is an exact identity, so an unreadable one can never pin a requirement`,
+            path,
+          ),
+        );
+        acceptance.push(requirement);
+        break;
       case "unsupported":
         log.errors.push(
           issue(
@@ -1218,15 +1229,17 @@ function readAcceptanceRequirement(
   if (!isNonEmptyString(validator)) return null;
   const version = raw.version;
   if (version === undefined) return { validator };
-  if (!isFiniteNumber(version)) return null;
-  return { validator, version };
+  const read = readValidatorVersion(version);
+  if (read === undefined) return null;
+  return { validator, version: read };
 }
 
 /** What one acceptance requirement resolves to against the installed set. */
 type ValidatorResolution =
   | { readonly kind: "resolved"; readonly version: number }
   | { readonly kind: "unpinned" }
-  | { readonly kind: "unsupported" };
+  | { readonly kind: "unsupported" }
+  | { readonly kind: "unreadable" };
 
 /**
  * Resolve one acceptance requirement to an EXACT installed capability version.
@@ -1238,6 +1251,9 @@ type ValidatorResolution =
  * - an UNVERSIONED requirement is pinned to the version of the FIRST matching
  *   versioned capability in the caller's declared order (deterministic for a
  *   given capability set, and never a numeric range);
+ * - a capability declaring a version that is not a positive safe integer can
+ *   pin nothing, so it is `unreadable` and the compilation is refused rather
+ *   than copying a version the run path will reject (F-10);
  * - a name no capability declares is `unsupported`.
  */
 function resolveValidatorCapability(
@@ -1251,11 +1267,13 @@ function resolveValidatorCapability(
       coveredWithoutVersion = true;
       continue;
     }
-    if (
-      requirement.version === undefined ||
-      capability.version === requirement.version
-    ) {
-      return { kind: "resolved", version: capability.version };
+    // An unreadable version is REFUSED here rather than copied into the plan:
+    // the executability marker and the run path disagree about this field
+    // otherwise, learned submission by submission (F-10).
+    const version = readValidatorVersion(capability.version);
+    if (version === undefined) return { kind: "unreadable" };
+    if (requirement.version === undefined || version === requirement.version) {
+      return { kind: "resolved", version };
     }
   }
   return coveredWithoutVersion ? { kind: "unpinned" } : { kind: "unsupported" };

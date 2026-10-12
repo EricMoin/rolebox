@@ -3,13 +3,11 @@ import { attemptCredentialDigest } from "./attempt-credential.ts";
 import type { OutcomeGraphState, OutcomeNodeState } from "./graph-state.ts";
 import { hostIdentityCheckRefusal, type HostIdentityReading } from "./host-identity.ts";
 import { readOutcomeProposal } from "./proposal.ts";
-import type {
-  HostCompletionExecution,
-  OutcomeRuntimeRefusal,
-} from "./runtime-contract.ts";
+import type { HostCompletionExecution } from "./runtime-contract.ts";
 import {
   stateNodeOf,
   submissionIdOf,
+  type OutcomeReading,
   type SettlementSource,
 } from "./runtime-readings.ts";
 import type { ExecutionIdentity } from "./validators.ts";
@@ -52,13 +50,16 @@ export function resolveSettlementIdentity(
   source: SettlementSource,
   expectedAttemptId?: string,
   hostCompletion?: HostCompletionExecution,
-): ExecutionIdentity | { readonly refusal: OutcomeRuntimeRefusal } {
+): OutcomeReading<ExecutionIdentity> {
   const reading = readOutcomeProposal(proposal);
   if (reading.kind === "malformed") {
     return {
-      graphId: context.graphId,
-      attemptId: "unclaimed-attempt",
-      submissionId: "unclaimed-submission",
+      kind: "ok",
+      value: {
+        graphId: context.graphId,
+        attemptId: "unclaimed-attempt",
+        submissionId: "unclaimed-submission",
+      },
     };
   }
   const index = context.plan.nodes.findIndex(
@@ -66,6 +67,7 @@ export function resolveSettlementIdentity(
   );
   if (index < 0) {
     return {
+      kind: "refused",
       refusal: {
         code: "unknown-node",
         path: "$.nodeId",
@@ -90,6 +92,7 @@ export function resolveSettlementIdentity(
   if (hostCompletion !== undefined) {
     if (reading.proposal.credential !== undefined) {
       return {
+        kind: "refused",
         refusal: {
           code: "malformed-natural-delivery",
           path: "$.credential",
@@ -104,6 +107,7 @@ export function resolveSettlementIdentity(
     }
     if (expectedAttemptId === undefined) {
       return {
+        kind: "refused",
         refusal: {
           code: "attempt-mismatch",
           path: "$.attemptId",
@@ -117,6 +121,7 @@ export function resolveSettlementIdentity(
     const recorded = stateNodeOf(state, reading.proposal.nodeId);
     if (recorded === undefined || recorded.attemptId !== expectedAttemptId) {
       return {
+        kind: "refused",
         refusal: {
           code: "attempt-mismatch",
           path: "$.attemptId",
@@ -135,6 +140,7 @@ export function resolveSettlementIdentity(
     }
     if (recorded.status === "pending") {
       return {
+        kind: "refused",
         refusal: {
           code: "node-not-dispatched",
           path: "$.nodeId",
@@ -155,17 +161,21 @@ export function resolveSettlementIdentity(
       recorded.dispatchIdentity,
       hostIdentity,
     );
-    if (hostIdentityCheck !== undefined) return { refusal: hostIdentityCheck };
+    if (hostIdentityCheck !== undefined) return { kind: "refused", refusal: hostIdentityCheck };
     return {
-      graphId: context.graphId,
-      attemptId: expectedAttemptId,
-      submissionId: submissionIdOf(proposal, source),
+      kind: "ok",
+      value: {
+        graphId: context.graphId,
+        attemptId: expectedAttemptId,
+        submissionId: submissionIdOf(proposal, source),
+      },
     };
   }
 
   const credential = reading.proposal.credential;
   if (credential === undefined) {
     return {
+      kind: "refused",
       refusal: {
         code: "credential-missing",
         path: "$.credential",
@@ -193,6 +203,7 @@ export function resolveSettlementIdentity(
   }
   if (holder === undefined) {
     return {
+      kind: "refused",
       refusal: {
         code: "credential-unknown",
         path: "$.credential",
@@ -210,6 +221,7 @@ export function resolveSettlementIdentity(
   }
   if (holder.nodeId !== reading.proposal.nodeId) {
     return {
+      kind: "refused",
       refusal: {
         code: "credential-node-mismatch",
         path: "$.credential",
@@ -225,6 +237,7 @@ export function resolveSettlementIdentity(
   const attemptId = holder.attemptId;
   if (attemptId === undefined) {
     return {
+      kind: "refused",
       refusal: {
         code: "unreadable-state",
         path: "$.nodes[" + index + "].attemptId",
@@ -245,6 +258,7 @@ export function resolveSettlementIdentity(
   // the credential really belongs to.
   if (expectedAttemptId !== undefined && attemptId !== expectedAttemptId) {
     return {
+      kind: "refused",
       refusal: {
         code: "attempt-mismatch",
         path: "$.attemptId",
@@ -270,10 +284,13 @@ export function resolveSettlementIdentity(
     holder.dispatchIdentity,
     hostIdentity,
   );
-  if (identityCheck !== undefined) return { refusal: identityCheck };
+  if (identityCheck !== undefined) return { kind: "refused", refusal: identityCheck };
   return {
-    graphId: context.graphId,
-    attemptId,
-    submissionId: submissionIdOf(proposal, source),
+    kind: "ok",
+    value: {
+      graphId: context.graphId,
+      attemptId,
+      submissionId: submissionIdOf(proposal, source),
+    },
   };
 }

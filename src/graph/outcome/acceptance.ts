@@ -6,6 +6,7 @@ import { acceptedDataBytes } from "../store/json.ts";
 import type { AcceptedData, JsonValue } from "../domain/model.ts";
 import {
   readPlanExecutability,
+  readValidatorVersion,
   type CompiledNode,
   type CompiledOutcome,
   type CompiledPlan,
@@ -409,7 +410,7 @@ function readRequest(request: AcceptanceRequest): RequestReading {
   // no identity to look up, and "any version" is exactly the silent widening
   // the protocol forbids.
   outcome.acceptance.forEach((requirement, index) => {
-    if (!isPositiveSafeInteger(requirement.version)) {
+    if (readValidatorVersion(requirement.version) === undefined) {
       refusals.push({
         code: "non-executable-plan",
         path: `$.outcome.acceptance[${index}]`,
@@ -569,10 +570,11 @@ export function validateSubmission(
   const missing: SubmissionRefusal[] = [];
   outcome.acceptance.forEach((requirement, index) => {
     // The version is present: readRequest refused an unpinned requirement.
-    if (!isPositiveSafeInteger(requirement.version)) return;
+    const version = readValidatorVersion(requirement.version);
+    if (version === undefined) return;
     const key: ValidatorKey = Object.freeze({
       id: requirement.validator,
-      version: requirement.version,
+      version,
     });
     const implementation = request.validators.lookup(key);
     if (implementation === undefined) {
@@ -1042,11 +1044,6 @@ function describeUnauthorizedCompletions(
 function describeKeys(keys: readonly ValidatorKey[]): string {
   if (keys.length === 0) return "none";
   return keys.map((key) => validatorKeyText(key)).join(", ");
-}
-
-/** Whether a value is a positive safe integer (the plan's pinning rule). */
-function isPositiveSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 /** Describe a rejected value for a diagnostic without ever throwing. */

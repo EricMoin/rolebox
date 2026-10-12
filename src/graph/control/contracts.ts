@@ -2,9 +2,10 @@ import type { ApprovalPolicy } from "../policy/approval-policy.ts";
 import type { BudgetReport } from "../domain/budget.ts";
 import type { AttemptCredentialSource } from "../outcome/attempt-credential.ts";
 import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
-import type {
-  ApprovalRequestRecord, ControlCommandName, ControlDecisionRecord,
-  PendingEffectRecord, RunControlRecord, RunReexecutionRecord,
+import {
+  CONTROL_COMMAND_NAMES,
+  type ApprovalRequestRecord, type ControlCommandName, type ControlDecisionRecord,
+  type PendingEffectRecord, type RunControlRecord, type RunReexecutionRecord,
 } from "../ledger/types.ts";
 import type { ApprovalRequestSpec } from "./approval.ts";
 
@@ -371,3 +372,72 @@ export type GraphControlResult =
     readonly graphId: string;
     readonly refusals: readonly GraphControlRefusal[];
   };
+
+// ── Reading an applied answer ───────────────────────────────────────────────
+
+/** Whether a value is a non-array record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether ONE value is a member of the control vocabulary
+ * ({@link CONTROL_COMMAND_NAMES}).
+ *
+ * THE ONE RUNTIME NARROWING of a control command arriving as `unknown` — the
+ * shape a serialized {@link GraphControlResult} comes back in. The list it reads
+ * is the SAME closed vocabulary {@link ControlCommandName} is declared beside,
+ * so a command this build does not define can never be read as one.
+ */
+export function isControlCommandName(value: unknown): value is ControlCommandName {
+  return CONTROL_COMMAND_NAMES.some((name) => name === value);
+}
+
+/** What an APPLIED `graph_control` answer names. */
+export interface AppliedControl {
+  /** The graph the command was applied to. */
+  readonly graphId: string;
+  /** The command, from the CLOSED control vocabulary. */
+  readonly command: ControlCommandName;
+}
+
+/**
+ * Read one serialized `graph_control` answer as an APPLIED command, or
+ * `undefined` when the value is not one this build may act on.
+ *
+ * WHY A READER AND NOT A CAST. The control tool renders the service's typed
+ * {@link GraphControlResult} as JSON, so the host that post-processes a call
+ * receives an `unknown` string and must decide — on the AUTHORIZATION path —
+ * whether the answer authorizes handing a graph's cancel intents to a platform
+ * and continuing a retried graph. Re-deriving `{graphId: string; command:
+ * string | undefined}` there dropped the two facts the producer's own type
+ * states: the discriminant literal and the command VOCABULARY. A renamed
+ * discriminant, or a command added to the service without a matching wrapper
+ * change, then compiled cleanly and silently stopped the hand-over. This reader
+ * is the ONE place that serialized shape is understood.
+ *
+ * TOTAL AND FAIL-CLOSED. A value that is not a string, a string that is not
+ * JSON, JSON that is not a plain record, a `kind` other than `"applied"`, a
+ * `graphId` other than the graph THIS call named, and a `command` outside
+ * {@link CONTROL_COMMAND_NAMES} all answer `undefined`: nothing is delivered and
+ * nothing is continued.
+ */
+export function readAppliedControl(
+  graphId: string,
+  result: unknown,
+): AppliedControl | undefined {
+  if (graphId.length === 0) return undefined;
+  if (typeof result !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
+  if (parsed["kind"] !== "applied") return undefined;
+  if (parsed["graphId"] !== graphId) return undefined;
+  const command = parsed["command"];
+  if (!isControlCommandName(command)) return undefined;
+  return Object.freeze({ graphId, command });
+}

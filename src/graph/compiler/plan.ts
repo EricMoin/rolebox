@@ -903,7 +903,7 @@ export function inspectCompiledTopology(
         if (
           isPlanRecord(requirement) &&
           isText(requirement.validator) &&
-          isFiniteNumber(requirement.version)
+          readValidatorVersion(requirement.version) !== undefined
         ) {
           return;
         }
@@ -1264,6 +1264,22 @@ function compareText(a: string, b: string): number {
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;
+}
+
+/**
+ * Read a validator version: a positive safe integer, or `undefined`.
+ *
+ * ONE total reader for the field, shared across the layering: the compiler
+ * refuses a capability whose version does not read instead of copying it into
+ * the plan, this module's inspector applies the same predicate to a pinning
+ * requirement, and the acceptance core refuses a requirement whose version
+ * does not read. A version is an exact identity, never a range, so `0`, a
+ * fraction, a negative number and an unsafe integer name nothing.
+ */
+export function readValidatorVersion(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 /** Whether a value is a finite number (the canonical digest can represent it). */

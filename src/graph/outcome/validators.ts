@@ -4,6 +4,7 @@ import { resolve, sep } from "node:path";
 
 import type { NormalizedOutcomeProposal } from "./proposal.ts";
 import { artifactIdOf, putArtifact } from "../store/artifacts.ts";
+import { readValidatorVersion } from "../compiler/plan.ts";
 
 // ── Validator identity ──────────────────────────────────────────────────────
 
@@ -182,25 +183,24 @@ export function createValidatorRegistry(
         `validator-registry: registration[${index}] has no non-empty id — a validator is keyed by an exact { id, version } identity`,
       );
     }
-    if (!isPositiveSafeInteger(registration.version)) {
+    const version = readValidatorVersion(registration.version);
+    if (version === undefined) {
       throw new Error(
         `validator-registry: validator ${JSON.stringify(registration.id)} has version ${describeValue(registration.version)}, not a positive safe integer — versions are compared by identity, never by ordering`,
       );
     }
     if (typeof registration.implementation !== "function") {
       throw new Error(
-        `validator-registry: validator ${JSON.stringify(registration.id)}@${registration.version} has no implementation function`,
+        `validator-registry: validator ${JSON.stringify(registration.id)}@${version} has no implementation function`,
       );
     }
-    const text = keyText(registration.id, registration.version);
+    const text = keyText(registration.id, version);
     if (implementations.has(text)) {
       throw new Error(
         `validator-registry: ${validatorKeyText(registration)} is registered twice — one exact identity has exactly one implementation, otherwise which one runs would depend on array order`,
       );
     }
-    keys.push(
-      Object.freeze({ id: registration.id, version: registration.version }),
-    );
+    keys.push(Object.freeze({ id: registration.id, version }));
     implementations.set(text, registration.implementation);
   });
   const frozenKeys: readonly ValidatorKey[] = Object.freeze(keys);
@@ -253,7 +253,7 @@ export function substantiatesSchema(
   set: AcceptanceCapabilitySet,
   contract: { readonly schema: string; readonly version?: number },
 ): boolean {
-  if (!isPositiveSafeInteger(contract.version)) return false;
+  if (readValidatorVersion(contract.version) === undefined) return false;
   return set.schemas.some(
     (identity) =>
       identity.schema === contract.schema && identity.version === contract.version,
@@ -513,11 +513,6 @@ function isInside(root: string, candidate: string): boolean {
   if (candidate === root) return true;
   const prefix = root.endsWith(sep) ? root : root + sep;
   return candidate.startsWith(prefix);
-}
-
-/** Whether a value is a positive safe integer (the capability-legality rule). */
-function isPositiveSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 /** Describe a rejected value for a diagnostic without ever throwing. */

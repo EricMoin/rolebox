@@ -32,6 +32,22 @@ import type {
 export type SettlementSource = "submission" | "natural-completion" | "host-derived";
 
 /**
+ * ONE READ THAT EITHER ANSWERS A VALUE OR REFUSES BY NAME.
+ *
+ * THE DISCRIMINANT IS DECLARED, not inferred from the shape of the value. A
+ * reader that answers a domain object used to be told apart from its refusal by
+ * probing the object for a field only the refusal declares (`"code" in value`),
+ * so which arm was taken was an accident of the model's field names: the day a
+ * state gained a `code`, a valid reading would silently be reported as a
+ * refusal. `kind` is the reading's own field, so the compiler proves the arms
+ * exhaustive when a caller narrows on it and no value a reader answers can move
+ * itself into the refusal arm.
+ */
+export type OutcomeReading<T> =
+  | { readonly kind: "ok"; readonly value: T }
+  | { readonly kind: "refused"; readonly refusal: OutcomeRuntimeRefusal };
+
+/**
  * Every in-flight attempt a submission can actually settle, plus a per-attempt
  * refusal for each in-flight attempt it cannot.
  *
