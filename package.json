@@ -1,7 +1,7 @@
 {
   "name": "rolebox",
   "version": "2.0.0-alpha.2",
-  "description": "Agent plugin — define custom AI agent roles with per-role prompts, models, skills, and permissions",
+  "description": "Agent plugin for major harnesses — DeepSeek Harness (DSH), OpenCode, Pi and Codex: define custom AI agent roles with per-role prompts, models, skills, permissions, memory and multi-agent orchestration.",
   "engines": {
     "opencode": "^1.0.0"
   },
@@ -91,7 +91,13 @@
     "lsp",
     "workflow",
     "cli",
-    "tui"
+    "tui",
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh-bundle",
+    "cordis",
+    "cordis-plugin",
+    "deepseek-harness-plugin"
   ],
   "pi": {
     "extensions": ["./dist/entries/pi.js"]

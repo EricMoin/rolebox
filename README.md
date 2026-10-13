@@ -86,6 +86,7 @@ mkdir -p ~/.pi/agent/rolebox && cd ~/.pi/agent/rolebox && rolebox init my-agent 
 
 ```bash
 dsh plugin --profile <name> add rolebox    # installs the bundle into that profile
+dsh plugin --profile web add rolebox       # installs the bundle into the web profile
 mkdir -p ~/.dsh/rolebox && cd ~/.dsh/rolebox && rolebox init my-agent -y   # $DSH_HOME/rolebox if set
 ```
 
