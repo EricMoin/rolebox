@@ -21,30 +21,35 @@ export interface WorkerChannelGrant {
 /**
  * THE GRAPH FACE THIS REMOTE CHANNEL EXPOSES to the worker process it serves.
  *
- * The list is the channel's own access decision (`allowedTools` below) AND the
- * set the Pi worker process registers as model-facing tools
- * (`src/platform/adapters/pi/graph-worker.ts`), so the two are one declaration:
- * the face a worker process is handed and the face the channel will serve
- * cannot drift apart. Typed by the closed vocabulary
+ * The list is the channel's own access decision (`allowedTools` below), the set
+ * the Pi worker process registers as model-facing tools
+ * (`src/platform/adapters/pi/graph-worker.ts`) AND the host's own per-call
+ * worker boundary ({@link WORKER_GRANTED_GRAPH_TOOLS},
+ * `src/graph/host/tool-binding.ts`), so the face a worker process is HANDED, the
+ * face the channel SERVES and the face the host ENFORCES are one and the same
+ * declaration and cannot drift apart. Typed by the closed vocabulary
  * ({@link GraphToolName}), so a misspelled or renamed entry is a compile error
  * rather than a 403 a worker only discovers at runtime.
  *
- * THE MEMBERSHIP DIVERGES FROM THE IN-PROCESS WORKER BASELINE ON PURPOSE, AND
- * THE DIVERGENCE IS RECORDED RATHER THAN UNIFIED. `graph_status` and
- * `graph_audit` read the authoritative store, which
- * `src/graph/host/tool-binding.ts` reserves to the declaring principal, so the
- * in-process face refuses them to a dispatched worker
- * ({@link WORKER_GRANTED_GRAPH_TOOLS} — the delivery channel alone). This
- * remote channel exposes the pair to the worker process it serves today, and
- * narrowing it would withdraw a capability the audit did not authorize
- * changing; the choice is a product decision, so the lists stay typed and
- * comparable instead of being silently reconciled. Widening the in-process
- * face would be the same unauthorized change in the other direction.
+ * THE FACE IS THE DELIVERY CHANNEL ALONE, because that is the whole contract a
+ * dispatched worker holds: the attempt credential it was handed, the prompt it
+ * was dispatched with, and its input view. It settles its node by SUBMITTING AN
+ * OUTCOME — `graph_submit_outcome` — and nothing else of the graph face.
+ * `graph_status` and `graph_audit` read the authoritative store, which
+ * {@link WORKER_GRANTED_GRAPH_TOOLS}' boundary reserves to the
+ * declaring/operating principal, and the worker's input view IS its information
+ * boundary: a worker that could read the store would bypass the very view the
+ * dispatch derived for it, learning the runs, nodes and effects it was never
+ * given. A forwarded `graph_status` or `graph_audit` is therefore refused BY
+ * NAME through the channel's existing refusal path (403, "This worker channel
+ * does not expose that tool"), fail-closed, with no tool body run and no store
+ * read — the same call the host refuses to the same worker in process with
+ * `worker-tool-forbidden`. Widening this list would hand a worker the readers
+ * the boundary withholds; the two faces are kept in step, never allowed to
+ * drift.
  */
 export const WORKER_CHANNEL_GRAPH_TOOLS: readonly GraphToolName[] = Object.freeze([
   "graph_submit_outcome",
-  "graph_status",
-  "graph_audit",
 ]);
 const allowedTools: ReadonlySet<GraphToolName> = new Set(WORKER_CHANNEL_GRAPH_TOOLS);
 const tokenDigest = (token: string) => createHash("sha256").update(token).digest("hex");

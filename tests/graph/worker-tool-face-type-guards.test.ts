@@ -13,13 +13,13 @@
  *    stops compiling the day a name outside the shipped vocabulary type-checks
  *    as one. The authority is `bun run typecheck:tests`; a bare-string face
  *    cannot come back without failing it.
- * 2. THE MEMBERSHIP DECISION, asserted per face. The in-process boundary grants
- *    exactly the delivery channel; dsh adds its own command entry; the remote
- *    channel exposes the two authoritative-store readers. The DIVERGENCE IS
- *    DELIBERATE AND RECORDED, not unified: narrowing the remote channel would
- *    withdraw a capability the audit did not authorize changing, and widening
- *    the in-process face would hand a worker the readers §3.3 reserves to the
- *    declaring principal.
+ * 2. THE MEMBERSHIP DECISION, asserted per face. The in-process boundary and
+ *    the remote channel grant exactly the delivery channel — ONE UNIFIED FACE —
+ *    and dsh adds its own command entry. The remote channel serves
+ *    `graph_submit_outcome` alone: `graph_status` and `graph_audit` read the
+ *    authoritative store §3.3 reserves to the declaring principal, and the
+ *    worker's input view IS its information boundary, so a forwarded reader
+ *    call takes the channel's own 403 refusal by name instead of a store read.
  * 3. THE ONE DECLARATION. The Pi worker process registers exactly the channel's
  *    list, driven through the production `registerPiGraphWorker` rather than
  *    compared by reading the source.
@@ -101,7 +101,7 @@ describe("the worker graph-tool faces", () => {
     expect(OUT_OF_VOCABULARY_IS_REJECTED).toBe(true);
   });
 
-  it("pins each face's membership, including the documented divergence", () => {
+  it("pins each face's membership, with the two worker faces unified", () => {
     // THE IN-PROCESS BOUNDARY: the delivery channel, and nothing else. The
     // authoritative-store readers belong to the declaring/operating principal.
     expect([...HOST_FACE]).toEqual(["graph_submit_outcome"]);
@@ -112,15 +112,19 @@ describe("the worker graph-tool faces", () => {
     // THE EXPORTED dsh BINDING IS THE TYPED GRANT — one array, widened only for
     // the callers that compare it against a name they know as a `string`.
     expect([...DSH_GRAPH_WORKER_TOOLS]).toEqual([...DSH_GRAPH_WORKER_GRANT]);
-    // THE REMOTE CHANNEL: the delivery channel plus the two store readers.
-    expect([...CHANNEL_FACE]).toEqual(["graph_submit_outcome", "graph_status", "graph_audit"]);
-    expect(CHANNEL_FACE.length).toBe(3);
-    // THE DIVERGENCE, stated as the contract instead of left implicit: the
-    // channel exposes the readers the in-process face refuses, and that is the
-    // recorded clarification item rather than a silent unification.
+    // THE REMOTE CHANNEL: the SAME delivery channel the in-process boundary
+    // grants, and the same one the Pi worker process registers. The face a
+    // worker process is HANDED, the face the channel SERVES and the face the
+    // host ENFORCES are one list rather than three that drift.
+    expect([...CHANNEL_FACE]).toEqual(["graph_submit_outcome"]);
+    expect(CHANNEL_FACE.length).toBe(1);
+    expect([...CHANNEL_FACE]).toEqual([...HOST_FACE]);
+    // THE UNIFIED CONTRACT, stated as the contract instead of left implicit: the
+    // channel refuses the authoritative-store readers by name exactly as the
+    // in-process face does, so a forwarded reader call reads nothing.
     for (const reader of ["graph_status", "graph_audit"] as const) {
       expect(WORKER_GRANTED_GRAPH_TOOLS).not.toContain(reader);
-      expect(WORKER_CHANNEL_GRAPH_TOOLS).toContain(reader);
+      expect(WORKER_CHANNEL_GRAPH_TOOLS).not.toContain(reader);
     }
   });
 
