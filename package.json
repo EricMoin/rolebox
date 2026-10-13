@@ -1,6 +1,6 @@
 {
   "name": "rolebox",
-  "version": "2.0.0-alpha.1",
+  "version": "2.0.0-alpha.2",
   "description": "Agent plugin — define custom AI agent roles with per-role prompts, models, skills, and permissions",
   "engines": {
     "opencode": "^1.0.0"
