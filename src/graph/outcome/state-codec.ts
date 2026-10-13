@@ -210,11 +210,26 @@ function outcomeStateLayout<V extends number>(
   });
 }
 
-/** The two reasons a version-9 writer could record, and only those. */
-const OUTCOME_STATE_STOP_REASONS_V9: readonly OutcomeStopReason[] = Object.freeze([
+/**
+ * The two reasons a version-9 writer could record, and only those.
+ *
+ * The literal tuple is the SOURCE: it pins the version-9 vocabulary to exactly
+ * these members, so a version-10-only reason is not assignable here. `satisfies`
+ * rejects a member the current union does not define, and the assertion under it
+ * names the one-way link between this vocabulary and the current one.
+ */
+const OUTCOME_STATE_STOP_REASONS_V9 = Object.freeze([
   "loop-exhausted",
   "progress-stalled",
-] as const);
+] as const satisfies readonly OutcomeStopReason[]);
+
+/** A stop reason a version-9 body may carry. */
+type OutcomeStopReasonV9 = (typeof OUTCOME_STATE_STOP_REASONS_V9)[number];
+
+type AssertNever<T extends never> = T;
+type _EveryV9StopReasonIsACurrentReason = AssertNever<
+  Exclude<OutcomeStopReasonV9, OutcomeStopReason>
+>;
 
 const OUTCOME_STATE_LAYOUT_V9 = outcomeStateLayout(
   OUTCOME_STATE_BODY_V9,
@@ -281,20 +296,6 @@ function readNodeState(
   const settledAt = readOptionalEpoch(raw, "settledAt", where);
   const recordedArrivals = readArrivals(raw.arrivals, expected, where, plan);
   if (status === "pending") {
-    if (
-      attemptId !== undefined ||
-      attemptSeq !== undefined ||
-      attemptCredentialDigest !== undefined ||
-      dispatchIdentity !== undefined ||
-      outcomeId !== undefined ||
-      dispatchedAt !== undefined ||
-      settledAt !== undefined
-    ) {
-      throw malformedState(
-        where + " is pending but carries attempt, credential, host binding, outcome or " +
-        "timestamp fields — a node that was never dispatched has no attempt identity",
-      );
-    }
     return Object.freeze({
       nodeId: expected.id,
       status: "pending" as const,
@@ -357,11 +358,6 @@ function readNodeState(
       ...(boundInputs === undefined ? {} : { inputs: boundInputs }),
       ...(inputRefusals === undefined ? {} : { inputRefusals }),
     });
-  }
-  if (outcomeId !== undefined || settledAt !== undefined) {
-    throw malformedState(
-      where + " is dispatched but carries a settled outcome or timestamp",
-    );
   }
   return Object.freeze({
     nodeId: expected.id,

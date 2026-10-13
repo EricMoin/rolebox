@@ -555,6 +555,23 @@ export type OutcomeReexecutionResult =
   };
 
 
+/**
+ * The ledger verdicts a `not-committed` result can carry.
+ *
+ * THE PRODUCER ALREADY NARROWED THIS. `OutcomeGraphRuntime.settleSubmission`
+ * answers every OTHER non-writing verdict — `controlled`, `superseded`,
+ * `attempt-stopped`, `run-superseded`, `approval-blocked` — with a named refusal
+ * before it can build a `not-committed` result, so those arms only ever carry a
+ * `conflict` (another submission committed first) or a `settled` (the attempt
+ * was already settled by one). Declaring the ledger's full verdict here would
+ * let a reader write a branch no producer can reach.
+ */
+export type NotCommittedVerdict = Extract<
+  Extract<SubmissionResult, { kind: "submitted" }>["verdict"],
+  { kind: "conflict" | "settled" }
+>;
+
+
 /** What {@link OutcomeGraphRuntime.submit} produced. */
 export type OutcomeSubmissionResult =
   /** The submission was refused before anything was written. */
@@ -606,7 +623,7 @@ export type OutcomeSubmissionResult =
   | {
     readonly kind: "not-committed";
     readonly decision: AcceptanceDecision;
-    readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
+    readonly verdict: NotCommittedVerdict;
   };
 
 
@@ -665,7 +682,7 @@ export type OutcomeNaturalSettlementResult =
     readonly kind: "not-committed";
     readonly completion: NaturalCompletionSettlement;
     readonly decision: AcceptanceDecision;
-    readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
+    readonly verdict: NotCommittedVerdict;
   };
 
 
@@ -726,7 +743,7 @@ export type OutcomeHostDerivedSettlementResult =
     readonly kind: "not-committed";
     readonly completion: HostDerivedSettlement;
     readonly decision: AcceptanceDecision;
-    readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
+    readonly verdict: NotCommittedVerdict;
   };
 
 
@@ -915,8 +932,8 @@ export interface OutcomeBudgetUsageReport {
 }
 
 
-/** What recording one usage report did, per attempt. */
-export interface OutcomeBudgetUsageEntry {
+/** The identity and the recorded fact every usage entry carries. */
+interface OutcomeBudgetUsageEntryBase {
   /**
    * The RUN whose claim this fact belongs to — the run that was CHARGED, not
    * necessarily the run the report addressed: a delayed bill for an attempt of a
@@ -928,17 +945,44 @@ export interface OutcomeBudgetUsageEntry {
   readonly nodeId: string;
   readonly attemptId: string;
   /**
-   * `reconciled` — the outstanding claim was settled with these amounts;
-   * `replayed` — the same amounts were already the standing fact;
-   * `recorded-late` — the attempt was never reserved here and the usage was
-   * APPENDED (delayed billing); `ignored` — the attempt already carries a
-   * DIFFERENT usage fact, which stands and was not summed.
+   * The recorded fact after this call (never this call's numbers when ignored).
+   *
+   * SHARED BY EVERY ARM ON PURPOSE. The store's own reservation union types a
+   * recorded fact as possibly absent, and `usageEntryOf` carries it whenever it
+   * is there — for a `reconciled`, `replayed` and `recorded-late` fact as much
+   * as for `ignored`, whose standing fact is exactly what its reason explains.
+   * Moving it onto one arm would state a correlation between the outcome and
+   * the fact that the producer does not have.
    */
-  readonly outcome: "reconciled" | "replayed" | "recorded-late" | "ignored";
-  /** The recorded fact after this call (never this call's numbers when ignored). */
   readonly used?: BudgetUsageAmounts;
-  readonly reason?: string;
 }
+
+/**
+ * What recording one usage report did, per attempt.
+ *
+ * THE OUTCOME SELECTS THE ARM, because the outcome and the explanation are one
+ * fact: `reason` says why an `ignored` outcome left the recorded usage alone
+ * (the attempt already carries a DIFFERENT usage fact, which stands and was not
+ * summed), and no other outcome has anything to explain. A `reconciled` fact
+ * carrying a reason — or an `ignored` one without — is not a value this type can
+ * hold.
+ */
+export type OutcomeBudgetUsageEntry = OutcomeBudgetUsageEntryBase & (
+  | {
+    /**
+     * `reconciled` — the outstanding claim was settled with these amounts;
+     * `replayed` — the same amounts were already the standing fact;
+     * `recorded-late` — the attempt was never reserved here and the usage was
+     * APPENDED (delayed billing).
+     */
+    readonly outcome: "reconciled" | "replayed" | "recorded-late";
+  }
+  | {
+    readonly outcome: "ignored";
+    /** Why the later report was NOT summed into the standing usage fact. */
+    readonly reason: string;
+  }
+);
 
 
 /**

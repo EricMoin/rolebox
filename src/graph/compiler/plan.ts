@@ -38,19 +38,35 @@ export interface CompiledOutcomeData {
 /**
  * One acceptance requirement of a compiled outcome.
  *
- * In an EXECUTABLE plan `version` is ALWAYS present: it is the exact capability
- * version compilation RESOLVED, whether the declaration named one or the
- * installed capability supplied it. In a DRAFT it is the version the
- * declaration named, when it named one — the requirement is unresolved and is
- * listed in {@link CompiledPlanBody.executability}. A requirement therefore
- * never silently means "any version" (B9).
+ * `version` is OPTIONAL ON THE TYPE, and the invariant that makes it required in
+ * practice lives one level up: `executability` is a sibling field of the plan
+ * BODY, so no requirement can be narrowed by it without making the whole plan a
+ * per-executability union (the requirement list is shared by drafts and
+ * executables). The runtime rule is therefore enforced where it is decidable,
+ * by readers that see the whole plan:
+ *
+ * - in an EXECUTABLE plan `version` is ALWAYS present — the exact capability
+ *   version compilation RESOLVED, whether the declaration named one or the
+ *   installed capability supplied it — and the compiler writes none other;
+ * - in a DRAFT it is the version the declaration named, when it named one, and
+ *   the unresolved requirement is listed in
+ *   {@link CompiledPlanBody.executability};
+ * - every consumer that needs the exact identity re-checks its presence rather
+ *   than assuming it: `readRequest` refuses an unpinned requirement by name
+ *   (`non-executable-plan`), and the requirement resolution in
+ *   `validateSubmission` reads the version through `readValidatorVersion` and
+ *   skips one that carries none. A requirement therefore never silently means
+ *   "any version" (B9).
  */
 export interface CompiledAcceptanceRequirement {
   /** Validator name. */
   readonly validator: string;
   /**
-   * Exact validator version. Present on every requirement of an executable
-   * plan; optional only while the requirement is unresolved in a draft.
+   * Exact validator version. REQUIRED in an executable plan and written by the
+   * compiler on every requirement it pins; optional on this type only because a
+   * DRAFT may carry an unresolved requirement, and the plan body's shape cannot
+   * depend on its sibling `executability`. A reader that needs the identity
+   * checks for it by name (see the doc block above).
    */
   readonly version?: number;
 }

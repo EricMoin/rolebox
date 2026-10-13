@@ -47,14 +47,28 @@ export interface NormalizedOutcomeProposal {
   readonly evidenceRefs: readonly string[];
 }
 
-/** The keys a proposal may carry; anything else is an unknown key. */
-const PROPOSAL_KEYS: readonly string[] = [
+/**
+ * The keys a proposal may carry, as CLOSED LITERALS — the source the widened
+ * view below and the completeness assertion under it are derived from.
+ *
+ * It is kept apart from the view because the reader asks `includes(key)` with a
+ * plain string, which a literal tuple would narrow to these members.
+ */
+const PROPOSAL_KEY_LITERALS = [
   "nodeId",
   "outcomeId",
   "credential",
   "data",
   "evidenceRefs",
-];
+] as const satisfies readonly (keyof OutcomeProposal)[];
+
+type AssertNever<T extends never> = T;
+type _EveryProposalFieldIsRead = AssertNever<
+  Exclude<keyof OutcomeProposal, (typeof PROPOSAL_KEY_LITERALS)[number]>
+>;
+
+/** The keys a proposal may carry; anything else is an unknown key. */
+const PROPOSAL_KEYS: readonly string[] = PROPOSAL_KEY_LITERALS;
 
 /** One shape violation of a raw proposal value. */
 export interface ProposalShapeIssue {
@@ -132,14 +146,15 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
         `outcomeId is ${describeValue(rawOutcomeId)}, not a non-empty outcome id`,
       );
     }
+    const rawCredential = record.credential;
     let credential: string | undefined;
-    if (record.credential !== undefined) {
-      if (isNonEmptyString(record.credential)) {
-        credential = record.credential;
+    if (rawCredential !== undefined) {
+      if (isNonEmptyString(rawCredential)) {
+        credential = rawCredential;
       } else {
         malformed(
           "$.credential",
-          `credential is ${describeValue(record.credential)}, not the non-empty attempt credential the runtime issued`,
+          `credential is ${describeValue(rawCredential)}, not the non-empty attempt credential the runtime issued`,
         );
       }
     }

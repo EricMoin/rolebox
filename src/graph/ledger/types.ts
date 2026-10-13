@@ -199,8 +199,15 @@ export type ControlCommandName =
   /** Resolve a pending request in the negative: a terminal refusal. */
   | "reject";
 
-/** The control commands this format records, in canonical order. */
-export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freeze([
+/**
+ * The control commands this format records, as CLOSED LITERALS — the source the
+ * widened view below and the completeness assertion under it are derived from.
+ *
+ * It is kept apart from the export because the export's consumers ask
+ * `includes(aControlCommand)`, which a literal tuple would narrow to these
+ * members; the tuple is the SOURCE and the export is the widened view of it.
+ */
+const CONTROL_COMMAND_LITERALS = [
   "failure",
   "cancel",
   "timeout",
@@ -209,6 +216,20 @@ export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freez
   "approval-request",
   "approve",
   "reject",
+] as const satisfies readonly ControlCommandName[];
+
+/**
+ * COMPLETENESS: every command of the control vocabulary appears in the list
+ * above, so a command dropped from it fails to compile instead of silently
+ * answering `false` in `isControlCommandName`.
+ */
+type _EveryControlCommandIsRecorded = AssertNever<
+  Exclude<ControlCommandName, (typeof CONTROL_COMMAND_LITERALS)[number]>
+>;
+
+/** The control commands this format records, in canonical order. */
+export const CONTROL_COMMAND_NAMES: readonly ControlCommandName[] = Object.freeze([
+  ...CONTROL_COMMAND_LITERALS,
 ]);
 
 /**
@@ -567,13 +588,12 @@ export type ApprovalRequestStatus = "pending" | "approved" | "rejected" | "expir
  * explicit `at` input, never a clock read inside the protocol, so the same
  * store replays the same transitions.
  */
-export interface ApprovalRequestRecord {
+export interface ApprovalRequestBase {
   readonly authority: ApprovalGrant;
   readonly graphId: string;
   readonly runId: string;
   readonly nodeId: string;
   readonly attemptId: string;
-  readonly status: ApprovalRequestStatus;
   /** Why the pause was raised. Never overwritten by the decision. */
   readonly reason: string;
   /** Epoch milliseconds the pause was recorded at. */
@@ -588,13 +608,78 @@ export interface ApprovalRequestRecord {
   readonly approverSessionId: string;
   /** Epoch milliseconds this request stops being answerable at. */
   readonly expiresAt: number;
-  /** The approver that decided, present exactly once the request is decided. */
-  readonly decidedBy?: ControlPrincipalRecord;
-  /** Epoch milliseconds the decision was taken at, when decided. */
-  readonly decidedAt?: number;
-  /** Why the request was approved, rejected or expired. */
-  readonly decisionReason?: string;
 }
+
+/**
+ * One durable principal-approval request and its trusted decision (P3 item 3),
+ * discriminated by {@link ApprovalRequestStatus} so the DECIDED FACTS live only
+ * on the arms that own them.
+ *
+ * - `pending` — the pause is live and NOTHING decided it: the DDL's CHECKs
+ *   relate the status to the decision time and reason, so this arm declares all
+ *   three decided fields `never`. A pending row that carries one is refused by
+ *   the store's reader, not read approximately;
+ * - `approved` / `rejected` — a trusted decision resolved the pause, so it names
+ *   the approver that took it AND the time and reason of the decision. The
+ *   approver is REQUIRED because a decision nobody took is not a decision: the
+ *   DDL's CHECK and the store's reader both refuse one without a principal;
+ * - `expired` — the DEADLINE ended the request, so it carries the time and
+ *   reason but names no approver: `expireDueApprovals` and `expireRunApprovals`
+ *   write the status, the instant and the reason, and deliberately not
+ *   `decided_by_session`.
+ *
+ * WHY THE APPROVER IS NAMED HERE. The subject that may RAISE a request (the
+ * graph's declaring principal) is not thereby the subject that may DECIDE it:
+ * the requester names the approver session explicitly, and a decision that
+ * arrives from any other session is refused by name. A worker's own `approved`
+ * field, a claim in `data`, and any other submitted content are not read at
+ * all — the gate reads THIS row, and the row carries no field a submission can
+ * reach (plan §3.4).
+ *
+ * WHY A DEADLINE IS PART OF THE RECORD. A pause with no deadline is a strand:
+ * the plan requires expiry to be a real, deterministically recorded outcome, and
+ * the only way it can be deterministic is for the record itself to say WHEN the
+ * request stops being answerable. Expiry is measured against `expiresAt` and an
+ * explicit `at` input, never a clock read inside the protocol, so the same
+ * store replays the same transitions.
+ *
+ * Keyed by the attempt, so ONE attempt carries at most one approval fact — a
+ * second request for the same attempt replays the first, and a decided request
+ * is never re-decided.
+ */
+export type ApprovalRequestRecord =
+  | (ApprovalRequestBase & {
+    readonly status: "pending";
+    /** ABSENT: a pending pause has not been decided. */
+    readonly decidedBy?: never;
+    readonly decidedAt?: never;
+    readonly decisionReason?: never;
+  })
+  | (ApprovalRequestBase & {
+    readonly status: "approved" | "rejected";
+    /** The approver that decided it. A decision nobody took is refused. */
+    readonly decidedBy: ControlPrincipalRecord;
+    /** Epoch milliseconds the decision was taken at. */
+    readonly decidedAt: number;
+    /** Why the request was approved or rejected. */
+    readonly decisionReason: string;
+  })
+  | (ApprovalRequestBase & {
+    readonly status: "expired";
+    /**
+     * ABSENT in every expiry this build writes: both the deadline sweep and a
+     * decision that arrives after the deadline record the status, the instant
+     * and the reason and no approver, because nobody decided it. Optional here
+     * because the DDL relates `decided_by_session` only to the `approved` and
+     * `rejected` statuses, so the store's reader accepts a row that carries one
+     * — and this union may not be stricter than what the store writes.
+     */
+    readonly decidedBy?: ControlPrincipalRecord;
+    /** Epoch milliseconds the deadline expired it at. */
+    readonly decidedAt: number;
+    /** Why the request expired. */
+    readonly decisionReason: string;
+  });
 
 /** The verdict of raising one approval request. */
 export type ApprovalRaiseResult =
@@ -1162,8 +1247,17 @@ export interface SubmissionKey {
  *
  * `acceptedEvent` is REQUIRED for an `accepted` decision and FORBIDDEN for a
  * `rejected` one — a rejected proposal does not enter the accepted-event stream
- * or settle the attempt. Every effect enters the batch `pending`: a started or
- * terminal effect is a transition, not part of the acceptance commit.
+ * or settle the attempt. THE DISCRIMINANT IS THE RECEIPT'S OWN
+ * {@link ReceiptRecord.decision}, and the correlation is enforced at the WRITE
+ * BOUNDARY (`ledger-tables.ts` refuses a batch whose event disagrees with the
+ * decision it records) rather than by a union of two batch arms: this type is
+ * the port's own parameter type, and the boundary must be handable a malformed
+ * batch by an untyped caller — which is exactly what the store's tests do to
+ * prove the refusal. A union here would make those batches unspellable in typed
+ * code and push an assertion into the tests that check the refusal.
+ *
+ * Every effect enters the batch `pending`: a started or terminal effect is a
+ * transition, not part of the acceptance commit.
  */
 export interface AcceptanceBatch {
   readonly receipt: ReceiptRecord;

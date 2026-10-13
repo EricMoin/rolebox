@@ -67,22 +67,25 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
  * `Record<string, CanonicalToolDef>` answers, which accepted a call the tool
  * never declared and only the runtime parse stood between.
  *
- * THE PRESENCE CHECK IS THE NARROWING, not an assertion: `hasOwnProperty` is
- * expressed as a type predicate, so a name that is an own property of the
- * record provably denotes a value of the record's own value type, and a name
- * the record does not hold answers `undefined` for the caller to refuse.
+ * THE LOOKUP IS KEYED BY THE RECORD, not asserted: `name` is a key of the
+ * record's own type, so `tools[name]` IS the named definition's own type, and a
+ * name the record does not hold answers `undefined` for the caller to refuse.
  */
-export function workerChannelToolOf<T extends Record<string, CanonicalToolDef>>(
-  tools: T,
-  name: string,
-): T[keyof T] | undefined {
+export function workerChannelToolOf<
+  T extends Record<string, CanonicalToolDef>,
+  K extends keyof T,
+>(tools: T, name: K): T[K] | undefined {
   return holdsWorkerChannelTool(tools, name) ? tools[name] : undefined;
 }
 
-function holdsWorkerChannelTool<T extends Record<string, CanonicalToolDef>>(
-  tools: T,
-  name: string,
-): tools is T & Record<string, T[keyof T]> {
+/**
+ * Whether the record itself carries the name (an own property).
+ *
+ * A plain predicate, never an assertion: the record's own value type already
+ * describes what a present name denotes, so this check establishes presence and
+ * nothing more.
+ */
+function holdsWorkerChannelTool(tools: object, name: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(tools, name);
 }
 

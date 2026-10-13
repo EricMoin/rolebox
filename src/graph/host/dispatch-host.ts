@@ -549,7 +549,7 @@ export class HostOutcomeDispatch implements OutcomeDispatchHost {
     const answer = this.executions.lookup(effect);
     if (answer.kind !== "created") return answer;
     const row = this.executions.read(effect);
-    if (row === undefined || row.state !== "created" || row.execution === undefined) {
+    if (row === undefined || row.state !== "created") {
       return Object.freeze({
         kind: "unknown" as const,
         reason:

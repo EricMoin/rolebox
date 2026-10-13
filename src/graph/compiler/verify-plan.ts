@@ -333,10 +333,13 @@ export function verifyPersistedCompiledPlan(
         identities: value.completionPolicyIdentities,
       },
     );
-    if (topology.issues.length > 0) {
-      const issue = topology.issues[0];
+    // The FIRST issue, read once: the length check above and the read below are
+    // one guard, so the element is total without relying on the effective
+    // tsconfig omitting `noUncheckedIndexedAccess`.
+    const firstIssue = topology.issues[0];
+    if (firstIssue !== undefined) {
       return contractCorrupt(
-        `compiled plan topology is inconsistent (${issue.code}): ${issue.message}`,
+        `compiled plan topology is inconsistent (${firstIssue.code}): ${firstIssue.message}`,
       );
     }
     const topologyNodeIds = new Set(topology.nodeIds);
@@ -465,8 +468,10 @@ export function verifyPersistedPlan(
 /**
  * Read the node fields a CONSUMER reads — `agent` and `prompt` (copied into an
  * `OutcomeDispatchIntent` whose fields are `string`), the declared host-tool
- * grant `tools`, the consumed results `inputs` and the fan-in `join` — and name
- * the first one a persisted plan cannot substantiate.
+ * grant `tools`, the consumed results `inputs`, the fan-in `join`, the node's
+ * `outcomes` (each one's `data` contract and `acceptance` gates) and its
+ * `completion` policy — and name the first one a persisted plan cannot
+ * substantiate.
  *
  * WHY THIS EXISTS. The integrity rules deliberately read none of these fields:
  * a node's prompt, budget, contract ref or any extra key is covered by the
@@ -557,6 +562,67 @@ function readConsumerNodeIssue(plan: unknown): string | undefined {
         }
       } else if (strategy !== "all" && strategy !== "any") {
         return `compiled plan node ${JSON.stringify(id)} join strategy is ${describeBindingValue(strategy)}, not "all", "any" or "quorum"`;
+      }
+    }
+    const outcomes = raw.outcomes;
+    if (!Array.isArray(outcomes) || outcomes.length === 0) {
+      return `compiled plan node ${JSON.stringify(id)} outcomes is not a non-empty array of compiled outcomes`;
+    }
+    const outcomeList: readonly unknown[] = outcomes;
+    for (const rawOutcome of outcomeList) {
+      if (!isPlainObject(rawOutcome)) {
+        return `compiled plan node ${JSON.stringify(id)} carries an outcome that is not a record`;
+      }
+      const outcomeId = rawOutcome.id;
+      if (typeof outcomeId !== "string" || outcomeId.length === 0) {
+        return `compiled plan node ${JSON.stringify(id)} carries an outcome with no non-empty id`;
+      }
+      const data = rawOutcome.data;
+      if (data !== undefined) {
+        if (!isPlainObject(data)) {
+          return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} data is ${describeBindingValue(data)}, not a { schema, version? } contract`;
+        }
+        const schema = data.schema;
+        if (typeof schema !== "string" || schema.length === 0) {
+          return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} data schema is ${describeBindingValue(schema)}, not a non-empty string`;
+        }
+        const version = data.version;
+        if (version !== undefined && (typeof version !== "number" || !Number.isFinite(version))) {
+          return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} data version is ${describeBindingValue(version)}, not a finite number`;
+        }
+      }
+      const acceptance = rawOutcome.acceptance;
+      if (!Array.isArray(acceptance)) {
+        return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} acceptance is not an array of { validator, version? } requirements`;
+      }
+      const requirements: readonly unknown[] = acceptance;
+      for (const requirement of requirements) {
+        if (!isPlainObject(requirement)) {
+          return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} carries an acceptance requirement that is not a record`;
+        }
+        const validator = requirement.validator;
+        if (typeof validator !== "string" || validator.length === 0) {
+          return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} acceptance validator is ${describeBindingValue(validator)}, not a non-empty string`;
+        }
+        const version = requirement.version;
+        if (version !== undefined && (typeof version !== "number" || !Number.isFinite(version))) {
+          return `compiled plan node ${JSON.stringify(id)} outcome ${JSON.stringify(outcomeId)} acceptance version is ${describeBindingValue(version)}, not a finite number`;
+        }
+      }
+    }
+    const completion = raw.completion;
+    if (completion !== undefined) {
+      if (!isPlainObject(completion)) {
+        return `compiled plan node ${JSON.stringify(id)} completion is ${describeBindingValue(completion)}, not a completion policy`;
+      }
+      const mode = completion.mode;
+      if (mode === "natural") {
+        const outcome = completion.outcome;
+        if (typeof outcome !== "string" || outcome.length === 0) {
+          return `compiled plan node ${JSON.stringify(id)} natural completion outcome is ${describeBindingValue(outcome)}, not a non-empty outcome id`;
+        }
+      } else if (mode !== "explicit") {
+        return `compiled plan node ${JSON.stringify(id)} completion mode is ${describeBindingValue(mode)}, not "explicit" or "natural"`;
       }
     }
   }

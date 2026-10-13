@@ -19,6 +19,10 @@ export function unconfirmedExecutionsOf(
       attemptId: node.attemptId,
     });
     if (row === undefined || row.attemptId !== node.attemptId) continue;
+    // A `created` row is a CONFIRMED execution, and this reader reports only the
+    // unconfirmed ones; what is left is `pending` or `creating`, and the store's
+    // own invariant makes an execution id unrepresentable on either — so the
+    // projection reports the state and never a name the row cannot carry.
     if (row.state === "created") continue;
     out.push(
       Object.freeze({
@@ -26,8 +30,6 @@ export function unconfirmedExecutionsOf(
         attemptId: node.attemptId,
         effectId,
         state: row.state,
-        ...(row.execution === undefined ? {} : { executionId: row.execution.executionId }),
-        ...(row.execution?.taskId === undefined ? {} : { taskId: row.execution.taskId }),
       }),
     );
   }

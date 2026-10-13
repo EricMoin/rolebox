@@ -336,30 +336,48 @@ function hasExactKeys(
   return keys.length === names.length && keys.every((key) => names.includes(key));
 }
 
+type AssertNever<T extends never> = T;
+
 /** The fields one {@link ResolvedInput} defines, exactly. */
-const RESOLVED_INPUT_KEYS: readonly string[] = Object.freeze([
+const RESOLVED_INPUT_KEYS = Object.freeze([
   "from",
   "outcome",
   "attemptId",
   "payload",
   "artifacts",
-]);
+] as const satisfies readonly (keyof ResolvedInput)[]);
+
+/**
+ * COMPLETENESS: the list above names every field of the model it mirrors, so the
+ * exact-key readers cannot stop demanding one in silence.
+ */
+type _EveryResolvedInputFieldIsRead = AssertNever<
+  Exclude<keyof ResolvedInput, (typeof RESOLVED_INPUT_KEYS)[number]>
+>;
 
 /** The fields one {@link AcceptedArtifact} defines, exactly. */
-const ACCEPTED_ARTIFACT_KEYS: readonly string[] = Object.freeze([
+const ACCEPTED_ARTIFACT_KEYS = Object.freeze([
   "ref",
   "artifactId",
   "digest",
   "size",
-]);
+] as const satisfies readonly (keyof AcceptedArtifact)[]);
+
+type _EveryAcceptedArtifactFieldIsRead = AssertNever<
+  Exclude<keyof AcceptedArtifact, (typeof ACCEPTED_ARTIFACT_KEYS)[number]>
+>;
 
 /** The fields one {@link DownstreamInputRefusal} defines, exactly. */
-const DOWNSTREAM_INPUT_REFUSAL_KEYS: readonly string[] = Object.freeze([
+const DOWNSTREAM_INPUT_REFUSAL_KEYS = Object.freeze([
   "from",
   "outcome",
   "code",
   "message",
-]);
+] as const satisfies readonly (keyof DownstreamInputRefusal)[]);
+
+type _EveryDownstreamInputRefusalFieldIsRead = AssertNever<
+  Exclude<keyof DownstreamInputRefusal, (typeof DOWNSTREAM_INPUT_REFUSAL_KEYS)[number]>
+>;
 
 /** What reading a persisted bound-input list produced. */
 export type ResolvedInputsReading =
@@ -385,6 +403,16 @@ export type InputRefusalsReading =
  * a body carrying the bare payload of a pre-v7 format is refused rather than
  * read as a `value`, because "absent" and "null" would otherwise be
  * indistinguishable again on the way back in.
+ *
+ * PRECONDITION — `raw` IS JSON. Every caller passes a value read back from a
+ * persisted JSON column (a state body, an effect payload) or one produced by
+ * `JSON.parse` over such a body, which is the boundary that makes each
+ * reachable value a `JsonValue`. This reader checks every SHAPE it reads, but
+ * it does NOT re-establish JSON representability — it has no refusal for a
+ * function, a symbol, a non-finite number or a cycle, because the encoder that
+ * wrote the body could not have produced one. A caller passing an in-process
+ * value must not expect that guarantee to be re-proved here; the domain's
+ * `JsonValue` comes from the digest/encode boundary, not from this reader.
  */
 export function readResolvedInputs(
   raw: unknown,
@@ -479,7 +507,10 @@ type AcceptedArtifactReading =
  * The `JsonValue` assertion is discharged by the boundary that produced the
  * value: this reader is reached through a state body or an effect payload the
  * ledger read back from its JSON column, so every reachable value is what
- * `JSON.parse` produced.
+ * `JSON.parse` produced (see the precondition on {@link readResolvedInputs},
+ * the exported reader this runs inside). It is checked to be an OWN value of an
+ * envelope with exactly the keys this format writes; it is not re-validated for
+ * JSON representability, which the encoder already proved.
  */
 function readAcceptedData(
   raw: unknown,

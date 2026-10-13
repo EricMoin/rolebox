@@ -244,10 +244,11 @@ function notices(
   for (const attempt of run.attempts) {
     if (!currentDispatchedAttempt(run, attempt.attemptId)) continue;
     const execution = attempt.execution;
-    const failed = execution?.state === "creating" && execution.refused?.kind === "unproven-failure";
-    const released = execution?.state === "pending" && execution.releasedAt !== undefined;
+    if (execution === undefined) continue;
+    const failed = execution.state === "creating" && execution.refused?.kind === "unproven-failure";
+    const released = execution.state === "pending" && execution.releasedAt !== undefined;
     if (!failed && !released) continue;
-    pending.push({ key: `dispatch:${attempt.attemptId}:${execution!.generation}`,
+    pending.push({ key: `dispatch:${attempt.attemptId}:${execution.generation}`,
       kind: "attention", nodeId: attempt.nodeId, attemptId: attempt.attemptId,
       reason: failed ? "Worker launch failed without proof that no execution exists; recovery needs attention." : "Worker launch was refused; the dispatch remains pending." });
   }

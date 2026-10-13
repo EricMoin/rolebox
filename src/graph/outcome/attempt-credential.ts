@@ -1,5 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 
+import type {
+  DispatchedNodeState,
+  OutcomeNodeState,
+  SettledNodeState,
+} from "./state-model.ts";
+
 // ── The scope ───────────────────────────────────────────────────────────────
 
 /**
@@ -189,15 +195,23 @@ export function isAttemptCredentialDigest(value: unknown): value is string {
 
 /**
  * The fields of a persisted state entry this module needs to locate the attempt
- * a presented credential was issued for. Structural on purpose: the caller
- * passes its own `OutcomeNodeState` (which carries exactly these fields among
- * others) without this dependency leaf importing the state model.
+ * a presented credential was issued for — taken from the arms that CAN carry
+ * one.
+ *
+ * A credential is recorded on a DISPATCHED or SETTLED entry, and those two arms
+ * require BOTH the attempt identity and the digest; the pending arm declares
+ * both `never`. Picking the fields off the two non-pending arms is therefore
+ * what makes "this entry has a digest" imply "this entry has an attempt id" at
+ * the boundary that decides WHICH attempt a credential names — a caller no
+ * longer has to re-derive that the two travel together.
+ *
+ * The state model is imported as a TYPE only, so the emitted module keeps its
+ * current dependency direction.
  */
-export interface AttemptCredentialEntry {
-  readonly nodeId: string;
-  readonly attemptId?: string;
-  readonly attemptCredentialDigest?: string;
-}
+export type AttemptCredentialEntry = Pick<
+  DispatchedNodeState | SettledNodeState,
+  "nodeId" | "attemptId" | "attemptCredentialDigest"
+>;
 
 /**
  * The entry whose recorded DIGEST matches the presented credential, or
@@ -212,17 +226,23 @@ export interface AttemptCredentialEntry {
  * a credential for a superseded attempt all answer `undefined` here, exactly as
  * they are refused there.
  *
- * WHAT THIS FUNCTION DOES NOT DECIDE. Finding an entry is NOT an acceptance: an
- * entry with no `attemptId`, a node whose status makes the attempt unsettleable
- * and every gate of the declared contract stay the acceptance core's to judge.
- * This locator only says WHICH attempt the submission is about.
+ * WHAT THIS FUNCTION DOES NOT DECIDE. Finding an entry is NOT an acceptance: a
+ * node whose status makes the attempt unsettleable and every gate of the
+ * declared contract stay the acceptance core's to judge. This locator only says
+ * WHICH attempt the submission is about.
+ *
+ * THE SCAN ACCEPTS THE WHOLE NODE LIST and skips the PENDING entries by name: a
+ * pending entry carries neither an attempt nor a digest (its arm declares both
+ * `never`), so it could never match a presented credential, and skipping it is
+ * what lets the answer be typed as the non-pending entry it must be.
  */
 export function attemptEntryHoldingCredential(
-  entries: readonly AttemptCredentialEntry[],
+  entries: readonly OutcomeNodeState[],
   credential: string,
 ): AttemptCredentialEntry | undefined {
   const presented = attemptCredentialDigest(credential);
   for (const entry of entries) {
+    if (entry.status === "pending") continue;
     if (entry.attemptCredentialDigest === presented) return entry;
   }
   return undefined;
@@ -231,15 +251,26 @@ export function attemptEntryHoldingCredential(
 // ── Shape ───────────────────────────────────────────────────────────────────
 
 /**
- * The shape rule of a credential value: a non-empty string.
+ * The shape rule of a credential value: a non-empty string that is NOT a
+ * {@link attemptCredentialDigest}.
  *
- * The VALUE is opaque — no structure, no checksum, no prefix — so a credential
- * carries no information a worker could use to derive another one. Length is
- * not enforced because an injected test source may mint a short deterministic
- * value; the SHIPPED source mints 256 bits.
+ * The VALUE is opaque — no structure, no checksum, no prefix of its own — so a
+ * credential carries no information a worker could use to derive another one.
+ * Length is not enforced because an injected test source may mint a short
+ * deterministic value; the SHIPPED source mints 256 bits.
+ *
+ * A DIGEST IS NOT A CREDENTIAL, AND THE TWO ARE NOT INTERCHANGEABLE. The
+ * persisted record keeps the digest — a verifier this build can check a
+ * presented credential against but can never present — while the credential
+ * itself is handed to one dispatch channel and kept by the host store. A host
+ * store answering a digest where a bearer credential belongs would otherwise be
+ * accepted as one, and the attempt it names could never settle: the verifier
+ * recorded for it is the digest OF THE CREDENTIAL, which the digest value
+ * itself does not hash to. The digest shape is therefore refused here, at the
+ * one boundary every credential (minted, injected or resolved) passes through.
  */
 export function isAttemptCredential(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+  return typeof value === "string" && value.length > 0 && !isAttemptCredentialDigest(value);
 }
 
 /** Describe a rejected value for a diagnostic without ever throwing. */

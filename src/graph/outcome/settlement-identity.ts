@@ -243,22 +243,11 @@ export function resolveSettlementIdentity(
       },
     };
   }
+  // THE HOLDER IS NEVER PENDING, and both non-pending arms REQUIRE an attempt
+  // id, so there is no "credential without an attempt" case to refuse here: the
+  // scan above skips the arm that has neither, and the state model makes the
+  // combination the removed branch described unrepresentable.
   const attemptId = holder.attemptId;
-  if (attemptId === undefined) {
-    return {
-      kind: "refused",
-      refusal: {
-        code: "unreadable-state",
-        path: "$.nodes[" + index + "].attemptId",
-        message:
-          "outcome-runtime: node " +
-          JSON.stringify(reading.proposal.nodeId) +
-          " records a credential on a " +
-          holder.status +
-          " entry but carries no attempt id — the binding cannot be resolved",
-      },
-    };
-  }
   // THE DELIVERY'S ATTEMPT NAME MUST AGREE WITH THE CREDENTIAL'S ATTEMPT
   // (the natural-completion cross-check): the delivery says WHICH attempt
   // completed, and that name is checked against the attempt the credential

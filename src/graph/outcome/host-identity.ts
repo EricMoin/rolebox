@@ -165,10 +165,28 @@ export function readHostIdentityCapability(
   });
 }
 
+/**
+ * A version-1 host identity capability AS THIS PREDICATE SEES IT.
+ *
+ * A type predicate can prove no more than the check behind it, and the check is
+ * "a plain record with exactly { version, id, current }, version 1, a non-empty
+ * id, and a `current` that is a FUNCTION". `HostIdentityCapability.current`
+ * claims to answer a `HostInvocationIdentity`, which this predicate never
+ * checked — narrowing to that interface would hand out an unvalidated return
+ * type. The predicate therefore narrows to THIS shape, whose callable returns
+ * `unknown`, and {@link readCurrentHostIdentity} stays the only reader that
+ * checks what `current()` answers and hands out the validated interface.
+ */
+export interface UnvalidatedHostIdentityCapability {
+  readonly version: typeof HOST_IDENTITY_VERSION;
+  readonly id: string;
+  readonly current: () => unknown;
+}
+
 /** Whether a value is a readable version-1 host identity capability. */
 export function isHostIdentityCapability(
   value: unknown,
-): value is HostIdentityCapability {
+): value is UnvalidatedHostIdentityCapability {
   return readHostIdentityCapability(value) !== undefined;
 }
 
@@ -587,10 +605,25 @@ export function readHostWorkerIdentityCapability(
   });
 }
 
+/**
+ * A worker-identity capability AS THIS PREDICATE SEES IT.
+ *
+ * The same bind as {@link UnvalidatedHostIdentityCapability}: the check proves
+ * that the three members are FUNCTIONS, not what they answer, so the predicate
+ * narrows to a shape whose callables return `unknown` — a caller that needs a
+ * validated session or binding reads it through `readCurrentWorkerSession` /
+ * `readHostWorkerBindingFor`, never off this narrowed value.
+ */
+export interface UnvalidatedHostWorkerIdentityCapability
+  extends UnvalidatedHostIdentityCapability {
+  readonly currentSession: () => unknown;
+  readonly bindingFor: (attempt: HostWorkerAttemptRef) => unknown;
+}
+
 /** Whether a value is a readable worker-identity capability. */
 export function isHostWorkerIdentityCapability(
   value: unknown,
-): value is HostWorkerIdentityCapability {
+): value is UnvalidatedHostWorkerIdentityCapability {
   return readHostWorkerIdentityCapability(value) !== undefined;
 }
 

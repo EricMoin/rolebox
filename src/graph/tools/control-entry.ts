@@ -5,11 +5,14 @@ import {
   type GraphControlResult,
 } from "../control/application.ts";
 import {
+  type GraphControlRefused,
   approvalRequestSpecAbsentRefusal,
   missingRetryCapabilityRefusal,
   nodeScopedCommandMissingNodeRefusal,
+  refuse,
   runWideCommandNamedNodeRefusal,
 } from "../control/command-context.ts";
+import { approvalSpecProblem } from "../control/approval.ts";
 import type { AttemptCredentialSource } from "../outcome/attempt-credential.ts";
 import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import { GraphStoreFormatError } from "../store/errors.ts";
@@ -77,6 +80,41 @@ function refused(
     graphId,
     refusals: Object.freeze([Object.freeze({ code, path, message })]),
   });
+}
+
+/**
+ * The refusal a raise whose specification is present but HALF missing is
+ * answered with.
+ *
+ * `approval-command.ts` states this sentence inside its own transaction, where
+ * it judges a request it could build; the tool entry applies the SAME rule when
+ * a caller supplied only half of the specification — the shape the handler's
+ * union cannot carry — so the code, the path and the wording are the handler's,
+ * taken from {@link approvalSpecProblem} and wrapped exactly as the handler
+ * wraps them.
+ *
+ * THE CALLER HAS ALREADY ESTABLISHED THAT ONE HALF IS MISSING, which is what
+ * the rule names; a specification the rule PASSES would mean the shape rule and
+ * the specification rule disagreed, and that is thrown rather than answered with
+ * a fabricated refusal.
+ */
+function halfApprovalSpecRefusal(
+  graphId: string,
+  spec: Record<string, unknown>,
+  at: number,
+): GraphControlRefused {
+  const problem = approvalSpecProblem(spec, at);
+  if (problem === undefined) {
+    throw new Error(
+      "graph-control: an approval specification missing one half was not refused",
+    );
+  }
+  return refuse(
+    graphId,
+    "approval-request-malformed",
+    "$.approval",
+    "graph-control refused [approval-request-malformed]: " + problem + " — nothing was written",
+  );
 }
 
 /**
@@ -245,22 +283,36 @@ export function runGraphControlEntry(
         if (nodeId === undefined) {
           return nodeScopedCommandMissingNodeRefusal(graphId, "approval-request");
         }
+        const approverSessionId = args.approver_session_id;
+        const expiresAt = args.expires_at;
         // WHAT AN APPROVAL REQUEST MUST CARRY. Passed through verbatim, never
         // inferred: no default approver, no default deadline. A raise that
-        // carried NEITHER is refused by name here; one that carried only half
-        // reaches the handler's own `approvalSpecProblem`, which names the
-        // missing half — the same refusal, from the same rule.
-        if (args.approver_session_id === undefined && args.expires_at === undefined) {
+        // carried NEITHER is refused by name here; one that carried only HALF
+        // cannot build the arm the handler's union requires, so the handler's own
+        // `approvalSpecProblem` names the missing half — the same refusal, from
+        // the same rule, with the present half handed over as it arrived.
+        if (approverSessionId === undefined && expiresAt === undefined) {
           return approvalRequestSpecAbsentRefusal(graphId);
+        }
+        // THE RAISE ARM IS BUILT ONLY WHEN BOTH HALVES ARE THERE. A present half
+        // is never padded with an empty approver or a zero deadline: the absent
+        // one is what the refusal must name, and a fabricated value would hide
+        // it.
+        if (approverSessionId === undefined || expiresAt === undefined) {
+          return halfApprovalSpecRefusal(
+            graphId,
+            {
+              ...(approverSessionId === undefined ? {} : { approverSessionId }),
+              ...(expiresAt === undefined ? {} : { expiresAt }),
+            },
+            base.at,
+          );
         }
         return applyGraphControl(store, {
           ...base,
           command: "approval-request",
           nodeId,
-          approval: Object.freeze({
-            approverSessionId: args.approver_session_id ?? "",
-            expiresAt: args.expires_at ?? 0,
-          }),
+          approval: Object.freeze({ approverSessionId, expiresAt }),
           ...(args.attempt_id === undefined ? {} : { attemptId: args.attempt_id }),
         });
       }

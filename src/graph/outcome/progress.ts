@@ -147,7 +147,12 @@ export type ProgressProjectionReading =
   | { readonly kind: "projected"; readonly projection: ProgressProjection }
   | {
     readonly kind: "refused";
-    readonly refusals: readonly ProgressProjectionRefusal[];
+    /**
+     * The refusals that stopped the projection. NON-EMPTY by construction: a
+     * projection is refused only to report the first reason it could not be
+     * produced, so a refused reading always names at least one refusal.
+     */
+    readonly refusals: readonly [ProgressProjectionRefusal, ...ProgressProjectionRefusal[]];
   };
 
 /** Inputs to {@link projectProgress}. */
@@ -303,17 +308,14 @@ export type ProgressUnknownReason =
   | "incomparable-value";
 
 /**
- * One comparison, as reported to the caller.
+ * The fields every comparison reports, whatever it answered.
  *
  * The unchanged count is the counter AFTER the comparison, the baseline the
  * persisted token after it, and stalled whether this comparison reached the
  * declared stagnation threshold — the explicit stopping policy the plan declares.
  */
-export interface ProgressReport {
+interface ProgressReportFields {
   readonly loopGroupId: string;
-  readonly verdict: ProgressVerdict;
-  /** Present exactly when the verdict is unknown. */
-  readonly unknownReason?: ProgressUnknownReason;
   readonly evaluator: string;
   readonly version: number;
   readonly subject: string;
@@ -321,6 +323,23 @@ export interface ProgressReport {
   readonly baseline?: string;
   readonly stalled: boolean;
 }
+
+/**
+ * One comparison, as reported to the caller.
+ *
+ * THE VERDICT AND ITS REASON ARE ONE FACT, so they are one arm: an `unknown`
+ * comparison always carries WHY it could not judge ({@link ProgressUnknownReason}),
+ * and the two comparable verdicts carry no reason at all. The verdict selects
+ * the arm, so an `unknown` report without a reason — or a `progressed` one with
+ * one — is a value this type cannot hold, and a reader that has seen
+ * `verdict === "unknown"` holds the reason without a second check.
+ */
+export type ProgressReport =
+  | (ProgressReportFields & {
+    readonly verdict: "unknown";
+    readonly unknownReason: ProgressUnknownReason;
+  })
+  | (ProgressReportFields & { readonly verdict: Exclude<ProgressVerdict, "unknown"> });
 
 /** What one comparison produced: the report and the entry to persist. */
 export interface ProgressComparison {
@@ -392,7 +411,7 @@ export function compareProgress(
       baseline: token,
     });
     return {
-      report: reportOf(established, "progressed", undefined, false),
+      report: reportOf(established, { verdict: "progressed" }, false),
       entry: established,
     };
   }
@@ -400,7 +419,7 @@ export function compareProgress(
     const unchanged = entry.unchanged + 1;
     const stalled = unchanged >= policy.maxUnchanged;
     const same: OutcomeLoopProgress = Object.freeze({ ...entry, unchanged });
-    return { report: reportOf(same, "unchanged", undefined, stalled), entry: same };
+    return { report: reportOf(same, { verdict: "unchanged" }, stalled), entry: same };
   }
   const progressed: OutcomeLoopProgress = Object.freeze({
     ...entry,
@@ -408,7 +427,7 @@ export function compareProgress(
     baseline: token,
   });
   return {
-    report: reportOf(progressed, "progressed", undefined, false),
+    report: reportOf(progressed, { verdict: "progressed" }, false),
     entry: progressed,
   };
 }
@@ -430,20 +449,30 @@ function unknownComparison(
   reason: ProgressUnknownReason,
 ): ProgressComparison {
   const cleared: OutcomeLoopProgress = Object.freeze({ ...entry, unchanged: 0 });
-  return { report: reportOf(cleared, "unknown", reason, false), entry: cleared };
+  return { report: reportOf(cleared, { verdict: "unknown", unknownReason: reason }, false), entry: cleared };
 }
 
-/** Assemble one frozen report from the entry a comparison produced. */
+/** What one comparison answered, in the shape the report carries it. */
+type ProgressReportAnswer =
+  | { readonly verdict: "unknown"; readonly unknownReason: ProgressUnknownReason }
+  | { readonly verdict: "progressed" | "unchanged" };
+
+/**
+ * Assemble one frozen report from the entry a comparison produced.
+ *
+ * The ANSWER is handed in whole, never as a verdict plus an independent reason:
+ * the caller that answered `unknown` names its reason here, and the caller that
+ * answered `progressed`/`unchanged` has none to name — a report whose verdict
+ * and reason disagreed is not a value this function can build.
+ */
 function reportOf(
   entry: OutcomeLoopProgress,
-  verdict: ProgressVerdict,
-  unknownReason: ProgressUnknownReason | undefined,
+  answer: ProgressReportAnswer,
   stalled: boolean,
 ): ProgressReport {
   return Object.freeze({
     loopGroupId: entry.loopGroupId,
-    verdict,
-    ...(unknownReason === undefined ? {} : { unknownReason }),
+    ...answer,
     evaluator: entry.evaluator,
     version: entry.version,
     subject: entry.subject,

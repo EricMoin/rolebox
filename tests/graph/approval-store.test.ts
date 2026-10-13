@@ -77,7 +77,10 @@ const DEADLINE = AT + 60_000;
 const APPROVER = "session.approver";
 const DECLARER = "session.declarer";
 
-function request(overrides: Partial<ApprovalRequestRecord> = {}): ApprovalRequestRecord {
+/** The PENDING arm of the record: the only shape `request` raises. */
+type PendingApprovalRequest = Extract<ApprovalRequestRecord, { status: "pending" }>;
+
+function request(overrides: Partial<PendingApprovalRequest> = {}): ApprovalRequestRecord {
   return Object.freeze({
     graphId: GRAPH,
     authority: approvalGrantFor(GRAPH, APPROVER),

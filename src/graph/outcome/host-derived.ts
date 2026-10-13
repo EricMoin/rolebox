@@ -88,8 +88,15 @@ export interface HostDerivedCompletionFact {
   readonly derivation?: HostDerivedDerivation;
 }
 
-/** The keys a fact may carry; anything else is an unknown key. */
-const FACT_KEYS: readonly string[] = [
+type AssertNever<T extends never> = T;
+
+/**
+ * The keys a fact may carry, as CLOSED LITERALS — the source the widened view
+ * below and the completeness assertion under it are derived from. It is kept
+ * apart from the view because the reader asks `includes(key)` with a plain
+ * string, which a literal tuple would narrow to these members.
+ */
+const FACT_KEY_LITERALS = [
   "nodeId",
   "attemptId",
   "executionId",
@@ -97,10 +104,27 @@ const FACT_KEYS: readonly string[] = [
   "data",
   "evidenceRefs",
   "derivation",
-];
+] as const satisfies readonly (keyof HostDerivedCompletionFact)[];
+
+type _EveryFactFieldIsRead = AssertNever<
+  Exclude<keyof HostDerivedCompletionFact, (typeof FACT_KEY_LITERALS)[number]>
+>;
+
+/** The keys a fact may carry; anything else is an unknown key. */
+const FACT_KEYS: readonly string[] = FACT_KEY_LITERALS;
+
+/** The keys a `derivation` may carry, as the same closed-literal source. */
+const DERIVATION_KEY_LITERALS = [
+  "eventIndex",
+  "turnIndex",
+] as const satisfies readonly (keyof HostDerivedDerivation)[];
+
+type _EveryDerivationFieldIsRead = AssertNever<
+  Exclude<keyof HostDerivedDerivation, (typeof DERIVATION_KEY_LITERALS)[number]>
+>;
 
 /** The keys a `derivation` may carry; anything else is an unknown key. */
-const DERIVATION_KEYS: readonly string[] = ["eventIndex", "turnIndex"];
+const DERIVATION_KEYS: readonly string[] = DERIVATION_KEY_LITERALS;
 
 /** One shape violation of a raw host-derived delivery. */
 export interface HostDerivedCompletionIssue {

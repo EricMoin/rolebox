@@ -324,12 +324,14 @@ export class HostCredentialVault {
 // ── Primitives ──────────────────────────────────────────────────────────────
 
 /**
- * The vault's map key: the runtime's own attempt identity, joined unambiguously.
+ * The vault's map key: the runtime's own attempt identity, encoded INJECTIVELY.
  *
- * THE ONE SPELLING (F-08) of this three-part identity. Exported so a second map
- * that ever keys the same credential identity composes this derivation instead
- * of spelling the join again; the bytes are unchanged.
+ * THE ONE SPELLING (F-08) of this three-part identity. The three ids are a JSON
+ * array rather than a NUL-joined string, so no id can forge another identity's
+ * key by carrying the separator; the key is a private in-memory Map key and is
+ * never persisted. Exported so a second map that ever keys the same credential
+ * identity composes this derivation instead of spelling the join again.
  */
 export function credentialCacheKeyOf(identity: CredentialStoreIdentity): string {
-  return identity.graphId + "\u0000" + identity.nodeId + "\u0000" + identity.attemptId;
+  return JSON.stringify([identity.graphId, identity.nodeId, identity.attemptId]);
 }

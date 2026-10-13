@@ -17,6 +17,8 @@ import {
   projectProgress,
   type OutcomeLoopProgress,
   type ProgressProjection,
+  type ProgressReport,
+  type ProgressUnknownReason,
 } from "../../src/graph/outcome/progress.ts";
 
 const BINDING: ValidationBinding = Object.freeze({
@@ -46,6 +48,15 @@ function projectionOf(data: unknown): ProgressProjection {
   });
   if (reading.kind !== "projected") throw new Error("fixture: the projection was refused");
   return reading.projection;
+}
+
+/**
+ * The reason of one UNKNOWN comparison, read through the report's own
+ * discriminant: a report that is not unknown carries no reason at all, so this
+ * answers `undefined` for it instead of reaching for a field its arm omits.
+ */
+function unknownReasonOf(report: ProgressReport): ProgressUnknownReason | undefined {
+  return report.verdict === "unknown" ? report.unknownReason : undefined;
 }
 
 /** The progress record a loop starts with: no baseline, no count. */
@@ -95,7 +106,7 @@ describe("progress comparison — an unknown clears the streak", () => {
     });
     verdicts.push(unknown.report.verdict);
     counters.push(unknown.report.unchanged);
-    expect(unknown.report.unknownReason).toBe("incomparable-value");
+    expect(unknownReasonOf(unknown.report)).toBe("incomparable-value");
     expect(unknown.report.baseline).toBe("r1");
     expect(unknown.report.stalled).toBe(false);
     expect(unknown.entry.baseline).toBe("r1");
@@ -129,7 +140,7 @@ describe("progress comparison — an unknown clears the streak", () => {
       projection: projectionOf({ revision: "r1".repeat(300) }),
     });
     expect(unknown.report.verdict).toBe("unknown");
-    expect(unknown.report.unknownReason).toBe("truncated-value");
+    expect(unknownReasonOf(unknown.report)).toBe("truncated-value");
     expect(unknown.report.unchanged).toBe(0);
     expect(unknown.report.stalled).toBe(false);
     expect(unknown.entry.baseline).toBe("r1");
@@ -159,7 +170,7 @@ describe("progress comparison — an unknown clears the streak", () => {
       projection: projectionOf({ revision: "r1" }),
     });
     expect(changed.report.verdict).toBe("unknown");
-    expect(changed.report.unknownReason).toBe("evaluator-identity-mismatch");
+    expect(unknownReasonOf(changed.report)).toBe("evaluator-identity-mismatch");
     expect(changed.report.version).toBe(2);
     expect(changed.report.unchanged).toBe(0);
     expect(changed.report.baseline).toBe("r1");

@@ -1455,7 +1455,7 @@ export class GraphStore {
       const row = this.readExecution(effect);
       if (row === undefined) return Object.freeze({ kind: "absent" as const });
       const current = row.ownerId === ownerId && row.generation === generation;
-      if (current && row.state === "created" && row.execution !== undefined) {
+      if (current && row.state === "created") {
         if (row.execution.executionId === execution.executionId) {
           return Object.freeze({ kind: "replayed" as const, execution: row.execution });
         }
@@ -1638,15 +1638,6 @@ export class GraphStore {
         GRAPH_STORE_FORMAT_VERSION,
       );
     }
-    const executionId = entry["execution_id"];
-    const taskId = entry["task_id"];
-    const execution =
-      typeof executionId === "string" && executionId.length > 0
-        ? Object.freeze({
-          executionId,
-          ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
-        })
-        : undefined;
     const generation = readStoreEpoch(entry, "owner_generation", this.filePath, table);
     if (generation < 1) {
       throw new GraphStoreFormatError(
@@ -1667,19 +1658,51 @@ export class GraphStore {
         GRAPH_STORE_FORMAT_VERSION,
       );
     }
-    return Object.freeze({
+    // The record is assembled in the FIELD ORDER this reader has always written,
+    // so a row that reaches a JSON renderer keeps its exact key order; the three
+    // pieces are read in the row's own column order as well.
+    const identity = {
       graphId: readStoreText(entry, "graph_id", this.filePath, table),
       effectId: readStoreText(entry, "effect_id", this.filePath, table),
       attemptId: readStoreText(entry, "attempt_id", this.filePath, table),
-      state,
+    };
+    const claim = {
       ownerId: readStoreText(entry, "owner_id", this.filePath, table),
       generation,
-      ...(execution === undefined ? {} : { execution }),
+    };
+    const release = {
       ...(releasedAt === undefined ? {} : { releasedAt }),
       ...refusalOf(entry, effect, this.filePath, table),
+    };
+    const times = {
       claimedAt: readStoreEpoch(entry, "claimed_at", this.filePath, table),
       updatedAt: readStoreEpoch(entry, "updated_at", this.filePath, table),
-    });
+    };
+    // THE STATE CARRIES THE PAYLOAD. The DDL relates the two with
+    // `(state = 'created') = (execution_id IS NOT NULL)`, so this reader does
+    // not re-derive "was an execution named?" from a nullable column: it reads
+    // the identity on the arm that owns one, and refuses a row that contradicts
+    // its own state instead of returning a record the union cannot describe.
+    if (state === "created") {
+      return Object.freeze({
+        ...identity,
+        state,
+        ...claim,
+        execution: readExecutionIdentity(entry, this.filePath, table),
+        ...release,
+        ...times,
+      });
+    }
+    if (readOptionalStoreText(entry, "execution_id", this.filePath, table) !== undefined) {
+      throw new GraphStoreFormatError(
+        "malformed-row",
+        this.filePath,
+        `graph-store: the execution binding for effect ${JSON.stringify(effect.effectId)} is ${state} and still carries an execution id — only a created binding names an execution, so refusing to read it approximately`,
+        entry["execution_id"],
+        GRAPH_STORE_FORMAT_VERSION,
+      );
+    }
+    return Object.freeze({ ...identity, state, ...claim, ...release, ...times });
   }
 
   // ── Credential records ────────────────────────────────────────────────────
@@ -1919,12 +1942,11 @@ export class GraphStore {
       this.filePath,
       GRAPH_STORE_TABLES.origins,
     );
-    const agent = entry["agent"];
-    return Object.freeze(
-      typeof agent === "string" && agent.length > 0
-        ? { sessionId, agent }
-        : { sessionId },
-    );
+    // THE AGENT IS READ THROUGH THE STORE'S REFUSING READER: a value that is
+    // neither NULL nor a non-empty string is a malformed row and is refused by
+    // name, never read as "the host attributed no agent".
+    const agent = readOptionalStoreText(entry, "agent", this.filePath, GRAPH_STORE_TABLES.origins);
+    return Object.freeze(agent === undefined ? { sessionId } : { sessionId, agent });
   }
 
   /** Every graph id this table holds an origin for, sorted. */
@@ -3214,14 +3236,14 @@ function readDecidedBy(
   table: string,
 ): { readonly decidedBy?: ControlPrincipalRecord } {
   const session = row[sessionColumn];
-  const agent = row[agentColumn];
+  const rawAgent = row[agentColumn];
   if (session === null || session === undefined) {
-    if (agent !== null && agent !== undefined) {
+    if (rawAgent !== null && rawAgent !== undefined) {
       throw new GraphStoreFormatError(
         "malformed-row",
         path,
         `graph-store: a ${table} row of ${path} records an agent with no deciding session — refusing to read it approximately`,
-        agent,
+        rawAgent,
         GRAPH_STORE_FORMAT_VERSION,
       );
     }
@@ -3236,7 +3258,12 @@ function readDecidedBy(
       GRAPH_STORE_FORMAT_VERSION,
     );
   }
-  if (typeof agent === "string" && agent.length > 0) {
+  // THE AGENT IS READ THROUGH THE STORE'S REFUSING READER, here where the row
+  // holds a session and an agent may legitimately be absent or named: a value
+  // that is neither NULL nor a non-empty string is a MALFORMED row and is
+  // refused by name, never silently read as "the host attributed no agent".
+  const agent = readOptionalStoreText(row, agentColumn, path, table);
+  if (agent !== undefined) {
     return { decidedBy: Object.freeze({ sessionId: session, agentId: agent }) };
   }
   return { decidedBy: Object.freeze({ sessionId: session }) };
@@ -3326,22 +3353,12 @@ function readApprovalRow(
       );
     }
   } else if (decidedAt === undefined || decisionReason === undefined) {
-    throw new GraphStoreFormatError(
-      "malformed-row",
-      path,
-      `graph-store: a ${table} row of ${path} is ${status} with no decision time or reason — refusing to read it approximately`,
-      status,
-      GRAPH_STORE_FORMAT_VERSION,
-    );
+    // ONE spelling of this refusal, in the reader that also proves the pair for
+    // the terminal arms built below.
+    readDecidedApproval(row, path, table, status);
   }
   if ((status === "approved" || status === "rejected") && decidedBy.decidedBy === undefined) {
-    throw new GraphStoreFormatError(
-      "malformed-row",
-      path,
-      `graph-store: a ${table} row of ${path} is ${status} with no deciding approver — refusing to read it approximately`,
-      status,
-      GRAPH_STORE_FORMAT_VERSION,
-    );
+    refuseMissingApprover(path, table, status);
   }
   const requestedBy = readDecidedBy(
     row,
@@ -3358,22 +3375,98 @@ function readApprovalRow(
     throw new GraphStoreFormatError("malformed-row", path,
       "approval request or decision violates its recorded authority", undefined, GRAPH_STORE_FORMAT_VERSION);
   }
-  return Object.freeze({
+  // The record is assembled in the FIELD ORDER this reader has always written
+  // (`status` stays between the attempt and the reason), so a row that reaches a
+  // JSON renderer keeps its exact key order.
+  const head = {
     graphId: readStoreText(row, "graph_id", path, table),
     runId: readStoreText(row, "run_id", path, table),
     nodeId: readStoreText(row, "node_id", path, table),
     attemptId: readStoreText(row, "attempt_id", path, table),
-    status,
+  };
+  const tail = {
     reason: readStoreText(row, "reason", path, table),
     requestedAt: readStoreEpoch(row, "requested_at", path, table),
     authority,
     approverSessionId,
     expiresAt: readStoreEpoch(row, "expires_at", path, table),
     ...(requestedBy.decidedBy === undefined ? {} : { requestedBy: requestedBy.decidedBy }),
-    ...(decidedBy.decidedBy === undefined ? {} : { decidedBy: decidedBy.decidedBy }),
-    ...(decidedAt === undefined ? {} : { decidedAt }),
-    ...(decisionReason === undefined ? {} : { decisionReason }),
+  };
+  // READ THE ARM THE STATUS NAMES (the record is a union, see
+  // {@link ApprovalRequestRecord}): a pending row carries no decision at all,
+  // and a terminal one is built from the facts the checks above proved — the
+  // decision pair is read back through the refusing reader, and an approved or
+  // rejected row names the approver check 3 demanded.
+  if (status === "pending") return Object.freeze({ ...head, status, ...tail });
+  const decided = readDecidedApproval(row, path, table, status);
+  if (status === "expired") {
+    return Object.freeze({
+      ...head,
+      status,
+      ...tail,
+      ...(decidedBy.decidedBy === undefined ? {} : { decidedBy: decidedBy.decidedBy }),
+      decidedAt: decided.decidedAt,
+      decisionReason: decided.decisionReason,
+    });
+  }
+  return Object.freeze({
+    ...head,
+    status,
+    ...tail,
+    decidedBy: decidedBy.decidedBy ?? refuseMissingApprover(path, table, status),
+    decidedAt: decided.decidedAt,
+    decisionReason: decided.decisionReason,
   });
+}
+
+/**
+ * Refuse a decided approval row that names no approver; NEVER returns.
+ *
+ * ONE spelling of the refusal: the reader's up-front check calls it for the
+ * `approved`/`rejected` arm it is about to build, and that arm names the same
+ * helper as the total fallback for the value the check proved — so a row that
+ * disagrees with its own status is refused in one place rather than two.
+ */
+function refuseMissingApprover(
+  path: string,
+  table: string,
+  status: ApprovalRequestStatus,
+): never {
+  throw new GraphStoreFormatError(
+    "malformed-row",
+    path,
+    `graph-store: a ${table} row of ${path} is ${status} with no deciding approver — refusing to read it approximately`,
+    status,
+    GRAPH_STORE_FORMAT_VERSION,
+  );
+}
+
+/**
+ * The decision time and reason a NON-pending approval row must carry.
+ *
+ * The DDL's CHECKs relate both to the status, and the reader's own check
+ * refuses a row that disagrees; reading them again THROUGH this function is what
+ * lets the terminal arms be built from the values the check proved instead of
+ * re-checking a nullable column at the construction site.
+ */
+function readDecidedApproval(
+  row: Record<string, unknown>,
+  path: string,
+  table: string,
+  status: ApprovalRequestStatus,
+): { readonly decidedAt: number; readonly decisionReason: string } {
+  const decidedAt = readOptionalStoreEpoch(row, "decided_at", path, table);
+  const decisionReason = readOptionalStoreText(row, "decision_reason", path, table);
+  if (decidedAt === undefined || decisionReason === undefined) {
+    throw new GraphStoreFormatError(
+      "malformed-row",
+      path,
+      `graph-store: a ${table} row of ${path} is ${status} with no decision time or reason — refusing to read it approximately`,
+      status,
+      GRAPH_STORE_FORMAT_VERSION,
+    );
+  }
+  return { decidedAt, decisionReason };
 }
 
 /** Read one approval status, or refuse a value this format does not write. */
@@ -3475,18 +3568,22 @@ function readReexecutionRow(
       GRAPH_STORE_FORMAT_VERSION,
     );
   }
+  // BOTH COLUMNS ARE READ THROUGH THE STORE'S REFUSING READERS: a value that is
+  // neither NULL nor what this format writes is a MALFORMED row, not an absent
+  // successor — the presence check above must not collapse "wrong type" into
+  // "nothing to read". The pair is then positively discriminated, so the
+  // successor arm needs no assertion about the value it was built from.
+  const successorRunId = readOptionalStoreText(row, "successor_run_id", path, table);
+  const successorStartedAt = readOptionalStoreEpoch(row, "successor_started_at", path, table);
   return Object.freeze({
     graphId: readStoreText(row, "graph_id", path, table),
     runId: readStoreText(row, "run_id", path, table),
     reason: readStoreText(row, "reason", path, table),
     decidedAt: readStoreEpoch(row, "decided_at", path, table),
     ...readDecidedBy(row, "decided_by_session", "decided_by_agent", path, table),
-    ...(hasSuccessor
-      ? {
-        successorRunId: successor as string,
-        successorStartedAt: readStoreEpoch(row, "successor_started_at", path, table),
-      }
-      : {}),
+    ...(successorRunId === undefined || successorStartedAt === undefined
+      ? {}
+      : { successorRunId, successorStartedAt }),
   });
 }
 
@@ -3657,6 +3754,27 @@ function requireStoreEpoch(value: unknown, field: string): void {
 /** The explicit refusal the create-once rule needs. */
 function heldClaim(row: ExecutionBindingRecord): ExecutionClaim {
   return Object.freeze({ kind: "held" as const, row });
+}
+
+/**
+ * The execution one `created` binding records, by the DDL's own invariant.
+ *
+ * `execution_id` is NOT NULL exactly for a `created` row, so it is read with the
+ * store's refusing text reader; a row that says `created` without one is a
+ * malformed row, not a binding without a name. The task id stays optional and
+ * is normalized the way the write path normalizes it.
+ */
+function readExecutionIdentity(
+  entry: Record<string, unknown>,
+  filePath: string,
+  table: string,
+): ExecutionIdentity {
+  const executionId = readStoreText(entry, "execution_id", filePath, table);
+  const taskId = entry["task_id"];
+  return Object.freeze({
+    executionId,
+    ...(typeof taskId === "string" && taskId.length > 0 ? { taskId } : {}),
+  });
 }
 
 /** One host execution identity, normalized (the task id only when it is named). */

@@ -737,17 +737,17 @@ describe("a run that still holds an undispatchable node does not report complete
     // settled WITHOUT routing to it and that no loop can re-enter.
     const plan = buildDeclaredOutcomeGraph({ declaration: abandonedByTerminalDeclaration() }).plan;
     const blocked = unsatisfiablePendingNodes(plan, [
-      { nodeId: "entry", status: "settled", attemptId: "entry#1", outcomeId: "failed" },
-      { nodeId: "verify", status: "pending", arrivals: [] },
-      { nodeId: "ship", status: "pending", arrivals: [] },
+      { nodeId: "entry", status: "settled" },
+      { nodeId: "verify", status: "pending" },
+      { nodeId: "ship", status: "pending" },
     ]);
     expect(blocked).toEqual({ ship: ["verify"], verify: ["entry"] });
     // A live run — an attempt in flight — strands nothing.
     expect(
       unsatisfiablePendingNodes(plan, [
-        { nodeId: "entry", status: "settled", attemptId: "entry#1", outcomeId: "done" },
-        { nodeId: "verify", status: "dispatched", attemptId: "verify#2" },
-        { nodeId: "ship", status: "pending", arrivals: [] },
+        { nodeId: "entry", status: "settled" },
+        { nodeId: "verify", status: "dispatched" },
+        { nodeId: "ship", status: "pending" },
       ]),
     ).toEqual({});
   });

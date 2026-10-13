@@ -275,36 +275,72 @@ export function bindingsEqual(a: ValidationBinding, b: ValidationBinding): boole
   return VALIDATION_BINDING_FIELDS.every((field) => a[field] === b[field]);
 }
 
-/** What {@link validateSubmission} answered. */
+/**
+ * What one acceptance must RETAIN if it commits (P4 item 5 / A17): the
+ * normalized proposal's payload and the artifact revisions the gates actually
+ * read.
+ *
+ * It is captured at VALIDATION time on purpose. Re-deriving it at commit time
+ * would read the paths again, and a path is exactly what may have changed in
+ * the window between the two — the "validated A, committed B" defect this record
+ * exists to make impossible.
+ */
+export interface RetainedValidation {
+  /**
+   * The accepted data, with its PRESENCE made explicit ({@link AcceptedData}):
+   * `absent` for a submission that carried no `data` at all, `value` for one
+   * that carried `null`, `{}`, `""` or anything else. The store persists exactly
+   * this envelope.
+   */
+  readonly payload: AcceptedData;
+  readonly artifacts: readonly ArtifactEvidence[];
+}
+
+/**
+ * What {@link validateSubmission} answered.
+ *
+ * THE DECISION AND THE RETAINED RECORD ARE ONE ARM. The accepted-arm producer
+ * builds the record the moment every gate has passed, so an ACCEPTED validation
+ * always carries it; a REJECTED one has nothing to retain, and its arm has no
+ * such field at all. `kind` alone cannot tell the two validated arms apart, so
+ * the arms are selected by `decision.kind` — and a reader that needs the record
+ * states that correlation ONCE through {@link isAcceptedValidation} instead of
+ * testing an optional field by hand.
+ */
 export type SubmissionValidation =
   | {
     readonly kind: "validated";
-    readonly decision: AcceptanceDecision;
+    readonly decision: AcceptedDecision;
     readonly binding: ValidationBinding;
-    /**
-     * What the acceptance must RETAIN if it commits (P4 item 5 / A17): the
-     * normalized proposal's payload and the artifact revisions the gates
-     * actually read.
-     *
-     * It is captured at VALIDATION time on purpose. Re-deriving it at commit
-     * time would read the paths again, and a path is exactly what may have
-     * changed in the window between the two — the "validated A, committed B"
-     * defect this record exists to make impossible.
-     *
-     * Present only for an ACCEPTED decision.
-     */
-    readonly retained?: {
-      /**
-       * The accepted data, with its PRESENCE made explicit
-       * ({@link AcceptedData}): `absent` for a submission that carried no
-       * `data` at all, `value` for one that carried `null`, `{}`, `""` or
-       * anything else. The store persists exactly this envelope.
-       */
-      readonly payload: AcceptedData;
-      readonly artifacts: readonly ArtifactEvidence[];
-    };
+    readonly retained: RetainedValidation;
+  }
+  | {
+    readonly kind: "validated";
+    readonly decision: RejectedDecision;
+    readonly binding: ValidationBinding;
   }
   | { readonly kind: "refused"; readonly refusals: readonly SubmissionRefusal[] };
+
+/** The validated arm whose decision was ACCEPTED — the one that retains. */
+export type AcceptedValidation = Extract<
+  SubmissionValidation,
+  { readonly decision: AcceptedDecision }
+>;
+
+/**
+ * Whether one validation carries an ACCEPTED decision.
+ *
+ * The union's discriminant is the DECISION's `kind`, nested inside the
+ * `validated` arm, so `TypeScript` narrows the decision but not the validation
+ * around it. This guard is the ONE place that correlation is read: the commit's
+ * retained-record read and the run path's just-accepted input both narrow
+ * through it, so neither can drift from the arms' own rule.
+ */
+export function isAcceptedValidation(
+  validation: SubmissionValidation,
+): validation is AcceptedValidation {
+  return validation.kind === "validated" && validation.decision.kind === "accepted";
+}
 
 /** The request {@link commitSubmission} is given: the live inputs, the ledger, the validation. */
 export interface CommitSubmissionRequest extends AcceptanceRequest {
@@ -671,7 +707,11 @@ export function validateSubmission(
   const decision: AcceptanceDecision = accepted
     ? Object.freeze({ kind: "accepted" as const, ...fields })
     : Object.freeze({ kind: "rejected" as const, ...fields });
-  if (!accepted) {
+  // THE ARM IS SELECTED BY THE DECISION IT RETURNED, so the rejected arm carries
+  // a `RejectedDecision` and not the union: the retained record the accepted arm
+  // requires cannot be forgotten on this path, and the union's own discriminant
+  // is what narrows it.
+  if (decision.kind === "rejected") {
     return {
       kind: "validated",
       decision,
@@ -755,10 +795,21 @@ export function validateSubmission(
  * collapsing the two into one stored byte sequence is what made an absent
  * payload indistinguishable from an accepted `null`.
  *
- * The `JsonValue` assertion is discharged by the digest taken above:
- * `proposalDigest` REFUSED this proposal already unless every reachable value
- * is losslessly JSON (no `undefined`, function, symbol, BigInt, non-finite
- * number, cycle or non-plain container), so no non-JSON value can reach here.
+ * The `JsonValue` assertion is discharged by an ENFORCED CHECK already taken on
+ * this exact value, not by a convention: `validateSubmission` digests the
+ * normalized proposal (`proposalDigest(normalized)`, line 609) before it reaches
+ * the payload, and that digest REFUSES every reachable value that is not
+ * losslessly JSON (no `undefined`, function, symbol, BigInt, non-finite number,
+ * cycle or non-plain container) by THROWING out of `contractDigest`. A non-JSON
+ * `normalized.data` therefore cannot arrive here.
+ *
+ * WHY NO SECOND CHECK IS TAKEN HERE. A checked conversion would re-implement
+ * `contractDigest`'s representability rules (its own depth bound, its own cycle
+ * handling) and would need a failure path this function does not have — the
+ * acceptance core's refusal vocabulary is closed, so inventing a refusal for a
+ * value the digest already refused would change the codes the runtime emits.
+ * The precondition is therefore stated where it is enforced, and the assertion
+ * stays the one that names it.
  */
 function acceptedDataOf(data: unknown): AcceptedData {
   if (data === undefined) return Object.freeze({ kind: "absent" as const });
@@ -807,10 +858,11 @@ export function commitSubmission(
 
   const decision = validation.decision;
   // The payload and the retained artifact revisions the VALIDATION observed.
-  // Absent when the decision was rejected, or when the plan's gates took no
-  // artifact evidence — never synthesized at commit time, where the path may
-  // already name different bytes.
-  const retained = validation.retained;
+  // A REJECTED validation has none — its arm carries no such field — and an
+  // accepted one always carries the record, so the coupling is the union's and
+  // is read here through its ONE guard. Never synthesized at commit time, where
+  // the path may already name different bytes.
+  const retained = isAcceptedValidation(validation) ? validation.retained : undefined;
   const now = request.now;
   const identity = request.identity;
   const effects = pendingEffectsOf(request.effects, identity, now);

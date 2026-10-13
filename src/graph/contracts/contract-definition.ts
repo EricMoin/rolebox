@@ -223,8 +223,10 @@ function writeCanonicalObject(
   // processes, so key ORDER never moves the digest.
   keys.sort();
   appendCanonical(buffer, "{", path);
-  for (let index = 0; index < keys.length; index++) {
-    const key = keys[index];
+  // `entries()` rather than an index read: the KEY is then total by
+  // construction, so this loop does not rely on the effective tsconfig omitting
+  // `noUncheckedIndexedAccess` to read a present key as a present `string`.
+  for (const [index, key] of keys.entries()) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined) {
       throw new Error(

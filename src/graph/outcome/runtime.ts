@@ -37,7 +37,6 @@ import type {
   OutcomeNaturalSettlementResult,
   OutcomeHostDerivedSettlementResult,
   OutcomeResumeResult,
-  OutcomeBudgetUsageReport,
   OutcomeBudgetReading,
   OutcomeBudgetUsageOutcome,
   OutcomeGraphRuntimeOptions,
@@ -84,6 +83,7 @@ import type { ExecutionProtocolRegistry } from "../protocol/execution-protocol.t
 import {
   bindingOf,
   commitSubmission,
+  isAcceptedValidation,
   validateSubmission,
   type AcceptedDecision,
   type AcceptanceDecision,
@@ -1259,13 +1259,16 @@ export class OutcomeGraphRuntime {
     // is the validation's own retained payload and revisions — the values the
     // acceptance batch is about to write — so the successor's assembly sees
     // exactly what this commit makes durable, IN this commit, instead of a later
-    // write filling the gap. Absent when the validation retained nothing, which
-    // means no accepted result is written for this attempt at all: a consumer of
-    // it is then blocked by name rather than handed a synthesized value.
+    // write filling the gap.
+    //
+    // THE UNION STATES THE CORRELATION, so the ONE guard over the validation is
+    // all this reads: an ACCEPTED validation always carries the record it would
+    // retain (its arm REQUIRES it), and a rejected or refused one carries none.
+    // An absent record therefore means no decision accepted anything, and a
+    // consumer of a value nothing accepted is blocked by name rather than handed
+    // a synthesized one.
     const justAccepted: JustAcceptedResult | undefined =
-      validation.kind === "validated" &&
-        validation.decision.kind === "accepted" &&
-        validation.retained !== undefined
+      isAcceptedValidation(validation)
         ? {
           attemptId: validation.decision.identity.attemptId,
           facts: Object.freeze({
@@ -2154,8 +2157,15 @@ export class OutcomeGraphRuntime {
       ?? this.budget.capabilityRefusal();
   }
 
-  /** Reconcile trusted host usage without advancing graph execution. */
-  recordUsage(report: OutcomeBudgetUsageReport): OutcomeBudgetUsageOutcome {
+  /**
+   * Reconcile trusted host usage without advancing graph execution.
+   *
+   * `report` is `unknown` because it IS the host boundary: the budget reader
+   * checks the value field by field and refuses a report that is not the closed
+   * record this protocol defines, so the parameter states where the value came
+   * from rather than the type the caller claims for it.
+   */
+  recordUsage(report: unknown): OutcomeBudgetUsageOutcome {
     return this.budget.recordUsage(report);
   }
 

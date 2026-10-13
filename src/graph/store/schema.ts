@@ -451,6 +451,21 @@ export type GraphStoreColumnName =
   (typeof GRAPH_STORE_TABLE_SPECS)[keyof typeof GRAPH_STORE_TABLE_SPECS]["columns"][number]["name"];
 
 /**
+ * Every column name of the DISPATCH BUDGET table, as the catalog above declares
+ * them.
+ *
+ * THE NARROWER SPELLING, for a module that addresses ONE table: it derives from
+ * the same catalog as {@link GraphStoreColumnName}, so a column renamed in the
+ * DDL (or added without a catalog entry) fails to compile at the declaration
+ * that names it — and it is narrower, so a reader cannot spell another table's
+ * column and still type-check. `budget-tables.ts` types its dimension catalog
+ * with this, which is what keeps the statements it generates and the rows it
+ * reads addressing the columns the format actually writes.
+ */
+export type BudgetReservationColumnName =
+  (typeof GRAPH_STORE_TABLE_SPECS)["budgetReservations"]["columns"][number]["name"];
+
+/**
  * One column this format version writes, as the shape gate expects it.
  *
  * `affinity` is SQLite's storage class rather than the spelled type, so the

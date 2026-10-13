@@ -205,23 +205,20 @@ export function resolveArmSet(
 
 /**
  * The node-progress projection {@link unsatisfiablePendingNodes} reads: each
- * entry's identity and status, plus the settled facts its callers may carry
- * beside them. Declared over this projection rather than the full
- * {@link OutcomeNodeState} union so a reader that reaches for a field outside
- * it must widen the parameter instead of reading `undefined` — the same
- * discipline {@link entryNodesOf} applies to the plan topology.
+ * entry's identity and status — and NOTHING else.
+ *
+ * Declared over this projection rather than the full {@link OutcomeNodeState}
+ * union so a reader that reaches for a field outside it must widen the parameter
+ * instead of reading `undefined` — the same discipline {@link entryNodesOf}
+ * applies to the plan topology. The settle-side fields (`attemptId`,
+ * `outcomeId`, `arrivals`) are deliberately NOT part of it: neither reader of
+ * this projection consumes them, every call site passes the richer state, and a
+ * field only the caller carries is a field a reader can start depending on
+ * without anyone noticing.
  */
 export interface OutcomeNodeProgress {
-
   readonly nodeId: string;
-
   readonly status: OutcomeNodeStatus;
-
-  readonly attemptId?: string;
-
-  readonly outcomeId?: string;
-
-  readonly arrivals?: readonly OutcomeArrival[];
 }
 
 /**

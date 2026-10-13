@@ -71,12 +71,11 @@ export interface HostExecutionRefusal {
   readonly count: number;
 }
 
-/** One effect's registry row, as read back. */
-export interface HostDispatchExecution {
+/** The fields every registry row carries, whatever its state. */
+export interface HostDispatchExecutionBase {
   readonly graphId: string;
   readonly effectId: string;
   readonly attemptId: string;
-  readonly state: HostExecutionState;
   /** The host instance that held (or holds) the create right. */
   readonly ownerId: string;
   /**
@@ -85,8 +84,6 @@ export interface HostDispatchExecution {
    * recorded rather than applied.
    */
   readonly generation: number;
-  /** The confirmed host execution, present exactly when `state` is `created`. */
-  readonly execution?: HostExecutionIdentity;
   /**
    * When this row's claim was released after a PROVEN not-created, if it was.
    * A released row is `pending` and answers `absent` to every reader — nothing
@@ -99,6 +96,36 @@ export interface HostDispatchExecution {
   readonly claimedAt: number;
   readonly updatedAt: number;
 }
+
+/**
+ * One effect's registry row, as read back.
+ *
+ * THE STATE CARRIES THE PAYLOAD, so a reader never re-checks the store's own
+ * invariant. The DDL relates the two columns with
+ * `CHECK ((state = 'created') = (execution_id IS NOT NULL))`, the INSERT writes
+ * only `pending` with a NULL execution id, and the one UPDATE that writes
+ * `state = 'created'` binds `execution_id` in the same statement — so a
+ * `created` row ALWAYS names the execution it records, and a `pending` or
+ * `creating` row never does. `GraphStore.readExecution` refuses a row that
+ * contradicts its state rather than returning a record this union cannot
+ * describe, which is what lets a reader drop its own `execution !== undefined`
+ * fallback.
+ */
+export type HostDispatchExecution =
+  | (HostDispatchExecutionBase & {
+    readonly state: "created";
+    /** The confirmed host execution this row records. */
+    readonly execution: HostExecutionIdentity;
+  })
+  | (HostDispatchExecutionBase & {
+    readonly state: "pending" | "creating";
+    /**
+     * ABSENT on this arm by the store's own CHECK: only a `created` row names
+     * an execution, so a row that carries one is refused, never read as this
+     * arm with the name silently dropped.
+     */
+    readonly execution?: never;
+  });
 
 /**
  * A delivery's PROOF that no execution was created for one effect.
@@ -496,17 +523,10 @@ export class HostExecutionIndex {
       });
     }
     if (row.state === "created") {
-      if (row.execution !== undefined) {
-        return Object.freeze({ kind: "created" as const });
-      }
-      return Object.freeze({
-        kind: "unknown" as const,
-        reason:
-          "the host registry records effect " +
-          JSON.stringify(effect.effectId) +
-          " as created but carries no host execution id, so the fact cannot be " +
-          "reconciled against the platform",
-      });
+      // The row NAMES the execution it records: the store's CHECK makes
+      // "created without an execution id" unrepresentable and its reader
+      // refuses such a row, so there is no nameless `created` to reconcile.
+      return Object.freeze({ kind: "created" as const });
     }
     if (row.state === "creating") {
       return Object.freeze({

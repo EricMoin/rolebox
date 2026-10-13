@@ -96,23 +96,29 @@ export interface SubmitOutcomeDiagnostic {
  * What `graph_submit_outcome` reports to the model.
  *
  * TWO DIFFERENT FACTS, NEVER CONFLATED: what this call EVALUATED, and what the
- * LEDGER committed.
+ * LEDGER committed. The answer is therefore a UNION OF TWO ARMS, and which arm
+ * it is IS the fact:
  *
- * `refusals` is NON-EMPTY exactly when nothing was written. That covers a
- * proposal refused before any decision AND a NOT-COMMITTED verdict, which
- * `verdict` names in the ledger's own vocabulary (`conflict`, `settled`,
- * `controlled` or `attempt-stopped`): in both cases the caller can repair one
- * field and submit again, or learn that the record already in the store stands
- * unchanged — and for `attempt-stopped` the run path answers the named
- * `attempt-stopped` refusal, because the RUN is not what stopped.
+ * - {@link GraphSubmitOutcomeCommittedResult} — a decision was COMMITTED (an
+ *   accepted or rejected submission): `decision`, `verdict`, the attempt and
+ *   submission identities and the gates' own `requirements` are all PRESENT,
+ *   and `stop` (an accepted outcome that ended the run) may be;
+ * - {@link GraphSubmitOutcomeUnwrittenResult} — NOTHING was written: a proposal
+ *   refused before any decision, or a not-committed verdict the ledger refused
+ *   to settle. `refusals` is NON-EMPTY (there is always a reason to repair or a
+ *   record that stands), `decision` is `never`, and the settled-run facts
+ *   (`stop`, `phase`, `settled_nodes`) are absent.
  *
- * `decision` is present EXACTLY when a decision was COMMITTED — an accepted or
- * rejected submission. `requirements` carries the gates' own answers: the
- * committed decision's gates for an accepted or rejected submission, and this
- * call's re-evaluation for a not-committed verdict, which the ledger did not
- * commit and which is therefore evidence only, never a settlement.
+ * A `decision === undefined && refusals.length === 0` answer, and a `stop` with
+ * no committed decision, are therefore UNREPRESENTABLE rather than forbidden by
+ * a comment — while the emitted JSON keeps exactly the fields each arm writes.
+ *
+ * `requirements` carries the gates' own answers: the committed decision's gates
+ * for an accepted or rejected submission, and this call's re-evaluation for a
+ * not-committed verdict, which the ledger did not commit and which is therefore
+ * evidence only, never a settlement.
  */
-export interface GraphSubmitOutcomeResult {
+export interface GraphSubmitOutcomeAnswer {
   readonly graph_id: string;
   readonly node_id: string;
   readonly outcome_id: string;
@@ -123,12 +129,6 @@ export interface GraphSubmitOutcomeResult {
   /** The submission id the runtime derived from the proposal digest. */
   readonly submission_id?: string;
   /**
-   * Present EXACTLY when a decision was COMMITTED: an accepted or rejected
-   * submission. Absent on a refusal and on a not-committed verdict, where
-   * nothing was written and `refusals` says so.
-   */
-  readonly decision?: "accepted" | "rejected";
-  /**
    * The ledger's verdict. `replayed` means this exact submission was already
    * committed and the PERSISTED receipt was returned; `committed` means this
    * call's decision is the one that landed; `controlled` means a trusted
@@ -136,7 +136,26 @@ export interface GraphSubmitOutcomeResult {
    * the run path answers that fact as the named `control-stopped` refusal, so
    * this verdict is only ever rendered when a refusal was not the answer).
    */
-  readonly verdict?:
+  readonly verdict?: SubmitOutcomeVerdict;
+  /** Why a conflict, settlement or control stop was refused, from the ledger. */
+  readonly verdict_reason?: string;
+  /**
+   * The gates' own outcomes: the committed decision's gates for an accepted or
+   * rejected submission, and this call's re-evaluation for a not-committed
+   * verdict, which the ledger did not commit.
+   */
+  readonly requirements?: readonly SubmitRequirementOutcome[];
+}
+
+/**
+ * The ledger's verdict vocabulary, as this projection renders it.
+ *
+ * The non-committing members are spelled here even though the RUN path answers
+ * them by name before this projection is reached: the field renders the
+ * LEDGER's own vocabulary, so the day one of them is answered through the
+ * ledger rather than as a named refusal, the shape already carries it.
+ */
+export type SubmitOutcomeVerdict =
   | "committed"
   | "replayed"
   | "conflict"
@@ -167,15 +186,44 @@ export interface GraphSubmitOutcomeResult {
   // reaches this projection; the verdict is spelled here for the same reason as
   // the ones above.
   | "attempt-stopped";
-  /** Why a conflict, settlement or control stop was refused, from the ledger. */
-  readonly verdict_reason?: string;
+
+/**
+ * The repair diagnostics of an answer that WROTE NOTHING, typed NON-EMPTY.
+ *
+ * "`refusals` is non-empty exactly when nothing was written" is the shape's own
+ * contract, so the arm that wrote nothing carries it in the type: an empty
+ * refusal list cannot be spelled here, which is what makes a successful-looking
+ * answer with nothing committed unrepresentable.
+ */
+export type SubmitOutcomeRefusals = readonly [
+  SubmitOutcomeDiagnostic,
+  ...SubmitOutcomeDiagnostic[],
+];
+
+/**
+ * The answer to a submission whose decision was COMMITTED.
+ *
+ * Every committed fact is REQUIRED: the attempt and submission the runtime
+ * derived, the decision, the ledger's verdict and the gates' own answers. The
+ * accepted-arm-only facts (`phase`, `settled_nodes`) and the stop stay optional
+ * because a REJECTED decision commits a receipt and nothing else.
+ */
+export interface GraphSubmitOutcomeCommittedResult extends GraphSubmitOutcomeAnswer {
+  /** The attempt the runtime derived from its own state (never caller input). */
+  readonly attempt_id: string;
+  /** The submission id the runtime derived from the proposal digest. */
+  readonly submission_id: string;
+  /** The decision this call COMMITTED: `accepted` or `rejected`. */
+  readonly decision: "accepted" | "rejected";
+  /** The ledger's verdict for a committed decision: first settlement or replay. */
+  readonly verdict: SubmitOutcomeVerdict;
+  /** The committed decision's gates, each with the exact identity it was run under. */
+  readonly requirements: readonly SubmitRequirementOutcome[];
   /**
-   * The gates' own outcomes: the committed decision's gates for an accepted or
-   * rejected submission, and this call's re-evaluation for a not-committed
-   * verdict, which the ledger did not commit.
+   * ALWAYS EMPTY HERE: nothing was refused, so there is nothing to repair. The
+   * union is what makes "a decision with a non-empty refusal list" and "no
+   * decision with an empty one" the same unrepresentable state.
    */
-  readonly requirements?: readonly SubmitRequirementOutcome[];
-  /** Structured repair diagnostics; non-empty exactly when nothing was written. */
   readonly refusals: readonly SubmitOutcomeDiagnostic[];
   /** The graph phase after an accepted decision. */
   readonly phase?: string;
@@ -190,6 +238,35 @@ export interface GraphSubmitOutcomeResult {
    */
   readonly stop?: SubmitOutcomeStop;
 }
+
+/**
+ * The answer to a submission that WROTE NOTHING: a proposal refused before any
+ * decision, or a not-committed verdict the ledger did not settle.
+ *
+ * `decision` is `never` and the run-settlement facts are absent, so the ledger's
+ * evaluation can never be mistaken for a committed decision — the evaluation
+ * stays visible through `requirements`, and the reason nothing landed is the
+ * non-empty `refusals`.
+ */
+export interface GraphSubmitOutcomeUnwrittenResult extends GraphSubmitOutcomeAnswer {
+  /**
+   * ABSENT by this arm: a not-committed verdict and a pre-decision refusal both
+   * wrote nothing, and rendering an evaluation here is exactly how a submission
+   * refused as already settled once read as a newly accepted one.
+   */
+  readonly decision?: never;
+  /** Structured repair diagnostics; NON-EMPTY, because nothing was written. */
+  readonly refusals: SubmitOutcomeRefusals;
+  /** Never on this arm: no accepted decision ran, so no state advanced. */
+  readonly phase?: never;
+  readonly settled_nodes?: never;
+  readonly stop?: never;
+}
+
+/** What `graph_submit_outcome` reports to the model; see the two arms above. */
+export type GraphSubmitOutcomeResult =
+  | GraphSubmitOutcomeCommittedResult
+  | GraphSubmitOutcomeUnwrittenResult;
 
 /** One stranded pending node of an `unreachable-pending-node` stop. */
 export interface SubmitOutcomeBlockedNode {
@@ -856,9 +933,16 @@ function renderResult(
     plan_revision: plan.planRevision,
   };
   if (result.kind === "refused") {
+    // THE RUNTIME NEVER REFUSES WITHOUT A REASON, so the list is non-empty by
+    // construction: every `refused(...)` construction names one refusal, and the
+    // one that forwards a dispatch-input block forwards a list the block reader
+    // only produces once it has collected one (`inputs.ts`). The head is split
+    // off so the NON-EMPTY arm of the answer is built from the list itself,
+    // with the same members in the same order.
+    const [first, ...rest] = result.refusals.map(toDiagnostic);
     return {
       ...base,
-      refusals: result.refusals.map(toDiagnostic),
+      refusals: [first, ...rest],
     };
   }
   const decision = result.decision;

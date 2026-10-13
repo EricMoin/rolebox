@@ -1763,6 +1763,49 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
     expect(parseOk(authoredValue())).toEqual(authoredValue());
   });
 
+  it("reads an acceptance version by the compiler's own rule — a positive safe integer", () => {
+    // WHAT THIS FRONT-END ACCEPTS IS WHAT THE COMPILER ACCEPTS. The compiler's
+    // `readValidatorVersion` refuses `0`, negatives, fractions and integers
+    // beyond the safe range, so the parser refuses exactly those — at the path
+    // the author wrote, instead of leaving a declaration the compiler can only
+    // answer `malformed-declaration` for. A positive safe integer is read by
+    // both, and an ABSENT version stays absent.
+    const withVersion = (version: unknown): unknown => ({
+      ...authoredRecord(),
+      nodes: [
+        {
+          id: "a",
+          agent: "agent.a",
+          prompt: "Do a.",
+          outcomes: [{ id: "done", acceptance: [{ validator: "schema.check", version }] }],
+        },
+      ],
+    });
+    for (const version of [0, -3, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(codes(withVersion(version))).toEqual(["invalid-value"]);
+      expect(expectParseErrors(withVersion(version)).map((error) => error.path)).toEqual([
+        "$.nodes[0].outcomes[0].acceptance[0].version",
+      ]);
+    }
+    expect(parseOk(withVersion(7)).nodes[0]?.outcomes[0]?.acceptance).toEqual([
+      { validator: "schema.check", version: 7 },
+    ]);
+    const unversioned = {
+      ...authoredRecord(),
+      nodes: [
+        {
+          id: "a",
+          agent: "agent.a",
+          prompt: "Do a.",
+          outcomes: [{ id: "done", acceptance: [{ validator: "schema.check" }] }],
+        },
+      ],
+    };
+    expect(parseOk(unversioned).nodes[0]?.outcomes[0]?.acceptance).toEqual([
+      { validator: "schema.check" },
+    ]);
+  });
+
   it("rejects an unknown key at every level with a stable code and its path", () => {
     const cases: ReadonlyArray<{ input: unknown; path: string }> = [
       { input: { ...authoredRecord(), extra: 1 }, path: "$.extra" },

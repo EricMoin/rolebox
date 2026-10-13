@@ -310,7 +310,12 @@ describe("F-28: the channel keeps the tool record's declared types", () => {
   });
 
   it("answers undefined for a name the record does not hold", () => {
-    expect(workerChannelToolOf(WORKER_TOOLS, "graph_status")).toBeUndefined();
+    // The lookup is KEYED by the record, so a name a narrowly-typed record does
+    // not declare is a compile error. A record typed with a string index — the
+    // shape the channel's own generic is instantiated with at the runtime
+    // boundary — can be asked, and the absent name answers `undefined`.
+    const widelyTyped: Record<string, CanonicalToolDef> = WORKER_TOOLS;
+    expect(workerChannelToolOf(widelyTyped, "graph_status")).toBeUndefined();
   });
 
   it("still executes a legitimate call and answers its typed result", async () => {

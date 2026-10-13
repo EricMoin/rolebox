@@ -92,11 +92,17 @@ function readDirectory(
   return reading;
 }
 
-/** Whether the directory reading already decided the verdict. */
+/**
+ * Whether the directory reading already decided the verdict.
+ *
+ * Both alternatives declare a `kind`, so the answer is read from that declared
+ * discriminant — the `store` arm is the one reading the loader still has to
+ * open — instead of probing the structural PRESENCE of a `kind` key.
+ */
 function isVerdict(
   value: Extract<StoreDirectoryReading, { kind: "store" }> | GraphStoreLoadResult,
 ): value is GraphStoreLoadResult {
-  return !("kind" in value) || value.kind !== "store";
+  return value.kind !== "store";
 }
 
 /** Verify a borrowed read-only connection and turn the outcome into a verdict. */

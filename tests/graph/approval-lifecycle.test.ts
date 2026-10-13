@@ -788,6 +788,16 @@ describe("graph_control — expiry is a durable, deterministic outcome", () => {
         "agent.declarer",
       );
       expect(noApprover.refusals?.[0]?.code).toBe("approval-request-malformed");
+      // THE HALF-PRESENT REFUSAL IS THE HANDLER'S OWN, WORD FOR WORD. The entry
+      // never pads a missing approver with an empty session or a missing deadline
+      // with a zero instant, so the sentence names the half that is really absent —
+      // and the rule that produces it is the handler's own.
+      expect(noApprover.refusals?.[0]?.message).toBe(
+        "graph-control refused [approval-request-malformed]: the request names no approver: " +
+        "`approver_session_id` must be the non-empty session whose decision resolves it, " +
+        "because the declaring principal's control authority does NOT imply approval authority" +
+        " — nothing was written",
+      );
 
       const noDeadline = control(
         fixture,
@@ -802,6 +812,11 @@ describe("graph_control — expiry is a durable, deterministic outcome", () => {
         "agent.declarer",
       );
       expect(noDeadline.refusals?.[0]?.code).toBe("approval-request-malformed");
+      expect(noDeadline.refusals?.[0]?.message).toBe(
+        "graph-control refused [approval-request-malformed]: the request names no usable deadline: " +
+        "`expires_at` must be a positive epoch-millisecond instant, because a pause with no deadline " +
+        "is a strand — nothing was written",
+      );
 
       const past = raise(fixture, { expiresAt: AT });
       expect(past.refusals?.[0]?.code).toBe("approval-request-malformed");

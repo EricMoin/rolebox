@@ -1632,6 +1632,17 @@ const BUDGET_FIELDS = [
 ] as const satisfies readonly (keyof NodeBudgetSpec)[];
 
 /**
+ * COMPLETENESS: every field of the runtime budget vocabulary appears in the list
+ * above. `satisfies` rejects a name the model does not declare, and this
+ * assertion refuses a model field the list omits, so a budget limit cannot be
+ * dropped from every compiled plan in silence.
+ */
+type AssertNever<T extends never> = T;
+type _EveryBudgetFieldIsCovered = AssertNever<
+  Exclude<keyof NodeBudgetSpec, (typeof BUDGET_FIELDS)[number]>
+>;
+
+/**
  * Read a node's optional budget. Only the runtime's five numeric fields are
  * copied — compilation normalizes to the plan vocabulary, so a non-grammar
  * field is not carried into the plan. A non-finite value is malformed because

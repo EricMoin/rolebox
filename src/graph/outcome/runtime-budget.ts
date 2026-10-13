@@ -6,11 +6,28 @@ import {
 import type { AcceptanceLedger, AcceptanceLedgerTx, BudgetUsageResult } from "../ledger/types.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { dispatchEffectIdOf } from "./dispatch-effects.ts";
-import { ledgerReadRefusal, readRuntimeClock, refused } from "./runtime-refusals.ts";
+import { describeValue, ledgerReadRefusal, readRuntimeClock, refused } from "./runtime-refusals.ts";
 import type {
+  OutcomeAttemptUsage,
   OutcomeBudgetReading, OutcomeBudgetUsageEntry, OutcomeBudgetUsageOutcome,
-  OutcomeBudgetUsageReport, OutcomeRuntimeRefusal,
+  OutcomeRuntimeRefusal,
 } from "./runtime-contract.ts";
+
+/**
+ * One usage report as this runtime read it: the validated attempts and the
+ * report's own `now`, or the refusal that names why it could not be read.
+ *
+ * The shape is the ingress's answer, so the caller never holds a half-checked
+ * record: either the value was read exactly or it was refused by name.
+ */
+type OutcomeBudgetUsageReading =
+  | { readonly kind: "ok"; readonly attempts: readonly OutcomeAttemptUsage[]; readonly now: number | undefined }
+  | { readonly kind: "malformed"; readonly refusal: OutcomeRuntimeRefusal };
+
+/** Whether a value is a non-null, non-array object (a report's own container). */
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 /** Budget claims join the caller's transaction; usage reconciliation owns its transaction. */
 export class OutcomeRuntimeBudget {
@@ -153,10 +170,18 @@ export class OutcomeRuntimeBudget {
     });
   }
 
-  recordUsage(report: OutcomeBudgetUsageReport): OutcomeBudgetUsageOutcome {
-    const malformed = this.usageReportProblem(report);
-    if (malformed !== undefined) return refused([malformed]);
-    const at = readRuntimeClock(this.clock, report.now);
+  /**
+   * Record one usage report the PLATFORM measured, or refuse it by name.
+   *
+   * `report` is `unknown` ON PURPOSE: it arrives from the host boundary, and the
+   * reader below is what turns it into the closed record this protocol defines.
+   * A report that cannot be read exactly moves nothing — the number it would
+   * move is the one an overrun is reported from.
+   */
+  recordUsage(report: unknown): OutcomeBudgetUsageOutcome {
+    const reportReading = this.readUsageReport(report);
+    if (reportReading.kind === "malformed") return refused([reportReading.refusal]);
+    const at = readRuntimeClock(this.clock, reportReading.now);
     if (typeof at !== "number") return refused([at]);
     const budget = this.ledger.budget;
     if (budget === undefined) {
@@ -204,7 +229,7 @@ export class OutcomeRuntimeBudget {
             "outcome-runtime: the transaction exposes no budget surface although the ledger does",
           );
         }
-        for (const attempt of report.attempts) {
+        for (const attempt of reportReading.attempts) {
           const result = surface.reconcileUsage({
             graphId: this.graphId,
             runId,
@@ -252,9 +277,22 @@ export class OutcomeRuntimeBudget {
     });
   }
 
-  private usageReportProblem(
-    report: OutcomeBudgetUsageReport,
-  ): OutcomeRuntimeRefusal | undefined {
+  /**
+   * Read one usage report from the HOST BOUNDARY, or name why it is not the
+   * closed record this protocol defines.
+   *
+   * THE PARAMETER IS `unknown` ON PURPOSE. This is an untrusted ingress — the
+   * amounts arrive from the host wiring, measured by the platform — so the
+   * checks below are what MAKE the value this contract, instead of a type the
+   * compiler already believed. The validated record is built only after every
+   * check has passed, and nothing downstream reads a field this reader did not
+   * read first.
+   *
+   * The checks, their order and their wording are unchanged: the object itself,
+   * the attempts list, then each attempt's identity, execution count and four
+   * amounts.
+   */
+  private readUsageReport(report: unknown): OutcomeBudgetUsageReading {
     const fail = (path: string, detail: string): OutcomeRuntimeRefusal => ({
       code: "budget-usage-malformed",
       path,
@@ -265,42 +303,99 @@ export class OutcomeRuntimeBudget {
         detail +
         ", so nothing was recorded",
     });
-    if (typeof report !== "object" || report === null || Array.isArray(report)) {
-      return fail("$", "the report is not an object");
+    if (!isRecordValue(report)) {
+      return { kind: "malformed", refusal: fail("$", "the report is not an object") };
     }
-    if (!Array.isArray(report.attempts)) {
-      return fail("$.attempts", "attempts is not a list");
+    const rawAttempts = report["attempts"];
+    if (!Array.isArray(rawAttempts)) {
+      return { kind: "malformed", refusal: fail("$.attempts", "attempts is not a list") };
     }
-    const amount = (value: unknown): boolean =>
+    const amount = (value: unknown): value is number | undefined =>
       value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
-    const count = (value: unknown): boolean =>
+    const count = (value: unknown): value is number | undefined =>
       value === undefined ||
       (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
-    for (let index = 0; index < report.attempts.length; index += 1) {
-      const attempt = report.attempts[index];
+    const attempts: OutcomeAttemptUsage[] = [];
+    for (let index = 0; index < rawAttempts.length; index += 1) {
+      const attempt = rawAttempts[index];
       const path = "$.attempts[" + index + "]";
-      if (typeof attempt !== "object" || attempt === null || Array.isArray(attempt)) {
-        return fail(path, "the entry is not an object");
+      if (!isRecordValue(attempt)) {
+        return { kind: "malformed", refusal: fail(path, "the entry is not an object") };
       }
-      if (typeof attempt.nodeId !== "string" || attempt.nodeId.length === 0) {
-        return fail(path + ".nodeId", "nodeId is not a non-empty string");
+      const nodeId = attempt["nodeId"];
+      if (typeof nodeId !== "string" || nodeId.length === 0) {
+        return {
+          kind: "malformed",
+          refusal: fail(path + ".nodeId", "nodeId is not a non-empty string"),
+        };
       }
-      if (typeof attempt.attemptId !== "string" || attempt.attemptId.length === 0) {
-        return fail(path + ".attemptId", "attemptId is not a non-empty string");
+      const attemptId = attempt["attemptId"];
+      if (typeof attemptId !== "string" || attemptId.length === 0) {
+        return {
+          kind: "malformed",
+          refusal: fail(path + ".attemptId", "attemptId is not a non-empty string"),
+        };
       }
-      if (!count(attempt.executions)) {
-        return fail(path + ".executions", "executions is not a non-negative safe integer");
+      const executions = attempt["executions"];
+      if (!count(executions)) {
+        return {
+          kind: "malformed",
+          refusal: fail(path + ".executions", "executions is not a non-negative safe integer"),
+        };
       }
+      const durationMs = attempt["durationMs"];
+      const inputTokens = attempt["inputTokens"];
+      const outputTokens = attempt["outputTokens"];
+      const costUsd = attempt["costUsd"];
       if (
-        !amount(attempt.durationMs) ||
-        !amount(attempt.inputTokens) ||
-        !amount(attempt.outputTokens) ||
-        !amount(attempt.costUsd)
+        !amount(durationMs) ||
+        !amount(inputTokens) ||
+        !amount(outputTokens) ||
+        !amount(costUsd)
       ) {
-        return fail(path, "an amount is not a finite non-negative number");
+        return {
+          kind: "malformed",
+          refusal: fail(path, "an amount is not a finite non-negative number"),
+        };
       }
+      attempts.push(Object.freeze({
+        nodeId,
+        attemptId,
+        ...(executions === undefined ? {} : { executions }),
+        ...(durationMs === undefined ? {} : { durationMs }),
+        ...(inputTokens === undefined ? {} : { inputTokens }),
+        ...(outputTokens === undefined ? {} : { outputTokens }),
+        ...(costUsd === undefined ? {} : { costUsd }),
+      }));
     }
-    return undefined;
+    const rawNow = report["now"];
+    // THE CLOCK'S RULE, FOR THE ONE VALUE ITS PARAMETER CANNOT TAKE.
+    // `readRuntimeClock` reads `override ?? clock()`, so a NULLISH `now` is the
+    // ABSENT case and the clock stands in — the report's own record is valid and
+    // nothing is refused, exactly as it was before this reader took `unknown`.
+    // Every other value that is not a number cannot be handed to the clock
+    // reader (its parameter is a number), and that reader owns the refusal's
+    // code, path and wording, so the SAME refusal is answered here: one
+    // boundary, one answer, whichever half of the type it came from.
+    if (rawNow !== undefined && rawNow !== null && typeof rawNow !== "number") {
+      return {
+        kind: "malformed",
+        refusal: {
+          code: "invalid-timestamp",
+          path: "$.now",
+          message:
+            "outcome-runtime: now is " +
+            describeValue(rawNow) +
+            ", not epoch milliseconds — time is an explicit input and the receipt records " +
+            "exactly the value this call was given",
+        },
+      };
+    }
+    return {
+      kind: "ok",
+      attempts: Object.freeze(attempts),
+      now: typeof rawNow === "number" ? rawNow : undefined,
+    };
   }
 
   budgetReport(runId?: string): OutcomeBudgetReading {

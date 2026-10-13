@@ -621,7 +621,17 @@ function readOutcomeData(
   };
 }
 
-/** Read one acceptance requirement (a validator identity and exact version). */
+/**
+ * Read one acceptance requirement (a validator identity and exact version).
+ *
+ * THE VERSION RULE IS THE COMPILER'S OWN, applied HERE so the authoring
+ * boundary and the compiler agree: `1.5`, `-3` and `0` are read as a version
+ * the compiler's `readValidatorVersion` refuses, and refusing them at the
+ * front-end reports them at the path the author wrote instead of leaving a
+ * declaration the compiler can only answer `malformed-declaration` for. The
+ * OPTIONAL field is untouched by this: an absent version is still absent, and
+ * every value the compiler accepts is still accepted here.
+ */
 function readAcceptanceRequirement(
   value: unknown,
   path: string,
@@ -635,7 +645,7 @@ function readAcceptanceRequirement(
   const version =
     record.version === undefined
       ? undefined
-      : readFiniteNumber(record.version, `${path}.version`, log);
+      : readPositiveSafeInteger(record.version, `${path}.version`, log);
   if (
     validator === undefined ||
     (record.version !== undefined && version === undefined)

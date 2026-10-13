@@ -46,39 +46,54 @@ export interface ApprovalRequestSpec {
  * a blank approver or a deadline that has already passed would create a row no
  * decision can ever legitimately resolve, and recording it would be recording an
  * intent nothing will honour.
+ *
+ * THE PARAMETER IS `unknown` ON PURPOSE. The value this rule judges is CALLER
+ * INPUT — the control entry reads it from a tool call, and the handler from a
+ * request the entry built — so `typeof spec !== "object"`, the array test and
+ * every field test below are real checks of an unvalidated value rather than
+ * tests of a type the compiler already guaranteed. The checks, their order and
+ * their wording are unchanged, and a value that is not a record is refused with
+ * the same sentence as before.
  */
 export function approvalSpecProblem(
-  spec: ApprovalRequestSpec,
+  spec: unknown,
   at: number,
 ): string | undefined {
-  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+  if (!isSpecRecord(spec)) {
     return "the approval specification must be an object naming its approver and deadline";
   }
-  if (typeof spec.approverSessionId !== "string" || spec.approverSessionId.length === 0) {
+  const approverSessionId = spec["approverSessionId"];
+  if (typeof approverSessionId !== "string" || approverSessionId.length === 0) {
     return (
       "the request names no approver: `approver_session_id` must be the non-empty session " +
       "whose decision resolves it, because the declaring principal's control authority does " +
       "NOT imply approval authority"
     );
   }
+  const expiresAt = spec["expiresAt"];
   if (
-    typeof spec.expiresAt !== "number" ||
-    !Number.isSafeInteger(spec.expiresAt) ||
-    spec.expiresAt <= 0
+    typeof expiresAt !== "number" ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= 0
   ) {
     return (
       "the request names no usable deadline: `expires_at` must be a positive epoch-" +
       "millisecond instant, because a pause with no deadline is a strand"
     );
   }
-  if (spec.expiresAt <= at) {
+  if (expiresAt <= at) {
     return (
       "the request's deadline (" +
-      String(spec.expiresAt) +
+      String(expiresAt) +
       ") is not in the future of this call (" +
       String(at) +
       "), so the request would be expired the moment it was raised — pass a later deadline"
     );
   }
   return undefined;
+}
+
+/** Whether a value is a non-null, non-array object — a specification's container. */
+function isSpecRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -2915,7 +2915,7 @@ export class OutcomeHost {
     const key = dispatchEffectKeyOf(attempt.graphId, attempt.attemptId);
     const row = this.executions.read(key);
     if (row !== undefined && row.attemptId === attempt.attemptId) {
-      if (row.state === "created" && row.execution !== undefined) return row.execution;
+      if (row.state === "created") return row.execution;
     }
     // THE PLATFORM'S OWN NAME, WHEN THE ROW NEVER GOT THE CONFIRMATION (F2).
     // The durable row is the host's record of what IT created, and a row that is
@@ -3146,7 +3146,7 @@ export class OutcomeHost {
     workerSessionOf: (execution: HostExecutionIdentity) => string | undefined,
   ): OutcomeWorkerPrincipal | undefined {
     const row = store.readExecution(effect);
-    if (row === undefined || row.state !== "created" || row.execution === undefined) {
+    if (row === undefined || row.state !== "created") {
       return undefined;
     }
     const workerSessionId = workerSessionOf(row.execution);

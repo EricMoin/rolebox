@@ -385,10 +385,17 @@ export function bindOutcomeToolInvocation<Tools extends Record<string, Canonical
   for (const [name, def] of Object.entries(tools)) {
     bound[name] = withInvocation(name, def, attribution);
   }
-  // THE RECORD'S OWN TYPE SURVIVES THE BIND. The wrapper below is generic over
-  // each entry's declared argument shape, so a caller holding a concretely typed
-  // record gets it back with `args`/`execute` intact instead of a
-  // `Record<string, CanonicalToolDef>` that erased them.
+  // THE RECORD'S OWN TYPE SURVIVES THE BIND, THE PER-ENTRY ARGUMENT TYPE DOES
+  // NOT. `Tools` is a concrete record and it is handed back as one — no caller
+  // loses `args`/`execute` to a `Record<string, CanonicalToolDef>`. But this
+  // loop reads the record STRUCTURALLY (`Object.entries` answers the erased
+  // `CanonicalToolDef` for every entry), so `withInvocation` is instantiated
+  // with `Args` at its default `z.ZodRawShape`, NOT with each entry's own
+  // declared shape. Its parsing is still the entry's own schema at runtime, so
+  // the declared shape is enforced; what is absent is only the STATIC tie
+  // between `parsed.data` and the body's declared arguments. Threading that type
+  // through would need a cast this module does not take, so nothing here may
+  // claim the tie.
   return Object.assign({ ...tools }, bound);
 }
 

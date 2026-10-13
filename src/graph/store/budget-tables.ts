@@ -19,7 +19,10 @@ import type {
 } from "../ledger/types.ts";
 import { GraphStoreWriteError } from "./errors.ts";
 import { malformedRow } from "./format.ts";
-import { GRAPH_STORE_TABLES } from "./schema.ts";
+import {
+  GRAPH_STORE_TABLES,
+  type BudgetReservationColumnName,
+} from "./schema.ts";
 
 /**
  * Every status a reservation row can carry, as the table's CHECK declares.
@@ -56,9 +59,16 @@ function isReservationStatus(value: unknown): value is BudgetReservationStatus {
  */
 interface BudgetDimension {
   readonly kind: BudgetLimitKind;
-  readonly checkedColumn: string;
-  readonly reservedColumn: string;
-  readonly usedColumn: string;
+  /**
+   * The three column families, each typed by the SCHEMA'S OWN NAME for it
+   * ({@link BudgetReservationColumnName}, derived from the catalog): a column
+   * renamed in the DDL — or misspelled here — cannot be addressed, so the
+   * generated statements and the reader cannot drift from the table they
+   * describe.
+   */
+  readonly checkedColumn: BudgetReservationColumnName;
+  readonly reservedColumn: BudgetReservationColumnName;
+  readonly usedColumn: BudgetReservationColumnName;
   /** The ceiling for this dimension, or `undefined` when undeclared. */
   readonly limitOf: (limits: NodeBudgetLimits) => number | undefined;
 }
@@ -145,7 +155,10 @@ const USAGE_FIELDS: readonly {
  * A direct lookup rather than a search with an unreachable refusal: the catalog
  * is keyed by `BudgetLimitKind`, so every argument has an entry by construction.
  */
-function columnOf(kind: BudgetLimitKind, family: "reserved" | "used"): string {
+function columnOf(
+  kind: BudgetLimitKind,
+  family: "reserved" | "used",
+): BudgetReservationColumnName {
   const dimension = DIMENSIONS[kind];
   return family === "reserved" ? dimension.reservedColumn : dimension.usedColumn;
 }
@@ -1093,12 +1106,16 @@ export class BudgetTables {
       // reader's own validated columns, and `NO_BUDGET_LIMITS` is the value
       // `nodeBudgetLimitsOf` returns for a node that declared none.
       checked: Object.freeze({ ...NO_BUDGET_LIMITS, ...checked }),
+      // THE DIMENSION COLUMNS COME FROM THE ONE DECLARATION: the field order is
+      // the catalog's, so the record's own key order is unchanged, and a column
+      // renamed in the schema is read (or fails to compile) here too rather than
+      // being re-spelled by hand beside a derived SELECT list.
       reserved: Object.freeze({
         executions: readCount(row, "reserved_executions", this.filePath, table),
-        durationMs: readAmount(row, "reserved_duration_ms", this.filePath, table),
-        inputTokens: readAmount(row, "reserved_input_tokens", this.filePath, table),
-        outputTokens: readAmount(row, "reserved_output_tokens", this.filePath, table),
-        costUsd: readAmount(row, "reserved_cost_usd", this.filePath, table),
+        durationMs: readAmount(row, DIMENSIONS.duration_ms.reservedColumn, this.filePath, table),
+        inputTokens: readAmount(row, DIMENSIONS.input_tokens.reservedColumn, this.filePath, table),
+        outputTokens: readAmount(row, DIMENSIONS.output_tokens.reservedColumn, this.filePath, table),
+        costUsd: readAmount(row, DIMENSIONS.cost_usd.reservedColumn, this.filePath, table),
       }),
     };
     const reservedAt = readCount(row, "reserved_at", this.filePath, table);
@@ -1119,10 +1136,10 @@ export class BudgetTables {
       settledAt,
       used: Object.freeze({
         executions: readCount(row, "used_executions", this.filePath, table),
-        durationMs: readAmount(row, "used_duration_ms", this.filePath, table),
-        inputTokens: readAmount(row, "used_input_tokens", this.filePath, table),
-        outputTokens: readAmount(row, "used_output_tokens", this.filePath, table),
-        costUsd: readAmount(row, "used_cost_usd", this.filePath, table),
+        durationMs: readAmount(row, DIMENSIONS.duration_ms.usedColumn, this.filePath, table),
+        inputTokens: readAmount(row, DIMENSIONS.input_tokens.usedColumn, this.filePath, table),
+        outputTokens: readAmount(row, DIMENSIONS.output_tokens.usedColumn, this.filePath, table),
+        costUsd: readAmount(row, DIMENSIONS.cost_usd.usedColumn, this.filePath, table),
       }),
     });
   }

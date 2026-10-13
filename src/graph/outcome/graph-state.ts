@@ -415,7 +415,8 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       .map((entry, index) => ({ node: entry, index }))
       .filter((candidate) => candidateIds.has(candidate.node.id));
     for (const candidate of candidates) {
-      if (nodes[candidate.index].status !== "settled") continue;
+      const entry = nodes[candidate.index];
+      if (entry === undefined || entry.status !== "settled") continue;
       const shared = sharedLoopGroup(plan, decision.nodeId, candidate.node.id);
       if (shared === undefined) {
         throw new OutcomeAdvanceRefusedError(
@@ -440,9 +441,10 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
           "this advance was given no durable accepted-result read, so a declared input " +
           "cannot be resolved from what the producers accepted",
       }));
-    const armable = candidates.filter(
-      (candidate) => nodes[candidate.index].status !== "dispatched",
-    );
+    const armable = candidates.filter((candidate) => {
+      const entry = nodes[candidate.index];
+      return entry !== undefined && entry.status !== "dispatched";
+    });
     let decisions: {
       candidate: (typeof candidates)[number];
       assembled: DownstreamInput;
