@@ -76,7 +76,7 @@ provider off and use rolebox's family — not both.
 | `computer_move` | `x`, `y`, `dry_run?` | Move the pointer without clicking |
 | `computer_type` | `text`, `window_id?`, `dry_run?` | Type text into the focused window |
 | `computer_key` | `keys`, `window_id?`, `dry_run?` | Press one key, optionally with modifiers |
-| `computer_permissions` | `dry_run?` | Report whether this system will accept input right now |
+| `computer_permissions` | `dry_run?`, `request?` | Report whether this system reports input as permitted, and ask the OS for the grant |
 
 The argument shapes are the tools' own zod schemas (`src/computer/tools.ts`).
 
@@ -123,6 +123,17 @@ The argument shapes are the tools' own zod schemas (`src/computer/tools.ts`).
   `["cmd", "shift", "t"]`, `["ctrl", "c"]`, `["Return"]`. A modifier in the
   final position, or a second normal key, is refused rather than serialized into
   a combination that would type something else.
+- **`computer_permissions`** — reports the permission state the OS itself
+  reports for this process, never a machine-wide preference, and reads a probe
+  whose output is a machine token **fail closed**: only the exact `granted`
+  token is a grant. `request: true` asks the OS to show its own prompt instead
+  of only reporting the status — on macOS the system Accessibility dialog, which
+  also registers the application in System Settings and appears once per
+  application. A system with no requestable grant ignores `request`. Approving
+  the grant requires restarting the host before input works, so call
+  `computer_permissions` again after the restart. `dry_run: true` reports the
+  variant's exact spawn vector and never shows a dialog
+  (`src/computer/tools.ts:388-525`).
 
 ### `dry_run`: rehearse the exact command
 
@@ -351,9 +362,16 @@ Moving the pointer and a right or middle click use the `cliclick` helper, which
 is **not** part of macOS; when it is missing the tool refuses and names the
 install command (`brew install cliclick`,
 `src/computer/drivers/darwin.ts:35-39`, `:348-349`). `computer_permissions`
-reads the Accessibility status (`UI elements enabled`) and returns the
-remediation text when it is off (`src/computer/drivers/darwin.ts:356-358`,
-`src/computer/tools.ts:400-407`).
+reads the calling process's own TCC Accessibility trust — `AXIsProcessTrusted`
+through JXA, not the global `UI elements enabled` preference, which is a System
+Events UI-scripting setting that answers `true` even while the OS is already
+blocking this process — and returns the remediation text when it is off
+(`src/computer/drivers/darwin.ts:344-439`, `src/computer/tools.ts:388-525`).
+With `request: true` it runs `AXIsProcessTrustedWithOptions` together with
+`kAXTrustedCheckOptionPrompt`, which makes macOS show its Accessibility dialog
+and register the application in System Settings; the process must then be
+restarted before input works. On linux and win32 a successful exit is itself the
+grant, so those probes' prose answer is never read as a permission token.
 
 ### Linux
 
@@ -402,7 +420,11 @@ naming the platform and the systems that work
    sends, deletes or confirms.
 5. **Stop on a permission refusal.** When `computer_permissions` (or a tool
    failure) reports that input is not permitted, report it and stop; retrying
-   the same gesture blindly cannot succeed.
+   the same gesture blindly cannot succeed. The grant can be *asked for*:
+   `computer_permissions` with `request: true` makes macOS show its Accessibility
+   dialog (once per application) and register the app in System Settings, but the
+   user must approve it and the host must then be restarted before the same call
+   reports the grant — until it does, keep stopping rather than retrying.
 6. **Ask before irreversible or outward-facing steps** — destroying data,
    changing system settings, sending messages, making payments, entering
    credentials.

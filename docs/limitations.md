@@ -70,7 +70,16 @@ limits it does not hide.
 - **Permissions belong to the application that launched the host.** On macOS,
   Screen Recording, Accessibility and Automation for System Events are granted
   to the terminal or agent process — not to rolebox — and installing the package
-  grants none of them (`src/computer/drivers/darwin.ts:59-63`). The window list
+  grants none of them (`src/computer/drivers/darwin.ts:59-63`).
+  `computer_permissions` reads this process's own TCC Accessibility trust
+  (`AXIsProcessTrusted` through JXA), never the global `UI elements enabled`
+  preference, which is a System Events UI-scripting setting and can answer `true`
+  while the OS is already blocking input; `request: true` asks macOS to show its
+  Accessibility dialog, and the host must be restarted before the grant takes
+  effect. A host that is already granted cannot exercise the denial path in a
+  test — that needs the grant revoked in System Settings and the host restarted
+  — so the fail-closed reading of an empty or unrecognized probe answer is
+  covered by unit tests over the verdict, not by a real denial. The window list
   is the exception: it reads the window server's own list and needs no grant at
   all, though its title column stays empty without Screen Recording.
 - **It does not convert coordinates for the caller.** A capture reports the

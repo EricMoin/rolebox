@@ -376,6 +376,9 @@ export const win32ComputerUse: SupportedComputerUse = {
     return inputPlan(request);
   },
   permissionProbe() {
+    // There is no requestable per-application grant here: a successful exit IS
+    // the grant, so `readsProbeOutput` stays absent and the printed sentence is
+    // prose for the caller, never a permission token.
     return powerShellPlan(
       [
         "$ErrorActionPreference = 'Stop'",

@@ -57,7 +57,7 @@ const CLICLICK = "cliclick";
 
 /** Appended to every failure of a plan that needs a macOS privacy grant. */
 const INPUT_PERMISSION_HINT =
-  "macOS gives input control only to a process the user has trusted with Accessibility (System Settings > Privacy & Security > Accessibility) to synthesize input and with Automation for System Events (System Settings > Privacy & Security > Automation) to script it, and grants both to the process that launched the host, which must be restarted after granting.";
+  "macOS gives input control only to a process the user has trusted with Accessibility (System Settings > Privacy & Security > Accessibility) to synthesize input and with Automation for System Events (System Settings > Privacy & Security > Automation) to script it, and grants both to the process that launched the host, which must be restarted after granting; call computer_permissions with request: true to make macOS show its Accessibility dialog for this app instead of only reporting the status.";
 
 const SCREEN_RECORDING_HINT =
   "macOS needs Screen Recording permission for screencapture to include window contents (System Settings > Privacy & Security > Screen Recording); without it the PNG contains only the desktop wallpaper.";
@@ -341,6 +341,83 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
   }
 }
 
+// ── The TCC Accessibility probe and prompt ───────────────────────────────────
+//
+// Input on macOS is gated by TCC's Accessibility grant, and that grant belongs
+// to the PROCESS that asks for it — not to the machine. `tell application
+// "System Events" to return UI elements enabled` reads a GLOBAL System Events
+// UI-scripting preference and answers true even while the OS is already blocking
+// this process's input, so it can never be a permission probe. The real TCC API
+// is `AXIsProcessTrusted` / `AXIsProcessTrustedWithOptions`, which JXA binds once
+// `ObjC.import('ApplicationServices')` has run.
+
+/** The one token the probe prints when this process is trusted for input. */
+const DARWIN_PROBE_GRANTED = "granted";
+/** The one token the probe prints when this process is NOT trusted for input. */
+const DARWIN_PROBE_DENIED = "not granted";
+
+/**
+ * The JXA body that reads one TCC Accessibility answer and prints exactly one
+ * token: `granted` or `not granted`, and nothing else.
+ *
+ * `console.log` is what puts the token on the process's own stderr as a clean
+ * line — osascript echoes only a script's final VALUE, which a call returning
+ * `undefined` suppresses, so the answer is never doubled. The `$.NSLog` spelling
+ * is deliberately not used: it prefixes every line with a date and a PID
+ * (`2026-10-13 13:55:42.315 osascript[31311:60752701] granted`), which an
+ * exact-token verdict could not read as a grant.
+ */
+function tccScript(trustCall: string): string {
+  return [
+    "ObjC.import('ApplicationServices');",
+    "ObjC.import('Foundation');",
+    `var PRINT_GRANTED = '${DARWIN_PROBE_GRANTED}';`,
+    `var PRINT_DENIED = '${DARWIN_PROBE_DENIED}';`,
+    `console.log(${trustCall} ? PRINT_GRANTED : PRINT_DENIED);`,
+  ].join("\n");
+}
+
+/**
+ * `osascript -l JavaScript` with one TCC script as its own `-e` argument.
+ *
+ * The script is a pure value like every other plan here; only the executor runs
+ * it, so a caller can rehearse the exact prompt or probe with `dry_run`.
+ */
+function tccPlan(script: string): ComputerPlan {
+  return {
+    argv: [OSASCRIPT, "-l", "JavaScript", "-e", script],
+    windowsVerbatimArguments: false,
+    script,
+    requires: [OSASCRIPT],
+    driver: "osascript",
+    permissionHint: INPUT_PERMISSION_HINT,
+  };
+}
+
+/** The probe: read THIS process's own TCC Accessibility trust. */
+function permissionProbePlan(): ComputerPlan {
+  return tccPlan(tccScript("$.AXIsProcessTrusted()"));
+}
+
+/**
+ * The prompt: ask TCC to show its Accessibility dialog for this process and
+ * report the answer it gives.
+ *
+ * `kAXTrustedCheckOptionPrompt` is what makes macOS show the dialog (and
+ * register the app under System Settings > Privacy & Security > Accessibility)
+ * instead of only answering. The dictionary spelling is
+ * `dictionaryWithObjectForKey`; the widely repeated
+ * `dictionaryWithObjectForDictionaryKey` is not a function (-2700) and must not
+ * be used.
+ */
+function permissionPromptPlan(): ComputerPlan {
+  return tccPlan(
+    tccScript(
+      "$.AXIsProcessTrustedWithOptions($.NSDictionary.dictionaryWithObjectForKey(true, $.kAXTrustedCheckOptionPrompt))",
+    ),
+  );
+}
+
 /** The macOS computer-use facts, declared once for the darwin descriptor. */
 export const darwinComputerUse: SupportedComputerUse = {
   supported: true,
@@ -354,6 +431,10 @@ export const darwinComputerUse: SupportedComputerUse = {
     return inputPlan(request);
   },
   permissionProbe() {
-    return osascriptPlan('tell application "System Events" to return UI elements enabled');
+    return permissionProbePlan();
   },
+  permissionPrompt() {
+    return permissionPromptPlan();
+  },
+  readsProbeOutput: true,
 };

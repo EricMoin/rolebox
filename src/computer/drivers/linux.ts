@@ -261,7 +261,9 @@ export const linuxComputerUse: SupportedComputerUse = {
   permissionProbe() {
     // X11 has no per-application input permission model; what can stop a
     // command here is the session type and a missing helper, so the probe
-    // reports both and exits non-zero only when input really cannot run.
+    // reports both and exits non-zero only when input really cannot run. A
+    // successful exit IS the grant, so `readsProbeOutput` stays absent and the
+    // tool never reads this prose sentence as a permission token.
     const script = [
       'if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then',
       "  echo 'Wayland session: rolebox drives X11 only, so input cannot be injected here.' >&2",

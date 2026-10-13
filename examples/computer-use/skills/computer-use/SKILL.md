@@ -89,8 +89,9 @@ fix the arguments and rehearse again — never "try it and see".
 
 ## Permissions: check, do not guess
 
-`computer_permissions({dry_run?})` reports whether this system will accept
-synthesized input right now and names the grant to fix when it will not.
+`computer_permissions({dry_run?, request?})` reports whether this system
+reports synthesized input as permitted right now and names the grant to fix when
+it does not.
 
 - On macOS, call it before your first gesture. Input goes through System Events
   and needs **Accessibility** permission for the terminal or agent process that
@@ -98,8 +99,17 @@ synthesized input right now and names the grant to fix when it will not.
   `computer_windows` — need **Screen Recording**. The window list itself needs
   neither: its ids come from the window server. Installing rolebox with npm
   grants none of these.
+- **Pass `request: true` to ask the OS for the grant instead of only reporting
+  it.** On macOS that makes the system show its Accessibility dialog (and
+  registers the app in System Settings) rather than answering silently. The
+  dialog appears once per application; approve it.
+- **A restart is needed after granting.** The grant goes to the process that
+  launched the host, so the host must be restarted before input works — then call
+  `computer_permissions` again and confirm it reports the grant before you retry
+  the gesture.
 - Follow the remediation text the tool returns verbatim — it names the exact
-  System Settings pane and the process that must be granted.
+  System Settings pane and the process that must be granted, and `request: true`
+  can open the same flow through the OS prompt.
 - If a gesture fails with a permission error, call `computer_permissions` and
   report what it says to the user. Do not retry the same gesture in a loop.
 

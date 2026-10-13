@@ -167,8 +167,31 @@ export interface SupportedComputerUse {
   capturePlan(request: ComputerCaptureRequest, env: NodeJS.ProcessEnv): ComputerPlanOrRefusal;
   /** How one window listing or input gesture is performed. */
   inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): ComputerPlanOrRefusal;
-  /** How this system reports whether input is permitted right now. */
+  /**
+   * How this system reports whether input is permitted right now.
+   *
+   * The plan's output is read only when {@link SupportedComputerUse.readsProbeOutput}
+   * is true; otherwise a successful exit is itself the answer.
+   */
   permissionProbe(): ComputerPlanOrRefusal;
+  /**
+   * How this system asks its OS to show its own grant prompt, when the grant is
+   * requestable.
+   *
+   * Absent on a system whose input permission is not a requestable
+   * per-application grant (linux, win32), where {@link permissionProbe} is the
+   * only permission plan.
+   */
+  permissionPrompt?(): ComputerPlanOrRefusal;
+  /**
+   * Whether this system's probe prints a machine token that must be validated.
+   *
+   * True on darwin, whose probe prints exactly `granted` or `not granted`, so an
+   * empty or unrecognized answer is never read as a grant. Absent on linux and
+   * win32, where a successful exit is itself the grant and the output is prose
+   * for the caller.
+   */
+  readonly readsProbeOutput?: boolean;
 }
 
 /** The computer-use facts of a system rolebox declares no driver for. */

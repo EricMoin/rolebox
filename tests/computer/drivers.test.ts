@@ -179,10 +179,39 @@ describe("darwin computer-use plans", () => {
     expect(filtered.script).toContain("no visible window belongs to a process whose name contains");
   });
 
-  it("probes the Accessibility grant with one read-only System Events property", () => {
+  it("probes this process's own TCC Accessibility trust with one JXA script", () => {
     const probe = planOf(darwinComputerUse.permissionProbe());
-    expect(probe.argv).toEqual(["/usr/bin/osascript", "-e", 'tell application "System Events" to return UI elements enabled']);
+    // The argv carries the script as its own `-e` argument, so what the dry run
+    // reports is exactly what `osascript -l JavaScript` runs.
+    expect(probe.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", probe.script]);
+    expect(probe.driver).toBe("osascript");
+    expect(probe.requires).toEqual(["/usr/bin/osascript"]);
+    expect(probe.script).toContain("AXIsProcessTrusted");
+    // The false-positive root cause: the global System Events UI-scripting
+    // preference is NOT the calling process's TCC trust and must not be read.
+    expect(probe.script).not.toContain("UI elements enabled");
+    // Exactly one machine token, and the token the verdict validates.
+    expect(probe.script).toContain("'granted'");
+    expect(probe.script).toContain("'not granted'");
     expect(probe.permissionHint).toContain("Accessibility");
+    // The driver declares that its probe output is a token to validate.
+    expect(darwinComputerUse.readsProbeOutput).toBe(true);
+  });
+
+  it("builds a prompt plan that asks TCC to show its Accessibility dialog", () => {
+    const prompt = planOf(darwinComputerUse.permissionPrompt!());
+    expect(prompt.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", prompt.script]);
+    expect(prompt.driver).toBe("osascript");
+    expect(prompt.requires).toEqual(["/usr/bin/osascript"]);
+    expect(prompt.script).toContain("AXIsProcessTrustedWithOptions");
+    expect(prompt.script).toContain("kAXTrustedCheckOptionPrompt");
+    // The prompt must not fall back to the no-options read: `AXIsProcessTrusted`
+    // followed by `(` is the call that cannot show the system dialog.
+    expect(prompt.script).not.toContain("AXIsProcessTrusted()");
+    expect(prompt.script).not.toContain("dictionaryWithObjectForDictionaryKey");
+    expect(prompt.script).toContain("'granted'");
+    expect(prompt.script).toContain("'not granted'");
+    expect(prompt.permissionHint).toContain("Accessibility");
   });
 });
 
@@ -260,6 +289,10 @@ describe("linux computer-use plans", () => {
     expect(probe.script).toContain("command -v xdotool");
     expect(probe.requires).toEqual(["/bin/sh"]);
   });
+  it("keeps a successful exit as the grant, so its prose is never token-read", () => {
+    expect(linuxComputerUse.readsProbeOutput).toBeUndefined();
+    expect(linuxComputerUse.permissionPrompt).toBeUndefined();
+  });
 });
 
 // ── win32 ────────────────────────────────────────────────────────────────────
@@ -325,6 +358,10 @@ describe("win32 computer-use plans", () => {
     const probe = planOf(win32ComputerUse.permissionProbe());
     expect(probe.script).toContain("UserInteractive");
     expect(probe.driver).toBe("powershell");
+  });
+  it("keeps a successful exit as the grant, so its prose is never token-read", () => {
+    expect(win32ComputerUse.readsProbeOutput).toBeUndefined();
+    expect(win32ComputerUse.permissionPrompt).toBeUndefined();
   });
 });
 

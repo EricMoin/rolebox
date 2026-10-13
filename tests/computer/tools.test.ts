@@ -155,9 +155,26 @@ describe("computer tools — dry runs", () => {
 
     const permissionsResult = await createComputerPermissionsTool().execute({ dry_run: true }, context);
     const permissions = parseReport(permissionsResult);
-    expect(permissions.script).toContain("UI elements enabled");
+    expect(permissions.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", permissions.script]);
+    expect(permissions.script).toContain("AXIsProcessTrusted");
+    expect(permissions.script).not.toContain("UI elements enabled");
     expect((permissions as any).metadata).toBeUndefined();
     expect((permissionsResult as any).metadata).toEqual({
+      platform: "darwin",
+      driver: "osascript",
+      action: "permissions",
+      dry_run: true,
+    });
+
+    // `request: true` selects the prompting plan, and a dry run reports it
+    // without ever showing a dialog.
+    const requestedResult = await createComputerPermissionsTool().execute({ request: true, dry_run: true }, context);
+    const requested = parseReport(requestedResult);
+    expect(requested.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", requested.script]);
+    expect(requested.argv.join(" ")).toContain("AXIsProcessTrustedWithOptions");
+    expect(requested.script).toContain("kAXTrustedCheckOptionPrompt");
+    expect((requested as any).metadata).toBeUndefined();
+    expect((requestedResult as any).metadata).toEqual({
       platform: "darwin",
       driver: "osascript",
       action: "permissions",
@@ -176,6 +193,14 @@ describe("computer tools — dry runs", () => {
     const screenshot = parseReport(await createComputerScreenshotTool().execute({ dry_run: true }, context));
     expect(screenshot.argv[0]).toBe("/bin/sh");
     expect(screenshot.script).toContain("import -window root");
+
+    // Linux declares no requestable grant, so request: true is ignored and the
+    // probe variant is reported instead.
+    const permissions = parseReport(
+      await createComputerPermissionsTool().execute({ request: true, dry_run: true }, context),
+    );
+    expect(permissions.argv[0]).toBe("/bin/sh");
+    expect(permissions.script).toContain("XDG_SESSION_TYPE");
   });
 
   it("win32 dry-runs PowerShell scripts and reports their metadata", async () => {
@@ -300,30 +325,29 @@ describe("computer tools — refusals", () => {
 // ── The permission verdict ───────────────────────────────────────────────────
 
 describe("the permission verdict", () => {
-  it("reads the answer each per-OS probe actually prints", () => {
-    // darwin: osascript prints the boolean `UI elements enabled` returns.
-    expect(permissionVerdict("true")).toBe(true);
-    expect(permissionVerdict("false")).toBe(false);
-    // linux and win32 print a sentence and report a refusal through a non-zero
-    // exit, which runComputerPlan turns into run.error before this rule is used.
-    expect(
-      permissionVerdict("X11 session: no per-application input permission is required, and xdotool is installed."),
-    ).toBe(true);
-    expect(
-      permissionVerdict(
-        "Windows input needs no per-application permission grant; this session is interactive and SendKeys is available.",
-      ),
-    ).toBe(true);
+  it("grants only the exact probe token, case- and whitespace-insensitively", () => {
+    expect(permissionVerdict("granted")).toBe(true);
+    expect(permissionVerdict(" Granted ")).toBe(true);
+    expect(permissionVerdict("GRANTED")).toBe(true);
+    expect(permissionVerdict("\tgranted\r\n")).toBe(true);
   });
 
-  it("denies only the refusal tokens, so an empty or unexpected answer reads as granted", () => {
-    for (const denial of ["false", "no", "FALSE", "No", " no \n", "\tFalse"]) {
-      expect(permissionVerdict(denial)).toBe(false);
-    }
-    // The rule is a deny-list: a probe that prints nothing, or prints something
-    // this family has never seen, is not read as a refusal.
-    for (const other of ["", "   ", "true", "yes", "0", "permission denied"]) {
-      expect(permissionVerdict(other)).toBe(true);
+  it("fails closed: an empty or unrecognized answer is never a grant", () => {
+    // Every one of these read as GRANTED under the old deny-list rule.
+    for (const other of [
+      "",
+      "  ",
+      "true",
+      "yes",
+      "0",
+      "false",
+      "no",
+      "permission denied",
+      "UI elements enabled",
+      "not granted",
+      "Input is permitted on this system.",
+    ]) {
+      expect(permissionVerdict(other)).toBe(false);
     }
   });
 
@@ -346,6 +370,61 @@ describe("the permission verdict", () => {
       "Error: osascript reports that input is not permitted; grant this process the permission its system requires and try again.",
     );
   });
+
+  it("quotes a non-empty probe answer and names the request route when it asked", () => {
+    setPlatformForTest("darwin");
+    const plan = darwinComputerUse.permissionProbe();
+    const requested = permissionRefusal(plan.driver, plan.permissionHint, { answer: "not granted", requested: true });
+    expect(requested.output.startsWith("Error: osascript reports that input is not permitted; macOS gives input")).toBe(
+      true,
+    );
+    expect(requested.output).toContain("The probe answered: not granted.");
+    expect(requested.output).toContain("has been asked to show its Accessibility dialog");
+    expect(requested.output).toContain("once per application");
+    expect(requested.output).toContain("restart the host");
+    expect(requested.output).toContain("computer_permissions again");
+    expect(requested.output).not.toContain("\n");
+    expect(requested.metadata).toEqual({
+      platform: "darwin",
+      driver: "osascript",
+      action: "permissions",
+      granted: false,
+    });
+
+    // A probe that printed nothing adds no answer sentence, and a call that did
+    // not ask the OS for the grant claims no dialog.
+    const silent = permissionRefusal(plan.driver, plan.permissionHint, { answer: "   \n" });
+    expect(silent.output).toBe(`Error: ${plan.driver} reports that input is not permitted; ${plan.permissionHint}`);
+    expect(silent.output).not.toContain("The probe answered:");
+    expect(silent.output).not.toContain("has been asked to show its Accessibility dialog");
+    expect(silent.metadata).toEqual({
+      platform: "darwin",
+      driver: "osascript",
+      action: "permissions",
+      granted: false,
+    });
+  });
+});
+
+// ── The real probe on this host (positive path only) ─────────────────────────
+
+describe("computer_permissions against the real OS", () => {
+  it.skipIf(process.platform !== "darwin")(
+    "reports the real grant on a trusted host, and never echoes the raw token",
+    async () => {
+      setPlatformForTest("darwin");
+      const context = makeContext(makeWorktree());
+      const result = (await createComputerPermissionsTool().execute({}, context)) as any;
+      // This host is already trusted with Accessibility, so only the POSITIVE
+      // path is observable here: the not-granted path needs the grant revoked in
+      // System Settings and the host restarted, which no test can do.
+      expect(result.metadata.granted).toBe(true);
+      expect(result.metadata.driver).toBe("osascript");
+      expect(result.output).not.toContain("Error:");
+      // The machine token is parsed, never echoed back as if it were prose.
+      expect(result.output).not.toContain("granted");
+    },
+  );
 });
 
 // ── Screenshot paths and attachments ─────────────────────────────────────────

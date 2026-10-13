@@ -41,6 +41,13 @@ const DRY_RUN_ARG = z
   .optional()
   .describe("Return the exact spawn plan as JSON and execute nothing (the test seam)");
 
+const REQUEST_ARG = z
+  .boolean()
+  .optional()
+  .describe(
+    "Ask the OS to show its own permission prompt (macOS Accessibility dialog) instead of only reporting the status",
+  );
+
 // ── Result plumbing ──────────────────────────────────────────────────────────
 
 function metadataFor(action: ActionName, driver: string): Record<string, unknown> {
@@ -378,49 +385,105 @@ export function createComputerKeyTool() {
 }
 
 /**
- * Read the permission probe's own answer.
+ * The one machine token a token-printing probe prints for a grant.
  *
- * The three probes answer in two different ways: `darwin` prints a bare boolean
- * (`tell application "System Events" to return UI elements enabled`), while
- * `linux` and `win32` print a prose sentence and report a refusal through a
- * non-zero exit, which `runComputerPlan` turns into `run.error` before this rule
- * is reached. Only the two refusal tokens therefore mean "not permitted"; every
- * other answer — including an empty one — is read as a grant.
+ * A probe whose output is read ({@link SupportedComputerUse.readsProbeOutput})
+ * prints exactly this token; every other answer is not a grant.
+ */
+export const PROBE_GRANTED_TOKEN = "granted";
+
+/**
+ * Read a token-printing probe's own answer, fail closed.
+ *
+ * A probe whose output is read — darwin's — prints exactly one machine token,
+ * and only {@link PROBE_GRANTED_TOKEN} (case- and whitespace-insensitive) is a
+ * grant. An empty answer, a sentence this family has never seen, an unrelated
+ * preference such as `UI elements enabled`, and an answer that could not be
+ * read all mean NOT permitted: a probe that cannot be read must never report
+ * permission. Probes whose output is not read (linux, win32) never reach this
+ * rule — there a successful exit is itself the grant, and their prose output is
+ * for the caller.
  */
 export function permissionVerdict(output: string): boolean {
-  return !/^(false|no)$/i.test(output.trim());
+  return output.trim().toLowerCase() === PROBE_GRANTED_TOKEN;
+}
+
+/** The first non-empty line of a probe's answer, trimmed, or the empty string. */
+function firstAnswerLine(text: string): string {
+  return text.split(/\r?\n/).find(line => line.trim().length > 0)?.trim() ?? "";
+}
+
+/** What a refused run adds to the refusal sentence. */
+export interface PermissionRefusalDetail {
+  /** The probe's raw output, quoted when it is non-empty. */
+  readonly answer?: string;
+  /** Whether this call actually ran the OS prompt plan. */
+  readonly requested?: boolean;
 }
 
 /**
  * The refusal the family returns when the probe reports no permission.
  *
  * `hint` is the plan's own remediation text ({@link ComputerPlan.permissionHint});
- * the generic sentence stands in for a driver that declares none.
+ * the generic sentence stands in for a driver that declares none. A non-empty
+ * probe answer is quoted verbatim as its own one-line answer, so the caller
+ * reads what the probe actually said instead of a paraphrase. When the caller
+ * asked the OS for the grant (`detail.requested`), the sentence says macOS has
+ * been asked to show its Accessibility dialog, that the prompt appears once per
+ * application, and the order to follow: approve it (or use the System Settings
+ * pane the hint names), restart the host, then call `computer_permissions`
+ * again.
  */
-export function permissionRefusal(driver: string, hint: string | undefined): ToolResult {
+export function permissionRefusal(
+  driver: string,
+  hint: string | undefined,
+  detail: PermissionRefusalDetail = {},
+): ToolResult {
+  const answer = detail.answer === undefined ? "" : firstAnswerLine(detail.answer);
+  const answered = answer.length === 0 ? "" : ` The probe answered: ${answer}.`;
+  const requested =
+    detail.requested === true
+      ? " macOS has been asked to show its Accessibility dialog, which appears once per application: approve it (or grant this process in the System Settings pane named above), restart the host, then call computer_permissions again."
+      : "";
   return {
     title: "permissions",
     output:
       `Error: ${driver} reports that input is not permitted; ` +
-      (hint ?? "grant this process the permission its system requires and try again."),
+      (hint ?? "grant this process the permission its system requires and try again.") +
+      answered +
+      requested,
     metadata: { ...metadataFor("permissions", driver), granted: false },
   };
 }
 
-/** `computer_permissions` — report whether this OS will accept input. */
+/**
+ * `computer_permissions` — report whether this OS reports input as permitted,
+ * and ask the OS for the grant when the caller asks for it.
+ */
 export function createComputerPermissionsTool() {
   return defineTool({
     description:
-      "Report whether this system will accept synthesized input right now, and name the permission to grant when it will not. " +
-      "macOS answers whether Accessibility UI scripting is enabled, Linux X11 whether the session and xdotool allow input, " +
-      "Windows whether the session is interactive. dry_run returns the exact probe command without executing it.",
-    args: { dry_run: DRY_RUN_ARG },
+      "Report whether this system's input permission is granted to this process right now, and name the permission to grant when it is not. " +
+      "The answer is the permission state the OS reports for this process, never a guess or a machine-wide preference: on macOS it reads this process's own TCC Accessibility trust, Linux X11 whether the session and xdotool allow input, Windows whether the session is interactive. " +
+      "request: true asks the OS itself to show its permission dialog — macOS shows the system Accessibility prompt and registers the app in System Settings — instead of only reporting the status; a system with no requestable grant ignores it. " +
+      "The host process must be restarted after a grant is approved. " +
+      "dry_run returns the exact command without executing it, and shows the request command without showing any dialog.",
+    args: {
+      dry_run: DRY_RUN_ARG,
+      request: REQUEST_ARG,
+    },
     async execute(args, context) {
-      const prepared = prepare("permissions", facts => facts.permissionProbe());
+      const facts = getSystem().computerUse;
+      const wantsPrompt = args.request === true;
+      const prepared = prepare("permissions", loaded =>
+        wantsPrompt && loaded.permissionPrompt !== undefined ? loaded.permissionPrompt() : loaded.permissionProbe(),
+      );
       if (!prepared.ok) return prepared.result;
       if (args.dry_run === true) return dryRunResult("permissions", prepared.plan);
 
-      const facts = getSystem().computerUse;
+      // Whether request: true really selected an OS prompt plan: on a system
+      // that declares none the request is ignored and the probe runs instead.
+      const ranPrompt = wantsPrompt && facts.supported && facts.permissionPrompt !== undefined;
       const run = await runComputerPlan(prepared.plan, {
         env: process.env,
         timeoutMs: DEFAULT_COMPUTER_TIMEOUT_MS,
@@ -435,12 +498,26 @@ export function createComputerPermissionsTool() {
           metadata: { ...metadataFor("permissions", driver), granted: false },
         };
       }
-      const granted = permissionVerdict(run.output);
-      if (!granted) return permissionRefusal(driver, prepared.plan.permissionHint);
+      // Read the answer by the driver's own rule: darwin's probe prints a
+      // machine token and ONLY the exact token is a grant, while a successful
+      // exit on linux and win32 IS the grant and their prose is for the caller.
+      const readsProbeOutput = facts.supported && facts.readsProbeOutput === true;
+      const granted = readsProbeOutput ? permissionVerdict(run.output) : true;
+      if (!granted) {
+        return permissionRefusal(driver, prepared.plan.permissionHint, { answer: run.output, requested: ranPrompt });
+      }
+      const metadata: Record<string, unknown> = { ...metadataFor("permissions", driver), granted: true };
+      if (ranPrompt) metadata.permission_requested = true;
       return {
         title: "permissions",
-        output: run.output.length === 0 ? "Input is permitted on this system." : run.output,
-        metadata: { ...metadataFor("permissions", driver), granted: true },
+        // A granted token-printing probe answers with one sentence, never by
+        // echoing its own raw `granted` marker back as if it were prose.
+        output: readsProbeOutput
+          ? "Input is permitted on this system."
+          : run.output.length === 0
+            ? "Input is permitted on this system."
+            : run.output,
+        metadata,
       };
     },
   });
