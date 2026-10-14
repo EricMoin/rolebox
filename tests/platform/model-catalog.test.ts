@@ -2,8 +2,8 @@
  * Per-harness model catalogs.
  *
  * Each `SyncTarget` reads its OWN declaration — opencode's merged
- * `opencode.json` + `opencode.jsonc`, dsh `settings.yaml` under
- * `llm-pi-ai.providers.<route>.models[]`, pi
+ * `opencode.json` + `opencode.jsonc`, dsh's layered `cordis.patch.yml`
+ * documents (with a legacy `settings.yaml` still supported), pi
  * `models.json` — and {@link scanModelsForTarget} seeds a target from its
  * declared fallback when its own catalog yields nothing.
  *
@@ -20,11 +20,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { readOpencodeCatalog } from "../../src/platform/model-catalog/opencode.ts";
 import { getOpencodeConfigPaths } from "../../src/platform/opencode-config.ts";
 import {
+  getDshCatalogPaths,
   getDshSettingsPath,
   readDshCatalog,
 } from "../../src/platform/model-catalog/dsh.ts";
@@ -90,6 +91,21 @@ afterEach(() => {
 function writeConfigHome(name: string, content: string): string {
   const home = mkdtempSync(join(tmpDir, "home-"));
   writeFileSync(join(home, name), content, "utf-8");
+  return home;
+}
+
+/**
+ * Write a dsh home from `{relative path: content}` pairs, creating parent
+ * directories. Lets a case lay out the home `cordis.patch.yml` and
+ * `profiles/<name>/cordis.patch.yml` exactly as dsh composes them.
+ */
+function writeDshHome(files: Record<string, string>): string {
+  const home = mkdtempSync(join(tmpDir, "dsh-home-"));
+  for (const [relPath, content] of Object.entries(files)) {
+    const path = join(home, relPath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, "utf-8");
+  }
   return home;
 }
 
@@ -207,6 +223,37 @@ describe("default catalog paths", () => {
 
   it("resolves the pi models document under PI_CODING_AGENT_DIR", () => {
     expect(getPiModelsPath()).toBe(join(tmpDir, "pi-agent", "models.json"));
+  });
+
+  it("lists the dsh documents in scan order (home patch, profiles, legacy)", () => {
+    const home = writeDshHome({
+      "profiles/zeta/cordis.patch.yml": "[]\n",
+      "profiles/alpha/cordis.patch.yml": "[]\n",
+      "settings.yaml": "llm-pi-ai:\n  providers: {}\n",
+    });
+
+    expect(getDshCatalogPaths(home)).toEqual([
+      join(home, "cordis.patch.yml"),
+      join(home, "profiles", "alpha", "cordis.patch.yml"),
+      join(home, "profiles", "zeta", "cordis.patch.yml"),
+      join(home, "settings.yaml"),
+    ]);
+  });
+
+  it("omits profile documents when profiles/ is missing", () => {
+    const home = mkdtempSync(join(tmpDir, "dsh-home-"));
+
+    expect(getDshCatalogPaths(home)).toEqual([
+      join(home, "cordis.patch.yml"),
+      join(home, "settings.yaml"),
+    ]);
+  });
+
+  it("resolves the dsh documents under DSH_HOME by default", () => {
+    expect(getDshCatalogPaths()).toEqual([
+      join(tmpDir, "dsh-home", "cordis.patch.yml"),
+      join(tmpDir, "dsh-home", "settings.yaml"),
+    ]);
   });
 
   it("lets an explicit config home override the platform default", () => {
@@ -409,6 +456,282 @@ describe("readDshCatalog", () => {
     expect(readDshCatalog({ configDir: home })).toEqual([
       { id: "openrouter/shared/model", name: "First", provider: "openrouter" },
     ]);
+  });
+});
+
+describe("readDshCatalog (cordis patch layers)", () => {
+  it("reads a flat config.models[] entry with no declared default provider", () => {
+    const home = writeDshHome({
+      "profiles/web/cordis.patch.yml": `
+- id: some-llm
+  name: '@scope/some-llm'
+  config:
+    models:
+      - id: alpha
+        name: Alpha
+      - beta
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "alpha", name: "Alpha", provider: "" },
+      { id: "beta", name: "beta", provider: "" },
+    ]);
+  });
+
+  it("prefixes flat models with the document's agent-default-model provider", () => {
+    const home = writeDshHome({
+      "profiles/web/cordis.patch.yml": `
+- id: agent-default-model
+  name: '@scope/agent-default-model'
+  config:
+    provider: acme-official
+    model: alpha
+- id: some-llm
+  name: '@scope/some-llm'
+  config:
+    models:
+      - id: alpha
+        name: Alpha
+      - beta
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme-official/alpha", name: "Alpha", provider: "acme-official" },
+      { id: "acme-official/beta", name: "beta", provider: "acme-official" },
+    ]);
+  });
+
+  it("reads providers.<route>.models[] from an insert entry as <route>/<id>", () => {
+    const home = writeDshHome({
+      "profiles/web/cordis.patch.yml": `
+- insert:
+    - id: llm-router
+      name: '@scope/llm-router'
+      config:
+        providers:
+          acme:
+            api: openai-completions
+            models:
+              - id: big-model
+                name: Big
+          beta-route:
+            models:
+              - small
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/big-model", name: "Big", provider: "acme" },
+      { id: "beta-route/small", name: "small", provider: "beta-route" },
+    ]);
+  });
+
+  it("skips a disabled entry wherever it appears", () => {
+    const home = writeDshHome({
+      "profiles/web/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: off
+  disabled: true
+  config:
+    models:
+      - id: off-model
+- insert:
+    - id: also-off
+      disabled: true
+      config:
+        models:
+          - id: insert-off
+    - id: on
+      config:
+        models:
+          - id: on-model
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/on-model", name: "on-model", provider: "acme" },
+    ]);
+  });
+
+  it("lets the home-level patch win over a profile patch for the same id", () => {
+    const home = writeDshHome({
+      "cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: home-llm
+  config:
+    models:
+      - id: shared
+        name: From Home
+      - id: home-only
+        name: Home Only
+`,
+      "profiles/web/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: profile-llm
+  config:
+    models:
+      - id: shared
+        name: From Profile
+      - id: profile-only
+        name: Profile Only
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/home-only", name: "Home Only", provider: "acme" },
+      { id: "acme/profile-only", name: "Profile Only", provider: "acme" },
+      { id: "acme/shared", name: "From Home", provider: "acme" },
+    ]);
+  });
+
+  it("unions profile patches in directory order and dedupes repeated ids", () => {
+    const home = writeDshHome({
+      "profiles/beta/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: beta-llm
+  config:
+    models:
+      - id: shared
+        name: From Beta
+      - id: beta-only
+        name: Beta Only
+`,
+      "profiles/alpha/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: alpha-llm
+  config:
+    models:
+      - id: shared
+        name: From Alpha
+      - id: alpha-only
+        name: Alpha Only
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/alpha-only", name: "Alpha Only", provider: "acme" },
+      { id: "acme/beta-only", name: "Beta Only", provider: "acme" },
+      { id: "acme/shared", name: "From Alpha", provider: "acme" },
+    ]);
+  });
+
+  it("still reads a legacy settings.yaml alongside the patch layers", () => {
+    const home = writeDshHome({
+      "profiles/web/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: patch-llm
+  config:
+    models:
+      - id: patch-model
+        name: Patch Model
+`,
+      "settings.yaml": `
+agent-default-model:
+  provider: legacy
+llm-pi-ai:
+  providers:
+    legacy-route:
+      models:
+        - id: legacy-model
+          name: Legacy Model
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/patch-model", name: "Patch Model", provider: "acme" },
+      {
+        id: "legacy-route/legacy-model",
+        name: "Legacy Model",
+        provider: "legacy-route",
+      },
+    ]);
+  });
+
+  it("reads a layer whose unrelated entries carry !!js expressions", () => {
+    const home = writeDshHome({
+      "profiles/web/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+    model: alpha
+- insert:
+    - id: mcp-thing
+      name: '@scope/mcp-thing'
+      config:
+        env:
+          TOKEN: !!js process.env.SOME_TOKEN?.trim() || ''
+        cwd: !!js process.cwd()
+    - id: tool-thing
+      name: '@scope/tool-thing'
+      disabled: !!js process.platform === 'win32'
+    - id: llm-entry
+      config:
+        models:
+          - id: alpha
+            name: Alpha
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/alpha", name: "Alpha", provider: "acme" },
+    ]);
+  });
+
+  it("returns [] without throwing for empty, scalar, null and malformed documents", () => {
+    expect(
+      readDshCatalog({ configDir: writeDshHome({ "cordis.patch.yml": "[]\n" }) }),
+    ).toEqual([]);
+    expect(
+      readDshCatalog({ configDir: writeDshHome({ "cordis.patch.yml": "just-a-scalar\n" }) }),
+    ).toEqual([]);
+    expect(
+      readDshCatalog({ configDir: writeDshHome({ "cordis.patch.yml": "null\n" }) }),
+    ).toEqual([]);
+    expect(
+      readDshCatalog({
+        configDir: writeDshHome({
+          "cordis.patch.yml": "- id: broken\n  config: [unterminated\n  : :\n",
+        }),
+      }),
+    ).toEqual([]);
+  });
+
+  it("skips a malformed document but keeps a well-formed sibling", () => {
+    const home = writeDshHome({
+      "cordis.patch.yml": "- id: broken\n  config: [unterminated\n  : :\n",
+      "profiles/web/cordis.patch.yml": `
+- id: agent-default-model
+  config:
+    provider: acme
+- id: ok
+  config:
+    models: [good]
+`,
+    });
+
+    expect(readDshCatalog({ configDir: home })).toEqual([
+      { id: "acme/good", name: "good", provider: "acme" },
+    ]);
+  });
+
+  it("returns [] when no catalog document exists (missing profiles/)", () => {
+    expect(
+      readDshCatalog({ configDir: mkdtempSync(join(tmpDir, "dsh-home-")) }),
+    ).toEqual([]);
   });
 });
 

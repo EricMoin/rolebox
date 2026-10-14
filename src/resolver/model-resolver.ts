@@ -4,7 +4,7 @@
  * Replaces placeholder/bare-name model strings with canonical
  * `provider/model_id` values using a two-source fallback chain:
  *   1. Known models (from the RUNNING harness's catalog — `opencode.jsonc`,
- *      `settings.yaml` or `models.json`) — passthrough if already canonical.
+ *      `cordis.patch.yml` or `models.json`) — passthrough if already canonical.
  *   2. User-configurable aliases (from role_config.yaml) — single-hop mapping.
  *
  * Unrecognized models pass through unchanged with a log message.
@@ -76,7 +76,7 @@ export function __resetForTest(): void {
  * re-armed.
  *
  * @param configDir — config home of the running harness (contains that
- *   harness's model catalog — `opencode.jsonc` / `settings.yaml` /
+ *   harness's model catalog — `opencode.jsonc` / `cordis.patch.yml` /
  *   `models.json` — and `role_config.yaml`).  When omitted, falls back to the
  *   config home `resolvePlatformPaths(platformId)` resolves; the catalog and
  *   the aliases are always read from the SAME directory.

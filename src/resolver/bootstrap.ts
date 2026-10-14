@@ -27,7 +27,7 @@ export interface BootstrapRolesOptions {
   configDir: string;
   /**
    * Platform identifier of the running harness — selects which harness's model
-   * catalog the model resolver reads (`opencode.jsonc` / `settings.yaml` /
+   * catalog the model resolver reads (`opencode.jsonc` / `cordis.patch.yml` /
    * `models.json`). Unknown or omitted → opencode.
    */
   platformId?: string;

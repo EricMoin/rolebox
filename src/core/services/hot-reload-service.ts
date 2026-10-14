@@ -301,7 +301,7 @@ export class HotReloadService implements PluginService {
     log.info("Hot reload — full re-discovery and re-resolution");
 
     // Re-initialize model resolver so edits to the running harness's model
-    // catalog (opencode.jsonc / settings.yaml / models.json) and
+    // catalog (opencode.jsonc / cordis.patch.yml / models.json) and
     // role_config.yaml take effect without a process restart.
     initModelResolver(this.ctx.configDir!, this.ctx.capabilities.platformId);
 

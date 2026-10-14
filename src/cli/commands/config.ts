@@ -22,7 +22,9 @@ const APPLY_ALL = "__apply_all__";
 // ── Helpers ───────────────────────────────────────────────────────
 
 function modelLabel(m: ModelOption): string {
-  return `${m.name} (${m.provider})`;
+  // A structurally-extracted model may carry no provider (see the dsh reader),
+  // so never render a dangling `Name ()`.
+  return m.provider.length > 0 ? `${m.name} (${m.provider})` : m.name;
 }
 
 /**

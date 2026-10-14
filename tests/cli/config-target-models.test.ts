@@ -2,9 +2,9 @@
  * Target-aware model-source threading through `rolebox config`.
  *
  * `rolebox config --target dsh` must offer the models declared in the dsh
- * settings document, and fall back to the opencode source when dsh declares
- * none; `--target pi` reads pi's own `models.json` with the same opencode
- * fallback. The project directory is injected as a parameter, never by moving
+ * profile/home `cordis.patch.yml` layers (a legacy `settings.yaml` is still
+ * read), and fall back to the opencode source when dsh declares none;
+ * `--target pi` reads pi's own `models.json` with the same opencode fallback. The project directory is injected as a parameter, never by moving
  * the process working directory, so the opencode picker also offers models
  * declared in the project's own opencode documents. `runInteractive` is driven
  * with an injected
@@ -98,6 +98,32 @@ llm-pi-ai:
           name: claude-sonnet-4
 `;
 
+/** A dsh profile patch: a default provider plus flat `config.models[]`. */
+const DSH_PROFILE_PATCH = `
+- id: agent-default-model
+  name: '@scope/agent-default-model'
+  config:
+    provider: acme-official
+    model: alpha
+- id: llm-entry
+  name: '@scope/llm-entry'
+  config:
+    models:
+      - id: alpha
+        name: Alpha
+      - beta
+`;
+
+/** A dsh profile patch whose only entry declares no default provider. */
+const DSH_PROFILE_PATCH_NO_PROVIDER = `
+- id: llm-entry
+  name: '@scope/llm-entry'
+  config:
+    models:
+      - id: alpha
+        name: Alpha
+`;
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-config-models-"));
   dshHome = join(tmpDir, "dsh-home");
@@ -130,6 +156,13 @@ afterEach(() => {
 function writeDshSettings(content: string): void {
   mkdirSync(dshHome, { recursive: true });
   writeFileSync(join(dshHome, "settings.yaml"), content, "utf-8");
+}
+
+/** Write the active profile's `cordis.patch.yml` under the dsh home. */
+function writeDshProfilePatch(content: string): void {
+  const profileDir = join(dshHome, "profiles", "web");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, "cordis.patch.yml"), content, "utf-8");
 }
 
 function writeOpencodeConfig(content: string): void {
@@ -192,6 +225,34 @@ describe("runInteractive target-aware model source", () => {
     expect(offered.some((v) => v.startsWith("oc/"))).toBe(false);
     // The flow completed against the synced role.
     expect(readFileSync(roleYaml, "utf-8")).toContain("model: dsh/picked-model");
+  });
+
+  it("offers the dsh profile patch models for the dsh target", async () => {
+    writeDshProfilePatch(DSH_PROFILE_PATCH);
+    const { roleDir, roleYaml } = writeSyncedRole("dsh-role");
+
+    await runInteractive(roleDir, "dsh", fakePrompts());
+
+    const offered = offeredValues();
+    expect(offered).toContain("acme-official/alpha");
+    expect(offered).toContain("acme-official/beta");
+    // The Custom escape hatch is always present.
+    expect(offered).toContain("__custom__");
+    // No opencode models configured here → no stray opencode entries.
+    expect(offered.some((v) => v.startsWith("oc/"))).toBe(false);
+    // The flow completed against the synced role.
+    expect(readFileSync(roleYaml, "utf-8")).toContain("model: dsh/picked-model");
+  });
+
+  it("labels a model with no declared provider without a dangling provider pair", async () => {
+    writeDshProfilePatch(DSH_PROFILE_PATCH_NO_PROVIDER);
+    const { roleDir } = writeSyncedRole("dsh-role");
+
+    await runInteractive(roleDir, "dsh", fakePrompts());
+
+    const options = selectCalls[0].options;
+    expect(options).toContainEqual({ value: "alpha", label: "Alpha" });
+    expect(options.some((o) => o.label.includes("()"))).toBe(false);
   });
 
   it("falls back to the opencode source for the dsh target when dsh declares no models", async () => {
