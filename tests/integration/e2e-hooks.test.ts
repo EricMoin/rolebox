@@ -363,7 +363,7 @@ describe.skipIf(!hasOpencode())("E2E hook pipeline (real server)", () => {
   });
 
   afterAll(() => {
-    server.close();
+    server?.close();
     try {
       rmSync(tmpDir, { recursive: true, force: true });
     } catch {
