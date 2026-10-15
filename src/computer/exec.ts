@@ -14,7 +14,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, win32 as windowsPath } from "node:path";
 import { resolveSpawnCommand, type SpawnCommand } from "../platform/system/spawn-command.ts";
 import type { ComputerPlan } from "../platform/system/types.ts";
@@ -50,7 +50,7 @@ export interface ComputerRunOptions {
 function isExecutableFile(file: string): boolean {
   try {
     accessSync(file, constants.X_OK);
-    return true;
+    return statSync(file).isFile();
   } catch {
     return false;
   }
@@ -103,6 +103,26 @@ export async function runComputerPlan(
   plan: ComputerPlan,
   options: ComputerRunOptions = {},
 ): Promise<ComputerRunResult> {
+  let started = false;
+  let result: ComputerRunResult;
+  try {
+    result = await runComputerCommand(plan, options, () => { started = true; });
+  } catch (error) {
+    result = { ok: false, error: `Error: the ${plan.driver} command could not run: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (!result.ok && started && plan.cleanupPlan !== undefined) {
+    const { cleanupPlan: _nested, ...cleanupPlan } = plan.cleanupPlan;
+    const cleanup = await runComputerPlan(cleanupPlan, { env: options.env, cwd: options.cwd, timeoutMs: 2000 });
+    if (!cleanup.ok) return { ok: false, error: `${result.error} Mouse release could not be confirmed: ${cleanup.error}` };
+  }
+  return result;
+}
+
+async function runComputerCommand(
+  plan: ComputerPlan,
+  options: ComputerRunOptions,
+  onStart: () => void,
+): Promise<ComputerRunResult> {
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? DEFAULT_COMPUTER_TIMEOUT_MS;
   const hint = options.installHint !== undefined && options.installHint.length > 0 ? ` ${options.installHint}` : "";
@@ -143,6 +163,7 @@ export async function runComputerPlan(
       detached: process.platform !== "win32",
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     });
+    if (child.pid !== undefined) onStart();
 
     const stop = (reason: "timeout" | "abort" | "output"): void => {
       if (stopped === null) stopped = reason;
@@ -171,6 +192,7 @@ export async function runComputerPlan(
     const timer = setTimeout(() => stop("timeout"), timeoutMs);
     const onAbort = (): void => stop("abort");
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
     const cleanup = (): void => {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
@@ -182,7 +204,7 @@ export async function runComputerPlan(
       cleanup();
       resolve({ ok: false, error: withPermissionHint(`Error: could not start "${executable}": ${error.message}`) });
     });
-    child.on("close", code => {
+    child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -209,10 +231,11 @@ export async function runComputerPlan(
       }
       if (code !== 0) {
         const detail = firstLine(output);
+        const outcome = signal === null ? `exited with status ${code}` : `was terminated by signal ${signal}`;
         resolve({
           ok: false,
           error: withPermissionHint(
-            `Error: the ${plan.driver} command exited with status ${code}${detail.length === 0 ? "." : `: ${detail}`}`,
+            `Error: the ${plan.driver} command ${outcome}${detail.length === 0 ? "." : `: ${detail}`}`,
           ),
         });
         return;

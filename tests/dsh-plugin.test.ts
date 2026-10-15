@@ -1056,10 +1056,10 @@ describe("dsh plugin apply()", () => {
 
       // (b) THE ALLOW-LIST: the node's declared entries INTERSECTED with the
       // tools the host actually registered, on top of the static baseline.
-      expect(shooter.toolFilter?.allow).toEqual([
+      expect([...(shooter.toolFilter?.allow ?? [])].sort()).toEqual([
         ...DSH_GRAPH_WORKER_TOOLS,
         ...COMPUTER_TOOL_NAMES,
-      ]);
+      ].sort());
       // …and the undeclared node keeps exactly the registered baseline.
       expect(plain.toolFilter?.allow).toEqual([...DSH_GRAPH_WORKER_TOOLS]);
 
@@ -2512,7 +2512,7 @@ describe("dsh plugin apply()", () => {
 //
 // The family is OFF unless a surface explicitly enabled it, and a wildcard
 // `enabledNamespaces` must never be the thing that turns it on. These boots pin
-// both halves of that: with the gate off the seven names are absent even under
+// both halves of that: with the gate off all family members are absent even under
 // `["*"]`, with the gate on (host option OR config file) they register, and a
 // host without the `ctx.tools.guard` seam gets nothing at all (fail closed).
 

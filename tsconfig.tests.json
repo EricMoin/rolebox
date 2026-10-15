@@ -223,6 +223,7 @@
     "tests/*.ts",
     "tests/asset/**/*.ts",
     "tests/cli/**/*.ts",
+    "tests/computer/**/*.ts",
     "tests/core/**/*.ts",
     "tests/dispatch/**/*.ts",
     "tests/extensions/**/*.ts",

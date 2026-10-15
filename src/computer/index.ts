@@ -1,6 +1,6 @@
 /**
  * rolebox's computer-use family: the per-OS plan builders, the executor behind
- * them, and the seven tools the tool surface registers when it is asked for
+ * them, and the tools the tool surface registers when it is asked for
  * them.
  */
 

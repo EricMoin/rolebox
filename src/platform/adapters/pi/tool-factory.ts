@@ -141,13 +141,14 @@ function toCanonicalContext(
   ctx: Record<string, unknown>,
 ): CanonicalToolContext {
   const c = ctx as Record<string, unknown>;
+  const directory = String(c.directory ?? c.dir ?? c.cwd ?? "");
 
   return {
     sessionID: String(extractPiSessionId(c, toolCallId)),
     messageID: String(c.messageID ?? c.message_id ?? c.messageId ?? toolCallId),
     agent: String(c.agent ?? c.agentName ?? c.agent_name ?? ""),
-    directory: String(c.directory ?? c.dir ?? c.cwd ?? ""),
-    worktree: String(c.worktree ?? c.workTree ?? c.workspace ?? c.root ?? ""),
+    directory,
+    worktree: String(c.worktree ?? c.workTree ?? c.workspace ?? c.root ?? directory),
     abort: signal,
     metadata(input) {
       const fn = c.metadata as unknown;

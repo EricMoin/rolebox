@@ -9,6 +9,7 @@ import { createLoadRoleSkillTool } from "../../src/asset/skill-tool.ts";
 import { codexCapabilities } from "../../src/platform/capabilities.ts";
 import { defineTool } from "../../src/platform/ports/tool-factory.ts";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
+import { COMPUTER_TOOL_NAMES } from "../../src/loader/computer-grants.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../src/platform/types.ts";
 import {
   JsonRpcErrorCode,
@@ -186,12 +187,13 @@ const EXPECTED_CODEX_TOOL_NAMES = [
   "web_search",
 ];
 
-function realCodexTools(): Record<string, CanonicalToolDef> {
+function realCodexTools(computerUse = false): Record<string, CanonicalToolDef> {
   return buildCanonicalTools({
     resolvedRoles: [],
     directory: process.cwd(),
     capabilities: codexCapabilities(),
     extraTools: { load_role_skill: createLoadRoleSkillTool([]) },
+    computerUse,
   });
 }
 
@@ -592,6 +594,21 @@ describe("CodexMcpServer", () => {
     expect(read?.inputSchema.properties.filePath.type).toBe("string");
     expect(read?.inputSchema.required).toContain("filePath");
     expect(read?.inputSchema.properties.offset.type).toBe("integer");
+  });
+
+  it("lists the complete computer family only when the canonical gate is enabled", async () => {
+    for (const enabled of [false, true]) {
+      const harness = createHarness(realCodexTools(enabled));
+      await harness.server.handleLine(request(1, "tools/list"));
+      const [message] = await waitForMessages(harness, 1);
+      const listed = (message.result.tools as Array<Record<string, any>>)
+        .filter(tool => tool.name.startsWith("computer_"));
+      expect(listed.map(tool => tool.name).sort()).toEqual(enabled ? [...COMPUTER_TOOL_NAMES].sort() : []);
+      for (const tool of listed) {
+        expect(tool.inputSchema.type).toBe("object");
+        expect(tool.description.length).toBeGreaterThan(0);
+      }
+    }
   });
 
   it("keeps the tool surface to the canonical intersection plus load_role_skill", () => {

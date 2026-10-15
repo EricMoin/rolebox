@@ -33,14 +33,19 @@ import {
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { ROLE_SNAPSHOT_TOOL_KEYS, buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import { setPlatformForTest } from "../../src/platform/system/index.ts";
-import type { CanonicalToolContext } from "../../src/platform/types.ts";
+import type { CanonicalToolContext, ToolResult } from "../../src/platform/types.ts";
 
 const COMPUTER_TOOL_NAMES = [
   "computer_click",
+  "computer_displays",
+  "computer_drag",
+  "computer_focus",
   "computer_key",
   "computer_move",
   "computer_permissions",
   "computer_screenshot",
+  "computer_scroll",
+  "computer_status",
   "computer_type",
   "computer_windows",
 ];
@@ -106,6 +111,11 @@ function tinyPng(width: number, height: number, dpi?: number): Buffer {
  */
 const PHYS_DATA_OFFSET = 8 + 25 + 8;
 
+function structuredResult(result: ToolResult): Exclude<ToolResult, string> {
+  if (typeof result === "string") throw new Error(`expected a structured result, got: ${result}`);
+  return result;
+}
+
 function parseReport(result: unknown): Record<string, any> {
   expect(typeof result).toBe("object");
   const output = (result as { output: string }).output;
@@ -140,14 +150,16 @@ describe("computer tools — dry runs", () => {
       await createComputerClickTool().execute({ x: 10, y: 20, button: "left", clicks: 2, dry_run: true }, context),
     );
     expect(click.argv[0]).toBe("/usr/bin/osascript");
-    expect(click.script).toContain("click at {10, 20}");
+    expect(click.script).toContain("postMouse($.kCGEventLeftMouseDown, 10, 20, $.kCGMouseButtonLeft, i)");
+    expect(click.script).toContain("i <= 2");
 
     const move = parseReport(await createComputerMoveTool().execute({ x: 1, y: 2, dry_run: true }, context));
-    expect(move.argv[0]).toBe("cliclick");
-    expect(move.argv[1]).toBe("m:1,2");
+    expect(move.argv[0]).toBe("/usr/bin/osascript");
+    expect(move.script).toContain("postMouse($.kCGEventMouseMoved, 1, 2)");
 
     const typed = parseReport(await createComputerTypeTool().execute({ text: "hello", dry_run: true }, context));
-    expect(typed.script).toContain('keystroke "hello"');
+    expect(typed.script).toContain('var segments = ["hello"];');
+    expect(typed.script).toContain("CGEventKeyboardSetUnicodeString");
 
     const key = parseReport(await createComputerKeyTool().execute({ keys: ["cmd", "c"], dry_run: true }, context));
     expect(key.argv[0]).toBe("/usr/bin/osascript");
@@ -186,8 +198,8 @@ describe("computer tools — dry runs", () => {
     setPlatformForTest("linux");
     const context = makeContext(makeWorktree());
 
-    const click = parseReport(await createComputerClickTool().execute({ x: 5, y: 6, dry_run: true }, context));
-    expect(click.argv).toEqual(["xdotool", "mousemove", "--sync", "5", "6", "click", "1"]);
+    const click = parseReport(await createComputerTools().computer_click!.execute({ x: 5, y: 6, dry_run: true }, context));
+    expect(click.argv).toEqual(["xdotool", "mousemove", "--sync", "--", "5", "6", "click", "1"]);
     const key = parseReport(await createComputerKeyTool().execute({ keys: ["ctrl", "t"], dry_run: true }, context));
     expect(key.argv).toEqual(["xdotool", "key", "--clearmodifiers", "ctrl+t"]);
     const screenshot = parseReport(await createComputerScreenshotTool().execute({ dry_run: true }, context));
@@ -236,7 +248,7 @@ describe("computer tools — refusals", () => {
     const calls: Array<[string, Promise<unknown>]> = [
       ["screenshot", createComputerScreenshotTool().execute({ dry_run: true }, context)],
       ["windows", createComputerWindowsTool().execute({ dry_run: true }, context)],
-      ["click", createComputerClickTool().execute({ x: 1, y: 2, dry_run: true }, context)],
+      ["click", createComputerTools().computer_click!.execute({ x: 1, y: 2, dry_run: true }, context)],
       ["move", createComputerMoveTool().execute({ x: 1, y: 2, dry_run: true }, context)],
       ["type", createComputerTypeTool().execute({ text: "x", dry_run: true }, context)],
       ["key", createComputerKeyTool().execute({ keys: ["Return"], dry_run: true }, context)],
@@ -277,7 +289,7 @@ describe("computer tools — refusals", () => {
     // A PATH with nothing in it: the xdotool plan cannot resolve, so the
     // executor must refuse without starting a process.
     const plan = {
-      argv: ["xdotool", "mousemove", "--sync", "1", "2"],
+      argv: ["xdotool", "mousemove", "--sync", "--", "1", "2"],
       windowsVerbatimArguments: false,
       requires: ["xdotool"],
       driver: "xdotool",
@@ -354,7 +366,8 @@ describe("the permission verdict", () => {
   it("builds the refusal sentence and metadata the permissions tool returns", () => {
     setPlatformForTest("darwin");
     const plan = darwinComputerUse.permissionProbe();
-    const refusal = permissionRefusal(plan.driver, plan.permissionHint);
+    if (typeof plan === "string") throw new Error(plan);
+    const refusal = structuredResult(permissionRefusal(plan.driver, plan.permissionHint));
     expect(refusal.output.startsWith("Error: osascript reports that input is not permitted; macOS gives input")).toBe(
       true,
     );
@@ -365,7 +378,7 @@ describe("the permission verdict", () => {
 
   it("falls back to the generic remediation sentence when a plan carries no hint", () => {
     setPlatformForTest("darwin");
-    const refusal = permissionRefusal("osascript", undefined);
+    const refusal = structuredResult(permissionRefusal("osascript", undefined));
     expect(refusal.output).toBe(
       "Error: osascript reports that input is not permitted; grant this process the permission its system requires and try again.",
     );
@@ -374,7 +387,8 @@ describe("the permission verdict", () => {
   it("quotes a non-empty probe answer and names the request route when it asked", () => {
     setPlatformForTest("darwin");
     const plan = darwinComputerUse.permissionProbe();
-    const requested = permissionRefusal(plan.driver, plan.permissionHint, { answer: "not granted", requested: true });
+    if (typeof plan === "string") throw new Error(plan);
+    const requested = structuredResult(permissionRefusal(plan.driver, plan.permissionHint, { answer: "not granted", requested: true }));
     expect(requested.output.startsWith("Error: osascript reports that input is not permitted; macOS gives input")).toBe(
       true,
     );
@@ -393,7 +407,7 @@ describe("the permission verdict", () => {
 
     // A probe that printed nothing adds no answer sentence, and a call that did
     // not ask the OS for the grant claims no dialog.
-    const silent = permissionRefusal(plan.driver, plan.permissionHint, { answer: "   \n" });
+    const silent = structuredResult(permissionRefusal(plan.driver, plan.permissionHint, { answer: "   \n" }));
     expect(silent.output).toBe(`Error: ${plan.driver} reports that input is not permitted; ${plan.permissionHint}`);
     expect(silent.output).not.toContain("The probe answered:");
     expect(silent.output).not.toContain("has been asked to show its Accessibility dialog");
@@ -409,15 +423,13 @@ describe("the permission verdict", () => {
 // ── The real probe on this host (positive path only) ─────────────────────────
 
 describe("computer_permissions against the real OS", () => {
-  it.skipIf(process.platform !== "darwin")(
+  it.skipIf(process.platform !== "darwin" || process.env.ROLEBOX_CUA_NATIVE_TESTS !== "1")(
     "reports the real grant on a trusted host, and never echoes the raw token",
     async () => {
       setPlatformForTest("darwin");
       const context = makeContext(makeWorktree());
       const result = (await createComputerPermissionsTool().execute({}, context)) as any;
-      // This host is already trusted with Accessibility, so only the POSITIVE
-      // path is observable here: the not-granted path needs the grant revoked in
-      // System Settings and the host restarted, which no test can do.
+      // Opting in requires a host already granted Accessibility access.
       expect(result.metadata.granted).toBe(true);
       expect(result.metadata.driver).toBe("osascript");
       expect(result.output).not.toContain("Error:");
@@ -581,7 +593,7 @@ describe("screenshot files and attachments", () => {
 describe("tool registration", () => {
   const base = { resolvedRoles: [], directory: process.cwd(), capabilities: opencodeCapabilities() };
 
-  it("declares exactly the seven documented tool names", () => {
+  it("declares exactly the documented tool names", () => {
     expect(Object.keys(createComputerTools()).sort()).toEqual(COMPUTER_TOOL_NAMES);
   });
 

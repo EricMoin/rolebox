@@ -84,25 +84,30 @@ describe("darwin computer-use plans", () => {
     expect(planOf(darwinComputerUse.capturePlan({ ...CAPTURE, display: 1 }, {})).argv).toContain("-D");
   });
 
-  it("clicks through System Events and moves/right-clicks through cliclick", () => {
+  it("clicks and moves through native Quartz events without external helpers", () => {
     const click: ComputerInputRequest = { action: "click", x: 100, y: 200, button: "left", clicks: 1 };
     const left = planOf(darwinComputerUse.inputPlan(click, {}));
     expect(left.argv[0]).toBe("/usr/bin/osascript");
-    expect(left.script).toContain("click at {100, 200}");
+    expect(left.script).toContain("postMouse($.kCGEventLeftMouseDown, 100, 200, $.kCGMouseButtonLeft, i)");
+    expect(left.script).toContain("postMouse($.kCGEventLeftMouseUp, 100, 200, $.kCGMouseButtonLeft, i)");
     expect(left.driver).toBe("osascript");
 
     const double = planOf(darwinComputerUse.inputPlan({ ...click, clicks: 2 }, {}));
-    expect(double.script?.match(/click at \{100, 200\}/g)?.length).toBe(2);
+    expect(double.script).toContain("i <= 2");
+    expect(double.script).toContain("kCGMouseEventClickState");
 
     const right = planOf(darwinComputerUse.inputPlan({ ...click, button: "right" }, {}));
-    expect(right.argv).toEqual(["cliclick", "rc:100,200"]);
-    expect(right.requires).toEqual(["cliclick"]);
+    expect(right.script).toContain("postMouse($.kCGEventRightMouseDown, 100, 200, $.kCGMouseButtonRight, i)");
+    expect(right.requires).toEqual(["/usr/bin/osascript"]);
+    expect(right.cleanupPlan?.script).toContain("kCGEventRightMouseUp");
 
     const middle = planOf(darwinComputerUse.inputPlan({ ...click, button: "middle", clicks: 2 }, {}));
-    expect(middle.argv).toEqual(["cliclick", "mc:100,200", "mc:100,200"]);
+    expect(middle.script).toContain("postMouse($.kCGEventOtherMouseDown, 100, 200, $.kCGMouseButtonCenter, i)");
+    expect(middle.script).toContain("i <= 2");
 
     const move = planOf(darwinComputerUse.inputPlan({ action: "move", x: 4, y: 5 }, {}));
-    expect(move.argv).toEqual(["cliclick", "m:4,5"]);
+    expect(move.script).toContain("postMouse($.kCGEventMouseMoved, 4, 5)");
+    expect(move.requires).toEqual(["/usr/bin/osascript"]);
   });
 
   it("refuses a window-targeted gesture, naming the frontmost-window rule", () => {
@@ -117,11 +122,12 @@ describe("darwin computer-use plans", () => {
     }
   });
 
-  it("types text as keystrokes, escaping AppleScript and pressing Return for newlines", () => {
-    const plan = planOf(darwinComputerUse.inputPlan({ action: "type", text: 'a"b\\c\nd' }, {}));
-    expect(plan.script).toContain('keystroke "a\\"b\\\\c"');
-    expect(plan.script).toContain("key code 36");
-    expect(plan.script).toContain('keystroke "d"');
+  it("types Unicode text through Quartz and presses Return for newlines", () => {
+    const plan = planOf(darwinComputerUse.inputPlan({ action: "type", text: 'a"b\\c\n中文🧪' }, {}));
+    expect(plan.argv.slice(0, 4)).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e"]);
+    expect(plan.script).toContain("CGEventKeyboardSetUnicodeString");
+    expect(plan.script).toContain(`var segments = ${JSON.stringify(['a"b\\c', 36, '中文🧪'])};`);
+    expect(plan.script).not.toContain("keystroke");
     expect(refusalOf(darwinComputerUse.inputPlan({ action: "type", text: "" }, {}))).toContain("non-empty text");
   });
 
@@ -139,7 +145,7 @@ describe("darwin computer-use plans", () => {
     const plan = planOf(darwinComputerUse.inputPlan({ action: "windows" }, {}));
     // -l JavaScript: the listing is JXA, and the script is one argv element of
     // its own, so the plan carries it both as argv and as `script`.
-    expect(plan.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", plan.script]);
+    expect(plan.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", plan.script!]);
     expect(plan.script).toContain("ObjC.import('CoreGraphics')");
     // The filter arrives in run(argv) and is never interpolated into the script.
     expect(plan.script).toContain("function run(argv)");
@@ -169,7 +175,7 @@ describe("darwin computer-use plans", () => {
 
     // A filter is the trailing argv element the script reads, never script text.
     const filtered = planOf(darwinComputerUse.inputPlan({ action: "windows", app: "Safari" }, {}));
-    expect(filtered.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", plan.script, "Safari"]);
+    expect(filtered.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", plan.script!, "Safari"]);
     expect(filtered.script).toBe(plan.script);
     // The app name is never script text, so a quoted name needs no escaping.
     expect(filtered.script).not.toContain("Safari");
@@ -183,7 +189,7 @@ describe("darwin computer-use plans", () => {
     const probe = planOf(darwinComputerUse.permissionProbe());
     // The argv carries the script as its own `-e` argument, so what the dry run
     // reports is exactly what `osascript -l JavaScript` runs.
-    expect(probe.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", probe.script]);
+    expect(probe.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", probe.script!]);
     expect(probe.driver).toBe("osascript");
     expect(probe.requires).toEqual(["/usr/bin/osascript"]);
     expect(probe.script).toContain("AXIsProcessTrusted");
@@ -200,7 +206,7 @@ describe("darwin computer-use plans", () => {
 
   it("builds a prompt plan that asks TCC to show its Accessibility dialog", () => {
     const prompt = planOf(darwinComputerUse.permissionPrompt!());
-    expect(prompt.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", prompt.script]);
+    expect(prompt.argv).toEqual(["/usr/bin/osascript", "-l", "JavaScript", "-e", prompt.script!]);
     expect(prompt.driver).toBe("osascript");
     expect(prompt.requires).toEqual(["/usr/bin/osascript"]);
     expect(prompt.script).toContain("AXIsProcessTrustedWithOptions");
@@ -236,7 +242,7 @@ describe("linux computer-use plans", () => {
     // The window branch has no scrot fallback: scrot cannot address a window.
     expect(window.script).not.toContain("scrot -o");
     const display = planOf(linuxComputerUse.capturePlan({ ...CAPTURE, display: 1 }, LINUX_ENV));
-    expect(display.script).toContain("env DISPLAY=:1 import -window root");
+    expect(display.script).toContain("env DISPLAY=':0.1' import -window root");
   });
 
   it("refuses a Wayland session for capture and for input", () => {
@@ -249,16 +255,16 @@ describe("linux computer-use plans", () => {
 
   it("drives input with xdotool argv — no shell, so typed text is never re-parsed", () => {
     const click = planOf(linuxComputerUse.inputPlan({ action: "click", x: 100, y: 200, button: "left", clicks: 1 }, LINUX_ENV));
-    expect(click.argv).toEqual(["xdotool", "mousemove", "--sync", "100", "200", "click", "1"]);
+    expect(click.argv).toEqual(["xdotool", "mousemove", "--sync", "--", "100", "200", "click", "1"]);
 
     const doubleRight = planOf(linuxComputerUse.inputPlan({ action: "click", x: 100, y: 200, button: "right", clicks: 2, windowId: 42 }, LINUX_ENV));
     expect(doubleRight.argv).toEqual([
-      "xdotool", "mousemove", "--sync", "--window", "42", "100", "200",
+      "xdotool", "mousemove", "--sync", "--", "100", "200",
       "click", "--window", "42", "--repeat", "2", "--delay", "100", "3",
     ]);
 
     const move = planOf(linuxComputerUse.inputPlan({ action: "move", x: 1, y: 2 }, LINUX_ENV));
-    expect(move.argv).toEqual(["xdotool", "mousemove", "--sync", "1", "2"]);
+    expect(move.argv).toEqual(["xdotool", "mousemove", "--sync", "--", "1", "2"]);
 
     const type = planOf(linuxComputerUse.inputPlan({ action: "type", text: "$(rm -rf /) 'quoted'" }, LINUX_ENV));
     expect(type.argv).toEqual(["xdotool", "type", "--delay", "12", "--", "$(rm -rf /) 'quoted'"]);
@@ -303,7 +309,7 @@ describe("win32 computer-use plans", () => {
     expect(plan.argv[0]).toBe("powershell");
     expect(plan.argv).toContain("-STA");
     expect(plan.requires).toEqual(["powershell"]);
-    expect(plan.script).toContain("[System.Windows.Forms.SystemInformation]::VirtualScreen");
+    expect(plan.script).toContain("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds");
     expect(plan.script).toContain("$bitmap.Save('C:\\Users\\o''brien\\shot.png'");
     expect(plan.script).toContain("CopyFromScreen");
   });
@@ -378,7 +384,7 @@ describe("plan builders", () => {
   });
 
   it("declare the helpers they call, so the executor can refuse a missing one", () => {
-    expect(darwinComputerUse.requiredBinaries).toContain("cliclick");
+    expect(darwinComputerUse.requiredBinaries).toEqual(["/usr/sbin/screencapture", "/usr/bin/osascript"]);
     expect(linuxComputerUse.requiredBinaries).toContain("xdotool");
     expect(win32ComputerUse.requiredBinaries).toEqual(["powershell"]);
     for (const facts of [darwinComputerUse, linuxComputerUse, win32ComputerUse]) {

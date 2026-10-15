@@ -1,13 +1,9 @@
 /// <reference types="bun-types" />
 
 /**
- * One REAL, harmless capture on macOS: the proof that a plan built for darwin
- * actually produces a PNG when it is executed.
- *
- * The capture writes into a throwaway worktree under the system temp directory
- * and photographs the screen without any input — no click, no keystroke — so
- * running the suite cannot disturb the machine it runs on. Every other platform
- * skips both tests.
+ * Opt-in native screen captures on macOS. ROLEBOX_CUA_NATIVE_TESTS=1 requires
+ * an already authorized host and captures the current main display into a
+ * temporary directory. Default module test runs skip both tests.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
@@ -19,7 +15,7 @@ import { readPixelScale } from "../../src/computer/capture.ts";
 import { createComputerScreenshotTool } from "../../src/computer/tools.ts";
 import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
-const onDarwin = process.platform === "darwin";
+const nativeTestsEnabled = process.platform === "darwin" && process.env.ROLEBOX_CUA_NATIVE_TESTS === "1";
 const worktrees: string[] = [];
 
 function makeContext(): CanonicalToolContext {
@@ -42,7 +38,7 @@ afterEach(() => {
 });
 
 describe("darwin capture", () => {
-  it.skipIf(!onDarwin)("writes a real PNG under .rolebox/computer and returns it as an attachment", async () => {
+  it.skipIf(!nativeTestsEnabled)("writes a real PNG under .rolebox/computer and returns it as an attachment", async () => {
     const context = makeContext();
     const result = (await createComputerScreenshotTool().execute({}, context)) as any;
 
@@ -85,7 +81,7 @@ describe("darwin capture", () => {
     }
   });
 
-  it.skipIf(!onDarwin)("creates the capture directory owner-only", () => {
+  it.skipIf(!nativeTestsEnabled)("creates the capture directory owner-only", () => {
     const context = makeContext();
     return createComputerScreenshotTool()
       .execute({}, context)

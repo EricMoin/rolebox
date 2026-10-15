@@ -113,7 +113,7 @@ limits it does not hide.
   must be committed through the host attachment service, and with no attachment
   service wired the model gets the text line plus the saved path under
   `.rolebox/computer/` instead of an image.
-- **Registration is host-side.** dsh, Pi and Codex register the seven tools
+- **Registration is host-side.** dsh, Pi and Codex register the 12 tools
   themselves (`src/entries/dsh.ts:2237-2246`, `src/entries/pi.ts:1244`,
   `src/entries/codex.ts:138`); the two opencode entries enforce the gate and the
   per-role grant as agent-config tool rules
@@ -122,9 +122,8 @@ limits it does not hide.
 - **Windows needs PowerShell and an interactive session**, and an unlisted
   platform is refused outright
   (`src/computer/drivers/win32.ts:14-17`, `src/computer/drivers/unsupported.ts:13-17`).
-- **The Linux and Windows drivers are unit-tested here, not exercised against a
-  live desktop.** Every tool test that does not capture the screen runs through
-  `dry_run` and asserts the plan the driver built; on macOS two tests perform one
-  real, input-free screenshot (`tests/computer/capture-darwin.test.ts:45-86`,
-  `:88-97`). No test synthesizes real mouse or keyboard input
-  (`src/computer/tools.ts:12-15`).
+- **The Linux and Windows drivers require live desktop validation.** Tests
+  cover command plans, fake-helper execution, permission verdicts, cancellation,
+  and host transport. They do not establish live behavior on every operating
+  system. The separate macOS capture tests require a GUI session and OS grants.
+  No test sends real mouse or keyboard input.

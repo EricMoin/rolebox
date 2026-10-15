@@ -14,9 +14,10 @@
  * the text.
  */
 
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { ToolResult } from "../platform/types.ts";
+import type { ComputerCaptureRequest } from "../platform/system/types.ts";
 import { hasPngSignature, readPngResolution, readPngSize } from "./png.ts";
 
 /** The worktree-relative directory every capture is written under. */
@@ -54,8 +55,9 @@ export function captureFilePath(
 }
 
 /** Create (or tighten) the capture directory before a helper writes into it. */
-export function ensureCaptureDirectory(directory: string): void {
+export function ensureCaptureDirectory(directory: string, tightenExisting = true): void {
   mkdirSync(directory, { recursive: true, mode: CAPTURE_DIRECTORY_MODE });
+  if (!tightenExisting) return;
   try {
     chmodSync(directory, CAPTURE_DIRECTORY_MODE);
   } catch {
@@ -101,7 +103,7 @@ function pixelScaleNote(width: number, height: number, scale: number): string {
   const points = `${Math.round(width / scale)}x${Math.round(height / scale)}`;
   return (
     `This capture is ${width}x${height} pixels at pixel_scale ${scale} (${points} in screen coordinates); ` +
-    `computer_click and computer_move take screen coordinates, so divide any pixel coordinate read off this image by ${scale}.`
+    `computer_click and computer_move take screen coordinates, so divide any pixel coordinate read off this image by ${scale}, then add the capture's screen origin.`
   );
 }
 
@@ -121,9 +123,17 @@ function screenshotFailure(driver: string, platform: string, message: string): T
  * make the tool report a picture it did not take. The density the file states,
  * when it states a usable one, is `metadata.pixel_scale`.
  */
-export function captureResult(path: string, platform: string, driver: string): ToolResult {
+export function captureResult(
+  path: string,
+  platform: string,
+  driver: string,
+  target?: Omit<ComputerCaptureRequest, "path">,
+): ToolResult {
   let bytes: Buffer;
   try {
+    if (statSync(path).size > 32 * 1024 * 1024) {
+      return screenshotFailure(driver, platform, "the screenshot exceeds the 32 MiB attachment limit; capture a smaller region.");
+    }
     bytes = readFileSync(path);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -134,7 +144,7 @@ export function captureResult(path: string, platform: string, driver: string): T
     );
   }
   const size = readPngSize(bytes);
-  if (size === null) {
+  if (size === null || size.width === 0 || size.height === 0) {
     const reason = hasPngSignature(bytes)
       ? "it has a PNG signature but no readable IHDR header"
       : `it is not a PNG (${bytes.byteLength} bytes)`;
@@ -144,7 +154,7 @@ export function captureResult(path: string, platform: string, driver: string): T
       `the ${driver} command wrote ${path}, but ${reason}; nothing was returned as an image.`,
     );
   }
-  const scale = readPixelScale(bytes);
+  const scale = platform === "darwin" ? readPixelScale(bytes) : 1;
   const output = [`[image: image/png, ${bytes.byteLength} bytes]`, path];
   if (scale !== null && scale > 1) output.push(pixelScaleNote(size.width, size.height, scale));
   const metadata: Record<string, unknown> = {
@@ -157,6 +167,19 @@ export function captureResult(path: string, platform: string, driver: string): T
     bytes: bytes.byteLength,
   };
   if (scale !== null) metadata.pixel_scale = scale;
+  if (target !== undefined) {
+    const origin = target.region !== undefined
+      ? { x: Math.round(target.region.x), y: Math.round(target.region.y) }
+      : target.windowId === undefined && target.display === undefined ? { x: 0, y: 0 } : null;
+    metadata.origin = origin;
+    metadata.coordinate_space = "screen";
+    metadata.target = target.windowId !== undefined ? { window_id: target.windowId }
+      : target.region !== undefined ? { region: target.region }
+        : target.display !== undefined ? { display: target.display } : { default: true };
+    if (origin === null) output.push("The screen origin of this window/display capture is unknown. Locate its screen bounds before converting image coordinates to absolute input coordinates.");
+    else if (target.region !== undefined) output.push(`Screen coordinates = origin (${origin.x}, ${origin.y}) + image coordinates / pixel_scale. Do not use image coordinates directly.`);
+    if (scale === null) output.push("The image does not declare a reliable pixel_scale. Establish its scale before converting image coordinates to screen coordinates.");
+  }
   return {
     title: `Image: ${path}`,
     output: output.join("\n"),

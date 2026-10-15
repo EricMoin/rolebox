@@ -4,17 +4,15 @@
  * dsh native presentation for the computer-use tool family.
  *
  * `DSH_TOOL_PRESENTATION` (src/platform/adapters/dsh/tool-factory.ts) declares
- * the optional dsh presentation surface. The seven `computer_*` tools are
+ * the optional dsh presentation surface. The `computer_*` tools are
  * merged into the canonical tool set only when the host opts in
  * (`buildCanonicalTools(..., { computerUse: true })`), so this pins:
  *
  * - `computer_screenshot` renders a generic card titled with the window or
  *   path it will capture;
- * - `computer_windows` / `computer_permissions` — read-only probes that mutate
- *   no rolebox-owned state — may join a parallel group;
- * - the four INPUT tools (`computer_click`, `computer_move`, `computer_type`,
- *   `computer_key`) never declare `isConcurrencySafe`, because overlapping
- *   calls would interleave real user-visible pointer/keyboard input.
+ * - read-only discovery and permission probes may join a parallel group;
+ * - INPUT tools and permission requests are never concurrency-safe, because
+ *   overlapping calls would interleave real user-visible actions.
  *
  * No GUI is touched: only the pure projectors and the compiled definitions are
  * exercised, never `execute`.
@@ -40,14 +38,22 @@ const COMPUTER_TOOL_NAMES = [
   "computer_type",
   "computer_key",
   "computer_permissions",
+  "computer_scroll",
+  "computer_drag",
+  "computer_focus",
+  "computer_displays",
+  "computer_status",
 ] as const;
 
-/** The four tools that synthesize shared pointer/keyboard input. */
+/** Tools that mutate shared desktop state. */
 const INPUT_TOOL_NAMES = [
   "computer_click",
   "computer_move",
   "computer_type",
   "computer_key",
+  "computer_scroll",
+  "computer_drag",
+  "computer_focus",
 ] as const;
 
 function compiledComputerTools(): Record<string, DshToolDefinition> {
@@ -90,9 +96,12 @@ describe("dsh computer_* native presentation", () => {
   });
 
   it("declares isConcurrencySafe for the read-only probes only", () => {
-    for (const name of ["computer_windows", "computer_permissions"] as const) {
+    for (const name of ["computer_windows", "computer_permissions", "computer_displays", "computer_status"] as const) {
       expect(DSH_TOOL_PRESENTATION[name]!.isConcurrencySafe?.({}), name).toBe(true);
     }
+    expect(DSH_TOOL_PRESENTATION["computer_permissions"]!.isConcurrencySafe?.({ request: true })).toBe(false);
+    expect(DSH_TOOL_PRESENTATION["computer_permissions"]!.isConcurrencySafe?.({ request: false })).toBe(true);
+    expect(DSH_TOOL_PRESENTATION["computer_permissions"]!.isConcurrencySafe?.(null)).toBe(false);
     for (const name of INPUT_TOOL_NAMES) {
       expect(DSH_TOOL_PRESENTATION[name]!.isConcurrencySafe, name).toBeUndefined();
     }
@@ -121,6 +130,9 @@ describe("dsh computer_* native presentation", () => {
     expect(typeof compiled["computer_screenshot"]!.presentCall).toBe("function");
     expect(typeof compiled["computer_windows"]!.isConcurrencySafe).toBe("function");
     expect(typeof compiled["computer_permissions"]!.isConcurrencySafe).toBe("function");
+    expect(compiled["computer_permissions"]!.isConcurrencySafe?.({ request: true })).toBe(false);
+    expect(compiled["computer_displays"]!.isConcurrencySafe?.({})).toBe(true);
+    expect(compiled["computer_status"]!.isConcurrencySafe?.({})).toBe(true);
     for (const name of INPUT_TOOL_NAMES) {
       expect(compiled[name]!.isConcurrencySafe, `${name}.isConcurrencySafe`).toBeUndefined();
     }

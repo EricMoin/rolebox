@@ -97,16 +97,33 @@ export interface ComputerCaptureRequest {
   readonly region?: ComputerRegion;
   /**
    * The OS's OWN display identifier — macOS `-D 1` is the main display, X11
-   * `:0` is the first, Windows indexes `Screen.AllScreens`. It is passed
+   * screen index (0 is the first), Windows indexes `Screen.AllScreens`. It is passed
    * through, never renumbered, so a caller can name the display the same way
    * the OS does.
    */
   readonly display?: number;
 }
 
-/** The window listing and the four input gestures, as the tool face receives them. */
+/** Desktop discovery and input operations, as the tool face receives them. */
 export type ComputerInputRequest =
   | { readonly action: "windows"; readonly app?: string }
+  | { readonly action: "displays" }
+  | { readonly action: "focus"; readonly windowId: number }
+  | {
+      readonly action: "scroll";
+      readonly direction: "up" | "down" | "left" | "right";
+      readonly amount: number;
+      readonly x?: number;
+      readonly y?: number;
+    }
+  | {
+      readonly action: "drag";
+      readonly fromX: number;
+      readonly fromY: number;
+      readonly toX: number;
+      readonly toY: number;
+      readonly durationMs: number;
+    }
   | {
       readonly action: "click";
       readonly x: number;
@@ -146,6 +163,8 @@ export interface ComputerPlan {
    * a refusal always names the grant that would fix it.
    */
   readonly permissionHint?: string;
+  /** Best-effort release after an interrupted gesture; never repeats the gesture. */
+  readonly cleanupPlan?: ComputerPlan;
 }
 
 /**
@@ -174,6 +193,8 @@ export interface SupportedComputerUse {
    * is true; otherwise a successful exit is itself the answer.
    */
   permissionProbe(): ComputerPlanOrRefusal;
+  /** Optional independent screen-capture permission probe; prints granted or not granted. */
+  capturePermissionProbe?(): ComputerPlanOrRefusal;
   /**
    * How this system asks its OS to show its own grant prompt, when the grant is
    * requestable.

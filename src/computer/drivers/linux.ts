@@ -7,8 +7,8 @@
  * the shell script the plan carries, so the plan itself stays a pure value: it
  * names the helpers it will try instead of probing for them here.
  *
- * Input is `xdotool` (XTEST), invoked as argv — no shell, so a typed string
- * cannot be re-parsed as shell syntax.
+ * Input is `xdotool` (XTEST). Text uses direct argv; drag uses a numeric-only
+ * shell plan so it can release the button if movement fails.
  *
  * A Wayland session is an explicit refusal, not a silent failure: scrot,
  * import and xdotool cannot inject through a Wayland compositor, and rolebox
@@ -33,13 +33,16 @@ const CAPTURE_INSTALL_HINT =
 const XDOTOOL_INSTALL_HINT =
   "install xdotool, for example: apt-get install xdotool, dnf install xdotool, or pacman -S xdotool.";
 
+const DISPLAY_INSTALL_HINT =
+  "install xdpyinfo (x11-utils on Debian/Ubuntu, xorg-x11-utils on Fedora, or xorg-xdpyinfo on Arch).";
+
 /** The refusal a Wayland session gets, or `null` on an X11 session. */
 function waylandRefusal(env: NodeJS.ProcessEnv): string | null {
   const waylandDisplay = env.WAYLAND_DISPLAY;
   const sessionType = env.XDG_SESSION_TYPE?.toLowerCase();
   const isWayland = sessionType === "wayland" || (waylandDisplay !== undefined && waylandDisplay.length > 0);
   if (!isWayland) return null;
-  return "this is a Wayland session, and rolebox's Linux driver drives X11 only (scrot, import and xdotool cannot inject through a Wayland compositor); log in to an X11 session, or run under Xwayland with DISPLAY set so the target windows are X11 clients.";
+  return "this is a Wayland session, and rolebox's Linux driver drives X11 only (scrot, import and xdotool cannot inject through a Wayland compositor); log in to an X11 desktop session. Xwayland does not provide control of the full Wayland desktop.";
 }
 
 function capturePlan(request: ComputerCaptureRequest, env: NodeJS.ProcessEnv): ComputerPlanOrRefusal {
@@ -48,8 +51,18 @@ function capturePlan(request: ComputerCaptureRequest, env: NodeJS.ProcessEnv): C
   if (request.windowId !== undefined && request.region !== undefined) {
     return "an X11 capture takes one window (-window) or one region (-crop), not both; pass window_id or region.";
   }
+  if (request.display !== undefined && (!Number.isInteger(request.display) || request.display < 0)) {
+    return "an X11 display must be a non-negative screen index from computer_displays.";
+  }
   const path = shellQuote(request.path);
-  const screen = request.display === undefined ? "" : `env DISPLAY=:${request.display} `;
+  let screen = "";
+  if (request.display !== undefined) {
+    const display = env.DISPLAY;
+    if (!display || !/:[0-9]+(?:\.[0-9]+)?$/.test(display)) {
+      return "selecting an X11 screen needs a valid DISPLAY connection, such as :0 or localhost:10.0.";
+    }
+    screen = `env DISPLAY=${shellQuote(display.replace(/\.[0-9]+$/, "") + "." + request.display)} `;
+  }
 
   let script: string;
   if (request.windowId !== undefined) {
@@ -170,7 +183,7 @@ function keyCombo(keys: readonly string[]): KeyCombo {
   }
   const final = parts[parts.length - 1];
   const lower = final.toLowerCase();
-  if (MODIFIERS[lower] !== undefined && parts.length === 1) {
+  if (MODIFIERS[lower] !== undefined) {
     return { refusal: `"${final}" is a modifier and cannot be the key of a press; put modifiers first and end with a normal key.` };
   }
   combo.push(KEYSYMS[lower] ?? final);
@@ -182,6 +195,86 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
   if (wayland !== null) return wayland;
 
   switch (request.action) {
+    case "displays": {
+      // X11 screens each have a root window; RandR monitors can share one root.
+      const script = [
+        "set -e",
+        "info=$(LC_ALL=C xdpyinfo)",
+        "printf '%s\\n' \"$info\" | awk '",
+        '  /default screen number:/ { primary = $NF }',
+        '  /^screen #[0-9]+:/ { id = $2; sub(/^#/, "", id); sub(/:$/, "", id); screen = 1 }',
+        '  screen && /^[[:space:]]*dimensions:/ {',
+        '    split($2, size, "x")',
+        '    if (size[1] + 0 <= 0 || size[2] + 0 <= 0) exit 3',
+        '    printf "%s{\\\"id\\\":%d,\\\"x\\\":0,\\\"y\\\":0,\\\"width\\\":%d,\\\"height\\\":%d,\\\"scale\\\":1,\\\"primary\\\":%s}", (count++ ? "," : "["), id, size[1], size[2], (id == primary ? "true" : "false")',
+        '    screen = 0',
+        '  }',
+        '  END { if (!count) exit 3; print "]" }',
+        "'",
+      ].join("\n");
+      return { argv: [SH, "-c", script], script, windowsVerbatimArguments: false, requires: [SH, "xdpyinfo", "awk"], driver: "xdotool" };
+    }
+    case "focus": {
+      if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
+      const script = [
+        "set -e",
+        `xdotool windowactivate --sync ${request.windowId}`,
+        "if ! active=$(xdotool getactivewindow); then",
+        "  echo 'could not verify the active X11 window' >&2",
+        "  exit 3",
+        "fi",
+        `if [ "$active" != '${request.windowId}' ]; then`,
+        "  echo 'the window manager refused foreground activation; select the target window manually and retry' >&2",
+        "  exit 3",
+        "fi",
+      ].join("\n");
+      return {
+        argv: [SH, "-c", script],
+        script,
+        windowsVerbatimArguments: false,
+        requires: [SH, XDOTOOL],
+        driver: "xdotool",
+      };
+    }
+    case "scroll": {
+      if (!Number.isInteger(request.amount) || request.amount < 1 || request.amount > 100) return "scroll amount must be an integer from 1 to 100 wheel ticks.";
+      if ((request.x === undefined) !== (request.y === undefined)) return "scroll coordinates x and y must be supplied together.";
+      const buttons = { up: 4, down: 5, left: 6, right: 7 };
+      const button = buttons[request.direction];
+      if (button === undefined) return "scroll direction must be up, down, left or right.";
+      const argv = [XDOTOOL];
+      if (request.x !== undefined && request.y !== undefined) {
+        if (!Number.isFinite(request.x) || !Number.isFinite(request.y)) return "scroll coordinates must be finite numbers.";
+        argv.push("mousemove", "--sync", "--", String(Math.round(request.x)), String(Math.round(request.y)));
+      }
+      argv.push("click", "--repeat", String(request.amount), "--delay", "20", String(button));
+      return { argv, windowsVerbatimArguments: false, requires: [XDOTOOL], driver: "xdotool" };
+    }
+    case "drag": {
+      const points = [request.fromX, request.fromY, request.toX, request.toY];
+      if (!points.every(Number.isFinite)) return "drag coordinates must be finite numbers.";
+      if (!Number.isInteger(request.durationMs) || request.durationMs < 100 || request.durationMs > 5000) return "drag duration must be an integer from 100 to 5000 milliseconds.";
+      const [fromX, fromY, toX, toY] = points.map(Math.round);
+      const steps = Math.min(100, Math.ceil(request.durationMs / 20));
+      const movement: string[] = [];
+      for (let step = 1; step <= steps; step++) {
+        movement.push("sleep", String(request.durationMs / steps / 1000), "mousemove", "--", String(Math.round(fromX + (toX - fromX) * step / steps)), String(Math.round(fromY + (toY - fromY) * step / steps)));
+      }
+      const script = [
+        "set -e",
+        `xdotool mousemove --sync -- ${fromX} ${fromY}`,
+        "trap 'xdotool mouseup 1' 0",
+        "trap 'exit 129' HUP",
+        "trap 'exit 130' INT",
+        "trap 'exit 143' TERM",
+        "xdotool mousedown 1",
+        `xdotool ${movement.join(" ")}`,
+      ].join("\n");
+      return {
+        argv: [SH, "-c", script], script, windowsVerbatimArguments: false, requires: [SH, XDOTOOL], driver: "xdotool",
+        cleanupPlan: { argv: [XDOTOOL, "mouseup", "1"], windowsVerbatimArguments: false, requires: [XDOTOOL], driver: "xdotool" },
+      };
+    }
     case "windows": {
       const app = request.app === undefined || request.app.trim().length === 0 ? null : request.app.trim();
       const search = app === null ? "--onlyvisible --name ''" : `--onlyvisible --name ${shellQuote(app)}`;
@@ -205,10 +298,9 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
       const x = Math.round(request.x);
       const y = Math.round(request.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return "click coordinates must be finite numbers.";
-      const argv = [XDOTOOL, "mousemove", "--sync"];
+      const argv = [XDOTOOL, "mousemove", "--sync", "--"];
       if (request.windowId !== undefined) {
         if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
-        argv.push("--window", String(request.windowId));
       }
       argv.push(String(x), String(y), "click");
       if (request.windowId !== undefined) argv.push("--window", String(request.windowId));
@@ -220,7 +312,7 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
       const x = Math.round(request.x);
       const y = Math.round(request.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return "pointer coordinates must be finite numbers.";
-      const argv = [XDOTOOL, "mousemove", "--sync", String(x), String(y)];
+      const argv = [XDOTOOL, "mousemove", "--sync", "--", String(x), String(y)];
       return { argv, windowsVerbatimArguments: false, requires: [XDOTOOL], driver: "xdotool" };
     }
     case "type": {
@@ -250,8 +342,8 @@ function inputPlan(request: ComputerInputRequest, env: NodeJS.ProcessEnv): Compu
 /** The Linux computer-use facts, declared once for the linux descriptor. */
 export const linuxComputerUse: SupportedComputerUse = {
   supported: true,
-  requiredBinaries: ["import", "scrot", XDOTOOL],
-  installHint: `${CAPTURE_INSTALL_HINT} ${XDOTOOL_INSTALL_HINT}`,
+  requiredBinaries: ["import", "scrot", XDOTOOL, "xdpyinfo"],
+  installHint: `${CAPTURE_INSTALL_HINT} ${XDOTOOL_INSTALL_HINT} ${DISPLAY_INSTALL_HINT}`,
   capturePlan(request, env) {
     return capturePlan(request, env);
   },
@@ -259,13 +351,11 @@ export const linuxComputerUse: SupportedComputerUse = {
     return inputPlan(request, env);
   },
   permissionProbe() {
-    // X11 has no per-application input permission model; what can stop a
-    // command here is the session type and a missing helper, so the probe
-    // reports both and exits non-zero only when input really cannot run. A
-    // successful exit IS the grant, so `readsProbeOutput` stays absent and the
-    // tool never reads this prose sentence as a permission token.
+    // A successful exit confirms the X connection, not XTEST or application
+    // acceptance. The probe does not inject input while checking access.
     const script = [
-      'if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then',
+      'case "${XDG_SESSION_TYPE:-}" in [Ww][Aa][Yy][Ll][Aa][Nn][Dd]) wayland=1 ;; *) wayland=0 ;; esac',
+      'if [ "$wayland" = 1 ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then',
       "  echo 'Wayland session: rolebox drives X11 only, so input cannot be injected here.' >&2",
       "  exit 3",
       "fi",
@@ -273,7 +363,15 @@ export const linuxComputerUse: SupportedComputerUse = {
       `  echo '${XDOTOOL_INSTALL_HINT}' >&2`,
       "  exit 4",
       "fi",
-      "echo 'X11 session: no per-application input permission is required, and xdotool is installed.'",
+      'if [ -z "${DISPLAY:-}" ]; then',
+      "  echo 'DISPLAY is not set; run rolebox inside the target X11 desktop session.' >&2",
+      "  exit 5",
+      "fi",
+      "if ! xdotool getmouselocation >/dev/null; then",
+      "  echo 'cannot access the X server; check DISPLAY and XAUTHORITY for the target desktop session.' >&2",
+      "  exit 6",
+      "fi",
+      "echo 'X11 session: xdotool can access the X server. Input still requires the XTEST extension and target application support.'",
     ].join("\n");
     return {
       argv: [SH, "-c", script],

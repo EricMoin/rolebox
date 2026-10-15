@@ -1,430 +1,264 @@
 # Computer use
 
-> Part of the rolebox documentation. See [README](../README.md) for overview.
+Rolebox's `computer_*` family provides 12 tools for observing and operating a
+native desktop: screenshots, windows, displays, focus, mouse input, text, keys
+and diagnostics. Drivers cover macOS, Windows and Linux X11. Wayland is
+explicitly unsupported.
 
-Rolebox can drive the real desktop: take screenshots, list windows, move the
-pointer, click, type text and press keys. It ships that as its own
-**computer-use family** — seven tools plus a per-OS driver — and registers it on
-dsh, Pi and Codex (on dsh only when the host exposes the guard seam that enforces
-the per-role grant). Neither opencode entry registers the family, so on opencode
-a role's `computer_*` grant changes nothing: the tools never appear (see
-[Policy: off by default](#policy-off-by-default)). The family is **off by
-default**: no tool registers until the global gate is on, and even then, on the
-hosts that carry a role (dsh and Pi), a role must opt in for itself. Codex is the
-exception — its MCP transport carries no role, so the gate alone decides, and
-with it on all seven tools are registered and callable with no role opt-in (see
-[Codex has no permission prompt](#codex-has-no-permission-prompt)).
+The family is off by default. dsh, Pi and Codex register it after the global gate
+is enabled; dsh and Pi additionally require an active role with an explicit tool
+grant. Neither OpenCode entry registers the family. See
+[compatibility](compatibility.md#computer-use) for host support.
 
-Two different things can supply desktop control on dsh, and only one of them
-should be enabled at a time — see [Two layers](#two-layers-the-hosts-own-computer-use-and-roleboxs-family).
+## Enable the tools
 
-## Two layers: the host's own computer use, and rolebox's family
+Set the boolean `computerUse: true` in the global rolebox config
+(`~/.config/rolebox/config.yaml`), or add it to the project's
+`.rolebox/config.json`:
 
-### The host's computer use (dsh)
+```json
+{ "computerUse": true }
+```
 
-On dsh the harness can supply computer use itself. Its shared service owns a
-**single exclusive provider slot**: `ctx.computerUse.register(name)` reserves the
-sole registration and rejects any second provider, including another instance of
-the same name (`deepseek-harness/docs/subsystems/computer-use.md`). Two **Cua
-Driver** providers fill that slot — Cua Driver MCP (an already installed
-`cua-driver` connected over MCP) and Cua Driver native (the platform-native
-runtime installed with the npm dependency). Both are experimental packages that
-require explicit activation, and each supplies its own upstream tool catalog; the
-shared service has no common desktop-operation methods and no model-controlled
-selector.
+The dsh plugin option and Codex MCP entry option also accept `computerUse: true`.
+Any one of these sources enables the family. An absent value, a non-boolean
+value, or a host option set to `false` does not enable it; a host option set to
+`false` does not override an enabled config file. Restart the host after changing
+the boot-time gate.
 
-On that path a screenshot is a **durable attachment**: an image-capable model
-route with an attachment store receives the stored image, and an unsupported
-image route receives the MCP image diagnostic
-(`deepseek-harness/docs/subsystems/computer-use.md`).
-
-### Rolebox's family (wherever it is registered)
-
-Rolebox ships its **own** tool family instead — `src/computer/` — built from the
-same canonical tool factory as every other rolebox tool
-(`createComputerTools`, `src/computer/tools.ts:455-464`). Its seven tools are
-`computer_screenshot`, `computer_windows`, `computer_click`, `computer_move`,
-`computer_type`, `computer_key` and `computer_permissions`, and each one resolves
-its command through the facts its own OS declares
-(`src/platform/system/types.ts:62-68`, `src/computer/drivers/`).
-
-**This family is the uniform surface.** One tool vocabulary and one set of
-arguments work the same way wherever it is registered, so a role or a graph
-written against it does not change when it moves between harnesses. dsh and
-Codex register it through the shared assembly's `computerUse` option
-(`src/platform/tool-assembly.ts:146-151`, `src/entries/dsh.ts:2237-2246`,
-`src/entries/codex.ts:138`), and Pi appends the same factory's record to its own
-tool set when the gate is on (`src/entries/pi.ts:1243-1244`). Both opencode
-entries read the same gate and grant, but only to emit per-role agent-config
-rules (`src/prompt/agent-config.ts:119-144`) — neither passes `computerUse` to
-the assembly, so neither registers the family. Where a host does not register
-the family, a role's `computer_*` grant changes nothing: the tools never appear.
-
-**On dsh, enable only one of the two.** The host provider and rolebox's family
-are two independent ways to drive the same desktop with different tool names and
-different screenshot transports, and both register into the model-visible tool
-set. Mount the host provider and leave rolebox's gate off, or turn the host
-provider off and use rolebox's family — not both.
-
-## The seven tools
-
-| Tool | Arguments | What it does |
-| --- | --- | --- |
-| `computer_screenshot` | `window_id?`, `region?`, `display?`, `path?`, `dry_run?`, `timeout_ms?` | Capture the screen, one window or one region as a PNG |
-| `computer_windows` | `app?`, `dry_run?` | List the visible windows with this OS's own window id |
-| `computer_click` | `x`, `y`, `button?`, `clicks?`, `window_id?`, `dry_run?` | Press a mouse button at absolute screen coordinates |
-| `computer_move` | `x`, `y`, `dry_run?` | Move the pointer without clicking |
-| `computer_type` | `text`, `window_id?`, `dry_run?` | Type text into the focused window |
-| `computer_key` | `keys`, `window_id?`, `dry_run?` | Press one key, optionally with modifiers |
-| `computer_permissions` | `dry_run?`, `request?` | Report whether this system reports input as permitted, and ask the OS for the grant |
-
-The argument shapes are the tools' own zod schemas (`src/computer/tools.ts`).
-
-- **`computer_screenshot`** — `window_id`, `region` and `display` are mutually
-  exclusive (`src/computer/drivers/darwin.ts:190-192`,
-  `src/computer/drivers/linux.ts:48-50`), a single-window capture selects no
-  display (`darwin.ts:193-195`), and on macOS a `region` is refused together with
-  `display` (`darwin.ts:196-198`): a region is in global screen coordinates and
-  therefore already selects its own display, and `screencapture` ignores `-D`
-  when `-R` is given. `display` is the OS's own display identifier: macOS `-D`,
-  which counts **from 1** — 1 is the main display, 2 the next, and a value below
-  1 is refused (`darwin.ts:199-201`) — an X11 screen number, a Windows
-  `Screen.AllScreens` index. It is passed through, never renumbered
-  (`src/platform/system/types.ts:98-104`). `timeout_ms` stops one capture
-  (default `15000`, `src/computer/exec.ts:23`).
-- **`computer_windows`** — one line per window, tab-separated. The id is the
-  OS's own — the macOS window number that `screencapture -l` takes, an X11
-  window id, or a Windows `MainWindowHandle` (`src/computer/tools.ts:236-266`).
-  On macOS and Windows a line is id, process or owner, title; an X11 line is the
-  id and the title alone, because that is all `xdotool getwindowname` returns
-  (`src/computer/drivers/linux.ts:189-195`). On macOS the listing comes from the
-  **window server's own list**, read through `osascript -l JavaScript`
-  (`src/computer/drivers/darwin.ts:225-295`), so its ids are real CGWindowIDs
-  `screencapture -l` accepts and it needs **no** Accessibility grant: only the
-  title column depends on Screen Recording, and it stays empty when macOS
-  withholds a window name. `app` narrows the list by platform: on macOS a
-  case-insensitive substring of the window **owner's** name
-  (`src/computer/drivers/darwin.ts:267-268`), on X11 a match against the window
-  **title** (`xdotool search --name`, case-insensitive unless `--case` is given:
-  `src/computer/drivers/linux.ts:187`), and on Windows a match against the
-  **process name or the title** (`src/computer/drivers/win32.ts:295`). Only macOS
-  turns a filter that matches no visible window into an error naming it
-  (`src/computer/drivers/darwin.ts:272-274`); on X11 and Windows it lists
-  nothing, and the tool answers with the empty listing
-  (`src/computer/tools.ts:258-262`).
-- **`computer_click`** — `button` is `left` (default), `right` or `middle`, and
-  `clicks` is `1` (default) or `2`. `window_id` targets one X11 window;
-  macOS and Windows send input to the focused window and refuse a `window_id`
-  instead of silently ignoring it (`src/computer/drivers/darwin.ts:185-187`).
-- **`computer_move`** — moves the real cursor; it takes no window.
-- **`computer_type`** — the text is never echoed back in the result, because it
-  may be a password (`src/computer/tools.ts:226-228`); a newline presses Return.
-- **`computer_key`** — `keys` is modifiers first and exactly one final key:
-  `["cmd", "shift", "t"]`, `["ctrl", "c"]`, `["Return"]`. A modifier in the
-  final position, or a second normal key, is refused rather than serialized into
-  a combination that would type something else.
-- **`computer_permissions`** — reports the permission state the OS itself
-  reports for this process, never a machine-wide preference, and reads a probe
-  whose output is a machine token **fail closed**: only the exact `granted`
-  token is a grant. `request: true` asks the OS to show its own prompt instead
-  of only reporting the status — on macOS the system Accessibility dialog, which
-  also registers the application in System Settings and appears once per
-  application. A system with no requestable grant ignores `request`. Approving
-  the grant requires restarting the host before input works, so call
-  `computer_permissions` again after the restart. `dry_run: true` reports the
-  variant's exact spawn vector and never shows a dialog
-  (`src/computer/tools.ts:388-525`).
-
-### `dry_run`: rehearse the exact command
-
-Every tool takes `dry_run: true`. It returns the **exact spawn vector** the tool
-would use as JSON — `{argv, windowsVerbatimArguments, script?}` — with
-`metadata.dry_run` set, and executes nothing
-(`src/computer/tools.ts:83-95`; the vector comes from the same resolver the real
-run uses, `src/computer/exec.ts:91-93`). This is the safe way to see what a
-gesture would do — which coordinates, which window id, which button, which
-helper binary — before it does anything. Use it first for any input you cannot
-take back.
-
-### Screenshots
-
-A capture is written under **`<worktree>/.rolebox/computer/`** as
-`<timestamp>-<seq>.png` unless `path` names another file, and the directory is
-created `0700` (`src/computer/capture.ts:22-26`, `:46-54`, `:56-64`). The result
-carries the PNG twice: as a `data:image/png;base64,...` attachment for an
-image-capable model route, and as plain text — `[image: image/png, N bytes]`
-plus the saved path — for the transcript (`src/computer/capture.ts:160-172`). The
-`metadata` records the PNG's own width, height and byte count, read from its
-IHDR, so a helper that wrote a different image cannot make the tool report one
-it did not take (`src/computer/capture.ts:116-146`).
-
-**A capture is in device pixels, input is in screen coordinates.** macOS
-`screencapture` writes the pixels of the captured screen's backing scale — a
-3024x1964 PNG for a 1512x982-point 2x display — and tags the file with that
-density. The result reports it as `metadata.pixel_scale` (`2` on that display),
-and when it is above 1 the text adds one sentence with the size in pixels, the
-scale and the same size in screen coordinates. `computer_click` and
-`computer_move` take screen coordinates, so a pixel coordinate read off the
-image must be divided by `pixel_scale` before it is clicked
-(`src/computer/capture.ts:66-106`). Two further facts follow from the same
-flags: a window capture drops the shadow (`screencapture -o`), so its image is
-exactly the window frame rather than a frame plus a margin whose pixel (0,0) is
-not the window's top-left, and a capture with no target covers **one display**
-(on macOS the main display), never a stitched image of every screen
-(`src/computer/drivers/darwin.ts:5-21`).
-
-A failure is never a thrown exception and never a silent no-op: the text is one
-sentence that starts with `Error:` and names the cause and what to do about it
-(`src/computer/tools.ts:5-10`, `src/computer/exec.ts:11-13`).
-
-## Policy: off by default
-
-On a host that carries roles, two independent decisions must both say yes before
-a `computer_*` call can reach the desktop: the **global gate** (may this host
-offer the family at all?) and the **role grant** (may this role use this tool?).
-Both fail closed, and neither one can turn the other on. Codex is the exception:
-its MCP transport carries no role and no per-call permission prompt
-([Codex has no permission prompt](#codex-has-no-permission-prompt)), so there the
-global gate is the whole policy.
-
-### 1. The global gate — `computerUse`, default OFF
-
-The gate is a single resolution point (`src/loader/computer-use-gate.ts:131-171`).
-Every source is checked, and the family is enabled only when one of them holds
-the boolean `true` (`:24-26`, `:92-94`, `:141`):
-
-1. the **host plugin option** — `computerUse` on a host that already carries
-   plugin options: the dsh plugin `Config` (`src/entries/dsh.ts:217-222`) and the
-   Codex MCP entry's options (`src/entries/codex.ts:101-112`);
-2. the **global rolebox config** — `computerUse: true` in
-   `~/.config/rolebox/config.yaml`;
-3. the **project config** — `computerUse: true` in
-   `{workspace}/.rolebox/config.json`.
-
-Absent everywhere is the default and means off. A non-boolean value — the string
-`"true"`, `1`, `{}` — is not enablement, so a config typo fails closed
-(`:24-26`). A host option can only ASSERT enablement: it is schema-defaulted, so
-`false` is indistinguishable from unset, and it never overrides a user's
-explicit config-file opt-in (`:28-32`).
-
-Registration is where the gate is enforced. On dsh the family is refused
-independently of — and before — any namespace filter
-(`src/platform/adapters/dsh/role-tool-policy.ts:96-112`, applied at
-`src/entries/dsh.ts:2100-2103`, `:2266-2269`), and the assembly receives the gate at
-`src/entries/dsh.ts:2237-2246`. The Codex entry resolves the same gate and hands
-it to the assembly (`src/entries/codex.ts:125-139`), and Pi appends the family to
-its tool record only when the gate is on (`src/entries/pi.ts:1243-1244`). On the
-opencode entries the same decision is expressed as agent-config tool rules:
-each of the seven names a role does not grant is emitted as `false`
-(`src/prompt/agent-config.ts:119-144`), which the v2 agent transform turns into a
-deny rule (`src/platform/adapters/opencode2/agents.ts:245-253`). Those rules
-concern names neither entry registers: the family is absent on opencode, so a
-grant there produces no callable tool.
-
-### 2. The role grant — `role.yaml` `tools:`
-
-On dsh and Pi, with the gate on, a call still needs a grant from the **acting
-role**. The grant is the role's `tools:` map
-(`src/loader/computer-grants.ts:83-100`):
+On dsh and Pi, grant the required tools in the active role's `role.yaml`:
 
 ```yaml
 tools:
-  computer_screenshot: true    # one tool, by exact name
-  computer_*: true             # the whole family
+  computer_status: true
+  computer_permissions: true
+  computer_windows: true
+  computer_displays: true
+  computer_screenshot: true
+  computer_focus: true
+  computer_click: true
 ```
 
-The vocabulary is exactly those two shapes: an exact name, or the family
-wildcard `computer_*` (`:86-88`, `:97-99`). The example role in
-[`examples/computer-use/role.yaml`](../examples/computer-use/role.yaml) opts in
-with `computer_*: true`, and the skill it loads
-([`examples/computer-use/skills/computer-use/SKILL.md`](../examples/computer-use/skills/computer-use/SKILL.md))
-teaches the observe → act → verify loop. An absent `tools:` map, a `false`
-value, an unrelated key and the generic `"*": true` wildcard are all **not**
-grants (`:14-18`) — a generic "everything else" allowance must not hand over
-control of the user's screen. A session with no active rolebox role (the base
-agent) is denied too, and every denial names the role and the exact line to add
-(`:127-159`).
+The family wildcard is available when a role needs the full surface. An exact
+`false` overrides it:
 
-How that grant is enforced depends on what the host offers, and each path fails
-closed:
+```yaml
+tools:
+  computer_*: true
+  computer_drag: false
+```
 
-- **dsh** — the family is registered globally, so the decision is a monotonic
-  `ctx.tools.guard` installed once at boot: it resolves the session's active role
-  and denies an ungranted `computer_*` call before the tool body runs
-  (`src/platform/adapters/dsh/role-tool-policy.ts:1-30`, `:163-171`). A host
-  without `ctx.tools.guard` cannot enforce the grant at all, so rolebox registers
-  nothing there rather than shipping an ungoverned screen-control surface
-  (`:26-30`, `:147-161`).
-- **Pi** — the tool interceptor runs the same decision before the tool call and
-  fails it with the denial reason (`src/platform/adapters/pi/tool-interceptor.ts:120-142`).
-- **opencode** — there is nothing to enforce: neither entry assembles the
-  family, so the per-role decision is emitted into the agent config as `false`
-  entries that deny a tool the host was never given. Whether opencode itself
-  turns an agent-config `tools: false` entry into an effective deny is host
-  behaviour this repository cannot observe and is **unverified here**.
-- **Codex** — see the next section: there is no role to grant anything.
-
-### What does NOT enable computer use
-
-- **`enabledNamespaces: ["*"]` is not the gate.** On dsh that option is an
-  allow-list filter over the tools that were already assembled and it matches the
-  `computer_` prefix like any other namespace, so the gate is checked
-  independently of it (`src/platform/adapters/dsh/role-tool-policy.ts:96-112`;
-  the filter itself is `src/entries/dsh.ts:770-795`, applied at `:2104-2107`, `:2270-2273`). `"*"`
-  registers everything assembled — including nothing, when the gate is off.
-- **A `computer_*` key in `role.yaml` alone is not the gate.** A role grant can
-  never turn the family on by itself; on the hosts that carry a role, the gate
-  AND the grant are both required (`src/loader/computer-grants.ts:28-30`).
-- **Installing rolebox is not the gate.** `npm install` grants no OS permission;
-  see [Host requirements](#host-requirements).
+An absent map, an inactive or unknown role, and the generic `"*": true` wildcard
+do not grant computer use. An exact `true` can grant a tool even when the family
+wildcard is `false`. dsh requires its monotonic `ctx.tools.guard` seam; when the
+host lacks that seam, rolebox refuses to register the family.
 
 ### Codex has no permission prompt
 
-The Codex transport is MCP over stdio, where `context.ask()` is a documented
-no-op (`src/entries/codex.ts:159-161`) — a tool that would request permission on
-another harness runs without a prompt. That transport also carries no role
-(`docs/limitations.md`), so no per-role grant can be resolved there and none is
-invented: the **global gate is the whole policy on Codex**
-(`src/entries/codex.ts:10-22`, `:125-131`). With the gate on, all seven tools are
-registered and callable with no role opt-in anywhere in the path. Turn it on
-only for a workspace where you are willing to have the desktop driven unattended.
+The Codex MCP transport has no active rolebox role and no per-call permission
+callback. Its global gate is the complete rolebox policy: enabling it makes all
+12 tools available. OS permissions still apply.
 
-## Graph nodes: the `tools` field
+## Workflow
 
-A version-3 graph declaration may grant one node extra host tools beyond the
-worker baseline. The field is `tools?: string[]` on the node: exact host tool
-names, or trailing-star prefixes (for example `computer_*`)
-(`src/graph/compiler/declaration-v3.ts:153-168`). Entries are trimmed, unique and
-sorted by the front-end, and **absent means the baseline only** — the worker
-baseline is `graph_submit_outcome`, plus `graph_worker_exec` on dsh, and a node
-that does not declare the field keeps exactly that baseline and gets no
-`computer_*` tool.
+1. Call `computer_status` to inspect planned operations, helper availability and
+   the input and screen-capture permission probes. It performs no screenshot, input or permission
+   prompt. A planned operation is not proof that the OS will let it run.
+2. Check `computer_permissions`. On macOS, `request: true` asks for the OS
+   Accessibility prompt. Grant the host application the requested permission,
+   restart it when required, and probe again. Screen Recording is separate;
+   inspect the separate screen-capture verdict, then inspect the image from `computer_screenshot`.
+3. Discover the target with `computer_windows` and `computer_displays`. Focus a
+   selected window with `computer_focus`, then take a fresh screenshot.
+4. Choose coordinates from the screenshot using its scale and screen origin.
+   Use `dry_run: true` to inspect a command without executing it when useful.
+5. Perform one action and inspect a fresh screenshot to verify the result.
+   Scrolling, focus changes and dragging can invalidate earlier coordinates.
 
-A declared grant is a NARROWING of what the node may do, never a widening of the
-graph face: those names are host tools, added for that worker's own calls only
-(`src/graph/host/tool-binding.ts:79-96`). Matching is fail-closed — an exact name
-admits exactly that name and a trailing-star prefix admits every name starting
-with the stem, so a bare `*` is the exact name `*` and no single entry grants the
-whole host tool surface (`src/graph/host/tool-binding.ts:98-126`).
+All real operations are serialized within one host process. This prevents
+rolebox calls in that process from interleaving, but does not lock out a person,
+another application or another host process. Delivered input has no rollback.
 
-```yaml
-- id: shooter
-  tools: ["computer_*"]        # or exact names: computer_screenshot, computer_click
+## Tools and arguments
+
+Every tool accepts optional `dry_run` and `timeout_ms`. The timeout is an integer
+from **1 to 120000 ms**, defaults to **15000 ms**, and includes time spent waiting
+in the desktop queue. Cancellation removes queued work before execution and
+stops an active helper. A failed or interrupted drag attempts to release the
+mouse button before the queue continues. Cleanup is best effort; forcibly
+terminating the host cannot guarantee release.
+
+| Tool | Additional arguments | Behavior |
+| --- | --- | --- |
+| `computer_status` | None | Diagnose operations, helpers and input permission without capturing or sending input |
+| `computer_permissions` | `request?` | Probe input permission; optionally request the OS grant |
+| `computer_windows` | `app?` | List visible windows and the IDs used by capture/focus |
+| `computer_displays` | None | Return JSON display IDs, bounds, scale and primary flag |
+| `computer_screenshot` | `window_id?`, `region?`, `display?`, `path?` | Capture a PNG and return an image attachment |
+| `computer_focus` | `window_id` | Bring the selected window forward and verify focus, or report refusal |
+| `computer_click` | `x`, `y`, `button?`, `clicks?`, `window_id?` | Click at absolute screen coordinates; button defaults to left, clicks to 1 |
+| `computer_move` | `x`, `y` | Move the pointer without clicking |
+| `computer_type` | `text`, `window_id?` | Type into the focused or supported target window |
+| `computer_key` | `keys`, `window_id?` | Press modifiers followed by one final key |
+| `computer_scroll` | `direction`, `amount?`, `x?`, `y?` | Scroll up/down/left/right by 1–100 wheel ticks, default 3; optional pointer position requires both coordinates |
+| `computer_drag` | `from_x`, `from_y`, `to_x`, `to_y`, `duration_ms?` | Left-button drag between absolute coordinates over 100–5000 ms, default 500 ms |
+
+`computer_click.button` is `left`, `right` or `middle`; `clicks` is 1 or 2.
+`computer_key.keys` is an array such as `["cmd", "shift", "t"]` or
+`["Return"]`. Exactly one non-modifier key comes last. `window_id` on click,
+type and key is X11-only; macOS and Windows reject it, so focus first there.
+The receiving application decides how far one scroll tick moves content.
+
+### Dry runs
+
+For operation tools, `dry_run: true` returns the exact spawn plan as JSON
+(`argv`, `windowsVerbatimArguments`, and an optional `script`) without running
+it. When applicable, the report also includes a separate capture-permission
+probe and a drag-release cleanup plan. `computer_status` instead returns its diagnostic plan without checking the
+filesystem or executing the permission probe. Dry runs do not verify helpers,
+OS grants or the current target.
+
+Normal `computer_type` results report the character count without repeating the
+text. Its **dry-run command contains the text in plaintext**, so do not dry-run
+secrets.
+
+## Screenshots and coordinates
+
+By default captures are saved under the session workspace's
+`.rolebox/computer/` as timestamped PNGs. The dedicated directory and capture files are owner-only
+on POSIX systems. A custom `path` may be absolute or workspace-relative; rolebox
+does not change the permissions of an existing custom parent directory. The
+result includes the path, PNG dimensions, byte count, an image attachment and
+coordinate metadata. Images above 32 MiB are refused; capture a smaller region.
+
+A screenshot accepts one target: a window, a region (`{x, y, w, h}` in screen
+coordinates), or a display. Consult `computer_displays` for valid display IDs:
+macOS IDs start at 1; Windows and X11 IDs start at 0. An untargeted capture covers
+one display. X11 display entries describe X screens, which have separate
+coordinate spaces; they are not a list of RandR monitors. Capturing another X
+screen does not switch input to it: input uses the host's `DISPLAY` screen. To
+control another X screen, start the host with `DISPLAY` pointing to that screen.
+
+Image pixels and input coordinates can differ. When both `pixel_scale` and the
+screen `origin` are known, convert a pixel position with:
+
+```text
+screen_x = origin.x + image_x / pixel_scale
+screen_y = origin.y + image_y / pixel_scale
 ```
 
-```json
-{ "id": "shooter", "tools": ["computer_screenshot"] }
-```
+For example, pixel `(100, 60)` in a 2× capture of a region beginning at
+`(300, 200)` corresponds to screen point `(350, 230)`.
 
-## Image transport per host
+Region captures report their origin. Window and explicitly selected display
+captures currently report `origin: null`: establish their screen bounds before
+clicking; dividing by scale alone is insufficient. A macOS PNG with no reliable
+density has no known `pixel_scale`, so establish the scale before conversion.
+A macOS window capture omits its shadow to keep the image aligned with its frame.
 
-A screenshot travels to the model through the harness's own tool-result
-transport, and each host does it differently:
+### Image transport per host
 
-| Host | How an image attachment reaches the model |
+| Host | Model-visible screenshot |
 | --- | --- |
-| Codex (MCP) | Image attachments become MCP `image` content blocks, with the base64 payload and the text block first (`src/platform/adapters/codex/tool-factory.ts:65-92`) |
-| opencode v2 | Attachments become v2 `file` content blocks `{type: "file", uri, mime, name?}` after the text block (`src/platform/adapters/opencode2/tool-factory.ts:84-115`). No screenshot travels this path today: neither opencode entry registers a `computer_*` tool |
-| Pi | Image attachments become Pi `image` content blocks `{type: "image", data, mimeType}` after the text block (`src/platform/adapters/pi/tool-factory.ts:46-92`) |
-| dsh | Needs the host's attachment service: the bytes are committed through `saveImage` and the result carries a durable `ImageAttachmentRef` on an `ImageBlock` (`src/platform/adapters/dsh/attachment.ts`). With no attachment service wired, the image does not travel as an image: the result stays text plus the saved path under `.rolebox/computer/` |
+| Codex MCP | Text followed by an inline MCP image block |
+| Pi | Text followed by a Pi image content block; metadata stays in details |
+| dsh | Image bytes saved through the mounted attachment service, then rendered as durable image refs |
+| OpenCode v1/v2 | This family is not registered |
 
-## Host requirements
+On dsh without an attachment service, the result remains text plus the saved
+path. The model route must support images; a successful file capture alone does
+not establish that the model received pixels.
 
-### macOS
+## Platform behavior and limits
 
-Screenshots use `/usr/sbin/screencapture`, input uses `/usr/bin/osascript`
-driving System Events, and the window list runs `osascript -l JavaScript`
-against the window server (`src/computer/drivers/darwin.ts:1-43`). Every grant
-goes to the **application that launched the host** — the terminal or agent
-process — not to rolebox, and not by `npm install`. Which capability needs which
-grant:
+| Platform | Driver requirements and limits |
+| --- | --- |
+| macOS | Built-in `screencapture` and JXA/AppleScript. Quartz sends mouse gestures and Unicode text; System Events handles focus and keyboard shortcuts. Screen Recording, Accessibility and System Events Automation grants belong to the application launching the host. Focus refuses ambiguous window matches. |
+| Linux X11 | `xdotool` for input/focus, ImageMagick `import` or `scrot` for capture, and `xdpyinfo`/`awk` for display discovery. Window-manager support affects focus. |
+| Windows | PowerShell with desktop .NET APIs and an interactive desktop session. The OS may refuse foreground activation or input into higher-privilege applications. |
+| Wayland / other systems | Explicit refusal; no fallback pretending to provide desktop control. |
 
-- **Screen Recording** for `screencapture` to include window contents; without
-  it the PNG contains only the desktop wallpaper
-  (`src/computer/drivers/darwin.ts:62-63`). It also decides the window *titles*
-  `computer_windows` reports: without it the ids and owner names still list and
-  the title column is empty.
-- **Accessibility** (System Settings > Privacy & Security > Accessibility) for
-  **input only** — it is what lets the process synthesize a click, a keystroke or
-  a pointer move, through System Events or the `cliclick` helper.
-- **Automation for System Events** (System Settings > Privacy & Security >
-  Automation) to script it. It is a grant *separate* from Accessibility, so an
-  application trusted for one can still fail the other; every input plan carries
-  a single remediation sentence naming both
-  (`src/computer/drivers/darwin.ts:59-60`, `:170`, `:180`), and the process must
-  be restarted after the grant.
+`computer_windows` returns tab-separated window IDs and labels. Its `app` filter
+matches owner names on macOS, window titles on X11, and process names or titles
+on Windows. Missing OS permission can withhold macOS window titles even though
+IDs remain available. Input-permission success does not imply Screen Recording
+permission or guarantee every individual input operation. On macOS, a separate
+`CGPreflightScreenCaptureAccess` probe reports Screen Recording permission; a
+capture is refused if that grant cannot be verified. Other platforms report
+that separate permission as unverified when they expose no probe. A PNG file
+alone is not proof that protected window contents were captured.
 
-`computer_windows` needs **none** of the three: it reads the window server's own
-list, which is not System Events and not input
-(`src/computer/drivers/darwin.ts:225-295`).
+The family controls the native desktop; it does not supply browser DOM
+selectors, a general accessibility-tree API or a transaction spanning multiple
+calls. Unit tests cover driver plans, argument validation, queue behavior,
+authorization and host image transport. They do not establish live desktop
+behavior on every operating system, and tests must not send real mouse or
+keyboard input to the developer's desktop.
 
-Moving the pointer and a right or middle click use the `cliclick` helper, which
-is **not** part of macOS; when it is missing the tool refuses and names the
-install command (`brew install cliclick`,
-`src/computer/drivers/darwin.ts:35-39`, `:348-349`). `computer_permissions`
-reads the calling process's own TCC Accessibility trust — `AXIsProcessTrusted`
-through JXA, not the global `UI elements enabled` preference, which is a System
-Events UI-scripting setting that answers `true` even while the OS is already
-blocking this process — and returns the remediation text when it is off
-(`src/computer/drivers/darwin.ts:344-439`, `src/computer/tools.ts:388-525`).
-With `request: true` it runs `AXIsProcessTrustedWithOptions` together with
-`kAXTrustedCheckOptionPrompt`, which makes macOS show its Accessibility dialog
-and register the application in System Settings; the process must then be
-restarted before input works. On linux and win32 a successful exit is itself the
-grant, so those probes' prose answer is never read as a permission token.
+## Optional macOS desktop smoke test
 
-### Linux
+The normal module test command does not operate the desktop or capture its
+contents. Native OS tests are skipped unless explicitly enabled:
 
-X11 only, for now. Capture prefers ImageMagick's `import` and falls back to
-`scrot` (which cannot address one window); input is `xdotool`
-(`src/computer/drivers/linux.ts:1-16`). A **Wayland session is an explicit
-refusal**, not a silent failure: `scrot`, `import` and `xdotool` cannot inject
-through a Wayland compositor, and rolebox declares no Wayland driver — the tool
-says so and names the X11 or Xwayland path
-(`src/computer/drivers/linux.ts:36-43`). A missing `import`/`scrot`/`xdotool` is
-also an explicit refusal that carries the install hint
-(`src/computer/drivers/linux.ts:30-34`, `:76-78`, `:87-89`;
-`src/computer/exec.ts:112-119`). `computer_permissions` reports the same two
-conditions (`src/computer/drivers/linux.ts:261-283`).
+```sh
+bun test --isolate tests/computer/
+```
 
-### Windows
+For the additional real permission and main-display screenshot checks on an
+already authorized macOS host, opt in with `ROLEBOX_CUA_NATIVE_TESTS=1`.
+These checks do not request permissions:
 
-Capture and input are PowerShell scripts — System.Drawing for the screen,
-System.Windows.Forms for `SendKeys` and the pointer
-(`src/computer/drivers/win32.ts:1-21`). PowerShell must be available (the plan
-names `powershell` in `requires`, and the executor refuses with a remediation
-when it is missing), and the session must be interactive
-(`src/computer/drivers/win32.ts:14-17`, `:34-35`, `:378-388`). There is no
-per-application permission grant on Windows; `computer_permissions` reports
-whether the session is interactive. The Windows key cannot be synthesized
-(`src/computer/drivers/win32.ts:150-153`).
+```sh
+ROLEBOX_CUA_NATIVE_TESTS=1 bun test --isolate tests/computer/tools.test.ts tests/computer/capture-darwin.test.ts
+```
 
-### Any other platform
+Use the smoke runner below for the complete temporary-window verification.
+This opt-in test uses a temporary native application with two windows and records
+button, text, scroll and drag events. It exercises the real `computer_*` tools,
+including window screenshots and focus, and stops at the first failed assertion.
+Run both terminals from the repository root. In the first terminal, compile and
+start a fresh fixture:
 
-A platform rolebox declares no driver for refuses every call with one sentence
-naming the platform and the systems that work
-(`src/computer/drivers/unsupported.ts:13-17`,
-`src/platform/system/descriptors.ts:36-38`).
+```sh
+cua_tmp="$(mktemp -d /tmp/rolebox-cua.XXXXXX)"
+swiftc tests/computer/fixtures/macos-cua-app.swift -o "$cua_tmp/macos-cua-app"
+printf 'Fixture directory: %s\n' "$cua_tmp"
+"$cua_tmp/macos-cua-app" "Rolebox CUA smoke test" "$cua_tmp/state.json"
+```
 
-## Safety rules
+Keep that process running. In a second terminal, replace the placeholder with
+the absolute directory printed above, then explicitly opt in to desktop input:
 
-1. **Delivered input cannot be rolled back.** A click, a keystroke or typed text
-   that reached an application is already part of the desktop's state; there is
-   no undo call (`deepseek-harness/docs/subsystems/computer-use.md`).
-2. **The desktop is shared and can change between calls.** Another person, a
-   notification or another process can move the window you aimed at. Re-observe
-   before acting; never assume the screen still matches an earlier screenshot.
-3. **Verify from fresh state.** After an action that was supposed to change
-   something, take a new screenshot and check that it did.
-4. **Rehearse risky input with `dry_run` first** — anything that submits,
-   sends, deletes or confirms.
-5. **Stop on a permission refusal.** When `computer_permissions` (or a tool
-   failure) reports that input is not permitted, report it and stop; retrying
-   the same gesture blindly cannot succeed. The grant can be *asked for*:
-   `computer_permissions` with `request: true` makes macOS show its Accessibility
-   dialog (once per application) and register the app in System Settings, but the
-   user must approve it and the host must then be restarted before the same call
-   reports the grant — until it does, keep stopping rather than retrying.
-6. **Ask before irreversible or outward-facing steps** — destroying data,
-   changing system settings, sending messages, making payments, entering
-   credentials.
+```sh
+cua_tmp=/absolute/path/printed/by/the/first/terminal
+bun scripts/computer-macos-smoke.ts --run --state "$cua_tmp/state.json" --output "$cua_tmp/results"
+```
+
+The runner requires granted Accessibility and Screen Recording permissions;
+it does not request them. macOS grants belong to the application launching the
+runner, such as the terminal or agent host, so granting a different application
+does not authorize this run. Restart that host when macOS requires it. Keep the
+fixture visible and avoid interacting with the desktop during the test; the
+runner checks its foreground window before sending input.
+
+Inspect `results/report.json`, `results/before.png` and `results/after.png`.
+The report records tool results without image base64 and the fixture's observed
+events. Use a new fixture for each run. Close its primary window, or press
+Ctrl-C in the first terminal, to quit; the runner does not close it. After
+inspecting the results, remove the generated temporary directory:
+
+```sh
+rm -rf -- "${cua_tmp:?}"
+```
+
+## Two layers: the host's own computer use, and rolebox's family
+
+A dsh profile may also mount a host-owned CUA provider. That provider has its own
+tools and lifecycle, separate from rolebox's family. Enable one control surface
+at a time to avoid competing input paths. Rolebox's process-local queue cannot
+serialize another provider's actions.
+
+The implementation lives in [src/computer](../src/computer/); the shared gate
+and role decision are in [computer-use-gate.ts](../src/loader/computer-use-gate.ts)
+and [computer-grants.ts](../src/loader/computer-grants.ts). Host registration and
+image transport are implemented by the platform entries and adapters.

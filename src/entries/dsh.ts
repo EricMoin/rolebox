@@ -171,7 +171,7 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
  *                           `{dsh home}/skills`)
  *   - `defaultRole`       — role id (directory name) promoted to primary
  *   - `computerUse`       — opt IN to rolebox's computer-use family
- *                           (`computer_screenshot` … `computer_permissions`).
+ *                           (`computer_*` observation and input tools).
  *                           Default `false`: absent registers NOTHING. The
  *                           family is registered only when this resolves true
  *                           (it is also enabled by `computerUse: true` in
@@ -218,7 +218,7 @@ export const Config = z.object({
     .boolean()
     .default(false)
     .describe(
-      "Enable rolebox's computer-use family (computer_screenshot, computer_windows, computer_click, computer_move, computer_type, computer_key, computer_permissions). Default false: absent registers NO computer_* tool at all. A host option can only ASSERT enablement (a schema default makes false indistinguishable from unset), so computerUse: true in ~/.config/rolebox/config.yaml or {cwd}/.rolebox/config.json also enables it; a role must still grant the tools in role.yaml tools: (computer_screenshot: true, or the family wildcard computer_*: true) or the boot-time guard denies every call.",
+      "Enable rolebox's computer-use family for screenshots, windows, displays, status, clicking, moving, typing, keys, scrolling, dragging, focus and permissions. Default false: absent registers NO computer_* tool at all. A host option can only ASSERT enablement (a schema default makes false indistinguishable from unset), so computerUse: true in ~/.config/rolebox/config.yaml or {cwd}/.rolebox/config.json also enables it; a role must still grant the tools in role.yaml tools: (computer_screenshot: true, or the family wildcard computer_*: true) or the boot-time guard denies every call.",
     ),
   enabledNamespaces: z
     .array(z.string())

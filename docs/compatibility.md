@@ -83,7 +83,7 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | lsp_* (32 tools) | ✓ | ✓ | — (not over MCP) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
-| computer_* (seven tools: computer_screenshot / computer_windows / computer_click / computer_move / computer_type / computer_key / computer_permissions) | — (not registered; the gate only emits deny rules) | ✓ (opt-in) | ✓ (opt-in) |
+| [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (opt-in) | ✓ (opt-in) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
@@ -92,12 +92,12 @@ The graph tools ship with every host that owns an outcome capability layer — d
 ## Computer use
 
 Rolebox's computer-use family — `computer_screenshot`, `computer_windows`,
-`computer_click`, `computer_move`, `computer_type`, `computer_key` and
-`computer_permissions` — is assembled by the shared `buildCanonicalTools`, which
+`computer_click`, `computer_move`, `computer_type`, `computer_key`,
+`computer_permissions`, `computer_scroll`, `computer_drag`, `computer_focus`,
+`computer_displays` and `computer_status` — is assembled by the shared `buildCanonicalTools`, which
 merges it only when the host asked for it (`src/platform/tool-assembly.ts:146-151`).
-It is **off by default** on every host, so the 15-tool Codex surface and the
-shared opencode/Pi surface are exactly what they were for a host that never asks
-for it; switching it on adds the seven tools (22 over MCP on Codex).
+It is **off by default** on every host. Enabling it adds the 12 tools on hosts
+that register the family.
 
 The switch is one shared resolution (`src/loader/computer-use-gate.ts`): the
 family is enabled only when a source holds the boolean `true` — the host plugin
@@ -108,7 +108,7 @@ option `computerUse` (the dsh plugin `Config`, the Codex MCP entry's options),
 `tools` map, by exact name or with the family wildcard `computer_*`. Codex is
 the exception: its MCP transport carries no role and no permission prompt
 (`src/entries/codex.ts:125-131`, `:159-161`), so the gate is the whole policy
-there — with the gate on, all seven tools are registered and callable with no
+there — with the gate on, all 12 tools are registered and callable with no
 role opt-in. On dsh, `enabledNamespaces` is only a filter over the tools that
 were already assembled, so `["*"]` does not enable computer use by itself
 (`src/platform/adapters/dsh/role-tool-policy.ts:96-112`). Neither opencode entry

@@ -35,7 +35,7 @@
 import type { ResolvedRole } from "../types.ts";
 
 /**
- * The seven computer-use tool names, in registration order.
+ * The registered computer-use tool names.
  *
  * Kept here (the loader owns role policy) instead of importing
  * `src/computer/tools.ts`: the gate must be evaluable by a host that never
@@ -50,6 +50,11 @@ export const COMPUTER_TOOL_NAMES = [
   "computer_type",
   "computer_key",
   "computer_permissions",
+  "computer_scroll",
+  "computer_drag",
+  "computer_focus",
+  "computer_displays",
+  "computer_status",
 ] as const;
 
 /** One member of the family. */
@@ -75,7 +80,7 @@ export function isComputerToolName(name: string): boolean {
   return name.startsWith(COMPUTER_TOOL_PREFIX);
 }
 
-/** Whether `name` is one of the seven registered family members. */
+/** Whether `name` is a registered family member. */
 export function isRegisteredComputerToolName(name: string): name is ComputerToolName {
   return (COMPUTER_TOOL_NAMES as readonly string[]).includes(name);
 }
@@ -84,8 +89,8 @@ export function isRegisteredComputerToolName(name: string): name is ComputerTool
  * Whether a role's `tools:` map grants ONE computer-use tool.
  *
  * Grants are exact (`computer_screenshot: true`) or the family wildcard
- * (`computer_*: true`); every other key — `"*"`, a namespace prefix, a `false`
- * value — is not a grant.
+ * (`computer_*: true`). An exact `false` overrides the family wildcard; every
+ * other key — `"*"` or a namespace prefix — is not a grant.
  *
  * @param tools - The role's raw `tools:` map (undefined when the role declares none).
  * @param toolName - The computer-use tool name to look up.
@@ -95,6 +100,7 @@ export function roleGrantsComputerTool(
   toolName: string,
 ): boolean {
   if (tools === undefined) return false;
+  if (tools[toolName] === false) return false;
   if (tools[toolName] === true) return true;
   return tools[COMPUTER_TOOL_WILDCARD] === true;
 }
@@ -149,11 +155,14 @@ export function decideComputerToolGrant(input: {
     };
   }
   if (!roleGrantsComputerTool(role.config.tools, toolName)) {
+    const hint = role.config.tools?.[toolName] === false
+      ? `set "${toolName}: true" in its role.yaml tools: map; an exact false overrides "${COMPUTER_TOOL_WILDCARD}: true"`
+      : computerToolGrantHint(toolName);
     return {
       granted: false,
       reason:
         `Computer use denied for role "${roleId}": its role.yaml tools: map does not grant ` +
-        `"${toolName}" — ${computerToolGrantHint(toolName)}.`,
+        `"${toolName}" — ${hint}.`,
     };
   }
   return { granted: true };

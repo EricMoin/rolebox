@@ -1036,18 +1036,24 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   // Computer use (src/computer/tools.ts, merged only when the host sets
   // `computerUse: true`). `computer_screenshot` writes a PNG and returns it as
   // an image attachment, so its pending card names the target it will capture.
-  // The two read-only probes below touch no rolebox-owned state, so they may
-  // join a parallel group. The four INPUT tools deliberately declare NOTHING:
-  // they synthesize shared pointer/keyboard input, so overlapping calls would
-  // interleave real user-visible actions — they must never be classified
-  // concurrency-safe.
+  // Read-only probes touch no rolebox-owned state, so they may join a parallel
+  // group. Permission requests may open OS dialogs; input tools mutate shared
+  // pointer, keyboard or window state. Those actions must not overlap.
   computer_screenshot: { presentCall: presentScreenshotCall },
   computer_windows: { isConcurrencySafe: () => true },
-  computer_permissions: { isConcurrencySafe: () => true },
+  computer_permissions: {
+    isConcurrencySafe: args => args !== null && typeof args === "object" &&
+      (!("request" in args) || args.request !== true),
+  },
   computer_click: {},
   computer_move: {},
   computer_type: {},
   computer_key: {},
+  computer_scroll: {},
+  computer_drag: {},
+  computer_focus: {},
+  computer_displays: { isConcurrencySafe: () => true },
+  computer_status: { isConcurrencySafe: () => true },
 };
 
 // ── Factory ──────────────────────────────────────────────────────────────────

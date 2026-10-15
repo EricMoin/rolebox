@@ -233,7 +233,7 @@ describe("computer-use gate — default OFF, one resolution point", () => {
 // ── 2. Per-role grants ──────────────────────────────────────────────────────
 
 describe("computer-use grants — explicit per-role opt-in", () => {
-  it("covers the seven registered tools, and no more", () => {
+  it("covers every registered computer tool, and no more", () => {
     // Compared as string[]: the matcher's expected parameter is inferred from
     // the received side, which the const annotation widens.
     const declared: string[] = [...COMPUTER_TOOL_NAMES];
@@ -249,6 +249,13 @@ describe("computer-use grants — explicit per-role opt-in", () => {
     expect(roleGrantsComputerTool({ computer_screenshot: true }, "computer_screenshot")).toBe(true);
     expect(roleGrantsComputerTool({ computer_screenshot: true }, "computer_click")).toBe(false);
     expect(roleGrantsComputerTool({ [COMPUTER_TOOL_WILDCARD]: true }, "computer_key")).toBe(true);
+  });
+
+  it("honors an exact denial before the family wildcard for every tool", () => {
+    for (const name of COMPUTER_TOOL_NAMES) {
+      expect(roleGrantsComputerTool({ [COMPUTER_TOOL_WILDCARD]: true, [name]: false }, name)).toBe(false);
+      expect(roleGrantsComputerTool({ [COMPUTER_TOOL_WILDCARD]: false, [name]: true }, name)).toBe(true);
+    }
   });
 
   it("does NOT grant from an absent map, a false value, or the opencode '*' wildcard", () => {
@@ -331,6 +338,13 @@ describe("opencode agent config — a non-opting role sees no callable computer 
     }
   });
 
+  it("preserves an exact denial alongside a family grant in the host config", () => {
+    const tools = withComputerUseDenials({ [COMPUTER_TOOL_WILDCARD]: true, computer_drag: false }, true)!;
+    expect(tools[COMPUTER_TOOL_WILDCARD]).toBe(true);
+    expect(tools.computer_drag).toBe(false);
+    expect(tools.computer_scroll).toBeUndefined();
+  });
+
   it("keeps an exact grant and a wildcard grant, denying only the rest", () => {
     const exact = withComputerUseDenials({ computer_click: true }, true)!;
     expect(exact.computer_click).toBe(true);
@@ -376,8 +390,10 @@ describe("opencode agent config — a non-opting role sees no callable computer 
 
 describe("dsh computer-use guard — per-role enforcement, fail closed", () => {
   it("never registers a computer_* name while the gate is off", () => {
-    expect(isComputerUseRegistrationAllowed("computer_screenshot", false)).toBe(false);
-    expect(isComputerUseRegistrationAllowed("computer_windows", false)).toBe(false);
+    for (const name of COMPUTER_TOOL_NAMES) {
+      expect(isComputerUseRegistrationAllowed(name, false)).toBe(false);
+      expect(isComputerUseRegistrationAllowed(name, true)).toBe(true);
+    }
     // The check is namespace-independent: every other tool is untouched.
     expect(isComputerUseRegistrationAllowed("hashline_read", false)).toBe(true);
     expect(isComputerUseRegistrationAllowed("computer_screenshot", true)).toBe(true);
@@ -420,6 +436,19 @@ describe("dsh computer-use guard — per-role enforcement, fail closed", () => {
     });
     expect(double.evaluate({ name: "computer_screenshot", agent: { id: "a" } })).toBeUndefined();
     expect(double.evaluate({ name: "computer_key", agent: { id: "a" } })).toBeUndefined();
+  });
+
+  it("denies an explicitly disabled input tool even when its role grants the family", () => {
+    const double = guardDouble();
+    const policy = installDshComputerUsePolicy({
+      tools: double.registry,
+      enabled: true,
+      activeRoleOf: () => "operator",
+      roles: () => [makeRole("operator", { [COMPUTER_TOOL_WILDCARD]: true, computer_drag: false })],
+    });
+    expect(double.evaluate({ name: "computer_drag", agent: { id: "a" } })).toContain("an exact false overrides");
+    expect(double.evaluate({ name: "computer_scroll", agent: { id: "a" } })).toBeUndefined();
+    policy.dispose();
   });
 
   it("denies the base agent and an unknown role", () => {
@@ -527,6 +556,19 @@ describe("pi tool interceptor — the same grant decision, per call", () => {
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("unreachable");
     expect(outcome.value).toEqual({ dry_run: true });
+  });
+
+  it("enforces an exact denial before a family grant on new input tools", async () => {
+    const outcome = await interceptToolBefore(
+      "computer_drag",
+      "call-denied-drag",
+      {},
+      toolContext("sess-denied-drag"),
+      hooks("operator", [makeRole("operator", { [COMPUTER_TOOL_WILDCARD]: true, computer_drag: false })]),
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("unreachable");
+    expect(outcome.error).toContain("computer_drag");
   });
 
   it("leaves every non-computer tool on the existing pipeline", async () => {

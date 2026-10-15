@@ -127,9 +127,9 @@ export function transformPermission(
  * opencode v2 transform already maps to a deny rule
  * (src/platform/adapters/opencode2/agents.ts `mapToolRuleset`). A role that
  * grants the family — one exact name or the `computer_*` wildcard — keeps its
- * own entries; a role that grants nothing ends up with all seven denied, so a
- * non-opting role never sees a callable computer tool on either opencode
- * version.
+ * own entries; a role that grants nothing ends up with all family members
+ * denied, so a non-opting role never sees a callable computer tool on either
+ * opencode version.
  */
 export function withComputerUseDenials(
   tools: Record<string, boolean> | undefined,

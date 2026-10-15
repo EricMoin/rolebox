@@ -1,8 +1,8 @@
 /**
  * Windows computer-use driver — PowerShell, one script per plan.
  *
- * Capture is System.Drawing: `SystemInformation.VirtualScreen` for the whole
- * virtual desktop, `Screen.AllScreens[n].Bounds` for one display, an explicit
+ * Capture is System.Drawing: `Screen.PrimaryScreen.Bounds` by default,
+ * `Screen.AllScreens[n].Bounds` for one display, an explicit
  * rectangle for a region, and a `GetWindowRect` P/Invoke for one window.
  * `Graphics.CopyFromScreen` writes straight into a bitmap saved as PNG.
  *
@@ -34,6 +34,32 @@ const POWERSHELL = "powershell";
 const INSTALL_HINT =
   "Windows PowerShell (powershell.exe) ships with Windows; if it was removed, install it from Microsoft, or run rolebox on a host that has it.";
 
+const DPI_API = [
+  "Add-Type @'",
+  "using System;",
+  "using System.Runtime.InteropServices;",
+  "public class RoleboxDpi {",
+  '  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);',
+  '  [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int awareness);',
+  '  [DllImport("user32.dll")] static extern bool SetProcessDPIAware();',
+  '  [DllImport("user32.dll")] static extern bool IsProcessDPIAware();',
+  "  public static void Enable() {",
+  "    try {",
+  "      if (SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero) return;",
+  "      if (SetThreadDpiAwarenessContext(new IntPtr(-3)) != IntPtr.Zero) return;",
+  '      throw new InvalidOperationException("could not enable per-monitor DPI awareness");',
+  "    } catch (EntryPointNotFoundException) { }",
+  "    try {",
+  "      if (SetProcessDpiAwareness(2) == 0) return;",
+  '      throw new InvalidOperationException("could not enable per-monitor DPI awareness");',
+  "    } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }",
+  '    if (!SetProcessDPIAware() && !IsProcessDPIAware()) throw new InvalidOperationException("could not enable DPI awareness");',
+  "  }",
+  "}",
+  "'@",
+  "[RoleboxDpi]::Enable()",
+].join("\n");
+
 /** The P/Invoke block the mouse plans compile once per run. */
 const MOUSE_API = [
   "Add-Type @'",
@@ -41,8 +67,7 @@ const MOUSE_API = [
   "using System.Runtime.InteropServices;",
   "public class RoleboxMouse {",
   '  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);',
-  '  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);',
-  '  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();',
+  '  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extraInfo);',
   "}",
   "'@",
 ].join("\n");
@@ -55,6 +80,23 @@ const WINDOW_API = [
   "public struct RoleboxRect { public int Left; public int Top; public int Right; public int Bottom; }",
   "public class RoleboxWindowApi {",
   '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out RoleboxRect rect);',
+  '  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr handle);',
+  '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr handle);',
+  '  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr handle, int command);',
+  '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);',
+  '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+  "}",
+  "'@",
+].join("\n");
+
+const DISPLAY_API = [
+  "Add-Type @'",
+  "using System;",
+  "using System.Runtime.InteropServices;",
+  "public struct RoleboxMonitorRect { public int Left; public int Top; public int Right; public int Bottom; }",
+  "public class RoleboxDisplayApi {",
+  '  [DllImport("user32.dll")] public static extern IntPtr MonitorFromRect(ref RoleboxMonitorRect rect, uint flags);',
+  '  [DllImport("shcore.dll")] public static extern int GetScaleFactorForMonitor(IntPtr monitor, out int scale);',
   "}",
   "'@",
 ].join("\n");
@@ -170,7 +212,7 @@ function keyStroke(keys: readonly string[]): KeyStroke {
   }
   const final = parts[parts.length - 1];
   const lower = final.toLowerCase();
-  if (SEND_MODIFIERS[lower] !== undefined && parts.length === 1) {
+  if (SEND_MODIFIERS[lower] !== undefined) {
     return { refusal: `"${final}" is a modifier and cannot be the key of a press; put modifiers first and end with a normal key.` };
   }
   const named = SEND_KEYS[lower];
@@ -201,6 +243,9 @@ function powerShellPlan(script: string): ComputerPlan {
 }
 
 function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
+  if (request.display !== undefined && (!Number.isInteger(request.display) || request.display < 0)) {
+    return "a Windows display must be a non-negative index from computer_displays.";
+  }
   if (request.windowId !== undefined && request.region !== undefined) {
     return "a Windows capture takes one window or one region, not both; pass window_id or region.";
   }
@@ -209,10 +254,13 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
   }
   const path = powerShellQuote(request.path);
   const save = [
-    "$graphics.CopyFromScreen($sourceX, $sourceY, 0, 0, $bitmap.Size)",
-    `$bitmap.Save(${path}, [System.Drawing.Imaging.ImageFormat]::Png)`,
-    "$graphics.Dispose()",
-    "$bitmap.Dispose()",
+    "try {",
+    "  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
+    "  try {",
+    "    $graphics.CopyFromScreen($sourceX, $sourceY, 0, 0, $bitmap.Size)",
+    `    $bitmap.Save(${path}, [System.Drawing.Imaging.ImageFormat]::Png)`,
+    "  } finally { $graphics.Dispose() }",
+    "} finally { $bitmap.Dispose() }",
   ];
 
   if (request.windowId !== undefined) {
@@ -222,6 +270,7 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
     return powerShellPlan(
       [
         "$ErrorActionPreference = 'Stop'",
+        DPI_API,
         "Add-Type -AssemblyName System.Drawing",
         WINDOW_API,
         "$rect = New-Object RoleboxRect",
@@ -232,7 +281,6 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
         "$sourceX = $rect.Left",
         "$sourceY = $rect.Top",
         "$bitmap = New-Object System.Drawing.Bitmap($width, $height)",
-        "$graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
         ...save,
       ].join("\n"),
     );
@@ -260,7 +308,7 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
     ];
   } else {
     source = [
-      "$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen",
+      "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
       "$sourceX = $bounds.X",
       "$sourceY = $bounds.Y",
       "$width = $bounds.Width",
@@ -270,11 +318,11 @@ function capturePlan(request: ComputerCaptureRequest): ComputerPlanOrRefusal {
   return powerShellPlan(
     [
       "$ErrorActionPreference = 'Stop'",
+      DPI_API,
       "Add-Type -AssemblyName System.Drawing",
       "Add-Type -AssemblyName System.Windows.Forms",
       ...source,
       "$bitmap = New-Object System.Drawing.Bitmap($width, $height)",
-      "$graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
       ...save,
     ].join("\n"),
   );
@@ -287,6 +335,89 @@ function windowTargetingRefusal(action: string): string {
 
 function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
   switch (request.action) {
+    case "displays": {
+      return powerShellPlan([
+        "$ErrorActionPreference = 'Stop'",
+        DPI_API,
+        "Add-Type -AssemblyName System.Windows.Forms",
+        DISPLAY_API,
+        "$screens = [System.Windows.Forms.Screen]::AllScreens",
+        "$displays = @(for ($index = 0; $index -lt $screens.Count; $index++) {",
+        "  $screen = $screens[$index]",
+        "  $bounds = $screen.Bounds",
+        "  $rect = New-Object RoleboxMonitorRect",
+        "  $rect.Left = $bounds.Left; $rect.Top = $bounds.Top; $rect.Right = $bounds.Right; $rect.Bottom = $bounds.Bottom",
+        "  $monitor = [RoleboxDisplayApi]::MonitorFromRect([ref]$rect, 0)",
+        "  $scale = 100",
+        "  if ($monitor -eq [IntPtr]::Zero -or [RoleboxDisplayApi]::GetScaleFactorForMonitor($monitor, [ref]$scale) -ne 0) { throw 'could not read monitor scale' }",
+        "  [PSCustomObject]@{ id = $index; x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height; scale = $scale / 100.0; primary = $screen.Primary }",
+        "})",
+        "ConvertTo-Json -InputObject $displays -Compress",
+      ].join("\n"));
+    }
+    case "focus": {
+      if (!usableWindowId(request.windowId)) return "a window id must be a positive whole number.";
+      return powerShellPlan([
+        "$ErrorActionPreference = 'Stop'",
+        WINDOW_API,
+        `$handle = [IntPtr]${request.windowId}`,
+        "if (-not [RoleboxWindowApi]::IsWindow($handle)) { throw 'window does not exist' }",
+        "if ([RoleboxWindowApi]::IsIconic($handle)) { [void][RoleboxWindowApi]::ShowWindowAsync($handle, 9) }",
+        "[void][RoleboxWindowApi]::SetForegroundWindow($handle)",
+        "for ($attempt = 0; $attempt -lt 20 -and [RoleboxWindowApi]::GetForegroundWindow() -ne $handle; $attempt++) { Start-Sleep -Milliseconds 50 }",
+        "if ([RoleboxWindowApi]::GetForegroundWindow() -ne $handle) { throw 'Windows refused foreground activation; select the target window manually and retry' }",
+      ].join("\n"));
+    }
+    case "scroll": {
+      if (!Number.isInteger(request.amount) || request.amount < 1 || request.amount > 100) return "scroll amount must be an integer from 1 to 100 wheel ticks.";
+      if ((request.x === undefined) !== (request.y === undefined)) return "scroll coordinates x and y must be supplied together.";
+      if (!["up", "down", "left", "right"].includes(request.direction)) return "scroll direction must be up, down, left or right.";
+      const movement: string[] = [];
+      if (request.x !== undefined && request.y !== undefined) {
+        if (!Number.isFinite(request.x) || !Number.isFinite(request.y)) return "scroll coordinates must be finite numbers.";
+        movement.push(`if (-not [RoleboxMouse]::SetCursorPos(${Math.round(request.x)}, ${Math.round(request.y)})) { throw 'could not move the pointer' }`);
+      }
+      const horizontal = request.direction === "left" || request.direction === "right";
+      const delta = request.amount * 120 * (request.direction === "down" || request.direction === "left" ? -1 : 1);
+      return powerShellPlan([
+        "$ErrorActionPreference = 'Stop'",
+        DPI_API,
+        MOUSE_API,
+        ...movement,
+        `[RoleboxMouse]::mouse_event(${horizontal ? "0x01000" : "0x0800"}, 0, 0, ${delta}, [UIntPtr]::Zero)`,
+      ].join("\n"));
+    }
+    case "drag": {
+      const points = [request.fromX, request.fromY, request.toX, request.toY];
+      if (!points.every(Number.isFinite)) return "drag coordinates must be finite numbers.";
+      if (!Number.isInteger(request.durationMs) || request.durationMs < 100 || request.durationMs > 5000) return "drag duration must be an integer from 100 to 5000 milliseconds.";
+      const [fromX, fromY, toX, toY] = points.map(Math.round);
+      const steps = Math.min(100, Math.ceil(request.durationMs / 20));
+      const drag = powerShellPlan([
+        "$ErrorActionPreference = 'Stop'",
+        DPI_API,
+        MOUSE_API,
+        `if (-not [RoleboxMouse]::SetCursorPos(${fromX}, ${fromY})) { throw 'could not move the pointer to the drag origin' }`,
+        "try {",
+        "  [RoleboxMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)",
+        `  for ($step = 1; $step -le ${steps}; $step++) {`,
+        `    Start-Sleep -Milliseconds ${Math.round(request.durationMs / steps)}`,
+        `    $x = [int][Math]::Round(${fromX} + (${toX} - ${fromX}) * $step / ${steps})`,
+        `    $y = [int][Math]::Round(${fromY} + (${toY} - ${fromY}) * $step / ${steps})`,
+        "    if (-not [RoleboxMouse]::SetCursorPos($x, $y)) { throw 'could not move the pointer during drag' }",
+        "  }",
+        "} finally {",
+        "  [RoleboxMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)",
+        "}",
+      ].join("\n"));
+      return {
+        ...drag,
+        cleanupPlan: powerShellPlan([
+          "$ErrorActionPreference = 'Stop'", MOUSE_API,
+          "[RoleboxMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)",
+        ].join("\n")),
+      };
+    }
     case "windows": {
       const app = request.app === undefined || request.app.trim().length === 0 ? null : request.app.trim();
       const filter =
@@ -315,8 +446,8 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       return powerShellPlan(
         [
           "$ErrorActionPreference = 'Stop'",
+          DPI_API,
           MOUSE_API,
-          "[void][RoleboxMouse]::SetProcessDPIAware()",
           `if (-not [RoleboxMouse]::SetCursorPos(${x}, ${y})) { Write-Error 'could not move the pointer to ${x},${y}'; exit 3 }`,
           "Start-Sleep -Milliseconds 40",
           ...clicks,
@@ -332,8 +463,8 @@ function inputPlan(request: ComputerInputRequest): ComputerPlanOrRefusal {
       return powerShellPlan(
         [
           "$ErrorActionPreference = 'Stop'",
+          DPI_API,
           MOUSE_API,
-          "[void][RoleboxMouse]::SetProcessDPIAware()",
           `if (-not [RoleboxMouse]::SetCursorPos(${x}, ${y})) { Write-Error 'could not move the pointer to ${x},${y}'; exit 3 }`,
         ].join("\n"),
       );

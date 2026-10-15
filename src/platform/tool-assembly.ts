@@ -75,8 +75,7 @@ export interface BuildToolsOptions {
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
   /**
    * Whether this host wants rolebox's own computer-use family
-   * (`computer_screenshot`, `computer_windows`, `computer_click`,
-   * `computer_move`, `computer_type`, `computer_key`, `computer_permissions`).
+   * (`computer_*` screenshot, discovery, input and permission tools).
    *
    * DEFAULT OFF: absent (or false) registers nothing, so a host that never
    * asked for screen control assembles exactly the tool set it assembled
