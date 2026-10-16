@@ -93,6 +93,16 @@
 import { useEffect, useRef, useState } from "react";
 import { monitorClass } from "./rolebox-monitor-panel.css.ts";
 import {
+  layoutGraphTopology,
+  TOPOLOGY_EDGE_LABEL_CHAR_WIDTH,
+  TOPOLOGY_LABEL_CHAR_WIDTH,
+  TOPOLOGY_LABEL_OFFSET_X,
+  TOPOLOGY_LABEL_RIGHT_PADDING,
+  TOPOLOGY_MARK_OFFSET_X,
+  TOPOLOGY_MARK_OFFSET_Y,
+  type TopologyLayout,
+} from "./graph-topology.ts";
+import {
   formatCount,
   formatRelativeTime,
 } from "../../../../utils/text-format.ts";
@@ -1511,14 +1521,359 @@ function renderAttentionBand(attention: MonitorAttention) {
 }
 
 /**
- * One graph as a ledger block: identity + state, the node strip, the run's
+ * The declaration's node list, in declaration order.
+ *
+ * Read STRUCTURALLY, not through the DTO's type: the payload is untrusted at
+ * the boundary, and a field a future backend renames must degrade to the strip
+ * rather than throw inside the render.
+ */
+function extractDeclarationNodes(
+  graph: MonitorEngineGraphDto,
+): Array<{ id: string; agent?: string }> {
+  const declaration: unknown = graph.graph?.declaration;
+  if (!isRecord(declaration)) return [];
+  const declared = declaration.nodes;
+  if (!Array.isArray(declared)) return [];
+  const out: Array<{ id: string; agent?: string }> = [];
+  for (const entry of declared) {
+    if (!isRecord(entry) || typeof entry.id !== "string") continue;
+    out.push({
+      id: entry.id,
+      agent: typeof entry.agent === "string" ? entry.agent : undefined,
+    });
+  }
+  return out;
+}
+
+/** The declaration's edges, structurally; malformed entries are dropped. */
+function extractDeclarationEdges(
+  graph: MonitorEngineGraphDto,
+): Array<{ from: string; to: string; outcome: string }> {
+  const declaration: unknown = graph.graph?.declaration;
+  if (!isRecord(declaration)) return [];
+  const declared = declaration.edges;
+  if (!Array.isArray(declared)) return [];
+  const out: Array<{ from: string; to: string; outcome: string }> = [];
+  for (const entry of declared) {
+    if (!isRecord(entry)) continue;
+    const from = entry.from;
+    const to = entry.to;
+    const outcome = entry.outcome;
+    if (typeof from !== "string" || typeof to !== "string" || typeof outcome !== "string") {
+      continue;
+    }
+    out.push({ from, to, outcome });
+  }
+  return out;
+}
+
+/** The declaration's loop groups, structurally; malformed entries are dropped. */
+function extractDeclarationLoopGroups(
+  graph: MonitorEngineGraphDto,
+): Array<{ id: string; nodes: string[] }> {
+  const declaration: unknown = graph.graph?.declaration;
+  if (!isRecord(declaration)) return [];
+  const declared = declaration.loop_groups;
+  if (!Array.isArray(declared)) return [];
+  const out: Array<{ id: string; nodes: string[] }> = [];
+  for (const entry of declared) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || !Array.isArray(entry.nodes)) continue;
+    out.push({
+      id: entry.id,
+      nodes: entry.nodes.filter((member): member is string => typeof member === "string"),
+    });
+  }
+  return out;
+}
+
+/**
+ * The drawn topology of one graph block, or `null` when the payload carries no
+ * declaration nodes — which is exactly the strip fallback's condition.
+ *
+ * The node set is the DECLARATION's order first, then any snapshot-only node
+ * the ledger also shows, so a box never appears for a node the ledger cannot
+ * name and no declared node is lost to a stale snapshot.
+ */
+function buildGraphTopology(
+  graph: MonitorEngineGraphDto,
+  snapshotNodes: readonly MonitorGraphNodeDto[],
+): TopologyLayout | null {
+  const declared = extractDeclarationNodes(graph);
+  if (declared.length === 0) return null;
+  const seen = new Set(declared.map((node) => node.id));
+  const nodes: Array<{ id: string; agent?: string }> = [...declared];
+  for (const node of snapshotNodes) {
+    const id = node.nodeId;
+    if (typeof id !== "string" || seen.has(id)) continue;
+    seen.add(id);
+    nodes.push({ id, agent: typeof node.agent === "string" ? node.agent : undefined });
+  }
+  const layout = layoutGraphTopology({
+    nodes,
+    edges: extractDeclarationEdges(graph),
+    loopGroups: extractDeclarationLoopGroups(graph),
+  });
+  return layout.boxes.length > 0 ? layout : null;
+}
+
+/**
+ * Deterministic display truncation; the full text always rides a `title`.
+ *
+ * `charWidth` must be the advance estimate the box was SIZED with — a node
+ * label and an outcome chip use different constants, and budgeting a chip's
+ * text with the node's wider estimate ellipsized outcomes that fit.
+ */
+function ellipsizeLabel(
+  text: string,
+  availableWidth: number,
+  charWidth: number = TOPOLOGY_LABEL_CHAR_WIDTH,
+): string {
+  const max = Math.max(1, Math.floor(availableWidth / charWidth));
+  if (text.length <= max) return text;
+  if (max <= 1) return "…";
+  return text.slice(0, max - 1) + "…";
+}
+
+/** The node-group state modifier — one of the seven pinned state classes. */
+function topologyNodeModifier(state: RoleboxRunState): string {
+  if (state === "running") return monitorClass.graphNodeRunning;
+  if (state === "complete") return monitorClass.graphNodeComplete;
+  if (state === "failed") return monitorClass.graphNodeFailed;
+  if (state === "blocked") return monitorClass.graphNodeBlocked;
+  if (state === "stopped") return monitorClass.graphNodeStopped;
+  if (state === "pending") return monitorClass.graphNodePending;
+  return monitorClass.graphNodeUnknown;
+}
+
+/**
+ * The state mark as SVG-native shapes on the glyph set's own 16-grid and
+ * stroke weight (see {@link StateGlyph}): a play triangle, a check, a cross,
+ * two pause bars, a hollow ring, a slashed circle and a dashed ring.
+ *
+ * Only GEOMETRY lives on these elements — the sheet owns stroke, width, dash
+ * and hue — and the state WORD stays in the box's `title`, so the mark is a
+ * second channel rather than the only one (the blocked amber measures 2.79:1).
+ */
+function renderTopologyMark(state: RoleboxRunState) {
+  const solid = monitorClass.graphMarkSolid;
+  if (state === "complete") {
+    return [<path key="mark" d="m3.5 8.4 3 3 6-7" />];
+  }
+  if (state === "failed") {
+    return [<path key="mark" d="m4.3 4.3 7.4 7.4M11.7 4.3 4.3 11.7" />];
+  }
+  if (state === "blocked") {
+    return [
+      <rect key="mark-a" className={solid} x="4" y="3.5" width="2.6" height="9" rx="1" />,
+      <rect key="mark-b" className={solid} x="9.4" y="3.5" width="2.6" height="9" rx="1" />,
+    ];
+  }
+  if (state === "running") {
+    return [<path key="mark" className={solid} d="M5.4 3.6 12.2 8l-6.8 4.4z" />];
+  }
+  if (state === "stopped") {
+    return [
+      <circle key="mark-ring" cx="8" cy="8" r="5.2" />,
+      <path key="mark-slash" d="M4.9 11.1 11.1 4.9" />,
+    ];
+  }
+  if (state === "pending") {
+    return [<circle key="mark" cx="8" cy="8" r="4.6" />];
+  }
+  // idle / unknown — a dashed ring (the dash is the sheet's): the panel is not
+  // claiming a state it cannot read.
+  return [<circle key="mark" cx="8" cy="8" r="4.8" />];
+}
+
+/**
+ * The topology figure.
+ *
+ * An `svg` with intrinsic width/height and a matching `viewBox` — ATTRIBUTES,
+ * never CSS px — inside a scroll container, so a rank wider than the docked
+ * sidebar scrolls instead of shrinking below legibility. The sheet centres the
+ * figure in its row with `margin-inline: auto`, so a narrow figure no longer
+ * hugs the left of a wide pane. Bands first, then edges, then boxes: a loop
+ * field sits behind the drawing, an edge crosses over it, and a node box is
+ * always on top.
+ *
+ * The visually-hidden `<ul>` states every edge in words
+ * (`from -outcome-> to`): the ledger below names nodes, agents and states but
+ * NOT the routing, so without it the edges would be a picture only.
+ */
+function renderTopologyFigure(graph: MonitorEngineGraphDto, layout: TopologyLayout) {
+  const graphId = graph.graphId ?? "graph";
+  // The arrow marker id is graph-scoped through the same DOM-id-safe reduction
+  // the ledger's list/label pair uses, so two graphs never share a marker.
+  const arrowId = "rolebox-monitor-arrow-" + domIdPart(graphId);
+  const statusByNode = new Map<string, string>();
+  const agentByNode = new Map<string, string>();
+  for (const node of extractDeclarationNodes(graph)) {
+    if (node.agent !== undefined) agentByNode.set(node.id, node.agent);
+  }
+  for (const node of extractNodes(graph)) {
+    const id = node.nodeId;
+    if (typeof id !== "string") continue;
+    statusByNode.set(
+      id,
+      typeof node.status === "string" && node.status !== "" ? node.status : "unknown",
+    );
+    if (!agentByNode.has(id) && typeof node.agent === "string") agentByNode.set(id, node.agent);
+  }
+  const ariaLabel =
+    "Engine graph " +
+    graphId +
+    ": " +
+    layout.boxes.length +
+    " nodes, " +
+    layout.edges.length +
+    " edges";
+
+  return (
+    <figure className={monitorClass.graphCanvas}>
+      <svg
+        className={monitorClass.graphSvg}
+        role="img"
+        aria-label={ariaLabel}
+        width={layout.width}
+        height={layout.height}
+        viewBox={"0 0 " + layout.width + " " + layout.height}
+      >
+        <defs>
+          <marker
+            id={arrowId}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto-start-reverse"
+          >
+            <path d="M0 0 10 5 0 10z" />
+          </marker>
+        </defs>
+        {layout.bands.map((band, index) => (
+          <g className={monitorClass.graphBand} key={"band-" + band.id + "-" + index}>
+            <rect x={band.x} y={band.y} width={band.width} height={band.height} rx="6" />
+            {/* The label rides the gutter the layout reserved for it, so the
+                band's name can never land on the first rank's boxes. */}
+            <text
+              className={monitorClass.graphBandLabel}
+              x={band.label.x}
+              y={band.label.y + band.label.height - 3}
+            >
+              {band.id}
+            </text>
+          </g>
+        ))}
+        {layout.edges.map((edge, index) => (
+          <g
+            className={
+              edge.back
+                ? monitorClass.graphEdge + " " + monitorClass.graphEdgeBack
+                : monitorClass.graphEdge
+            }
+            data-from={edge.from}
+            data-to={edge.to}
+            data-outcome={edge.outcome}
+            key={"edge-" + edge.from + "-" + edge.outcome + "-" + edge.to + "-" + index}
+          >
+            <path d={edge.d} markerEnd={"url(#" + arrowId + ")"} />
+            {/* A chip ONLY where the source is divergent (or the edge is a back
+                edge): a lone `ok` repeated on every arrow is noise the title
+                and the sr-only routing list already carry. */}
+            {edge.label !== null && (
+              <>
+                <rect
+                  className={monitorClass.graphEdgeLabel}
+                  x={edge.label.x}
+                  y={edge.label.y}
+                  width={edge.label.width}
+                  height={edge.label.height}
+                  rx="3"
+                />
+                <text
+                  className={monitorClass.graphEdgeLabel + " " + monitorClass.graphEdgeLabelText}
+                  x={edge.label.x + 3}
+                  y={edge.label.y + 11}
+                >
+                  {ellipsizeLabel(
+                    edge.outcome,
+                    edge.label.width - 6,
+                    TOPOLOGY_EDGE_LABEL_CHAR_WIDTH,
+                  )}
+                </text>
+              </>
+            )}
+            <title>{edge.from + " -" + edge.outcome + "-> " + edge.to}</title>
+          </g>
+        ))}
+        {layout.boxes.map((box) => {
+          const status = statusByNode.get(box.id) ?? "unknown";
+          const state = classifyNodeStatus(status);
+          const agent = agentByNode.get(box.id) ?? "unknown";
+          return (
+            <g
+              className={monitorClass.graphNode + " " + topologyNodeModifier(state)}
+              data-node-id={box.id}
+              key={"node-" + box.id}
+            >
+              <rect x={box.x} y={box.y} width={box.width} height={box.height} rx="6" />
+              <g
+                className={monitorClass.graphNodeMark}
+                transform={
+                  "translate(" +
+                  (box.x + TOPOLOGY_MARK_OFFSET_X) +
+                  " " +
+                  (box.y + TOPOLOGY_MARK_OFFSET_Y) +
+                  ")"
+                }
+              >
+                {renderTopologyMark(state)}
+              </g>
+              <text
+                className={monitorClass.graphNodeLabel}
+                x={box.x + TOPOLOGY_LABEL_OFFSET_X}
+                y={box.y + 21}
+              >
+                {ellipsizeLabel(
+                  box.id,
+                  box.width - TOPOLOGY_LABEL_OFFSET_X - TOPOLOGY_LABEL_RIGHT_PADDING,
+                )}
+              </text>
+              <title>{box.id + " - " + agent + " - " + status}</title>
+            </g>
+          );
+        })}
+      </svg>
+      <ul className={monitorClass.srOnly + " " + monitorClass.graphRouting}>
+        {layout.edges.map((edge, index) => (
+          <li key={"route-" + edge.from + "-" + edge.outcome + "-" + edge.to + "-" + index}>
+            {edge.from + " -" + edge.outcome + "-> " + edge.to}
+          </li>
+        ))}
+      </ul>
+    </figure>
+  );
+}
+
+/**
+ * One graph as a ledger block: identity + state, the TOPOLOGY FIGURE, the run's
  * readings, then the node ledger and loop groups.
  *
- * The strip carries EXACTLY one cell per node in the graph's own declaration
- * order — no normalised sampling, so a three-node graph shows three cells and a
- * thirty-node graph shows thirty. Each cell keeps its own `title`, and the
- * counts are restated as text in the readings below, so the strip is a
- * position-preserving overview rather than the only channel.
+ * The figure is the real node-and-edge drawing of the graph's own v3
+ * declaration: one box per declared node (plus any snapshot-only node the
+ * ledger knows about), one orthogonally routed, arrowed edge per declared
+ * edge, an outcome chip only where the source fans out (or the edge is the
+ * loop's back edge), and a quiet band behind each loop group. It is the only place
+ * the ROUTING is stated — the node ledger below names nodes, agents and states
+ * but never which outcome leads where — so the figure also emits a
+ * visually-hidden list of the edges in words.
+ *
+ * DEGRADATION PATH: a payload with no declaration nodes (sparse or older
+ * backend) draws the original STRIP instead — exactly one cell per snapshot
+ * node, in declaration order, each cell keeping its own `title`, with the
+ * counts restated as text in the readings below. The strip code and its CSS
+ * are deliberately kept for that case.
  */
 function renderGraphBlock(
   graph: MonitorEngineGraphDto,
@@ -1571,6 +1926,11 @@ function renderGraphBlock(
   const quietMs = updatedMs === undefined ? undefined : now - updatedMs;
   const quiet = quietMs !== undefined && quietMs > GRAPH_QUIET_MS && graph.phase !== "complete";
 
+  // THE FIGURE, WHEN THE DECLARATION IS THERE. A v3 declaration names the
+  // nodes and the routing, so this block can draw the real topology; a payload
+  // without declaration nodes keeps the position-preserving strip below.
+  const topology = buildGraphTopology(graph, nodes);
+
   // The strip's legend: the SAME shapes the strip draws, counted. The word is
   // only rendered for a status the shape vocabulary does not already cover.
   const statusFacts: Array<MetaFact | null> = counts.map(([name, value]) => {
@@ -1602,20 +1962,24 @@ function renderGraphBlock(
           <pre>{JSON.stringify(graph.graph.runs, null, 2)}</pre>
         </details>
       )}
-      {nodes.length > 0 && (
-        <div className={monitorClass.strip} aria-hidden="true">
-          {nodes.map((node, index) => (
-            <span
-              className={
-                monitorClass.stripCell +
-                " " +
-                stripCellModifier(classifyNodeStatus(node.status))
-              }
-              key={(node.nodeId ?? "node") + index}
-              title={(node.nodeId ?? "node") + " — " + (node.status ?? "unknown")}
-            />
-          ))}
-        </div>
+      {topology !== null ? (
+        renderTopologyFigure(graph, topology)
+      ) : (
+        nodes.length > 0 && (
+          <div className={monitorClass.strip} aria-hidden="true">
+            {nodes.map((node, index) => (
+              <span
+                className={
+                  monitorClass.stripCell +
+                  " " +
+                  stripCellModifier(classifyNodeStatus(node.status))
+                }
+                key={(node.nodeId ?? "node") + index}
+                title={(node.nodeId ?? "node") + " — " + (node.status ?? "unknown")}
+              />
+            ))}
+          </div>
+        )
       )}
 
       {renderFacts(

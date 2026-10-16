@@ -752,6 +752,202 @@ export const monitorCss = `
   border: 1px dashed var(--rolebox-ink-faint, rgb(84, 85, 87));
 }
 
+/* ── Engine-graph topology ──────────────────────────────────────────────
+   The node-and-edge figure. Every BOX coordinate comes from
+   graph-topology.ts as an SVG attribute, so a rule in this section carries
+   colour, stroke, dash and opacity only. A rank wider than the docked sidebar
+   SCROLLS inside the canvas instead of being squeezed below legibility. */
+.rolebox-monitor-graph-canvas {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  margin: var(--rolebox-space-1, 4px) 0;
+  border: 1px solid var(--rolebox-border-subtle, rgba(0, 0, 0, 0.04));
+  border-radius: var(--rolebox-radius-card, 12px);
+  background: var(--rolebox-surface, rgb(245, 246, 247));
+  overflow-x: auto;
+}
+
+.rolebox-monitor-graph-svg {
+  display: block;
+  /* A figure narrower than the docked pane sits in the MIDDLE of its row
+     instead of hugging the left: the svg keeps its intrinsic (legible) size
+     and the free space is split evenly. A figure wider than the pane still
+     scrolls, because the canvas is the overflow container. */
+  margin-inline: auto;
+}
+
+/* The arrowhead itself: the marker in defs takes its ink from here. */
+.rolebox-monitor-graph-svg marker path {
+  fill: var(--rolebox-ink-faint, rgb(84, 85, 87));
+}
+
+/* A loop group is a quiet field BEHIND the drawing: a low-contrast wash over
+   the ranks its members occupy, labelled in its top-left gutter. It is NOT
+   dashed — the edge vocabulary already spends its one dash on the back edge,
+   and a third dashed treatment only muddles the picture. */
+.rolebox-monitor-graph-band rect {
+  fill: var(--rolebox-surface-hover, rgba(38, 49, 72, 0.06));
+  fill-opacity: 0.45;
+  stroke: var(--rolebox-border-subtle, rgba(0, 0, 0, 0.04));
+  stroke-width: 1;
+}
+
+.rolebox-monitor-graph-band-label {
+  fill: var(--rolebox-ink-muted, rgb(97, 102, 107));
+  font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 9px;
+}
+
+/* ── Topology edges ───────────────────────────────────────────────────────
+   A hairline the eye can follow, a chip naming the outcome, an arrowhead
+   saying which way control flows. A BACK edge leaves and re-enters beside the
+   ranks, so it is dashed as well as routed outside them: direction is never
+   carried by colour alone. */
+.rolebox-monitor-graph-edge > path {
+  fill: none;
+  stroke: var(--rolebox-ink-faint, rgb(84, 85, 87));
+  stroke-width: 1.4;
+  /* The route is an orthogonal polyline; the join is what rounds its corners,
+     and a round cap keeps the two ends from poking past the box edge. */
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.rolebox-monitor-graph-edge-back > path {
+  stroke: var(--rolebox-ink-muted, rgb(97, 102, 107));
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
+/* The outcome chip: a surface-coloured rectangle under the outcome text. */
+.rolebox-monitor-graph-edge-label {
+  fill: var(--rolebox-surface, rgb(245, 246, 247));
+  stroke: var(--rolebox-border-hairline, rgba(0, 0, 0, 0.1));
+  stroke-width: 1;
+}
+
+.rolebox-monitor-graph-edge-label-text {
+  fill: var(--rolebox-ink-muted, rgb(97, 102, 107));
+  stroke: none;
+  font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 9px;
+}
+
+/* ── Topology nodes ───────────────────────────────────────────────────────
+   Hue is ONE channel of four: the fill tint, the mark's SHAPE, its hollowness
+   and its dash. The blocked amber measures 2.79:1, so it must never be the
+   only mark, and the state WORD always rides the box's own title. */
+.rolebox-monitor-graph-node {
+  color: var(--rolebox-ink, rgb(15, 17, 21));
+}
+
+.rolebox-monitor-graph-node > rect {
+  fill: var(--rolebox-surface, rgb(245, 246, 247));
+  stroke: var(--rolebox-border-strong, rgba(0, 0, 0, 0.12));
+  stroke-width: 1;
+}
+
+.rolebox-monitor-graph-node-label {
+  fill: var(--rolebox-ink, rgb(15, 17, 21));
+  font-family: var(--rolebox-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 10px;
+}
+
+/* The state mark takes its stroke from the group's colour and its fill from
+   the shapes the sheet marks solid, so the elements carry geometry only. */
+.rolebox-monitor-graph-node-mark {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rolebox-monitor-graph-mark-solid {
+  fill: currentColor;
+  stroke: none;
+}
+
+.rolebox-monitor-graph-node-running {
+  color: var(--rolebox-mark-running, rgb(65, 118, 230));
+}
+
+.rolebox-monitor-graph-node-running > rect {
+  fill: var(--rolebox-surface-running, rgb(228, 237, 253));
+  stroke: var(--rolebox-mark-running, rgb(65, 118, 230));
+}
+
+.rolebox-monitor-graph-node-complete {
+  color: var(--rolebox-mark-done, rgb(84, 85, 87));
+}
+
+.rolebox-monitor-graph-node-complete > rect {
+  fill: var(--rolebox-surface-complete, rgb(230, 250, 237));
+  stroke: var(--rolebox-mark-done, rgb(84, 85, 87));
+}
+
+.rolebox-monitor-graph-node-failed {
+  color: var(--rolebox-mark-failed, rgb(236, 19, 19));
+}
+
+.rolebox-monitor-graph-node-failed > rect {
+  fill: var(--rolebox-surface-failed, rgba(236, 19, 19, 0.05));
+  stroke: var(--rolebox-mark-failed, rgb(236, 19, 19));
+}
+
+.rolebox-monitor-graph-node-blocked {
+  color: var(--rolebox-mark-blocked, rgb(221, 134, 41));
+}
+
+.rolebox-monitor-graph-node-blocked > rect {
+  fill: var(--rolebox-surface-blocked, rgb(254, 245, 231));
+  stroke: var(--rolebox-mark-blocked, rgb(221, 134, 41));
+}
+
+.rolebox-monitor-graph-node-stopped {
+  color: var(--rolebox-mark-done, rgb(84, 85, 87));
+}
+
+.rolebox-monitor-graph-node-stopped > rect {
+  fill: none;
+  stroke: var(--rolebox-mark-done, rgb(84, 85, 87));
+  opacity: 0.7;
+}
+
+.rolebox-monitor-graph-node-pending {
+  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
+}
+
+.rolebox-monitor-graph-node-pending > rect {
+  fill: none;
+  stroke: var(--rolebox-ink-faint, rgb(84, 85, 87));
+  stroke-dasharray: 3 2;
+}
+
+.rolebox-monitor-graph-node-unknown {
+  color: var(--rolebox-ink-faint, rgb(84, 85, 87));
+}
+
+.rolebox-monitor-graph-node-unknown > rect {
+  fill: none;
+  stroke: var(--rolebox-ink-faint, rgb(84, 85, 87));
+  stroke-dasharray: 3 2;
+}
+
+/* An unreadable node's RING is dashed as well, so "hollow" (queued) and "not
+   known" are two different drawings rather than two alphas of one. */
+.rolebox-monitor-graph-node-unknown .rolebox-monitor-graph-node-mark > circle {
+  stroke-dasharray: 3 3;
+}
+
+/* The edge roster in words: visually hidden, still read. */
+.rolebox-monitor-graph-routing {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .rolebox-monitor-node-group {
   display: grid;
   gap: var(--rolebox-space-1, 4px);
@@ -1271,6 +1467,26 @@ export const monitorClass = {
   stripStopped: "rolebox-monitor-strip-stopped",
   stripPending: "rolebox-monitor-strip-pending",
   stripUnknown: "rolebox-monitor-strip-unknown",
+  graphCanvas: "rolebox-monitor-graph-canvas",
+  graphSvg: "rolebox-monitor-graph-svg",
+  graphBand: "rolebox-monitor-graph-band",
+  graphBandLabel: "rolebox-monitor-graph-band-label",
+  graphEdge: "rolebox-monitor-graph-edge",
+  graphEdgeBack: "rolebox-monitor-graph-edge-back",
+  graphEdgeLabel: "rolebox-monitor-graph-edge-label",
+  graphEdgeLabelText: "rolebox-monitor-graph-edge-label-text",
+  graphNode: "rolebox-monitor-graph-node",
+  graphNodeRunning: "rolebox-monitor-graph-node-running",
+  graphNodeComplete: "rolebox-monitor-graph-node-complete",
+  graphNodeFailed: "rolebox-monitor-graph-node-failed",
+  graphNodeBlocked: "rolebox-monitor-graph-node-blocked",
+  graphNodeStopped: "rolebox-monitor-graph-node-stopped",
+  graphNodePending: "rolebox-monitor-graph-node-pending",
+  graphNodeUnknown: "rolebox-monitor-graph-node-unknown",
+  graphNodeMark: "rolebox-monitor-graph-node-mark",
+  graphNodeLabel: "rolebox-monitor-graph-node-label",
+  graphMarkSolid: "rolebox-monitor-graph-mark-solid",
+  graphRouting: "rolebox-monitor-graph-routing",
   nodeGroup: "rolebox-monitor-node-group",
   nodeList: "rolebox-monitor-node-list",
   nodeRow: "rolebox-monitor-node-row",

@@ -42,6 +42,11 @@
 
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 
+// TYPE-ONLY: the mocked dynamic import below is what loads the module at run
+// time; this erases completely and only names the DTO the fixture stands in
+// for, so the `graph` seat is checked against the real wire contract.
+import type { MonitorEngineGraphDto } from "../../src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx";
+
 // ── Stateful react double + tree harness ───────────────────────────────────
 
 /** One rendered JSX element (bun's automatic runtime passes children via props). */
@@ -172,6 +177,14 @@ function walk(node: unknown, visit: (vnode: VNode) => void): void {
   if (typeof vnode !== "object" || vnode.type === undefined || vnode.props === undefined) return;
   visit(vnode);
   for (const child of childNodes(vnode)) walk(child, visit);
+}
+
+/** The ELEMENT children of a vnode (text, numbers and falsy entries removed). */
+function vnodeChildren(node: VNode): VNode[] {
+  return childNodes(node).filter(
+    (child): child is VNode =>
+      typeof child === "object" && child !== null && child.type !== undefined,
+  );
 }
 
 function allNodes(): VNode[] {
@@ -379,8 +392,65 @@ const LOOPS = [
 ];
 
 /** One live engine graph with a full node ledger. */
+/**
+ * The graph's own v3 declaration — the nodes and the ROUTING the figure has to
+ * draw. It follows the snapshot's own node ids (so every box has a status to
+ * show), and it carries a real cycle (`build-api <-> verify`) plus the loop
+ * group that bounds it, which is the shape the live payload ships.
+ */
+const GRAPH_DECLARATION: NonNullable<MonitorEngineGraphDto["graph"]>["declaration"] = {
+  version: 3,
+  name: "graph-1",
+  nodes: [
+    { id: "plan", agent: "architect", prompt: "Plan the change.", outcomes: [{ id: "planned" }] },
+    {
+      id: "build-api",
+      agent: "engineer",
+      prompt: "Build the API.",
+      outcomes: [{ id: "built" }, { id: "revise" }],
+    },
+    {
+      id: "verify",
+      agent: "reviewer",
+      prompt: "Verify the build.",
+      outcomes: [{ id: "approved" }, { id: "revise" }],
+    },
+    { id: "docs", agent: "writer", prompt: "Write the docs.", outcomes: [{ id: "documented" }] },
+    {
+      id: "changelog",
+      agent: "writer",
+      prompt: "Write the changelog.",
+      outcomes: [{ id: "logged" }],
+    },
+  ],
+  edges: [
+    { from: "plan", to: "build-api", outcome: "planned" },
+    { from: "build-api", to: "verify", outcome: "built" },
+    { from: "verify", to: "build-api", outcome: "revise" },
+    { from: "verify", to: "docs", outcome: "approved" },
+    { from: "docs", to: "changelog", outcome: "documented" },
+  ],
+  loop_groups: [
+    {
+      id: "lg-revise",
+      nodes: ["build-api", "verify"],
+      max_traversals: 3,
+      continuation_outcome: "revise",
+      exit_outcome: "approved",
+    },
+  ],
+};
+
+/**
+ * The `graph` seat as the fixture needs it. The real `GraphView` also carries
+ * the run's plan revision, runs and attempts; this suite's subject is what the
+ * panel DRAWS from the declaration, so the cast names that subset explicitly.
+ */
+const GRAPH_VIEW = { declaration: GRAPH_DECLARATION };
+
 const GRAPH = {
   graphId: "graph-1",
+  graph: GRAPH_VIEW as MonitorEngineGraphDto["graph"],
   phase: "executing",
   nodeCount: 5,
   nodeStatusCounts: { completed: 3, running: 1, pending: 1 },
@@ -650,19 +720,241 @@ describe("RoleboxMonitorPanel", () => {
       expect(text).toContain("lg-1 2/5");
     });
 
-    it("draws exactly one strip cell per node", async () => {
+    it("draws the declared graph as a node-and-edge topology figure", async () => {
       mountPanel();
       await settle();
 
       const graph = byClass("rolebox-monitor-graph")[0]!;
-      const cells = within(graph, "rolebox-monitor-strip-cell");
-      expect(cells).toHaveLength(GRAPH.nodes.length);
-      // The strip is a redundant, position-preserving overview: one running
-      // cell, three done, one queued.
+      // The scroll container replaced the strip: a rank wider than the docked
+      // sidebar scrolls instead of shrinking below legibility.
+      const canvas = within(graph, "rolebox-monitor-graph-canvas");
+      expect(canvas).toHaveLength(1);
+      expect(canvas[0]!.type).toBe("figure");
+      // The strip is NOT drawn beside the figure.
+      expect(within(graph, "rolebox-monitor-strip-cell")).toHaveLength(0);
+
+      const svg = within(graph, "rolebox-monitor-graph-svg")[0]!;
+      expect(svg.type).toBe("svg");
+      expect(svg.props.role).toBe("img");
+      const ariaLabel = String(svg.props["aria-label"]);
+      expect(ariaLabel).toContain("graph-1");
+      expect(ariaLabel).toContain(GRAPH_DECLARATION.nodes.length + " nodes");
+      expect(ariaLabel).toContain(GRAPH_DECLARATION.edges.length + " edges");
+      // Size rides the width/height ATTRIBUTES with a matching viewBox: the
+      // sheet is not allowed a fixed width above the panel's own measure.
+      expect(typeof svg.props.width).toBe("number");
+      expect(typeof svg.props.height).toBe("number");
+      expect(String(svg.props.viewBox)).toBe(
+        "0 0 " + String(svg.props.width) + " " + String(svg.props.height),
+      );
+
+      // One box per declared node, one edge per declared edge.
+      expect(within(graph, "rolebox-monitor-graph-node")).toHaveLength(
+        GRAPH_DECLARATION.nodes.length,
+      );
+      expect(within(graph, "rolebox-monitor-graph-node-label")).toHaveLength(
+        GRAPH_DECLARATION.nodes.length,
+      );
+      expect(within(graph, "rolebox-monitor-graph-edge")).toHaveLength(
+        GRAPH_DECLARATION.edges.length,
+      );
+      // The cycle's two edges are back edges, routed clear of the rank rows.
+      expect(within(graph, "rolebox-monitor-graph-edge-back")).toHaveLength(2);
+      // A CHIP only where the source is divergent (or the edge is a back
+      // edge): `build-api -built-> verify` is a back edge, `verify` fans out
+      // to both `build-api` and `docs` — and `plan`, `docs` and `changelog`
+      // carry their single outcome in the title and the routing list only. The
+      // pinned structure puts the label class on BOTH the chip's rect and its
+      // text, so three chips are six label elements.
+      expect(within(graph, "rolebox-monitor-graph-edge-label")).toHaveLength(6);
+    });
+
+    it("draws one path per edge, a chip only where it says something", async () => {
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      const edges = within(graph, "rolebox-monitor-graph-edge");
+      expect(edges).toHaveLength(GRAPH_DECLARATION.edges.length);
+      const withChip = new Set([
+        "build-api -built-> verify",
+        "verify -revise-> build-api",
+        "verify -approved-> docs",
+      ]);
+      for (const edge of edges) {
+        const children = vnodeChildren(edge);
+        expect(children.filter((child) => child.type === "path")).toHaveLength(1);
+        const from = String(edge.props["data-from"]);
+        const to = String(edge.props["data-to"]);
+        const outcome = String(edge.props["data-outcome"]);
+        const name = from + " -" + outcome + "-> " + to;
+        // Every edge NAMES itself in the data contract, whatever it draws.
+        expect(from).not.toBe("undefined");
+        expect(to).not.toBe("undefined");
+        expect(outcome).not.toBe("undefined");
+        if (withChip.has(name)) {
+          // A chip's rect comes first, then its text, both under the label.
+          const labels = within(edge, "rolebox-monitor-graph-edge-label");
+          expect(labels).toHaveLength(2);
+          // The rect comes first, then the text it masks.
+          expect(labels[0]!.type).toBe("rect");
+          expect(labels[1]!.type).toBe("text");
+          expect(within(edge, "rolebox-monitor-graph-edge-label-text")).toHaveLength(1);
+        } else {
+          // Suppressed: no rect, no text, no chip at all.
+          expect(within(edge, "rolebox-monitor-graph-edge-label")).toHaveLength(0);
+          expect(within(edge, "rolebox-monitor-graph-edge-label-text")).toHaveLength(0);
+          expect(children.filter((child) => child.type === "rect")).toHaveLength(0);
+        }
+        const path = children.find((child) => child.type === "path")!;
+        // An ORTHOGONAL route with rounded corners: lines and quadratics, no
+        // bezier blobs.
+        expect(String(path.props.d)).not.toContain("C");
+        // The full routing is stated on the title whatever the chip shows.
+        const title = children.find((child) => child.type === "title");
+        expect(title).toBeDefined();
+        expect(textOf(title!)).toMatch(/^\S+ -\S+-> \S+$/);
+      }
+    });
+
+    it("renders a chip's own outcome in full when it fits the chip", async () => {
+      // A chip is SIZED from the outcome's length at the chip's own advance
+      // estimate; budgeting its text with the node label's wider estimate
+      // ellipsized outcomes (11+ characters) inside a chip with room to spare.
+      const LONG = "revise_needed";
+      cfg.status = {
+        ...STATUS_BODY,
+        engineGraphs: [
+          {
+            ...GRAPH,
+            graph: {
+              declaration: {
+                version: 3,
+                name: "graph-long-outcome",
+                nodes: [
+                  { id: "apply", outcomes: [{ id: LONG }, { id: "ok" }] },
+                  { id: "review", outcomes: [{ id: "ok" }] },
+                  { id: "audit", outcomes: [{ id: "ok" }] },
+                ],
+                edges: [
+                  { from: "apply", to: "review", outcome: LONG },
+                  { from: "apply", to: "audit", outcome: "ok" },
+                ],
+              },
+            },
+          },
+        ],
+      };
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      const longEdge = within(graph, "rolebox-monitor-graph-edge").find(
+        (edge) => edge.props["data-outcome"] === LONG,
+      )!;
+      expect(longEdge).toBeDefined();
+      const chipText = within(longEdge, "rolebox-monitor-graph-edge-label-text");
+      expect(chipText).toHaveLength(1);
+      // The whole outcome, no ellipsis, inside an 88px chip.
+      expect(textOf(chipText[0]!)).toBe(LONG);
+      const rect = within(longEdge, "rolebox-monitor-graph-edge-label")[0]!;
+      expect(Number(rect.props.width)).toBeGreaterThanOrEqual(
+        LONG.length * 6 + 10,
+      );
+    });
+
+    it("tags every node and edge for the DOM contract", async () => {
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      const nodes = within(graph, "rolebox-monitor-graph-node");
+      expect(nodes.map((node) => node.props["data-node-id"])).toEqual(
+        GRAPH_DECLARATION.nodes.map((node) => node.id),
+      );
+      const edges = within(graph, "rolebox-monitor-graph-edge");
+      expect(
+        edges.map((edge) => [
+          edge.props["data-from"],
+          edge.props["data-outcome"],
+          edge.props["data-to"],
+        ]),
+      ).toEqual(
+        GRAPH_DECLARATION.edges.map((edge) => [edge.from, edge.outcome, edge.to]),
+      );
+    });
+
+    it("states every edge in words for a screen reader", async () => {
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      // The visual column states nodes, agents and states but NOT the routing,
+      // so this hidden list is the only accessible statement of the edges.
+      const routing = within(graph, "rolebox-monitor-sr").filter((node) => node.type === "ul");
+      expect(routing).toHaveLength(1);
+      expect(vnodeChildren(routing[0]!).map((item) => textOf(item))).toEqual([
+        "plan -planned-> build-api",
+        "build-api -built-> verify",
+        "verify -revise-> build-api",
+        "verify -approved-> docs",
+        "docs -documented-> changelog",
+      ]);
+      expect(textOf(byClass("rolebox-monitor-node-list")[0]!)).not.toContain("planned");
+    });
+
+    it("draws a loop group as a labelled band over the ranks it covers", async () => {
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      const bands = within(graph, "rolebox-monitor-graph-band");
+      expect(bands).toHaveLength(1);
+      const children = vnodeChildren(bands[0]!);
+      expect(children.filter((child) => child.type === "rect")).toHaveLength(1);
+      expect(textOf(within(bands[0]!, "rolebox-monitor-graph-band-label")[0]!)).toBe("lg-revise");
+    });
+
+    it("carries each node's state as a shape as well as a tint", async () => {
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      // One running node, one queued node, three finished ones — the same
+      // vocabulary the strip and the ledger use.
+      expect(within(graph, "rolebox-monitor-graph-node-running")).toHaveLength(1);
+      expect(within(graph, "rolebox-monitor-graph-node-pending")).toHaveLength(1);
+      expect(within(graph, "rolebox-monitor-graph-node-complete")).toHaveLength(3);
+      // The running mark is a SOLID play triangle; a queued mark is a hollow
+      // ring — hue is never the only channel.
+      const running = within(graph, "rolebox-monitor-graph-node-running")[0]!;
+      expect(within(running, "rolebox-monitor-graph-mark-solid")).toHaveLength(1);
+      const pending = within(graph, "rolebox-monitor-graph-node-pending")[0]!;
+      expect(within(pending, "rolebox-monitor-graph-mark-solid")).toHaveLength(0);
+      // Every box names its own id, agent and state in words.
+      const titles = within(graph, "rolebox-monitor-graph-node").map((node) => {
+        const title = vnodeChildren(node).find((child) => child.type === "title");
+        return title === undefined ? "" : textOf(title);
+      });
+      expect(titles).toContain("build-api - engineer - running");
+      expect(titles).toContain("verify - reviewer - pending");
+      // The full id rides the title even if the visible label is ellipsized.
+      expect(titles.some((title) => title.startsWith("changelog - "))).toBe(true);
+    });
+
+    it("falls back to the one-cell-per-node strip without a declaration", async () => {
+      // A sparse or older payload carries no declaration: the figure is not
+      // invented, and the original position-preserving strip still renders.
+      cfg.status = { ...STATUS_BODY, engineGraphs: [{ ...GRAPH, graph: undefined }] };
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      expect(within(graph, "rolebox-monitor-graph-canvas")).toHaveLength(0);
+      expect(within(graph, "rolebox-monitor-strip-cell")).toHaveLength(GRAPH.nodes.length);
       expect(within(graph, "rolebox-monitor-strip-running")).toHaveLength(1);
       expect(within(graph, "rolebox-monitor-strip-complete")).toHaveLength(3);
       expect(within(graph, "rolebox-monitor-strip-pending")).toHaveLength(1);
-      // Decorative: the states are restated in words beside it.
       expect(within(graph, "rolebox-monitor-strip")[0]!.props["aria-hidden"]).toBe("true");
     });
 
@@ -686,7 +978,9 @@ describe("RoleboxMonitorPanel", () => {
       // Five nodes against a four-row cap: the rest stays one click away.
       const toggle = within(graph, "rolebox-monitor-more")[0]!;
       expect(textOf(toggle)).toBe("Show all 5 nodes");
-      expect(textOf(graph)).not.toContain("changelog");
+      // The capped LEDGER hides it; the topology figure above deliberately
+      // draws every declared node, so the assertion is scoped to the list.
+      expect(textOf(within(graph, "rolebox-monitor-node-list")[0]!)).not.toContain("changelog");
       click(toggle);
       expect(nodeIds(byClass("rolebox-monitor-graph")[0]!)).toEqual([
         "build-api",
@@ -1186,6 +1480,17 @@ describe("RoleboxMonitorPanel", () => {
       mountPanel();
       await settle();
 
+      // The topology figure is ONE labelled image: a screen reader hears the
+      // graph's own summary and the routing list, not a box-by-box recital.
+      const svg = byClass("rolebox-monitor-graph-svg")[0]!;
+      expect(svg.props.role).toBe("img");
+      expect(String(svg.props["aria-label"])).toContain("graph-1");
+
+      // The strip is the FALLBACK channel, and it stays decorative when it is
+      // the one drawn: the states are restated in words beside it.
+      cfg.status = { ...STATUS_BODY, engineGraphs: [{ ...GRAPH, graph: undefined }] };
+      mountPanel();
+      await settle();
       expect(byClass("rolebox-monitor-strip")[0]!.props["aria-hidden"]).toBe("true");
       // The normalised state word is announced; it is never colour-only.
       expect(textOf(byClass("rolebox-monitor-chip-running")[0]!)).toBe("Running");
