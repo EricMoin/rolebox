@@ -3,7 +3,8 @@
   "version": "2.0.0",
   "description": "Agent plugin for major harnesses — DeepSeek Harness (DSH), OpenCode, Pi and Codex: define custom AI agent roles with per-role prompts, models, skills, permissions, memory and multi-agent orchestration.",
   "engines": {
-    "opencode": "^1.0.0"
+    "opencode": "^1.0.0",
+    "dsh": ">=0.2.1-alpha.3"
   },
   "type": "module",
   "bin": {

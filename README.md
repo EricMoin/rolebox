@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/rolebox"><img alt="npm" src="https://img.shields.io/npm/v/rolebox"></a>
+  <a href="docs/compatibility.md#harness-versions"><img alt="dsh" src="https://img.shields.io/badge/dsh-0.2.1--alpha.3%2B-blue"></a>
   <a href="https://github.com/EricMoin/rolebox/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/EricMoin/rolebox/ci.yml"></a>
   <a href="https://github.com/EricMoin/rolebox"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/EricMoin/rolebox"></a>
   <a href="https://www.npmjs.com/package/rolebox"><img alt="npm downloads" src="https://img.shields.io/npm/dm/rolebox"></a>
@@ -169,7 +170,7 @@ The Logs pane polls the workspace's `.rolebox/logs` directory (in the capture `r
 
 ## Install
 
-rolebox runs on four harnesses. A `rolebox/` directory in the **current working directory** takes precedence over the global roles directory; registry roles install with `rolebox install <name>` and deploy with `rolebox sync <opencode|pi|dsh|codex>`.
+rolebox runs on four harnesses. A `rolebox/` directory in the **current working directory** takes precedence over the global roles directory; registry roles install with `rolebox install <name>` and deploy with `rolebox sync <opencode|pi|dsh|codex>`. Each harness has a minimum version — [Harness versions](docs/compatibility.md#harness-versions) lists them and why.
 
 | Harness | Config directory | Roles directory | Global skills | Env override |
 |---|---|---|---|---|

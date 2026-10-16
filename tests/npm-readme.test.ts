@@ -34,9 +34,14 @@ const REPO = "repo";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const RAW = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${SHA}`;
 
-/** The shields.io badges rolebox's README carries; none may ever change. */
+/**
+ * The shields.io badges rolebox's README carries, in README order. The rewriter
+ * must leave every one of them untouched; keep this list in step with
+ * `README.md` when the badge row changes.
+ */
 const BADGES = [
   "https://img.shields.io/npm/v/rolebox",
+  "https://img.shields.io/badge/dsh-0.2.1--alpha.3%2B-blue",
   "https://img.shields.io/github/actions/workflow/status/EricMoin/rolebox/ci.yml",
   "https://img.shields.io/github/stars/EricMoin/rolebox",
   "https://img.shields.io/npm/dm/rolebox",

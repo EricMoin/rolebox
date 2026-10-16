@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- **Graph workers dispatch again on dsh 0.2.x, which removed the subagent start seam they used** — dsh replaced `SubagentRuntime.start(name, request)` with `startActivation(spec)` and narrowed `SubagentCapabilities` to `agentOptions` / `agentPreset` / `outputSchema` / `depthLimit`, dropping the start-request `toolFilter` and `persona` fields. rolebox still called the removed method, so dispatching a declared graph's node — or a loop round — threw before a worker existed. Every production call site now activates through `startActivation`, and the provider advertises the four booleans dsh actually declares. Because rolebox's provider declares `prepareContinuable`, dsh takes its LOCAL activation path and never calls the provider's own `start()`, so the role prompt, the per-session active-role override, the spawn context and the model override are composed at the call site by `DshAgentRegistrar.composeSpawnRequest` (wired into both the loop dispatch adapter and the graph outcome delivery) and a graph worker's complete prompt is prepended there. The activation's `label` still carries the stable idempotency key and `dispose()` is still the abort surface, and a graph worker's declared tool face is now enforced by rolebox's own execution guard plus the prompt rather than by a start-time filter.
+
+- **rolebox declares the dsh line it needs, so an unsupported host is refused before it loads** — rolebox established every subagent through `startActivation` and advertised the four-boolean capability shape, but `package.json` declared no dsh requirement at all: dsh's pre-flight reads `engines.dsh` first and otherwise only `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` PEER ranges, and rolebox's dsh packages are devDependencies, so every line passed the check and an unsupported one failed later at the dispatch seam. `engines.dsh` now states `>=0.2.1-alpha.3`, the first release whose subagent contract rolebox implements. Verified against dsh's own `evaluatePluginCompatibility`: `0.2.1-alpha.4` and `0.2.1-alpha.3` satisfy it, while `0.2.1-alpha.2`, `0.2.1-alpha.1`, `0.2.0-rc.2` and `0.1.5-rc.2` are refused with dsh's incompatibility message and the `dsh plugin allow-version` exemption path.
+
+### Documentation
+
+- **Every harness minimum is stated once, and the README badge row names the binding one** — rolebox's four targets each carry a real version contract, but only dsh's is both hard and non-obvious: the subagent line moved twice inside `0.2.1-alpha`, so `startActivation` and `delivery` appear in `0.2.1-alpha.2` while the four-boolean capability shape rolebox advertises (`agentPreset` in, `toolFilter`/`persona` out) only appears in `0.2.1-alpha.3` — and `0.2.0-rc.x` has neither. `docs/compatibility.md` gains a **Harness versions** section carrying that release table together with the opencode 1.x / v2, Pi and Codex minimums and where each is declared, and the README badge row gains a `dsh 0.2.1-alpha.3+` badge that links to it beside a pointer from the Install section. Reference: [docs/compatibility.md](docs/compatibility.md#harness-versions).
+
 ## 2.0.0
 
 2.0.0 is the first stable release of the 2.x line. The breaking changes an upgrader from 1.x must act on are recorded under `## 2.0.0-alpha.1` and `## 2.0.0-alpha.2`, and are not repeated here.

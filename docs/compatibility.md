@@ -4,6 +4,34 @@
 
 Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skills are discoverable by the skill tool. No conflicts.
 
+## Harness versions
+
+Each target has a minimum version, and each minimum is a runtime contract rather than a packaging detail. The README badge reports the dsh line — the binding one.
+
+| Harness | Minimum | Declared by |
+| --- | --- | --- |
+| [opencode](https://github.com/sst/opencode) 1.x | plugin API `^1.3.0` | the `@opencode-ai/plugin` peer range; loaded through the package root |
+| opencode 2.x | CLI and plugin API `2.0.18` | the `@opencode/plugin` peer range; loaded through `rolebox/server` |
+| [pi](https://pi.dev) | `0.86.0` | the `@earendil-works/pi-coding-agent` peer range |
+| [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) | `0.2.1-alpha.3` | the subagent contract below |
+| Codex | none | the integration is an MCP server, so no versioned Codex package is involved |
+
+rolebox's manifest also declares the `@deepseek-ai/cordis` peer (`4.0.2`) its dsh entry is built against.
+
+### Why dsh starts at 0.2.1-alpha.3
+
+rolebox establishes every subagent — a graph worker and a loop round alike — through `ctx.subagents.startActivation(spec)`, and advertises the four `SubagentCapabilities` booleans `agentOptions`, `agentPreset`, `outputSchema` and `depthLimit`. Both parts of that contract landed during the `0.2.1-alpha` line, and neither is present in `0.2.0-rc.x`:
+
+| dsh | `startActivation` | `agentPreset` | `toolFilter` / `persona` |
+| --- | --- | --- | --- |
+| `0.2.0-rc.2` and earlier | absent | absent | present |
+| `0.2.1-alpha.2` | present | absent | present |
+| `0.2.1-alpha.3` | present | present | absent |
+
+In `packages/subagent/subagent/src/{types,index,manager}.ts`, everything rolebox reads or writes is byte-identical between `0.2.1-alpha.3` and `0.2.1-alpha.4`, so `0.2.1-alpha.3` is the first release whose contract rolebox implements. `0.2.1-alpha.2` has the activation entry but the older five-boolean capability shape, and on a line before that a dispatch reaches a `startActivation` that does not exist — which is why the minimum is DECLARED rather than merely documented.
+
+`package.json` states it as `engines.dsh: ">=0.2.1-alpha.3"`, so dsh refuses an unsupported line before loading rolebox instead of failing later, at the dispatch seam. dsh's own pre-flight reads `engines.dsh` first — an own range decides alone and peer ranges are then ignored — and otherwise checks every `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` peer range, treating prereleases as participants. An unmet requirement denies the plugin until an exact-version exemption is granted (`dsh plugin allow-version`).
+
 ## Pi parity status
 
 Rolebox's Pi extension (`src/entries/pi.ts`) registers the full shared opencode tool surface through `PiLightweightServiceStack`; parity is enforced by `tests/pi-parity.test.ts`.
