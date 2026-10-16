@@ -16,11 +16,15 @@
  * A loop round's `agent` IS the rolebox agent id registered by
  * {@link DshAgentRegistrar} (`agent-registrar.ts`) — the registrar registers
  * one `SubagentProvider` per `AgentDefinition` keyed by `definition.id`. The
- * adapter therefore resolves the agent directly as the provider name for
- * `SubagentRuntime.start`; when the agent is not registered the start rejects
- * with a descriptive error. Per-role tool allowlists / model overrides are
- * applied by the registrar's provider at spawn time (capabilities.toolFilter /
- * agentOptions merge) — not duplicated here.
+ * adapter therefore names the agent as the activation's `provider`; when the
+ * agent is not registered the activation rejects with a descriptive error.
+ * Per-role prompts, model overrides and spawn context are applied at THIS call
+ * site, through the optional `composeRequest` composer
+ * ({@link DshSpawnRequestComposer}) — not inside the provider, because on dsh
+ * 0.2.x a rolebox provider declares `prepareContinuable`, takes the LOCAL
+ * activation path, and never sees its own `start()`. The worker's tool face
+ * rides in the prompt and is enforced by rolebox's own execution guard: dsh
+ * removed the start-request `toolFilter`.
  *
  * ── Graceful degradations (documented) ───────────────────────────────────
  *   - Per-run hard timeout: dsh's `SubagentStartRequest` has no
@@ -58,12 +62,15 @@ import { SUMMARY_INPUT_CHAR_CAP } from "../../../loop/constants.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type {
   DshContentBlock,
+  DshSubagentActivation,
+  DshSubagentActivationSpec,
   DshSubagentProvider,
   DshSubagentResult,
   DshSubagentRun,
   DshSubagentRuntime,
   DshSubagentStartRequest,
 } from "./agent-registrar.ts";
+import { activationToRun } from "./agent-registrar.ts";
 import { extractResultBlock, writeResultSidecar } from "../../../dispatch/completion/result-extractor.ts";
 import { sessionSignalLedger } from "../../../signal/session-signal-ledger.ts";
 import { SYNTHETIC_ANSWER_SIGNAL } from "../../../signal/signal-constants.ts";
@@ -77,15 +84,39 @@ export type { DshSubagentResult } from "./agent-registrar.ts";
 
 /**
  * The dsh `SubagentRuntime` surface the dispatch path consumes. A superset of
- * {@link DshSubagentRuntime} (the registrar's catalog seam) — adds `start`,
- * which routes to the registered provider for the given name. Consumed
+ * {@link DshSubagentRuntime} (the registrar's catalog seam) — adds
+ * `startActivation`, the ONLY child-establishment entry on the 0.2.x line
+ * (`SubagentRuntime.start(name, request)` no longer exists). Consumed
  * structurally so the real `ctx.subagents` service and a test double both
  * satisfy it.
  */
 export interface DshSubagentDispatchRuntime extends DshSubagentRuntime {
-  /** Start a subagent run through the named provider (§4.3 `start`). */
-  start(name: string, request: DshSubagentStartRequest): Promise<DshSubagentRun>;
+  /**
+   * Establish a managed child through the named provider (§4.3
+   * `startActivation`). `provider` names a registered provider; rolebox passes
+   * the agent id, whose provider takes the LOCAL path (it declares
+   * `prepareContinuable`) and receives the rolebox-composed request.
+   */
+  startActivation(spec: DshSubagentActivationSpec): Promise<DshSubagentActivation>;
 }
+
+/**
+ * Compose the request ONE spawn is started with, at the CALL SITE.
+ *
+ * On the 0.2.x line a provider with `prepareContinuable` never sees its own
+ * `start()` — the service composes the child — so the role prompt, context and
+ * model must be resolved before `startActivation`. The dsh entry wires this to
+ * {@link DshAgentRegistrar.composeSpawnRequest}. `workerPrompt`, when supplied,
+ * is a graph worker's COMPLETE prompt and replaces the role-prompt prepend.
+ *
+ * Absent → the request is started exactly as composed by the adapter (a host
+ * without the registrar still dispatches, just without role materialization).
+ */
+export type DshSpawnRequestComposer = (
+  agent: string,
+  request: DshSubagentStartRequest,
+  workerPrompt?: string,
+) => DshSubagentStartRequest;
 
 /**
  * dsh `SubagentResult` — the terminal outcome a `SubagentRun.result` promise
@@ -153,6 +184,14 @@ export interface DshDispatchAdapterOptions {
    * probed live-agent registry: `(sid) => registry?.get(sid)`.
    */
   parentResolver?: (sessionId: string) => unknown;
+  /**
+   * Optional call-site spawn composer ({@link DshSpawnRequestComposer}): builds
+   * the request `startActivation` is called with, applying the target role's
+   * system prompt, spawn-time context and model override. The dsh entry wires
+   * it to `DshAgentRegistrar.composeSpawnRequest`. Absent → the request is
+   * started as composed by this adapter.
+   */
+  composeRequest?: DshSpawnRequestComposer;
   /**
    * Optional workspace directory for result sidecars
    * (`{directory}/.rolebox/state/results/`). Defaults to `process.cwd()`.
@@ -311,22 +350,38 @@ export class DshDispatchAdapter implements IDispatchAdapter {
     }
 
     const controller = new AbortController();
-    const request: DshSubagentStartRequest = {
+    const baseRequest: DshSubagentStartRequest = {
       label: description,
       prompt: [{ type: "text", text: prompt }],
       parent,
       signal: controller.signal,
       // rolebox extension: carry the CONTEXT session onto the spawn so the
-      // registered provider (DshAgentRegistrar.buildProvider) can apply the
-      // per-session ACTIVE role at spawn time. On the loop path this is the
-      // origin dsh session id (matches the web dock's key). The live parent
-      // `Agent` (dsh requires one) is resolved separately from
-      // `liveParentSessionId` above, so the context session key and the parent
-      // Agent never have to be the same value. Graph dispatch does not run
-      // through this adapter (the host layer dispatches it).
+      // composer can apply the per-session ACTIVE role. On the loop path this
+      // is the origin dsh session id (matches the web dock's key). The live
+      // parent `Agent` is resolved separately from `liveParentSessionId`
+      // above, so the context session key and the parent Agent never have to
+      // be the same value.
       sessionId: parentSessionId,
     };
-    const run = await this.opts.subagents.start(agent, request);
+    // THE ROLE IS MATERIALIZED HERE, BEFORE THE SERVICE SEES THE REQUEST. On
+    // dsh 0.2.x a provider with `prepareContinuable` never receives its own
+    // `start()`, so the composed request is what the child actually runs with
+    // (see `DshSpawnRequestComposer`). The composer is optional: an unwired
+    // host still dispatches the adapter-composed request.
+    const request = this.opts.composeRequest?.(agent, baseRequest) ?? baseRequest;
+    const activation = await this.opts.subagents.startActivation({
+      provider: agent,
+      // dsh 0.2.x requires the activation label; a dispatch without a
+      // description falls back to the agent id rather than an empty label.
+      label: description ?? agent,
+      request,
+      signal: controller.signal,
+      // The loop coordinator observes `run.result` itself and writes its own
+      // result sidecar, so the child's answer is returned to the caller rather
+      // than injected into the orchestrator's turn.
+      delivery: "caller",
+    });
+    const run = activationToRun(activation);
 
     const id = run.id;
     // Record the dispatch-parent edge BEFORE any settlement can fire so the

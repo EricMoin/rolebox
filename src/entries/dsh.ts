@@ -233,13 +233,13 @@ export const Config = z.object({
     )
     .optional()
     .describe(
-      "Programmatic host seam (not representable in YAML): spawn delegate invoked by registered providers' start(). Omitted → start() delegates to the host provider named by spawnProviderName (default 'spawn'); only when that provider is unregistered does it reject DshSpawnNotWiredError.",
+      "Programmatic host seam (not representable in YAML): spawn delegate invoked by a registered provider's external start(). On dsh 0.2.x a rolebox provider declares prepareContinuable, so the host takes the LOCAL activation path, composes the child itself and never calls that start() — this delegate is therefore not consulted for rolebox's own providers. Omitted → start() delegates to the host provider named by spawnProviderName (default 'spawn'); only when that provider is unregistered does it reject DshSpawnNotWiredError.",
     ),
   spawnProviderName: z
     .string()
     .optional()
     .describe(
-      "Name of the ctx.subagents provider rolebox delegates real spawning to when no onSpawn delegate is wired (default 'spawn', as registered by @deepseek-ai/dsh-subagent-spawn-in-process). A value colliding with a rolebox agent id is refused at spawn time.",
+      "Name of the ctx.subagents provider an external start() delegates real spawning to when no onSpawn delegate is wired (default 'spawn', as registered by @deepseek-ai/dsh-subagent-spawn-in-process). On dsh 0.2.x a rolebox provider takes the LOCAL activation path and never reaches this delegation. A value colliding with a rolebox agent id is refused.",
     ),
 });
 
@@ -283,9 +283,9 @@ export interface DshPluginContext {
   sessions: DshSessionStoreLike;
   /**
    * dsh subagent service (`SubagentRuntime`, contract §4.3). Typed as the
-   * dispatch superset (adds `start`) because this plugin both syncs agents
-   * into the catalog (via {@link DshAgentRegistrar}) and dispatches graph
-   * nodes / loop rounds through `ctx.subagents.start` (via
+   * dispatch superset (adds `startActivation`) because this plugin both syncs
+   * agents into the catalog (via {@link DshAgentRegistrar}) and dispatches graph
+   * nodes / loop rounds through `ctx.subagents.startActivation` (via
    * {@link DshDispatchAdapter}).
    *
    * `listChildren` is OPTIONAL ON THIS MIRROR because it is one consumer's
@@ -402,8 +402,8 @@ export interface DshPluginStats {
   /**
    * Dispatch mode — always `"dsh"` on this platform. The graph engine and
    * loop mode dispatch subagent sessions through the dsh subagent seam
-   * (`ctx.subagents.start` / the dsh session service) instead of the opencode
-   * SDK client (see {@link DshDispatchAdapter}).
+   * (`ctx.subagents.startActivation` / the dsh session service) instead of the
+   * opencode SDK client (see {@link DshDispatchAdapter}).
    */
   dispatchMode: "dsh";
   /**
@@ -1314,13 +1314,15 @@ export async function apply(
    * declared grant may name (`tools: ["computer_*"]` becomes the registered
    * computer_* names), intersected per delivery with the host's own lookup.
    *
-   * WHY A CANDIDATE SET IS NEEDED AT ALL: the start request's `toolFilter.allow`
-   * is a list of CONCRETE names, and a declared PREFIX has to be expanded
-   * against something. The composed record is that something, and it is a
-   * SUPERSET: nothing is granted by being here — the per-delivery intersection
+   * WHY A CANDIDATE SET IS NEEDED AT ALL: a node's declared grant is a list of
+   * CONCRETE names (`tools: ["computer_*"]`), and a declared PREFIX has to be
+   * expanded against something. The composed record is that something, and it is
+   * a SUPERSET: nothing is granted by being here — the per-delivery intersection
    * with `ctx.tools.get` is what decides, so a name this boot did not actually
    * register (namespace-filtered, gate-filtered, skipped on collision) is never
-   * named to `restrict()`.
+   * reported as granted by the execution guard, nor stated in the worker prompt.
+   * (On dsh 0.1.x this same list became the start request's `toolFilter.allow`;
+   * dsh 0.2.x removed that field.)
    *
    * PUBLISHED AFTER THE BOOT'S TWO REGISTRATION GENERATIONS RUN, which is after
    * the sessions restored at boot may already have opened their graph runtimes:
@@ -1358,14 +1360,14 @@ export async function apply(
     subagents: ctx.subagents,
     activeRole,
     contextProvider,
-    graphWorkerPrompt: () => workerBoundary?.prompt(),
     providerRoutes,
     // Host-supplied spawn seam : when the host passes `onSpawn`, registered
     // providers delegate real spawning to it. Absent → the registrar warns once
-    // at construction and every `ctx.subagents.start()` delegates to the host
-    // provider named by `spawnProviderName` (default "spawn", registered by
-    // @deepseek-ai/dsh-subagent-spawn-in-process); only when that provider is
-    // unregistered does `start()` reject DshSpawnNotWiredError.
+    // at construction. On the 0.2.x line the SPAWN COMPOSITION does not travel
+    // through a provider at all: the dispatch adapters call
+    // `registrar.composeSpawnRequest` at the call site (a provider with
+    // `prepareContinuable` takes dsh's local path and never sees its own
+    // `start()`), so the same method serves both paths.
     onSpawn: config.onSpawn,
     spawnProviderName: config.spawnProviderName,
   });
@@ -1587,22 +1589,25 @@ export async function apply(
   //
   // The dsh platform's "dispatch manager" for LOOP worker rounds: routes loop
   // rounds through the dsh services instead of the opencode SDK client —
-  // `ctx.subagents.start` for spawning (per-role agent mapping via the
+  // `ctx.subagents.startActivation` for spawning (per-role agent mapping via the
   // providers {@link DshAgentRegistrar} registered above), `ctx.sessions` +
   // the run's `result` promise for collecting results, `run.dispose()` for
   // cancellation, and stopReason→DispatchTaskStatus translation so failures
-  // map to the loop coordinator's semantics.
+  // map to the loop coordinator's semantics. The role's prompt/model/context are
+  // composed at the CALL SITE (`composeRequest`), because a rolebox provider
+  // declares `prepareContinuable` and therefore never sees its own `start()`.
   const dshDispatch = new DshDispatchAdapter({
     subagents: ctx.subagents,
     sessionClient: sessionAdapter,
-    // dsh REQUIRES a live parent `Agent` on every SubagentStartRequest
-    // (`dsh-subagent/lib/types/types.d.ts:101`) and the in-process driver
+    // dsh REQUIRES a live parent `Agent` on every start request
+    // (`dsh-subagent/lib/types/types.d.ts:139-143`) and the in-process driver
     // dereferences it while composing the child. Resolve it from the probed
     // live-agent registry (`ctx.agents`); when the registry is absent
     // (headless/minimal profile) or the session has no live agent, the adapter
     // fails loud with DshParentUnresolvedError instead of forwarding
     // `parent: undefined`.
     parentResolver: (sid) => agentRegistry?.get(sid),
+    composeRequest: (agent, request) => registrar.composeSpawnRequest(agent, request),
     directory: process.cwd(),
   });
 
@@ -1646,23 +1651,33 @@ export async function apply(
         if (session.id === id && event.type === "turn/end") listener(session.events);
       }) ?? (() => { }),
       readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
-      startWorker: async (label, start, request) => {
+      // THE WORKER'S COMPLETE PROMPT, composed at the CALL SITE. On dsh 0.2.x
+      // the rolebox provider takes the local path (`prepareContinuable`) and
+      // never sees its own `start()`, so the worker prompt must be in the start
+      // request rather than prepended by a provider.
+      workerPrompt: (request) => {
         const inputDirectory = inputConsumerDirectory(join(outcomeStoreRoot, INPUT_DELIVERY_DIR), request.graphId, request.attemptId);
         // The worker's own session does not exist at prompt-assembly time, so this
         // states the mode the host resolves for the request (its deployment default);
         // each command's own result carries the authoritative mode and enforcement.
         //
-        // THE SIXTH ARGUMENT IS THE EXECUTING NODE'S OWN GRANT, resolved from the
+        // The SIXTH argument is the EXECUTING NODE'S OWN GRANT, resolved from the
         // plan by the runtime and carried on the request
         // (`OutcomeDispatchRequest.declaredTools`). It reaches the prompt HERE —
-        // the same value the start request's tool filter is built from below, so
-        // the sentence a worker reads and the face it holds state one grant. An
+        // the same value the derived worker face is built from below — so the
+        // sentence a worker reads and the face it holds state one grant. An
         // absent declaration stays absent and the prompt states the baseline.
-        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
+        //
+        // The attempt's materialized input view reaches the worker through the
+        // attempt-delivery prompt the adapter appends after this block, so this
+        // hook does not read it.
+        return prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
           resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
           request.declaredTools);
-        return workerBoundary!.start(label, start, prompt);
       },
+      composeRequest: (agent, request, workerPrompt) =>
+        registrar.composeSpawnRequest(agent, request, workerPrompt),
+      startWorker: async (label, start) => workerBoundary!.start(label, start),
       // THE BASELINE the delivery falls back to: the static two-tool surface, used
       // when the per-request resolver below is not installed (a host with no tool
       // lookup) or answers nothing. It is never widened from here.

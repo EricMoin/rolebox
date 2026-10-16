@@ -259,7 +259,7 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
   const labels = new Set<string>();
   const presentations = new WeakSet<object>();
   const workerSessions = new Set<string>();
-  const starting = new AsyncLocalStorage<{ active: boolean; prompt?: string }>();
+  const starting = new AsyncLocalStorage<{ active: boolean }>();
   const disposers: (() => void)[] = [];
   const isWorker = (agent?: WorkerAgent) => {
     if (!agent) return false;
@@ -330,12 +330,11 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
   });
   if (stop) disposers.push(stop);
   return {
-    prompt() { const scope = starting.getStore(); return scope?.active ? scope.prompt : undefined; },
     isWorker,
-    async start<T>(label: string, create: () => Promise<T>, prompt?: string): Promise<T> {
+    async start<T>(label: string, create: () => Promise<T>): Promise<T> {
       if (!guard) throw new Error("This dsh host cannot enforce the graph worker execution guard");
       labels.add(label);
-      const scope = { active: true, prompt };
+      const scope = { active: true };
       try { return await starting.run(scope, create); }
       finally { scope.active = false; }
     },

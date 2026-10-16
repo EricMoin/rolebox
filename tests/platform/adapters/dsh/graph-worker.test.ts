@@ -51,29 +51,48 @@ describe("DSH graph worker presentation", () => {
     boundary.dispose();
   });
 
-  it("isolates prepared prompts between concurrent starts and clears the start scope", async () => {
+  // The start scope no longer carries a prepared prompt (the worker's complete
+  // prompt is composed at the call site by
+  // `DshAgentRegistrar.composeSpawnRequest`, because dsh 0.2.x runs a provider
+  // with `prepareContinuable` on the LOCAL activation path and never calls its
+  // `start()`). Its remaining job is ADMISSION: an `agent/created` observed
+  // inside a start scope is marked as a worker before its first assembly, and
+  // concurrent starts stay independent.
+  it("admits each concurrent start's own child and leaves agents created outside every start alone", async () => {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>();
     const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
       guard: () => () => {},
-    }, () => undefined);
+    }, (event, listener) => {
+      listeners.set(event, listener);
+      return () => { listeners.delete(event); };
+    });
+    const agent = (id: string) => {
+      const modes: string[] = [];
+      return { id, session: { id, events: [] }, modes,
+        ctx: { tools: { presentAs: (mode: "native") => { modes.push(mode); return () => {}; } } } };
+    };
+    const first = agent("first-worker");
+    const second = agent("second-worker");
+    const outside = agent("outside");
     let release!: () => void;
-    const ready = new Promise<void>(resolve => { release = resolve; });
-    let finish!: () => void;
-    const afterStart = new Promise<void>(resolve => { finish = resolve; });
-    let inherited!: Promise<string | undefined>;
-    const first = boundary.start("first", async () => {
-      expect(boundary.prompt()).toBe("first prompt");
-      await ready;
-      expect(boundary.prompt()).toBe("first prompt");
-      inherited = afterStart.then(() => boundary.prompt());
-    }, "first prompt");
-    await boundary.start("second", async () => {
-      expect(boundary.prompt()).toBe("second prompt");
-      release();
-    }, "second prompt");
-    expect(boundary.prompt()).toBeUndefined();
-    await first;
-    finish();
-    expect(await inherited).toBeUndefined();
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+
+    const firstStart = boundary.start("first-label", async () => {
+      await blocked;
+      await listeners.get("agent/created")!({ agent: first });
+    });
+    await boundary.start("second-label", async () => {
+      await listeners.get("agent/created")!({ agent: second });
+    });
+    release();
+    await firstStart;
+
+    expect(first.modes).toEqual(["native"]);
+    expect(second.modes).toEqual(["native"]);
+    // No start scope is active here, and this agent has no worker descriptor or
+    // principal, so admission must not leak onto it.
+    await listeners.get("agent/created")!({ agent: outside });
+    expect(outside.modes).toEqual([]);
     boundary.dispose();
   });
 });

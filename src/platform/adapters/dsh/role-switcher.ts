@@ -21,10 +21,10 @@
  *      a per-session holder (an exposed {@link ActiveRoleRef}, the
  *      session-aware sibling of Pi's `ActiveAgentRef`). The holder is the
  *      single shared source of truth for the switch: `DshAgentRegistrar`
- *      reads it at spawn time (`buildProvider().start()` consults
- *      `request.sessionId`) to apply the active role's system prompt and
- *      model override to spawned agents, and the web role-switch surface
- *      reads/writes it for the UI.
+ *      consults it when a spawn is COMPOSED
+ *      (`composeSpawnRequest` reads `request.sessionId`) to apply the active
+ *      role's system prompt and model override to spawned agents, and the web
+ *      role-switch surface reads/writes it for the UI.
  *   2. **Persistence (sidecar remedy)** — durability lives in a rolebox-owned
  *      sidecar under `.rolebox/state` (see {@link ActiveRolePersistence},
  *      backed by `active-role-store.ts`), NOT in the dsh session event log.

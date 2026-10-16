@@ -145,10 +145,9 @@ function makeProviderDouble(name: string): DshSubagentProvider {
     name,
     capabilities: {
       agentOptions: false,
+      agentPreset: false,
       outputSchema: false,
       depthLimit: false,
-      toolFilter: false,
-      persona: false,
     },
     inheritsParentContext: false,
     start: async () => {
@@ -157,6 +156,13 @@ function makeProviderDouble(name: string): DshSubagentProvider {
   };
 }
 
+/**
+ * The start request the delivery composes onto an activation. `label` and
+ * `signal` live on the enclosing `SubagentActivationSpec`, not on its request
+ * (dsh 0.2.x), so this is what a double can observe from `spec.request`.
+ */
+type RecordedStartRequest = Omit<DshSubagentStartRequest, "label" | "signal">;
+
 /** A dsh subagent runtime double that starts one run and resolves it. */
 function makeDshRuntime(options: {
   readonly stopReason?: "completed" | "error";
@@ -164,9 +170,9 @@ function makeDshRuntime(options: {
   readonly providerMissing?: boolean;
 } = {}): {
   runtime: DshSubagentDispatchRuntime;
-  starts: Array<{ agent: string; request: DshSubagentStartRequest }>;
+  starts: Array<{ agent: string; request: RecordedStartRequest }>;
 } {
-  const starts: Array<{ agent: string; request: DshSubagentStartRequest }> = [];
+  const starts: Array<{ agent: string; request: RecordedStartRequest }> = [];
   const runtime: DshSubagentDispatchRuntime = {
     // The delivery path never registers a provider; the port member is required
     // by `DshSubagentRuntime` (the dsh `ctx.subagents` service), so the double
@@ -177,20 +183,19 @@ function makeDshRuntime(options: {
         ? undefined
         : makeProviderDouble(agent),
     list: () => ["agent.work"],
-    start: async (agent: string, startRequest: DshSubagentStartRequest) => {
-      starts.push({ agent, request: startRequest });
+    startActivation: async (spec) => {
+      starts.push({ agent: spec.provider, request: spec.request });
       if (options.rejectStart === true) {
         throw new Error("provider refused to start");
       }
-      const run: DshSubagentRun = {
-        id: "run-1",
+      return {
+        childId: "run-1",
         result: Promise.resolve({
           output: [],
           stopReason: options.stopReason ?? "completed",
         }),
         dispose: async () => {},
       };
-      return run;
     },
   };
   return { runtime, starts };

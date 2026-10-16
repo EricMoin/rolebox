@@ -154,29 +154,41 @@ export type DshAgentOptions = {
 
 /**
  * dsh SubagentCapabilities — the provider's start-time feature flags
- * (`packages/subagent/subagent/src/types.ts:130-136`, dsh 0.1.5-rc.1).
- * dsh declares FIVE REQUIRED booleans — `agentOptions`, `outputSchema`,
- * `depthLimit`, `toolFilter`, `persona` — each corresponding one-to-one to a
+ * (`packages/subagent/subagent/src/types.ts:123-129`, dsh 0.2.1-alpha.4).
+ * dsh declares FOUR REQUIRED booleans — `agentOptions`, `agentPreset`,
+ * `outputSchema`, `depthLimit` — each corresponding one-to-one to a
  * `SubagentStartRequest` option that the service's `assertCapabilities`
- * truthy-checks before delegating to `start()`
- * (`packages/subagent/subagent/src/index.ts:641-657`). A start carrying an
+ * truthy-checks before establishing the child
+ * (`packages/subagent/subagent/src/index.ts:631-651`). A start carrying an
  * option whose capability is falsy is rejected with `UNSUPPORTED_CAPABILITY`.
- * rolebox's provider honors only `agentOptions` (its `start()` forwards
- * `request.agentOptions` into the delegated start request), so it advertises
- * `agentOptions: true` and the remaining four as `false`.
+ *
+ * `agentPreset` is new on the 0.2.x line and is the only option that selects an
+ * independent child composition (persona + tool composition); rolebox composes
+ * its own prompt instead and never requests an independent preset, so it
+ * advertises `agentPreset: false`. The former `toolFilter` and `persona` flags
+ * are GONE from this interface: dsh 0.2.x removed the start-request tool
+ * restriction and persona fields, so a provider that still declared them would
+ * be describing an API the host no longer has (and the worker boundary is now
+ * enforced by rolebox's own execution guard plus its prompt, not a start-time
+ * filter).
  */
 export type DshSubagentCapabilities = {
   agentOptions: boolean;
+  agentPreset: boolean;
   outputSchema: boolean;
   depthLimit: boolean;
-  toolFilter: boolean;
-  persona: boolean;
 };
 
 /**
- * dsh SubagentStartRequest — the resolved request a provider's `start()`
- * receives (§4.3). Structural subset; rolebox touches `prompt`/`agentOptions`
- * and forwards the rest untouched.
+ * dsh SubagentStartRequest — the request a child is established with (§4.3).
+ * Structural subset; rolebox touches `prompt`/`agentOptions` and forwards the
+ * rest untouched.
+ *
+ * The 0.2.x line moved `signal` and `label` onto the enclosing activation spec
+ * ({@link DshSubagentActivationSpec}) and removed `toolFilter`/`persona`. This
+ * mirror keeps `signal`/`label` because the provider-facing RESOLVED request
+ * ({@link DshResolvedSubagentStartRequest}) still carries them, and because
+ * rolebox composes request objects for its own seam.
  */
 export type DshSubagentStartRequest = {
   label?: string;
@@ -185,8 +197,13 @@ export type DshSubagentStartRequest = {
   signal: AbortSignal;
   agentOptions?: DshAgentOptions;
   maxDepth?: number;
-  toolFilter?: DshToolRestriction;
-  persona?: unknown;
+  /**
+   * Independent child preset selection (`SubagentStartRequest.agentPreset`,
+   * dsh 0.2.x). rolebox does not request one: its roles ride in the prompt and
+   * its worker tool face is enforced by the execution guard, so the child keeps
+   * the parent's composition.
+   */
+  agentPreset?: string;
   /**
    * The detached durable child descriptor the dsh service resolves and stamps
    * onto the provider-facing request before dispatching to `start()`
@@ -251,6 +268,65 @@ export type DshSubagentRun = {
   result: Promise<DshSubagentResult>;
   dispose(): Promise<void>;
 };
+
+/**
+ * dsh `SubagentActivationSpec` — the ONLY entry that establishes a child on the
+ * 0.2.x line (`packages/subagent/subagent/src/types.ts:54-66`, dsh
+ * 0.2.1-alpha.4). The manager owns identity reservation, composition, prompt
+ * delivery, and disposal; the spec names the backend and the result recipient.
+ *
+ * `provider` is the registered provider NAME, not a function: the service looks
+ * the provider up (`SubagentRuntime.startActivation`,
+ * `packages/subagent/subagent/src/index.ts:269-284`) and routes on
+ * `provider.prepareContinuable`:
+ *   - a provider WITH it runs the LOCAL (continuable) manager path — the child
+ *     Agent is composed from the parent and the provider contributes only a
+ *     {@link DshContinuableCreateSpec} (this is rolebox's path);
+ *   - a provider WITHOUT it runs the EXTERNAL path and its `start()` is called.
+ *
+ * `request` deliberately EXCLUDES `label` and `signal` — both live on this spec
+ * — and `delivery` selects whether the child's result is delivered to the
+ * parent model (`"parent"`) or returned to the caller alone (`"caller"`).
+ */
+export type DshSubagentActivationSpec = {
+  /** Registered backend to use. */
+  readonly provider: string;
+  /** Short task label retained in cataloged child membership. */
+  readonly label: string;
+  /** Optional reserved identity for a local child. */
+  readonly childId?: string;
+  /** Task and backend-supported execution options (no `label`/`signal`). */
+  readonly request: Omit<DshSubagentStartRequest, "label" | "signal">;
+  /** Cancellation before publication. */
+  readonly signal: AbortSignal;
+  /** Parent delivery notifies the model; caller delivery only returns the result. */
+  readonly delivery: "parent" | "caller";
+};
+
+/**
+ * dsh `SubagentActivation` — the managed execution `startActivation` resolves
+ * with (`packages/subagent/subagent/src/types.ts:68-84`, dsh 0.2.1-alpha.4).
+ *
+ * The child's identity is `childId` (dsh brands it `SessionId`; rolebox reads it
+ * as a string) — there is no `run.id` on this line. The terminal outcome is
+ * `result` (the same contract as {@link DshSubagentResult}), and `dispose()` is
+ * the activation's own abort/release surface.
+ */
+export type DshSubagentActivation = {
+  /** Stable identity of the child session. */
+  readonly childId: string;
+  /** Accepted inbox message id, present for local children. */
+  readonly messageId?: string;
+  /** Execution result after teardown settles. */
+  readonly result: Promise<DshSubagentResult>;
+  /** Stop and release this activation and its owned descendants. */
+  dispose(): Promise<void>;
+};
+
+/** One {@link DshSubagentActivation} projected onto the run shape rolebox reads. */
+export function activationToRun(activation: DshSubagentActivation): DshSubagentRun {
+  return { id: activation.childId, result: activation.result, dispose: activation.dispose };
+}
 
 /**
  * dsh `ContinuableCreateRequest` — what the continuation manager hands a
@@ -353,8 +429,14 @@ export type DshSubagentProvider = {
    * service has already validated the requested capabilities and stamped the
    * detached child descriptor, so a session-backed provider appends it inside
    * the child's initial turn.
+   *
+   * OPTIONAL on the 0.2.x line, exactly as dsh declares it. The runtime never
+   * calls it for a provider that supplies `prepareContinuable` (that provider
+   * takes the LOCAL path — see {@link DshSubagentActivationSpec}), which is why
+   * rolebox's providers keep `prepareContinuable` and the spawn composition now
+   * happens at the call site ({@link DshAgentRegistrar.composeSpawnRequest}).
    */
-  start(request: DshResolvedSubagentStartRequest): Promise<DshSubagentRun>;
+  start?(request: DshResolvedSubagentStartRequest): Promise<DshSubagentRun>;
   /**
    * OPTIONAL (continuable-creation capability) — dsh's analogue of rolebox's
    * opencode `Task(task_id=…)` resumption. Method PRESENCE IS the capability:
@@ -384,10 +466,13 @@ export type DshSubagentProvider = {
 /**
  * dsh SubagentRuntime seam — the minimal `ctx.subagents` surface this
  * adapter depends on (§4.3,
- * `dsh-subagent/lib/types/index.d.ts:237,243,248,259` — registerProvider /
- * getProvider / list / start).
+ * `dsh-subagent/lib/types/index.d.ts:288,294,313` — registerProvider /
+ * getProvider / list).
  * Consumed structurally so the real service can be injected in a dsh profile
- * and a fake double can be injected in tests.
+ * and a fake double can be injected in tests. The start surface
+ * (`startActivation`) belongs to the dispatch seam
+ * ({@link DshSubagentDispatchRuntime} in `./dispatch.ts`), not to the catalog
+ * adapter, so a registrar double need not implement it.
  */
 export type DshSubagentRuntime = {
   registerProvider(provider: DshSubagentProvider): () => void;
@@ -608,18 +693,17 @@ function isRouteRegistered(
 /**
  * Build the dsh SubagentCapabilities advertised by a rolebox provider.
  *
- * dsh 0.1.5-rc.1 requires FIVE booleans — `agentOptions`, `outputSchema`,
- * `depthLimit`, `toolFilter`, `persona`
- * (`packages/subagent/subagent/src/types.ts:130-136`) — and
+ * dsh 0.2.x requires FOUR booleans — `agentOptions`, `agentPreset`,
+ * `outputSchema`, `depthLimit`
+ * (`packages/subagent/subagent/src/types.ts:123-129`) — and
  * `assertCapabilities` truthy-checks each matching request option before
- * delegating to `start()`
- * (`packages/subagent/subagent/src/index.ts:641-657`): a start carrying
+ * establishing the child
+ * (`packages/subagent/subagent/src/index.ts:631-651`): a start carrying
  * `agentOptions` is REJECTED with `UNSUPPORTED_CAPABILITY` unless the provider
- * declares `agentOptions` truthy. rolebox's provider `start()` honors
- * `request.agentOptions` (it merges the definition's model override into it and
- * forwards it to the delegated start), so rolebox declares
- * `agentOptions: true`. It reads none of the other four request fields, so those
- * are advertised `false`.
+ * declares `agentOptions` truthy. rolebox's composition emits its definition's
+ * model override as `agentOptions`, so rolebox declares `agentOptions: true`.
+ * It requests no independent preset and reads none of the other request fields,
+ * so those are advertised `false`.
  *
  * `AgentDefinition.maxSteps` and `.tools` are CATALOG configuration, not dsh
  * start-capabilities — they map to no request option this provider honors, so
@@ -628,10 +712,9 @@ function isRouteRegistered(
 function buildCapabilities(_definition: AgentDefinition): DshSubagentCapabilities {
   return {
     agentOptions: true,
+    agentPreset: false,
     outputSchema: false,
     depthLimit: false,
-    toolFilter: true,
-    persona: false,
   };
 }
 
@@ -681,8 +764,6 @@ export interface DshAgentRegistrarOptions {
    * no context injection (spawn unchanged).
    */
   contextProvider?: DshSpawnContextProvider;
-  /** Prepared prompt for the graph attempt currently being dispatched. */
-  graphWorkerPrompt?: () => string | undefined;
   /**
    * Optional spawn-time probe for the dsh llm service's registered provider
    * routes (`ctx.llm.listProviders()`). When wired, a split definition model
@@ -720,7 +801,6 @@ export class DshAgentRegistrar implements IAgentRegistrar {
   private readonly spawnProviderName?: string;
   private readonly activeRole?: DshActiveRoleLookup;
   private readonly contextProvider?: DshSpawnContextProvider;
-  private readonly graphWorkerPrompt?: () => string | undefined;
   private readonly providerRoutes?: DshProviderRouteProbe;
 
   constructor(options: DshAgentRegistrarOptions) {
@@ -729,7 +809,6 @@ export class DshAgentRegistrar implements IAgentRegistrar {
     this.spawnProviderName = options.spawnProviderName;
     this.activeRole = options.activeRole;
     this.contextProvider = options.contextProvider;
-    this.graphWorkerPrompt = options.graphWorkerPrompt;
     this.providerRoutes = options.providerRoutes;
     if (!this.onSpawn) {
       // ONE-TIME diagnostic at registration time (NOT at first spawn): with no
@@ -914,27 +993,11 @@ export class DshAgentRegistrar implements IAgentRegistrar {
       capabilities,
       inheritsParentContext: false,
       start: async (request: DshResolvedSubagentStartRequest): Promise<DshSubagentRun> => {
-        const workerPrompt = this.graphWorkerPrompt?.();
-        const isolated = workerPrompt !== undefined || definition.mode === RoleMode.Subagent;
-        const prompt = workerPrompt !== undefined
-          ? [{ type: "text", text: workerPrompt }, ...request.prompt]
-          : prependSystemPrompt(definition, request.prompt);
-        const agentOptions = mergeAgentOptions(
-          definition,
-          request.agentOptions,
-          this.providerRoutes,
-        );
-        // Session role overrides apply to ordinary session rounds, not workers.
-        const active = isolated ? undefined : this.resolveActiveOverride(request.sessionId, definition.id);
-        const context = workerPrompt !== undefined ? undefined
-          : isolated ? this.contextProvider?.(request.sessionId ?? "", definition.id)
-          : this.resolveSpawnContext(request.sessionId);
+        const composed = this.resolveComposition(definition, request);
         const startRequest: DshResolvedSubagentStartRequest = {
           ...request,
-          prompt: composePrompt(context, active, prompt),
-          agentOptions: active
-            ? mergeAgentOptions(active, agentOptions, this.providerRoutes)
-            : agentOptions,
+          prompt: composed.prompt,
+          agentOptions: composed.agentOptions,
         };
         if (this.onSpawn) {
           return this.onSpawn(definition, startRequest);
@@ -949,7 +1012,7 @@ export class DshAgentRegistrar implements IAgentRegistrar {
           throw new DshSpawnRecursionError(definition.id, hostName);
         }
         const host = this.subagents.getProvider(hostName);
-        if (!host) {
+        if (!host || host.start === undefined) {
           throw new DshSpawnNotWiredError(
             definition.id,
             hostName,
@@ -981,6 +1044,68 @@ export class DshAgentRegistrar implements IAgentRegistrar {
       ): Promise<DshContinuableCreateSpec> => ({}),
     };
   };
+  /**
+   * Compose the start request for ONE spawn, at the call site.
+   *
+   * THE 0.2.x SEAM. On the current dsh line a provider that declares
+   * `prepareContinuable` takes the LOCAL path: `SubagentRuntime.startActivation`
+   * composes the child itself and NEVER calls the provider's `start()`. So the
+   * role prompt, the active-role override, the spawn-context blocks and the
+   * definition's model must be resolved BEFORE the start request is handed to
+   * the service — this method is that one composition, and
+   * {@link DshDispatchAdapter} / {@link DshOutcomeDelivery} both call it.
+   *
+   * `workerPrompt` is the COMPLETE prompt a graph worker runs under (assembled
+   * by the graph host); when present it replaces the definition's system-prompt
+   * prepend and suppresses the session-role/context injection, exactly as the
+   * provider's external path always did. An UNKNOWN agent id is forwarded
+   * untouched: the provider lookup inside `startActivation` reports it by name.
+   */
+  composeSpawnRequest(
+    agentId: string,
+    request: DshSubagentStartRequest,
+    workerPrompt?: string,
+  ): DshSubagentStartRequest {
+    const definition = this.entries.get(agentId)?.definition;
+    if (definition === undefined) return request;
+    const composed = this.resolveComposition(definition, request, workerPrompt);
+    return {
+      ...request,
+      prompt: composed.prompt,
+      agentOptions: composed.agentOptions,
+    };
+  }
+
+  /**
+   * The ONE prompt/model composition shared by the provider's external `start()`
+   * and {@link composeSpawnRequest}, so the two cannot drift.
+   */
+  private resolveComposition(
+    definition: AgentDefinition,
+    request: DshSubagentStartRequest,
+    workerPrompt?: string,
+  ): { prompt: DshContentBlock[]; agentOptions?: DshAgentOptions } {
+    const isolated = workerPrompt !== undefined || definition.mode === RoleMode.Subagent;
+    const prompt = workerPrompt !== undefined
+      ? [{ type: "text", text: workerPrompt } as DshContentBlock, ...request.prompt]
+      : prependSystemPrompt(definition, request.prompt);
+    const agentOptions = mergeAgentOptions(
+      definition,
+      request.agentOptions,
+      this.providerRoutes,
+    );
+    // Session role overrides apply to ordinary session rounds, not workers.
+    const active = isolated ? undefined : this.resolveActiveOverride(request.sessionId, definition.id);
+    const context = workerPrompt !== undefined ? undefined
+      : isolated ? this.contextProvider?.(request.sessionId ?? "", definition.id)
+      : this.resolveSpawnContext(request.sessionId);
+    return {
+      prompt: composePrompt(context, active, prompt),
+      agentOptions: active
+        ? mergeAgentOptions(active, agentOptions, this.providerRoutes)
+        : agentOptions,
+    };
+  }
 
   /**
    * Resolve the active-role override for a spawn request, or `undefined`.

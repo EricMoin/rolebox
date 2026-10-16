@@ -46,6 +46,8 @@ import type { DshPluginDisposer } from "../src/entries/dsh.ts";
 import type { DshToolDefinition } from "../src/platform/adapters/dsh/tool-factory.ts";
 import {
   DshAgentRegistrar,
+  type DshSubagentActivation,
+  type DshSubagentActivationSpec,
   type DshSubagentCapabilities,
   type DshSubagentProvider,
   type DshSubagentRun,
@@ -84,15 +86,24 @@ class FakeToolsService extends Service {
 
 /**
  * Fake `ctx.subagents` service (contract §4.3 `SubagentRuntime`): a catalog
- * seam (`registerProvider`/`getProvider`/`list`) plus `start()`. `start()`
- * mirrors the REAL runtime (`dsh-subagent/lib/index.js:2504-2519`): it
- * resolves the named provider from the catalog (fail loud when absent),
- * stamps the versioned one-shot `descriptor` onto the request, and returns
- * the PROVIDER's own run — never a synthetic one. A graph dispatch therefore
- * round-trips through the real delegation chain
- * (`ctx.subagents.start` → rolebox provider → host `spawn` provider), so a
- * regression that stops a rolebox provider from delegating surfaces here.
- * Records every start request for assertions.
+ * seam (`registerProvider`/`getProvider`/`list`) plus `startActivation()`.
+ * `startActivation()` mirrors the REAL 0.2.x runtime
+ * (`packages/subagent/subagent/src/index.ts:269-284`): it resolves the named
+ * provider from the catalog (fail loud when absent) and then routes on
+ * `prepareContinuable` exactly as the real service does —
+ *
+ *   - a provider that DECLARES it runs dsh's LOCAL path (`manager.startLocal`,
+ *     `packages/subagent/subagent/src/manager.ts:379`): the runtime composes the
+ *     child itself and NEVER calls the provider's `start()`. Every rolebox agent
+ *     provider declares it, so this is the path a graph dispatch takes;
+ *   - a provider without it runs the EXTERNAL path: `start()` is called with the
+ *     resolved request, which the runtime has stamped with the versioned
+ *     one-shot `descriptor` (`SUBAGENT_DESCRIPTOR_VERSION === 2`).
+   *
+ * A graph dispatch therefore round-trips through the runtime composition rather
+ * than through a provider's `start()`, so a regression that reintroduces the
+ * removed `start(name, request)` seam surfaces here. Records every activation
+ * for assertions.
  *
  * Host providers seeded by the fixture live in a SEPARATE {@link hostProviders}
  * map (not the rolebox agent catalog) so the plugin's `registeredAgents` stat
@@ -101,7 +112,7 @@ class FakeToolsService extends Service {
 class FakeSubagentsService extends Service {
   readonly providers = new Map<string, DshSubagentProvider>();
   readonly hostProviders = new Map<string, DshSubagentProvider>();
-  readonly started: Array<{ name: string; request: DshSubagentStartRequest }> = [];
+  readonly started: Array<{ name: string; spec: DshSubagentActivationSpec }> = [];
 
   constructor(ctx: Context) {
     super(ctx, "subagents");
@@ -127,27 +138,51 @@ class FakeSubagentsService extends Service {
     return [...this.providers.keys(), ...this.hostProviders.keys()];
   }
 
-  async start(
-    name: string,
-    request: DshSubagentStartRequest,
-  ): Promise<DshSubagentRun> {
-    this.started.push({ name, request });
+  async startActivation(spec: DshSubagentActivationSpec): Promise<DshSubagentActivation> {
+    this.started.push({ name: spec.provider, spec });
     // Resolve the rolebox provider from the catalog and fail loud when it is
     // absent — the real runtime's `expectProvider` behavior.
-    const provider = this.providers.get(name);
+    const provider = this.providers.get(spec.provider);
     if (!provider) {
       throw new Error(
-        `FakeSubagentsService: no subagent provider registered for "${name}"`,
+        `FakeSubagentsService: no subagent provider registered for "${spec.provider}"`,
       );
     }
-    // Stamp the detached one-shot descriptor exactly as the real runtime does
-    // (SUBAGENT_DESCRIPTOR_VERSION === 2,
-    // dsh-subagent/lib/types/descriptor.d.ts:43).
+    const childId = spec.childId ?? `fake-child-${String(this.started.length)}`;
+    const prepareContinuable = provider.prepareContinuable;
+    if (prepareContinuable !== undefined) {
+      // LOCAL path: the provider contributes only a creation spec. The runtime
+      // owns identity, composition, prompt delivery and disposal, so the
+      // provider's own `start()` is deliberately NOT called here.
+      await prepareContinuable({
+        sessionId: childId,
+        parent: spec.request.parent,
+        signal: spec.signal,
+      });
+      return {
+        childId,
+        messageId: `fake-message-${childId}`,
+        result: Promise.resolve({ output: [], stopReason: "completed" }),
+        dispose: async () => {},
+      };
+    }
+    // EXTERNAL path: stamp the detached one-shot descriptor exactly as the real
+    // runtime does (SUBAGENT_DESCRIPTOR_VERSION === 2,
+    // dsh-subagent/lib/types/descriptor.d.ts:43) and call the provider's start.
+    const start = provider.start;
+    if (start === undefined) {
+      throw new Error(
+        `FakeSubagentsService: provider "${spec.provider}" declares neither prepareContinuable nor start`,
+      );
+    }
     const resolved: DshResolvedSubagentStartRequest = {
-      ...request,
-      descriptor: { version: 2, mode: "one-shot", provider: name },
+      ...spec.request,
+      label: spec.label,
+      signal: spec.signal,
+      descriptor: { version: 2, mode: "one-shot", provider: spec.provider },
     };
-    return provider.start(resolved);
+    const run = await start(resolved);
+    return { childId: run.id, result: run.result, dispose: run.dispose };
   }
 }
 
@@ -162,10 +197,9 @@ class FakeSpawnProvider implements DshSubagentProvider {
   readonly name = "spawn";
   readonly capabilities: DshSubagentCapabilities = {
     agentOptions: false,
+    agentPreset: false,
     outputSchema: false,
     depthLimit: false,
-    toolFilter: false,
-    persona: false,
   };
   readonly inheritsParentContext = false;
   /** Requests received post-descriptor stamp (proves the delegation landed). */

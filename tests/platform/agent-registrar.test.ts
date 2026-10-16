@@ -76,6 +76,23 @@ __setLoggerForTest({
 // ── Fake dsh registry double ────────────────────────────────────────────────
 
 /**
+ * The provider's EXTERNAL `start()`, which every provider rolebox builds
+ * defines. dsh 0.2.x declares `SubagentProvider.start` OPTIONAL — a provider
+ * that only serves dsh's local activation path (`prepareContinuable`) need not
+ * implement it — so the invariant is asserted here instead of scattering
+ * non-null assertions through the suite.
+ */
+function definedStart(
+  provider: DshSubagentProvider,
+): NonNullable<DshSubagentProvider["start"]> {
+  const start = provider.start;
+  if (start === undefined) {
+    throw new Error(`provider "${provider.name}" declares no external start()`);
+  }
+  return start;
+}
+
+/**
  * In-memory fake of the dsh `ctx.subagents` seam (SubagentRuntime §4.3).
  * Tracks registrations and disposals so tests can assert that the adapter
  * cleans up platform artifacts (the disposer removes the provider).
@@ -92,14 +109,15 @@ class FakeSubagentRuntime implements DshSubagentRuntime {
   registerProvider(provider: DshSubagentProvider): () => void {
     const calls: DshSubagentStartRequest[] = [];
     this.startCalls.set(provider.name, calls);
-    const inner = provider.start.bind(provider);
     // Wrap start() so tests can observe delegation (and prove non-re-entry)
-    // without every provider double re-implementing call recording.
-    this.providers.set(provider.name, {
+    // without every provider double re-implementing call recording. An absent
+    // start() (a local-only provider on dsh 0.2.x) is registered as-is.
+    const start = provider.start;
+    this.providers.set(provider.name, start === undefined ? provider : {
       ...provider,
       start: (request: DshResolvedSubagentStartRequest) => {
         calls.push(request);
-        return inner(request);
+        return start(request);
       },
     });
     this.registrations.push(provider.name);
@@ -126,10 +144,9 @@ class FakeSubagentRuntime implements DshSubagentRuntime {
       name,
       capabilities: {
         agentOptions: false,
+        agentPreset: false,
         outputSchema: false,
         depthLimit: false,
-        toolFilter: true,
-        persona: false,
       },
       inheritsParentContext: false,
       start: async () => run,
@@ -201,40 +218,36 @@ describe("DshAgentRegistrar", () => {
     const provider = fake.getProvider("a")!;
     expect(provider.name).toBe("a");
     expect(provider.inheritsParentContext).toBe(false);
-    // dsh 0.1.5-rc.1 requires all five SubagentCapabilities booleans; rolebox's
-    // provider honors only the start-time `agentOptions` request option (it
-    // forwards it into the delegated start), so `agentOptions` is true and the
-    // remaining four are false. The definition's catalog config
-    // (maxSteps/tools) is not mapped.
+    // dsh 0.2.x requires the four SubagentCapabilities booleans; rolebox's
+    // provider emits its definition's model override as the start-time
+    // `agentOptions` request option, so that one is true and the rest false. The
+    // definition's catalog config (maxSteps/tools) is not mapped.
     expect(provider.capabilities).toEqual({
       agentOptions: true,
+      agentPreset: false,
       outputSchema: false,
       depthLimit: false,
-      toolFilter: true,
-      persona: false,
     });
 
     const bProvider = fake.getProvider("b")!;
     expect(bProvider.capabilities).toEqual({
       agentOptions: true,
+      agentPreset: false,
       outputSchema: false,
       depthLimit: false,
-      toolFilter: true,
-      persona: false,
     });
   });
 
-  it("buildCapabilities advertises exactly the five required 0.1.5-rc.1 booleans, all boolean", () => {
+  it("buildCapabilities advertises exactly the four required 0.2.x booleans, all boolean", () => {
     // Regression: a missing/extra key or a non-boolean value fails here.
-    // dsh 0.1.5-rc.1 `SubagentCapabilities` —
-    // packages/subagent/subagent/src/types.ts:130-136.
+    // dsh 0.2.x `SubagentCapabilities` —
+    // packages/subagent/subagent/src/types.ts:123-129.
     const capabilities = registrar.buildProvider(makeDef()).capabilities;
     expect(Object.keys(capabilities).sort()).toEqual([
       "agentOptions",
+      "agentPreset",
       "depthLimit",
       "outputSchema",
-      "persona",
-      "toolFilter",
     ]);
     for (const value of Object.values(capabilities)) {
       expect(typeof value).toBe("boolean");
@@ -273,7 +286,7 @@ describe("DshAgentRegistrar", () => {
     expect(fake.disposals).toEqual([def.id]);
 
     // The fake now holds the NEW provider; its start must use the new prompt.
-    const result = await fake.getProvider(def.id)!.start(makeRequest());
+    const result = await definedStart(fake.getProvider(def.id)!)(makeRequest());
     expect(result.id).toBe("run-1");
     expect(captured).toHaveLength(1);
     expect(captured[0].prompt[0]).toEqual({
@@ -387,7 +400,7 @@ describe("DshAgentRegistrar", () => {
     });
 
     const provider = withSpawn.buildProvider(makeDef());
-    await provider.start(makeRequest());
+    await definedStart(provider)(makeRequest());
 
     expect(captured).toHaveLength(1);
     const { definition, request } = captured[0];
@@ -416,7 +429,7 @@ describe("DshAgentRegistrar", () => {
     });
 
     const provider = withSpawn.buildProvider(makeDef({ systemPrompt: "", model: undefined }));
-    await provider.start(makeRequest({ agentOptions: undefined }));
+    await definedStart(provider)(makeRequest({ agentOptions: undefined }));
 
     expect(captured[0].request.prompt).toEqual([{ type: "text", text: "user request" }]);
     expect(captured[0].request.agentOptions).toBeUndefined();
@@ -442,7 +455,7 @@ describe("DshAgentRegistrar", () => {
       },
       ...(providerRoutes ? { providerRoutes } : {}),
     });
-    await wired.buildProvider(def).start(makeRequest({ agentOptions: base }));
+    await definedStart(wired.buildProvider(def))(makeRequest({ agentOptions: base }));
     return captured[0];
   }
 
@@ -579,7 +592,7 @@ describe("DshAgentRegistrar", () => {
     const parent = { id: "parent-1" };
     const signal = new AbortController().signal;
     const descriptor = { childId: "child-1", durable: true };
-    const run = await provider.start(makeRequest({ parent, signal, descriptor }));
+    const run = await definedStart(provider)(makeRequest({ parent, signal, descriptor }));
 
     expect(run.id).toBe("run-1");
     const calls = fake.startCallsFor("spawn");
@@ -608,7 +621,7 @@ describe("DshAgentRegistrar", () => {
       spawnProviderName: "fork",
     });
 
-    await custom.buildProvider(makeDef()).start(makeRequest());
+    await definedStart(custom.buildProvider(makeDef()))(makeRequest());
 
     expect(fake.startCallsFor("fork")).toHaveLength(1);
     // The default "spawn" name was never targeted (nor registered).
@@ -630,7 +643,7 @@ describe("DshAgentRegistrar", () => {
       },
     });
 
-    await withSpawn.buildProvider(makeDef()).start(makeRequest());
+    await definedStart(withSpawn.buildProvider(makeDef()))(makeRequest());
 
     expect(captured).toHaveLength(1);
     // The registered host provider was never consulted.
@@ -644,7 +657,7 @@ describe("DshAgentRegistrar", () => {
     await registrar.register([makeDef({ id: "alpha" })]);
     const provider = registrar.buildProvider(makeDef());
 
-    const error = await provider.start(makeRequest()).catch((err) => err);
+    const error = await definedStart(provider)(makeRequest()).catch((err) => err);
     expect(error).toBeInstanceOf(DshSpawnNotWiredError);
     const notWired = error as DshSpawnNotWiredError;
     expect(notWired.agentId).toBe("emperor--jinyiwei--ui");
@@ -664,9 +677,7 @@ describe("DshAgentRegistrar", () => {
 
     // Drive the spawn through the registered provider so the fake records
     // every start() that actually runs.
-    const error = await fake
-      .getProvider("beta")!
-      .start(makeRequest())
+    const error = await definedStart(fake.getProvider("beta")!)(makeRequest())
       .catch((err) => err);
 
     expect(error).toBeInstanceOf(DshSpawnRecursionError);
@@ -701,7 +712,7 @@ describe("DshAgentRegistrar onSpawn wiring diagnostic", () => {
     await unwired.register([makeDef()]);
     const provider = fake.getProvider("emperor--jinyiwei--ui")!;
     // No fabricated spawn: start() still rejects with the real error.
-    await expect(provider.start(makeRequest())).rejects.toThrow(
+    await expect(definedStart(provider)(makeRequest())).rejects.toThrow(
       DshSpawnNotWiredError,
     );
     // register() + a failed start() did not emit a second diagnostic.
@@ -722,7 +733,7 @@ describe("DshAgentRegistrar onSpawn wiring diagnostic", () => {
 
     await wired.register([makeDef()]);
     const provider = fake.getProvider("emperor--jinyiwei--ui")!;
-    const run = await provider.start(makeRequest());
+    const run = await definedStart(provider)(makeRequest());
     expect(run.id).toBe("run-1");
     expect(spawned).toEqual(["emperor--jinyiwei--ui"]);
   });

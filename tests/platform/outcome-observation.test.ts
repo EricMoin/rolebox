@@ -105,15 +105,14 @@ const DSH_PROVIDER: DshSubagentProvider = {
   name: "agent.work",
   capabilities: {
     agentOptions: true,
+    agentPreset: false,
     outputSchema: false,
     depthLimit: false,
-    toolFilter: true,
-    persona: false,
   },
   inheritsParentContext: false,
   start: () => {
     throw new Error(
-      "the delivery must start the run through ctx.subagents.start, never the provider",
+      "the delivery must start the run through ctx.subagents.startActivation, never the provider",
     );
   },
 };
@@ -125,10 +124,10 @@ function makeDshRuntime(options: {
   readonly noListing?: boolean;
 } = {}): {
   runtime: DshOutcomeSubagentRuntime;
-  starts: Array<{ agent: string; request: DshSubagentStartRequest }>;
+  starts: Array<{ agent: string; label: string; request: Omit<DshSubagentStartRequest, "label" | "signal"> }>;
   listings: string[];
 } {
-  const starts: Array<{ agent: string; request: DshSubagentStartRequest }> = [];
+  const starts: Array<{ agent: string; label: string; request: Omit<DshSubagentStartRequest, "label" | "signal"> }> = [];
   const listings: string[] = [];
   const runtime: DshOutcomeSubagentRuntime = {
     // The query/delivery path never registers a provider; the port member is
@@ -137,14 +136,16 @@ function makeDshRuntime(options: {
     registerProvider: () => () => {},
     getProvider: () => DSH_PROVIDER,
     list: () => ["agent.work"],
-    start: async (agent: string, startRequest: DshSubagentStartRequest) => {
-      starts.push({ agent, request: startRequest });
+    startActivation: async (spec) => {
+      // dsh 0.2.x carries `label` (the stable idempotency key) and `signal` on
+      // the ACTIVATION, and only the task/execution options on its request.
+      starts.push({ agent: spec.provider, label: spec.label, request: spec.request });
       const run: DshSubagentRun = {
         id: "run-1",
         result: new Promise(() => {}),
         dispose: async () => {},
       };
-      return run;
+      return { childId: run.id, result: run.result, dispose: run.dispose };
     },
     ...(options.noListing === true
       ? {}
@@ -243,15 +244,15 @@ describe("the dsh execution query port", () => {
     expect(answer.reason).toContain("more than one child");
   });
 
-  it("carries the stable idempotency key as the run's durable label", () => {
+  it("carries the stable idempotency key as the activation's durable label", () => {
     const { runtime, starts } = makeDshRuntime();
     dshDelivery(runtime).deliver(request(), EFFECT, INVOCATION);
 
     return Promise.resolve().then(() => {
       expect(starts).toHaveLength(1);
-      expect(starts[0]?.request.label).toBe(STABLE_KEY);
+      expect(starts[0]?.label).toBe(STABLE_KEY);
       // The label is the CREATE's key and the QUERY's key, spelled once.
-      expect(starts[0]?.request.label).toBe(dispatchIdempotencyKeyOf(EFFECT));
+      expect(starts[0]?.label).toBe(dispatchIdempotencyKeyOf(EFFECT));
     });
   });
 

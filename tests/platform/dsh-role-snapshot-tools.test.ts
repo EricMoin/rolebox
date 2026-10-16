@@ -146,8 +146,8 @@ function createFakeCtx() {
     },
     getProvider: (providerName: string) => providers.get(providerName),
     list: () => [...providers.keys()],
-    async start(name: string): Promise<never> {
-      throw new Error('unexpected ctx.subagents.start("' + name + '")');
+    async startActivation(spec): Promise<never> {
+      throw new Error('unexpected ctx.subagents.startActivation("' + spec.provider + '")');
     },
   };
 

@@ -53,6 +53,8 @@ import type { DshSubagentResult } from "../src/platform/adapters/dsh/dispatch.ts
 import type {
   DshContinuableCreateRequest,
   DshContinuableCreateSpec,
+  DshSubagentActivation,
+  DshSubagentActivationSpec,
   DshSubagentCapabilities,
   DshSubagentProvider,
   DshSubagentRun,
@@ -97,20 +99,32 @@ class FakeRun implements DshSubagentRun {
 }
 
 /**
- * Fake `SubagentRuntime` (`ctx.subagents`) that mirrors the real seam's
- * provider delegation: `start(name, request)` resolves the provider registered
- * under `name` and awaits ITS `start(request)` — exactly as
- * `ctx.subagents.start` does — so a provider-level spawn rejection surfaces
- * through the seam instead of being swallowed. Records every start request.
+ * Fake `SubagentRuntime` (`ctx.subagents`) mirroring the dsh 0.2.x seam's
+ * provider delegation. `startActivation(spec)` resolves the provider registered
+ * under `spec.provider` and ROUTES on `prepareContinuable`, exactly as the real
+ * runtime does (`packages/subagent/subagent/src/index.ts:269-284`):
+ *
+ *   - a provider that DECLARES it takes dsh's LOCAL path
+ *     (`manager.startLocal`): the runtime composes the child itself and never
+ *     calls the provider's `start()`. Every rolebox agent provider declares it in
+ *     production, so a caller that needs role materialization must compose the
+ *     request at the CALL SITE (`DshAgentRegistrar.composeSpawnRequest`) first;
+ *   - a provider without it takes the EXTERNAL path: `start()` is called with
+ *     the resolved request (descriptor stamped) and its run is projected onto
+ *     the activation. That is the path {@link seedProvider} providers take, so a
+ *     provider-level spawn rejection still surfaces through the seam instead of
+ *     being swallowed.
+ *
+ * Records every activation's request.
  *
  * Each provider seeded via {@link seedProvider} yields a controllable run.
  * Per-agent behavior:
- *   - `autoComplete.get(agent)` — the provider's start returns a run that
- *     completes on a microtask with the given result (normal graph flow).
- *   - `autoError.get(agent)` — the provider's start REJECTS with the message
+ *   - `autoComplete.get(agent)` — the run completes on a macrotask with the
+ *     given result (normal graph flow).
+ *   - `autoError.get(agent)` — starting the agent REJECTS with the message
  *     (provider-level spawn failure → engine escalate / loop round error).
- *   - otherwise — the provider's start returns a run that stays pending until
- *     the test calls `completeRun(runId, result)`.
+ *   - otherwise — the run stays pending until the test calls
+ *     `completeRun(runId, result)`.
  */
 class FakeSubagentService implements DshSubagentDispatchRuntime {
   readonly providers = new Map<string, DshSubagentProvider>();
@@ -137,9 +151,9 @@ class FakeSubagentService implements DshSubagentDispatchRuntime {
 
   /**
    * Mirror dsh's service-side continuable gate
-   * (`packages/subagent/subagent/src/index.ts:593-606`, dsh 0.1.5-rc.1):
-   * resolving a provider's detached continuable-creation contribution throws a
-   * typed `UNSUPPORTED_CAPABILITY` error when the provider does not implement
+   * (`packages/subagent/subagent/src/index.ts:271-273`, dsh 0.2.x): resolving a
+   * provider's detached continuable-creation contribution throws a typed
+   * `UNSUPPORTED_CAPABILITY` error when the provider does not implement
    * `prepareContinuable`, and otherwise delegates to it. Method PRESENCE IS the
    * capability, so this is exactly the surface a continuity-capable rolebox
    * provider must survive without rejection.
@@ -163,16 +177,53 @@ class FakeSubagentService implements DshSubagentDispatchRuntime {
     return provider.prepareContinuable(request);
   }
 
-  async start(name: string, request: DshResolvedSubagentStartRequest): Promise<DshSubagentRun> {
-    this.started.push({ name, request });
-    // Mirror the real SubagentRuntime: the seam resolves the named provider and
-    // delegates to its start(). A provider-level rejection (e.g. the registrar
-    // delegating to an unwired host provider) therefore propagates unchanged.
-    const provider = this.providers.get(name);
+  /**
+   * dsh 0.2.x `SubagentRuntime.startActivation` — the only entry that
+   * establishes a child on this line. See the class docstring for the routing.
+   */
+  async startActivation(spec: DshSubagentActivationSpec): Promise<DshSubagentActivation> {
+    this.started.push({
+      name: spec.provider,
+      request: { ...spec.request, label: spec.label, signal: spec.signal },
+    });
+    const provider = this.providers.get(spec.provider);
     if (!provider) {
-      throw new Error(`dsh subagent provider "${name}" is not registered`);
+      throw new Error(`dsh subagent provider "${spec.provider}" is not registered`);
     }
-    return provider.start(request);
+    const prepareContinuable = provider.prepareContinuable;
+    if (prepareContinuable !== undefined) {
+      // LOCAL path: the runtime owns identity, composition and prompt delivery,
+      // so the provider's own start() is deliberately not called. The fake still
+      // has to hand the engine a controllable run.
+      const requestedChildId = spec.childId ?? `dsh-child-${++this.seq}`;
+      await prepareContinuable({
+        sessionId: requestedChildId,
+        parent: spec.request.parent,
+        signal: spec.signal,
+      });
+      const run = this.mintRun(spec.provider);
+      return {
+        childId: run.id,
+        messageId: `dsh-message-${run.id}`,
+        result: run.result,
+        dispose: () => run.dispose(),
+      };
+    }
+    const start = provider.start;
+    if (start === undefined) {
+      throw new Error(
+        `dsh subagent provider "${spec.provider}" declares neither prepareContinuable nor start`,
+      );
+    }
+    // EXTERNAL path: the service stamps the detached one-shot descriptor before
+    // dispatching to the provider (SUBAGENT_DESCRIPTOR_VERSION === 2).
+    const run = await start({
+      ...spec.request,
+      label: spec.label,
+      signal: spec.signal,
+      descriptor: { version: 2, mode: "one-shot", provider: spec.provider },
+    });
+    return { childId: run.id, result: run.result, dispose: () => run.dispose() };
   }
 
   /** Manually settle a specific run (for controllable tests). */
@@ -180,35 +231,37 @@ class FakeSubagentService implements DshSubagentDispatchRuntime {
     this.runs.get(runId)?.complete(result);
   }
 
+  /** Mint the controllable run a start yields (or reject when autoError names it). */
+  private mintRun(name: string): FakeRun {
+    const rejectMsg = this.autoError.get(name);
+    if (rejectMsg) throw new Error(rejectMsg);
+    const id = `dsh-run-${++this.seq}`;
+    const run = new FakeRun(id);
+    this.runs.set(id, run);
+    const auto = this.autoComplete.get(name);
+    if (auto) {
+      setTimeout(() => run.complete(auto), 0);
+    }
+    return run;
+  }
+
   /**
    * Register a provider for an agent so the adapter's mapping guard passes.
-   * The provider's `start()` yields the controllable run (or rejects when
-   * `autoError` names it) — the same provider-level surface the real registrar
-   * exposes through `ctx.subagents.start`.
+   * The seeded provider is EXTERNAL (no `prepareContinuable`), so the runtime
+   * routes to its `start()`, which yields the controllable run (or rejects when
+   * `autoError` names it).
    */
   seedProvider(name: string): void {
     this.providers.set(name, {
       name,
       capabilities: {
         agentOptions: true,
+        agentPreset: false,
         outputSchema: false,
         depthLimit: false,
-        toolFilter: false,
-        persona: false,
       },
       inheritsParentContext: false,
-      start: async () => {
-        const rejectMsg = this.autoError.get(name);
-        if (rejectMsg) throw new Error(rejectMsg);
-        const id = `dsh-run-${++this.seq}`;
-        const run = new FakeRun(id);
-        this.runs.set(id, run);
-        const auto = this.autoComplete.get(name);
-        if (auto) {
-          setTimeout(() => run.complete(auto), 0);
-        }
-        return run;
-      },
+      start: async () => this.mintRun(name),
     });
   }
 }
@@ -806,7 +859,7 @@ describe("the real host execution-id flow over the production dsh delivery", () 
 // ── Parent resolution ─────────────────────────────────────────────────
 
 describe("dsh dispatch parent resolution", () => {
-  it("forwards the resolved live parent Agent byte-identically to subagents.start", async () => {
+  it("forwards the resolved live parent Agent byte-identically to the activation", async () => {
     service.seedProvider("worker-agent");
     const parent = { id: "live-parent-agent", inject: () => undefined };
     const seenSessions: string[] = [];
@@ -883,9 +936,9 @@ describe("dsh dispatch parent resolution", () => {
 
 });
 
-// ── dsh 0.1.5-rc.1 SubagentCapabilities contract ────────────────────────────
+// ── dsh 0.2.x SubagentCapabilities contract ─────────────────────────────────
 
-describe("dsh 0.1.5-rc.1 subagent capability contract", () => {
+describe("dsh 0.2.x subagent capability contract", () => {
   const capabilityDef: AgentDefinition = {
     id: "cap-probe",
     name: "Capability Probe",
@@ -893,29 +946,32 @@ describe("dsh 0.1.5-rc.1 subagent capability contract", () => {
     systemPrompt: "",
   };
 
-  it("declares exactly the five required booleans, with agentOptions true", () => {
+  it("declares exactly the four required booleans, with agentOptions true", () => {
     const registrar = new DshAgentRegistrar({ subagents: service });
     const capabilities: DshSubagentCapabilities =
       registrar.buildProvider(capabilityDef).capabilities;
 
-    // dsh 0.1.5-rc.1 declares FIVE SubagentCapabilities booleans
-    // (packages/subagent/subagent/src/types.ts:130-136). A missing/extra key
-    // or a non-boolean value fails here.
+    // dsh 0.2.x declares FOUR SubagentCapabilities booleans
+    // (packages/subagent/subagent/src/types.ts:123-129): `agentPreset` replaced
+    // the removed `toolFilter`/`persona` pair. A missing/extra key or a
+    // non-boolean value fails here.
     expect(Object.keys(capabilities).sort()).toEqual([
       "agentOptions",
+      "agentPreset",
       "depthLimit",
       "outputSchema",
-      "persona",
-      "toolFilter",
     ]);
     for (const value of Object.values(capabilities)) {
       expect(typeof value).toBe("boolean");
     }
 
-    // rolebox honors request.agentOptions, so dsh's assertCapabilities
-    // (packages/subagent/subagent/src/index.ts:641-657) accepts a start
+    // rolebox emits its definition's model override as request.agentOptions, so
+    // dsh's assertCapabilities
+    // (packages/subagent/subagent/src/index.ts:631-651) accepts a start
     // carrying it instead of rejecting with UNSUPPORTED_CAPABILITY.
     expect(capabilities.agentOptions).toBe(true);
+    // rolebox requests no independent preset: its roles ride in the prompt.
+    expect(capabilities.agentPreset).toBe(false);
   });
 
   it("forwards a start request carrying agentOptions into start()", async () => {
@@ -928,9 +984,13 @@ describe("dsh 0.1.5-rc.1 subagent capability contract", () => {
       },
     });
     const provider = registrar.buildProvider(capabilityDef);
+    const start = provider.start;
+    if (start === undefined) {
+      throw new Error("a rolebox provider must expose an external start()");
+    }
 
     const options = { provider: "openai", model: "deepseek-chat" };
-    await provider.start({
+    await start({
       prompt: outputBlock("do the work"),
       parent: fakeParent,
       signal: new AbortController().signal,
@@ -946,9 +1006,9 @@ describe("dsh 0.1.5-rc.1 subagent capability contract", () => {
   });
 });
 
-// ── dsh 0.1.5-rc.1 continuable-creation capability (prepareContinuable) ──────
+// ── dsh 0.2.x continuable-creation capability (prepareContinuable) ──────────
 
-describe("dsh 0.1.5-rc.1 continuable-creation contract (prepareContinuable)", () => {
+describe("dsh 0.2.x continuable-creation contract (prepareContinuable)", () => {
   const continuableDef: AgentDefinition = {
     id: "continuable-probe",
     name: "Continuable Probe",

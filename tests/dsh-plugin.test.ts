@@ -71,7 +71,6 @@ import type {
   DshToolPresentation,
 } from "../src/platform/adapters/dsh/tool-factory.ts";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
-import { DSH_GRAPH_WORKER_TOOLS } from "../src/platform/adapters/dsh/graph-worker.ts";
 import { COMPUTER_TOOL_NAMES } from "../src/loader/computer-grants.ts";
 import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import type {
@@ -334,14 +333,18 @@ function createFakeCtx(
     },
     getProvider: (providerName: string) => providers.get(providerName),
     list: () => [...providers.keys()],
-    // Dispatch seam (DshDispatchAdapter surface): records every start and
-    // returns a run that settles `completed` on a microtask, so the plugin
-    // level dispatch test can assert the adapter forwarded a live parent Agent
-    // without a real spawn provider.
-    start: async (startName: string, request: DshSubagentStartRequest) => {
-      started.push({ name: startName, request });
+    // Dispatch seam (DshSubagentDispatchRuntime): dsh 0.2.x establishes every
+    // child through `startActivation`, records it here, and returns a run that
+    // settles `completed` on a microtask, so the plugin-level dispatch test can
+    // assert the adapter forwarded a live parent Agent without a real spawn
+    // provider.
+    startActivation: async (spec) => {
+      started.push({
+        name: spec.provider,
+        request: { ...spec.request, label: spec.label, signal: spec.signal },
+      });
       return {
-        id: `fake-run-${started.length}`,
+        childId: `fake-run-${started.length}`,
         result: Promise.resolve({
           stopReason: "completed",
           output: [{ type: "text", text: "ok" }],
@@ -762,6 +765,22 @@ describe("dsh packaging — dsh-client-modules resolution seam", () => {
 
 // ── apply() end-to-end on the fake ctx ─────────────────────────────────────
 
+/**
+ * The provider's EXTERNAL `start()`, which every provider rolebox builds
+ * defines. dsh 0.2.x declares `SubagentProvider.start` OPTIONAL — a provider that
+ * only serves the local activation path (`prepareContinuable`) need not implement
+ * it — so the invariant is asserted here rather than with a non-null assertion.
+ */
+function definedStart(
+  provider: DshSubagentProvider,
+): NonNullable<DshSubagentProvider["start"]> {
+  const start = provider.start;
+  if (start === undefined) {
+    throw new Error(`provider "${provider.name}" declares no external start()`);
+  }
+  return start;
+}
+
 describe("dsh plugin apply()", () => {
   it("resolves roles from a temp rolebox dir, registers tools + agents, reports counts", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
@@ -835,7 +854,7 @@ describe("dsh plugin apply()", () => {
     disposerWithout();
   });
 
-  it("dispatches a declared graph's entry attempt through ctx.subagents.start with a live parent", async () => {
+  it("dispatches a declared graph's entry attempt through ctx.subagents.startActivation with a live parent", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
 
     // A REAL invoking session id — the canonical `sessionID` resolved from the
@@ -959,22 +978,36 @@ describe("dsh plugin apply()", () => {
     }
   });
 
-  it("hands a node's declared tools to the dispatch delivery: per-request toolFilter + prompt (item 1)", async () => {
+  it("hands a node's declared tools to the dispatch delivery: per-node prompt grant (item 1)", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
 
     const INVOKING_SESSION = "declared-tools-session";
     const parent = { id: "live-parent", inject: () => undefined };
     const fixture = createFakeCtx({ agents: { get: () => parent } });
     const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
-    // The fake service DELEGATES to the registered rolebox provider, exactly as
-    // the real dsh subagent service does, so the provider's own composition runs
-    // INSIDE the graph worker's start scope and the worker prompt it reads
-    // (`graphWorkerPrompt()`) is the delivered one. `onSpawn` then captures the
-    // final request: the tool filter the delivery composed AND the prompt the
-    // worker would actually receive.
+    // THE RUNTIME'S ONLY ENTRY on dsh 0.2.x (`startActivation`). The delivery
+    // composes the request at the CALL SITE — role prompt, worker prompt, model —
+    // and hands it here, so what this records IS what the child runs with. The
+    // fake stands in for the service's LOCAL path: rolebox's provider declares
+    // `prepareContinuable`, so the provider's own start() is never called and the
+    // child creation the worker boundary observes is emitted here, inside the
+    // worker's start scope.
     const requests: DshSubagentStartRequest[] = [];
-    runtime.start = async (agent, request) =>
-      fixture.providers.get(agent)!.start({ ...request, descriptor: {} });
+    runtime.startActivation = async (spec) => {
+      requests.push({ ...spec.request, label: spec.label, signal: spec.signal });
+      const id = "worker-" + requests.length;
+      const worker = {
+        id,
+        session: { id, events: [] },
+        ctx: { tools: { presentAs: () => () => {} } },
+      };
+      fixture.ctx.emit("agent/created", { agent: worker });
+      return {
+        childId: id,
+        result: Promise.resolve({ stopReason: "completed", output: [] }),
+        dispose: async () => {},
+      };
+    };
 
     const cwd = process.cwd();
     process.chdir(tmpDir);
@@ -988,21 +1021,6 @@ describe("dsh plugin apply()", () => {
       disposer = await applyTracked(fixture.ctx, {
         roleboxDir: tmpDir,
         computerUse: true,
-        onSpawn: async (_definition, request) => {
-          const id = "worker-" + requests.length;
-          const worker = {
-            id,
-            session: { id, events: [] },
-            ctx: { tools: { presentAs: () => () => {} } },
-          };
-          fixture.ctx.emit("agent/created", { agent: worker });
-          requests.push(request);
-          return {
-            id,
-            result: Promise.resolve({ stopReason: "completed", output: [] }),
-            dispose: async () => {},
-          };
-        },
       } as DshPluginConfig);
       const byName = new Map(fixture.tools.registeredTools.map((t) => [t.name, t]));
       const exec = {
@@ -1054,29 +1072,33 @@ describe("dsh plugin apply()", () => {
       const shooter = requestOf("shooter");
       const plain = requestOf("plain");
 
-      // (b) THE ALLOW-LIST: the node's declared entries INTERSECTED with the
-      // tools the host actually registered, on top of the static baseline.
-      expect([...(shooter.toolFilter?.allow ?? [])].sort()).toEqual([
-        ...DSH_GRAPH_WORKER_TOOLS,
-        ...COMPUTER_TOOL_NAMES,
-      ].sort());
-      // …and the undeclared node keeps exactly the registered baseline.
-      expect(plain.toolFilter?.allow).toEqual([...DSH_GRAPH_WORKER_TOOLS]);
+      // (b) THE START REQUEST NO LONGER CARRIES A TOOL FILTER: dsh 0.2.x removed
+      // `SubagentStartRequest.toolFilter`, so the per-attempt face is no longer
+      // expressed at the start seam. It is enforced by rolebox's OWN execution
+      // guard (`installDshGraphWorkerBoundary`, pinned in
+      // tests/platform/adapters/dsh/graph-worker.test.ts and
+      // tests/platform/dsh-worker-tool-allow-list.test.ts) and STATED in the
+      // prompt asserted below.
+      expect("toolFilter" in shooter).toBe(false);
+      expect("toolFilter" in plain).toBe(false);
 
-      // (a) THE DELIVERED PROMPT states the SAME grant: the declared node is
-      // told about its host tools, the undeclared node is told the baseline.
+      // (a) THE DELIVERED PROMPT states the grant: the declared node is told
+      // about its host tools, the undeclared node is told the baseline.
       expect(promptText(shooter)).toContain(
         "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares.",
       );
       expect(promptText(shooter)).toContain("this node declares the host tools computer_*");
       expect(promptText(shooter)).not.toContain("declares no extra host tools");
-      // The composed worker prompt is the one the provider prepends, ahead of
-      // the plan prompt and the attempt handoff.
+      // The composed worker prompt reaches the child ahead of the plan prompt
+      // and the attempt handoff.
       expect(promptText(shooter)).toContain("shoot");
       expect(promptText(plain)).toContain("declares no extra host tools");
       expect(promptText(plain)).toContain(
         "Your tools are graph_worker_exec and graph_submit_outcome.",
       );
+      // ONE start, TWO nodes: the stated grant is per attempt, which a static
+      // option could not express.
+      expect(promptText(shooter)).not.toBe(promptText(plain));
     } finally {
       disposer?.();
       process.chdir(cwd);
@@ -1114,23 +1136,27 @@ describe("dsh plugin apply()", () => {
       const parent = { id: "parent", inject: () => undefined };
       const fixture = createFakeCtx({ agents: { get: () => parent }, systemPrompt: true });
       const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
-      runtime.start = async (agent, request) => fixture.providers.get(agent)!.start({ ...request, descriptor: {} });
       const requests: DshSubagentStartRequest[] = [];
       const workerSections: string[] = [];
       const workerContexts: string[] = [];
+      // THE RUNTIME'S ONLY ENTRY on dsh 0.2.x (`startActivation`), standing in
+      // for the service's LOCAL path exactly as in the declared-tools test above:
+      // the delivery composes the worker's COMPLETE prompt at the call site, and
+      // the child creation the worker boundary observes is emitted here, inside
+      // the worker's start scope.
+      runtime.startActivation = async (spec) => {
+        requests.push({ ...spec.request, label: spec.label, signal: spec.signal });
+        const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: { presentAs: () => () => {} } } };
+        fixture.ctx.emit("agent/created", { agent: worker });
+        workerSections.push(...fixture.sections.map(section => section.text({ agent: { id: "worker" } })));
+        workerContexts.push(...fixture.contexts.map(context => context.text({ agent: { id: "worker" } })));
+        return { childId: "worker", result: Promise.resolve({ stopReason: "completed", output: [] }), dispose: async () => {} };
+      };
       disposer = await applyTracked(fixture.ctx, {
         roleboxDir: tmpDir,
         // The GATE stays OFF, spelled out: `computerUse` is a defaulted boolean
         // on the schema, so `DshPluginConfig` declares it required.
         computerUse: false,
-        onSpawn: async (_definition, request) => {
-          const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: { presentAs: () => () => {} } } };
-          fixture.ctx.emit("agent/created", { agent: worker });
-          requests.push(request);
-          workerSections.push(...fixture.sections.map(section => section.text({ agent: { id: "worker" } })));
-          workerContexts.push(...fixture.contexts.map(context => context.text({ agent: { id: "worker" } })));
-          return { id: "worker", result: Promise.resolve({ stopReason: "completed", output: [] }), dispose: async () => {} };
-        },
       } as DshPluginConfig);
       const declare = fixture.tools.registeredTools.find(tool => tool.name === "graph_declare")!;
       await declare.execute({ declaration: {
@@ -1745,14 +1771,15 @@ describe("dsh plugin apply()", () => {
     // to the host delegate instead of rejecting DshSpawnNotWiredError.
     const provider = [...providers.values()][0];
     expect(provider).toBeDefined();
-    const run = await provider!.start({
+    if (provider === undefined) throw new Error("expected a registered provider");
+    const run = await definedStart(provider)({
       prompt: [{ type: "text", text: "hi" }],
       parent: {},
       signal: new AbortController().signal,
       descriptor: {},
     });
     expect(run.id).toBe("host-run");
-    expect(spawned).toEqual([provider!.name]);
+    expect(spawned).toEqual([provider.name]);
 
     disposer();
   });
@@ -1794,7 +1821,8 @@ describe("dsh plugin apply()", () => {
 
     const provider = providers.get("modeler");
     expect(provider).toBeDefined();
-    await provider!.start({
+    if (provider === undefined) throw new Error("expected the modeler provider");
+    await definedStart(provider)({
       prompt: [{ type: "text", text: "hi" }],
       parent: {},
       signal: new AbortController().signal,
@@ -1834,7 +1862,8 @@ describe("dsh plugin apply()", () => {
 
     const provider = providers.get("modeler");
     expect(provider).toBeDefined();
-    await provider!.start({
+    if (provider === undefined) throw new Error("expected the modeler provider");
+    await definedStart(provider)({
       prompt: [{ type: "text", text: "hi" }],
       parent: {},
       signal: new AbortController().signal,
@@ -1872,7 +1901,8 @@ describe("dsh plugin apply()", () => {
 
     const provider = providers.get("modeler");
     expect(provider).toBeDefined();
-    await provider!.start({
+    if (provider === undefined) throw new Error("expected the modeler provider");
+    await definedStart(provider)({
       prompt: [{ type: "text", text: "hi" }],
       parent: {},
       signal: new AbortController().signal,

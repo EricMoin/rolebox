@@ -26,10 +26,10 @@ import { describe, expect, it } from "bun:test";
 
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type {
+  DshSubagentActivationSpec,
   DshSubagentProvider,
   DshSubagentResult,
   DshSubagentRun,
-  DshSubagentStartRequest,
 } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import {
   DshOutcomeDelivery,
@@ -93,7 +93,7 @@ interface FakeDshRun {
  * exposes `interrupt` only when the scenario asks for it.
  */
 function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" | "absent" }) {
-  const starts: DshSubagentStartRequest[] = [];
+  const starts: DshSubagentActivationSpec[] = [];
   const runs: FakeDshRun[] = [];
   const interrupts: string[] = [];
   const authorities: unknown[] = [];
@@ -101,10 +101,9 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
     name: "spawn",
     capabilities: {
       agentOptions: false,
+      agentPreset: false,
       outputSchema: false,
       depthLimit: false,
-      toolFilter: false,
-      persona: false,
     },
     inheritsParentContext: false,
     start: async () => {
@@ -115,8 +114,8 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
     registerProvider: () => () => {},
     getProvider: (name: string) => (name === "agent.work" ? provider : undefined),
     list: () => ["spawn"],
-    start: async (_name: string, request: DshSubagentStartRequest) => {
-      starts.push(request);
+    startActivation: async (spec) => {
+      starts.push(spec);
       let resolveResult!: (result: DshSubagentResult) => void;
       const result = new Promise<DshSubagentResult>((resolve) => {
         resolveResult = resolve;
@@ -125,7 +124,7 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
       const entry: FakeDshRun = {
         id,
         disposeCalls: 0,
-        signal: request.signal,
+        signal: spec.signal,
         onDispose: () => {},
         resolveResult,
         run: {
@@ -138,7 +137,7 @@ function makeDshRuntime(options: { readonly interrupt?: "present" | "throwing" |
         },
       };
       runs.push(entry);
-      return entry.run;
+      return { childId: entry.run.id, result: entry.run.result, dispose: entry.run.dispose };
     },
     ...(options.interrupt === "present" || options.interrupt === "throwing"
       ? {

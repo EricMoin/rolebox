@@ -56,11 +56,7 @@ import type {
 } from "../../src/entries/dsh.ts";
 import { shortHash } from "../../src/utils/state-paths.ts";
 import type { DshToolDefinition } from "../../src/platform/adapters/dsh/tool-factory.ts";
-import type {
-  DshSubagentProvider,
-  DshSubagentRun,
-  DshSubagentStartRequest,
-} from "../../src/platform/adapters/dsh/agent-registrar.ts";
+import type { DshSubagentProvider } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import type { DshSubagentDispatchRuntime } from "../../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
 import {
@@ -133,12 +129,9 @@ function createFakeCtx(options: { skills?: boolean } = {}) {
     },
     getProvider: (providerName: string) => providers.get(providerName),
     list: () => [...providers.keys()],
-    async start(
-      _name: string,
-      _request: DshSubagentStartRequest,
-    ): Promise<DshSubagentRun> {
+    async startActivation(_spec) {
       return {
-        id: "fake-run",
+        childId: "fake-run",
         result: Promise.resolve({ stopReason: "completed", output: [] }),
         dispose: async () => {},
       };

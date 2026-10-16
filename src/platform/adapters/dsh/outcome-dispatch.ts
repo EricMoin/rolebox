@@ -16,10 +16,15 @@ import type { DshSessionEventLike } from "./session.ts";
  * injects as the delivery seam, and it starts exactly one dsh subagent run per
  * attempt:
  *
- * - the run is started through `ctx.subagents.start(agent, request)` — the same
- *   seam the legacy graph dispatch used, with the same parent-resolution
+ * - the run is started through `ctx.subagents.startActivation(spec)` — the ONLY
+ *   child-establishment entry on the dsh 0.2.x line (the older
+ *   `start(name, request)` no longer exists), with the same parent-resolution
  *   contract (dsh REQUIRES a live parent `Agent` and dereferences it while
  *   composing the child, so an unresolvable parent fails LOUD before the start);
+ *   the agent id is the `provider`, `delivery: "caller"` leaves the worker's
+ *   answer with the graph host that observes the run, and the composed request
+ *   (role prompt, model override) is built BEFORE the call because a local
+ *   provider never sees its own `start()`;
  * - the invocation the run belongs to arrives WITH the delivery (the host's
  *   third argument: the graph's declaring invocation, recorded by the host and
  *   re-supplied on every window that arms a dispatch). The adapter keeps no
@@ -111,9 +116,11 @@ import type {
 import type {
   DshSubagentDispatchRuntime,
   DshSubagentResult,
+  DshSpawnRequestComposer,
 } from "./dispatch.ts";
 import { DshParentUnresolvedError } from "./dispatch.ts";
-import type { DshSubagentRun, DshSubagentStartRequest } from "./agent-registrar.ts";
+import type { DshContentBlock, DshSubagentRun, DshSubagentStartRequest } from "./agent-registrar.ts";
+import { activationToRun } from "./agent-registrar.ts";
 import type { HostDispatchInvocation } from "../../../graph/host/dispatch-host.ts";
 import type { HostExecutionIdentity } from "../../../graph/host/execution-index.ts";
 import type {
@@ -221,6 +228,28 @@ export interface DshOutcomeDeliveryOptions {
    */
   readonly workerToolsOf?: (request: OutcomeDispatchRequest) => readonly string[] | undefined;
   readonly readExecutionEvents?: (id: string) => Promise<readonly DshSessionEventLike[] | undefined>;
+  /**
+   * Build the COMPLETE prompt a graph worker runs under (role, command
+   * boundary, tool face and the attempt handoff). The dsh entry wires it to
+   * `prepareDshGraphWorkerPrompt`. A host that omits it starts the worker with
+   * the bare attempt-delivery prompt.
+   *
+   * ON dsh 0.2.x THIS IS THE ONLY WAY THE WORKER PROMPT REACHES THE CHILD: the
+   * provider whose `prepareContinuable` puts it on the local path never sees its
+   * own `start()`, so the prompt must be composed into the request here rather
+   * than prepended by the provider.
+   */
+  readonly workerPrompt?: (
+    request: OutcomeDispatchRequest,
+    inputView: DeliveredInputView | undefined,
+  ) => string | undefined;
+  /**
+   * Optional call-site spawn composer ({@link DshSpawnRequestComposer}) — the
+   * dsh entry wires it to `DshAgentRegistrar.composeSpawnRequest` so a graph
+   * worker still receives its role's MODEL override and any spawn context, with
+   * `workerPrompt` replacing the role's system-prompt prepend.
+   */
+  readonly composeRequest?: DshSpawnRequestComposer;
   readonly startWorker?: (label: string, start: () => Promise<DshSubagentRun>, request: OutcomeDispatchRequest) => Promise<DshSubagentRun>;
   readonly subscribeExecutionEvents?: (id: string, listener: (events: readonly DshSessionEventLike[]) => void) => (() => void);
   /** `ctx.subagents` — the dsh subagent runtime. */
@@ -266,31 +295,32 @@ export interface DshOutcomeDeliveryOptions {
 }
 
 /**
- * THE ALLOW-LIST ONE ATTEMPT'S START REQUEST CARRIES.
+ * THE ALLOW-LIST ONE ATTEMPT'S WORKER FACE IS DERIVED FROM.
  *
- * The list becomes `toolFilter.allow`, which the harness applies as a scoped
- * `tools.restrict()` in the child's creation window: it is the child's only
- * VISIBLE and EXECUTABLE tool set, and `restrict()` THROWS on a name the host
- * does not resolve. The list therefore has to name tools that actually exist,
- * and it must never name one the node did not declare.
+ * On dsh 0.1.x the list became `toolFilter.allow`, the child's only VISIBLE and
+ * EXECUTABLE tool set. dsh 0.2.x removed the start-request tool restriction, so
+ * the list no longer reaches the start call: it now feeds rolebox's own worker
+ * boundary — the execution guard installed by `installDshGraphWorkerBoundary`
+ * and the tool sentence in the worker prompt. It therefore has to name tools the
+ * host actually resolves, and it must never name one the node did not declare.
  *
  * THREE INPUTS, ONE FAIL-CLOSED RULE:
  *
  *   - the BASELINE — the worker's delivery channel, granted unconditionally
- *     (still filtered by `isRegistered` so an unregistered name cannot make
- *     `restrict()` throw and abort the start);
+ *     (still filtered by `isRegistered` so an unresolved name is not reported
+ *     as granted);
  *   - the node's DECLARED entries, matched with the ONE matcher the worker
- *     boundary itself uses ({@link declaredToolsAllow}), so the start filter and
+ *     boundary itself uses ({@link declaredToolsAllow}), so the derived face and
  *     the per-call refusal cannot disagree; that matcher never admits a name in
  *     the graph face's own reserved namespace, so a declaration cannot re-open
  *     the face through this door either;
  *   - the CANDIDATE names this host composed, each verified by `isRegistered`.
  *
  * THE INTERSECTION IS THE POINT. A declared name the host did not register is
- * not granted: it could not be called, and naming it would throw inside
- * `restrict()`. An undeclared node, an absent declaration, and a declaration
- * whose every entry fails the intersection all produce the registered baseline
- * alone — exactly the surface this delivery had before the field existed.
+ * not granted: it could not be called. An undeclared node, an absent declaration,
+ * and a declaration whose every entry fails the intersection all produce the
+ * registered baseline alone — exactly the surface this delivery had before the
+ * field existed.
  *
  * AN EXACT ENTRY IS ALSO PROBED BY NAME, so a HOST-owned tool this build did not
  * compose remains grantable; a prefix entry is expanded over the candidates,
@@ -874,37 +904,55 @@ export class DshOutcomeDelivery {
     // answers nothing has not granted anything: the delivery falls back to the
     // static baseline rather than starting a worker under a list nobody
     // resolved. Never wider, only narrower.
+    //
+    // ON dsh 0.2.x THIS LIST NO LONGER REACHES THE START REQUEST: dsh removed
+    // the start-request `toolFilter` field, so the worker's face is enforced by
+    // rolebox's execution guard (`installDshGraphWorkerBoundary`) and STATED in
+    // the worker prompt (`prepareDshGraphWorkerPrompt`), which is why the tool
+    // sentence below is still appended.
     let workerTools: readonly string[] | undefined;
     try {
       workerTools = this.opts.workerToolsOf?.(request) ?? this.opts.workerTools;
     } catch {
       workerTools = this.opts.workerTools;
     }
-    const startRequest: DshSubagentStartRequest = {
-      // THE STABLE IDEMPOTENCY KEY IS THE CREATE CALL'S LABEL (P2 item 5). The
-      // key — `graphId + "/dispatch:" + attemptId`, derived by the one function
-      // both sides use — is CARRIED as the documented start-request `label`,
-      // and it is the string {@link DshOutcomeDelivery.executionQuery} looks for
-      // later. WHETHER the child listing returns that label is UNVERIFIED in
-      // this repository (the contract extract documents `label?` on the start
-      // request only, and `@deepseek-ai/dsh-subagent` is not installed); if it
-      // does not, the correlation answers `unknown` and the effect stays
-      // blocked — fail-closed, never a wrong execution. (dsh does not DEDUPE on
-      // it either: at-most-once remains the host's fenced create right, and the
-      // label is the correlation, not the fence.)
+    // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff and
+    // the input view the host materialized beside it, under the COMPLETE worker
+    // role/boundary prompt when the host supplies one. The view's file paths are
+    // the worker's own copies, verified before this call.
+    const workerPrompt = this.opts.workerPrompt?.(request, inputView);
+    const deliveryText = buildAttemptDeliveryPrompt(request, inputView)
+      + (workerTools ? "\nUse graph_worker_exec for all workspace commands, file reads, edits and tests." : "");
+    const baseRequest: DshSubagentStartRequest = {
       label: dispatchIdempotencyKeyOf(effect),
-      // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff
-      // and the input view the host materialized beside it. The view's file
-      // paths are the worker's own copies, verified before this call.
-      prompt: [{ type: "text", text: buildAttemptDeliveryPrompt(request, inputView) + (workerTools ? "\nUse graph_worker_exec for all workspace commands, file reads, edits and tests." : "") }],
+      prompt: [{ type: "text", text: deliveryText }],
       parent,
       signal: controller.signal,
       sessionId: parentSessionId,
-      ...(workerTools ? { toolFilter: { allow: [...workerTools] } } : {}),
+    };
+    // THE ROLE AND MODEL ARE MATERIALIZED AT THE CALL SITE (0.2.x). The
+    // provider whose `prepareContinuable` selects the local path never receives
+    // its own `start()`, so the composer — not the provider — builds the request
+    // the child runs with. `workerPrompt` replaces the role's system-prompt
+    // prepend and keeps the definition's model override.
+    const startRequest = this.opts.composeRequest?.(agent, baseRequest, workerPrompt) ?? {
+      ...baseRequest,
+      ...(workerPrompt === undefined ? {} : { prompt: [{ type: "text", text: workerPrompt } as DshContentBlock, ...baseRequest.prompt] }),
     };
     // The start itself is a promise; the delivery contract is synchronous. A
     // rejection is reported as a failed start (nothing was observed running).
-    const start = () => this.opts.subagents.start(agent, startRequest);
+    const start = () => this.opts.subagents.startActivation({
+      provider: agent,
+      label: dispatchIdempotencyKeyOf(effect),
+      request: startRequest,
+      signal: controller.signal,
+      // THE GRAPH HOST OBSERVES THE RUN ITSELF (its own `result` promise and the
+      // worker's own `graph_submit_outcome`) and owns settlement, so the worker's
+      // answer is returned to the caller instead of being injected into the
+      // orchestrator's turn. This also keeps the delivery independent of the
+      // session-persistence service that `delivery: "parent"` requires.
+      delivery: "caller",
+    }).then(activationToRun);
     void Promise.resolve(this.opts.startWorker ? this.opts.startWorker(dispatchIdempotencyKeyOf(effect), start, request) : start()).then(
       (run) => {
         // The platform named the execution, so the host can record the fact it

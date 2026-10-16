@@ -9,9 +9,14 @@
  * wrote the per-session active role into the holder, but the holder was only
  * read by `GET /rolebox/roles/active` — no message/spawn path consulted it,
  * so switching a role in the web UI had no effect on the conversation. The
- * fix: `DshAgentRegistrar` now consumes the same shared holder at spawn time
- * (`buildProvider().start()` reads `request.sessionId` → `activeRole.get` →
- * prepends the active role's system prompt + applies its model override).
+ * fix: `DshAgentRegistrar` consumes the same shared holder when a spawn is
+ * COMPOSED (`composeSpawnRequest` reads `request.sessionId` → `activeRole.get`
+ * → prepends the active role's system prompt + applies its model override).
+ *
+ * On dsh 0.2.x that composition is a CALL-SITE step: a rolebox provider declares
+ * `prepareContinuable`, so the runtime takes the LOCAL activation path and never
+ * calls the provider's `start()`. The fixture's `start` therefore composes first
+ * and activates second — the same order the production adapters use.
  *
  * Verifies:
  *   - activate(role, session) then spawn for THAT session includes the
@@ -34,8 +39,6 @@ import { RoleMode } from "../../src/constants.ts";
 import { DshAgentRegistrar } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import type {
   DshSubagentProvider,
-  DshSubagentRun,
-  DshSubagentRuntime,
   DshSubagentStartRequest,
   DshSpawnContextProvider,
 } from "../../src/platform/adapters/dsh/agent-registrar.ts";
@@ -82,13 +85,36 @@ function createFakeCtx() {
 }
 
 /**
- * Fake dsh subagent runtime — records registered providers and, on `start`,
- * routes through the registered provider's `start()` (like the real
- * `SubagentRuntime.start(name, request)`).
+ * Fake dsh subagent runtime (`SubagentRuntime`, dsh 0.2.x). It records the
+ * registered providers and implements `startActivation`, ROUTING on
+ * `prepareContinuable` exactly as the real service does
+ * (`packages/subagent/subagent/src/index.ts:269-284`): a provider that declares
+ * it takes the LOCAL path, where the runtime composes the child itself and NEVER
+ * calls the provider's `start()`.
+ *
+ * Every rolebox agent provider declares `prepareContinuable`, so this is the path
+ * a production spawn takes — and therefore the role prompt, the active-role
+ * override, the context blocks and the model override must already be applied by
+ * the caller ({@link createFixture}'s `start`, which calls
+ * `DshAgentRegistrar.composeSpawnRequest` the way both production adapters do)
+ * before `startActivation` sees the request.
  */
-function createFakeSubagents(): DshSubagentDispatchRuntime {
+function createFakeSubagents(): {
+  subagents: DshSubagentDispatchRuntime;
+  /** Every activation the runtime received, in call order. */
+  activations: Array<{
+    provider: string;
+    label: string;
+    request: DshSubagentStartRequest;
+  }>;
+} {
   const providers = new Map<string, DshSubagentProvider>();
-  return {
+  const activations: Array<{
+    provider: string;
+    label: string;
+    request: DshSubagentStartRequest;
+  }> = [];
+  const subagents: DshSubagentDispatchRuntime = {
     registerProvider(provider: DshSubagentProvider): () => void {
       providers.set(provider.name, provider);
       return () => {
@@ -97,15 +123,33 @@ function createFakeSubagents(): DshSubagentDispatchRuntime {
     },
     getProvider: (name: string) => providers.get(name),
     list: () => [...providers.keys()],
-    async start(name: string, request: DshSubagentStartRequest) {
-      const provider = providers.get(name);
-      if (!provider) throw new Error(`no provider for ${name}`);
-      // Like the real SubagentRuntime: the service resolves and stamps the
-      // detached child descriptor BEFORE the provider's start() sees the
-      // request (DshResolvedSubagentStartRequest, agent-registrar.ts).
-      return provider.start({ ...request, descriptor: request.descriptor ?? {} });
+    async startActivation(spec) {
+      const provider = providers.get(spec.provider);
+      if (!provider) throw new Error(`no provider for ${spec.provider}`);
+      activations.push({
+        provider: spec.provider,
+        label: spec.label,
+        request: { ...spec.request, label: spec.label, signal: spec.signal },
+      });
+      const prepareContinuable = provider.prepareContinuable;
+      if (prepareContinuable !== undefined) {
+        // LOCAL path — the runtime owns identity, composition and prompt
+        // delivery, so the provider's own start() is deliberately not called.
+        await prepareContinuable({
+          sessionId: spec.childId ?? "child-1",
+          parent: spec.request.parent,
+          signal: spec.signal,
+        });
+      }
+      return {
+        childId: spec.childId ?? "child-1",
+        messageId: "message-1",
+        result: Promise.resolve({ output: [], stopReason: "completed" }),
+        dispose: async () => {},
+      };
     },
   };
+  return { subagents, activations };
 }
 
 /** Minimal AgentDefinition factory for the catalog. */
@@ -170,15 +214,6 @@ function promptText(blocks: DshSubagentStartRequest["prompt"]): string {
     .join("\n");
 }
 
-/** A fake run whose result resolves immediately (provider start() returns). */
-function makeRun(): DshSubagentRun {
-  return {
-    id: "run-1",
-    result: Promise.resolve({ output: [], stopReason: "completed" }),
-    dispose: async () => {},
-  };
-}
-
 /** A bare start request (the dispatch adapter's shape, plus sessionId). */
 function spawnRequest(sessionId?: string): DshSubagentStartRequest {
   return {
@@ -191,36 +226,34 @@ function spawnRequest(sessionId?: string): DshSubagentStartRequest {
 
 /**
  * Full fixture mirroring the real dsh-plugin wiring: ONE shared activeRole
- * holder feeding BOTH the registrar (read at spawn) and the switcher (write
- * on activate/clear), a fake subagents seam that routes start() through the
- * registered provider, and the dsh dispatch adapter over that seam.
+ * holder feeding BOTH the registrar (read when a spawn is composed) and the
+ * switcher (write on activate/clear), a fake 0.2.x subagents seam, and the dsh
+ * dispatch adapter over that seam.
  *
- * The registrar is wired with an `onSpawn` delegate that captures the FULLY
- * TRANSFORMED start request (the request a real spawn-provider adapter would
- * receive — the point where the active role has already been applied) and
- * returns a fake run. An optional `contextProvider` wires the spawn-time
- * context-injection seam (the dsh counterpart of the system-transform hook).
+ * WHY THE FIXTURE'S `start` EXISTS: on dsh 0.2.x a rolebox provider declares
+ * `prepareContinuable`, so the runtime takes the LOCAL activation path and never
+ * calls the provider's `start()`. Role materialization therefore happens at the
+ * CALL SITE — `DshAgentRegistrar.composeSpawnRequest` — which is exactly what
+ * `start` below does before handing the request to `startActivation`, and what
+ * the dispatch adapter does through its `composeRequest` seam. An optional
+ * `contextProvider` wires the spawn-time context-injection seam (the dsh
+ * counterpart of the system-transform hook).
+ *
+ * `spawned` is what the runtime actually RECEIVED, i.e. the request the child is
+ * created with; `provider` replaces the old `definition` field because the
+ * runtime addresses an activation by provider name.
  */
 async function createFixture(
   agents: AgentDefinition[],
-  opts: { contextProvider?: DshSpawnContextProvider; graphWorkerPrompt?: () => string | undefined } = {},
+  opts: { contextProvider?: DshSpawnContextProvider } = {},
 ) {
   const { ctx, listeners } = createFakeCtx();
-  const subagents = createFakeSubagents();
+  const { subagents, activations: spawned } = createFakeSubagents();
   const activeRole = createActiveRoleRef();
-  const spawned: Array<{
-    definition: AgentDefinition;
-    request: DshSubagentStartRequest;
-  }> = [];
   const registrar = new DshAgentRegistrar({
     subagents,
     activeRole,
     contextProvider: opts.contextProvider,
-    graphWorkerPrompt: opts.graphWorkerPrompt,
-    onSpawn: async (definition, request) => {
-      spawned.push({ definition, request });
-      return makeRun();
-    },
   });
   await registrar.register(agents);
   const s1 = makeSession("s1");
@@ -229,10 +262,33 @@ async function createFixture(
   const dispatch = new DshDispatchAdapter({
     subagents,
     directory: process.cwd(),
+    // THE PRODUCTION CALL-SITE COMPOSER: a loop round's role prompt, context
+    // and model are resolved here, not by the provider's dead start().
+    composeRequest: (agent, request) => registrar.composeSpawnRequest(agent, request),
     // dsh requires a live parent Agent on every start request; this
     // fixture resolves a sentinel for the dispatch-threading test below.
     parentResolver: () => ({ id: "s1", inject: () => undefined }),
   });
+  /**
+   * Spawn ONE agent the way the production adapters do: compose the request at
+   * the call site (applying the active role, the spawn context and the
+   * definition's model), then activate it. `workerPrompt`, when given, is a
+   * graph worker's COMPLETE prompt and replaces the role-prompt prepend.
+   */
+  const start = async (
+    agentId: string,
+    request: DshSubagentStartRequest,
+    workerPrompt?: string,
+  ) => {
+    const composed = registrar.composeSpawnRequest(agentId, request, workerPrompt);
+    return subagents.startActivation({
+      provider: agentId,
+      label: agentId,
+      request: composed,
+      signal: composed.signal,
+      delivery: "caller",
+    });
+  };
   return {
     ctx,
     listeners,
@@ -243,6 +299,7 @@ async function createFixture(
     switcher,
     activeRole,
     dispatch,
+    start,
     spawned,
   };
 }
@@ -264,15 +321,16 @@ function markerContextProvider(): DshSpawnContextProvider {
 describe("dsh active-role spawn seam", () => {
   it("keeps graph workers on their target prompt and model, including primary targets", async () => {
     for (const mode of [RoleMode.Primary, RoleMode.Subagent]) {
-      const { switcher, subagents, spawned } = await createFixture([
+      const { switcher, start, spawned } = await createFixture([
         makeAgent("coordinator", { mode: RoleMode.Primary, model: "parent-provider/parent-model" }),
         makeAgent("planner", { mode, model: "worker-provider/worker-model" }),
       ], {
         contextProvider: () => [{ type: "text", text: "parent functions" }],
-        graphWorkerPrompt: () => "Worker planner instructions and own functions",
       });
       await switcher.activate("coordinator", "s1");
-      await subagents.start("planner", spawnRequest("s1"));
+      // The worker's COMPLETE prompt is the call-site composer's third argument;
+      // on dsh 0.2.x it never travels through the provider's start().
+      await start("planner", spawnRequest("s1"), "Worker planner instructions and own functions");
       expect(promptText(spawned[0].request.prompt)).toBe("Worker planner instructions and own functions\nuser request");
       expect(spawned[0].request.agentOptions).toEqual({ provider: "worker-provider", model: "worker-model" });
     }
@@ -280,7 +338,7 @@ describe("dsh active-role spawn seam", () => {
 
   it("uses a named subagent's own context without inheriting its parent's role", async () => {
     const contexts: string[] = [];
-    const { switcher, subagents, spawned } = await createFixture([
+    const { switcher, start, spawned } = await createFixture([
       makeAgent("coordinator", { mode: RoleMode.Primary, model: "parent-model" }),
       makeAgent("planner", { mode: RoleMode.Subagent, model: "worker-model" }),
     ], {
@@ -290,14 +348,14 @@ describe("dsh active-role spawn seam", () => {
       },
     });
     await switcher.activate("coordinator", "s1");
-    await subagents.start("planner", spawnRequest("s1"));
+    await start("planner", spawnRequest("s1"));
     expect(contexts).toEqual(["planner"]);
     expect(promptText(spawned[0].request.prompt)).toBe("planner functions\nYou are planner.\nuser request");
     expect(spawned[0].request.agentOptions?.model).toBe("worker-model");
   });
 
   it("activate(role) then spawn for that session includes the role's systemPrompt + model", async () => {
-    const { switcher, subagents, spawned, activeRole } = await createFixture([
+    const { switcher, start, spawned, activeRole } = await createFixture([
       makeAgent("base", {
         systemPrompt: "You are the base agent.",
         model: "base-model",
@@ -313,10 +371,10 @@ describe("dsh active-role spawn seam", () => {
     expect(result).toEqual({ ok: true, value: undefined });
     expect(activeRole.get("s1")).toBe("alpha");
 
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
 
     expect(spawned).toHaveLength(1);
-    expect(spawned[0].definition.id).toBe("base");
+    expect(spawned[0].provider).toBe("base");
     expect(spawned[0].request.sessionId).toBe("s1");
 
     // The ACTIVE ROLE's prompt leads, ahead of the spawned definition's own.
@@ -329,7 +387,7 @@ describe("dsh active-role spawn seam", () => {
   });
 
   it("activate(null)/clear restores the base definition behavior", async () => {
-    const { switcher, subagents, spawned, activeRole } = await createFixture([
+    const { switcher, start, spawned, activeRole } = await createFixture([
       makeAgent("base", {
         systemPrompt: "You are the base agent.",
         model: "base-model",
@@ -345,7 +403,7 @@ describe("dsh active-role spawn seam", () => {
     await switcher.activate(null, "s1"); // clear
     expect(activeRole.get("s1")).toBeNull();
 
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
 
     expect(spawned).toHaveLength(1);
     const text = promptText(spawned[0].request.prompt);
@@ -355,7 +413,7 @@ describe("dsh active-role spawn seam", () => {
   });
 
   it("a session WITHOUT an active role keeps base behavior", async () => {
-    const { subagents, spawned } = await createFixture([
+    const { start, spawned } = await createFixture([
       makeAgent("base", {
         systemPrompt: "You are the base agent.",
         model: "base-model",
@@ -367,7 +425,7 @@ describe("dsh active-role spawn seam", () => {
       }),
     ]);
 
-    await subagents.start("base", spawnRequest("other-session"));
+    await start("base", spawnRequest("other-session"));
 
     const text = promptText(spawned[0].request.prompt);
     expect(text).toContain("You are the base agent.");
@@ -376,7 +434,7 @@ describe("dsh active-role spawn seam", () => {
   });
 
   it("spawning the ACTIVE ROLE's own definition does not double-prepend its prompt", async () => {
-    const { switcher, subagents, spawned } = await createFixture([
+    const { switcher, start, spawned } = await createFixture([
       makeAgent("alpha", {
         mode: RoleMode.Primary,
         systemPrompt: "You are ALPHA, the active role.",
@@ -386,7 +444,7 @@ describe("dsh active-role spawn seam", () => {
 
     await switcher.activate("alpha", "s1");
 
-    await subagents.start("alpha", spawnRequest("s1"));
+    await start("alpha", spawnRequest("s1"));
 
     const text = promptText(spawned[0].request.prompt);
     // Exactly one occurrence — the definition's own prompt, not duplicated.
@@ -394,7 +452,7 @@ describe("dsh active-role spawn seam", () => {
   });
 
   it("a spawn request WITHOUT a sessionId falls back to base behavior", async () => {
-    const { switcher, subagents, spawned } = await createFixture([
+    const { switcher, start, spawned } = await createFixture([
       makeAgent("base", {
         systemPrompt: "You are the base agent.",
       }),
@@ -405,7 +463,7 @@ describe("dsh active-role spawn seam", () => {
     ]);
     await switcher.activate("alpha", "s1");
 
-    await subagents.start("base", spawnRequest(undefined));
+    await start("base", spawnRequest(undefined));
 
     const text = promptText(spawned[0].request.prompt);
     expect(text).toContain("You are the base agent.");
@@ -413,7 +471,7 @@ describe("dsh active-role spawn seam", () => {
   });
 
   it("active-role override carries BOTH provider and model from a DIFFERENT provider", async () => {
-    const { switcher, subagents, spawned } = await createFixture([
+    const { switcher, start, spawned } = await createFixture([
       makeAgent("base", {
         systemPrompt: "You are the base agent.",
         model: "base-provider/base-model",
@@ -427,12 +485,12 @@ describe("dsh active-role spawn seam", () => {
 
     // Before activation: the base definition's OWN resolved provider/model
     // apply (split via the shared splitModel helper at agent-registrar.ts:690).
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
     expect(spawned[0].request.agentOptions?.provider).toBe("base-provider");
     expect(spawned[0].request.agentOptions?.model).toBe("base-model");
 
     await switcher.activate("alpha", "s1");
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
 
     // After activation: the ACTIVE ROLE's resolved model is split into BOTH
     // fields (agent-registrar.ts:707), so the spawn routes through the role's
@@ -447,7 +505,7 @@ describe("dsh active-role spawn seam", () => {
   });
 
   it("active-role override keeps a multi-segment model id after the first slash", async () => {
-    const { switcher, subagents, spawned } = await createFixture([
+    const { switcher, start, spawned } = await createFixture([
       makeAgent("base", {
         systemPrompt: "You are the base agent.",
         model: "base-provider/base-model",
@@ -460,7 +518,7 @@ describe("dsh active-role spawn seam", () => {
     ]);
 
     await switcher.activate("alpha", "s1");
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
 
     // First-slash semantics survive the active-role merge: provider is the
     // segment before the first slash, model id keeps the remaining slashes.
@@ -477,7 +535,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
   const CONTEXT_MARKER = '<rolebox_context role="s1">';
 
   it("with an active role, the injected context is present ALONGSIDE the role's prompt", async () => {
-    const { switcher, subagents, spawned } = await createFixture(
+    const { switcher, start, spawned } = await createFixture(
       [
         makeAgent("base", {
           systemPrompt: "You are the base agent.",
@@ -493,7 +551,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
     );
 
     await switcher.activate("alpha", "s1");
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
 
     expect(spawned).toHaveLength(1);
     const text = promptText(spawned[0].request.prompt);
@@ -516,7 +574,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
   });
 
   it("spawning the ACTIVE ROLE's own definition carries the context (prompt not duplicated)", async () => {
-    const { switcher, subagents, spawned } = await createFixture(
+    const { switcher, start, spawned } = await createFixture(
       [
         makeAgent("alpha", {
           mode: RoleMode.Primary,
@@ -527,7 +585,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
     );
 
     await switcher.activate("alpha", "s1");
-    await subagents.start("alpha", spawnRequest("s1"));
+    await start("alpha", spawnRequest("s1"));
 
     const text = promptText(spawned[0].request.prompt);
     // Context injected even though the redundant role-prompt prepend is
@@ -537,7 +595,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
   });
 
   it("WITHOUT an active role the spawned prompt is unchanged (no context injection)", async () => {
-    const { subagents, spawned } = await createFixture(
+    const { start, spawned } = await createFixture(
       [
         makeAgent("base", {
           systemPrompt: "You are the base agent.",
@@ -552,7 +610,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
     );
 
     // No activate() — base session behavior.
-    await subagents.start("base", spawnRequest("other-session"));
+    await start("base", spawnRequest("other-session"));
 
     const text = promptText(spawned[0].request.prompt);
     expect(text).toContain("You are the base agent.");
@@ -562,7 +620,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
   });
 
   it("a context provider that returns nothing leaves the spawn unchanged", async () => {
-    const { switcher, subagents, spawned } = await createFixture(
+    const { switcher, start, spawned } = await createFixture(
       [
         makeAgent("base", { systemPrompt: "You are the base agent." }),
         makeAgent("alpha", {
@@ -575,7 +633,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
     );
 
     await switcher.activate("alpha", "s1");
-    await subagents.start("base", spawnRequest("s1"));
+    await start("base", spawnRequest("s1"));
 
     const text = promptText(spawned[0].request.prompt);
     expect(text).toContain("You are ALPHA, the active role.");
@@ -587,7 +645,7 @@ describe("dsh context injection reaches the spawned role prompt", () => {
 // ── Dispatch threading ──────────────────────────────────────────────────────
 
 describe("dsh dispatch threads the session id onto the spawn request", () => {
-  it("dispatchRound carries the originSessionId (the dock's key) to start()", async () => {
+  it("dispatchRound carries the originSessionId (the dock's key) onto the activation", async () => {
     const { switcher, dispatch, spawned } = await createFixture([
       makeAgent("base", { systemPrompt: "You are the base agent." }),
       makeAgent("alpha", {
