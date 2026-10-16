@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="rolebox" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/banner.png" width="640">
+  <img alt="rolebox" src="assets/banner.png" width="640">
 </p>
 
 # rolebox
@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img alt="The role picker opened from the dsh composer: a filter field over the 18 loaded roles, each row a display name and a one-line description, with Base agent as the current selection" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/role-picker.png" width="880">
+  <img alt="The role picker opened from the dsh composer: a filter field over the 18 loaded roles, each row a display name and a one-line description, with Base agent as the current selection" src="assets/screenshots/role-picker.png" width="880">
 </p>
 
 <p align="center">
@@ -67,7 +67,7 @@ Every screenshot in this README was captured from a live dsh session on a demo w
 ### 1 · Every loaded role, on one page
 
 <p align="center">
-  <img alt="Settings, Rolebox section: one card per loaded role with its slug, description, Model, Mode, Max steps and tool policy" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/roles-settings.png" width="900">
+  <img alt="Settings, Rolebox section: one card per loaded role with its slug, description, Model, Mode, Max steps and tool policy" src="assets/screenshots/roles-settings.png" width="900">
 </p>
 
 <p align="center">
@@ -79,7 +79,7 @@ Each card carries the display name, the slug at the right (`ai-designer`, `apk-r
 ### 2 · Work is declared as a graph, not prompted node by node
 
 <p align="center">
-  <img alt="A TypeScript Engineer session loading its skill, reading the protocol reference and declaring a version-3 graph with graph_declare" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/graph-declare.png" width="900">
+  <img alt="A TypeScript Engineer session loading its skill, reading the protocol reference and declaring a version-3 graph with graph_declare" src="assets/screenshots/graph-declare.png" width="900">
 </p>
 
 <p align="center">
@@ -98,7 +98,7 @@ The turn closes on the declaration being started (`start.kind: started`, phase `
 ### 3 · Independent verification, then reconciliation
 
 <p align="center">
-  <img alt="The parent session reconciling the accepted results, with a baseline-versus-result checks table and an explicit risk-and-gaps list" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/graph-verified.png" width="900">
+  <img alt="The parent session reconciling the accepted results, with a baseline-versus-result checks table and an explicit risk-and-gaps list" src="assets/screenshots/graph-verified.png" width="900">
 </p>
 
 <p align="center">
@@ -114,7 +114,7 @@ The `Risk and gaps` list keeps three things open on purpose: the one judgment ca
 ### 4 · One brief in, one outcome out
 
 <p align="center">
-  <img alt="A graph worker one-shot session running its brief with graph_worker_exec and settling its node with graph_submit_outcome" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/graph-worker.png" width="900">
+  <img alt="A graph worker one-shot session running its brief with graph_worker_exec and settling its node with graph_submit_outcome" src="assets/screenshots/graph-worker.png" width="900">
 </p>
 
 <p align="center">
@@ -126,7 +126,7 @@ A dispatched worker is a one-shot session with exactly two tools — `graph_work
 ### 5 · Watch the engine while it runs
 
 <p align="center">
-  <img alt="The Rolebox monitor pane showing live sessions with their active role, the engine graph with its node agents and durations, the repair counter and the budget expander" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/monitor.png" width="900">
+  <img alt="The Rolebox monitor pane showing live sessions with their active role, the engine graph with its node agents and durations, the repair counter and the budget expander" src="assets/screenshots/monitor.png" width="900">
 </p>
 
 <p align="center">
@@ -138,7 +138,7 @@ The Rolebox pane in dsh's right sidebar is the live engine view. In the capture 
 ### 6 · The same run from a terminal
 
 <p align="center">
-  <img alt="rolebox monitor running in a terminal pane, showing the System Pulse, Graphs and Tasks boxed panes" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/monitor-tui.png" width="900">
+  <img alt="rolebox monitor running in a terminal pane, showing the System Pulse, Graphs and Tasks boxed panes" src="assets/screenshots/monitor-tui.png" width="900">
 </p>
 
 <p align="center">
@@ -150,7 +150,7 @@ The Rolebox pane in dsh's right sidebar is the live engine view. In the capture 
 ### 7 · Logs, filtered by channel and by session
 
 <p align="center">
-  <img alt="The rolebox logs pane showing INFO and WARN records from the dsh plugin, agent registrar, role loader and prompt builder, with channel and session filters" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/screenshots/logs.png" width="900">
+  <img alt="The rolebox logs pane showing INFO and WARN records from the dsh plugin, agent registrar, role loader and prompt builder, with channel and session filters" src="assets/screenshots/logs.png" width="900">
 </p>
 
 <p align="center">
