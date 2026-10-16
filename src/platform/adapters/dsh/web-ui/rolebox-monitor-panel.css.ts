@@ -69,6 +69,28 @@ export const monitorCss = `
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-xs-13);
 
+  /* ── Bounded scroller: the host's tab-body contract ──────────────────────
+     The right Sidebar wraps EVERY tab body in a pane-height clipping box
+     (the host's .tabBody: height 100%, min-height 0, overflow hidden), so a
+     tab body ROOT is expected to be bounded and to scroll INSIDE itself,
+     exactly as the host's own tabs do. This console was instead a static
+     block of natural height: measured 5145px inside that 855px tab body, so
+     everything past the first viewport was clipped away and unreachable at
+     ANY scroll position. */
+  /* Bound the root to the host's clipped .tabBody (855px) instead of letting
+     it grow to its content height. */
+  height: 100%;
+  min-height: 0;
+  /* The pane becomes its own scroller — the host's tab-body contract. */
+  overflow-y: auto;
+  /* A wheel at the end of the pane must not chain to the host pane beneath it. */
+  overscroll-behavior: contain;
+  /* Paint containment stops THIS pane's scrollable overflow from propagating
+     into the host's .paneBody (overflow: auto): measured live, the host
+     otherwise kept a 4153px phantom scroll range whose scrollbar dragged the
+     pane out of view and showed blank. With containment that range went to 0. */
+  contain: paint;
+
   --rolebox-surface: var(--dsw-specific-tip, rgb(245, 246, 247));
   --rolebox-surface-hover: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
   --rolebox-surface-skeleton: var(--dsw-alias-bg-skeleton, rgba(0, 0, 0, 0.04));

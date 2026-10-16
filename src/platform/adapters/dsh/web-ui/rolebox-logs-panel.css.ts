@@ -47,6 +47,28 @@ export const logsCss = `
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-xs-13);
 
+  /* ── Bounded scroller: the host's tab-body contract ──────────────────────
+     The right Sidebar wraps EVERY tab body in a pane-height clipping box
+     (the host's .tabBody: height 100%, min-height 0, overflow hidden), so a
+     tab body ROOT is expected to be bounded and to scroll INSIDE itself,
+     exactly as the host's own tabs do. This ledger was instead a static block of
+     natural height: measured 9629px inside that 855px tab body (the tab body
+     overflowed by 8774px), so everything past the first viewport was clipped
+     away and unreachable at ANY scroll position. */
+  /* Bound the root to the host's clipped .tabBody (855px) instead of letting
+     it grow to its content height. */
+  height: 100%;
+  min-height: 0;
+  /* The pane becomes its own scroller — the host's tab-body contract. */
+  overflow-y: auto;
+  /* A wheel at the end of the pane must not chain to the host pane beneath it. */
+  overscroll-behavior: contain;
+  /* Paint containment stops THIS pane's scrollable overflow from propagating
+     into the host's .paneBody (overflow: auto), where it became a phantom
+     scroll range that dragged the pane out of view and showed blank (measured
+     live on the sibling monitor pane: 4153px -> 0 with containment). */
+  contain: paint;
+
   --rolebox-logs-surface: var(--dsw-specific-tip, rgb(245, 246, 247));
   --rolebox-logs-surface-hover: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
   --rolebox-logs-border: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.04));

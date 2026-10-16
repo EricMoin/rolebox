@@ -1173,6 +1173,27 @@ describe("RoleboxLogsPanel", () => {
       expect(fixedWidths.every((width) => width <= 280)).toBe(true);
     });
 
+    it("bounds the pane root as the tab body's own scroller", () => {
+      // The host's right Sidebar wraps EVERY tab body in a pane-height
+      // clipping box (`.tabBody`: height 100%, min-height 0, overflow hidden),
+      // so a tab-body ROOT is expected to be bounded and to scroll INSIDE
+      // itself, exactly as the host's own tabs do. Without these declarations
+      // the ledger grew to its natural height — measured 9629px inside an
+      // 855px tab body (overflowing it by 8774px) — so everything past the
+      // first viewport was clipped away and unreachable at ANY scroll
+      // position.
+      const rootBlock = /\.rolebox-logs\s*\{([^}]*)\}/s.exec(css.logsCss)?.[1] ?? "";
+      // height + min-height bound the root to the host's clipped .tabBody.
+      expect(rootBlock).toContain("height: 100%");
+      expect(rootBlock).toContain("min-height: 0");
+      // The pane is its own scroller instead of a static block.
+      expect(rootBlock).toContain("overflow-y: auto");
+      // Paint containment is load-bearing: without it the pane's scrollable
+      // overflow propagates into the host's `.paneBody` as a phantom scroll
+      // range that drags the pane out of view.
+      expect(rootBlock).toContain("contain: paint");
+    });
+
     it("ships namespaced rules with only --dsw-* tokens", () => {
       const cssText = css.logsCss;
       // Every class the component names exists in the sheet.
