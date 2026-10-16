@@ -359,7 +359,7 @@ Unrecognized values pass through unchanged with a warning. Full resolution chain
 
 ---
 
-> **Upgrading from 0.x or 1.x?** rolebox 2.x (`package.json` currently reads `2.0.0-alpha.2`) runs work through the **graph outcome protocol**: `graph_declare` persists a version-3 declaration, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. An existing (legacy) declaration must be rewritten for the version-3 grammar and started as a new run. A persisted legacy state body stays readable but is never advanced, and this protocol has no incremental node or edge construction tool. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
+> **Upgrading from 0.x or 1.x?** rolebox 2.x (`package.json` currently reads `2.0.0`) runs work through the **graph outcome protocol**: `graph_declare` persists a version-3 declaration, and a node advances only through an outcome its worker submits with `graph_submit_outcome`. An existing (legacy) declaration must be rewritten for the version-3 grammar and started as a new run. A persisted legacy state body stays readable but is never advanced, and this protocol has no incremental node or edge construction tool. See [docs/graph-outcome-protocol.md](docs/graph-outcome-protocol.md).
 
 ---
 
