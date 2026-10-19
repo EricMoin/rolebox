@@ -1,4 +1,5 @@
 import { errorText } from "../../utils/error-text.ts";
+import { normalizeWorkerToolPresentation, validateWorkerToolPreload, type WorkerToolPresentation } from "../domain/worker-tools.ts";
 import { readRunBudget } from "../domain/budget.ts";
 import {
   isGraphDeclarationV3,
@@ -167,6 +168,7 @@ export const NODE_KEYS = [
   "budget",
   "inputs",
   "tools",
+  "toolPresentation",
 ] as const satisfies readonly (keyof NodeDeclarationV3)[];
 export const INPUT_KEYS = ["from", "outcome", "when"] as const satisfies readonly (keyof InputDeclarationV3)[];
 export const OUTCOME_KEYS = ["id", "data", "acceptance"] as const satisfies readonly (keyof OutcomeDeclarationV3)[];
@@ -404,6 +406,14 @@ function readNode(
     record.tools === undefined
       ? undefined
       : readNodeTools(record.tools, `${path}.tools`, log);
+  let toolPresentation: WorkerToolPresentation | undefined;
+  try {
+    toolPresentation = normalizeWorkerToolPresentation(record.toolPresentation);
+    validateWorkerToolPreload(toolPresentation, tools);
+  } catch (error) {
+    log.issues.push(issue("invalid-value", error instanceof Error ? error.message : String(error), `${path}.toolPresentation`));
+    return undefined;
+  }
 
   if (
     id === undefined ||
@@ -427,6 +437,7 @@ function readNode(
     ...(budget === undefined ? {} : { budget }),
     ...(inputs === undefined ? {} : { inputs }),
     ...(tools === undefined ? {} : { tools }),
+    ...(toolPresentation === undefined ? {} : { toolPresentation }),
   };
 }
 

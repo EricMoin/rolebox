@@ -113,9 +113,11 @@ export function openOpencode2GraphHost(options: {
   observe?: (input: { sessionID: string }) => Promise<OpencodeGraphSessionReading | null>;
   env?: Readonly<Record<string, string | undefined>>;
   getEffectiveAgent?: (sessionID?: string) => string;
+  workerTools?: OpencodeGraphHostOptions["workerTools"];
 }): OpencodeGraphHost {
   const hostOptions: OpencodeGraphHostOptions = {
     workspaceDir: options.directory,
+    ...(options.workerTools === undefined ? {} : { workerTools: options.workerTools }),
     storeRoot: graphStoreRoot(getDataDir(), options.directory),
     // NO CUSTOM INTERRUPT: `ISessionClient.abort` is the platform's own
     // interrupt on this adapter, so the shared port installs it. `observe` is

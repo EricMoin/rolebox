@@ -1,4 +1,5 @@
 import type { ResolvedRole, ResolvedSubAgent } from "../types.ts";
+import { workerPresentationTools, type WorkerToolPresentation } from "../graph/domain/worker-tools.ts";
 import { buildAgentPrompt, buildFunctionBlock, type AgentPromptOptions } from "./builder.ts";
 
 type WorkerRole = ResolvedRole | ResolvedSubAgent;
@@ -32,14 +33,22 @@ export function buildGraphWorkerFunctionBlock(role: WorkerRole): string {
  */
 export function buildGraphWorkerToolGrantBlock(
   declaredTools: readonly string[] | undefined,
+  presentation?: WorkerToolPresentation,
+  baseline: readonly string[] = ["graph_submit_outcome", "graph_worker_exec"],
 ): string {
+  const entries = [...baseline, ...workerPresentationTools(presentation)].join(" and ");
+  const guidance = presentation?.mode === "discover"
+    ? " Use graph_worker_tools to list/search authorized capabilities and describe a tool to load its schema before calling it. Discovery cannot grant additional permissions."
+    : presentation?.mode === "code"
+      ? " Use graph_worker_tools to inspect authorized tool schemas, then graph_worker_code to call them from JavaScript. Submit the outcome separately using graph_submit_outcome."
+      : "";
   if (declaredTools === undefined || declaredTools.length === 0) {
     return "Tool grant: this node declares no extra host tools, so the worker baseline stands — " +
-      "graph_submit_outcome and graph_worker_exec are the only tools you may call, and a call to any other tool is refused.";
+      entries + " are the only tools you may call, and a call to any other tool is refused." + guidance;
   }
-  return "Tool grant: beyond the worker baseline graph_submit_outcome and graph_worker_exec, this node declares the host tools " +
+  return "Tool grant: beyond the worker baseline " + entries + ", this node declares the host tools " +
     declaredTools.join(", ") +
-    ". A name ending in * grants every tool whose name starts with that prefix; a call to any tool this node does not declare is refused.";
+    ". A name ending in * grants every host tool whose name starts with that prefix; a call to any tool this node does not declare is refused. Graph control tools remain unavailable." + guidance;
 }
 
 export function buildGraphWorkerRolePrompt(

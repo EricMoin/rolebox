@@ -1,5 +1,7 @@
 import { afterEach, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -33,6 +35,54 @@ function fixture() {
   };
   return { root, open };
 }
+
+it("binds added host tools to the authenticated caller and aborts them when HTTP disconnects", async () => {
+  const { root } = fixture();
+  let started!: () => void;
+  let aborted!: () => void;
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const cancelled = new Promise<void>(resolve => { aborted = resolve; });
+  const channel = await openGraphWorkerChannel({}, root, join(root, "store"), {
+    resolveTool(name, context) {
+      if (name !== "custom_wait" || context.sessionID !== "worker") return undefined;
+      return { description: "Wait", args: {}, execute: async (_args, ctx) => {
+        started();
+        await new Promise<void>(resolve => ctx.abort.addEventListener("abort", () => { aborted(); resolve(); }, { once: true }));
+        return "cancelled";
+      } };
+    },
+  });
+  channels.push(channel);
+  const grant = channel.issue("worker");
+  const signal = new AbortController();
+  const call = invokeGraphWorkerChannel(grant, "custom_wait", {}, signal.signal).catch(() => undefined);
+  await entered;
+  signal.abort();
+  await call;
+  await Promise.race([cancelled, new Promise((_, reject) => setTimeout(() => reject(new Error("Host tool was not cancelled")), 2_000))]);
+  const other = channel.issue("other");
+  await expect(invokeGraphWorkerChannel(other, "custom_wait", {})).rejects.toThrow("403");
+  await expect(invokeGraphWorkerChannel(grant, "graph_arbitrary", {})).rejects.toThrow("403");
+});
+
+it("never replays a host tool after its response is lost", async () => {
+  const { root } = fixture();
+  let executions = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume the complete submitted call */ }
+    executions++;
+    if (executions === 1) response.socket?.destroy();
+    else response.end(JSON.stringify({ result: "duplicate execution" }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/invoke`;
+  const routeFile = join(root, "route.json");
+  writeFileSync(routeFile, JSON.stringify({ endpoint }));
+  try {
+    await expect(invokeGraphWorkerChannel({ endpoint, routeFile, token: "fixture" }, "memory_write", {})).rejects.toThrow();
+    expect(executions).toBe(1);
+  } finally { server.closeAllConnections(); server.close(); }
+});
 
 it("preserves caller authentication across host restart without storing the bearer", async () => {
   const { root, open } = fixture();

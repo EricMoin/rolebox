@@ -1,4 +1,5 @@
 import type { PendingEffectRecord } from "../ledger/types.ts";
+import type { WorkerToolPresentation } from "../domain/worker-tools.ts";
 import type { ResolvedInput } from "./inputs.ts";
 
 // ── The dispatch request ────────────────────────────────────────────────────
@@ -83,6 +84,7 @@ export interface OutcomeDispatchRequest extends OutcomeDispatchTarget {
    * declaration can never move a grant under a running plan.
    */
   readonly declaredTools?: readonly string[];
+  readonly toolPresentation?: WorkerToolPresentation;
 }
 
 /**

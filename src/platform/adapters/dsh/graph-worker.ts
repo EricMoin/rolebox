@@ -8,6 +8,10 @@ import {
   type OutcomeWorkerPrincipal,
 } from "../../../graph/host/tool-binding.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../types.ts";
+import { workerPresentationTools, type WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
+import { createWorkerCapabilityTools, createWorkerToolSession } from "../../worker-tools/index.ts";
+import { DshToolFactory, type DshToolDefinition, type DshToolRunContext } from "./tool-factory.ts";
+import type { DshContentBlock } from "./agent-registrar.ts";
 import { executeGraphWorkerCommand } from "../../sandbox/worker-exec.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
 
@@ -231,114 +235,239 @@ export function createDshGraphWorkerTools(resolve: (context: CanonicalToolContex
   };
 }
 
-interface WorkerAgent {
+export interface DshWorkerAgent {
   readonly id?: string;
   readonly session?: { readonly id?: string; readonly events?: readonly { type: string; data?: unknown }[] };
-  readonly ctx?: { readonly tools?: { presentAs(mode: "native"): () => void } };
+  readonly ctx?: { readonly tools?: {
+    presentAs(mode: "native"): () => void;
+    register?(definition: DshToolDefinition): () => void;
+  } };
+}
+
+export interface DshWorkerToolSchema {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: unknown;
 }
 
 export interface DshGraphWorkerRegistry {
-  guard?(guard: (execution: { readonly name: string; readonly agent?: WorkerAgent }) => string | undefined): () => void;
+  guard?(guard: (execution: { readonly name: string; readonly agent?: DshWorkerAgent }) => string | undefined): () => void;
+  schemas?(scope?: DshWorkerAgent): readonly DshWorkerToolSchema[];
+  get?(name: string, scope?: DshWorkerAgent): unknown;
+  execute?(execution: {
+    name: string;
+    arguments: Record<string, unknown>;
+    agent: DshWorkerAgent;
+    callId: string;
+    rootCallId?: string;
+    parent?: unknown;
+    signal: AbortSignal;
+  }): Promise<unknown>;
 }
 
-/**
- * The host facts this boundary judges a worker's tool NAME by: which session is a
- * worker, and the HOST tools the executing node declared beyond the baseline.
- *
- * `workerDeclaredToolsOf` is OPTIONAL BY DESIGN. A host that cannot resolve a
- * node's declared grant (an older assembly, a store this process cannot read)
- * leaves every worker at the baseline rather than allowing a name it cannot
- * substantiate, and a host that never declares extra tools is unaffected.
- */
 export type DshGraphWorkerGrantHost = Pick<OutcomeHost, "workerPrincipalOf"> &
-  Partial<Pick<OutcomeHost, "workerDeclaredToolsOf">>;
+  Partial<Pick<OutcomeHost, "workerDeclaredToolsOf" | "workerToolPresentationOf">>;
 
-/** Protect the execution pipeline too: Code Mode transports are outside toolFilter. */
+export interface DshWorkerStartupTools {
+  readonly declaredTools?: readonly string[];
+  readonly toolPresentation?: WorkerToolPresentation;
+}
+
+function nativeResultContent(value: unknown): DshContentBlock[] {
+  if (value === null || typeof value !== "object") return [];
+  const result = value as { content?: unknown; emitted?: unknown[]; value?: unknown };
+  if (Array.isArray(result.content)) {
+    return result.content.filter((block): block is DshContentBlock =>
+      block !== null && typeof block === "object" && typeof block.type === "string");
+  }
+  return [nativeResultContent(result.value), ...(result.emitted ?? []).map(nativeResultContent)].flat();
+}
+
+function nativeResultFailed(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const result = value as { isError?: unknown; metadata?: { error?: unknown } };
+  return result.isError === true || result.metadata?.error === true;
+}
+
+/** Keep authorization in the registry guard and presentation in prompt assembly. */
 export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, tools: DshGraphWorkerRegistry,
   subscribe: (event: string, listener: (...args: unknown[]) => unknown) => (() => void) | void) {
   const labels = new Set<string>();
-  const presentations = new WeakSet<object>();
+  const prepared = new WeakMap<DshWorkerAgent, { startup: DshWorkerStartupTools; activated: Set<string> }>();
   const workerSessions = new Set<string>();
-  const starting = new AsyncLocalStorage<{ active: boolean }>();
+  const starting = new AsyncLocalStorage<{ active: boolean; tools: DshWorkerStartupTools }>();
+  const calls = new AsyncLocalStorage<DshToolRunContext & { token?: unknown }>();
   const disposers: (() => void)[] = [];
-  const isWorker = (agent?: WorkerAgent) => {
+  const isWorker = (agent?: DshWorkerAgent) => {
     if (!agent) return false;
-    if (presentations.has(agent)) return true;
+    if (prepared.has(agent)) return true;
     const sessionId = agent.session?.id ?? agent.id ?? "";
     if (workerSessions.has(sessionId) || host.workerPrincipalOf(sessionId)) return true;
     return agent.session?.events?.some(event => event.type === "subagent/descriptor" && event.data !== null && typeof event.data === "object" &&
       "label" in event.data && typeof event.data.label === "string" && labels.has(event.data.label)) ?? false;
   };
-  /**
-   * The declared HOST tools of the node THIS agent's worker executes, or
-   * `undefined`.
-   *
-   * Resolved through the worker PRINCIPAL the host bound the session as, exactly
-   * like {@link isWorker} — never from the tool name, a caller argument or a
-   * process-wide setting. FAIL CLOSED: an unbound session, a host without the
-   * accessor, a throwing accessor and a value that is not an array all answer
-   * `undefined`, which the predicate below reads as baseline only.
-   */
-  const declaredToolsOf = (agent?: WorkerAgent): readonly string[] | undefined => {
-    if (!agent) return undefined;
-    const sessionId = agent.session?.id ?? agent.id ?? "";
-    if (sessionId.length === 0) return undefined;
-    const principal: OutcomeWorkerPrincipal | undefined = host.workerPrincipalOf(sessionId);
-    if (principal === undefined) return undefined;
-    const lookup = host.workerDeclaredToolsOf;
-    if (lookup === undefined) return undefined;
+  const grantOf = (agent?: DshWorkerAgent): DshWorkerStartupTools => {
+    if (!agent) return {};
+    const principal: OutcomeWorkerPrincipal | undefined = host.workerPrincipalOf(agent.session?.id ?? agent.id ?? "");
+    if (!principal) return prepared.get(agent)?.startup ?? {};
     try {
-      const declared = lookup(principal);
-      return Array.isArray(declared) ? declared : undefined;
-    } catch {
-      return undefined;
-    }
+      const declared = host.workerDeclaredToolsOf?.(principal);
+      return {
+        declaredTools: Array.isArray(declared) ? declared : undefined,
+        toolPresentation: host.workerToolPresentationOf?.(principal),
+      };
+    } catch { return {}; }
   };
-  /**
-   * THE GRANT: the two baseline tools, or a name the executing node declared —
-   * an exact name or a trailing-star prefix such as `computer_*`. The baseline
-   * check runs FIRST, so a baseline call never reaches the store, and every
-   * unresolved grant answers "not granted".
-   */
-  const grantedToWorker = (execution: { readonly name: string; readonly agent?: WorkerAgent }): boolean => {
-    if (isGraphToolName(execution.name) && DSH_GRAPH_WORKER_GRANT.includes(execution.name)) return true;
-    return declaredToolsAllow(execution.name, declaredToolsOf(execution.agent));
+  const grantedToWorker = (name: string, agent?: DshWorkerAgent): boolean => {
+    if (isGraphToolName(name) && DSH_GRAPH_WORKER_GRANT.includes(name)) return true;
+    const grant = grantOf(agent);
+    return workerPresentationTools(grant.toolPresentation).some(tool => tool === name) || declaredToolsAllow(name, grant.declaredTools);
   };
-  const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution)
+  const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution.name, execution.agent)
     ? "Graph workers may only use their node's granted tools: the baseline graph_submit_outcome and graph_worker_exec, plus any host tools the node declares" : undefined);
   if (guard) disposers.push(guard);
-  const prepare = (agent?: WorkerAgent, admitted = false) => {
-    if (agent && (admitted || isWorker(agent)) && !presentations.has(agent)) {
-      const scoped = agent.ctx?.tools;
-      if (!scoped?.presentAs) throw new Error("Graph workers require native scoped tool presentation");
-      disposers.push(scoped.presentAs("native"));
-      presentations.add(agent);
-      const sessionId = agent.session?.id ?? agent.id;
+  const catalogOf = (agent: DshWorkerAgent): readonly DshWorkerToolSchema[] | undefined => {
+    if (!tools.schemas) return undefined;
+    try { return tools.schemas(agent); }
+    catch (error) { throw new Error(`Worker tool catalog is unavailable: ${message(error)}`); }
+  };
+  const checkAvailability = (agent: DshWorkerAgent, grant: DshWorkerStartupTools): string[] => {
+    const catalog = catalogOf(agent);
+    if (!catalog) return [];
+    const names = new Set(catalog.map(tool => tool.name));
+    const exact = [...(grant.declaredTools ?? []).filter(name => !name.endsWith("*")), ...(grant.toolPresentation?.preload ?? [])];
+    const missing = [...new Set(exact.filter(name => !names.has(name)))];
+    if (missing.length) throw new Error(`Worker tool grant names unavailable host tools: ${missing.join(", ")}`);
+    return (grant.declaredTools ?? []).filter(pattern => pattern.endsWith("*") &&
+      !catalog.some(tool => declaredToolsAllow(tool.name, [pattern])));
+  };
+  let subcall = 0;
+  const prepare = (agent?: DshWorkerAgent, admitted = false, startup: DshWorkerStartupTools = {}) => {
+    if (!agent || (!admitted && !isWorker(agent)) || prepared.has(agent)) return;
+    const scoped = agent.ctx?.tools;
+    if (!scoped?.presentAs) throw new Error("Graph workers require native scoped tool presentation");
+    const state = { startup, activated: new Set<string>() };
+    prepared.set(agent, state);
+    const sessionId = agent.session?.id ?? agent.id;
+    const owned: (() => void)[] = [];
+    try {
+      owned.push(scoped.presentAs("native"));
       if (sessionId) workerSessions.add(sessionId);
+      const grant = grantOf(agent);
+      checkAvailability(agent, grant);
+      const presentation = grant.toolPresentation ?? { mode: "native" };
+      if (presentation.mode === "native") {
+        disposers.push(...owned);
+        return;
+      }
+      if (!scoped.register || !tools.schemas || !tools.execute) {
+        throw new Error("Worker discovery and code presentation require scoped registration, tool schemas and registry execution");
+      }
+      const sessionFor = (outer: DshToolRunContext & { token?: unknown }) => createWorkerToolSession({
+        presentation,
+        allowedTools: () => grantOf(agent).declaredTools ?? [],
+        registry: {
+          list: () => catalogOf(agent)!.map(schema => {
+            const definition = tools.get?.(schema.name, agent) as { output?: { schema?: unknown } } | undefined;
+            return { name: schema.name, description: schema.description, inputSchema: schema.parameters,
+              ...(definition?.output?.schema === undefined ? {} : { outputSchema: definition.output.schema }),
+            };
+          }),
+          invoke: async (name, args, context) => {
+            const result = await tools.execute!({ name, arguments: args, agent,
+              callId: `${outer.callId}:worker:${++subcall}`, rootCallId: outer.rootCallId ?? outer.callId,
+              ...(outer.token === undefined ? {} : { parent: outer.token }), signal: context.signal });
+            if (result !== null && typeof result === "object") {
+              const delivered = result as { additionalContexts?: unknown[]; concludesTurn?: boolean };
+              for (const context of delivered.additionalContexts ?? []) outer.deferContext(context);
+              if (delivered.concludesTurn === true) outer.concludeTurn();
+            }
+            return result;
+          },
+        },
+        activate: descriptors => { for (const descriptor of descriptors) state.activated.add(descriptor.name); },
+      });
+      const capabilities = new DshToolFactory().compileAll(createWorkerCapabilityTools({
+        resolveSession: () => {
+          const outer = calls.getStore();
+          if (!outer || outer.agent !== agent) throw new Error("Worker tool invocation requires its original host execution");
+          return sessionFor(outer);
+        },
+        formatResult: result => ({ output: JSON.stringify(result), metadata: {
+          nativeResult: result, ...(nativeResultFailed(result) ? { error: true } : {}),
+        } }),
+      }));
+      for (const name of workerPresentationTools(presentation)) {
+        const compiled = capabilities[name] as DshToolDefinition;
+        const execute = compiled.execute;
+        const render = compiled.output.render;
+        owned.push(scoped.register({ ...compiled,
+          output: { ...compiled.output, render: (args, value) => {
+            const raw = value !== null && typeof value === "object"
+              ? (value as { metadata?: { nativeResult?: unknown } }).metadata?.nativeResult : undefined;
+            const content = nativeResultContent(raw);
+            if (!content.length) return render(args, value);
+            return raw !== null && typeof raw === "object" && "content" in raw
+              ? content : [...render(args, value), ...content];
+          } },
+          execute: (args, execution) => calls.run(execution, () => execute(args, execution)),
+        }));
+      }
+      disposers.push(...owned);
+    } catch (error) {
+      for (const dispose of owned.reverse()) dispose();
+      prepared.delete(agent);
+      if (sessionId) workerSessions.delete(sessionId);
+      throw error;
     }
   };
-  // Prompt assembly precedes pre-step, and the child's descriptor is appended
-  // during pre-step. The host's start scope identifies it before either occurs.
   const created = subscribe("agent/created", (...args) => {
-    prepare((args[0] as { agent?: WorkerAgent }).agent, starting.getStore()?.active === true);
+    const scope = starting.getStore();
+    prepare((args[0] as { agent?: DshWorkerAgent }).agent, scope?.active === true, scope?.tools);
   });
   if (created) disposers.push(created);
+  const assemble = subscribe("system-prompt/assemble", async (...args) => {
+    const assembly = await (args[2] as () => Promise<{ tools: DshWorkerToolSchema[]; contexts?: Array<{ name: string; text: string }> }>)();
+    const agent = (args[1] as { scope?: DshWorkerAgent }).scope;
+    if (!isWorker(agent)) return assembly;
+    prepare(agent);
+    const grant = grantOf(agent);
+    const presentation = grant.toolPresentation;
+    const activated = agent && prepared.get(agent)?.activated;
+    const unmatched = agent ? checkAvailability(agent, grant) : [];
+    return { ...assembly,
+      ...(unmatched.length ? { contexts: [...(assembly.contexts ?? []), {
+        name: "rolebox:worker-tool-availability",
+        text: `No currently available host tool matches these granted prefixes: ${unmatched.join(", ")}. Search the catalog again if a provider becomes available; these grants do not create tools.`,
+      }] } : {}),
+      tools: assembly.tools.filter(tool => {
+        if (!grantedToWorker(tool.name, agent)) return false;
+        if (!presentation || presentation.mode === "native" || isGraphToolName(tool.name)) return true;
+        return declaredToolsAllow(tool.name, presentation.preload) ||
+          (presentation.mode === "discover" && activated?.has(tool.name));
+      }),
+    };
+  });
+  if (assemble) disposers.push(assemble);
   const stop = subscribe("agent/pre-step", async (...args) => {
     const decision = await (args[1] as () => Promise<unknown>)();
-    prepare((args[0] as { agent?: WorkerAgent }).agent);
+    prepare((args[0] as { agent?: DshWorkerAgent }).agent);
     return decision;
   });
   if (stop) disposers.push(stop);
   return {
     isWorker,
-    async start<T>(label: string, create: () => Promise<T>): Promise<T> {
+    async start<T>(label: string, create: () => Promise<T>, startup: DshWorkerStartupTools = {}): Promise<T> {
       if (!guard) throw new Error("This dsh host cannot enforce the graph worker execution guard");
       labels.add(label);
-      const scope = { active: true };
+      const scope = { active: true, tools: startup };
       try { return await starting.run(scope, create); }
       finally { scope.active = false; }
     },
     prepare,
-    dispose() { for (const dispose of disposers.splice(0).reverse()) dispose(); labels.clear(); workerSessions.clear(); starting.disable(); },
+    dispose() {
+      for (const dispose of disposers.splice(0).reverse()) dispose();
+      labels.clear(); workerSessions.clear(); starting.disable(); calls.disable();
+    },
   };
 }

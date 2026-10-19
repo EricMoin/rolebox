@@ -1,4 +1,4 @@
-import type { Plugin, PluginInput } from "@opencode-ai/plugin";
+import type { Plugin, PluginInput, Hooks } from "@opencode-ai/plugin";
 import { OpencodeAgentRegistrar } from "../platform/adapters/opencode/agent-registrar.ts";
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
 import { createPluginHooks } from "../core/composition.ts";
@@ -19,6 +19,7 @@ import { setAgentConfigWorkspace } from "../prompt/agent-config.ts";
 import { createSubLogger, formatError, getLogFilePath, configureLogDirectory } from "../logger.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import { opencodeCapabilities } from "../platform/capabilities.ts";
+import { OpencodeWorkerTools } from "../platform/adapters/opencode/worker-tools.ts";
 
 const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
   configureLogDirectory(ctx.directory);
@@ -78,11 +79,16 @@ const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
   // opencode run a turn on the notification. One adapter is built per plugin
   // context and shared; no second one is constructed for notifications.
   let graphHost: OpencodeGraphHost | undefined;
+  const workerTools = new OpencodeWorkerTools({
+    host: () => graphHost?.host, nativeActivation: false, supportsPresentation: false,
+    catalog: async () => [],
+  });
   try {
     graphHost = OpencodeGraphHost.open({
       workspaceDir: ctx.directory,
       storeRoot: graphStoreRoot(getDataDir(), ctx.directory),
       session: opencodeGraphSessionPort(sessionAdapter),
+      workerTools,
       notifyClient: sessionAdapter,
       sessionEndFeed: true,
       env: process.env,
@@ -118,7 +124,7 @@ const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
     capabilities: opencodeCapabilities(),
     ...(graphHost === undefined ? {} : { outcomeGraphTools: graphHost.createTools() }),
     isGraphWorker: sessionID => graphHost?.host.workerPrincipalOf(sessionID) !== undefined,
-  });
+  }) as Hooks;
 
   // The session ends and the session STATES the declared-graph host reads arrive
   // as EVENTS on this platform: 1.x has no session-turn-end call, so
@@ -168,9 +174,12 @@ const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
       await dispose();
     };
   }
-  // Every other key — `tool`, `config`, `chat.message`, … — is carried through
-  // unchanged, and the two the host reads are the wrapped ones.
-  return { ...hooks, ...wrapped };
+  return { ...hooks, ...wrapped,
+    "tool.execute.before": async (input, output) => {
+      workerTools.assertAllowed(input.sessionID, input.tool);
+      await hooks["tool.execute.before"]?.(input, output);
+    },
+  };
 };
 
 /**

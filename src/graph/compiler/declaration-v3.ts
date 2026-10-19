@@ -1,4 +1,5 @@
 import type { RunBudgetSpec } from "../domain/budget.ts";
+import type { WorkerToolPresentation } from "../domain/worker-tools.ts";
 import type { ContractRef } from "../contracts/contract-definition.ts";
 import type { JoinConfig } from "../domain/join.ts";
 import type { NodeBudgetSpec } from "../domain/budget.ts";
@@ -166,6 +167,8 @@ export interface NodeDeclarationV3 {
    * exactly the baseline restriction.
    */
   tools?: string[];
+  /** How authorized host tools are presented to this worker. */
+  toolPresentation?: WorkerToolPresentation;
 }
 
 // ── Edges ───────────────────────────────────────────────────────────────────
@@ -378,6 +381,7 @@ function isNodeDeclarationV3(value: unknown): boolean {
   // Shape level only, like the input list above: a non-array can never be a
   // host-tool grant, while what an ENTRY may say is the front-end's refusal.
   if (value.tools !== undefined && !Array.isArray(value.tools)) return false;
+  if (value.toolPresentation !== undefined && !isRecord(value.toolPresentation)) return false;
   if (typeof value.agent !== "string") return false;
   if (typeof value.prompt !== "string") return false;
   if (!Array.isArray(value.outcomes)) return false;

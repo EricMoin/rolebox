@@ -1,5 +1,6 @@
 import { HostGraphRuntimes, type RunningGraphRuntime } from "./graph-runtimes.ts";
-import { declaredNodeTools } from "../compiler/plan.ts";
+import { declaredNodeTools, declaredNodeToolPresentation } from "../compiler/plan.ts";
+import type { WorkerToolPresentation } from "../domain/worker-tools.ts";
 import { WORKER_GRANTED_GRAPH_TOOLS, bindOutcomeToolInvocation, reportControlContinuation } from "./tool-binding.ts";
 import type { OutcomeWorkerPrincipal } from "./tool-binding.ts";
 import { applyGraphControl, type GraphControlResult } from "../control/application.ts";
@@ -2761,6 +2762,7 @@ export class OutcomeHost {
         // worker with the baseline alone.
         declaredToolsOf: (principal: OutcomeWorkerPrincipal) =>
           this.workerDeclaredToolsOf(principal),
+        presentationOf: (principal: OutcomeWorkerPrincipal) => this.workerToolPresentationOf(principal),
       },
       ...(getEffectiveAgent === undefined ? {} : { getEffectiveAgent }),
     });
@@ -3067,6 +3069,18 @@ export class OutcomeHost {
       const reading = readStoredDefinition(this.storeRoot, principal.graphId);
       if (reading.kind !== "ok") return undefined;
       return declaredNodeTools(reading.declared.plan, binding.nodeId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  workerToolPresentationOf(principal: OutcomeWorkerPrincipal): WorkerToolPresentation | undefined {
+    try {
+      const binding = this.bridgeFor(principal.graphId).bindingFor({ graphId: principal.graphId, attemptId: principal.attemptId });
+      if (binding === undefined) return undefined;
+      const reading = readStoredDefinition(this.storeRoot, principal.graphId);
+      if (reading.kind !== "ok") return undefined;
+      return declaredNodeToolPresentation(reading.declared.plan, binding.nodeId);
     } catch {
       return undefined;
     }

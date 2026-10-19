@@ -9,6 +9,7 @@ import {
   type ContractRegistry,
 } from "../contracts/resolve.ts";
 import type { JoinConfig } from "../domain/join.ts";
+import { normalizeWorkerToolPresentation, validateWorkerToolPreload, type WorkerToolPresentation } from "../domain/worker-tools.ts";
 import type { NodeBudgetSpec } from "../domain/budget.ts";
 import { nodeBudgetLimitsOf, readRunBudget } from "../domain/budget.ts";
 import {
@@ -736,6 +737,13 @@ function compileNode(
   // `compileGraph` directly can never put a non-string entry into a plan the
   // worker boundary matches tool names against.
   const tools = readDeclaredTools(node.tools, `${base}.tools`, log);
+  let toolPresentation: WorkerToolPresentation | undefined;
+  try {
+    toolPresentation = normalizeWorkerToolPresentation(node.toolPresentation);
+    validateWorkerToolPreload(toolPresentation, tools);
+  } catch (error) {
+    log.errors.push(issue("malformed-declaration", error instanceof Error ? error.message : String(error), `${base}.toolPresentation`));
+  }
 
   return {
     id: node.id,
@@ -748,6 +756,7 @@ function compileNode(
     ...(budget === null ? {} : { budget }),
     ...(inputs === undefined ? {} : { inputs }),
     ...(tools === undefined ? {} : { tools }),
+    ...(toolPresentation === undefined ? {} : { toolPresentation }),
   };
 }
 

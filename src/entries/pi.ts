@@ -3,6 +3,9 @@ import { buildGraphWorkerRolePrompt } from "../prompt/graph-worker.ts";
 import { renderInjectBlock } from "../prompt/blocks.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
+import { piWorkerToolConfig, piWorkerToolAllowed, type PiWorkerToolConfig } from "../platform/adapters/pi/worker-tools.ts";
+import type { CanonicalToolDef } from "../platform/types.ts";
+import { interceptToolBefore } from "../platform/adapters/pi/tool-interceptor.ts";
 /**
  * Pi Extension Entry Point — `src/pi-extension.ts`
  *
@@ -816,8 +819,8 @@ export default async function(pi: any): Promise<void> {
       observeWorker: execution => sessionAdapter.observeGraphWorker(execution.executionId),
       confirmWorkerStopped: execution => sessionAdapter.confirmGraphWorkerStopped(execution.executionId),
       manager: dispatchManager,
-      launchWorker: (args, context) => sessionAdapter.runGraphWorker(
-        () => dispatchManager.launch(args, context)),
+      launchWorker: (args, context, _inputView, request) => sessionAdapter.runGraphWorker(
+        () => dispatchManager.launch(args, context), request),
       directory: process.cwd(),
       onStartFailed: (_request, effect, reason) => {
         outcomeHost?.reportDeliveryFailure(effect, reason);
@@ -959,8 +962,22 @@ export default async function(pi: any): Promise<void> {
     });
     outcomeHost = graphApplication.host;
     bridgeUnsubscribers.push(() => { outcomeDelivery.close(); graphApplication.close(); });
-    const graphWorkerChannel = await openGraphWorkerChannel(graphApplication.createTools(), process.cwd(), graphStoreRoot(getDataDir(), process.cwd()));
-    sessionAdapter.setGraphWorkerChannel((sessionId, agent) => graphWorkerChannel.issue(sessionId, agent));
+    let workerToolDefinitions: Readonly<Record<string, CanonicalToolDef>> = {};
+    const workerToolConfigs = new Map<string, PiWorkerToolConfig>();
+    const graphWorkerChannel = await openGraphWorkerChannel(graphApplication.createTools(), process.cwd(), graphStoreRoot(getDataDir(), process.cwd()), {
+      resolveTool(name, context) {
+        const principal = outcomeHost?.workerPrincipalOf(context.sessionID);
+        const config = workerToolConfigs.get(context.sessionID) ?? (principal === undefined ? undefined :
+          piWorkerToolConfig(PI_SUBAGENT_TOOLS, outcomeHost?.workerDeclaredToolsOf(principal), outcomeHost?.workerToolPresentationOf(principal), workerToolDefinitions));
+        if (config === undefined || !piWorkerToolAllowed(name, config)) return undefined;
+        return workerToolDefinitions[name];
+      },
+    });
+    sessionAdapter.setGraphWorkerToolConfig((request, baseline) => piWorkerToolConfig(baseline, request?.declaredTools, request?.toolPresentation, workerToolDefinitions));
+    sessionAdapter.setGraphWorkerChannel((sessionId, agent, config) => {
+      if (config) workerToolConfigs.set(sessionId, config);
+      return graphWorkerChannel.issue(sessionId, agent);
+    });
     bridgeUnsubscribers.push(() => graphWorkerChannel.close());
     const hostCapabilities = graphApplication.capabilities;
     for (const issue of hostCapabilities.completionPolicyIssues) {
@@ -1398,6 +1415,19 @@ export default async function(pi: any): Promise<void> {
     }
 
     await serviceStack.init();
+    workerToolDefinitions = Object.fromEntries(Object.entries(serviceStack.getCanonicalTools()).map(([name, definition]) => [name, {
+      ...definition,
+      execute: async (args, context) => {
+        const before = await interceptToolBefore(name, "worker-channel", args, context, {
+          ...interceptorHooks,
+          computerUse: interceptorHooks.computerUse ? {
+            ...interceptorHooks.computerUse, activeRoleFor: () => context.agent ?? null,
+          } : undefined,
+        });
+        if (!before.ok) throw new Error(before.error);
+        return definition.execute(before.value, context);
+      },
+    }]));
 
     // ── 6. Event wiring ─────────────────────────────────────────────────
     //

@@ -1,6 +1,9 @@
 import type { HostExecutionObservation } from "../../../graph/host/outcome-host.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { WorkerChannelGrant } from "../../../graph/application/worker-channel.ts";
+import type { OutcomeDispatchRequest } from "../../../graph/outcome/dispatch-effects.ts";
+import type { PiWorkerToolConfig } from "./worker-tools.ts";
+import { buildGraphWorkerToolGrantBlock } from "../../../prompt/graph-worker.ts";
 import { childSessionFile } from "./child-session.ts";
 import { readPiGraphObservation } from "./graph-observation.ts";
 /**
@@ -403,14 +406,19 @@ export class PiProcessSessionAdapter implements ISessionClient {
   // now is the worker delivery grant below. The read-root list it used to carry
   // died with rolebox's own OS profile (docs/graph-outcome-protocol.md,
   // "Worker execution boundary").
-  private readonly graphDispatch = new AsyncLocalStorage<true>();
+  private readonly graphDispatch = new AsyncLocalStorage<{ request?: OutcomeDispatchRequest }>();
 
-  runGraphWorker<T>(launch: () => T): T { return this.graphDispatch.run(true, launch); }
+  runGraphWorker<T>(launch: () => T, request?: OutcomeDispatchRequest): T { return this.graphDispatch.run({ request }, launch); }
 
-  private graphWorkerChannel?: (sessionId: string, agent?: string) => WorkerChannelGrant;
+  private graphWorkerChannel?: (sessionId: string, agent?: string, config?: PiWorkerToolConfig) => WorkerChannelGrant;
+  private graphWorkerToolConfig?: (request: OutcomeDispatchRequest | undefined, baseline: readonly string[]) => PiWorkerToolConfig;
 
-  setGraphWorkerChannel(issue: (sessionId: string, agent?: string) => WorkerChannelGrant): void {
+  setGraphWorkerChannel(issue: (sessionId: string, agent?: string, config?: PiWorkerToolConfig) => WorkerChannelGrant): void {
     this.graphWorkerChannel = issue;
+  }
+
+  setGraphWorkerToolConfig(resolve: (request: OutcomeDispatchRequest | undefined, baseline: readonly string[]) => PiWorkerToolConfig): void {
+    this.graphWorkerToolConfig = resolve;
   }
 
   // ── Recovery ──────────────────────────────────────────────────────────────
@@ -1058,9 +1066,12 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // --append-system-prompt). Falls back to the record's config when no
     // explicit prompt is passed (e.g. reopenForContinuation).
     // If there is no system prompt, an empty file is written.
-    const effectivePrompt = this.graphDispatch.getStore()
+    const graphDispatch = this.graphDispatch.getStore();
+    const workerTools = graphDispatch && this.graphWorkerToolConfig?.(graphDispatch.request, tools);
+    const rolePrompt = graphDispatch
       ? record.agentConfig.graphWorkerSystemPrompt ?? systemPrompt ?? record.agentConfig.systemPrompt
       : systemPrompt ?? record.agentConfig.systemPrompt;
+    const effectivePrompt = workerTools ? rolePrompt + "\n\n" + buildGraphWorkerToolGrantBlock(workerTools.grants, workerTools.presentation, workerTools.baseline) : rolePrompt;
     await writeFile(sysPromptPath, effectivePrompt, "utf-8");
 
     // Persist the effective system prompt NEXT TO the transcript
@@ -1072,7 +1083,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
 
     // Build CLI arguments (ordering locked by buildSpawnArgs + unit tests).
     const nativeSessionFile = await childSessionFile(process.cwd(), id);
-    const args = buildSpawnArgs(model, tools, sysPromptPath, promptText, undefined, nativeSessionFile);
+    const args = buildSpawnArgs(model, workerTools ? [...workerTools.baseline] : tools, sysPromptPath, promptText, undefined, nativeSessionFile);
 
     this.log.debug("Spawning Pi process", { id, model, toolCount: tools.length, agent: agentId });
 
@@ -1091,10 +1102,11 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // every non-batch binary — keeps the direct `[executable, ...args]` vector.
     const command = resolveSpawnCommand(this._resolvePiBinary(), args);
     if (this.graphWorkerChannel && this.graphDispatch.getStore()) {
-      const grant = this.graphWorkerChannel(id, agentId);
+      const grant = this.graphWorkerChannel(id, agentId, workerTools);
       childEnv.ROLEBOX_GRAPH_WORKER_ENDPOINT = grant.endpoint;
       childEnv.ROLEBOX_GRAPH_WORKER_TOKEN = grant.token;
       if (grant.routeFile) childEnv.ROLEBOX_GRAPH_WORKER_ROUTE = grant.routeFile;
+      if (workerTools) childEnv.ROLEBOX_GRAPH_WORKER_TOOLS = JSON.stringify(workerTools);
       // NO OS PROFILE IS APPLIED HERE. This path has no host sandbox service to
       // resolve the session's policy, so rolebox no longer wraps the child in a
       // boundary of its own: it spawns the resolved pi binary directly and the

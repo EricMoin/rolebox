@@ -1,4 +1,5 @@
 import type { RunBudgetSpec } from "../domain/budget.ts";
+import { normalizeWorkerToolPresentation, validateWorkerToolPreload, type WorkerToolPresentation } from "../domain/worker-tools.ts";
 import {
   contractDigest,
   type ContractContentSnapshot,
@@ -161,6 +162,7 @@ export interface CompiledNode {
    * so `planRevision` covers it: a grant cannot be edited under a running plan.
    */
   readonly tools?: readonly string[];
+  readonly toolPresentation?: WorkerToolPresentation;
 }
 
 /**
@@ -559,6 +561,24 @@ export function declaredNodeTools(
       names.push(tool);
     }
     return names.length === 0 ? undefined : Object.freeze(names);
+  }
+  return undefined;
+}
+
+export function declaredNodeToolPresentation(plan: unknown, nodeId: string): WorkerToolPresentation | undefined {
+  if (typeof plan !== "object" || plan === null || Array.isArray(plan)) return undefined;
+  const nodes = (plan as Record<string, unknown>).nodes;
+  if (!Array.isArray(nodes)) return undefined;
+  for (const raw of nodes as readonly unknown[]) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const node = raw as Record<string, unknown>;
+    if (node.id !== nodeId) continue;
+    try {
+      const presentation = normalizeWorkerToolPresentation(node.toolPresentation);
+      validateWorkerToolPreload(presentation, declaredNodeTools(plan, nodeId));
+      return presentation;
+    }
+    catch { return undefined; }
   }
   return undefined;
 }

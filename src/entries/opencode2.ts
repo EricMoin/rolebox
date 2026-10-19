@@ -38,6 +38,7 @@
  */
 
 import { Plugin } from "@opencode/plugin";
+import { OpencodeWorkerTools } from "../platform/adapters/opencode/worker-tools.ts";
 import type { Plugin as Opencode2Plugin } from "@opencode/plugin";
 import {
   Opencode2SessionAdapter,
@@ -521,6 +522,15 @@ export function createOpencode2Plugin(
       //     A partial Context with no `ctx.session.wait` degrades to no wait
       //     rather than throwing (the wait is never synthesized).
       let graphHost: OpencodeGraphHost | undefined;
+      let workerGuardReady = false;
+      let workerContextReady = false;
+      let workerRegistrationReady = false;
+      const workerTools = new OpencodeWorkerTools({
+        host: () => graphHost?.host, nativeActivation: true,
+        ready: () => workerGuardReady && workerContextReady && workerRegistrationReady,
+        contextCatalogOnly: true,
+        catalog: async () => [],
+      });
       try {
         const sessionWait = ctx.session.wait;
         // THE PLATFORM'S OWN READ OF A SESSION'S TERMINAL OUTCOME. A context
@@ -531,6 +541,7 @@ export function createOpencode2Plugin(
         graphHost = (deps.openGraphHost ?? openOpencode2GraphHost)({
           directory,
           client: sessionAdapter,
+          workerTools,
           // THE DECLARING SESSION'S WAKE-UP CHANNEL, named at this seam as well as
           // derived by the factory: the host pushes the shipped
           // `[GRAPH COMPLETE] / [GRAPH BLOCKED]` reminder into the session that
@@ -581,6 +592,7 @@ export function createOpencode2Plugin(
         ...(graphHost === undefined ? {} : { outcomeGraphTools: graphHost.createTools() }),
         isGraphWorker: sessionID => graphHost?.host.workerPrincipalOf(sessionID) !== undefined,
       })) as unknown as Opencode2Handlers;
+      const workerCapabilityTools = graphHost === undefined ? {} : workerTools.createTools();
 
       // 2d. What the declared-graph host installed or had to degrade, one line
       //     each — the completion channel, the observation read, the cancel port
@@ -603,16 +615,19 @@ export function createOpencode2Plugin(
       // 3a. Tools — one editor.add per canonical tool.
       const toolFactory = new Opencode2ToolFactory({ directory });
       const compiled = toolFactory.compileAll(
-        (handlers.tool ?? {}) as Parameters<Opencode2ToolFactory["compileAll"]>[0],
+        { ...(handlers.tool ?? {}), ...workerCapabilityTools } as Parameters<Opencode2ToolFactory["compileAll"]>[0],
       );
       disposers.push(
-        await safeRegister(log, "tool", () =>
-          ctx.tool.transform((editor) => {
+        await safeRegister(log, "tool", async () => {
+          const registration = await ctx.tool.transform((editor) => {
             for (const [name, tool] of Object.entries(compiled)) {
               if (name.length === 0 || tool === undefined) continue;
               editor.add(tool as never);
             }
-          }),
+          });
+          workerRegistrationReady = true;
+          return registration;
+        },
         ),
       );
 
@@ -622,15 +637,19 @@ export function createOpencode2Plugin(
       //     the handler mutated, so recovery guards that rewrite args keep
       //     working (src/hooks/tool-before.ts:48-70).
       disposers.push(
-        await safeRegister(log, "tool.execute.before", () =>
-          ctx.tool.hook("execute.before", async (event) => {
+        await safeRegister(log, "tool.execute.before", async () => {
+          const registration = await ctx.tool.hook("execute.before", async (event) => {
+            workerTools.assertAllowed(event.sessionID, event.tool);
             const view = toolArgsView(event);
             await handlers["tool.execute.before"](
               { tool: event.tool, sessionID: event.sessionID, callID: event.id },
               view,
             );
             if (view.args !== event.input) event.input = view.args;
-          }),
+          });
+          workerGuardReady = true;
+          return registration;
+        },
         ),
       );
 
@@ -731,8 +750,9 @@ export function createOpencode2Plugin(
       //     `SessionContext.agent` explicitly, so that fallback is not needed
       //     here.
       disposers.push(
-        await safeRegister(log, "session.context", () =>
-          ctx.session.hook("context", async (event) => {
+        await safeRegister(log, "session.context", async () => {
+          const registration = await ctx.session.hook("context", async (event) => {
+            if (event.tools) workerTools.filterContext(event.sessionID, event.tools);
             if (event.sessionID && event.agent) {
               hookState.sessionAgentRegistry.set(event.sessionID, String(event.agent));
             }
@@ -754,7 +774,10 @@ export function createOpencode2Plugin(
                 ? previous
                 : { type: "text" as const, text };
             });
-          }),
+          });
+          workerContextReady = true;
+          return registration;
+        },
         ),
       );
 

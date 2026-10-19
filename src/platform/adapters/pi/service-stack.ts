@@ -133,6 +133,11 @@ export class PiLightweightServiceStack implements IHookProvider {
   private _outcomeGraphTools?: Record<string, CanonicalToolDef>;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
+  private _canonicalTools: Record<string, CanonicalToolDef> = {};
+
+  getCanonicalTools(): Readonly<Record<string, CanonicalToolDef>> {
+    return this._canonicalTools;
+  }
 
   constructor(
     pi: any,
@@ -246,6 +251,7 @@ export class PiLightweightServiceStack implements IHookProvider {
 
     // 3. Compile all tools to Pi's native format
     const compiled = this._toolFactory.compileAll(allTools);
+    this._canonicalTools = allTools;
 
     // 4. Store compiled tools for getHandlers() (IHookProvider compliance)
     this._compiledTools = compiled;

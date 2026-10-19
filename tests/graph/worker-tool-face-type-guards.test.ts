@@ -92,7 +92,9 @@ const VOCABULARY_RESOLVES_THROUGH_THE_GUARD: readonly GraphToolName[] =
 
 describe("the worker graph-tool faces", () => {
   it("answers membership by narrowing into one closed vocabulary", () => {
-    expect(GRAPH_TOOL_NAMES.length).toBe(6);
+    expect(GRAPH_TOOL_NAMES.length).toBe(8);
+    expect(isGraphToolName("graph_worker_tools")).toBe(true);
+    expect(isGraphToolName("graph_worker_code")).toBe(true);
     expect([...VOCABULARY_RESOLVES_THROUGH_THE_GUARD]).toEqual([...GRAPH_TOOL_NAMES]);
     expect(isGraphToolName("graph_not_shipped")).toBe(false);
     expect(isGraphToolName("graph_submit_outcome_extra")).toBe(false);

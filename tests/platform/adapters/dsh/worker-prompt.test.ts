@@ -80,6 +80,14 @@ function filesUnder(root: string): string[] {
 }
 
 describe("DSH graph worker prompt", () => {
+  it("names the enabled capability entry points even without extra host grants", () => {
+    const f = fixture();
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED,
+      undefined, { mode: "code" });
+    expect(prompt).toContain("Your tool entry points are graph_worker_exec, graph_submit_outcome, graph_worker_tools, graph_worker_code");
+    expect(prompt).not.toContain("Your tools are graph_worker_exec and graph_submit_outcome.");
+  });
+
   it("omits inactive function instructions that the worker cannot activate", () => {
     const f = fixture();
     f.planner.functions.push({

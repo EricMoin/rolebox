@@ -108,6 +108,7 @@ import type {
   OutcomeDispatchEffectKey,
   OutcomeDispatchRequest,
 } from "../../../graph/outcome/dispatch-effects.ts";
+import { buildGraphWorkerToolGrantBlock } from "../../../prompt/graph-worker.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 import { createGraphNotificationSender } from "../../graph-notifications.ts";
@@ -254,6 +255,10 @@ export function opencodeGraphSessionPort(
 
 /** Inputs to {@link OpencodeGraphHost.open}. */
 export interface OpencodeGraphHostOptions {
+  readonly workerTools?: {
+    prepare(request: OutcomeDispatchRequest): Promise<void>;
+    bind(sessionID: string, request: OutcomeDispatchRequest): void;
+  };
   /** The workspace whose artifacts an attempt produces and whose agent it runs as. */
   readonly workspaceDir: string;
   /** The HOST-owned root the vault, the execution index and the ledger live under. */
@@ -536,8 +541,11 @@ export class OpencodeGraphHost {
     effect: OutcomeDispatchEffectKey,
     inputView?: DeliveredInputView,
   ): Promise<void> {
+    try { await this.options.workerTools?.prepare(request); }
+    catch (error) { this.failDelivery(request, effect, "worker tool configuration refused before session creation", error); return; }
     // 1. The ONE channel the credential travels over (delivery.ts:14-43).
-    const text = buildAttemptDeliveryPrompt(request, inputView);
+    const text = buildAttemptDeliveryPrompt(request, inputView) + (request.toolPresentation === undefined ? "" :
+      "\n\n" + buildGraphWorkerToolGrantBlock(request.declaredTools, request.toolPresentation, ["bash", "graph_submit_outcome"]));
     // 2-3. Create the session and confirm it, in that order: the confirm is what
     // turns the registry row from `creating` into a host FACT.
     let session: { id: string } | null;
@@ -561,6 +569,7 @@ export class OpencodeGraphHost {
       return;
     }
     this.host.confirmExecution(effect, { executionId: session.id });
+    this.options.workerTools?.bind(session.id, request);
     // 4. Remember which attempt — and which NODE — this session was handed,
     // BEFORE the prompt: the platform's end may arrive while the prompt is still
     // in flight, and the end path reports a failed execution by graph/node/

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workerPresentationTools, type WorkerToolPresentation } from "../domain/worker-tools.ts";
 
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 import { readAppliedControl } from "../control/contracts.ts";
@@ -109,6 +110,7 @@ export interface OutcomeWorkerToolBoundary {
   readonly declaredToolsOf?: (
     principal: OutcomeWorkerPrincipal,
   ) => readonly string[] | undefined;
+  readonly presentationOf?: (principal: OutcomeWorkerPrincipal) => WorkerToolPresentation | undefined;
 }
 
 /**
@@ -180,6 +182,8 @@ export const GRAPH_TOOL_NAMES = Object.freeze([
   "graph_control",
   /** dsh's worker command entry, shipped beside the graph face on that host. */
   "graph_worker_exec",
+  "graph_worker_tools",
+  "graph_worker_code",
 ] as const);
 
 /** One tool name in the graph face's closed vocabulary. */
@@ -285,6 +289,13 @@ function workerToolRefusal(
   if (sessionId === undefined || sessionId.length === 0) return undefined;
   const principal = boundary.principalOf(sessionId);
   if (principal === undefined) return undefined;
+  let presentationTools: readonly string[] = [];
+  try {
+    presentationTools = workerPresentationTools(boundary.presentationOf?.(principal));
+  } catch {
+    // An unreadable presentation never grants a capability entry point.
+  }
+  if (presentationTools.includes(toolName)) return undefined;
   // THE DECLARED GRANT IS THE NODE'S OWN: it is resolved from the principal the
   // HOST bound this session as — never from the caller, the tool name or a
   // process-wide setting — and it only ever ADDS names for that one worker.
@@ -294,6 +305,7 @@ function workerToolRefusal(
     toolName,
     [
       ...boundary.granted,
+      ...presentationTools,
       // A declared graph-namespace entry is NOT reported as granted: it admits
       // no host tool, and this refusal is read as "what the face grants".
       ...declared.filter((entry) => !declaredEntryNamesGraphFace(entry)),

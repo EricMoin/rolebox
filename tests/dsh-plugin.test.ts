@@ -310,9 +310,13 @@ function createFakeCtx(
     taken(name) || registeredTools.some((def) => def.name === name)
       ? hostOwnedDefinition(name)
       : undefined;
+  const workerGuards: Array<Parameters<NonNullable<DshPluginContext["tools"]["guard"]>>[0]> = [];
   const tools = {
     registeredTools,
-    guard: () => () => {},
+    guard: (callback: Parameters<NonNullable<DshPluginContext["tools"]["guard"]>>[0]) => {
+      workerGuards.push(callback);
+      return () => { workerGuards.splice(workerGuards.indexOf(callback), 1); };
+    },
     ...(options.noToolsLookup ? {} : { get: lookup }),
     register(definition: DshToolDefinition): () => void {
       registeredTools.push(definition);
@@ -423,6 +427,7 @@ function createFakeCtx(
   return {
     ctx,
     tools,
+    workerGuards,
     providers,
     listeners,
     systemPrompt,
@@ -993,6 +998,7 @@ describe("dsh plugin apply()", () => {
     // child creation the worker boundary observes is emitted here, inside the
     // worker's start scope.
     const requests: DshSubagentStartRequest[] = [];
+    const workers: Array<{ id: string; session: { id: string; events: never[] } }> = [];
     runtime.startActivation = async (spec) => {
       requests.push({ ...spec.request, label: spec.label, signal: spec.signal });
       const id = "worker-" + requests.length;
@@ -1001,6 +1007,7 @@ describe("dsh plugin apply()", () => {
         session: { id, events: [] },
         ctx: { tools: { presentAs: () => () => {} } },
       };
+      workers.push(worker);
       fixture.ctx.emit("agent/created", { agent: worker });
       return {
         childId: id,
@@ -1064,6 +1071,17 @@ describe("dsh plugin apply()", () => {
         await new Promise((r) => setTimeout(r, 5));
       }
       expect(requests).toHaveLength(2);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      // Confirmed execution bindings must retain each node's grant through the
+      // real entry's host delegation, after the temporary start scope ends.
+      const shooterIndex = requests.findIndex(request => request.label?.includes("shooter#"));
+      const plainIndex = requests.findIndex(request => request.label?.includes("plain#"));
+      const guard = fixture.workerGuards.find(check =>
+        check({ name: "graph_control", agent: workers[shooterIndex] })?.includes("Graph workers may only"))!;
+      expect(guard).toBeDefined();
+      expect(guard({ name: "computer_screenshot", agent: workers[shooterIndex] })).toBeUndefined();
+      expect(guard({ name: "computer_screenshot", agent: workers[plainIndex] })).toContain("Graph workers may only");
+      expect(guard({ name: "graph_control", agent: workers[shooterIndex] })).toContain("Graph workers may only");
 
       const requestOf = (node: string): DshSubagentStartRequest =>
         requests.find((request) => (request.label ?? "").includes(node + "#"))!;

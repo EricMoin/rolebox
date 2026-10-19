@@ -1309,28 +1309,6 @@ export async function apply(
   const activeRoleStore = new ActiveRoleStore(process.cwd());
   const activeRole = createActiveRoleRef(activeRoleStore);
   let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary> | undefined;
-  /**
-   * EVERY CANONICAL TOOL NAME THIS BOOT COMPOSED — the candidate set a node's
-   * declared grant may name (`tools: ["computer_*"]` becomes the registered
-   * computer_* names), intersected per delivery with the host's own lookup.
-   *
-   * WHY A CANDIDATE SET IS NEEDED AT ALL: a node's declared grant is a list of
-   * CONCRETE names (`tools: ["computer_*"]`), and a declared PREFIX has to be
-   * expanded against something. The composed record is that something, and it is
-   * a SUPERSET: nothing is granted by being here — the per-delivery intersection
-   * with `ctx.tools.get` is what decides, so a name this boot did not actually
-   * register (namespace-filtered, gate-filtered, skipped on collision) is never
-   * reported as granted by the execution guard, nor stated in the worker prompt.
-   * (On dsh 0.1.x this same list became the start request's `toolFilter.allow`;
-   * dsh 0.2.x removed that field.)
-   *
-   * PUBLISHED AFTER THE BOOT'S TWO REGISTRATION GENERATIONS RUN, which is after
-   * the sessions restored at boot may already have opened their graph runtimes:
-   * a delivery that happens in that early window (a boot-window recovery) sees
-   * the empty set and therefore delivers the registered baseline alone — the
-   * fail-closed answer, never a name the host cannot resolve.
-   */
-  let workerToolCandidates: readonly string[] = Object.freeze([]);
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -1641,6 +1619,24 @@ export async function apply(
       }
       return undefined;
     },
+    workerDeclaredToolsOf: principal => {
+      for (const runtime of graphRuntimes.values()) {
+        const worker = runtime.host.workerPrincipalOf(principal.workerSessionId);
+        if (worker?.graphId === principal.graphId && worker.attemptId === principal.attemptId) {
+          return runtime.host.workerDeclaredToolsOf(principal);
+        }
+      }
+      return undefined;
+    },
+    workerToolPresentationOf: principal => {
+      for (const runtime of graphRuntimes.values()) {
+        const worker = runtime.host.workerPrincipalOf(principal.workerSessionId);
+        if (worker?.graphId === principal.graphId && worker.attemptId === principal.attemptId) {
+          return runtime.host.workerToolPresentationOf(principal);
+        }
+      }
+      return undefined;
+    },
   }, ctx.tools, (event, listener) => ctx.on(event, listener));
   function openGraphRuntime(workspace: string) {
     let outcomeHost: OutcomeHost | undefined;
@@ -1673,11 +1669,11 @@ export async function apply(
         // hook does not read it.
         return prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
           resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
-          request.declaredTools);
+          request.declaredTools, request.toolPresentation);
       },
       composeRequest: (agent, request, workerPrompt) =>
         registrar.composeSpawnRequest(agent, request, workerPrompt),
-      startWorker: async (label, start) => workerBoundary!.start(label, start),
+      startWorker: async (label, start, request) => workerBoundary!.start(label, start, request),
       // THE BASELINE the delivery falls back to: the static two-tool surface, used
       // when the per-request resolver below is not installed (a host with no tool
       // lookup) or answers nothing. It is never widened from here.
@@ -1693,7 +1689,7 @@ export async function apply(
           resolveDshWorkerToolAllowList({
             baseline: DSH_GRAPH_WORKER_TOOLS,
             declared: request.declaredTools,
-            candidates: workerToolCandidates,
+            candidates: ctx.tools.schemas?.().map(tool => tool.name) ?? [],
             isRegistered: (name: string) => {
               try {
                 return ctx.tools.get?.(name) !== undefined;
@@ -2305,15 +2301,6 @@ export async function apply(
   // Initial generation: the same four tools, registered through the reload
   // seam so a later re-registration replaces them cleanly.
   registeredTools += registerRoleSnapshotTools(resolvedRoles);
-
-  // THE CANDIDATE SET IS PUBLISHED NOW (item 1b): every canonical name this boot
-  // composed is a name a node's declared grant may name, and the per-delivery
-  // intersection with the host lookup decides which of them are real. A name the
-  // namespace filter or the computer-use gate dropped is NOT registered, so the
-  // intersection excludes it — the list is a superset of candidates, never a
-  // grant. `graph_*` names are in it too; the declared-grant matcher refuses the
-  // graph namespace outright, so they can never be granted by a declaration.
-  workerToolCandidates = Object.freeze([...new Set(Object.keys(tools))]);
 
   // 5. Mount hooks (rolebox hook kinds onto dsh extension points).
   const hookProvider = new DshHookProvider(ctx, {});

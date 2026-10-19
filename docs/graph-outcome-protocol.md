@@ -129,6 +129,8 @@ the failing path, and nothing is persisted.
 | `join` | No | Fan-in strategy: `{ strategy: "all" }`, `{ strategy: "any" }` or `{ strategy: "quorum", quorum: N }` with a positive integer `N`. |
 | `budget` | No | Per-node ceilings: `timeout_ms`, `max_input_tokens`, `max_output_tokens`, `max_cost_usd`. `max_retries` is refused by name. |
 | `inputs` | No | The accepted results this node consumes, each `{ from, outcome, when?: "triggered" }`. Resolved against declared nodes and outcomes at compile time. |
+| `tools` | No | Extra host tool names or trailing-star prefixes, such as `docs_search` or `docs_*`. The grant never admits graph control tools. |
+| `toolPresentation` | No | `{ mode: "native" \| "discover" \| "code", preload?: string[] }`. Controls how granted tools are shown, without expanding authority. See [Worker tools](worker-tools.md). |
 
 **A join waits for FEEDERS, and a loop continuation edge is not one.** The nodes
 a `join` counts are the sources of the node's in-edges **minus the loop
@@ -934,8 +936,9 @@ the worker execution boundary's job.
 ## Worker execution boundary
 
 A dispatched worker is not a second operator. Which graph tools it may call is an
-allow-list decided per call: the granted name is `graph_submit_outcome`, and
-every other graph tool refuses a session the host bound as a dispatched worker —
+allow-list decided per call: `graph_submit_outcome` is the completion entry;
+hosts may additionally provide worker execution, discovery and code entries.
+Graph control tools refuse a session the host bound as a dispatched worker —
 declaring or mutating a graph definition, reading the authoritative store and
 controlling another attempt belong to the declaring principal.
 
@@ -943,8 +946,10 @@ What a worker actually gets depends on the host:
 
 | Host | Worker-facing tools |
 | --- | --- |
-| pi | `graph_submit_outcome`, delivered through a loopback channel to its owning host process |
-| dsh | `graph_submit_outcome` and `graph_worker_exec`, presented natively to the child |
+| pi | Native worker tools and `graph_submit_outcome`, with the latter delivered through a loopback channel to its owning host process |
+| dsh | `graph_submit_outcome` and `graph_worker_exec` by default; declared host tools and presentation entries are added per node |
+
+Worker grants, discovery and code invocation are described in [Worker tools](worker-tools.md).
 
 A dsh graph worker receives its target role's prompt, functions and model. The
 declaring session's active role is not applied to that child. Worker prompts omit

@@ -905,11 +905,9 @@ export class DshOutcomeDelivery {
     // static baseline rather than starting a worker under a list nobody
     // resolved. Never wider, only narrower.
     //
-    // ON dsh 0.2.x THIS LIST NO LONGER REACHES THE START REQUEST: dsh removed
-    // the start-request `toolFilter` field, so the worker's face is enforced by
-    // rolebox's execution guard (`installDshGraphWorkerBoundary`) and STATED in
-    // the worker prompt (`prepareDshGraphWorkerPrompt`), which is why the tool
-    // sentence below is still appended.
+    // The start scope carries this request to the worker boundary, which
+    // filters the model's schemas through system-prompt/assemble and checks
+    // every execution independently through the host registry guard.
     let workerTools: readonly string[] | undefined;
     try {
       workerTools = this.opts.workerToolsOf?.(request) ?? this.opts.workerTools;

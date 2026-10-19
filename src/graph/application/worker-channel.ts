@@ -150,8 +150,10 @@ export async function openGraphWorkerChannel<T extends Record<string, CanonicalT
   tools: T,
   directory: string,
   storeRoot: string,
+  options?: { resolveTool?(name: string, context: CanonicalToolContext): CanonicalToolDef | undefined },
 ) {
   const store = GraphStore.openFile(storeRoot);
+  const invocations = new Map<string, AbortController>();
   const server = createServer(async (request, response) => {
     const reply = (status: number, body: unknown) => {
       response.writeHead(status, { "content-type": "application/json" });
@@ -166,10 +168,16 @@ export async function openGraphWorkerChannel<T extends Record<string, CanonicalT
       reply(503, { error: "Graph worker channel is unavailable" });
       return;
     }
-    if (!caller || request.method !== "POST" || request.url !== "/invoke") {
+    if (!caller || request.method !== "POST" || (request.url !== "/invoke" && request.url !== "/cancel")) {
       reply(403, { error: "Worker channel rejected the invocation" });
       return;
     }
+    const controller = new AbortController();
+    const aborted = () => controller.abort(new Error("Worker invocation disconnected"));
+    const closed = () => { if (!response.writableEnded) aborted(); };
+    let invocationKey: string | undefined;
+    request.once("aborted", aborted);
+    response.once("close", closed);
     try {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -183,22 +191,40 @@ export async function openGraphWorkerChannel<T extends Record<string, CanonicalT
         chunks.push(bytes);
       }
       const input: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      const envelope = z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()) }).strict().parse(input);
+      if (request.url === "/cancel") {
+        const cancellation = z.object({ callId: z.string().min(1).max(128) }).strict().parse(input);
+        invocations.get(`${caller.tokenDigest}/${cancellation.callId}`)?.abort(new Error("Worker invocation cancelled"));
+        reply(200, { cancelled: true });
+        return;
+      }
+      const envelope = z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()), callId: z.string().min(1).max(128).optional() }).strict().parse(input);
+      if (envelope.callId) {
+        const key = `${caller.tokenDigest}/${envelope.callId}`;
+        if (invocations.has(key)) throw new Error("Duplicate worker invocation");
+        invocationKey = key;
+        invocations.set(key, controller);
+      }
       // The name arrives as an unchecked `string`: it is narrowed into the
       // closed vocabulary FIRST, so the typed membership below is a real check
       // and a name outside the face cannot reach a tool definition at all.
-      const tool = isGraphToolName(envelope.tool) && allowedTools.has(envelope.tool)
-        ? workerChannelToolOf(tools, envelope.tool) : undefined;
-      if (!tool) { reply(403, { error: "This worker channel does not expose that tool" }); return; }
       const context: CanonicalToolContext = {
         sessionID: caller.sessionId, agent: caller.agent, directory, worktree: directory,
-        messageID: "worker-channel", abort: new AbortController().signal,
+        messageID: "worker-channel", abort: controller.signal,
         metadata() { }, async ask() { throw new Error("Worker channel cannot approve permissions"); },
       };
-      reply(200, { result: await invokeWorkerChannelTool(tool, envelope.args, context) });
+      const tool = isGraphToolName(envelope.tool)
+        ? allowedTools.has(envelope.tool) ? workerChannelToolOf(tools, envelope.tool) : undefined
+        : envelope.tool.startsWith("graph_") ? undefined : options?.resolveTool?.(envelope.tool, context);
+      if (!tool) { reply(403, { error: "This worker channel does not expose that tool" }); return; }
+      const result = await invokeWorkerChannelTool(tool, envelope.args, context);
+      if (controller.signal.aborted) response.destroy(); else reply(200, { result });
     } catch {
       // Exceptions may contain caller data; the protocol deliberately returns no raw exception.
-      reply(400, { error: "Worker invocation failed validation or execution" });
+      if (controller.signal.aborted) response.destroy(); else reply(400, { error: "Worker invocation failed validation or execution" });
+    } finally {
+      request.off("aborted", aborted);
+      response.off("close", closed);
+      if (invocationKey) invocations.delete(invocationKey);
     }
   });
   server.requestTimeout = 30_000;
@@ -234,47 +260,62 @@ export async function openGraphWorkerChannel<T extends Record<string, CanonicalT
     revoke(sessionID: string) {
       store.forgetWorkerChannels(sessionID);
     },
-    close() { if (closed) return; closed = true; server.closeAllConnections(); server.close(); store.close(); },
+    close() { if (closed) return; closed = true; for (const controller of invocations.values()) controller.abort(); invocations.clear(); server.closeAllConnections(); server.close(); store.close(); },
   };
 }
 
 export async function invokeGraphWorkerChannel(grant: WorkerChannelGrant, tool: string, args: unknown, signal?: AbortSignal) {
+  const callId = randomBytes(16).toString("hex");
   const currentEndpoint = () => grant.routeFile
     ? z.object({ endpoint: z.string().regex(/^http:\/\/127\.0\.0\.1:[0-9]+\/invoke$/) }).strict().parse(JSON.parse(readFileSync(grant.routeFile, "utf8"))).endpoint
     : grant.endpoint;
   const send = async (endpoint: string) => {
     const response = await fetch(endpoint, {
-      method: "POST", headers: { authorization: `Bearer ${grant.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ tool, args }), signal,
+      method: "POST", headers: { authorization: `Bearer ${grant.token}`, "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ tool, args, callId }), signal,
     });
     if (response.status >= 500) throw new Error("Graph worker channel is unavailable");
     return response;
   };
-  let response: Response;
-  try { response = await send(currentEndpoint()); }
-  catch (error) {
-    if (!grant.routeFile || signal?.aborted) throw error;
-    const deadline = Date.now() + 15_000;
-    while (true) {
-      signal?.throwIfAborted();
-      try {
-        response = await send(currentEndpoint());
-        break;
-      } catch {
-        if (Date.now() >= deadline || signal?.aborted) throw error;
-        await new Promise(resolve => setTimeout(resolve, 100));
+  let endpoint = currentEndpoint();
+  const cancel = () => {
+    void fetch(endpoint.replace(/\/invoke$/, "/cancel"), {
+      method: "POST", headers: { authorization: `Bearer ${grant.token}`, "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ callId }),
+    }).catch(() => {});
+  };
+  signal?.throwIfAborted();
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    let response: Response;
+    try { response = await send(endpoint); }
+    catch (error) {
+      if (tool !== "graph_submit_outcome" || !grant.routeFile || signal?.aborted) throw error;
+      const deadline = Date.now() + 15_000;
+      while (true) {
+        signal?.throwIfAborted();
+        try {
+          endpoint = currentEndpoint();
+          response = await send(endpoint);
+          break;
+        } catch {
+          if (Date.now() >= deadline || signal?.aborted) throw error;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       }
     }
+    if (!response.ok) throw new Error(`Graph host rejected the worker invocation (${response.status})`);
+    const body: unknown = await response.json();
+    const envelope = workerChannelEnvelope.safeParse(body);
+    if (!envelope.success) {
+      throw new Error(
+        "Graph worker channel answered a malformed response envelope for " +
+          JSON.stringify(tool) +
+          ", so no tool result is fabricated",
+      );
+    }
+    return envelope.data.result;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
   }
-  if (!response.ok) throw new Error(`Graph host rejected the worker invocation (${response.status})`);
-  const body: unknown = await response.json();
-  const envelope = workerChannelEnvelope.safeParse(body);
-  if (!envelope.success) {
-    throw new Error(
-      "Graph worker channel answered a malformed response envelope for " +
-        JSON.stringify(tool) +
-        ", so no tool result is fabricated",
-    );
-  }
-  return envelope.data.result;
 }

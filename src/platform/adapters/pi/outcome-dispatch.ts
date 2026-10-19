@@ -172,7 +172,7 @@ export interface PiOutcomeDispatchPort {
 export interface PiOutcomeDeliveryOptions {
   readonly observeWorker?: HostExecutionObservationPort;
   readonly confirmWorkerStopped?: (execution: HostExecutionIdentity) => Promise<boolean>;
-  readonly launchWorker?: (input: DispatchInput, context: Parameters<PiOutcomeDispatchPort["launch"]>[1], inputView?: DeliveredInputView) => Promise<DispatchTask>;
+  readonly launchWorker?: (input: DispatchInput, context: Parameters<PiOutcomeDispatchPort["launch"]>[1], inputView?: DeliveredInputView, request?: OutcomeDispatchRequest) => Promise<DispatchTask>;
   /** The Pi dispatch port that starts and tracks the worker task. */
   readonly manager: PiOutcomeDispatchPort;
   /** Reports one attempt's terminal observation (completion or failure). */
@@ -557,6 +557,7 @@ export class PiOutcomeDelivery {
         directory: this.opts.directory,
       },
       inputView,
+      request,
     );
     void Promise.resolve(launched).then(
       (task) => {

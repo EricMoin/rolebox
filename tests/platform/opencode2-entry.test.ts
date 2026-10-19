@@ -628,7 +628,7 @@ describe("opencode v2 entry — setup wiring", () => {
 
     expect(calls).toContain("initializeRuntime");
     expect(calls).toContain("createHooks");
-    expect(fake.tools).toEqual(["rolebox_ping"]);
+    expect(fake.tools).toEqual(["rolebox_ping", "graph_worker_tools", "graph_worker_code"]);
     expect(fake.agents).toContain("emperor");
     expect(fake.skills).toContain("emperor");
     expect(fake.commands).toEqual(["stop-loop"]);
@@ -1298,7 +1298,7 @@ describe("opencode v2 entry — setup wiring", () => {
     // surface, exactly as the documented failure policy promises.
     const cleanup = await runSetup(plugin.setup, ctx);
 
-    expect(fake.tools).toEqual(["rolebox_ping"]);
+    expect(fake.tools).toEqual(["rolebox_ping", "graph_worker_tools", "graph_worker_code"]);
     expect(fake.agents).toContain("emperor");
     expect(fake.skills).toContain("emperor");
     expect(fake.commands).toEqual(["stop-loop"]);

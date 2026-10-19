@@ -1,4 +1,5 @@
 import { readRunBudget } from "../domain/budget.ts";
+import { normalizeWorkerToolPresentation, validateWorkerToolPreload } from "../domain/worker-tools.ts";
 import { errorText } from "../../utils/error-text.ts";
 import { contractDigest, contractRefsEqual, isContractRef, type ContractRef } from "../contracts/contract-definition.ts";
 import {
@@ -525,6 +526,12 @@ function readConsumerNodeIssue(plan: unknown): string | undefined {
           return `compiled plan node ${JSON.stringify(id)} tools carries ${describeBindingValue(tool)}, not a non-empty host tool name`;
         }
       }
+    }
+    try {
+      const presentation = normalizeWorkerToolPresentation(raw.toolPresentation);
+      validateWorkerToolPreload(presentation, tools as readonly string[] | undefined);
+    } catch (error) {
+      return `compiled plan node ${JSON.stringify(id)} has invalid toolPresentation: ${errorText(error)}`;
     }
     const inputs = raw.inputs;
     if (inputs !== undefined) {

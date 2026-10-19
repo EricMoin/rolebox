@@ -209,7 +209,11 @@ function createGraphDeclareTool(
         .describe(
           "The v3 declaration as JSON text or an already-parsed JSON value: " +
           "{ version: 3, name, nodes[], edges[], loop_groups?[] } with the closed " +
-          "v3 grammar (nodes declare outcomes; every edge binds one).",
+          "v3 grammar (nodes declare outcomes; every edge binds one). " +
+          "A node may declare tools: [exact host names or trailing-star prefixes] and " +
+          "toolPresentation: { mode: 'native' | 'discover' | 'code', preload?: [exact granted names] }. " +
+          "Presentation controls visibility only; tools remains the capability grant. " +
+          "Omitting both preserves the host's worker baseline. See worker-tools.md for host support.",
         ),
       graph_id: z
         .string()

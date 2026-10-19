@@ -48,6 +48,7 @@ import { createPluginHooks } from "../../src/core/composition.ts";
 import { initializeRoleboxRuntime } from "../../src/platform/factory.ts";
 import { openOpencode2GraphHost } from "../../src/platform/adapters/opencode2/index.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import { PLUGIN_ID } from "../../src/constants.ts";
 
 // ── What the entry must register ────────────────────────────────────────────
@@ -236,6 +237,7 @@ interface OpenOptions {
   readonly notifyClient?: unknown;
   /** The entry's own terminal-outcome read over the RAW `ctx.session` domain. */
   readonly observe?: unknown;
+  readonly workerTools?: { prepare(request: OutcomeDispatchRequest): Promise<void> };
 }
 
 interface SpyHost {
@@ -404,7 +406,7 @@ describe("opencode v2 entry — the declared-graph face registers through the re
     }
   });
 
-  it("adds exactly the five graph tools to the editor, and nothing else changes", async () => {
+  it("adds the graph tools and worker presentation capabilities to the editor", async () => {
     writeRole();
     const { ctx, fake } = contextInTmp();
     // NO INJECTION: the module's default export, its default deps, and the REAL
@@ -413,7 +415,7 @@ describe("opencode v2 entry — the declared-graph face registers through the re
 
     const graphNames = fake.tools.filter((name) => name.startsWith("graph_")).sort();
     // THE OBSERVATION: the names the host's own tool editor received.
-    expect(graphNames).toEqual([...GRAPH_TOOLS]);
+    expect(graphNames).toEqual([...GRAPH_TOOLS, "graph_worker_code", "graph_worker_tools"]);
     // The face is additive: every other canonical tool is still registered, and
     // the count is unchanged.
     const others = fake.tools.filter((name) => !name.startsWith("graph_"));
@@ -451,6 +453,34 @@ describe("opencode v2 entry — the declared-graph face registers through the re
 // ── The injection seam ──────────────────────────────────────────────────────
 
 describe("opencode v2 entry — the graph host injection seam", () => {
+  for (const failure of ["execute.before", "context"] as const) {
+    it(`refuses configured workers when ${failure} enforcement registration fails`, async () => {
+      writeRole();
+      const spy = makeHostSpy();
+      const { ctx } = contextInTmp();
+      if (failure === "execute.before") {
+        const hook = ctx.tool.hook;
+        Object.assign(ctx.tool, { hook: async (name: string, callback: unknown) => {
+          if (name === failure) throw new Error("Host refused worker enforcement hook");
+          return hook(name as never, callback as never);
+        } });
+      } else {
+        const hook = ctx.session.hook;
+        Object.assign(ctx.session, { hook: async (name: string, callback: unknown) => {
+          if (name === failure) throw new Error("Host refused worker context hook");
+          return hook(name as never, callback as never);
+        } });
+      }
+      const plugin = createOpencode2Plugin(withGraphSpy(spy.openGraphHost));
+      const cleanup = await plugin.setup(ctx);
+      try {
+        const policy = spy.calls[0]?.workerTools;
+        if (!policy) throw new Error("Entry did not provide worker tool policy");
+        await expect(policy.prepare({ graphId: "graph", planRevision: "revision", nodeId: "node", attemptId: "attempt",
+          agent: "worker", prompt: "Task", credential: "fixture", toolPresentation: { mode: "native" } })).rejects.toThrow("enforcement hooks are unavailable");
+      } finally { await cleanup?.(); }
+    });
+  }
   it("hands the factory the directory, client, wait, env and agent resolver", async () => {
     writeRole();
     const spy = makeHostSpy();
@@ -481,8 +511,8 @@ describe("opencode v2 entry — the graph host injection seam", () => {
     // (the real `createPluginHooks` is still injected here), and no graph tool
     // is invented by the entry itself.
     expect(fake.tools).toContain("spy_graph_tool");
-    expect(fake.tools.filter((name) => name.startsWith("graph_"))).toEqual([]);
-    expect(fake.tools.length).toBe(NON_GRAPH_TOOL_COUNT + 1);
+    expect(fake.tools.filter((name) => name.startsWith("graph_"))).toEqual(["graph_worker_tools", "graph_worker_code"]);
+    expect(fake.tools.length).toBe(NON_GRAPH_TOOL_COUNT + 3);
 
     await cleanup?.();
   }, 30_000);
@@ -500,7 +530,7 @@ describe("opencode v2 entry — the graph host injection seam", () => {
     expect(spy.calls.length).toBe(1);
     expect(spy.calls[0]!.wait).toBeUndefined();
     expect(fake.tools).toContain("spy_graph_tool");
-    expect(fake.tools.length).toBe(NON_GRAPH_TOOL_COUNT + 1);
+    expect(fake.tools.length).toBe(NON_GRAPH_TOOL_COUNT + 3);
 
     await cleanup?.();
   }, 30_000);

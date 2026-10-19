@@ -72,7 +72,7 @@ export type {
   HostCompletionFact,
 } from "./runtime-contract.ts";
 
-import { declaredNodeTools, type CompiledPlan } from "../compiler/plan.ts";
+import { declaredNodeTools, declaredNodeToolPresentation, type CompiledPlan } from "../compiler/plan.ts";
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
@@ -292,8 +292,13 @@ function withDeclaredNodeTools(
   return Object.freeze({
     create: (request: OutcomeDispatchRequest, effect: OutcomeDispatchEffectKey) => {
       const declaredTools = declaredNodeTools(plan, request.nodeId);
+      const toolPresentation = declaredNodeToolPresentation(plan, request.nodeId);
       dispatch.create(
-        declaredTools === undefined ? request : Object.freeze({ ...request, declaredTools }),
+        declaredTools === undefined && toolPresentation === undefined ? request : Object.freeze({
+          ...request,
+          ...(declaredTools === undefined ? {} : { declaredTools }),
+          ...(toolPresentation === undefined ? {} : { toolPresentation }),
+        }),
         effect,
       );
     },

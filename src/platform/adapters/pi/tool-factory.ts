@@ -76,7 +76,7 @@ const IMAGE_DATA_URI = /^data:(image\/[^;,]+);base64,([A-Za-z0-9+/=]+)$/;
  * malformed data URI is skipped silently. `metadata` never rides the text; it
  * stays in `details`.
  */
-function toPiResult(
+export function toPiResult(
   result: ToolResult,
 ): { content: PiContentBlock[]; details: Record<string, unknown> } {
   if (typeof result === "string") {

@@ -7,6 +7,7 @@ import {
   findGraphWorkerRole,
 } from "../../../prompt/graph-worker.ts";
 import type { ResolvedRole } from "../../../types.ts";
+import { workerPresentationTools, type WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
 import type { DshWorkerCommandBoundary } from "./graph-worker.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
 
@@ -99,7 +100,7 @@ function workspaceBlock(workspace: string): string {
  * — or passing the empty list — states the baseline restriction, which is what
  * an undeclared node keeps.
  */
-export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, workspace: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[]): string {
+export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, workspace: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[], presentation?: WorkerToolPresentation): string {
   if (typeof workspace !== "string" || workspace.trim().length === 0 || !isAbsolute(workspace)) {
     throw new Error(`The 'workspace' argument must be a non-blank absolute path: ${JSON.stringify(workspace)}`);
   }
@@ -135,8 +136,10 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
     // The sentence names the tools the boundary will actually grant: the two
     // baseline entries alone when the node declares none, and the node's
     // declared host tools as well when it does.
-    const toolsSentence =
-      declaredTools === undefined || declaredTools.length === 0
+    const capabilityTools = workerPresentationTools(presentation);
+    const toolsSentence = capabilityTools.length
+      ? `Your tool entry points are graph_worker_exec, graph_submit_outcome, ${capabilityTools.join(", ")}, and any host tools currently exposed by this presentation. `
+      : declaredTools === undefined || declaredTools.length === 0
         ? "Your tools are graph_worker_exec and graph_submit_outcome. "
         : "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares. ";
     return [
@@ -147,7 +150,7 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
         "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
         "{\"outcome_id\": \"<an outcome this node declares>\", \"data\": <the outcome payload>, \"evidence_refs\": [\"<path>\"]} " +
         "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
-      buildGraphWorkerToolGrantBlock(declaredTools),
+      buildGraphWorkerToolGrantBlock(declaredTools, presentation),
       boundaryBlock(boundary),
       workspaceBlock(workspace),
 
