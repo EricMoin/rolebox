@@ -40,7 +40,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 
 // TYPE-ONLY: the mocked dynamic import below is what loads the module at run
 // time; this erases completely and only names the DTO the fixture stands in
@@ -365,6 +365,9 @@ globalThis.fetch = ((input: unknown, init?: RequestInit) => {
 /** Fixture epoch — ages are relative to it so durations are deterministic. */
 const T0 = Date.now();
 
+/** The real clock, restored after each test so the freeze cannot leak. */
+const realDateNow = Date.now;
+
 /** ISO timestamp at an offset (ms) from the fixture epoch. */
 function iso(offsetMs: number): string {
   return new Date(T0 + offsetMs).toISOString();
@@ -608,6 +611,10 @@ function bandGlyph(): string {
 
 describe("RoleboxMonitorPanel", () => {
   beforeEach(() => {
+    // The panel seeds its clock with `useState(() => Date.now())` at mount while
+    // every fixture age is relative to T0: freeze wall time so a second of
+    // module-load-to-mount latency cannot change a rendered duration.
+    Date.now = () => T0;
     cfg = {
       status: STATUS_BODY,
       metrics: METRICS_BODY,
@@ -616,6 +623,10 @@ describe("RoleboxMonitorPanel", () => {
       gate: false,
     };
     installEventSource();
+  });
+
+  afterEach(() => {
+    Date.now = realDateNow;
   });
 
   describe("API contract", () => {

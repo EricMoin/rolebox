@@ -463,9 +463,12 @@ describe("file sink", () => {
 
     // Nobody is refreshing this lock, so the record pays one no-progress window
     // and then appends.
-    const secondStarted = Date.now();
     sink(makeRecord({ level: "info", message: "second", channel: "locked" }));
-    expect(Date.now() - secondStarted).toBeGreaterThanOrEqual(ROTATE_WAIT_MS - 1);
+    // The waiter blocks until the LOCK's mtime is older than ROTATE_WAIT_MS —
+    // and the fixture wrote that mtime before this call started. Timing the
+    // call would credit the wait with the fixture's own head start; the lock's
+    // age at return is the condition the sink actually waited for.
+    expect(Date.now() - statSync(lock).mtimeMs).toBeGreaterThanOrEqual(ROTATE_WAIT_MS);
 
     // The give-up is scoped to the lock INSTANCE it gave up on: the same
     // stalled lock is not paid for twice.
@@ -479,9 +482,8 @@ describe("file sink", () => {
     // file mid-rename (rotated copies reached 40x the limit).
     rmSync(lock, { force: true });
     writeFileSync(lock, "999998", "utf8");
-    const fourthStarted = Date.now();
     sink(makeRecord({ level: "info", message: "fourth", channel: "locked" }));
-    expect(Date.now() - fourthStarted).toBeGreaterThanOrEqual(ROTATE_WAIT_MS - 1);
+    expect(Date.now() - statSync(lock).mtimeMs).toBeGreaterThanOrEqual(ROTATE_WAIT_MS);
     sink.close();
 
     expect(existsSync(path + ".1")).toBe(false);
