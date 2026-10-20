@@ -11,6 +11,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   DEFAULT_REGISTRY_URL,
   HOST_FAMILIES,
@@ -72,8 +74,16 @@ describe("host-version policy table", () => {
     expect(VOCABULARY_GUARD_SLICES).toEqual([
       "tests/platform/dsh-event-vocabulary.test.ts",
       "tests/platform/pi-event-vocabulary.test.ts",
-      "tests/opencode-liveness-relay.test.ts",
+      "tests/platform/opencode2-event-bridge.test.ts",
     ]);
+  });
+
+  it("names only guard slices that exist on disk", () => {
+    // `bun test` exits 0 for a path it cannot find, so a slice deleted with its
+    // subject would leave the updater reporting PASS while shrinking the guard.
+    for (const slice of VOCABULARY_GUARD_SLICES) {
+      expect(existsSync(join(import.meta.dir, "..", slice))).toBe(true);
+    }
   });
 });
 

@@ -100,11 +100,17 @@ export const HOST_FAMILIES: readonly string[] = [
 /** Registry base URL used when HOST_VERSIONS_REGISTRY_URL is unset. */
 export const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org"
 
-/** Slices that must stay green for a host bump to count as guard-clean. */
+/**
+ * Slices that must stay green for a host bump to count as guard-clean.
+ *
+ * Every path must name an EXISTING test file: `bun test` exits 0 for a path it
+ * cannot find, so a stale entry silently shrinks the guard to whatever still
+ * exists. Pinned by the existence test in tests/host-versions.test.ts.
+ */
 export const VOCABULARY_GUARD_SLICES: readonly string[] = [
   "tests/platform/dsh-event-vocabulary.test.ts",
   "tests/platform/pi-event-vocabulary.test.ts",
-  "tests/opencode-liveness-relay.test.ts",
+  "tests/platform/opencode2-event-bridge.test.ts",
 ]
 
 // ── Version logic (pure) ───────────────────────────────────────────────────
