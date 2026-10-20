@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { createWorkerToolSession, type WorkerToolRegistry } from "../../../src/platform/worker-tools/index.ts";
 
-const registry = (invoke: WorkerToolRegistry["invoke"]): WorkerToolRegistry => ({
-  list: () => [{ name: "service.query", description: "Query records", inputSchema: { type: "object" } }], invoke,
+const registry = (
+  invoke: WorkerToolRegistry["invoke"],
+  tools: readonly { name: string; description: string }[] = [
+    { name: "service.query", description: "Query records" },
+  ],
+): WorkerToolRegistry => ({
+  list: () => tools.map(tool => ({ ...tool, inputSchema: { type: "object" } })),
+  invoke,
 });
 
 describe("worker code execution", () => {
@@ -65,18 +71,39 @@ describe("worker code execution", () => {
 
   test("drains started host calls after stopping code and signalling cancellation", async () => {
     let hostSettled = false;
-    const session = createWorkerToolSession({ registry: registry(async (_name, _args, { signal }) => {
-      await new Promise<void>(resolve => {
-        const complete = () => { setTimeout(() => { hostSettled = true; resolve(); }, 30); };
-        if (signal.aborted) complete();
-        else signal.addEventListener('abort', complete, {once:true});
-      });
-      return 'done';
-    }), allowedTools: ["service.*"], presentation: { mode: "code" } });
-    await expect(session.runCode("tools.call('service.query', {}); return 1")).rejects.toThrow("before awaiting all host calls");
+    const startSignal = () => {
+      let mark: (() => void) | undefined;
+      const promise = new Promise<void>(resolve => { mark = resolve; });
+      return { promise, mark: () => mark?.() };
+    };
+    let queryStarted = startSignal();
+    const session = createWorkerToolSession({
+      registry: registry(async (name, _args, { signal }) => {
+        if (name === "service.await-query") {
+          // The code awaits this AFTER firing the un-awaited call, so the call has
+          // provably reached the host before the code returns or enters its loop.
+          await queryStarted.promise;
+          return "started";
+        }
+        queryStarted.mark();
+        await new Promise<void>(resolve => {
+          const complete = () => { setTimeout(() => { hostSettled = true; resolve(); }, 30); };
+          if (signal.aborted) complete();
+          else signal.addEventListener("abort", complete, { once: true });
+        });
+        return "done";
+      }, [
+        { name: "service.query", description: "Query records" },
+        { name: "service.await-query", description: "Wait for a query to start" },
+      ]),
+      allowedTools: ["service.*"],
+      presentation: { mode: "code" },
+    });
+    await expect(session.runCode("tools.call('service.query', {}); await tools.call('service.await-query', {}); return 1")).rejects.toThrow("before awaiting all host calls");
     expect(hostSettled).toBe(true);
     hostSettled = false;
-    await expect(session.runCode("tools.call('service.query', {}); while(true) {}", {timeoutMs:100})).rejects.toThrow('exceeded');
+    queryStarted = startSignal();
+    await expect(session.runCode("tools.call('service.query', {}); await tools.call('service.await-query', {}); while(true) {}", { timeoutMs: 100 })).rejects.toThrow('exceeded');
     expect(hostSettled).toBe(true);
   });
 
