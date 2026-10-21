@@ -14,6 +14,8 @@ function fixture(startup: DshWorkerStartupTools) {
   const executions: Parameters<NonNullable<DshGraphWorkerRegistry["execute"]>>[0][] = [];
   let guard: Parameters<NonNullable<DshGraphWorkerRegistry["guard"]>>[0] = () => undefined;
   let confirmed = false;
+  let grantReads = 0;
+  let grantUnavailable = false;
   const principal = { graphId: "graph", attemptId: "attempt", executionId: "worker", workerSessionId: "worker" };
   const rich = { isError: false, value: { count: 2 }, content: [
     { type: "text", text: "Two matches" },
@@ -47,6 +49,11 @@ function fixture(startup: DshWorkerStartupTools) {
     workerPrincipalOf: id => confirmed && id === "worker" ? principal : undefined,
     workerDeclaredToolsOf: () => startup.declaredTools,
     workerToolPresentationOf: () => startup.toolPresentation,
+    workerToolGrantOf: () => {
+      grantReads++;
+      if (grantUnavailable) throw new Error("worker grant unavailable");
+      return startup;
+    },
   }, registry, (event, listener) => { listeners.set(event, listener); return () => { listeners.delete(event); }; });
   const start = async () => {
     await boundary.start("attempt", async () => { await listeners.get("agent/created")!({ agent }); }, startup);
@@ -65,10 +72,43 @@ function fixture(startup: DshWorkerStartupTools) {
     return local.get(name)!.execute(args, execution);
   };
   return { start, visible, assemble, registry, call, boundary, local, rich, executions, agent, register, hidden, denied,
-    confirm: () => { confirmed = true; }, guard: (name: string) => guard({ name, agent }) };
+    confirm: () => { confirmed = true; }, guard: (name: string) => guard({ name, agent }),
+    grantReads: () => grantReads, failGrant: () => { grantUnavailable = true; } };
 }
 
 describe("dsh worker capability integration", () => {
+  it("reads one coherent grant for the entire catalog and rechecks it for each invocation", async () => {
+    const startup = { declaredTools: ["custom_*"] };
+    const f = fixture(startup);
+    try {
+      await f.start();
+      f.confirm();
+      for (let i = 0; i < 100; i++) f.register("custom_" + i);
+      const before = f.grantReads();
+      const visible = await f.visible();
+      expect(visible).toContain("custom_99");
+      expect(visible).not.toContain("private_lookup");
+      expect(f.grantReads() - before).toBe(1);
+      expect(f.guard("custom_search")).toBeUndefined();
+      startup.declaredTools = [];
+      expect(f.guard("custom_search")).toContain("Graph workers may only");
+      expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS]);
+    } finally { f.boundary.dispose(); }
+  });
+
+  it("keeps a confirmed worker on baseline when the merged authorization read fails", async () => {
+    const f = fixture({ declaredTools: ["custom_*"] });
+    try {
+      await f.start();
+      f.confirm();
+      expect(f.guard("custom_search")).toBeUndefined();
+      f.failGrant();
+      expect(f.guard("custom_search")).toContain("Graph workers may only");
+      expect(f.guard("graph_submit_outcome")).toBeUndefined();
+      expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS]);
+    } finally { f.boundary.dispose(); }
+  });
+
   it("presents and authorizes custom and MCP tools before and after worker confirmation", async () => {
     const f = fixture({ declaredTools: ["custom_*", "mcp_docs_*"] });
     try {

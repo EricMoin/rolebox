@@ -209,9 +209,7 @@ export const LOG_EVENTS = {
   // in each entry's own comment below — `index.confirmation-refused` still says
   // the stale attempt was recorded on the row, and `dispatch.query-threw` still
   // says why the port's message is not quoted.
-  // Every one of these nineteen diagnostics was a warning, so every entry stays
-  // `warn` and the default console gate (ROLEBOX_LOG_CONSOLE_LEVEL, "warn")
-  // keeps all nineteen visible.
+  // Recovery summaries are informational; problems remain visible at the default warn gate.
   //
   // THE CHANNEL NAMES THE SOURCE, not the code's prefix: the host's own files
   // report on "graph:host", the tool binding on "graph:tool", the execution
@@ -285,35 +283,19 @@ export const LOG_EVENTS = {
       "the workspace store could not be read, so this was a blocked sweep with no inventory to visit, not an empty one",
   },
 
-  /**
-   * The boot sweep's aggregate report: what it started, resumed, refused,
-   * completed, left awaiting, controlled, failed, cancelled or could not
-   * confirm.
-   * WARNING because a sweep that changed or refused anything must be visible;
-   * with every list empty there is no event (the caller decides that, not this
-   * table).
-   * Scope: none (the sweep is workspace-wide). Fields: `started`, `resumed`,
-   * `refused`, `effectRefusals`, `divergences`, `completed`, `awaiting`,
-   * `controlled`, `failedAttempts`, `cancellations`, `cancelBlocked`,
-   * `unconfirmed` — each an array of ids, states and counts, and each entry of
-   * the per-graph arrays a "graphId:…" string rather than a nested object.
-   * Caller: src/graph/host/outcome-host.ts (recoverDeclaredGraphs).
-   * THROTTLED: 10s, and this is the densest code the platform has. Measured on
-   * the workspace's own log (`bun scripts/log-event-density.ts`): 335 records,
-   * 74 of them inside ONE ten-second window, 20 inside one second, and 36
-   * carrying exactly their predecessor's fields. The sweep re-derives the same
-   * non-empty lists on every boot in a burst (a test run, a supervisor restarting
-   * workers), so the burst is one observation repeated, not 74 observations. The
-   * window is deliberately the SHORTEST of the throttled entries: a sweep only
-   * runs at boot in a long-lived host, and a state that moves ten seconds later
-   * must still produce its own line. Suppressed sweeps ride on the next record as
-   * `suppressed`.
-   */
+  /** Normal recovery, including controlled stops and executions still running. */
   "sweep.summary": {
-    level: "warn",
+    level: "info",
     channel: "graph:host",
     message: "declared-graph boot sweep summary",
     throttleMs: 10_000,
+  },
+
+  /** Recovery failures and unconfirmed external work; fields match the normal summary. */
+  "sweep.attention": {
+    level: "warn",
+    channel: "graph:host",
+    message: "declared-graph boot sweep requires attention",
   },
 
   /**

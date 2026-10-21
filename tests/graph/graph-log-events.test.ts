@@ -10,9 +10,9 @@
  * the engine is still responsible for:
  *
  * 1. THE VOCABULARY. Every diagnostic this slice reports is registered in the
- *    shared table (src/log/registry.ts) at `warn`, so the default console gate
- *    (ROLEBOX_LOG_CONSOLE_LEVEL, "warn") keeps all of them visible — the
- *    visibility the deleted module had for the engine's nineteen, and the
+ *    shared table (src/log/registry.ts). Normal recovery summaries use `info`;
+ *    problems use `warn`, keeping them visible at the default console gate.
+ *    This preserves the engine diagnostics' visibility, and the
  *    visibility the outbox's three loose warn calls had before stage 4 moved
  *    them here. The sentences are those events' facts RE-WORDED for the table
  *    (the old lines were multi-clause, with rationale and formatted id lists);
@@ -63,6 +63,7 @@ const GRAPH_EVENTS: ReadonlyArray<readonly [LogEventCode, string]> = [
   ["host.control-continuation.failed", "graph:host"],
   ["sweep.store-blocked", "graph:host"],
   ["sweep.summary", "graph:host"],
+  ["sweep.attention", "graph:host"],
   ["watch.unwatched-executions", "graph:host"],
   ["watch.port-threw", "graph:host"],
   ["watch.announcement-unconfirmed", "graph:host"],
@@ -103,24 +104,24 @@ afterEach(() => {
 });
 
 describe("graph engine event vocabulary", () => {
-  it("registers exactly the twenty-two graph-slice events in the shared table", () => {
-    expect(GRAPH_EVENTS.length).toBe(22);
+  it("registers exactly the twenty-three graph-slice events in the shared table", () => {
+    expect(GRAPH_EVENTS.length).toBe(23);
     for (const [code] of GRAPH_EVENTS) {
       expect(isLogEventCode(code)).toBe(true);
       expect(LOG_EVENTS[code]).toBeDefined();
     }
     // The slice owns every code that reports on a "graph:" channel — the
-    // nineteen the engine migration registered and the notification outbox's
-    // three — so nothing outside this list can claim one.
+    // engine events and the notification outbox's three — so nothing outside
+    // this list can claim one.
     const registered = Object.entries(LOG_EVENTS)
       .filter(([, entry]) => entry.channel.startsWith("graph:"))
       .map(([code]) => code);
     expect([...registered].sort()).toEqual(GRAPH_EVENTS.map(([code]) => code as string).sort());
   });
 
-  it("keeps every graph-slice event at warn", () => {
+  it("keeps normal summaries informational and graph problems at warn", () => {
     for (const [code] of GRAPH_EVENTS) {
-      expect(logEventDefinition(code).level).toBe("warn");
+      expect(logEventDefinition(code).level).toBe(code === "sweep.summary" ? "info" : "warn");
     }
   });
 
@@ -131,7 +132,7 @@ describe("graph engine event vocabulary", () => {
       counts[channel] = (counts[channel] ?? 0) + 1;
     }
     expect(counts).toEqual({
-      "graph:host": 13,
+      "graph:host": 14,
       "graph:index": 2,
       "graph:tool": 3,
       "graph:declare": 1,
@@ -154,7 +155,7 @@ describe("graph engine event vocabulary", () => {
       });
       const record = memory.last();
       expect(record?.code).toBe(code);
-      expect(record?.level).toBe("warn");
+      expect(record?.level).toBe(code === "sweep.summary" ? "info" : "warn");
       expect(record?.channel).toBe(channel);
       expect(record?.scope).toEqual({ graphId: "g1", nodeId: "n1", attemptId: "a1", effectId: "e1" });
       // The data keeps its shape: strings, numbers, booleans and a real array.

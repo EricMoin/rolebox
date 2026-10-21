@@ -136,28 +136,17 @@ import type { DeliveredInputView } from "../../../graph/host/input-view.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 
-/**
- * One durable direct-child row as rolebox READS a dsh subagent listing row.
- * The contract extract names `SubagentRuntime.listChildren` (contract §4.3) but
- * does not define `SubagentListEntry`'s members, so this is a structural
- * reading, not a quoted contract shape.
- *
- * `label` is the key the create call CARRIED as the documented start-request
- * `label` — for an outcome dispatch it is {@link dispatchIdempotencyKeyOf},
- * which is what would make the child correlatable with its effect in a later
- * process. Whether `listChildren` returns that label is UNVERIFIED in this
- * repository (`@deepseek-ai/dsh-subagent` is not installed): if it does not,
- * {@link DshOutcomeDelivery.executionQuery} answers `unknown` and the effect
- * stays blocked. `activity` is the listing's own liveness sample and
- * `kind`/`id`/`mode` identify the row; rolebox reads none of them as an
- * outcome.
- */
+/** Direct-child catalog fields used to correlate one-shot graph workers. */
 export interface DshSubagentChildRow {
-  readonly kind: string;
+  readonly kind?: string;
   readonly id: string;
   readonly label?: string;
   readonly activity?: string;
   readonly mode?: string;
+}
+
+function isGraphWorkerChild(child: DshSubagentChildRow): boolean {
+  return child.mode === "one-shot" || (child.mode === undefined && child.kind === "child");
 }
 
 /**
@@ -477,8 +466,8 @@ export class DshOutcomeDelivery {
   /**
    * THE PLATFORM EXECUTION QUERY PORT (P2 item 5 / F3).
    *
-   * `prime` reads the child listing of every parent the probes name — the
-   * graphs' recorded declaring invocations — once per call, so the answers are
+   * `prime` reads confirmed child executions directly and lists parents only
+   * for dispatches without a confirmed binding, so the answers are
    * ready before the run path asks. `lookup` then correlates a probe with a
    * child by the DURABLE LABEL the create carried
    * ({@link dispatchIdempotencyKeyOf}), which is the one string both sides
@@ -520,7 +509,7 @@ export class DshOutcomeDelivery {
       }
       const label = dispatchIdempotencyKeyOf(probe.effect);
       const matches = children.filter(
-        (child) => child.kind === "child" && child.label === label,
+        (child) => isGraphWorkerChild(child) && child.label === label,
       );
       if (matches.length === 1) {
         const child = matches[0];
@@ -552,42 +541,29 @@ export class DshOutcomeDelivery {
       );
     },
     prime: async (probes: readonly OutcomeExecutionProbe[]): Promise<void> => {
-      const listing = this.opts.subagents.listChildren;
-      if (listing === undefined) return;
       const parents = new Set<string>();
       for (const probe of probes) {
+        if (probe.execution !== undefined) {
+          await this.readExecutionObservation(probe.execution.executionId, dispatchIdempotencyKeyOf(probe.effect));
+          continue;
+        }
         const parentSessionId = probe.invocation?.sessionId;
         if (parentSessionId !== undefined && parentSessionId.length > 0) {
           parents.add(parentSessionId);
         }
       }
+      const listing = this.opts.subagents.listChildren;
+      if (listing === undefined) return;
       for (const parentSessionId of parents) {
         try {
           const children = await listing.call(this.opts.subagents, parentSessionId);
           this.childListings.set(parentSessionId, Object.freeze([...children]));
-          if (this.opts.readExecutionEvents) {
-            const labels = new Set(probes.filter(probe => probe.invocation?.sessionId === parentSessionId).map(probe => dispatchIdempotencyKeyOf(probe.effect)));
-            for (const child of children) {
-              if (child.kind !== "child" || !child.label || !labels.has(child.label)) continue;
-              try {
-                const events = await this.opts.readExecutionEvents(child.id);
-                if (!events) continue;
-                const observation = observeDshExecutionEvents(events, child.label);
-                if (observation.kind === "completed") {
-                  this.terminalRuns.set(child.id, { stopReason: "completed" });
-                  // THE OWN LAST TURN IS READ FROM THE SAME EVENTS (DEFECT 2).
-                  // Only a COMPLETED end authorises a declaration reading (a
-                  // failed end belongs to failObservedExecution), and the
-                  // reading is STORED here — never interpreted, repaired or
-                  // settled in this adapter.
-                  this.derivedOutcomes.set(
-                    child.id,
-                    derivedOutcomeOfReading(readDshLastTurnDeclaration(events, child.label)),
-                  );
-                }
-                if (observation.kind === "failed") this.terminalRuns.set(child.id, { failure: observation.reason });
-              } catch { /* An unavailable host log leaves this execution unknown. */ }
-            }
+          const labels = new Set(probes
+            .filter(probe => probe.execution === undefined && probe.invocation?.sessionId === parentSessionId)
+            .map(probe => dispatchIdempotencyKeyOf(probe.effect)));
+          for (const child of children) {
+            if (!isGraphWorkerChild(child) || !child.label || !labels.has(child.label)) continue;
+            await this.readExecutionObservation(child.id, child.label);
           }
         } catch (error) {
           // An unreadable listing is NOT an empty one: the parent's reading is
@@ -602,20 +578,26 @@ export class DshOutcomeDelivery {
     },
   });
 
-  /**
-   * THE PLATFORM EXECUTION OBSERVATION PORT (P2 item 6 / F3).
-   *
-   * IT ANSWERS `unknown`, AND THAT IS THE HONEST ANSWER. The dsh runtime's
-   * public surface has no durable outcome read: `listChildren` reports a
-   * child's live/inactive activity, and the dsh contract states explicitly that
-   * activity neither encodes a durable outcome (a continuable child may be
-   * inactive and still resumable). A run's `result` promise lives in the
-   * process that started it, so after that process exits the outcome is not
-   * readable from dsh at all. Rolebox therefore refuses to round "not resident"
-   * into "finished": the boot sweep reports every confirmed execution it cannot
-   * observe as an explicit `completion-unsettled` refusal and names it in
-   * `awaitingCompletion`, which is the observable block the plan requires.
-   */
+  private async readExecutionObservation(executionId: string, label: string): Promise<void> {
+    if (this.opts.readExecutionEvents === undefined) return;
+    this.terminalRuns.delete(executionId);
+    this.derivedOutcomes.delete(executionId);
+    try {
+      const events = await this.opts.readExecutionEvents(executionId);
+      if (events === undefined) return;
+      const observation = observeDshExecutionEvents(events, label);
+      const reading = observation.kind === "completed"
+        ? derivedOutcomeOfReading(readDshLastTurnDeclaration(events, label))
+        : undefined;
+      if (observation.kind === "completed") this.terminalRuns.set(executionId, { stopReason: "completed" });
+      if (observation.kind === "failed") this.terminalRuns.set(executionId, { failure: observation.reason });
+      if (reading !== undefined) this.derivedOutcomes.set(executionId, reading);
+    } catch (error) {
+      this.log.warn("dsh outcome dispatch: execution events unreadable", { executionId, error: errorText(error) });
+    }
+  }
+
+  /** Terminal reads come from execution events or local run results; missing evidence stays unknown. */
   readonly observeExecution: HostExecutionObservationPort = (execution) => {
     const observed = this.terminalRuns.get(execution.executionId);
     if (observed !== undefined) {

@@ -266,7 +266,7 @@ export interface DshGraphWorkerRegistry {
 }
 
 export type DshGraphWorkerGrantHost = Pick<OutcomeHost, "workerPrincipalOf"> &
-  Partial<Pick<OutcomeHost, "workerDeclaredToolsOf" | "workerToolPresentationOf">>;
+  Partial<Pick<OutcomeHost, "workerDeclaredToolsOf" | "workerToolPresentationOf" | "workerToolGrantOf">>;
 
 export interface DshWorkerStartupTools {
   readonly declaredTools?: readonly string[];
@@ -311,6 +311,7 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     const principal: OutcomeWorkerPrincipal | undefined = host.workerPrincipalOf(agent.session?.id ?? agent.id ?? "");
     if (!principal) return prepared.get(agent)?.startup ?? {};
     try {
+      if (host.workerToolGrantOf) return host.workerToolGrantOf(principal);
       const declared = host.workerDeclaredToolsOf?.(principal);
       return {
         declaredTools: Array.isArray(declared) ? declared : undefined,
@@ -318,10 +319,12 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
       };
     } catch { return {}; }
   };
+  const grantedBy = (name: string, grant: DshWorkerStartupTools): boolean =>
+    (isGraphToolName(name) && DSH_GRAPH_WORKER_GRANT.includes(name)) ||
+    workerPresentationTools(grant.toolPresentation).some(tool => tool === name) || declaredToolsAllow(name, grant.declaredTools);
   const grantedToWorker = (name: string, agent?: DshWorkerAgent): boolean => {
     if (isGraphToolName(name) && DSH_GRAPH_WORKER_GRANT.includes(name)) return true;
-    const grant = grantOf(agent);
-    return workerPresentationTools(grant.toolPresentation).some(tool => tool === name) || declaredToolsAllow(name, grant.declaredTools);
+    return grantedBy(name, grantOf(agent));
   };
   const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution.name, execution.agent)
     ? "Graph workers may only use their node's granted tools: the baseline graph_submit_outcome and graph_worker_exec, plus any host tools the node declares" : undefined);
@@ -441,7 +444,7 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
         text: `No currently available host tool matches these granted prefixes: ${unmatched.join(", ")}. Search the catalog again if a provider becomes available; these grants do not create tools.`,
       }] } : {}),
       tools: assembly.tools.filter(tool => {
-        if (!grantedToWorker(tool.name, agent)) return false;
+        if (!grantedBy(tool.name, grant)) return false;
         if (!presentation || presentation.mode === "native" || isGraphToolName(tool.name)) return true;
         return declaredToolsAllow(tool.name, presentation.preload) ||
           (presentation.mode === "discover" && activated?.has(tool.name));

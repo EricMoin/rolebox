@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { queryGraphs } from "../../../src/graph/query/graph-query.ts";
 import type { OutcomeDispatchRequest, OutcomeDispatchEffectKey } from "../../../src/graph/outcome/dispatch-effects.ts";
 import type { CanonicalToolContext } from "../../../src/platform/types.ts";
 import { naturalDeclaration, POLICY_BODY, POLICY_ID } from "../helpers/host-graph-fixture.ts";
+import { createDatabaseSync } from "../../../src/memory/db-driver.ts";
 
 const roots: string[] = [];
 const closers: { close(): void }[] = [];
@@ -391,5 +392,185 @@ describe("a body that says complete while nodes are still pending", () => {
     await f.app.notifications!.flush();
     expect(f.received.map(notification => notification.kind)).toEqual(["complete"]);
     expect(f.received[0]!.reason).toBe("All activated graph work completed.");
+  });
+});
+
+
+describe("notification capture work", () => {
+  it("does not scan graph definitions for same-origin, read-only or outbox-only transactions", async () => {
+    const f = fixture(async () => true);
+    await f.declare(); await f.app.notifications!.flush();
+    const store = GraphStore.openFile(f.storeRoot); closers.push(store);
+    const definitions = spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    try {
+      expect(store.recordInvocationOrigin("flow", { sessionId: "parent", agent: "orchestrator" }, f.clock())).toBe(false);
+      store.transaction(() => store.readGraphState("flow"));
+      store.transaction(() => store.run(`UPDATE ${GRAPH_STORE_TABLES.pendingEffects} SET status = status WHERE kind = 'graph-notification'`));
+      await f.app.notifications!.flush();
+      expect(definitions).not.toHaveBeenCalled();
+      expect(inventory).not.toHaveBeenCalled();
+    } finally { definitions.mockRestore(); inventory.mockRestore(); }
+  });
+
+  it("captures only the graph changed by a local business transaction", async () => {
+    const f = fixture(async () => true);
+    await f.declare();
+    await f.call("graph_declare", { declaration: { version: 3, name: "unrelated", nodes: [
+      { id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }] },
+    ], edges: [] } });
+    await f.app.notifications!.flush();
+    const store = GraphStore.openFile(f.storeRoot); closers.push(store);
+    const definitions = spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    try {
+      store.recordInvocationOrigin("flow", { sessionId: "another-parent", agent: "orchestrator" }, f.clock());
+      await f.app.notifications!.flush();
+      expect(definitions.mock.calls.map(([graphId]) => graphId)).toEqual(["flow", "flow"]);
+      expect(inventory).not.toHaveBeenCalled();
+    } finally { definitions.mockRestore(); inventory.mockRestore(); }
+  });
+
+  it("commits notification intent with its source and retries capture after rollback", async () => {
+    const f = fixture();
+    await f.declare();
+    f.app.host.confirmExecution(f.requests[0]!.effect, { executionId: "worker" });
+    await f.app.notifications!.flush();
+    const store = GraphStore.openFile(f.storeRoot); closers.push(store);
+    const outbox = () => store.all(`SELECT * FROM ${GRAPH_STORE_TABLES.pendingEffects} WHERE kind = 'graph-notification'`);
+    const refuse = store.observeTransactions({
+      beforeCommit(ids) {
+        expect(ids).toEqual(["flow"]);
+        expect(outbox()).toHaveLength(1);
+        throw new Error("commit refused after capture");
+      }, afterCommit() {},
+    });
+    const record = () => store.rememberExecutionObservation("worker", { kind: "completed", reason: "Finished", observedAt: f.clock() });
+    try { expect(record).toThrow("commit refused after capture"); }
+    finally { refuse(); }
+    expect(outbox()).toEqual([]);
+    expect(store.readExecutionObservation("worker")).toBeUndefined();
+    await f.app.notifications!.flush();
+    expect(f.received).toEqual([]);
+    record();
+    expect(outbox()).toHaveLength(1);
+    await f.app.notifications!.flush();
+    expect(f.received).toHaveLength(1);
+    expect(f.received[0]).toMatchObject({ graphId: "flow", kind: "attention" });
+  });
+
+  it("shares scoped changes between notifiers without capturing their outbox writes", async () => {
+    const f = fixture(async () => true);
+    await f.declare();
+    f.app.host.confirmExecution(f.requests[0]!.effect, { executionId: "worker" });
+    const second = new GraphNotifications(f.storeRoot, { send: async () => true }); closers.push(second);
+    await f.app.notifications!.flush(); await second.flush();
+    const store = GraphStore.openFile(f.storeRoot); closers.push(store);
+    const definitions = spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    try {
+      store.rememberExecutionObservation("worker", { kind: "completed", reason: "Finished", observedAt: f.clock() });
+      expect(definitions.mock.calls.map(([id]) => id)).toEqual(["flow", "flow", "flow", "flow"]);
+      definitions.mockClear();
+      await f.app.notifications!.flush(); await second.flush();
+      // Attention delivery checks this graph once more for obsolescence.
+      expect(definitions.mock.calls.map(([id]) => id)).toEqual(["flow"]);
+      expect(inventory).not.toHaveBeenCalled();
+      expect(store.all(`SELECT * FROM ${GRAPH_STORE_TABLES.pendingEffects} WHERE kind = 'graph-notification'`)).toHaveLength(1);
+    } finally { definitions.mockRestore(); inventory.mockRestore(); }
+  });
+
+  it("captures raw local changes on flush without a full inventory", async () => {
+    const f = fixture(); await f.declare();
+    f.app.host.confirmExecution(f.requests[0]!.effect, { executionId: "worker" });
+    await f.app.notifications!.flush();
+    const store = GraphStore.openFile(f.storeRoot); closers.push(store);
+    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    try {
+      store.run(`INSERT INTO ${GRAPH_STORE_TABLES.executionObservations} VALUES ('worker', 'completed', 'Finished', ?)`, f.clock());
+      await f.app.notifications!.flush();
+      expect(f.received).toHaveLength(1);
+      expect(inventory).not.toHaveBeenCalled();
+    } finally { inventory.mockRestore(); }
+  });
+
+  it("catches another connection's commit and rescans when a catch-up raced a commit", async () => {
+    const f = fixture(); await f.declare();
+    await f.call("graph_declare", { declaration: { version: 3, name: "zz-last", nodes: [
+      { id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }] },
+    ], edges: [] } });
+    f.app.host.confirmExecution(f.requests[0]!.effect, { executionId: "worker" });
+    await f.app.notifications!.flush(); f.app.close();
+    const path = GraphStore.openFile(f.storeRoot); closers.push(path);
+    const external = createDatabaseSync(path.path); closers.push(external);
+    const inventories = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const read = GraphStore.prototype.readDefinition;
+    let injected = false;
+    const definitions = spyOn(GraphStore.prototype, "readDefinition").mockImplementation(function (this: GraphStore, id) {
+      if (id === "flow" && !injected) {
+        injected = true;
+        setImmediate(() => external.run(`INSERT INTO ${GRAPH_STORE_TABLES.executionObservations}
+          VALUES ('worker', 'completed', 'Finished', ?)`, f.clock()));
+      }
+      return read.call(this, id);
+    });
+    const received: GraphNotification[] = [];
+    const reopened = new GraphNotifications(f.storeRoot, { send: async n => { received.push(n); return true; } }); closers.push(reopened);
+    try {
+      await reopened.flush();
+      expect(injected).toBe(true);
+      expect(received).toEqual([]);
+      await reopened.flush();
+      expect(inventories).toHaveBeenCalledTimes(2);
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({ graphId: "flow", kind: "attention" });
+      await reopened.flush();
+      expect(inventories).toHaveBeenCalledTimes(2);
+    } finally { inventories.mockRestore(); definitions.mockRestore(); }
+  });
+
+  it("retries a pending completion without a database version change or graph scan", async () => {
+    const attempts: GraphNotification[] = [];
+    const f = fixture(async n => { attempts.push(n); return attempts.length > 1; });
+    await f.declare(); await f.settle(0); await f.settle(1); await f.app.notifications!.flush();
+    expect(attempts).toHaveLength(1);
+    const definitions = spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    try {
+      f.advance(); await f.app.notifications!.flush();
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]!.id).toBe(attempts[0]!.id);
+      expect(definitions).not.toHaveBeenCalled();
+      expect(inventory).not.toHaveBeenCalled();
+    } finally { definitions.mockRestore(); inventory.mockRestore(); }
+  });
+
+  it("lets I/O callbacks run between historical graphs during startup catch-up", async () => {
+    const f = fixture(async () => true); await f.declare();
+    for (let i = 0; i < 12; i++) {
+      const graphId = "history-" + i.toString().padStart(2, "0");
+      await f.call("graph_declare", { declaration: { version: 3, name: graphId, nodes: [
+        { id: "work", agent: "worker", prompt: "Work", outcomes: [{ id: "done" }] },
+      ], edges: [] } });
+    }
+    await f.app.notifications!.flush(); f.app.close();
+    const read = GraphStore.prototype.readDefinition;
+    const visits: string[] = [];
+    let previous = "";
+    let callbacks = 0;
+    const definitions = spyOn(GraphStore.prototype, "readDefinition").mockImplementation(function (this: GraphStore, id) {
+      if (id !== previous) {
+        expect(callbacks).toBe(visits.length);
+        visits.push(id); previous = id;
+        setImmediate(() => { callbacks++; });
+      }
+      return read.call(this, id);
+    });
+    const reopened = new GraphNotifications(f.storeRoot, { send: async () => true }); closers.push(reopened);
+    try {
+      await reopened.flush();
+      expect(visits).toHaveLength(13);
+      expect(callbacks).toBe(13);
+    } finally { definitions.mockRestore(); }
   });
 });

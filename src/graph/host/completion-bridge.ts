@@ -269,7 +269,7 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
    * with no invocation in effect.
    */
   bindingFor(attempt: HostCompletionAttempt): HostAttemptBinding | undefined {
-    const local = this.bindings.get(attemptCacheKeyOf(attempt));
+    const local = this.cachedBindingFor(attempt);
     if (local !== undefined) return local;
     // THE DURABLE HALF (P2 item 6). A completion that arrives after the process
     // which dispatched the attempt exited has no entry in the map above, so the
@@ -284,6 +284,10 @@ export class HostDispatchCompletionBridge implements HostCompletionBindingSink {
     } catch {
       return undefined;
     }
+  }
+
+  cachedBindingFor(attempt: HostCompletionAttempt): HostAttemptBinding | undefined {
+    return this.bindings.get(attemptCacheKeyOf(attempt));
   }
 
   /**

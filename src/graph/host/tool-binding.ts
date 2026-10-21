@@ -67,6 +67,11 @@ export interface OutcomeWorkerPrincipal {
   readonly workerSessionId: string;
 }
 
+export interface OutcomeWorkerToolGrant {
+  readonly declaredTools?: readonly string[];
+  readonly toolPresentation?: WorkerToolPresentation;
+}
+
 /**
  * The worker-principal half of a bound tool face: which names a dispatched
  * worker may call, and what the host bound one arriving session as.

@@ -71,6 +71,7 @@ import {
   STOPPING_CONTROL_COMMAND_SQL
 } from "./schema.ts";
 import type { HostExecutionRefusal } from "../host/execution-index.ts";
+import { dispatchEffectIdOf } from "../outcome/dispatch-effects.ts";
 import type {
   AcceptedResultRecord,
   CredentialRecordIdentity,
@@ -235,20 +236,63 @@ interface SharedConnection {
   depth: number;
   fileStamp?: string;
   bindingId?: string;
+  readSnapshotStamp?: { readonly fileStamp: string | undefined; readonly dataVersion: number };
+  readSnapshotFenced?: boolean;
   observers?: Set<GraphStoreTransactionObserver>;
 }
 
 export interface GraphStoreTransactionObserver {
-  beforeCommit(): void;
+  beforeCommit(graphIds: readonly string[]): void;
   afterCommit(): void;
 }
 
-function verifyConnectionFile(connection: SharedConnection, filePath: string): void {
-  if (filePath === ":memory:") return;
+const DIRTY_GRAPHS = "rolebox_notification_dirty_graphs";
+const NOTIFICATION_TABLES = [
+  GRAPH_STORE_TABLES.definitions,
+  GRAPH_STORE_TABLES.origins,
+  GRAPH_STORE_TABLES.runs,
+  GRAPH_STORE_TABLES.graphState,
+  GRAPH_STORE_TABLES.acceptedEvents,
+  GRAPH_STORE_TABLES.budgetReservations,
+  GRAPH_STORE_TABLES.executions,
+  GRAPH_STORE_TABLES.approvalRequests,
+  GRAPH_STORE_TABLES.controlDecisions,
+] as const;
+
+function ensureDirtyGraphJournal(db: DatabaseDriver): void {
+  // TEMP schema changes roll back too, including registration inside a transaction.
+  if (db.query("SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name = ?").get(DIRTY_GRAPHS) != null) return;
+  db.exec(`CREATE TEMP TABLE ${DIRTY_GRAPHS} (graph_id TEXT PRIMARY KEY) WITHOUT ROWID`);
+  for (const table of NOTIFICATION_TABLES) {
+    for (const operation of ["INSERT", "UPDATE", "DELETE"] as const) {
+      const rows = operation === "UPDATE" ? ["OLD", "NEW"] : [operation === "INSERT" ? "NEW" : "OLD"];
+      db.exec(`CREATE TEMP TRIGGER rolebox_dirty_${table}_${operation}
+        AFTER ${operation} ON main.${table} BEGIN
+        ${rows.map(row => `INSERT INTO ${DIRTY_GRAPHS} VALUES (${row}.graph_id) ON CONFLICT(graph_id) DO NOTHING;`).join("\n")}
+        END`);
+    }
+  }
+  for (const operation of ["INSERT", "UPDATE", "DELETE"] as const) {
+    const rows = operation === "UPDATE" ? ["OLD", "NEW"] : [operation === "INSERT" ? "NEW" : "OLD"];
+    db.exec(`CREATE TEMP TRIGGER rolebox_dirty_observations_${operation}
+      AFTER ${operation} ON main.${GRAPH_STORE_TABLES.executionObservations} BEGIN
+      ${rows.map(row => `INSERT INTO ${DIRTY_GRAPHS}
+        SELECT graph_id FROM ${GRAPH_STORE_TABLES.executions} WHERE execution_id = ${row}.execution_id ON CONFLICT(graph_id) DO NOTHING;`).join("\n")}
+      END`);
+  }
+}
+
+function verifyConnectionFile(connection: SharedConnection, filePath: string): string | undefined {
+  if (filePath === ":memory:") return undefined;
+  if (connection.readSnapshotFenced) {
+    throw identityRefusal(filePath, "the open read-only database changed outside a verified SQLite commit; close existing handles before restoring");
+  }
   let stamp: string;
+  let contentStamp: string;
   try {
-    const stat = statSync(filePath);
+    const stat = statSync(filePath, { bigint: true });
     stamp = `${stat.dev}:${stat.ino}`;
+    contentStamp = `${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
   } catch {
     throw identityRefusal(filePath, "the open database file has disappeared");
   }
@@ -261,6 +305,7 @@ function verifyConnectionFile(connection: SharedConnection, filePath: string): v
   }
   connection.fileStamp = stamp;
   connection.bindingId = bindingId;
+  return contentStamp;
 }
 
 /** The open connections of this process, by path and mode. */
@@ -307,6 +352,7 @@ export class GraphStore {
   private readonly budgetView: BudgetLedger;
   private readonly txView: GraphStoreTx;
   private closed = false;
+  private verifiedReadVersion: string | undefined;
 
   private constructor(
     connection: SharedConnection,
@@ -608,12 +654,21 @@ export class GraphStore {
     connectionKey: string,
     filePath: string,
   ): GraphStore {
-    connection.db.exec("PRAGMA busy_timeout = 5000");
     try {
-      verifyStore(connection.db, filePath);
-      verifyConnectionFile(connection, filePath);
+      if (connection.fileStamp !== undefined) verifyConnectionFile(connection, filePath);
+      connection.db.exec("PRAGMA busy_timeout = 5000");
+      const verify = () => {
+        verifyStore(connection.db, filePath);
+        const version = asStoreRow(connection.db.query("PRAGMA data_version").get(), filePath, "data_version");
+        const fileStamp = verifyConnectionFile(connection, filePath);
+        connection.readSnapshotStamp ??= { fileStamp, dataVersion: readStoreEpoch(version, "data_version", filePath, "data_version") };
+      };
+      if (connection.depth > 0) verify();
+      else connection.db.transaction(verify)();
     } catch (error) {
       // A refused read-only open must not leak the borrowed connection.
+      connection.readSnapshotFenced = true;
+      if (CONNECTIONS.get(connectionKey) === connection) CONNECTIONS.delete(connectionKey);
       GraphStore.releaseConnection(connection, connectionKey);
       throw error;
     }
@@ -802,7 +857,7 @@ export class GraphStore {
     }
     connection.refs -= 1;
     if (connection.refs > 0) return;
-    CONNECTIONS.delete(key);
+    if (CONNECTIONS.get(key) === connection) CONNECTIONS.delete(key);
     try {
       connection.db.close();
     } catch {
@@ -952,6 +1007,54 @@ export class GraphStore {
   }
 
   /**
+   * Read one committed revision on a retained read-only connection.
+   * The revision is comparable only between calls on this store. Format changes
+   * are verified before the callback, and failed reads invalidate that verification.
+   */
+  readOnlySnapshot<R>(read: (revision: string) => R): R {
+    if (!this.connectionKey?.startsWith("ro\u0000")) {
+      throw new GraphStoreWriteError("invalid-record", "graph-store: revision snapshots require a read-only connection");
+    }
+    try {
+      const result = this.transaction(() => {
+        const identity = asStoreRow(
+          this.db.query(`SELECT store_id FROM ${GRAPH_STORE_TABLES.meta} WHERE id = 1`).get(),
+          this.filePath,
+          GRAPH_STORE_TABLES.meta,
+        );
+        if (identity["store_id"] !== this.connection.bindingId) {
+          throw identityRefusal(this.filePath, "the open database identity no longer matches its binding");
+        }
+        const row = asStoreRow(this.db.query("PRAGMA data_version").get(), this.filePath, "data_version");
+        const dataVersion = readStoreEpoch(row, "data_version", this.filePath, "data_version");
+        const fileStamp = this.assertOpen("readOnlySnapshot");
+        const previous = this.connection.readSnapshotStamp;
+        // In-place restores can preserve SQLite's counter and leave its pager serving old pages.
+        if (previous !== undefined && previous.fileStamp !== fileStamp && previous.dataVersion === dataVersion) {
+          this.connection.readSnapshotFenced = true;
+          throw identityRefusal(this.filePath, "the database file changed without a SQLite revision change");
+        }
+        const revision = `${dataVersion}:${fileStamp}`;
+        if (this.verifiedReadVersion !== revision) verifyStore(this.db, this.filePath);
+        const value = read(revision);
+        if (this.assertOpen("readOnlySnapshot") !== fileStamp) {
+          throw identityRefusal(this.filePath, "the database file changed during its read snapshot");
+        }
+        this.verifiedReadVersion = revision;
+        this.connection.readSnapshotStamp = { fileStamp, dataVersion };
+        return value;
+      });
+      this.assertOpen("readOnlySnapshot");
+      return result;
+    } catch (error) {
+      this.verifiedReadVersion = undefined;
+      this.connection.readSnapshotFenced = true;
+      if (CONNECTIONS.get(this.connectionKey) === this.connection) CONNECTIONS.delete(this.connectionKey);
+      throw error;
+    }
+  }
+
+  /**
    * Run `work` inside the OPEN transaction when there is one, and inside the
    * single transaction otherwise.
    *
@@ -974,12 +1077,22 @@ export class GraphStore {
    * second one over the same file.
    */
   private inTransaction<R>(work: () => R): R {
+    if ((this.connection.observers?.size ?? 0) > 0) ensureDirtyGraphJournal(this.db);
     this.connection.depth += 1;
     let committed = false;
+    let observers: readonly GraphStoreTransactionObserver[] = [];
     try {
       const result = this.db.transaction(() => {
         const result = work();
-        for (const observer of this.connection.observers ?? []) observer.beforeCommit();
+        if ((this.connection.observers?.size ?? 0) > 0) {
+          const graphIds = Object.freeze(this.db.query(`SELECT graph_id FROM ${DIRTY_GRAPHS} ORDER BY graph_id`).all()
+            .map(value => readStoreText(asStoreRow(value, this.filePath, DIRTY_GRAPHS), "graph_id", this.filePath, DIRTY_GRAPHS)));
+          if (graphIds.length > 0) {
+            observers = [...this.connection.observers!];
+            for (const observer of observers) observer.beforeCommit(graphIds);
+            for (const graphId of graphIds) this.db.run(`DELETE FROM ${DIRTY_GRAPHS} WHERE graph_id = ?`, graphId);
+          }
+        }
         return result;
       })();
       committed = true;
@@ -987,17 +1100,26 @@ export class GraphStore {
     } finally {
       this.connection.depth -= 1;
       if (committed) {
-        for (const observer of this.connection.observers ?? []) observer.afterCommit();
+        for (const observer of observers) observer.afterCommit();
       }
     }
   }
 
-  /** Observes every writer sharing this connection; delivery must happen after commit. */
+  /** Observers share changed graph ids before commit; delivery must wait for afterCommit. */
   observeTransactions(observer: GraphStoreTransactionObserver): () => void {
     this.assertOpen("observeTransactions");
+    if (this.connectionKey?.startsWith("ro\0")) throw new Error("Transaction observers require a writable graph store");
+    ensureDirtyGraphJournal(this.db);
     const observers = this.connection.observers ??= new Set();
     observers.add(observer);
     return () => { observers.delete(observer); };
+  }
+
+  /** Compare only on this connection; commits through other connections advance it. */
+  externalDataVersion(): number {
+    this.assertOpen("externalDataVersion");
+    const row = asStoreRow(this.db.query("PRAGMA data_version").get(), this.filePath, "data_version");
+    return readStoreEpoch(row, "data_version", this.filePath, "data_version");
   }
 
   // ── Ledger records (the port's own surface, delegated) ────────────────────
@@ -1626,7 +1748,42 @@ export class GraphStore {
       )
       .get(effect.graphId, effect.effectId);
     if (row === undefined || row === null) return undefined;
+    return this.decodeExecution(row);
+  }
+
+  /** Eligible worker bindings in graph order, with pending dispatches before accepted attempts. */
+  readWorkerExecutions(): readonly ExecutionBindingRecord[] {
+    this.assertOpen("readWorkerExecutions");
+    const tables = GRAPH_STORE_TABLES;
+    const rows = this.db.query(`
+      WITH candidates AS (
+        SELECT p.graph_id, p.effect_id, 0 AS source, p.created_at AS instant, p.effect_id AS ordering
+        FROM ${tables.pendingEffects} p
+        WHERE p.status IN ('pending', 'started') AND (
+          p.run_id = (SELECT r.run_id FROM ${tables.runs} r WHERE r.graph_id = p.graph_id ORDER BY r.run_seq DESC LIMIT 1)
+          OR NOT EXISTS (SELECT 1 FROM ${tables.runs} r WHERE r.graph_id = p.graph_id)
+        )
+        UNION ALL
+        SELECT a.graph_id, ? || a.attempt_id, 1, a.accepted_at, a.attempt_id
+        FROM ${tables.acceptedEvents} a
+      )
+      SELECT e.* FROM candidates c
+      INNER JOIN ${tables.definitions} d ON d.graph_id = c.graph_id
+      INNER JOIN ${tables.executions} e ON e.graph_id = c.graph_id AND e.effect_id = c.effect_id
+      ORDER BY c.graph_id, c.source, c.instant, c.ordering
+    `).all(dispatchEffectIdOf(""));
+    const records = rows.map(row => this.decodeExecution(row));
+    records.sort((left, right) => left.graphId < right.graphId ? -1 : left.graphId > right.graphId ? 1 : 0);
+    return Object.freeze(records);
+  }
+
+  private decodeExecution(row: unknown): ExecutionBindingRecord {
     const entry = asStoreRow(row, this.filePath, GRAPH_STORE_TABLES.executions);
+    const effect = {
+      graphId: readStoreText(entry, "graph_id", this.filePath, GRAPH_STORE_TABLES.executions),
+      effectId: readStoreText(entry, "effect_id", this.filePath, GRAPH_STORE_TABLES.executions),
+      attemptId: readStoreText(entry, "attempt_id", this.filePath, GRAPH_STORE_TABLES.executions),
+    };
     const table = GRAPH_STORE_TABLES.executions;
     const state = entry["state"];
     if (state !== "pending" && state !== "creating" && state !== "created") {
@@ -3073,9 +3230,9 @@ export class GraphStore {
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /** Refuse any use of a closed store with a clear, typed error. */
-  private assertOpen(operation: string): void {
+  private assertOpen(operation: string): string | undefined {
     if (this.closed) throw new GraphStoreClosedError(operation);
-    verifyConnectionFile(this.connection, this.filePath);
+    return verifyConnectionFile(this.connection, this.filePath);
   }
 
   /**

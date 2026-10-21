@@ -322,8 +322,8 @@ export class GraphNotifications {
   private readonly timer: ReturnType<typeof setInterval>;
   private active: Promise<void> | undefined;
   private queued = false;
-  private writing = false;
   private captured = false;
+  private capturedExternalVersion: number | undefined;
   private closed = false;
 
   constructor(root: string, private readonly options: GraphNotificationOptions) {
@@ -331,7 +331,7 @@ export class GraphNotifications {
     this.now = options.clock ?? Date.now;
     this.retryMs = options.retryMs ?? 5_000;
     this.unsubscribe = this.store.observeTransactions({
-      beforeCommit: () => { this.captured = !this.writing && this.capture(); },
+      beforeCommit: graphIds => { this.captured = this.capture(graphIds); },
       afterCommit: () => { if (this.captured) this.schedule(); },
     });
     this.timer = setInterval(() => this.schedule(), this.retryMs);
@@ -340,17 +340,16 @@ export class GraphNotifications {
   }
 
   private write<T>(work: () => T): T {
-    this.writing = true;
-    try { return this.store.transaction(work); }
-    finally { this.writing = false; }
+    return this.store.transaction(work);
   }
 
-  private capture(): boolean {
+  private capture(graphIds: readonly string[], listedOrigins = false): boolean {
     let captured = false;
-    for (const graphId of this.store.invocationOriginGraphIds()) {
+    for (const graphId of graphIds) {
       if (this.store.readDefinition(graphId) === undefined) continue;
       const origin = this.store.readInvocationOrigin(graphId);
       if (origin === undefined) {
+        if (!listedOrigins) continue;
         // BOTH READS RUN ON ONE SYNCHRONOUS CONNECTION, so a listed graph id with
         // no origin row means the store answered inconsistently. `{ ...origin }`
         // would spread `undefined` — legal JavaScript — and persist a durable
@@ -403,6 +402,17 @@ export class GraphNotifications {
     return captured;
   }
 
+  private async captureExternalChanges(): Promise<void> {
+    const version = this.store.externalDataVersion();
+    if (version === this.capturedExternalVersion) return;
+    for (const graphId of this.store.invocationOriginGraphIds()) {
+      if (this.closed) return;
+      this.write(() => this.capture([graphId], true));
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    if (this.store.externalDataVersion() === version) this.capturedExternalVersion = version;
+  }
+
   private schedule(): void {
     if (this.closed) return;
     this.queued = true;
@@ -425,7 +435,8 @@ export class GraphNotifications {
   private async drain(): Promise<void> {
     do {
       this.queued = false;
-      this.write(() => this.capture());
+      this.write(() => {});
+      await this.captureExternalChanges();
       for (const effect of this.store.readPendingNotificationEffects(EFFECT_KIND)) {
         if (this.closed) return;
         const previous = effect.payload;

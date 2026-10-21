@@ -1,3 +1,4 @@
+import { createDshGraphWorkerGrantHost } from "../platform/adapters/dsh/graph-worker-host.ts";
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, resolveDshWorkerCommandBoundary, type DshGraphWorkerRegistry, type DshSandboxPolicyService, type DshSandboxService, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
@@ -1611,33 +1612,10 @@ export async function apply(
   // (workers are not handed its path): see `credential-vault.ts` for what that
   // can and cannot isolate on a same-account platform.
   const graphRuntimes = new Map<string, ReturnType<typeof openGraphRuntime>>();
-  workerBoundary = installDshGraphWorkerBoundary({
-    workerPrincipalOf: (sessionId) => {
-      for (const runtime of graphRuntimes.values()) {
-        const principal = runtime.host.workerPrincipalOf(sessionId);
-        if (principal) return principal;
-      }
-      return undefined;
-    },
-    workerDeclaredToolsOf: principal => {
-      for (const runtime of graphRuntimes.values()) {
-        const worker = runtime.host.workerPrincipalOf(principal.workerSessionId);
-        if (worker?.graphId === principal.graphId && worker.attemptId === principal.attemptId) {
-          return runtime.host.workerDeclaredToolsOf(principal);
-        }
-      }
-      return undefined;
-    },
-    workerToolPresentationOf: principal => {
-      for (const runtime of graphRuntimes.values()) {
-        const worker = runtime.host.workerPrincipalOf(principal.workerSessionId);
-        if (worker?.graphId === principal.graphId && worker.attemptId === principal.attemptId) {
-          return runtime.host.workerToolPresentationOf(principal);
-        }
-      }
-      return undefined;
-    },
-  }, ctx.tools, (event, listener) => ctx.on(event, listener));
+  workerBoundary = installDshGraphWorkerBoundary(
+    createDshGraphWorkerGrantHost(() => [...graphRuntimes.values()].map(runtime => runtime.host)),
+    ctx.tools, (event, listener) => ctx.on(event, listener),
+  );
   function openGraphRuntime(workspace: string) {
     let outcomeHost: OutcomeHost | undefined;
     const outcomeDelivery = new DshOutcomeDelivery({
@@ -1881,71 +1859,6 @@ export async function apply(
     void outcomeHost
       .recoverDeclaredGraphs()
       .then(async (report) => {
-        if (
-          report.started.length > 0 ||
-          report.resumed.length > 0 ||
-          report.refused.length > 0 ||
-          report.effectRefusals.length > 0 ||
-          report.divergences.length > 0 ||
-          // A controlled run is reported in `resumed` too, but it is named here so
-          // the gate cannot depend on that staying true (P3 item 1).
-          report.controlled.length > 0 ||
-          report.failedAttempts.length > 0 ||
-          report.unconfirmedExecutions.length > 0 ||
-          report.cancellations.length > 0 ||
-          report.cancelBlocked.length > 0
-        ) {
-          log.warn("dsh outcome graph recovery", {
-            started: report.started,
-            resumed: report.resumed,
-            refused: report.refused,
-            // Per-effect facts a visited graph still owes: an effect the resume
-            // would not launch, and a row the host's fact contradicted.
-            effectRefusals: report.effectRefusals.map(
-              (refusal) => refusal.graphId + ":" + refusal.code,
-            ),
-            divergences: report.divergences.map(
-              (divergence) =>
-                divergence.graphId +
-                ":" +
-                divergence.effectId +
-                ":" +
-                divergence.local +
-                "->" +
-                divergence.host,
-            ),
-            // WHAT A TRUSTED RUN-WIDE CONTROL COMMAND STOPPED (P3 item 1):
-            // `graph:command` for every run a `cancel` / `budget-stop` ended. The
-            // values are computed by the sweep, and logging them here is what
-            // keeps a restart from presenting a stopped run as merely `resumed`.
-            // A NODE-SCOPED `failure` / `timeout` is deliberately NOT here: it
-            // ends one attempt and the run keeps executing.
-            controlled: report.controlled,
-            // WHAT A NODE-SCOPED STOP ENDED (DEFECT 2): `graph:node:attempt:command`
-            // for every attempt the sweep failed WITHOUT the run being stopped.
-            // Logged beside `controlled` so the two facts are never conflated.
-            failedAttempts: report.failedAttempts,
-            // WHAT THE SWEEP'S CANCEL DELIVERIES ESTABLISHED (P3): confirmed /
-            // requested / unsupported / blocked, per attempt. Only `confirmed`
-            // is the platform's own substantiation; everything else leaves the
-            // execution visible and unsettled, which is why the report names it.
-            cancellations: report.cancellations.map(
-              (entry) =>
-                entry.graphId + ":" + entry.attemptId + ":" + entry.state,
-            ),
-            cancelBlocked: report.cancelBlocked,
-            // THE EXTERNAL WORK A STOP LEFT UNCONFIRMED (P3 item 1): every
-            // `pending` / `creating` execution behind a controlled run, as
-            // `graph:attempt:state`. A `creating` row may name a task the
-            // platform really started, so it is REPORTED here rather than hidden;
-            // this runs AFTER the cancel deliveries above, so an execution the
-            // platform has since confirmed is no longer unconfirmed.
-            unconfirmedExecutions: report.unconfirmedExecutions.map(
-              (entry) =>
-                entry.graphId + ":" + entry.attemptId + ":" + entry.state,
-            ),
-          });
-        }
         // THE AWAITING INVENTORY IS CONSUMED, NOT JUST PRINTED (F4). Every
         // confirmed execution the sweep is still waiting on is handed back to the
         // platform adapter, which re-subscribes where dsh supports it and reports

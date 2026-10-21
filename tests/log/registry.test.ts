@@ -5,12 +5,12 @@
  * What these cases fix in place:
  *
  * 1. THE TABLE'S SECTIONS, EXACTLY. The four platform codes are the table's
- *    head, in their original order; the graph engine's nineteen follow them as
- *    four channel sections (thirteen `graph:host`, two `graph:index`, three
+ *    head, in their original order; the graph engine's twenty follow them as
+ *    four channel sections (fourteen `graph:host`, two `graph:index`, three
  *    `graph:tool`, one `graph:declare`); stage 4's per-channel sections follow
  *    those. The appended block is pinned ENTRY BY ENTRY against a fixture
  *    grouped by channel, so this suite answers "which codes exist, in which
- *    section, in what order" rather than "at least nineteen of something" —
+ *    section, in what order" rather than "at least twenty of something" —
  *    an entry dropped, reordered into another channel's section, or added
  *    without updating the fixture fails here by name.
  * 2. EVERY ENTRY IS USABLE. A level from the four, a non-empty channel, a
@@ -50,20 +50,13 @@ const PLATFORM_CODES: readonly string[] = [
   "log.event.unknown-code",
 ];
 
-/**
- * The GRAPH ENGINE EVENTS block: one section per channel, in the table's own
- * order, each holding every code that section declares in declaration order.
- *
- * These are the nineteen diagnostics the engine emitted before the platform
- * existed, and their counts are the engine's own mapping (13 host / 2 index /
- * 3 tool / 1 declare) — a code that moves to another channel without moving
- * section is a vocabulary change, not a refactor, so it belongs here.
- */
+/** Graph engine codes grouped by channel in registry declaration order. */
 const ENGINE_SECTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["graph:host", [
     "host.control-continuation.failed",
     "sweep.store-blocked",
     "sweep.summary",
+    "sweep.attention",
     "watch.unwatched-executions",
     "watch.port-threw",
     "watch.announcement-unconfirmed",
@@ -253,17 +246,17 @@ describe("closed event vocabulary", () => {
     expect(observedSections(appended)).toEqual(APPENDED_SECTIONS.map(([channel, codes]) => [channel, [...codes]]));
   });
 
-  it("holds the graph engine's nineteen after the platform entries, on the engine's own channels", () => {
+  it("holds the graph engine's twenty after the platform entries, on the engine's own channels", () => {
     const appended = Object.keys(LOG_EVENTS).slice(PLATFORM_CODES.length);
     const engineCount = ENGINE_SECTIONS.reduce((total, [, codes]) => total + codes.length, 0);
-    expect(engineCount).toBe(19);
+    expect(engineCount).toBe(20);
     // The engine's block is the head of the appended entries — not merely
     // present somewhere after the platform four.
     expect(appended.slice(0, engineCount)).toEqual([...ENGINE_SECTIONS.flatMap(([, codes]) => codes)]);
     // One section per engine channel, in the engine's own order, each with the
     // engine's count for that channel.
     expect(ENGINE_SECTIONS.map(([channel, codes]) => `${channel}=${codes.length}`)).toEqual([
-      "graph:host=13",
+      "graph:host=14",
       "graph:index=2",
       "graph:tool=3",
       "graph:declare=1",

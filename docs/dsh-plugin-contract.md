@@ -737,10 +737,18 @@ class SubagentRuntime extends Service {
   sendMessage(sender, targetId, content, options): Promise<MessageId>;       // :246
   interrupt(targetSessionId, authority): void;                // :295
   drainContinuableDescendants(parents): Promise<void>;        // :309
-  listChildren(parentSessionId, signal?): Promise<SubagentListEntry[]>;      // :349
+  listChildren(parentSessionId, signal?): Promise<SubagentCatalogEntry[]>;   // :349
   listDescendants(rootSessionId, signal?): Promise<SubagentDescendantListEntry[]>; // :368
 }
 ```
+
+Direct-child catalog rows are `{id, createdAt, mode, label?}` with mode
+`one-shot`, `continuable`, `external` or `unknown`
+(`source:packages/subagent/subagent/src/projection-types.ts`). They carry no
+`kind`; that discriminator belongs to descendant-list rows. Graph recovery
+correlates the stable dispatch label on `one-shot` rows. Legacy rows with
+`kind: "child"` and no mode remain compatible; an explicit different mode is
+refused even when its label matches.
 
 **`SubagentProvider`** (`source:packages/subagent/subagent/src/types.ts`):
 

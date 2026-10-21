@@ -234,6 +234,17 @@ grep -n '^  "' src/log/registry.ts          # every registered code, in table or
 Records that are not events carry no `code`; they come from the level helpers
 (`log.warn("…", { … })`) with a sentence that only exists at the call site.
 
+Declared graph recovery emits one aggregate report from the host. Normal starts,
+resumes, completed graphs, explicit control stops, confirmed cancellations and
+executions reported as running use `sweep.summary` at `info`. Refused work,
+declaration-driven stops, divergence, failed attempts, unknown execution state,
+and unconfirmed cancellation or execution use unthrottled `sweep.attention` at
+`warn`, with the same report
+fields. DSH consumes the report to restore observation without logging it again.
+Confirmed workers are read by their execution id even after their parent session
+has been removed; recovery checks the child's stable dispatch label before using
+its terminal events. Missing or unreadable child events remain `unknown`.
+
 ### Throttling
 
 A few events opt into a suppression window (`throttleMs` in the registry). A

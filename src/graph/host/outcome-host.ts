@@ -2,7 +2,7 @@ import { HostGraphRuntimes, type RunningGraphRuntime } from "./graph-runtimes.ts
 import { declaredNodeTools, declaredNodeToolPresentation } from "../compiler/plan.ts";
 import type { WorkerToolPresentation } from "../domain/worker-tools.ts";
 import { WORKER_GRANTED_GRAPH_TOOLS, bindOutcomeToolInvocation, reportControlContinuation } from "./tool-binding.ts";
-import type { OutcomeWorkerPrincipal } from "./tool-binding.ts";
+import type { OutcomeWorkerPrincipal, OutcomeWorkerToolGrant } from "./tool-binding.ts";
 import { applyGraphControl, type GraphControlResult } from "../control/application.ts";
 export {
   WORKER_TOOL_FORBIDDEN_CODE,
@@ -10,7 +10,7 @@ export {
   bindOutcomeToolInvocation,
   withCancelDelivery,
 } from "./tool-binding.ts";
-export type { OutcomeWorkerPrincipal, OutcomeWorkerToolBoundary, OutcomeToolAttribution } from "./tool-binding.ts";
+export type { OutcomeWorkerPrincipal, OutcomeWorkerToolGrant, OutcomeWorkerToolBoundary, OutcomeToolAttribution } from "./tool-binding.ts";
 
 
 import { join } from "node:path";
@@ -24,6 +24,7 @@ import {
   readStoredDefinition,
   readStoredRunStateOf,
   type StoredDeclaredGraph,
+  type StoredRunStateReading,
 } from "../persistence/declared-record.ts";
 import { loadGraphStoreSync } from "../store/load.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
@@ -120,6 +121,22 @@ import {
   type HostInvocationHolder,
   type HostWorkerSessionHolder,
 } from "./identity.ts";
+
+interface WorkerGraphBindings {
+  readonly dispatch: ReadonlyMap<string, OutcomeDispatchTarget>;
+  recorded?: StoredRunStateReading;
+  recordedNodes?: ReadonlyMap<string, string | undefined>;
+}
+
+interface WorkerReadSnapshot {
+  readonly revision: string;
+  principals?: ReadonlyMap<string, OutcomeWorkerPrincipal>;
+  readonly definitions: Map<string, StoredDeclaredGraph | undefined>;
+  readonly bindings: Map<string, WorkerGraphBindings>;
+  readonly grants: Map<string, OutcomeWorkerToolGrant>;
+}
+
+const BASELINE_WORKER_GRANT: OutcomeWorkerToolGrant = Object.freeze({});
 
 /**
  * The host's own log channel.
@@ -798,6 +815,8 @@ export interface OutcomeHostRecoveryReport {
    * would tell every reader the whole run had stopped.
    */
   readonly controlled: readonly string[];
+  /** `graph:reason` for each declaration-driven stop, independent of control commands. */
+  readonly stopped: readonly string[];
   /**
    * EVERY EXECUTION OF A CONTROLLED GRAPH THE HOST HAS NOT CONFIRMED (P3 item 1):
    * the `pending` and `creating` rows behind the effects a control stop left
@@ -947,6 +966,8 @@ export class OutcomeHost {
    * demand ({@link OutcomeHost.dispatchedWorkerPrincipalOf}).
    */
   private readonly workerPrincipals = new Map<string, OutcomeWorkerPrincipal>();
+  private workerReadStore: GraphStore | undefined;
+  private workerReadSnapshot: WorkerReadSnapshot | undefined;
   private readonly declareInvocationIdentity: boolean;
   /** The platform's child-session derivation, when the host declared one. */
   private readonly workerSessionOf:
@@ -1555,16 +1576,9 @@ export class OutcomeHost {
     this.assertOpen();
     const { runtime, ledger } = await this.runtimeFor(graphId);
     this.rememberOrigin(graphId, invocation);
-    // THE PLATFORM'S READINGS ARE PRIMED BEFORE THE SYNCHRONOUS WINDOW (P2
-    // item 5 / F3). `resume` reconciles every unsettled effect and asks the
-    // dispatch adapter — synchronously — whether an execution already exists for
-    // it; a platform whose correlation read is asynchronous would have no answer
-    // to give inside that window. Awaiting the port's `prime` here (with the
-    // graph's own recorded origin, the parent the creates were made under) is
-    // what makes the question answerable when it is asked. A platform without
-    // `prime` needs nothing; a failed prime leaves every reading unset, which
-    // answers `unknown` and blocks — never guesses.
-    await this.primePlatformReadings(graphId, ledger, invocation);
+    if (this.pendingReexecutionOf(graphId, ledger) === undefined) {
+      await this.primePlatformReadings(graphId, runtime, ledger, invocation);
+    }
     this.setInvocation(invocation);
     try {
       // A PENDING RE-EXECUTION ORDER IS HONOURED HERE (P3 item 2). The order is a
@@ -1576,8 +1590,6 @@ export class OutcomeHost {
       if (this.pendingReexecutionOf(graphId, ledger) !== undefined) {
         return this.reexecuteDeclaredGraph(graphId, runtime, ledger);
       }
-      // The run advanced inside the acceptance transaction, which wrote the run
-      // state to the store; the query paths read it from there.
       return runtime.resume(this.clock());
     } finally {
       this.holder.clear();
@@ -1703,12 +1715,16 @@ export class OutcomeHost {
    */
   private async primePlatformReadings(
     graphId: string,
+    runtime: OutcomeGraphRuntime,
     ledger: SqliteAcceptanceLedger,
     invocation: OutcomeHostInvocation,
   ): Promise<void> {
     if (this.query?.prime === undefined) return;
     let effects: readonly PendingEffectRecord[];
     try {
+      if (ledger.runs?.readRunControl(graphId) !== undefined) return;
+      const state = runtime.state();
+      if (state?.phase === "complete" || state?.phase === "stopped") return;
       effects = ledger.pendingEffects(graphId);
     } catch {
       // The unreadable ledger is the run path's own report to make; priming
@@ -1727,10 +1743,20 @@ export class OutcomeHost {
     const probes: OutcomeExecutionProbe[] = [];
     for (const effect of effects) {
       if (effect.kind !== "dispatch") continue;
+      const key = dispatchEffectKeyOf(graphId, effect.attemptId);
+      let execution: HostExecutionIdentity | undefined;
+      try {
+        const binding = this.executions.read(key);
+        execution = binding?.state === "created" && binding.attemptId === effect.attemptId
+          ? binding.execution : undefined;
+      } catch {
+        return;
+      }
       probes.push(
         Object.freeze({
-          effect: dispatchEffectKeyOf(graphId, effect.attemptId),
+          effect: key,
           ...(origin === undefined ? {} : { invocation: origin }),
+          ...(execution === undefined ? {} : { execution }),
         }),
       );
     }
@@ -1836,6 +1862,7 @@ export class OutcomeHost {
     const completed: string[] = [];
     const awaiting: OutcomeHostAwaitingCompletion[] = [];
     const controlled: string[] = [];
+    const stoppedReasons = new Set<string>();
     const failedAttempts: string[] = [];
     const unconfirmed: OutcomeHostUnconfirmedExecution[] = [];
     const cancellations: OutcomeCancelDeliveryEntry[] = [];
@@ -1843,6 +1870,7 @@ export class OutcomeHost {
     const reexecuted: string[] = [];
     const inventory = this.declaredGraphInventory();
     for (const graphId of inventory.graphIds) {
+      await new Promise<void>(resolve => setImmediate(resolve));
       try {
         // The invocation this graph was declared under, when this host knows it
         // (in memory, or from its own record after a restart): a resumed graph
@@ -1872,6 +1900,8 @@ export class OutcomeHost {
         } else {
           resumed.push(graphId + ":" + result.state.phase);
         }
+        const stop = result.kind === "resumed" ? result.stop ?? result.state.stop : result.state.stop;
+        if (stop !== undefined) stoppedReasons.add(graphId + ":" + stop.reason);
         // A VISITED GRAPH STILL OWES ITS PER-EFFECT FACTS. Every effect the
         // resume would not launch and every row that contradicted the host is
         // carried into the report (and the log below), so "resumed" never hides
@@ -1944,6 +1974,7 @@ export class OutcomeHost {
         // question is REPORTED: never resumed-and-fine, never waited on
         // forever, and an execution that ENDED without its outcome is reported,
         // not fabricated into one.
+        let settledDuringRecovery = false;
         for (const node of result.armed) {
           const attemptId = node.attemptId;
           let execution: HostExecutionIdentity | undefined;
@@ -2075,12 +2106,14 @@ export class OutcomeHost {
           // reading), so the block is diagnosable without re-running the sweep.
           const settlement = await this.settleFinishedAttempt(graphId, attemptId);
           if (settlement.kind === "settled") {
+            settledDuringRecovery = true;
             completed.push(
               graphId + ":" + attemptId + ":" + describeFinishedAttempt(settlement),
             );
             continue;
           }
           if (settlement.kind === "already-settled") {
+            settledDuringRecovery = true;
             // The ledger already holds an accepted event for this attempt: the
             // attempt IS settled, so this is a settlement the sweep REPLAYED, not
             // a block. It is named as such instead of being reported unsettled.
@@ -2110,6 +2143,11 @@ export class OutcomeHost {
             }),
           );
         }
+        if (settledDuringRecovery) {
+          const { runtime } = await this.runtimeFor(graphId);
+          const finalStop = runtime.state()?.stop;
+          if (finalStop !== undefined) stoppedReasons.add(graphId + ":" + finalStop.reason);
+        }
       } catch (err) {
         refused.push(graphId + ": " + errorText(err));
       }
@@ -2117,6 +2155,17 @@ export class OutcomeHost {
     if (inventory.blocked !== undefined) {
       logEvent("sweep.store-blocked", { reason: inventory.blocked });
     }
+    const stopped = [...stoppedReasons];
+    const needsAttention =
+      stopped.length > 0 ||
+      refused.length > 0 ||
+      effectRefusals.some(refusal => refusal.code !== "control-stopped") ||
+      divergences.length > 0 ||
+      failedAttempts.length > 0 ||
+      awaiting.some(entry => entry.status === "unknown") ||
+      unconfirmed.length > 0 ||
+      cancelBlocked.length > 0 ||
+      cancellations.some(entry => entry.state !== "confirmed");
     if (
       started.length > 0 ||
       resumed.length > 0 ||
@@ -2126,11 +2175,13 @@ export class OutcomeHost {
       completed.length > 0 ||
       awaiting.length > 0 ||
       controlled.length > 0 ||
+      stopped.length > 0 ||
       failedAttempts.length > 0 ||
       cancellations.length > 0 ||
-      cancelBlocked.length > 0
+      cancelBlocked.length > 0 ||
+      unconfirmed.length > 0
     ) {
-      logEvent("sweep.summary", {
+      logEvent(needsAttention ? "sweep.attention" : "sweep.summary", {
         started,
         resumed,
         refused,
@@ -2150,6 +2201,7 @@ export class OutcomeHost {
           (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.status,
         ),
         controlled,
+        stopped,
         failedAttempts,
         cancellations: cancellations.map(
           (entry) => entry.graphId + ":" + entry.attemptId + ":" + entry.state,
@@ -2176,6 +2228,7 @@ export class OutcomeHost {
       // work that stop leaves unconfirmed: both are reported, so a restart
       // neither re-starts a cancelled graph nor presents it as quiet.
       controlled: Object.freeze(controlled),
+      stopped: Object.freeze(stopped),
       // WHAT A NODE-SCOPED STOP ENDED (DEFECT 2): `graph:node:attempt:command`
       // for every attempt this sweep failed WITHOUT the run being stopped. The
       // run's own control fact is in `controlled`, exactly when one stands.
@@ -2816,6 +2869,7 @@ export class OutcomeHost {
     this.closed = true;
     this.runtimes.close();
     this.bridges.clear();
+    this.releaseWorkerReadStore();
     // The host is the ONLY owner of these three long-lived capabilities, and
     // EACH holds a borrow on the same GraphStore connection: the store's shared
     // connection map closes the database only when the LAST borrow returns, so
@@ -3036,141 +3090,174 @@ export class OutcomeHost {
   }
 
   /**
-   * THE NODE'S DECLARED HOST-TOOL GRANT for the worker this principal names, or
-   * `undefined`.
-   *
-   * This is the ONE new fact the worker-tool boundary needs to judge a name
-   * outside the baseline: the v3 node declaration's `tools?: string[]` — extra
-   * HOST tool names or trailing-star prefixes such as `computer_*` — read from
-   * the SAME durable facts every other binding is read from:
-   *
-   *   - the NODE comes from the attempt's own dispatch binding (this process's
-   *     cache, else the host's durable record), never from the caller and never
-   *     from a node lookup by list order;
-   *   - the GRANT comes from the persisted, verified compiled plan of that
-   *     graph ({@link readStoredDefinition}), so an edited declaration cannot
-   *     move a grant under a running plan.
-   *
-   * FAIL CLOSED, and TOTAL: a principal that is not bound to an attempt, an
-   * absent/unreadable/refused store, a graph with no definition, an unknown
-   * node, an absent field, or any malformed value answers `undefined` — which
-   * the boundary reads as BASELINE ONLY. Nothing here throws and nothing here
-   * widens a grant on an uncertainty.
+   * Resolve both authorization inputs from one verified committed store revision.
+   * Missing or unreadable bindings and definitions leave only the worker baseline.
    */
-  workerDeclaredToolsOf(
-    principal: OutcomeWorkerPrincipal,
-  ): readonly string[] | undefined {
-    try {
-      const binding = this.bridgeFor(principal.graphId).bindingFor({
-        graphId: principal.graphId,
-        attemptId: principal.attemptId,
-      });
-      if (binding === undefined) return undefined;
-      const reading = readStoredDefinition(this.storeRoot, principal.graphId);
-      if (reading.kind !== "ok") return undefined;
-      return declaredNodeTools(reading.declared.plan, binding.nodeId);
-    } catch {
-      return undefined;
+  workerToolGrantOf(principal: OutcomeWorkerPrincipal): OutcomeWorkerToolGrant {
+    if (this.closed) return BASELINE_WORKER_GRANT;
+    if (this.sharedStore !== undefined) {
+      // Memory bindings have no independently observable commit revision.
+      try {
+        const binding = this.bridges.get(principal.graphId)?.cachedBindingFor(principal);
+        if (binding === undefined) return BASELINE_WORKER_GRANT;
+        const reading = readStoredDefinition(this.storeRoot, principal.graphId);
+        return reading.kind === "ok"
+          ? this.toolGrantOf(reading.declared, binding.nodeId)
+          : BASELINE_WORKER_GRANT;
+      } catch {
+        return BASELINE_WORKER_GRANT;
+      }
     }
+    return this.readWorkerSnapshot((store, snapshot) => {
+      const key = JSON.stringify([principal.graphId, principal.attemptId]);
+      const cached = snapshot.grants.get(key);
+      if (cached !== undefined) return cached;
+      const grant = this.readWorkerToolGrant(store, snapshot, principal);
+      snapshot.grants.set(key, grant);
+      return grant;
+    }) ?? BASELINE_WORKER_GRANT;
+  }
+
+  private readWorkerToolGrant(
+    store: GraphStore,
+    snapshot: WorkerReadSnapshot,
+    principal: OutcomeWorkerPrincipal,
+  ): OutcomeWorkerToolGrant {
+    const declared = this.workerDefinitionOf(store, snapshot, principal.graphId);
+    if (declared === undefined) return BASELINE_WORKER_GRANT;
+    const local = this.bridges.get(principal.graphId)?.cachedBindingFor(principal);
+    let nodeId = local?.nodeId;
+    if (nodeId === undefined) {
+      const effect = dispatchEffectKeyOf(principal.graphId, principal.attemptId);
+      const row = store.readExecution(effect);
+      if (row === undefined || row.attemptId !== principal.attemptId) return BASELINE_WORKER_GRANT;
+      nodeId = this.workerNodeOf(store, snapshot, declared, effect.effectId, principal.attemptId);
+    }
+    if (nodeId === undefined) return BASELINE_WORKER_GRANT;
+    return this.toolGrantOf(declared, nodeId);
+  }
+
+  workerDeclaredToolsOf(principal: OutcomeWorkerPrincipal): readonly string[] | undefined {
+    return this.workerToolGrantOf(principal).declaredTools;
   }
 
   workerToolPresentationOf(principal: OutcomeWorkerPrincipal): WorkerToolPresentation | undefined {
-    try {
-      const binding = this.bridgeFor(principal.graphId).bindingFor({ graphId: principal.graphId, attemptId: principal.attemptId });
-      if (binding === undefined) return undefined;
-      const reading = readStoredDefinition(this.storeRoot, principal.graphId);
-      if (reading.kind !== "ok") return undefined;
-      return declaredNodeToolPresentation(reading.declared.plan, binding.nodeId);
-    } catch {
-      return undefined;
-    }
+    return this.workerToolGrantOf(principal).toolPresentation;
   }
 
-  /**
-   * The durable half of {@link OutcomeHost.workerPrincipalOf}: scan every
-   * declared graph's dispatch records and ask which execution row names this
-   * session as its worker.
-   *
-   * TWO LISTINGS, ONE ROW. A still-unsettled effect is listed by
-   * `pendingEffects`. A SETTLED attempt is listed by its ACCEPTED EVENT: the
-   * effect stops being pending the moment the attempt settles, while the store
-   * KEEPS the execution row (a `created` row is never released — that
-   * execution exists), so the event's attempt id is what reaches the same row
-   * a running attempt's effect reaches. Without the second listing a worker
-   * whose attempt settled would be unbound in a host that did not confirm it
-   * itself, and the face would grant it the declarer's capabilities again
-   * (G-A21-restart).
-   *
-   * READ-ONLY AND FAIL-OPEN. The scan borrows a read-only connection (it never
-   * creates or initializes a store), and a store that cannot be read answers
-   * "no worker bound" rather than denying: the very tool the caller is invoking
-   * reports the unreadable store by name, and a boundary that turned a damaged
-   * store into "everything is a worker" would break the declarer's own
-   * recovery.
-   */
-  private dispatchedWorkerPrincipalOf(
-    sessionId: string,
-  ): OutcomeWorkerPrincipal | undefined {
-    const workerSessionOf = this.workerSessionOf;
-    if (workerSessionOf === undefined) return undefined;
-    const loaded = loadGraphStoreSync(this.storeRoot);
-    if (loaded.kind !== "valid") return undefined;
-    const store = loaded.value;
-    try {
-      for (const graphId of store.definitionGraphIds()) {
-        for (const effect of store.pendingEffects(graphId)) {
-          const principal = this.durableWorkerPrincipalOf(
-            store,
-            effect,
-            sessionId,
-            workerSessionOf,
-          );
-          if (principal !== undefined) return principal;
-        }
-        for (const event of store.acceptedEvents(graphId)) {
-          const principal = this.durableWorkerPrincipalOf(
-            store,
-            dispatchEffectKeyOf(graphId, event.attemptId),
-            sessionId,
-            workerSessionOf,
-          );
-          if (principal !== undefined) return principal;
-        }
-      }
-      return undefined;
-    } catch {
-      return undefined;
-    } finally {
-      store.close();
-    }
-  }
-
-  /**
-   * One durable execution row as a worker principal, when the session the
-   * platform created it for is the one that arrived.
-   *
-   * The row is the host's own fact on both listings: a row that is not
-   * `created`, or that carries no execution the platform's derivation can turn
-   * into a session, binds nobody.
-   */
-  private durableWorkerPrincipalOf(
-    store: GraphStore,
-    effect: OutcomeDispatchEffectKey,
-    sessionId: string,
-    workerSessionOf: (execution: HostExecutionIdentity) => string | undefined,
-  ): OutcomeWorkerPrincipal | undefined {
-    const row = store.readExecution(effect);
-    if (row === undefined || row.state !== "created") {
-      return undefined;
-    }
-    const workerSessionId = workerSessionOf(row.execution);
-    if (workerSessionId !== sessionId) return undefined;
+  private toolGrantOf(declared: StoredDeclaredGraph, nodeId: string): OutcomeWorkerToolGrant {
+    const declaredTools = declaredNodeTools(declared.plan, nodeId);
+    const toolPresentation = declaredNodeToolPresentation(declared.plan, nodeId);
     return Object.freeze({
-      graphId: effect.graphId,
-      attemptId: row.attemptId,
-      executionId: row.execution.executionId,
-      workerSessionId,
+      ...(declaredTools === undefined ? {} : { declaredTools }),
+      ...(toolPresentation === undefined ? {} : { toolPresentation }),
     });
+  }
+
+  private workerDefinitionOf(
+    store: GraphStore,
+    snapshot: WorkerReadSnapshot,
+    graphId: string,
+  ): StoredDeclaredGraph | undefined {
+    if (snapshot.definitions.has(graphId)) return snapshot.definitions.get(graphId);
+    const row = store.readDefinition(graphId);
+    const reading = row === undefined ? undefined : decodeStoredDefinition(row);
+    const declared = reading?.kind === "ok" ? reading.declared : undefined;
+    snapshot.definitions.set(graphId, declared);
+    return declared;
+  }
+
+  private workerNodeOf(
+    store: GraphStore,
+    snapshot: WorkerReadSnapshot,
+    declared: StoredDeclaredGraph,
+    effectId: string,
+    attemptId: string,
+  ): string | undefined {
+    let bindings = snapshot.bindings.get(declared.graphId);
+    if (bindings === undefined) {
+      const dispatch = new Map<string, OutcomeDispatchTarget>();
+      for (const effect of store.pendingEffects(declared.graphId)) {
+        const reading = readDispatchRequest(effect.payload, {
+          graphId: declared.graphId,
+          planRevision: declared.plan.planRevision,
+        });
+        if (reading.kind === "ok") dispatch.set(effect.effectId, reading.target);
+      }
+      bindings = { dispatch };
+      snapshot.bindings.set(declared.graphId, bindings);
+    }
+    const dispatch = bindings.dispatch.get(effectId);
+    if (dispatch?.attemptId === attemptId) return dispatch.nodeId;
+    const reading = bindings.recorded ??= readStoredRunStateOf(store, declared);
+    if (reading.kind !== "recorded") return this.recordedNodeOf(store, declared, attemptId, reading);
+    if (bindings.recordedNodes === undefined) {
+      const nodes = new Map<string, string | undefined>();
+      for (const node of reading.state.nodes) {
+        if (node.attemptId === undefined) continue;
+        if (!nodes.has(node.attemptId)) nodes.set(node.attemptId, node.nodeId);
+        else if (nodes.get(node.attemptId) !== node.nodeId) nodes.set(node.attemptId, undefined);
+      }
+      bindings.recordedNodes = nodes;
+    }
+    return bindings.recordedNodes.get(attemptId);
+  }
+
+  private dispatchedWorkerPrincipalOf(sessionId: string): OutcomeWorkerPrincipal | undefined {
+    const workerSessionOf = this.workerSessionOf;
+    if (workerSessionOf === undefined || this.sharedStore !== undefined) return undefined;
+    return this.readWorkerSnapshot((store, snapshot) => {
+      if (snapshot.principals === undefined) {
+        const principals = new Map<string, OutcomeWorkerPrincipal>();
+        for (const row of store.readWorkerExecutions()) {
+          if (row.state !== "created") continue;
+          const workerSessionId = workerSessionOf(row.execution);
+          if (workerSessionId === undefined || workerSessionId.length === 0 || principals.has(workerSessionId)) continue;
+          principals.set(workerSessionId, Object.freeze({
+            graphId: row.graphId,
+            attemptId: row.attemptId,
+            executionId: row.execution.executionId,
+            workerSessionId,
+          }));
+        }
+        snapshot.principals = principals;
+      }
+      return snapshot.principals.get(sessionId);
+    });
+  }
+
+  private readWorkerSnapshot<T>(read: (store: GraphStore, snapshot: WorkerReadSnapshot) => T): T | undefined {
+    if (this.closed) return undefined;
+    try {
+      if (this.workerReadStore === undefined) {
+        const loaded = loadGraphStoreSync(this.storeRoot);
+        if (loaded.kind !== "valid") return undefined;
+        this.workerReadStore = loaded.value;
+      }
+      const store = this.workerReadStore;
+      let selected: WorkerReadSnapshot | undefined;
+      const value = store.readOnlySnapshot(revision => {
+        selected = this.workerReadSnapshot?.revision === revision ? this.workerReadSnapshot : {
+          revision,
+          definitions: new Map(),
+          bindings: new Map(),
+          grants: new Map(),
+        };
+        return read(store, selected);
+      });
+      this.workerReadSnapshot = selected;
+      return value;
+    } catch {
+      this.releaseWorkerReadStore();
+      return undefined;
+    }
+  }
+
+  private releaseWorkerReadStore(): void {
+    this.workerReadSnapshot = undefined;
+    const store = this.workerReadStore;
+    this.workerReadStore = undefined;
+    store?.close();
   }
 
   /** The per-graph completion bridge, created on first use. */
@@ -3358,8 +3445,8 @@ export class OutcomeHost {
     store: GraphStore,
     declared: StoredDeclaredGraph,
     attemptId: string,
+    reading: StoredRunStateReading = readStoredRunStateOf(store, declared),
   ): string | undefined {
-    const reading = readStoredRunStateOf(store, declared);
     if (reading.kind === "unstarted") return undefined;
     if (reading.kind === "unreadable") {
       withLogScope({ graphId: declared.graphId, attemptId }, () =>

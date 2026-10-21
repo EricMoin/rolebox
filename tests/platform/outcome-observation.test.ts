@@ -40,6 +40,7 @@ import {
   PiOutcomeDelivery,
   type PiOutcomeDispatchPort,
 } from "../../src/platform/adapters/pi/outcome-dispatch.ts";
+import type { DshSessionEventLike } from "../../src/platform/adapters/dsh/session.ts";
 import type { DshOutcomeSubagentRuntime } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
 import type {
   DshSubagentProvider,
@@ -84,7 +85,8 @@ function probe(invocation: OutcomeExecutionProbe["invocation"] = INVOCATION): Ou
 // ── dsh ─────────────────────────────────────────────────────────────────────
 
 interface DshChild {
-  readonly kind: string;
+  readonly kind?: string;
+  readonly createdAt?: number;
   readonly id: string;
   readonly label?: string;
   readonly activity?: string;
@@ -173,6 +175,126 @@ function dshDelivery(runtime: DshOutcomeSubagentRuntime): DshOutcomeDelivery {
 }
 
 describe("the dsh execution query port", () => {
+  for (const parent of [undefined, INVOCATION]) {
+    for (const noListing of [false, true]) {
+      it("reads a confirmed execution without listing a parent: parent=" + (parent !== undefined) + ", listing=" + !noListing, async () => {
+        const { runtime, listings } = makeDshRuntime({ noListing, listingThrows: true });
+        const reads: string[] = [];
+        const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
+          readExecutionEvents: async id => { reads.push(id); return [
+            { type: "subagent/descriptor", time: 1, data: { version: 2, mode: "one-shot", label: STABLE_KEY } },
+            { type: "turn/end", time: 2, data: { reason: { kind: "completed" } } },
+          ]; },
+        });
+        const known: OutcomeExecutionProbe = { effect: EFFECT, ...(parent === undefined ? {} : { invocation: parent }),
+          execution: { executionId: EXECUTION_ID } };
+        await delivery.executionQuery.prime?.([known]);
+        expect(reads).toEqual([EXECUTION_ID]);
+        expect(listings).toEqual([]);
+        expect(delivery.observeExecution({ executionId: EXECUTION_ID })).toEqual({ kind: "completed" });
+        expect(delivery.executionQuery.lookup(known).kind).toBe("unknown");
+        delivery.close();
+      });
+    }
+  }
+
+  it("drops old terminal readings when current execution events are mismatched or unreadable", async () => {
+    const { runtime, listings } = makeDshRuntime({ listingThrows: true });
+    let events: readonly DshSessionEventLike[] = [
+      { type: "subagent/descriptor", time: 1, data: { version: 2, mode: "one-shot", label: STABLE_KEY } },
+      { type: "turn/end", time: 2, data: { reason: { kind: "completed" } } },
+    ];
+    let unreadable = false;
+    const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
+      readExecutionEvents: async () => { if (unreadable) throw new Error("execution unavailable"); return events; },
+    });
+    const known: OutcomeExecutionProbe = { effect: EFFECT, invocation: INVOCATION, execution: { executionId: EXECUTION_ID } };
+    await delivery.executionQuery.prime?.([known]);
+    expect(delivery.observeExecution({ executionId: EXECUTION_ID }).kind).toBe("completed");
+    events = [{ type: "subagent/descriptor", time: 1, data: { version: 2, mode: "one-shot", label: "other-effect" } },
+      { type: "turn/end", time: 2, data: { reason: { kind: "completed" } } }];
+    await delivery.executionQuery.prime?.([known]);
+    expect(delivery.observeExecution({ executionId: EXECUTION_ID }).kind).toBe("unknown");
+    expect(delivery.derivedOutcomeOf({ executionId: EXECUTION_ID }).kind).toBe("unavailable");
+    unreadable = true;
+    await delivery.executionQuery.prime?.([known]);
+    expect(delivery.observeExecution({ executionId: EXECUTION_ID }).kind).toBe("unknown");
+    expect(listings).toEqual([]);
+    delivery.close();
+  });
+
+  it("correlates current mode-only child catalog rows and reads their terminal events", async () => {
+    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, createdAt: 1, mode: "one-shot", label: STABLE_KEY }] });
+    const reads: string[] = [];
+    const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
+      readExecutionEvents: async id => { reads.push(id); return [
+        { type: "subagent/descriptor", time: 1, data: { version: 2, mode: "one-shot", label: STABLE_KEY } },
+        { type: "turn/start", time: 2, data: { turn: 1 } },
+        { type: "assistant/message", time: 3, data: { turn: 1, step: 1,
+          message: { content: [{ type: "text", text: '```json\n{"outcome_id":"done"}\n```' }] }, stream: [] } },
+        { type: "turn/end", time: 4, data: { reason: { kind: "completed" } } },
+      ]; },
+    });
+    await delivery.executionQuery.prime?.([probe()]);
+    expect(delivery.executionQuery.lookup(probe())).toEqual({ kind: "created", execution: { executionId: EXECUTION_ID } });
+    expect(reads).toEqual([EXECUTION_ID]);
+    expect(delivery.observeExecution({ executionId: EXECUTION_ID })).toEqual({ kind: "completed" });
+    expect(delivery.derivedOutcomeOf({ executionId: EXECUTION_ID })).toMatchObject({ kind: "declared", outcomeId: "done" });
+    delivery.close();
+  });
+
+  it("keeps duplicate current one-shot catalog matches ambiguous", async () => {
+    const { runtime } = makeDshRuntime({ children: [
+      { id: "modern-a", createdAt: 1, mode: "one-shot", label: STABLE_KEY },
+      { id: "modern-b", createdAt: 2, mode: "one-shot", label: STABLE_KEY },
+    ] });
+    const delivery = dshDelivery(runtime);
+    await delivery.executionQuery.prime?.([probe()]);
+    expect(delivery.executionQuery.lookup(probe()).kind).toBe("unknown");
+    delivery.close();
+  });
+
+  for (const mode of ["continuable", "external", "unknown"]) {
+    for (const kind of [undefined, "child"]) {
+      it("rejects a non-one-shot row even with the matching label: mode=" + mode + ", kind=" + kind, async () => {
+        const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, mode, label: STABLE_KEY,
+          ...(kind === undefined ? {} : { kind }) }] });
+        const reads: string[] = [];
+        const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
+          readExecutionEvents: async id => { reads.push(id); return []; },
+        });
+        await delivery.executionQuery.prime?.([probe()]);
+        expect(delivery.executionQuery.lookup(probe()).kind).toBe("unknown");
+        expect(reads).toEqual([]);
+        delivery.close();
+      });
+    }
+  }
+
+  it("rejects a current one-shot catalog row with another stable label", async () => {
+    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, mode: "one-shot", label: "other-effect" }] });
+    const reads: string[] = [];
+    const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
+      readExecutionEvents: async id => { reads.push(id); return []; },
+    });
+    await delivery.executionQuery.prime?.([probe()]);
+    expect(delivery.executionQuery.lookup(probe()).kind).toBe("unknown");
+    expect(reads).toEqual([]);
+    delivery.close();
+  });
+
+  it("continues to correlate legacy child rows without a mode", async () => {
+    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, kind: "child", label: STABLE_KEY }] });
+    const reads: string[] = [];
+    const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
+      readExecutionEvents: async id => { reads.push(id); return []; },
+    });
+    await delivery.executionQuery.prime?.([probe()]);
+    expect(delivery.executionQuery.lookup(probe())).toEqual({ kind: "created", execution: { executionId: EXECUTION_ID } });
+    expect(reads).toEqual([EXECUTION_ID]);
+    delivery.close();
+  });
+
   it("names the execution whose durable label is the stable idempotency key", async () => {
     const { runtime, listings } = makeDshRuntime({
       children: [

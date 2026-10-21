@@ -18,6 +18,17 @@ proposal against the plan's pinned gates, and the decision commits with the grap
 state in a single transaction. Effects — dispatch intents and notifications —
 are durable rows committed with that state and delivered only afterwards.
 
+Notification observers share a connection-local TEMP journal of changed graph
+ids. SQLite triggers track notification source facts, so a business transaction
+captures notices only for its changed graphs; read-only transactions, unchanged
+invocation origins and outbox delivery writes do not scan graphs. The journal
+and notification intents roll back with the business transaction. Startup and
+commits from other connections still trigger a catch-up scan, with a short
+transaction per graph and an event-loop yield between graphs. A commit during
+that scan leaves another catch-up due; delivery retries keep their own schedule.
+Recovery also yields between graphs so historical work does not monopolize the
+host's event loop.
+
 ## Responsibilities
 
 | Responsibility | Component |
@@ -64,3 +75,25 @@ payload is data, never authority: it cannot route the graph, satisfy an approval
 forge budget usage or choose a plan revision. And every identity the protocol
 compares — a plan revision, a validator version, a contract or policy revision, a
 storage format — is matched exactly, never by ordering or by "latest".
+
+## Worker authorization reads
+
+Each `OutcomeHost` lazily retains a read-only store connection for worker identity
+and tool grants. A short transaction reads one committed revision. The revision
+keys an index of eligible worker executions, verified graph definitions, graph
+binding inputs and merged tool grants. Identity lookup uses one bulk query per
+revision, including accepted attempts so settled workers retain their boundary.
+The platform still derives each worker session from its execution record.
+
+Commits from any writer invalidate these derived values through SQLite's
+connection-local `data_version`. Every read also checks the file and store
+identity. A changed file without a SQLite revision change fences the old reader;
+failed reads discard the cache and release its connection, allowing a later read
+to reopen a repaired store. Unreadable authorization grants only the worker
+baseline. Locally confirmed identities remain worker identities when storage is
+unavailable. Closing the host releases its retained reader.
+
+The DSH boundary routes a resolved principal to its owning host and requests the
+merged grant once for tool-list assembly. Filtering the tool catalog performs no
+storage reads. Execution guards resolve the current grant for each invocation,
+so presentation caching cannot preserve a revoked permission.

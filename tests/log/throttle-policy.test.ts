@@ -74,6 +74,7 @@ const NEVER_THROTTLED: readonly string[] = [
   "log.file.write-failed",
   "log.file.rotate-failed",
   "sweep.store-blocked",
+  "sweep.attention",
   "watch.unwatched-executions",
   "watch.announcement-unconfirmed",
   "dispatch.delivery-unproven",

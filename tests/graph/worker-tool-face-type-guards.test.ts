@@ -28,7 +28,10 @@
  * a graph whose invocation origin the store lists but cannot answer: the spread
  * of `undefined` is legal JavaScript, so the missing origin used to produce a
  * persisted record whose required `sessionId` was absent. The last case drives
- * that path through the production capture and asserts the outcome.
+ * that path through the production capture and asserts the outcome. A changed
+ * graph whose origin is absent is not itself contradictory — a definition may
+ * be written without one — so the inconsistency is observable on the catch-up
+ * scan over the origin listing, not on a local commit's journal.
  *
  * STRENGTH: pure unit plus one store-backed capture. No host SDK runs. Every
  * store root lives under the OS temp directory and is removed.
@@ -47,6 +50,7 @@ import {
 } from "../../src/graph/host/tool-binding.ts";
 import { WORKER_CHANNEL_GRAPH_TOOLS } from "../../src/graph/application/worker-channel.ts";
 import { GraphApplication } from "../../src/graph/application/graph-application.ts";
+import { createDatabaseSync } from "../../src/memory/db-driver.ts";
 import type { GraphNotification } from "../../src/graph/application/graph-notifications.ts";
 import { GraphStore } from "../../src/graph/store/graph-store.ts";
 import { GRAPH_STORE_TABLES } from "../../src/graph/store/schema.ts";
@@ -253,7 +257,24 @@ describe("the notification capture with a listed graph and no origin row (F-29)"
       await settle(0);
       originVisible = false;
       await settle(1);
+      // The local commit skips the graph silently: its journal lists CHANGED
+      // graphs, and a changed graph with no origin is legitimate. The store's
+      // origin listing, though, claims every id it answers, so a subsequent
+      // commit from another connection drives the catch-up scan that must
+      // report the inconsistency.
       await notifications.flush();
+      const opened = GraphStore.openFile(storeRoot);
+      const external = createDatabaseSync(opened.path);
+      try {
+        external.run(
+          `INSERT INTO ${GRAPH_STORE_TABLES.executionObservations}
+           VALUES ('worker-1', 'completed', 'Finished', ?)`,
+          now,
+        );
+      } finally {
+        external.close();
+        opened.close();
+      }
       await notifications.flush();
     } finally {
       GraphStore.prototype.readInvocationOrigin = original;
@@ -277,7 +298,8 @@ describe("the notification capture with a listed graph and no origin row (F-29)"
     }
 
     // THE SKIP IS OBSERVABLE, not silent: the event the unreadable-view path
-    // already emits names the graph, once for the stretch rather than per pass.
+    // already emits names the graph on the catch-up scan, once for the stretch
+    // rather than per pass.
     const reported = records("notifications.source-unreadable");
     expect(reported.length).toBe(1);
     expect(reported[0]?.scope).toEqual({ graphId: "flow" });

@@ -186,13 +186,15 @@ export interface OutcomeDispatchInvocation {
  * `effect` is the stable key the create carried (see
  * {@link dispatchIdempotencyKeyOf} for its one-string spelling); `invocation`
  * is the parent invocation the create was handed, present only when the host
- * has one recorded — a platform that needs the parent to find the child (dsh
- * lists a parent's children) answers `unknown` for a question that names none,
- * rather than searching a control plane it cannot scope.
+ * has one recorded. A confirmed `execution` lets the platform read that child
+ * directly; without one, a platform that needs a parent to discover the child
+ * answers `unknown` when no parent is recorded.
  */
 export interface OutcomeExecutionProbe {
   readonly effect: OutcomeDispatchEffectKey;
   readonly invocation?: OutcomeDispatchInvocation;
+  /** The host's confirmed durable execution, readable even when its parent is gone. */
+  readonly execution?: OutcomeExecutionIdentity;
 }
 
 /**
