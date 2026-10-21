@@ -155,8 +155,12 @@ it("invalidates a negative identity after a same-process writer commits and afte
   expect(fx.reader.workerPrincipalOf(session)?.attemptId).toBe(fx.request.attemptId);
   expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
   expect(fx.reader.workerPrincipalOf("external-worker")).toBeUndefined();
+  // A file URL, never `new URL(...).pathname`: on Windows the pathname of a
+  // file URL is "/D:/a/rolebox/…", which the child runtime cannot import (the
+  // leading separator makes it root-relative on the current drive).
+  const driverUrl = new URL("../../src/memory/db-driver.ts", import.meta.url).href;
   const child = Bun.spawnSync([process.execPath, "-e", `
-    import { createDatabaseSync } from ${JSON.stringify(new URL("../../src/memory/db-driver.ts", import.meta.url).pathname)};
+    import { createDatabaseSync } from ${JSON.stringify(driverUrl)};
     const db = createDatabaseSync(process.argv[1]);
     db.run("UPDATE host_dispatch_executions SET execution_id = ? WHERE graph_id = ? AND attempt_id = ?", "external-worker", process.argv[2], process.argv[3]);
     db.close();
