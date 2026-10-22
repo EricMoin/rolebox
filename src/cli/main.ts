@@ -42,6 +42,7 @@ const main = defineCommand({
     memory: () => import("./commands/memory.ts").then((m) => m.default),
     checkpoint: () => import("./commands/checkpoint.ts").then((m) => m.default),
     mcp: () => import("./commands/mcp.ts").then((m) => m.default),
+    bench: () => import("./commands/bench.ts").then((m) => m.default),
   },
   cleanup() {
     return checkForUpdate(version);
