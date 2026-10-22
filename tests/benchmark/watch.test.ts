@@ -29,10 +29,10 @@ async function until(predicate: () => boolean): Promise<void> {
   }
 }
 
-async function fixture() {
+async function fixture(template: "response" | "code-fix" = "response") {
   const root = await mkdtemp(join(tmpdir(), "rolebox-benchmark-watch-"));
   roots.push(root);
-  const directory = await scaffoldBenchmark(join(root, "suite"));
+  const directory = await scaffoldBenchmark(join(root, "suite"), template);
   const controller = new AbortController();
   controllers.push(controller);
   return { root, directory, role: join(directory, "role", "role.yaml"), outputDirectory: join(root, "results"), controller };
@@ -66,6 +66,26 @@ function start(directory: string, options: BenchmarkWatchOptions): Promise<void>
 }
 
 describe("benchmark watch", () => {
+  it("reruns fixture and check revisions and refuses deltas against their previous conditions", async () => {
+    const target = await fixture("code-fix");
+    const baseline = (await resultFor(await loadBenchmarkSuite(target.directory), 0)).record;
+    const completed: BenchmarkWatchResult[] = [];
+    let calls = 0;
+    start(target.directory, { outputDirectory: target.outputDirectory, signal: target.controller.signal,
+      baseline, run: async loaded => resultFor(loaded, ++calls), onRun: result => completed.push(result) });
+    await until(() => completed.length === 1);
+    expect(completed[0]!.comparison?.successRateDelta).toBe(0);
+    await appendFile(join(target.directory, "fixtures", "sum", "src", "sum.mjs"), "\n// Revised fixture\n");
+    await until(() => completed.length === 2);
+    await appendFile(join(target.directory, "checks", "sum", "check.mjs"), "\n// Revised checks\n");
+    await until(() => completed.length === 3);
+    expect(new Set(completed.map(result => result.record.suiteDigest)).size).toBe(3);
+    for (const result of completed.slice(1)) {
+      expect(result.current).toBe(true);
+      expect(result.comparison?.compatibility.status).toBe("incompatible");
+      expect(result.comparison?.successRateDelta).toBeNull();
+    }
+  });
   it("runs initially and does not rerun unchanged content or formatting-only suite saves", async () => {
     const target = await fixture();
     const completed: BenchmarkWatchResult[] = [];
@@ -289,7 +309,7 @@ describe("benchmark watch", () => {
   });
 
   it("stops after unconfirmed termination or a thrown run rather than overlapping unknown workers", async () => {
-    for (const mode of ["unconfirmed", "throws"] as const) {
+    for (const mode of ["unconfirmed", "grader", "throws"] as const) {
       const target = await fixture();
       let calls = 0;
       const watching = start(target.directory, { outputDirectory: target.outputDirectory, signal: target.controller.signal,
@@ -297,7 +317,8 @@ describe("benchmark watch", () => {
           calls++;
           if (mode === "throws") throw new Error("private diagnostic");
           const result = await resultFor(loaded, calls);
-          result.record.trials[0]!.result.terminationConfirmed = false;
+          if (mode === "grader") result.record.trials[0]!.grade = { verdict: "unscored", assertions: [], error: "Grader cleanup unknown", terminationConfirmed: false };
+          else result.record.trials[0]!.result.terminationConfirmed = false;
           return result;
         } });
       await expect(watching).rejects.toThrow(mode === "throws" ? "cleanup could not be verified" : "termination could not be confirmed");

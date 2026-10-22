@@ -10,7 +10,7 @@ export async function writeBenchmarkReport(runDirectories: string | readonly str
   for (const runDirectory of typeof runDirectories === "string" ? [runDirectories] : runDirectories) {
     const directory = await realpath(resolve(runDirectory));
     const location = relative(directory, output).toLowerCase();
-    if (evidenceFiles.has(location) || location === "snapshot" || location.startsWith(`snapshot${sep}`)) {
+    if (evidenceFiles.has(location) || ["snapshot", "fixtures", "artifacts"].some(name => location === name || location.startsWith(`${name}${sep}`))) {
       throw new Error("Report output must not overwrite benchmark evidence");
     }
   }

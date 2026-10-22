@@ -1,4 +1,4 @@
-import { assertBenchmarkOutputDirectory, runBenchmark } from "./runner.ts";
+import { assertBenchmarkInputsOutputDirectory, runBenchmark } from "./runner.ts";
 import { snapshotBenchmarkRole } from "./snapshot.ts";
 import { BenchmarkSpecError, loadBenchmarkSuite } from "./spec.ts";
 import { compareBenchmarkRuns, type BenchmarkComparison } from "./compare.ts";
@@ -54,14 +54,14 @@ async function pause(milliseconds: number, signal?: AbortSignal): Promise<void> 
 
 async function probe(path: string, outputDirectory: string): Promise<Revision> {
   const loaded = await loadBenchmarkSuite(path);
-  await assertBenchmarkOutputDirectory(loaded.roleDirectory, outputDirectory);
+  await assertBenchmarkInputsOutputDirectory(loaded, outputDirectory);
   const snapshot = await snapshotBenchmarkRole(loaded.roleDirectory);
   return { loaded, roleDigest: snapshot.digest, fingerprint: `${loaded.digest}:${snapshot.digest}:${snapshot.roleId}` };
 }
 
 function invalidDiagnostic(error: unknown): string {
   if (error instanceof BenchmarkSpecError) return `${error.message}; waiting for a valid save.`;
-  if (error instanceof Error && error.message === "Benchmark results must be stored outside the target role directory") {
+  if (error instanceof Error && ["Benchmark results must be stored outside the target role directory", "Benchmark results must be stored outside fixture and check directories"].includes(error.message)) {
     return `${error.message}; waiting for a valid target.`;
   }
   return "Benchmark role snapshot or output location is invalid; waiting for a valid save.";
@@ -91,7 +91,7 @@ export async function watchBenchmark(path: string, options: BenchmarkWatchOption
       throw new Error("Benchmark watch stopped after a run error because worker cleanup could not be verified");
     }
     const value = attempt.outcome.value;
-    const unconfirmed = value.record.trials.some((trial) => !trial.result.terminationConfirmed);
+    const unconfirmed = value.record.trials.some((trial) => !trial.result.terminationConfirmed || trial.grade.terminationConfirmed === false);
     const matches = value.record.suiteDigest === attempt.revision.loaded.digest && value.record.roleDigest === attempt.revision.roleDigest;
     const current = !stopping && !unconfirmed && !attempt.stale && !attempt.controller.signal.aborted
       && desired?.fingerprint === attempt.revision.fingerprint && matches;

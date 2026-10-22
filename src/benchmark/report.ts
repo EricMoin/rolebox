@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { BenchmarkRunRecord, BenchmarkTrial, BenchmarkUsage, BenchmarkWorkerResult } from "./types.ts";
+import type { BenchmarkGrade, BenchmarkRunRecord, BenchmarkTrial, BenchmarkUsage, BenchmarkWorkerResult } from "./types.ts";
+import { safeBenchmarkRelativePath } from "./workspace.ts";
 
 const recordName = z.string().min(1).max(128);
 const quantity = z.number().finite().nonnegative();
@@ -7,7 +8,20 @@ const usageSchema = z.object({
   inputTokens: quantity.int().nullable(), outputTokens: quantity.int().nullable(), costUsd: quantity.nullable(),
   source: z.enum(["host", "unavailable"]),
 }).strict();
-const assertionResultSchema = z.object({ kind: z.enum(["equals", "contains"]), passed: z.boolean() }).strict();
+const safePath = z.string().max(4096).refine(safeBenchmarkRelativePath);
+const digest = z.string().regex(/^[0-9a-f]{64}$/);
+const assertionResultSchema = z.object({
+  kind: z.enum(["equals", "contains", "file_exists", "file_equals", "file_contains", "command"]), passed: z.boolean(), path: safePath.optional(),
+  command: z.object({ status: z.enum(["completed", "timeout", "error", "cancelled"]), exitCode: z.number().int().min(0).max(255).nullable(),
+    stdout: z.string().max(16_384), stderr: z.string().max(16_384), durationMs: quantity,
+    terminationConfirmed: z.boolean(), truncated: z.boolean() }).strict().optional(),
+}).strict();
+const workspaceSchema = z.object({
+  fixtureDigest: digest, resultDigest: digest, artifactDirectory: safePath,
+  changes: z.array(z.object({ path: safePath, kind: z.enum(["added", "modified", "deleted"]),
+    beforeDigest: digest.nullable(), afterDigest: digest.nullable(), beforeText: z.string().max(16_384).nullable(), afterText: z.string().max(16_384).nullable(),
+    beforeExecutable: z.boolean().nullable(), afterExecutable: z.boolean().nullable(), contentOmitted: z.boolean() }).strict()).max(2_000),
+}).strict();
 const runSchema = z.object({
   schemaVersion: z.literal(1), id: recordName, suiteId: recordName,
   suiteDigest: z.string().regex(/^[0-9a-f]{64}$/), roleDigest: z.string().regex(/^[0-9a-f]{64}$/),
@@ -24,7 +38,9 @@ const runSchema = z.object({
       runtime: z.object({ dshVersion: recordName, roleboxVersion: recordName }).strict().optional(),
       usage: usageSchema, durationMs: quantity, terminationConfirmed: z.boolean(), diagnostic: z.string().max(65_536).optional(),
     }).strict(),
-    grade: z.object({ verdict: z.enum(["pass", "fail", "unscored"]), assertions: z.array(assertionResultSchema).max(64) }).strict(),
+    grade: z.object({ verdict: z.enum(["pass", "fail", "unscored"]), assertions: z.array(assertionResultSchema).max(64),
+      error: z.string().min(1).max(4096).optional(), terminationConfirmed: z.boolean().optional() }).strict(),
+    workspace: workspaceSchema.optional(),
   }).strict()).max(20_000),
 }).strict();
 
@@ -46,13 +62,40 @@ export function parseBenchmarkRunRecord(value: unknown): BenchmarkRunRecord {
     trialIds.add(trial.id);
     trialKeys.add(key);
     const { result, grade } = trial;
+    if (grade.assertions.some(assertion => assertion.kind.startsWith("file_") || assertion.kind === "command") && !trial.workspace) {
+      throw new Error("Benchmark workspace assertions require captured workspace evidence");
+    }
+    for (const assertion of grade.assertions) {
+      if (assertion.kind.startsWith("file_") !== (assertion.path !== undefined)
+        || (assertion.kind === "command") !== (assertion.command !== undefined)) throw new Error("Benchmark assertion evidence does not match its kind");
+      const command = assertion.command;
+      if (command && ((command.status !== "completed" && assertion.passed)
+        || (command.status === "completed" && command.exitCode === null)
+        || (["error", "cancelled"].includes(command.status) && !grade.error)
+        || (!command.terminationConfirmed && grade.terminationConfirmed !== false))) throw new Error("Benchmark command grading evidence is inconsistent");
+    }
+    if (trial.workspace) {
+      if (result.status !== "completed" || !result.terminationConfirmed) throw new Error("Benchmark workspace evidence requires confirmed task completion");
+      if (trial.workspace.artifactDirectory !== `artifacts/${trial.id}/workspace`
+        || new Set(trial.workspace.changes.map(change => change.path)).size !== trial.workspace.changes.length) throw new Error("Benchmark workspace evidence has invalid identity");
+      for (const change of trial.workspace.changes) {
+        if ((change.kind === "added") !== (change.beforeDigest === null)
+          || (change.kind === "deleted") !== (change.afterDigest === null)
+          || (change.beforeDigest === null) !== (change.beforeExecutable === null)
+          || (change.afterDigest === null) !== (change.afterExecutable === null)
+          || (change.beforeDigest === null && (change.beforeText !== null || change.beforeExecutable !== null))
+          || (change.afterDigest === null && (change.afterText !== null || change.afterExecutable !== null))) throw new Error("Benchmark workspace change evidence is inconsistent");
+      }
+    }
     if (result.status === "completed" && !result.activation) {
       throw new Error("Benchmark result claims completion without activation evidence");
     }
     if (result.usage.source === "unavailable" && [result.usage.inputTokens, result.usage.outputTokens, result.usage.costUsd].some((quantity) => quantity !== null)) {
       throw new Error("Benchmark result has inconsistent usage provenance");
     }
-    if (result.status === "completed" && result.terminationConfirmed) {
+    if (grade.error !== undefined || grade.terminationConfirmed === false) {
+      if (!grade.error || grade.verdict !== "unscored") throw new Error("Benchmark grading errors must remain unscored");
+    } else if (result.status === "completed" && result.terminationConfirmed) {
       if (!grade.assertions.length || grade.verdict !== (grade.assertions.every((assertion) => assertion.passed) ? "pass" : "fail")) {
         throw new Error("Benchmark result has an inconsistent assertion grade");
       }
@@ -60,7 +103,7 @@ export function parseBenchmarkRunRecord(value: unknown): BenchmarkRunRecord {
       throw new Error("Benchmark result has a grade inconsistent with execution status");
     }
   }
-  if (run.status === "completed" && (run.trials.length !== run.plannedTrials || run.trials.some((trial) => trial.grade.verdict === "unscored" || !trial.result.terminationConfirmed) || !run.completedAt)) {
+  if (run.status === "completed" && (run.trials.length !== run.plannedTrials || run.trials.some((trial) => trial.grade.verdict === "unscored" || trial.grade.terminationConfirmed === false || !trial.result.terminationConfirmed) || !run.completedAt)) {
     throw new Error("Benchmark result claims completion without complete scored observations");
   }
   return run;
@@ -113,6 +156,7 @@ function usageSummary(run: BenchmarkRunRecord, key: "inputTokens" | "outputToken
 }
 
 function verdict(trial: BenchmarkTrial): "pass" | "fail" | "unscored" {
+  if (trial.grade.error || trial.grade.terminationConfirmed === false) return "unscored";
   if (trial.result.status === "task_timeout" || trial.result.status === "task_failure") return "fail";
   if (trial.result.status !== "completed" || !trial.result.terminationConfirmed) return "unscored";
   return trial.grade.verdict;
@@ -144,7 +188,7 @@ export function summarizeBenchmarkRun(run: BenchmarkRunRecord): BenchmarkRunSumm
   const missingTrials = Math.max(0, run.plannedTrials - run.trials.length);
   const complete = run.status === "completed" && run.plannedTrials > 0 && validTrials === run.plannedTrials
     && run.trials.length === run.plannedTrials && cases.every((item) => item.trials === item.plannedTrials)
-    && run.trials.every((trial) => trial.result.terminationConfirmed);
+    && run.trials.every((trial) => trial.result.terminationConfirmed && trial.grade.terminationConfirmed !== false);
   return {
     plannedTrials: run.plannedTrials,
     recordedTrials: run.trials.length,
@@ -179,13 +223,28 @@ function renderUsage(summary: BenchmarkUsageSummary): string {
   return `${summary.observed.toLocaleString("en-US", { maximumFractionDigits: 6 })}${summary.complete ? "" : " observed (partial)"}; ${summary.knownTrials} known, ${summary.unknownTrials} unknown`;
 }
 
+function renderGrade(grade: BenchmarkGrade): string {
+  return `${grade.error ? `<p>Grading error (unscored): ${escapeHtml(grade.error)}</p>` : ""}${grade.assertions.map(assertion => {
+    const command = assertion.command;
+    return `<div><p>${escapeHtml(assertion.kind)}${assertion.path ? ` · ${escapeHtml(assertion.path)}` : ""}: ${assertion.passed ? "pass" : "fail"}</p>${command ?
+      `<p>Command: ${escapeHtml(command.status)}; exit code: ${command.exitCode ?? "unavailable"}; ${command.durationMs} ms; cleanup confirmed: ${command.terminationConfirmed ? "yes" : "no"}${command.truncated ? "; output truncated" : ""}</p><pre>${escapeHtml(command.stdout)}</pre><pre>${escapeHtml(command.stderr)}</pre>` : ""}</div>`;
+  }).join("")}`;
+}
+
+function renderWorkspace(trial: BenchmarkTrial): string {
+  const workspace = trial.workspace;
+  if (!workspace) return "";
+  return `<h3>Workspace changes</h3><p>Artifacts: <code>${escapeHtml(workspace.artifactDirectory)}</code></p><p>Fixture ${escapeHtml(workspace.fixtureDigest)}; result ${escapeHtml(workspace.resultDigest)}</p>${workspace.changes.length ? workspace.changes.map(change =>
+    `<details><summary>${escapeHtml(change.path)} · ${escapeHtml(change.kind)}</summary><p>Executable: ${change.beforeExecutable ?? "absent"} → ${change.afterExecutable ?? "absent"}</p>${change.contentOmitted ? "<p>Binary or oversized content omitted from this preview; inspect the saved files.</p>" : ""}<h4>Before</h4><pre>${escapeHtml(change.beforeText ?? "(no text preview)")}</pre><h4>After</h4><pre>${escapeHtml(change.afterText ?? "(no text preview)")}</pre></details>`).join("") : "<p>No file changes.</p>"}`;
+}
+
 export function renderBenchmarkHtml(run: BenchmarkRunRecord): string {
   const summary = summarizeBenchmarkRun(run);
   const caseRows = summary.cases.map((item) => `<tr><td>${escapeHtml(item.caseId)}</td><td>${item.trials}</td><td>${item.passed}</td><td>${item.failed}</td><td>${item.unscored}</td><td>${percent(item.successRate)}</td></tr>`).join("\n");
   const trials = run.trials.map((trial) => `<details><summary>${escapeHtml(trial.caseId)} · repetition ${trial.repetition + 1} · ${escapeHtml(trial.result.status)} · ${verdict(trial)}</summary>
 <p>Termination confirmed: ${trial.result.terminationConfirmed ? "yes" : "no"}; duration: ${trial.result.durationMs} ms</p>
 ${trial.result.runtime ? `<p>Runtime: dsh ${escapeHtml(trial.result.runtime.dshVersion)}; rolebox ${escapeHtml(trial.result.runtime.roleboxVersion)}</p>` : "<p>Runtime versions: unknown</p>"}
-${trial.result.diagnostic ? `<p>${escapeHtml(trial.result.diagnostic)}</p>` : ""}<pre>${escapeHtml(trial.result.output)}</pre></details>`).join("\n");
+${trial.result.diagnostic ? `<p>${escapeHtml(trial.result.diagnostic)}</p>` : ""}<pre>${escapeHtml(trial.result.output)}</pre>${renderGrade(trial.grade)}${renderWorkspace(trial)}</details>`).join("\n");
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${escapeHtml(run.suiteId)} benchmark</title>
 <style>body{font:16px/1.6 system-ui,sans-serif;max-width:1100px;margin:3rem auto;padding:0 1.5rem;color:#182030;background:#fafbfc}h1,h2{line-height:1.2}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{text-align:left;padding:.5rem;border-bottom:1px solid #ccd2dc}dt{font-weight:600}dd{margin:0 0 .75rem}details{border:1px solid #ccd2dc;border-radius:6px;padding:.75rem;margin:.75rem 0}summary{cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f2f5;padding:1rem}code{overflow-wrap:anywhere}</style></head><body>

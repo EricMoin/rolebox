@@ -61,6 +61,18 @@ describe("benchmark report output", () => {
     await expect(writeBenchmarkReport([run, other], join(root, "comparison.json"), "report", [join(root, "missing-catalog")])).resolves.toBe(join(await realpath(root), "comparison.json"));
   });
 
+  it("protects frozen fixtures and captured workspace artifacts", async () => {
+    const { root, run } = await fixture();
+    for (const name of ["fixtures", "artifacts"]) {
+      const directory = join(run, name);
+      await mkdir(directory);
+      const alias = join(root, `${name}-alias`);
+      createDirSymlink(directory, alias);
+      await expect(writeBenchmarkReport(run, join(alias, "source.mjs"), "report")).rejects.toThrow("benchmark evidence");
+      await expect(writeBenchmarkReport(run, directory, "report")).rejects.toThrow("benchmark evidence");
+    }
+  });
+
   it.skipIf(process.platform === "win32")("rejects an existing final symlink without changing its target", async () => {
     const { root, run } = await fixture();
     const evidence = join(run, "run.json");
