@@ -10,12 +10,16 @@ import { watchBenchmark } from "../../benchmark/watch.ts";
 import { readBenchmarkRun } from "../../benchmark/store.ts";
 import { renderBenchmarkHtml, summarizeBenchmarkRun } from "../../benchmark/report.ts";
 import { writeBenchmarkReport } from "../../benchmark/report-output.ts";
+import { compareBenchmarkRuns, renderBenchmarkComparisonHtml } from "../../benchmark/compare.ts";
+import baselineCommand, { benchmarkBaselineDirectory, readNamedBenchmarkBaseline } from "./bench-baseline.ts";
 
 const suiteArg = { type: "positional" as const, required: true, description: "Suite directory or suite.yaml" };
+const baselineArg = { type: "string" as const, description: "Named baseline to pin for historical comparison" };
 
 export default defineCommand({
   meta: { name: "bench", description: "Run trusted local role benchmarks on dsh" },
   subCommands: {
+    baseline: baselineCommand,
     init: defineCommand({
       meta: { name: "init", description: "Create a benchmark starter directory" },
       args: { directory: { ...suiteArg, description: "New benchmark directory" } },
@@ -43,8 +47,9 @@ export default defineCommand({
     }),
     run: defineCommand({
       meta: { name: "run", description: "Execute the suite in fresh dsh worker processes" },
-      args: { suite: suiteArg, output: { type: "string", description: "Parent directory for results" } },
+      args: { suite: suiteArg, output: { type: "string", description: "Parent directory for results" }, baseline: baselineArg },
       async run({ args }) {
+        const baseline = args.baseline !== undefined ? readNamedBenchmarkBaseline(args.baseline) : undefined;
         const loaded = await loadBenchmarkSuite(args.suite!);
         const host = doctorDshRuntime(loaded.suite.host.moduleRoot);
         if (!host.available) throw new Error(host.diagnostic ?? "dsh runtime is unavailable");
@@ -58,7 +63,8 @@ export default defineCommand({
             outputDirectory: args.output ?? join(getDataDir(), "benchmarks"), signal: controller.signal,
             onTrial: trial => console.log(`${trial.caseId} #${trial.repetition + 1}: ${trial.result.status} / ${trial.grade.verdict}`),
           });
-          console.log(JSON.stringify({ directory: result.directory, ...summarizeBenchmarkRun(result.record) }, null, 2));
+          console.log(JSON.stringify({ directory: result.directory, ...summarizeBenchmarkRun(result.record),
+            ...(baseline ? { baseline: { name: baseline.name, revision: baseline.revision }, comparison: compareBenchmarkRuns(baseline.record, result.record) } : {}) }, null, 2));
           process.exitCode = controller.signal.aborted ? 130 : result.record.status !== "completed" ? 2 : result.record.trials.some(trial => trial.grade.verdict === "fail") ? 1 : 0;
         } finally {
           process.off("SIGINT", cancel);
@@ -68,8 +74,9 @@ export default defineCommand({
     }),
     watch: defineCommand({
       meta: { name: "watch", description: "Re-run the benchmark when role assets or suite inputs change" },
-      args: { suite: suiteArg, output: { type: "string", description: "Parent directory for results" } },
+      args: { suite: suiteArg, output: { type: "string", description: "Parent directory for results" }, baseline: baselineArg },
       async run({ args }) {
+        const baseline = args.baseline !== undefined ? readNamedBenchmarkBaseline(args.baseline) : undefined;
         const controller = new AbortController();
         const cancel = (): void => controller.abort();
         process.on("SIGINT", cancel);
@@ -78,8 +85,11 @@ export default defineCommand({
         try {
           await watchBenchmark(args.suite!, {
             outputDirectory: args.output ?? join(getDataDir(), "benchmarks"), signal: controller.signal,
+            baseline: baseline?.record,
             onTrial: trial => console.log(`${trial.caseId} #${trial.repetition + 1}: ${trial.result.status} / ${trial.grade.verdict}`),
-            onRun: result => console.log(JSON.stringify({ directory: result.directory, current: result.current, ...summarizeBenchmarkRun(result.record) }, null, 2)),
+            onRun: result => console.log(JSON.stringify({ directory: result.directory, current: result.current, ...summarizeBenchmarkRun(result.record),
+              ...(baseline ? { baseline: { name: baseline.name, revision: baseline.revision } } : {}),
+              ...(result.comparison ? { comparison: result.comparison } : {}) }, null, 2)),
             onDiagnostic: message => console.error(message),
           });
           if (controller.signal.aborted) process.exitCode = 130;
@@ -87,6 +97,29 @@ export default defineCommand({
           process.off("SIGINT", cancel);
           process.off("SIGTERM", cancel);
         }
+      },
+    }),
+    compare: defineCommand({
+      meta: { name: "compare", description: "Compare a saved candidate with a historical baseline; no model calls" },
+      args: {
+        directory: { ...suiteArg, description: "Saved candidate run directory" }, baseline: baselineArg,
+        against: { type: "string", description: "Saved baseline run directory (instead of --baseline)" },
+        format: { type: "enum", options: ["html", "json"], default: "json" },
+        output: { type: "string", description: "Report destination; omit to print the comparison" },
+      },
+      async run({ args }) {
+        if (Boolean(args.baseline) === Boolean(args.against)) throw new Error("Specify exactly one of --baseline or --against");
+        const directory = resolve(args.directory!);
+        const candidate = readBenchmarkRun(directory);
+        const baselineDirectory = args.against ? resolve(args.against) : undefined;
+        const baseline = baselineDirectory ? readBenchmarkRun(baselineDirectory) : readNamedBenchmarkBaseline(args.baseline!).record;
+        const comparison = compareBenchmarkRuns(baseline, candidate);
+        const body = args.format === "html" ? renderBenchmarkComparisonHtml(comparison) : JSON.stringify(comparison, null, 2);
+        if (args.output) {
+          const directories = baselineDirectory ? [directory, baselineDirectory] : [directory];
+          console.log(`Comparison: ${await writeBenchmarkReport(directories, args.output, body, [benchmarkBaselineDirectory()])}`);
+        } else console.log(body);
+        process.exitCode = comparison.comparable && comparison.complete ? 0 : 2;
       },
     }),
     report: defineCommand({
@@ -97,7 +130,7 @@ export default defineCommand({
         const record = readBenchmarkRun(directory);
         const body = args.format === "json" ? JSON.stringify({ run: record, summary: summarizeBenchmarkRun(record) }, null, 2) : renderBenchmarkHtml(record);
         const output = args.output ? resolve(args.output) : join(directory, args.format === "json" ? "report.json" : "report.html");
-        console.log(`Report: ${await writeBenchmarkReport(directory, output, body)}`);
+        console.log(`Report: ${await writeBenchmarkReport(directory, output, body, [benchmarkBaselineDirectory()])}`);
       },
     }),
   },

@@ -44,6 +44,23 @@ describe("benchmark report output", () => {
     expect(await readFile(join(snapshot, "role.yaml"), "utf8")).toBe("original role");
   });
 
+  it("protects both compared runs and the entire baseline catalog through aliases", async () => {
+    const { root, run } = await fixture();
+    const other = join(root, "other-run");
+    const catalog = join(root, "baselines");
+    const alias = join(root, "catalog-alias");
+    await mkdir(other);
+    await mkdir(catalog);
+    createDirSymlink(catalog, alias);
+    await writeFile(join(other, "run.json"), "original evidence");
+    for (const output of [join(run, "run.json"), join(other, "run.json"), join(alias, "baselines.sqlite"), join(alias, "new.json")]) {
+      await expect(writeBenchmarkReport([run, other], output, "report", [catalog])).rejects.toThrow();
+    }
+    expect(await readFile(join(other, "run.json"), "utf8")).toBe("original evidence");
+    expect(await readdir(catalog)).toEqual([]);
+    await expect(writeBenchmarkReport([run, other], join(root, "comparison.json"), "report", [join(root, "missing-catalog")])).resolves.toBe(join(await realpath(root), "comparison.json"));
+  });
+
   it.skipIf(process.platform === "win32")("rejects an existing final symlink without changing its target", async () => {
     const { root, run } = await fixture();
     const evidence = join(run, "run.json");

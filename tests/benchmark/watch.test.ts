@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffoldBenchmark } from "../../src/benchmark/scaffold.ts";
 import { snapshotBenchmarkRole } from "../../src/benchmark/snapshot.ts";
+import { loadBenchmarkSuite } from "../../src/benchmark/spec.ts";
+import { BenchmarkBaselineStore } from "../../src/benchmark/baseline.ts";
 import { watchBenchmark, type BenchmarkWatchOptions, type BenchmarkWatchResult } from "../../src/benchmark/watch.ts";
 import type { BenchmarkRunRecord, LoadedBenchmarkSuite } from "../../src/benchmark/types.ts";
 
@@ -48,6 +50,7 @@ async function resultFor(loaded: LoadedBenchmarkSuite, index: number): Promise<{
         id: String(index), caseId: item.id, repetition: 0,
         grade: { verdict: "pass", assertions: [{ kind: "equals", passed: true }] },
         result: { protocolVersion: 1, status: "completed", output: "READY", terminationConfirmed: true, durationMs: 1,
+          runtime: { dshVersion: "1.0.0", roleboxVersion: "1.0.0" },
           usage: { inputTokens: null, outputTokens: null, costUsd: null, source: "unavailable" },
           activation: { roleId: snapshot.roleId, provider: loaded.suite.target.provider, model: loaded.suite.target.model, promptDigest: "a".repeat(64) } },
       })),
@@ -79,6 +82,7 @@ describe("benchmark watch", () => {
 
   it("debounces saves, cancels a superseded revision and waits for its cleanup", async () => {
     const target = await fixture();
+    const baseline = (await resultFor(await loadBenchmarkSuite(target.directory), 0)).record;
     const completed: BenchmarkWatchResult[] = [];
     let calls = 0;
     let active = 0;
@@ -89,7 +93,7 @@ describe("benchmark watch", () => {
     let release!: () => void;
     const cleanup = new Promise<void>(resolve => { release = resolve; });
     releases.push(() => release());
-    start(target.directory, { outputDirectory: target.outputDirectory, signal: target.controller.signal,
+    start(target.directory, { outputDirectory: target.outputDirectory, signal: target.controller.signal, baseline,
       run: async (loaded, options) => {
         const index = ++calls;
         active++;
@@ -119,7 +123,34 @@ describe("benchmark watch", () => {
     expect(calls).toBe(2);
     expect(maximumActive).toBe(1);
     expect(completed.map(value => value.current)).toEqual([false, true]);
+    expect(completed[0]!.comparison).toBeUndefined();
+    expect(completed[1]!.comparison?.successRateDelta).toBe(0);
     expect(completed[0]!.record.roleDigest).not.toBe(completed[1]!.record.roleDigest);
+  });
+
+  it("pins the captured baseline across caller mutations and explicit name updates", async () => {
+    const target = await fixture();
+    const catalog = new BenchmarkBaselineStore(join(target.root, "baselines"));
+    try {
+      const original = (await resultFor(await loadBenchmarkSuite(target.directory), 0)).record;
+      catalog.set("main", original);
+      const pinned = catalog.get("main");
+      const completed: BenchmarkWatchResult[] = [];
+      let calls = 0;
+      start(target.directory, { outputDirectory: target.outputDirectory, signal: target.controller.signal,
+        baseline: pinned.record, run: async loaded => resultFor(loaded, ++calls), onRun: value => completed.push(value) });
+      await until(() => completed.length === 1);
+      pinned.record.id = "mutated-caller";
+      const replacement = structuredClone(original);
+      replacement.id = "new-baseline";
+      catalog.set("main", replacement);
+      await appendFile(target.role, "\n# New role version\n");
+      await until(() => completed.length === 2);
+      expect(catalog.get("main").record.id).toBe("new-baseline");
+      expect(completed.map(result => result.comparison?.baseline.runId)).toEqual(["run-0", "run-0"]);
+      expect(completed.map(result => result.comparison?.baseline.recordDigest)).toEqual([pinned.recordDigest, pinned.recordDigest]);
+      expect(completed[1]!.comparison?.successRateDelta).toBe(0);
+    } finally { catalog.close(); }
   });
 
   it("pauses for invalid configuration and resumes after a valid save", async () => {

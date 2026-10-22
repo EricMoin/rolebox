@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dump, load } from "js-yaml";
 import { doctorDshRuntime, resolveDshRuntime } from "../../src/benchmark/hosts/dsh.ts";
+import type { BenchmarkComparison } from "../../src/benchmark/compare.ts";
 import type { BenchmarkRunSummary } from "../../src/benchmark/report.ts";
 import type { BenchmarkRunRecord, BenchmarkSuite } from "../../src/benchmark/types.ts";
 
@@ -207,22 +208,32 @@ describe.skipIf(!available || process.platform === "win32")("benchmark CLI with 
     expect(await readdir(env.ROLEBOX_DATA_DIR!)).toEqual(["cache"]);
   }, 30_000);
 
-  it("watches saved role revisions, writes distinct evidence and drains on SIGINT", async () => {
+  it("watches saved role revisions with a pinned baseline, writes distinct evidence and drains on SIGINT", async () => {
     await initialize();
     await configure();
+    const initial = await cli("run", suiteDirectory);
+    expect(initial.code, initial.stderr).toBe(0);
+    const initialRun = await persistedRun(initial.stdout);
+    const captured = await cli("baseline", "set", "main", initialRun.directory);
+    expect(captured.code, captured.stderr).toBe(0);
+    expect(jsonOutput(captured.stdout)).toMatchObject({ name: "main", revision: 1, runId: initialRun.run.id });
     const outputDirectory = join(root, "watch-results");
     const rolePath = join(suiteDirectory, "role", "role.yaml");
     const firstSource = await readFile(rolePath, "utf8");
-    const child = Bun.spawn([process.execPath, entry, "bench", "watch", suiteDirectory, "--output", outputDirectory], {
+    const child = Bun.spawn([process.execPath, entry, "bench", "watch", suiteDirectory, "--output", outputDirectory, "--baseline", "main"], {
       cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     });
     let stdout = "";
     let stderr = "";
     const output = capture(child.stdout, text => { stdout += text; });
     const errors = capture(child.stderr, text => { stderr += text; });
+    function currentResults(): Array<{ directory: string; current: boolean; baseline: { name: string; revision: number }; comparison: BenchmarkComparison }> {
+      return [...stdout.matchAll(/^\{\n[\s\S]*?^\}/gm)].map(match => JSON.parse(match[0]))
+        .filter(result => result.current === true);
+    }
     async function waitForCurrentRuns(count: number): Promise<void> {
       const deadline = Date.now() + 15_000;
-      while ((stdout.match(/"current": true/g) ?? []).length < count) {
+      while (currentResults().length < count) {
         if (child.exitCode !== null) throw new Error(`Watch exited before the expected run: ${stderr}`);
         if (Date.now() >= deadline) throw new Error(`Watch did not publish the expected revision: ${stderr}`);
         await new Promise(resolve => setTimeout(resolve, 25));
@@ -231,6 +242,10 @@ describe.skipIf(!available || process.platform === "win32")("benchmark CLI with 
     try {
       await waitForCurrentRuns(1);
       expect(stdout).toContain("Watching benchmark inputs");
+      const firstWatch = currentResults()[0]!;
+      const moved = await cli("baseline", "set", "main", firstWatch.directory);
+      expect(moved.code, moved.stderr).toBe(0);
+      expect(jsonOutput(moved.stdout)).toMatchObject({ name: "main", revision: 2, runId: firstWatch.comparison.candidate.runId });
       const role = load(firstSource) as Record<string, unknown>;
       role.prompt = "Complete the offline task using the second saved role revision.";
       const secondSource = dump(role);
@@ -243,7 +258,8 @@ describe.skipIf(!available || process.platform === "win32")("benchmark CLI with 
         expect(await child.exited).toBe(130);
       } finally { clearTimeout(stopTimer); }
       await Promise.all([output, errors]);
-      const directories = [...stdout.matchAll(/"directory": "([^"]+)"/g)].map(match => match[1]!);
+      const results = currentResults();
+      const directories = results.map(result => result.directory);
       expect(directories).toHaveLength(2);
       const runs = await Promise.all(directories.map(async directory =>
         JSON.parse(await readFile(join(directory, "run.json"), "utf8")) as BenchmarkRunRecord));
@@ -251,8 +267,20 @@ describe.skipIf(!available || process.platform === "win32")("benchmark CLI with 
       expect(runs[0]!.suiteDigest).toBe(runs[1]!.suiteDigest);
       expect(runs[0]!.roleDigest).not.toBe(runs[1]!.roleDigest);
       expect(runs[0]!.trials[0]!.result.activation!.promptDigest).not.toBe(runs[1]!.trials[0]!.result.activation!.promptDigest);
+      for (const [index, result] of results.entries()) {
+        expect(result.baseline).toEqual({ name: "main", revision: 1 });
+        expect(result.comparison).toMatchObject({ mode: "historical", comparable: true, complete: true, successRateDelta: 0,
+          baseline: { runId: initialRun.run.id }, candidate: { runId: runs[index]!.id } });
+      }
       expect(await readFile(join(directories[0]!, "snapshot", "role", "role.yaml"), "utf8")).toBe(firstSource);
       expect(await readFile(join(directories[1]!, "snapshot", "role", "role.yaml"), "utf8")).toBe(secondSource);
+      const compared = await cli("run", suiteDirectory, "--baseline", "main");
+      expect(compared.code, compared.stderr).toBe(0);
+      const comparedRun = await persistedRun(compared.stdout);
+      expect(comparedRun.run.trials[0]?.result.activation).toEqual(runs[1]!.trials[0]!.result.activation);
+      expect(jsonOutput(compared.stdout)).toMatchObject({ baseline: { name: "main", revision: 2 },
+        comparison: { mode: "historical", comparable: true, complete: true, successRateDelta: 0,
+          baseline: { runId: runs[0]!.id }, candidate: { runId: comparedRun.run.id } } });
       expect(await readdir(env.TMPDIR!)).toEqual([]);
       expect(stderr).toBe("");
     } finally {

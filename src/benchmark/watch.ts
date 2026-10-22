@@ -1,17 +1,21 @@
 import { assertBenchmarkOutputDirectory, runBenchmark } from "./runner.ts";
 import { snapshotBenchmarkRole } from "./snapshot.ts";
 import { BenchmarkSpecError, loadBenchmarkSuite } from "./spec.ts";
+import { compareBenchmarkRuns, type BenchmarkComparison } from "./compare.ts";
+import { parseBenchmarkRunRecord } from "./report.ts";
 import type { BenchmarkRunRecord, BenchmarkTrial, LoadedBenchmarkSuite } from "./types.ts";
 
 export interface BenchmarkWatchResult {
   record: BenchmarkRunRecord;
   directory: string;
   current: boolean;
+  comparison?: BenchmarkComparison;
 }
 
 export interface BenchmarkWatchOptions {
   outputDirectory: string;
   signal?: AbortSignal;
+  baseline?: BenchmarkRunRecord;
   onTrial?: (trial: BenchmarkTrial) => void;
   onRun?: (result: BenchmarkWatchResult) => void;
   onDiagnostic?: (message: string) => void;
@@ -64,6 +68,7 @@ function invalidDiagnostic(error: unknown): string {
 }
 
 export async function watchBenchmark(path: string, options: BenchmarkWatchOptions): Promise<void> {
+  const baseline = options.baseline ? parseBenchmarkRunRecord(structuredClone(options.baseline)) : undefined;
   const pollIntervalMs = options.pollIntervalMs ?? 500;
   const debounceMs = options.debounceMs ?? 300;
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 60_000
@@ -90,7 +95,7 @@ export async function watchBenchmark(path: string, options: BenchmarkWatchOption
     const matches = value.record.suiteDigest === attempt.revision.loaded.digest && value.record.roleDigest === attempt.revision.roleDigest;
     const current = !stopping && !unconfirmed && !attempt.stale && !attempt.controller.signal.aborted
       && desired?.fingerprint === attempt.revision.fingerprint && matches;
-    options.onRun?.({ ...value, current });
+    options.onRun?.({ ...value, current, ...(baseline && current ? { comparison: compareBenchmarkRuns(baseline, value.record) } : {}) });
     if (unconfirmed) {
       throw new Error("Benchmark watch stopped because worker termination could not be confirmed");
     }
