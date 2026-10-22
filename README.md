@@ -300,13 +300,14 @@ Architecture and the full toolset: [graph-outcome-protocol.md](docs/graph-outcom
 | `rolebox info [name]` | Inspect one installed role in detail (picker when omitted) |
 | `rolebox sync <target>` | Deploy installed roles to `opencode` / `pi` / `dsh` / `codex` |
 | `rolebox config [name]` | Configure models for a role and its subagents (`--target` selects the harness) |
+| `rolebox bench <subcommand>` | Local dsh role benchmarks: `init`, `validate`, `doctor`, `run`, `watch`, `report` |
 | `rolebox monitor` | Runtime dashboard for a project's persisted dispatch state (TUI, `--json`, Prometheus export) |
 | `rolebox logs` | Query, follow and prune the rolebox log files (`logs files`, `logs prune`) |
 | `rolebox memory` | Manage the rolebox memory store (`list`, `show`, `search`, `delete`, `export`, `clean`, `stats`) |
 | `rolebox checkpoint` | Manage dispatch checkpoints (`list`, `clean`) |
 | `rolebox mcp` | Run the rolebox MCP server on stdio (Codex integration) |
 
-Full flags and examples: [cli.md](docs/cli.md).
+Full flags and examples: [cli.md](docs/cli.md). Build a suite with [Benchmarks on dsh](docs/benchmarks.md): deterministic response assertions, independent trials, feedback after role edits, and saved JSON/HTML results.
 
 ---
 
@@ -341,7 +342,7 @@ Unrecognized values pass through unchanged with a warning. Full resolution chain
 |---|---|---|
 | [Create a role](docs/create-a-role.md) | [role.yaml reference](docs/role-yaml.md) | [Directory structure](docs/directory-structure.md) |
 | [Skills](docs/skills.md) | [References](docs/references.md) | [Subagents](docs/subagents.md) |
-| [Registry](docs/registry.md) | [Model aliases](docs/model-aliases.md) | |
+| [Registry](docs/registry.md) | [Model aliases](docs/model-aliases.md) | [Benchmarks on dsh](docs/benchmarks.md) |
 
 **Harnesses**
 

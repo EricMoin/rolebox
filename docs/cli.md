@@ -236,6 +236,39 @@ synced anywhere yet, every valid target is listed. Passing `--target`/`-t`
 skips the menu; in the non-interactive `--model` path an omitted target still
 defaults to opencode.
 
+### `bench <subcommand>`
+
+Create and run local role benchmarks on dsh. The first implementation evaluates final response text using literal `equals` and `contains` assertions, with a frozen role snapshot and an independent process for each trial. See [Benchmarks on dsh](benchmarks.md) for the suite schema, provider configuration, scoring, and execution boundaries.
+
+```bash
+rolebox bench init output-quality
+rolebox bench validate output-quality
+rolebox bench doctor output-quality
+rolebox bench run output-quality --output benchmark-results
+rolebox bench watch output-quality --output benchmark-results
+rolebox bench report benchmark-results/RUN_ID
+rolebox bench report benchmark-results/RUN_ID --format json --output report.json
+```
+
+Configure `target.provider`, `target.model`, and trusted `host.plugins` in the generated `suite.yaml` before running. Replace `RUN_ID` with the directory component printed by `run`.
+
+| Subcommand | Arguments and flags | Behavior |
+| --- | --- | --- |
+| `init` | `<directory>` | Create a new suite, three example cases, and a starter role; the parent directory must exist |
+| `validate` | `<suite>` | Validate the suite, JSONL cases, and self-contained role assets without importing provider plugins |
+| `doctor` | `<suite>` | Check installed dsh module resolution and report `pluginsConfigured`; no live provider request |
+| `run` | `<suite> [--output <directory>]` | Execute the planned trials and commit results to SQLite; `--output` selects the parent directory for run results |
+| `watch` | `<suite> [--output <directory>]` | Run immediately, then rerun stable changed revisions after cancelling and cleaning up the previous run |
+| `report` | `<run-directory> [--format html\|json] [--output <file>]` | Read saved results and write a standalone HTML report or JSON result plus summary |
+
+`<suite>` accepts a directory containing `suite.yaml` or the YAML file itself. Without `run --output`, results are stored under the rolebox data directory's `benchmarks/` subdirectory. Reports default to `report.html` or `report.json` in the saved run directory.
+
+`doctor` reports `liveExecutionVerified: false`; resolvable modules and configured plugins do not prove that credentials or a selected provider/model work. Execution uses `trusted-process` isolation, not an operating-system sandbox, and requires a compatible dsh installation on a system with POSIX process groups. Credentials are passed explicitly through `host.env` and `{ $env: VARIABLE_NAME }` plugin config references.
+
+For runs that reach result reporting, exit codes are `0` when every planned trial passes, `1` for a complete run with task failures, `2` for incomplete results, and `130` for cancellation. Incomplete overall scores and unobserved usage remain `null`.
+
+Watch polls content every 500 ms with a 300 ms debounce, runs the suite's configured plan, and preserves superseded run records. Invalid saves pause execution; unconfirmed worker cleanup stops the watcher. Keep output outside the role directory. Watch does not compare against a baseline or impose a cumulative cost budget. Baselines, comparisons, and CI regression gates are not implemented yet.
+
 ### `monitor`
 
 Show runtime dispatch activity, activated functions, and agent workflows for the current project. Reads persisted state files from the project-local `.rolebox/state/` directory. Supports a TUI dashboard (Solid.js + OpenTU) with live-updating status panels, task tables, and function state tracking.
