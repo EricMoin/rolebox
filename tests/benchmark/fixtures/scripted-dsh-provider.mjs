@@ -11,6 +11,21 @@ export async function apply(ctx, config) {
   const { LlmAdapter } = await import(pathToFileURL(hostRequire.resolve("@deepseek-ai/dsh-llm")).href);
   class ScriptedAdapter extends LlmAdapter {
     async *stream(options) {
+      if (config.mode === "workspace" && JSON.stringify(options.messages).includes("APPLY_WORKSPACE_FIX")) {
+        const history = JSON.stringify(options.messages);
+        const name = !history.includes('"name":"read"') ? "read" : !history.includes('"name":"edit"') ? "edit" : undefined;
+        if (name) {
+          const args = name === "read" ? { file_path: "src/sum.mjs" } : {
+            file_path: "src/sum.mjs", old_string: "return values.reduce((total, value) => total + value);",
+            new_string: "return values.reduce((total, value) => total + value, 0);",
+          };
+          yield { type: "block-start", index: 0, blockType: "tool-call" };
+          yield { type: "block-end", index: 0, block: { type: "tool-call", id: randomUUID(), name, arguments: JSON.stringify(args) } };
+          yield { type: "usage", usage: { inputTokens: 7, cacheReadTokens: 3, outputTokens: 5 } };
+          yield { type: "finish", reason: { kind: "tool-calls" } };
+          return;
+        }
+      }
       if (config.mode === "loop" && options.sessionId?.startsWith("benchmark-") && !JSON.stringify(options.messages).includes('"name":"loop_start"')) {
         yield { type: "block-start", index: 0, blockType: "tool-call" };
         yield { type: "block-end", index: 0, block: { type: "tool-call", id: randomUUID(), name: "loop_start", arguments: JSON.stringify({ prompt: "Complete each fixture loop round.", iterations: 2, mode: "fresh" }) } };

@@ -118,6 +118,53 @@ describe("benchmark CLI scaffolding", () => {
 });
 
 describe.skipIf(!available || process.platform === "win32")("benchmark CLI with a real dsh host and offline provider", () => {
+  it("evaluates native file edits against frozen checks and compares the repaired role with its failing baseline", async () => {
+    const initialized = await cli("init", suiteDirectory, "--template", "code-fix");
+    expect(initialized.code, initialized.stderr).toBe(0);
+    const suitePath = join(suiteDirectory, "suite.yaml");
+    const suite = load(await readFile(suitePath, "utf8")) as BenchmarkSuite;
+    suite.target.provider = "example-provider";
+    suite.target.model = "scripted";
+    suite.host.plugins = [{ module: provider, config: { runtimeAnchor: resolveDshRuntime().anchor, mode: "workspace" } }];
+    suite.run.timeoutMs = 5_000;
+    await writeFile(suitePath, dump(suite));
+    const fixturePath = join(suiteDirectory, "fixtures", "sum", "src", "sum.mjs");
+    const original = await readFile(fixturePath, "utf8");
+    const validation = await cli("validate", suiteDirectory);
+    expect(validation.code, validation.stderr).toBe(0);
+    const doctor = await cli("doctor", suiteDirectory);
+    expect(doctor.code, doctor.stderr).toBe(0);
+    const before = await cli("run", suiteDirectory);
+    const baseline = await persistedRun(before.stdout);
+    expect(before.code, JSON.stringify(baseline.run.trials)).toBe(1);
+    expect(baseline.run.trials[0]!.grade.assertions[1]!.command).toMatchObject({ status: "completed", exitCode: 1, terminationConfirmed: true });
+    expect(baseline.run.trials[0]!.workspace?.changes).toEqual([]);
+    const saved = await cli("baseline", "set", "code-fix", baseline.directory);
+    expect(saved.code, saved.stderr).toBe(0);
+    const rolePath = join(suiteDirectory, "role", "role.yaml");
+    const role = load(await readFile(rolePath, "utf8")) as Record<string, unknown>;
+    role.prompt = "APPLY_WORKSPACE_FIX: Read the source, then edit the actual file to fix the empty-array bug.";
+    await writeFile(rolePath, dump(role));
+    const after = await cli("run", suiteDirectory, "--baseline", "code-fix");
+    const candidate = await persistedRun(after.stdout);
+    expect(after.code, JSON.stringify(candidate.run.trials)).toBe(0);
+    expect(jsonOutput(after.stdout)).toMatchObject({ comparison: { comparable: true, complete: true, successRateDelta: 1 } });
+    const trial = candidate.run.trials[0]!;
+    expect(trial.grade.assertions[1]!.command?.stdout).toContain("All sum checks passed");
+    expect(trial.workspace?.changes).toEqual([expect.objectContaining({ path: "src/sum.mjs", kind: "modified", beforeText: original,
+      afterText: original.replace("total + value);", "total + value, 0);") })]);
+    expect(await readFile(join(candidate.directory, trial.workspace!.artifactDirectory, "src", "sum.mjs"), "utf8"))
+      .toBe(original.replace("total + value);", "total + value, 0);"));
+    expect(await readFile(fixturePath, "utf8")).toBe(original);
+    expect(await readFile(join(candidate.directory, "fixtures", "000000", "workspace", "src", "sum.mjs"), "utf8")).toBe(original);
+    const report = await cli("report", candidate.directory);
+    expect(report.code, report.stderr).toBe(0);
+    const html = await readFile(join(candidate.directory, "report.html"), "utf8");
+    expect(html).toContain("Workspace changes");
+    expect(html).toContain("All sum checks passed");
+    expect(await readdir(env.TMPDIR!)).toEqual([]);
+  }, 45_000);
+
   it("runs init, validate, doctor, run and report with durable evidence in private storage", async () => {
     await initialize();
     await configure({ repetitions: 2 });

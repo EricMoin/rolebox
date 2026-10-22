@@ -22,8 +22,8 @@ export default defineCommand({
     baseline: baselineCommand,
     init: defineCommand({
       meta: { name: "init", description: "Create a benchmark starter directory" },
-      args: { directory: { ...suiteArg, description: "New benchmark directory" } },
-      async run({ args }) { console.log(`Created benchmark: ${await scaffoldBenchmark(args.directory!)}`); },
+      args: { directory: { ...suiteArg, description: "New benchmark directory" }, template: { type: "enum", options: ["response", "code-fix"], default: "response" } },
+      async run({ args }) { console.log(`Created benchmark: ${await scaffoldBenchmark(args.directory!, args.template)}`); },
     }),
     validate: defineCommand({
       meta: { name: "validate", description: "Check suite, cases and self-contained role assets without executing plugins" },
@@ -40,7 +40,7 @@ export default defineCommand({
       async run({ args }) {
         const loaded = await loadBenchmarkSuite(args.suite!);
         await snapshotBenchmarkRole(loaded.roleDirectory);
-        const result = doctorDshRuntime(loaded.suite.host.moduleRoot);
+        const result = doctorDshRuntime(loaded.suite.host.moduleRoot, loaded.cases.some(item => !!item.workspace));
         console.log(JSON.stringify({ ...result, pluginsConfigured: loaded.suite.host.plugins.length > 0, liveExecutionVerified: false }, null, 2));
         if (!result.available || loaded.suite.host.plugins.length === 0) process.exitCode = 2;
       },
@@ -51,7 +51,7 @@ export default defineCommand({
       async run({ args }) {
         const baseline = args.baseline !== undefined ? readNamedBenchmarkBaseline(args.baseline) : undefined;
         const loaded = await loadBenchmarkSuite(args.suite!);
-        const host = doctorDshRuntime(loaded.suite.host.moduleRoot);
+        const host = doctorDshRuntime(loaded.suite.host.moduleRoot, loaded.cases.some(item => !!item.workspace));
         if (!host.available) throw new Error(host.diagnostic ?? "dsh runtime is unavailable");
         if (loaded.suite.host.plugins.length === 0) throw new Error("Configure host.plugins with an LLM provider before running");
         const controller = new AbortController();

@@ -93,6 +93,11 @@ describe("dsh benchmark runtime resolution", () => {
     expect(doctorDshRuntime(root)).toMatchObject({ available: false, diagnostic: expect.stringContaining("activation API") });
     await writeFile(subagentTypes, "declare class SubagentService { startActivation(): void }");
     expect(doctorDshRuntime(root).available).toBe(true);
+    expect(doctorDshRuntime(root, true).available).toBe(true);
+    await writeFile(join(root, "node_modules/@deepseek-ai/dsh-tool-fs/package.json"),
+      JSON.stringify({ name: "@deepseek-ai/dsh-tool-fs", version: "0.0.1", main: "lib/index.js" }));
+    expect(doctorDshRuntime(root, true)).toMatchObject({ available: false, diagnostic: expect.stringContaining("Workspace tools") });
+    expect(doctorDshRuntime(root).available).toBe(true);
     await writeFile(join(root, "node_modules/@deepseek-ai/dsh-llm/package.json"),
       JSON.stringify({ name: "@deepseek-ai/dsh-llm", version: "0.0.1", main: "lib/index.js" }));
     expect(doctorDshRuntime(root)).toMatchObject({ available: false, diagnostic: expect.stringContaining("release versions") });

@@ -20,11 +20,12 @@ export interface DshRuntime {
   anchor: string;
   modules: Record<(typeof corePackages)[number], string>;
   version: string;
+  workspaceModules?: { policy: string; tools: string };
 }
 
 class DshRuntimeError extends Error {}
 
-export function resolveDshRuntime(moduleRoot?: string): DshRuntime {
+export function resolveDshRuntime(moduleRoot?: string, workspaceTools = false): DshRuntime {
   try {
     const base = moduleRoot ? createRequire(join(resolve(moduleRoot), "package.json")) : createRequire(import.meta.url);
     const anchor = base.resolve("@deepseek-ai/dsh-agent-loop");
@@ -47,16 +48,24 @@ export function resolveDshRuntime(moduleRoot?: string): DshRuntime {
     if (!/\bstartActivation\s*\(/.test(declarations)) {
       throw new DshRuntimeError("The dsh runtime lacks the required subagent activation API; update the complete runtime.");
     }
-    return { anchor, modules, version };
+    let workspaceModules: DshRuntime["workspaceModules"];
+    if (workspaceTools) {
+      workspaceModules = { policy: hostRequire.resolve("@deepseek-ai/dsh-fs-observation-policy"), tools: hostRequire.resolve("@deepseek-ai/dsh-tool-fs") };
+      for (const module of Object.values(workspaceModules)) {
+        const manifest = JSON.parse(readFileSync(join(dirname(module), "../package.json"), "utf8")) as { version?: string };
+        if (manifest.version !== version) throw new DshRuntimeError("Workspace tools must use the same dsh release as the runtime.");
+      }
+    }
+    return { anchor, modules, version, ...(workspaceModules ? { workspaceModules } : {}) };
   } catch (error) {
     if (error instanceof DshRuntimeError) throw error;
     throw new DshRuntimeError("A complete compatible dsh runtime could not be resolved; configure host.moduleRoot.");
   }
 }
 
-export function doctorDshRuntime(moduleRoot?: string): { available: boolean; version?: string; diagnostic?: string } {
+export function doctorDshRuntime(moduleRoot?: string, workspaceTools = false): { available: boolean; version?: string; diagnostic?: string } {
   try {
-    return { available: true, version: resolveDshRuntime(moduleRoot).version };
+    return { available: true, version: resolveDshRuntime(moduleRoot, workspaceTools).version };
   } catch (error) {
     return { available: false, diagnostic: error instanceof DshRuntimeError ? error.message : "DSH runtime inspection failed." };
   }
@@ -154,7 +163,7 @@ export async function executeDshBenchmark(request: BenchmarkWorkerRequest): Prom
   const sessionId = `benchmark-${randomUUID()}`;
 
   try {
-    const runtime = resolveDshRuntime(request.host.moduleRoot);
+    const runtime = resolveDshRuntime(request.host.moduleRoot, request.workspaceTask);
     const packageInfo = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string };
     result.runtime = { dshVersion: runtime.version, roleboxVersion: packageInfo.version };
     const hostRequire = createRequire(runtime.anchor);
@@ -167,6 +176,12 @@ export async function executeDshBenchmark(request: BenchmarkWorkerRequest): Prom
     mount(modules["dsh-fs-local"]!.default, { cwd: request.workspace });
     mount(modules["dsh-working-directory"]!.default, { defaultDirectory: request.workspace });
     mount(modules["dsh-tools"]!.default, { mode: "native" });
+    if (runtime.workspaceModules) {
+      const policy = await import(pathToFileURL(runtime.workspaceModules.policy).href);
+      const tools = await import(pathToFileURL(runtime.workspaceModules.tools).href);
+      mount(policy.default ?? policy);
+      mount(tools.default ?? tools);
+    }
     mount(modules["dsh-agent-loop"]!.default, { agents: [], maxParallelToolCalls: 1 });
     mount(modules["dsh-subagent-spawn"]!.default ?? modules["dsh-subagent-spawn"], { providerName: "spawn" });
     mount(modules["dsh-tool-skill"]!.default ?? modules["dsh-tool-skill"], {});
