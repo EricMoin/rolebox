@@ -222,6 +222,7 @@
     "tests/monitor/**/*.ts",
     "tests/*.ts",
     "tests/asset/**/*.ts",
+    "tests/benchmark/**/*.ts",
     "tests/cli/**/*.ts",
     "tests/computer/**/*.ts",
     "tests/core/**/*.ts",
