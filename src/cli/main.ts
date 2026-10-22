@@ -5,6 +5,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineCommand, runMain } from "citty";
 import { checkForUpdate } from "./version-check.ts";
+import { installBrokenPipeGuard } from "./stdio-guard.ts";
+
+// A vanished reader (`| head`, a closed terminal, a detached PTY) must end the
+// command quietly instead of crashing inside the next write — and inside an
+// interactive prompt that is the difference between a clean exit and a stack
+// trace over a half-drawn picker. A picker's failed redraw is thrown out of the
+// prompt's promise, so the guard also covers the fatal process events, not just
+// the stream. Installed before any command loads.
+installBrokenPipeGuard();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8")) as { version: string };

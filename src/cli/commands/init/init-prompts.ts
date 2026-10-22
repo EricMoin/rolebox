@@ -51,7 +51,7 @@ export async function runInteractiveWizard(
     message: 'Role name (e.g. "Code Reviewer"):',
     placeholder: 'My Role',
     defaultValue: defaults.name,
-    validate(value) {
+    validate(value = "") {
       if (value.trim().length === 0) {
         return 'Role name must not be empty.';
       }
@@ -126,7 +126,7 @@ export async function runInteractiveWizard(
       message: 'Number of subagents:',
       placeholder: '2',
       defaultValue: String(defaults.subagentNames?.length ?? 2),
-      validate(value) {
+      validate(value = "") {
         const n = Number(value);
         if (!Number.isInteger(n) || n < 1) {
           return 'Must be a positive integer (e.g. 2).';
@@ -148,7 +148,7 @@ export async function runInteractiveWizard(
         message: `Subagent ${i + 1} name (e.g. "Researcher"):`,
         placeholder: `Subagent ${i + 1}`,
         defaultValue: defaults.subagentNames?.[i],
-        validate(value) {
+        validate(value = "") {
           if (value.trim().length === 0) {
             return 'Name must not be empty.';
           }

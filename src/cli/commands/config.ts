@@ -161,7 +161,7 @@ export async function runInteractive(
       const custom = await prompts.text({
         message: "Enter custom model identifier:",
         placeholder: "e.g. provider/model-name",
-        validate(value) {
+        validate(value = "") {
           if (value.trim().length === 0) return "Model identifier cannot be empty.";
         },
       });
@@ -234,7 +234,7 @@ export async function runInteractive(
         const custom = await prompts.text({
           message: "Enter custom model identifier for all subagents:",
           placeholder: "e.g. provider/model-name",
-          validate(value) {
+          validate(value = "") {
             if (value.trim().length === 0) return "Model identifier cannot be empty.";
           },
         });
@@ -280,7 +280,7 @@ export async function runInteractive(
           const custom = await prompts.text({
             message: `Enter custom model identifier for "${sub.name}":`,
             placeholder: "e.g. provider/model-name",
-            validate(value) {
+            validate(value = "") {
               if (value.trim().length === 0) return "Model identifier cannot be empty.";
             },
           });
