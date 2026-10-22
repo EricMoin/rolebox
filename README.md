@@ -307,7 +307,7 @@ Architecture and the full toolset: [graph-outcome-protocol.md](docs/graph-outcom
 | `rolebox checkpoint` | Manage dispatch checkpoints (`list`, `clean`) |
 | `rolebox mcp` | Run the rolebox MCP server on stdio (Codex integration) |
 
-Full flags and examples: [cli.md](docs/cli.md). Build a suite with [Benchmarks on dsh](docs/benchmarks.md): deterministic response assertions, independent trials, feedback against a saved baseline after role edits, and offline JSON/HTML results.
+Full flags and examples: [cli.md](docs/cli.md). Build a suite with [Benchmarks on dsh](docs/benchmarks.md): response/file assertions, trusted local command checks, a `code-fix` template, independent trials, feedback against a saved baseline after role edits, and offline JSON/HTML results with file-change evidence.
 
 ---
 

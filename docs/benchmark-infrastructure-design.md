@@ -1,8 +1,8 @@
 # Rolebox Benchmark 基建设计提案
 
-状态：长期设计提案；dsh v1 的执行、报告和历史基线比较已实现，完整路线尚未落地。日期：2026-10-22。设计起点的仓库依据：`f6799da`。首发宿主：dsh。
+状态：长期设计提案；dsh v1 的执行、报告、历史基线比较和基础 workspace 评测已实现，完整路线尚未落地。日期：2026-10-22。设计起点的仓库依据：`f6799da`。首发宿主：dsh。
 
-当前实现包含 `rolebox bench init/validate/doctor/run/watch/report/baseline/compare`、可信本地进程隔离、独立 trial、role 快照、确定性文本断言、SQLite 记录和 JSON/HTML 报告。基础 watch 支持内容变化后去抖、取消旧版本并等待清理、无效配置修复后恢复，以及保留过时结果。baseline 保存不可变历史结果并保留名称修订；run/watch 可固定基线，只有当前、完整且已知条件可比的结果才输出差值。历史比较没有显著性或因果结论，watch 尚无累计费用预算。可执行命令、v1 schema 与能力边界以 [Benchmarks on dsh](benchmarks.md) 为准。
+当前实现包含 `rolebox bench init/validate/doctor/run/watch/report/baseline/compare`、可信本地进程隔离、独立 trial、role 快照、确定性文本/文件断言、可信本地命令评分、SQLite 记录和 JSON/HTML 报告。`init --template code-fix` 提供真实小型代码缺陷、工作区 fixture 和独立 checks；fixture/checks 冻结并参与 suite digest，执行结束先采集产物，再为每个评分命令单独复制产物与 checks。报告保留文件前后证据和命令输出，baseline 同时保存这些结果字段。checks 不出现在初始模型工作区，但当前 OS 权限隔离不足以保证答案保密，运行生成代码也需要信任。基础 watch 支持内容变化后去抖、取消旧版本并等待清理、无效配置修复后恢复，以及保留过时结果。baseline 保存不可变历史结果并保留名称修订；run/watch 可固定基线，只有当前、完整且已知条件可比的结果才输出差值。历史比较没有显著性或因果结论，watch 尚无累计费用预算。可执行命令、v1 schema 与能力边界以 [Benchmarks on dsh](benchmarks.md) 为准。
 
 本文其余配置、`rolebox/benchmark` SDK、完整 watch 分层与预算策略、配对实验及统计比较、CI gate、容器隔离、replay 与完整宿主依赖锁仍是设计方向；不能将本提案的完整示例视为当前已支持接口。
 

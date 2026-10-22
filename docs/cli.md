@@ -238,10 +238,11 @@ defaults to opencode.
 
 ### `bench <subcommand>`
 
-Create and run local role benchmarks on dsh. The first implementation evaluates final response text using literal `equals` and `contains` assertions, with a frozen role snapshot and an independent process for each trial. See [Benchmarks on dsh](benchmarks.md) for the suite schema, provider configuration, scoring, and execution boundaries.
+Create and run local role benchmarks on dsh. Evaluate final response text, captured workspace files, and trusted local command checks, with frozen role/fixture/check inputs and an independent process for each trial. See [Benchmarks on dsh](benchmarks.md) for the suite schema, provider configuration, scoring, and execution boundaries.
 
 ```bash
 rolebox bench init output-quality
+rolebox bench init code-quality --template code-fix
 rolebox bench validate output-quality
 rolebox bench doctor output-quality
 rolebox bench run output-quality --output benchmark-results
@@ -257,7 +258,7 @@ Configure `target.provider`, `target.model`, and trusted `host.plugins` in the g
 
 | Subcommand | Arguments and flags | Behavior |
 | --- | --- | --- |
-| `init` | `<directory>` | Create a new suite, three example cases, and a starter role; the parent directory must exist |
+| `init` | `<directory> [--template response\|code-fix]` | Create a new suite and starter role; default `response` has three text cases, `code-fix` includes a broken module and separate checks; the parent directory must exist |
 | `validate` | `<suite>` | Validate the suite, JSONL cases, and self-contained role assets without importing provider plugins |
 | `doctor` | `<suite>` | Check installed dsh module resolution and report `pluginsConfigured`; no live provider request |
 | `run` | `<suite> [--output <directory>] [--baseline <name>]` | Execute the planned trials and commit results to SQLite; optionally print a historical comparison |
@@ -274,7 +275,9 @@ Configure `target.provider`, `target.model`, and trusted `host.plugins` in the g
 
 For runs that reach result reporting, exit codes are `0` when every planned trial passes, `1` for a complete run with task failures, `2` for incomplete results, and `130` for cancellation. Incomplete overall scores and unobserved usage remain `null`.
 
-Watch polls content every 500 ms with a 300 ms debounce, runs the suite's configured plan, and preserves superseded run records. Invalid saves pause execution; unconfirmed worker cleanup stops the watcher. Keep output outside the role directory. Named baselines capture result records in the rolebox data directory; explicit updates preserve history and do not move an active watch's pinned baseline.
+Watch polls content every 500 ms with a 300 ms debounce, including fixture/check contents, runs the suite's configured plan, and preserves superseded run records. Invalid saves pause execution; unconfirmed worker or grader cleanup stops the watcher. Keep output outside the role, fixture, and checks directories. Named baselines capture result records in the rolebox data directory; explicit updates preserve history and do not move an active watch's pinned baseline.
+
+Workspace cases support `file_exists`, `file_equals`, `file_contains`, and `command` assertions. Command checks run without an implicit shell, with separate copies of captured output and checks for each command. They execute trusted code, including model-produced code, with the user's operating-system permissions. This is not a security boundary for hidden answers. Reports retain bounded file-change previews and command stdout/stderr; failed checks and unscored grader infrastructure errors remain distinct. See [workspace cases](benchmarks.md#workspace-fixtures-and-checks).
 
 Historical comparisons check suite/plan, route, and runtime compatibility. Deltas require complete comparable runs; unknown usage remains unknown. `compare` exits `0` for complete comparable evidence regardless of score direction, and `2` for incomplete, incompatible, or unverified evidence. It does not perform a statistical regression gate. Watch has no cumulative cost budget. See [baseline semantics](benchmarks.md#comparing-role-edits-with-a-baseline).
 
