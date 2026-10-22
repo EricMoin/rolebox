@@ -138,6 +138,7 @@ import {
   describeCompletionPolicyIssue,
 } from "../graph/policy/declarations.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
+import type { LoopPhase } from "../loop/types.ts";
 import { LoopStore } from "../loop/loop-store.ts";
 import { createLoopTools } from "../loop/loop-tools.ts";
 import { applyProjectConfig } from "../project-config.ts";
@@ -468,6 +469,9 @@ export interface DshPluginDisposer {
   (): void;
   /** Bootstrap + wiring statistics for this apply() run. */
   stats: DshPluginStats;
+  activateRole: DshRoleSwitcher["activate"];
+  getActiveRole: DshRoleSwitcher["getActive"];
+  getLoopPhases(): readonly LoopPhase[];
   /**
    * In-process role-reload seam: replace the four role-snapshot tools
    * (`asset_search` / `asset_inspect` / `asset_validate` / `reference_search`)
@@ -2405,6 +2409,9 @@ export async function apply(
     logsRouteRegistered,
   };
   disposer.registerRoleSnapshotTools = registerRoleSnapshotTools;
+  disposer.activateRole = roleSwitcher.activate.bind(roleSwitcher);
+  disposer.getActiveRole = roleSwitcher.getActive.bind(roleSwitcher);
+  disposer.getLoopPhases = () => [...loopCoordinator.getAllLoopStates().values()].map(loop => loop.phase);
   return disposer;
 }
 

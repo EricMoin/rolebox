@@ -604,6 +604,9 @@ async function applyTracked(
     },
     {
       stats: boot.stats,
+      activateRole: boot.activateRole,
+      getActiveRole: boot.getActiveRole,
+      getLoopPhases: boot.getLoopPhases,
       registerRoleSnapshotTools: boot.registerRoleSnapshotTools,
     },
   );
