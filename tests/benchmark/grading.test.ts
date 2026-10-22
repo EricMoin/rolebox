@@ -33,4 +33,11 @@ describe("benchmark grading", () => {
     expect(gradeBenchmarkResult({ ...item, assertions: [{ kind: "equals", value: "" }] }, { ...result, output: "" }).verdict).toBe("pass");
     expect(gradeBenchmarkResult({ ...item, assertions: [] }, result).verdict).toBe("fail");
   });
+
+  it("does not silently score workspace assertions through the text-only API", () => {
+    const grade = gradeBenchmarkResult({ ...item, assertions: [{ kind: "file_exists", path: "result.txt" }] }, result);
+    expect(grade.verdict).toBe("unscored");
+    expect(grade.assertions).toEqual([]);
+    expect(grade.error).toContain("workspace grading");
+  });
 });

@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { JSON_SCHEMA, load } from "js-yaml";
 import { z } from "zod";
-import type { BenchmarkCase, BenchmarkSuite, LoadedBenchmarkSuite } from "./types.ts";
+import type { BenchmarkCase, BenchmarkFileSnapshot, BenchmarkSuite, BenchmarkWorkspaceInput, LoadedBenchmarkSuite } from "./types.ts";
+import { safeBenchmarkRelativePath, snapshotBenchmarkFiles } from "./workspace.ts";
 
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/);
 const nonempty = z.string().trim().min(1).max(4_096);
+const validUnicode = (value: string): boolean => !/[\p{Cs}]/u.test(value);
+const relativePath = z.string().refine(value => safeBenchmarkRelativePath(value) && value.split("/")[0]!.toLowerCase() !== ".rolebox");
+const workspacePath = z.string().refine(value => safeBenchmarkRelativePath(value.startsWith("./") ? value.slice(2) : value));
 const environmentName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(128);
 const suiteSchema = z.object({
   schemaVersion: z.literal(1),
@@ -34,13 +38,26 @@ const suiteSchema = z.object({
   }).strict().default({ repetitions: 1, concurrency: 1, timeoutMs: 120_000 }),
 }).strict();
 
+const assertionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("equals"), value: z.string().max(16_384).refine(validUnicode) }).strict(),
+  z.object({ kind: z.literal("contains"), value: z.string().min(1).max(16_384).refine(validUnicode) }).strict(),
+  z.object({ kind: z.literal("file_exists"), path: relativePath }).strict(),
+  z.object({ kind: z.literal("file_equals"), path: relativePath, value: z.string().max(16_384).refine(validUnicode) }).strict(),
+  z.object({ kind: z.literal("file_contains"), path: relativePath, value: z.string().min(1).max(16_384).refine(validUnicode) }).strict(),
+  z.object({
+    kind: z.literal("command"),
+    argv: z.array(z.string().max(4_096).refine(value => validUnicode(value) && !value.includes("\0"))).min(1).max(64)
+      .refine(argv => Boolean(argv[0]?.trim())),
+    timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
+    expectedExitCode: z.number().int().min(0).max(255).default(0),
+  }).strict(),
+]);
+
 const caseSchema = z.object({
   id: identifier,
-  prompt: z.string().min(1).max(131_072).refine((value) => value.trim().length > 0),
-  assertions: z.array(z.object({
-    kind: z.enum(["equals", "contains"]),
-    value: z.string().max(16_384),
-  }).strict()).min(1).max(64),
+  prompt: z.string().min(1).max(131_072).refine((value) => value.trim().length > 0 && validUnicode(value)),
+  assertions: z.array(assertionSchema).min(1).max(64),
+  workspace: z.object({ fixture: workspacePath, checks: workspacePath.optional() }).strict().optional(),
 }).strict();
 
 const reservedEnvironment = /^(?:HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|PATH|PWD|OLDPWD|TMPDIR|TMP|TEMP|NODE_.*|BUN_.*|XDG_.*|DSH_.*|ROLEBOX_.*|LD_.*|DYLD_.*)$/i;
@@ -63,7 +80,8 @@ async function readBounded(path: string, limit: number, label: string): Promise<
     if (!info.isFile() || info.size > limit) fail(`${label} must be a file no larger than ${limit} bytes`);
     const bytes = await readFile(path);
     if (bytes.length > limit) fail(`${label} exceeds ${limit} bytes`);
-    return bytes.toString("utf8");
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+    catch { fail(`${label} must contain valid UTF-8 text`); }
   } catch (error) {
     if (error instanceof BenchmarkSpecError) throw error;
     fail(`${label} could not be read`);
@@ -172,6 +190,37 @@ export async function loadBenchmarkSuite(path: string): Promise<LoadedBenchmarkS
   await readBounded(join(roleDirectory, "role.yaml"), 1_048_576, "Target role.yaml");
   const dataset = await readBounded(resolve(directory, suite.dataset), 16_777_216, "Case dataset");
   const cases: BenchmarkCase[] = [];
+  const workspaces: Record<string, BenchmarkWorkspaceInput> = Object.create(null);
+  const snapshots = new Map<string, BenchmarkFileSnapshot>();
+  let workspaceBytes = 0;
+  let workspaceFiles = 0;
+  let workspaceRoot: string;
+  try { workspaceRoot = await realpath(directory); }
+  catch { fail("Benchmark suite directory could not be read"); }
+  async function workspaceSnapshot(path: string): Promise<BenchmarkFileSnapshot> {
+    path = path.startsWith("./") ? path.slice(2) : path;
+    const cached = snapshots.get(path);
+    if (cached) return cached;
+    let location = workspaceRoot;
+    try {
+      for (const part of path.split("/")) {
+        location = join(location, part);
+        const info = await lstat(location);
+        if (info.isSymbolicLink() || !info.isDirectory()) fail("Case workspace sources must be directories inside the suite without symlinks");
+      }
+      const snapshot = await snapshotBenchmarkFiles(location);
+      const handle = await opendir(location);
+      for await (const entry of handle) {
+        if (entry.name.toLowerCase() === ".rolebox") fail("Case workspace sources must not contain reserved .rolebox runtime state");
+      }
+      snapshots.set(path, snapshot);
+      return snapshot;
+    } catch (error) {
+      if (error instanceof BenchmarkSpecError) throw error;
+      if (error instanceof Error && error.message.startsWith("Benchmark workspace")) fail(error.message);
+      fail("Case workspace source could not be read");
+    }
+  }
   const ids = new Set<string>();
   for (const [index, line] of dataset.split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
@@ -182,7 +231,25 @@ export async function loadBenchmarkSuite(path: string): Promise<LoadedBenchmarkS
     const item = parse(caseSchema, value, `Case line ${index + 1}`);
     if (ids.has(item.id)) fail(`Case line ${index + 1} has a duplicate ID`);
     for (const assertion of item.assertions) {
-      if (assertion.kind === "contains" && !assertion.value.length) fail(`Case line ${index + 1} has an empty contains assertion`);
+      if (!["equals", "contains"].includes(assertion.kind) && !item.workspace) {
+        fail(`Case line ${index + 1} requires a workspace for file and command assertions`);
+      }
+      if (assertion.kind === "command" && assertion.argv.some(arg => arg.includes("{checks}")) && !item.workspace?.checks) {
+        fail(`Case line ${index + 1} requires workspace.checks for the checks placeholder`);
+      }
+    }
+    if (item.workspace) {
+      const workspace: BenchmarkWorkspaceInput = {
+        fixture: await workspaceSnapshot(item.workspace.fixture),
+        ...(item.workspace.checks ? { checks: await workspaceSnapshot(item.workspace.checks) } : {}),
+      };
+      for (const snapshot of [workspace.fixture, ...(workspace.checks ? [workspace.checks] : [])]) {
+        workspaceFiles += snapshot.files.length;
+        for (const file of snapshot.files) workspaceBytes += Buffer.byteLength(file.content, "base64");
+      }
+      if (workspaceBytes > 67_108_864) fail("Case workspace sources exceed the 64 MiB suite budget across all case references");
+      if (workspaceFiles > 50_000) fail("Case workspace sources exceed the 50000-file suite budget across all case references");
+      workspaces[item.id] = workspace;
     }
     ids.add(item.id);
     cases.push(item);
@@ -220,8 +287,14 @@ export async function loadBenchmarkSuite(path: string): Promise<LoadedBenchmarkS
     id: suite.id,
     target: { host: suite.target.host, provider: suite.target.provider, model: suite.target.model },
     host: { moduleRootDigest, plugins, env: [...suite.host.env].sort() },
-    cases,
+    cases: cases.map(item => item.workspace ? {
+      ...item,
+      workspace: {
+        fixture: workspaces[item.id]!.fixture.digest,
+        ...(workspaces[item.id]!.checks ? { checks: workspaces[item.id]!.checks!.digest } : {}),
+      },
+    } : item),
     run: suite.run,
   }));
-  return { suite, directory, roleDirectory, cases, digest: suiteDigest };
+  return { suite, directory, roleDirectory, cases, digest: suiteDigest, ...(Object.keys(workspaces).length ? { workspaces } : {}) };
 }

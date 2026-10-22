@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dump } from "js-yaml";
@@ -84,7 +84,7 @@ describe("benchmark suite validation", () => {
   it("accepts an exact empty-output assertion", async () => {
     await save();
     await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, assertions: [{ kind: "equals", value: "" }] }));
-    expect((await loadBenchmarkSuite(directory)).cases[0]!.assertions[0]!.value).toBe("");
+    expect((await loadBenchmarkSuite(directory)).cases[0]!.assertions[0]).toEqual({ kind: "equals", value: "" });
   });
 
   it("resolves module locations and keeps credential references unresolved", async () => {
@@ -157,5 +157,155 @@ describe("benchmark suite validation", () => {
     source.dataset = "cases.jsonl";
     await save();
     expect((await loadBenchmarkSuite(directory)).digest).not.toBe(initial.digest);
+  });
+
+  it("freezes workspace fixtures and checks, supplies command defaults and fingerprints source edits", async () => {
+    await mkdir(join(directory, "fixture"));
+    await mkdir(join(directory, "checks"));
+    await writeFile(join(directory, "fixture", "sum.ts"), "export const sum = () => 0;\n");
+    await writeFile(join(directory, "checks", "test.ts"), "throw new Error('test fixture');\n");
+    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({
+      ...exampleCase, workspace: { fixture: "./fixture", checks: "./checks" },
+      assertions: [{ kind: "file_exists", path: "sum.ts" }, { kind: "command", argv: ["bun", "{checks}/test.ts", "{workspace}"] }],
+    }));
+    await save();
+    const initial = await loadBenchmarkSuite(directory);
+    expect(initial.cases[0]!.workspace).toEqual({ fixture: "./fixture", checks: "./checks" });
+    expect(initial.cases[0]!.assertions[1]).toEqual({ kind: "command", argv: ["bun", "{checks}/test.ts", "{workspace}"], timeoutMs: 10_000, expectedExitCode: 0 });
+    expect(initial.workspaces?.one?.fixture.files[0]!.content).toBe(Buffer.from("export const sum = () => 0;\n").toString("base64"));
+    expect(initial.workspaces?.one?.checks?.files[0]!.path).toBe("test.ts");
+    await writeFile(join(directory, "fixture", "sum.ts"), "export const sum = () => 1;\n");
+    const edited = await loadBenchmarkSuite(directory);
+    expect(edited.digest).not.toBe(initial.digest);
+    expect(edited.workspaces?.one?.fixture.digest).not.toBe(initial.workspaces?.one?.fixture.digest);
+    await writeFile(join(directory, "checks", "test.ts"), "throw new Error('changed fixture');\n");
+    expect((await loadBenchmarkSuite(directory)).digest).not.toBe(edited.digest);
+    const beforeMode = await loadBenchmarkSuite(directory);
+    await chmod(join(directory, "fixture", "sum.ts"), 0o700);
+    expect((await loadBenchmarkSuite(directory)).digest).not.toBe(beforeMode.digest);
+  });
+
+  it("hashes workspace contents independently of fixture and checks directory names", async () => {
+    for (const name of ["fixture-a", "fixture-b", "checks-a", "checks-b"]) {
+      await mkdir(join(directory, name));
+      await writeFile(join(directory, name, "file.txt"), "same content");
+    }
+    await save();
+    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture-a", checks: "checks-a" } }));
+    const initial = await loadBenchmarkSuite(directory);
+    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture-b", checks: "checks-b" } }));
+    expect((await loadBenchmarkSuite(directory)).digest).toBe(initial.digest);
+  });
+
+  it("counts repeated fixture and checks references against the aggregate suite budget", async () => {
+    await save();
+    await mkdir(join(directory, "fixture"));
+    await writeFile(join(directory, "fixture", "file"), Buffer.alloc(1_048_576));
+    async function cases(count: number, checks: boolean): Promise<void> {
+      const lines = Array.from({ length: count }, (_, index) => JSON.stringify({
+        ...exampleCase, id: `case-${index}`, workspace: { fixture: "fixture", ...(checks ? { checks: "fixture" } : {}) },
+      }));
+      await writeFile(join(directory, "cases.jsonl"), lines.join("\n"));
+    }
+    await cases(64, false);
+    expect((await loadBenchmarkSuite(directory)).cases).toHaveLength(64);
+    await cases(65, false);
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("64 MiB suite budget");
+    await cases(32, true);
+    expect((await loadBenchmarkSuite(directory)).cases).toHaveLength(32);
+    await cases(33, true);
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("64 MiB suite budget");
+  });
+
+  it("bounds the aggregate file count even for repeatedly referenced empty files", async () => {
+    await save();
+    await mkdir(join(directory, "fixture"));
+    for (let index = 0; index < 100; index++) await writeFile(join(directory, "fixture", `file-${index}`), "");
+    async function cases(count: number, checks: boolean): Promise<void> {
+      await writeFile(join(directory, "cases.jsonl"), Array.from({ length: count }, (_, index) => JSON.stringify({
+        ...exampleCase, id: `case-${index}`, workspace: { fixture: "fixture", ...(checks ? { checks: "fixture" } : {}) },
+      })).join("\n"));
+    }
+    await cases(500, false);
+    expect((await loadBenchmarkSuite(directory)).cases).toHaveLength(500);
+    await cases(501, false);
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("50000-file suite budget");
+    await cases(250, true);
+    expect((await loadBenchmarkSuite(directory)).cases).toHaveLength(250);
+    await cases(251, true);
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("50000-file suite budget");
+  });
+
+  it("rejects escaping workspace paths, symlink ancestors and unsupported workspace fields", async () => {
+    await save();
+    await mkdir(join(directory, "fixture"));
+    await mkdir(join(directory, "fixture", "nested"));
+    await symlink(join(directory, "fixture"), join(directory, "linked"));
+    for (const workspace of [
+      { fixture: "../outside" }, { fixture: "/absolute" }, { fixture: "a/../fixture" },
+      { fixture: "linked/nested" }, { fixture: "linked" }, { fixture: "fixture", unknown: true },
+      { fixture: "fixture", checks: "../outside" }, { fixture: "missing" },
+    ]) {
+      await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace }));
+      await expect(loadBenchmarkSuite(directory)).rejects.toThrow();
+    }
+  });
+
+  it("requires workspace inputs and explicit checks for new assertions", async () => {
+    await save();
+    await mkdir(join(directory, "fixture"));
+    for (const assertions of [
+      [{ kind: "file_exists", path: "output.txt" }],
+      [{ kind: "file_equals", path: "output.txt", value: "expected" }],
+      [{ kind: "file_contains", path: "output.txt", value: "expected" }],
+      [{ kind: "command", argv: ["bun", "test"] }],
+    ]) {
+      await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, assertions }));
+      await expect(loadBenchmarkSuite(directory)).rejects.toThrow("requires a workspace");
+    }
+    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture" }, assertions: [{ kind: "command", argv: ["bun", "{checks}/test.ts"] }] }));
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("requires workspace.checks");
+  });
+
+  it("reserves the top-level runtime namespace in fixtures, checks and file assertions", async () => {
+    await save();
+    await mkdir(join(directory, "fixture"));
+    await mkdir(join(directory, "checks"));
+    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture", checks: "checks" } }));
+    for (const location of ["fixture", "checks"]) {
+      await mkdir(join(directory, location, ".rolebox"));
+      await expect(loadBenchmarkSuite(directory)).rejects.toThrow("reserved .rolebox runtime state");
+      await rm(join(directory, location, ".rolebox"), { recursive: true });
+    }
+    for (const path of [".rolebox", ".rolebox/state/active.json", ".Rolebox/state.json"]) {
+      await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture" }, assertions: [{ kind: "file_exists", path }] }));
+      await expect(loadBenchmarkSuite(directory)).rejects.toThrow("invalid or unsupported fields");
+    }
+  });
+
+  it("strictly validates file and command assertions without accepting shell configuration", async () => {
+    await save();
+    await mkdir(join(directory, "fixture"));
+    for (const assertion of [
+      { kind: "file_exists", path: "../outside" }, { kind: "file_exists", path: "file", value: "extra" },
+      { kind: "file_contains", path: "file", value: "" }, { kind: "file_equals", path: "file", value: "\ud800" },
+      { kind: "command", argv: [] }, { kind: "command", argv: [""] }, { kind: "command", argv: [" "] },
+      { kind: "command", argv: Array.from({ length: 65 }, () => "arg") },
+      { kind: "command", argv: ["bun", "a\0b"] }, { kind: "command", argv: ["bun", "\ud800"] },
+      { kind: "command", argv: ["bun"], timeoutMs: 99 }, { kind: "command", argv: ["bun"], timeoutMs: 60_001 },
+      { kind: "command", argv: ["bun"], expectedExitCode: -1 }, { kind: "command", argv: ["bun"], expectedExitCode: 256 },
+      { kind: "command", argv: ["bun"], shell: true }, { kind: "command", command: "bun test" },
+    ]) {
+      await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture" }, assertions: [assertion] }));
+      await expect(loadBenchmarkSuite(directory)).rejects.toThrow("invalid or unsupported fields");
+    }
+  });
+
+  it("rejects invalid UTF-8 rather than silently changing input contents", async () => {
+    await save();
+    await writeFile(join(directory, "cases.jsonl"), Buffer.from([0xff]));
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("valid UTF-8");
+    await writeFile(join(directory, "suite.yaml"), Buffer.from([0xff]));
+    await expect(loadBenchmarkSuite(directory)).rejects.toThrow("valid UTF-8");
   });
 });
