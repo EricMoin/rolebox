@@ -68,18 +68,26 @@ export const HOST_PACKAGES: readonly HostPackage[] = [
   // cordis — `latest` (4.0.2) is newer than its `next` tag (4.0.1-rc.4).
   { name: "@deepseek-ai/cordis", channel: "latest" },
   // dsh packages — `next` is the current line; `latest` is the older 0.0.1-rc.1.
+  { name: "@deepseek-ai/dsh-agent", channel: "next" },
+  { name: "@deepseek-ai/dsh-agent-loop", channel: "next" },
   { name: "@deepseek-ai/dsh-client-locale", channel: "next" },
   { name: "@deepseek-ai/dsh-client-ui-conversation", channel: "next" },
   { name: "@deepseek-ai/dsh-client-ui-settings", channel: "next" },
   { name: "@deepseek-ai/dsh-client-ui-slots", channel: "next" },
+  { name: "@deepseek-ai/dsh-fs-local", channel: "next" },
   { name: "@deepseek-ai/dsh-invariants", channel: "next" },
   { name: "@deepseek-ai/dsh-llm", channel: "next" },
   { name: "@deepseek-ai/dsh-scope", channel: "next" },
   { name: "@deepseek-ai/dsh-session", channel: "next" },
   { name: "@deepseek-ai/dsh-session-persistence", channel: "next" },
+  { name: "@deepseek-ai/dsh-session-projection", channel: "next" },
   { name: "@deepseek-ai/dsh-skill", channel: "next" },
+  { name: "@deepseek-ai/dsh-subagent", channel: "next" },
+  { name: "@deepseek-ai/dsh-subagent-spawn-in-process", channel: "next" },
   { name: "@deepseek-ai/dsh-system-prompt", channel: "next" },
+  { name: "@deepseek-ai/dsh-tool-skill", channel: "next" },
   { name: "@deepseek-ai/dsh-tools", channel: "next" },
+  { name: "@deepseek-ai/dsh-working-directory", channel: "next" },
   // pi host — published to `latest`.
   { name: "@earendil-works/pi-coding-agent", channel: "latest" },
 ]
