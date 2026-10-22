@@ -2,7 +2,7 @@
 
 > Part of the rolebox documentation. See [CLI reference](cli.md#bench-subcommand) for the command surface and the [infrastructure design](benchmark-infrastructure-design.md) for future work.
 
-The first benchmark implementation runs a self-contained role in a real dsh primary session, scores its final text response, and saves the evidence locally. It supports `init`, `validate`, `doctor`, `run`, `watch`, and `report`. This is the initial execution and reporting foundation; the broader design is not fully implemented.
+The benchmark implementation runs a self-contained role in a real dsh primary session, scores its final text response, and saves the evidence locally. It supports `init`, `validate`, `doctor`, `run`, `watch`, `report`, `baseline`, and historical `compare`. The broader design is not fully implemented.
 
 Each trial gets a separate process, workspace, home, and runtime state. The role is frozen before execution, and the adapter checks the activated role prompt and the actual top-level provider/model route. A trial is one case executed once; increasing `repetitions` creates independent trials rather than retrying a failed answer until it passes.
 
@@ -56,7 +56,46 @@ If a save changes the revision or leaves invalid configuration, watch cancels th
 
 Old run directories remain available for audit. Completion feedback distinguishes the current revision from superseded results; an old run finishing during cancellation is not the current role's score. Stopping watch waits for the active run to finish cleanup. An unexpected run error or unconfirmed worker termination stops watch entirely, because safely starting another revision would require proof that the previous workers stopped.
 
-The result directory must be outside the role directory, including through symlinks. This prevents generated results from becoming watched role input. Watch does not set a baseline, compare scores across runs, or calculate statistical significance. A normally returned infrastructure failure does not automatically retry unchanged input; save a changed valid revision to run again.
+The result directory must be outside the role directory, including through symlinks. This prevents generated results from becoming watched role input. Add `--baseline <name>` for historical feedback as described below. A normally returned infrastructure failure does not automatically retry unchanged input; save a changed valid revision to run again.
+
+## Comparing role edits with a baseline
+
+Save a complete run before editing the role, then use its name for feedback:
+
+```bash
+rolebox bench baseline set main benchmark-results/BASELINE_RUN_ID
+rolebox bench baseline show main
+rolebox bench watch output-quality --output benchmark-results --baseline main
+```
+
+`baseline set` captures the full validated run record in a local SQLite catalog under the rolebox data directory at `benchmarks/baselines/baselines.sqlite`. It accepts complete scored runs, including runs containing task failures. It rejects incomplete runs. Names contain 1–64 letters, digits, underscores, or hyphens and must start with a letter or digit. Names are case-sensitive.
+
+Each saved record is content-addressed and verified on read. Changing or deleting its original run directory does not change the captured baseline. Updating a name explicitly appends a revision and keeps previous records; it never happens automatically after a high score. The catalog captures result evidence, not a runnable copy of the workspace or host installation. Keep the original run directory if you need its role snapshot and plan.
+
+```bash
+rolebox bench baseline list
+rolebox bench baseline history main
+rolebox bench baseline set main benchmark-results/NEW_BASELINE_RUN_ID
+rolebox bench run output-quality --output benchmark-results --baseline main
+```
+
+Both `run --baseline` and `watch --baseline` resolve the name once at startup and print the pinned name/revision with the result. Watch compares only `current: true` results; cancelled and superseded revisions have no comparison. Updating the name from another process does not move an active watch's baseline. Restart watch to use the new revision. Comparisons appear in command output; export a saved comparison separately when needed:
+
+```bash
+rolebox bench compare benchmark-results/CANDIDATE_RUN_ID --baseline main
+rolebox bench compare benchmark-results/CANDIDATE_RUN_ID --baseline main --format html --output comparison.html
+rolebox bench compare benchmark-results/CANDIDATE_RUN_ID --against benchmark-results/BASELINE_RUN_ID --output comparison.json
+```
+
+`compare` reads existing evidence without model requests. Supply exactly one of `--baseline <name>` and `--against <run-directory>`. The default format is JSON; omitting `--output` prints the comparison. HTML is standalone and works offline. Exports cannot overwrite either compared run's evidence or the baseline catalog. When using a named baseline, its original source directory is no longer an input; the captured catalog record is the protected baseline.
+
+Every comparison is labeled `mode: "historical"` and identifies both run IDs, record digests, suite/role digests, summaries, and observation times. It checks the suite digest, case plan, isolation, observed top-level provider/model, and known dsh/rolebox versions. Changed role and prompt digests are allowed. Conflicting conditions yield `incompatible`; missing runtime or route observations yield `unverified`. Both preserve side-by-side observations but suppress deltas. A changed dataset or execution setting requires a new baseline; matching case IDs alone is insufficient.
+
+Only complete, comparable runs receive overall and per-case pass-rate deltas. `successRateDelta` is candidate minus baseline as a ratio: `0.10` means **+10 percentage points**, including when the baseline is zero. Per-case `improved` and `regressed` labels describe observed scores. There are no confidence intervals, significance claims, paired trials, or CI quality gates. Historical differences cannot be attributed solely to the role edit: backend models, external services, environment values, and unlocked dependencies can change between runs.
+
+Token and cost deltas additionally require that particular metric to be known for every planned trial on both sides. Unknown values stay `null`; a measured zero stays zero. Duration summaries include failed and timed-out trials and measure host startup, execution, and cleanup, not pure model latency. A shorter unsuccessful run is not a quality improvement.
+
+For `compare`, exit `0` means a complete, comparable historical comparison, even if scores regressed; exit `2` means incomplete or unverified/incompatible evidence. Invalid arguments or corrupt records fail the command. Adding `--baseline` to `run` does not change its existing pass/fail exit policy.
 
 ## Suite configuration
 
@@ -201,4 +240,4 @@ For a run that reaches result reporting, exit code `0` means all planned trials 
 
 Native graph execution and named skill loading have been verified through the real dsh services. Native loop execution has a known role/provider routing limitation in the current integration, so successful multi-round loop benchmarks are not yet a supported claim. This benchmark work does not change that existing runtime route. A loop ending in an unsuccessful terminal state without evidence of a business-task failure is recorded as `infra_error` and `unscored`, keeping the overall result incomplete rather than lowering the role's score.
 
-Use this version for explicit local runs and watch feedback while developing a role. It does not yet provide baselines, paired comparisons, confidence intervals, CI regression gates, container isolation, replay, custom grader SDKs, or a complete host/plugin dependency lock. Watch has no cumulative token or cost budget. These remain part of the [infrastructure design](benchmark-infrastructure-design.md), whose broader examples describe planned interfaces rather than the schema above.
+Use this version for explicit local runs and watch feedback against a captured historical baseline while developing a role. It does not yet provide paired experiments, confidence intervals, CI regression gates, container isolation, replay, custom grader SDKs, or a complete host/plugin dependency lock. Watch has no cumulative token or cost budget. These remain part of the [infrastructure design](benchmark-infrastructure-design.md), whose broader examples describe planned interfaces rather than the schema above.

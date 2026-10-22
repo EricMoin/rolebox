@@ -300,14 +300,14 @@ Architecture and the full toolset: [graph-outcome-protocol.md](docs/graph-outcom
 | `rolebox info [name]` | Inspect one installed role in detail (picker when omitted) |
 | `rolebox sync <target>` | Deploy installed roles to `opencode` / `pi` / `dsh` / `codex` |
 | `rolebox config [name]` | Configure models for a role and its subagents (`--target` selects the harness) |
-| `rolebox bench <subcommand>` | Local dsh role benchmarks: `init`, `validate`, `doctor`, `run`, `watch`, `report` |
+| `rolebox bench <subcommand>` | Local dsh role benchmarks: `init`, `validate`, `doctor`, `run`, `watch`, `report`, `baseline`, `compare` |
 | `rolebox monitor` | Runtime dashboard for a project's persisted dispatch state (TUI, `--json`, Prometheus export) |
 | `rolebox logs` | Query, follow and prune the rolebox log files (`logs files`, `logs prune`) |
 | `rolebox memory` | Manage the rolebox memory store (`list`, `show`, `search`, `delete`, `export`, `clean`, `stats`) |
 | `rolebox checkpoint` | Manage dispatch checkpoints (`list`, `clean`) |
 | `rolebox mcp` | Run the rolebox MCP server on stdio (Codex integration) |
 
-Full flags and examples: [cli.md](docs/cli.md). Build a suite with [Benchmarks on dsh](docs/benchmarks.md): deterministic response assertions, independent trials, feedback after role edits, and saved JSON/HTML results.
+Full flags and examples: [cli.md](docs/cli.md). Build a suite with [Benchmarks on dsh](docs/benchmarks.md): deterministic response assertions, independent trials, feedback against a saved baseline after role edits, and offline JSON/HTML results.
 
 ---
 

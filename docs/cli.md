@@ -248,6 +248,9 @@ rolebox bench run output-quality --output benchmark-results
 rolebox bench watch output-quality --output benchmark-results
 rolebox bench report benchmark-results/RUN_ID
 rolebox bench report benchmark-results/RUN_ID --format json --output report.json
+rolebox bench baseline set main benchmark-results/RUN_ID
+rolebox bench watch output-quality --baseline main
+rolebox bench compare benchmark-results/CANDIDATE_RUN_ID --baseline main --format html --output comparison.html
 ```
 
 Configure `target.provider`, `target.model`, and trusted `host.plugins` in the generated `suite.yaml` before running. Replace `RUN_ID` with the directory component printed by `run`.
@@ -257,9 +260,13 @@ Configure `target.provider`, `target.model`, and trusted `host.plugins` in the g
 | `init` | `<directory>` | Create a new suite, three example cases, and a starter role; the parent directory must exist |
 | `validate` | `<suite>` | Validate the suite, JSONL cases, and self-contained role assets without importing provider plugins |
 | `doctor` | `<suite>` | Check installed dsh module resolution and report `pluginsConfigured`; no live provider request |
-| `run` | `<suite> [--output <directory>]` | Execute the planned trials and commit results to SQLite; `--output` selects the parent directory for run results |
-| `watch` | `<suite> [--output <directory>]` | Run immediately, then rerun stable changed revisions after cancelling and cleaning up the previous run |
+| `run` | `<suite> [--output <directory>] [--baseline <name>]` | Execute the planned trials and commit results to SQLite; optionally print a historical comparison |
+| `watch` | `<suite> [--output <directory>] [--baseline <name>]` | Rerun stable changed revisions after cleanup; compare current results with the baseline pinned at startup |
 | `report` | `<run-directory> [--format html\|json] [--output <file>]` | Read saved results and write a standalone HTML report or JSON result plus summary |
+| `baseline set` | `<name> <run-directory>` | Capture a complete run and append a baseline revision |
+| `baseline show` / `history` | `<name>` | Show the captured summary or preserved revision metadata |
+| `baseline list` | None | List the latest revision of every baseline |
+| `compare` | `<candidate-run-directory> (--baseline <name> \| --against <baseline-run-directory>) [--format json\|html] [--output <file>]` | Compare saved evidence; default JSON to stdout, optional offline report file |
 
 `<suite>` accepts a directory containing `suite.yaml` or the YAML file itself. Without `run --output`, results are stored under the rolebox data directory's `benchmarks/` subdirectory. Reports default to `report.html` or `report.json` in the saved run directory.
 
@@ -267,7 +274,9 @@ Configure `target.provider`, `target.model`, and trusted `host.plugins` in the g
 
 For runs that reach result reporting, exit codes are `0` when every planned trial passes, `1` for a complete run with task failures, `2` for incomplete results, and `130` for cancellation. Incomplete overall scores and unobserved usage remain `null`.
 
-Watch polls content every 500 ms with a 300 ms debounce, runs the suite's configured plan, and preserves superseded run records. Invalid saves pause execution; unconfirmed worker cleanup stops the watcher. Keep output outside the role directory. Watch does not compare against a baseline or impose a cumulative cost budget. Baselines, comparisons, and CI regression gates are not implemented yet.
+Watch polls content every 500 ms with a 300 ms debounce, runs the suite's configured plan, and preserves superseded run records. Invalid saves pause execution; unconfirmed worker cleanup stops the watcher. Keep output outside the role directory. Named baselines capture result records in the rolebox data directory; explicit updates preserve history and do not move an active watch's pinned baseline.
+
+Historical comparisons check suite/plan, route, and runtime compatibility. Deltas require complete comparable runs; unknown usage remains unknown. `compare` exits `0` for complete comparable evidence regardless of score direction, and `2` for incomplete, incompatible, or unverified evidence. It does not perform a statistical regression gate. Watch has no cumulative cost budget. See [baseline semantics](benchmarks.md#comparing-role-edits-with-a-baseline).
 
 ### `monitor`
 
