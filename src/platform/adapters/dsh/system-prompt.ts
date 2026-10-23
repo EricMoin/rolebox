@@ -70,6 +70,7 @@ export type DshSystemPromptRegistry = {
 /** Options for constructing a DshSystemPromptAdapter. */
 export interface DshSystemPromptAdapterOptions {
   memoryContext?: (ctx: DshSystemPromptContext) => string;
+  computerContext?: (ctx: DshSystemPromptContext) => string;
   /** Graph workers receive their target role through the dispatch prompt. */
   isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry holding all resolved agent definitions (roles + subagents). */
@@ -100,6 +101,7 @@ export class DshSystemPromptAdapter {
   private readonly directory: string;
   private readonly isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   private readonly memoryContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly computerContext?: (ctx: DshSystemPromptContext) => string;
   /** Registry disposers returned by `section()`/`context()` — released by `dispose()`. */
   private readonly disposers: Array<() => void> = [];
   private readonly _log;
@@ -114,6 +116,7 @@ export class DshSystemPromptAdapter {
     this.directory = options.directory;
     this.isGraphWorker = options.isGraphWorker;
     this.memoryContext = options.memoryContext;
+    this.computerContext = options.computerContext;
     this._log = createSubLogger("dsh-system-prompt");
   }
 
@@ -155,6 +158,14 @@ export class DshSystemPromptAdapter {
         order: 10,
         interpolate: false,
         text: this.memoryContext,
+      }));
+    }
+    if (this.computerContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:computer",
+        order: 20,
+        interpolate: false,
+        text: this.computerContext,
       }));
     }
   }

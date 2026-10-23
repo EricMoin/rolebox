@@ -98,7 +98,7 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | Tool surface | Opencode | Pi | Codex |
 | --- | --- | --- | --- |
 | hashline_read / hashline_edit | ✓ | ✓ | ✓ |
-| memory_write / memory_recall / memory_list / memory_update | ✓ | ✓ | ✓ (no `memory_update`) |
+| memory_write / memory_recall / memory_list / memory_read / memory_update | ✓ | ✓ | ✓ |
 | web_search / web_read / web_fetch | ✓ | ✓ | ✓ |
 | signal | ✓ | ✓ | ✓ |
 | interactive_terminal | ✓ | ✓ | ✓ |
@@ -111,7 +111,7 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | lsp_* (32 tools) | ✓ | ✓ | — (not over MCP) |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
-| [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (opt-in) | ✓ (opt-in) |
+| [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (default on) | ✓ (default on) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
@@ -124,25 +124,15 @@ Rolebox's computer-use family — `computer_screenshot`, `computer_windows`,
 `computer_permissions`, `computer_scroll`, `computer_drag`, `computer_focus`,
 `computer_displays` and `computer_status` — is assembled by the shared `buildCanonicalTools`, which
 merges it only when the host asked for it (`src/platform/tool-assembly.ts:146-151`).
-It is **off by default** on every host. Enabling it adds the 12 tools on hosts
-that register the family.
+DSH, Pi and Codex enable it by default. No role YAML opt-in is needed; optional
+role `tools` rules can restrict it. An explicit `computerUse: false` in a host
+option, global config, or project config disables the family. DSH namespace
+filters and graph node grants still apply. Neither OpenCode entry registers
+the family.
 
-The switch is one shared resolution (`src/loader/computer-use-gate.ts`): the
-family is enabled only when a source holds the boolean `true` — the host plugin
-option `computerUse` (the dsh plugin `Config`, the Codex MCP entry's options),
-`computerUse: true` in `~/.config/rolebox/config.yaml`, or `computerUse: true` in
-`{workspace}/.rolebox/config.json`. On the hosts whose transport carries a role
-— dsh and Pi — a role must ADDITIONALLY grant the tools in its `role.yaml`
-`tools` map, by exact name or with the family wildcard `computer_*`. Codex is
-the exception: its MCP transport carries no role and no permission prompt
-(`src/entries/codex.ts:125-131`, `:159-161`), so the gate is the whole policy
-there — with the gate on, all 12 tools are registered and callable with no
-role opt-in. On dsh, `enabledNamespaces` is only a filter over the tools that
-were already assembled, so `["*"]` does not enable computer use by itself
-(`src/platform/adapters/dsh/role-tool-policy.ts:96-112`). Neither opencode entry
-registers the family — a role's `computer_*` grant only emits opencode deny
-rules for it and changes nothing about the tools that appear. The family, its
-per-host image transport and its platform requirements are documented in
-[computer-use.md](computer-use.md).
+OS authorization is requested through `computer_permissions` and remains a
+separate user-controlled step. DSH/Pi prompt context and Codex MCP initialize
+instructions explain the available workflow. The family, per-host image
+transport, and platform requirements are documented in [computer-use.md](computer-use.md).
 
 Remaining platform-inherent gaps (hot reload, extensions, recovery engine, TUI) are explicit non-goals on Pi and Codex — see [limitations.md](limitations.md).

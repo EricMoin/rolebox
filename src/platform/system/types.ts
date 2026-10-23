@@ -158,9 +158,8 @@ export interface ComputerPlan {
   /** The mechanism for diagnostics: `screencapture`, `osascript`, `xdotool`, `powershell`. */
   readonly driver: string;
   /**
-   * The OS permission this plan needs, as one sentence the executor appends to
-   * any failure. Absent when the system accepts the command unconditionally, so
-   * a refusal always names the grant that would fix it.
+   * Remediation appended when the helper explicitly reports an OS permission
+   * denial. Other execution failures must not be presented as missing grants.
    */
   readonly permissionHint?: string;
   /** Best-effort release after an interrupted gesture; never repeats the gesture. */
@@ -195,6 +194,8 @@ export interface SupportedComputerUse {
   permissionProbe(): ComputerPlanOrRefusal;
   /** Optional independent screen-capture permission probe; prints granted or not granted. */
   capturePermissionProbe?(): ComputerPlanOrRefusal;
+  /** Optional request for the independent screen-capture grant; never a substitute for a probe. */
+  capturePermissionPrompt?(): ComputerPlanOrRefusal;
   /**
    * How this system asks its OS to show its own grant prompt, when the grant is
    * requestable.

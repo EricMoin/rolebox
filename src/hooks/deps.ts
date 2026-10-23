@@ -16,6 +16,8 @@ export interface HookDeps {
   roleMap: Map<string, ResolvedRole>;
   /** Host-confirmed attempt sessions, including workers recovered after restart. */
   isGraphWorker?: (sessionID: string) => boolean;
+  /** Tools registered by this host for the session; absence advertises no computer capabilities. */
+  availableTools?: (sessionID: string) => readonly string[];
   dir: string;
   dispatchManager: DispatchManager;
   loopManager: LoopCoordinator;

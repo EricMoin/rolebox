@@ -92,6 +92,9 @@ import {
   isComputerUseRegistrationAllowed,
 } from "../platform/adapters/dsh/role-tool-policy.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
+import { COMPUTER_TOOL_NAMES } from "../loader/computer-grants.ts";
+import { createDshComputerContext } from "../platform/adapters/dsh/computer-context.ts";
+import { resolveDshSessionContext, type DshContextOptions } from "../platform/adapters/dsh/session-context.ts";
 import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
 import { createDshMemoryContext, DSH_MEMORY_WORKFLOW_TOOLS, type DshMemoryAgent } from "../platform/adapters/dsh/memory-context.ts";
 import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/system-prompt.ts";
@@ -173,17 +176,8 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
  *   - `skillsDir`         — override the global skills directory (default:
  *                           `{dsh home}/skills`)
  *   - `defaultRole`       — role id (directory name) promoted to primary
- *   - `computerUse`       — opt IN to rolebox's computer-use family
- *                           (`computer_*` observation and input tools).
- *                           Default `false`: absent registers NOTHING. The
- *                           family is registered only when this resolves true
- *                           (it is also enabled by `computerUse: true` in
- *                           `~/.config/rolebox/config.yaml` or
- *                           `{cwd}/.rolebox/config.json`), and a role must STILL
- *                           grant each tool in its `role.yaml` `tools:` map
- *                           (`computer_screenshot: true`, or the family
- *                           wildcard `computer_*: true`) — the boot-time guard
- *                           denies every call that role does not grant.
+ *   - `computerUse`       — optional opt-out for rolebox's computer_* tools;
+ *                           absent enables the family, false disables it.
  *   - `enabledNamespaces` — allow-list of tool names / namespace prefixes,
  *                           composable with `!` exclusions (e.g.
  *                           `["*", "!web"]`); `"*"` or absent registers every
@@ -219,9 +213,9 @@ export const Config = z.object({
     .describe("Role id (directory name) to promote to primary"),
   computerUse: z
     .boolean()
-    .default(false)
+    .optional()
     .describe(
-      "Enable rolebox's computer-use family for screenshots, windows, displays, status, clicking, moving, typing, keys, scrolling, dragging, focus and permissions. Default false: absent registers NO computer_* tool at all. A host option can only ASSERT enablement (a schema default makes false indistinguishable from unset), so computerUse: true in ~/.config/rolebox/config.yaml or {cwd}/.rolebox/config.json also enables it; a role must still grant the tools in role.yaml tools: (computer_screenshot: true, or the family wildcard computer_*: true) or the boot-time guard denies every call.",
+      "Expose rolebox computer_* tools by default. Set false to disable this family; an explicit false in the global or project config also disables it. Roles may restrict individual tools. OS permissions are requested through computer_permissions when needed.",
     ),
   enabledNamespaces: z
     .array(z.string())
@@ -1277,15 +1271,9 @@ export async function apply(
     configDir: dirs.configDir,
   });
 
-  // 1a. Resolve the GLOBAL computer-use gate — ONCE, before any tool is
-  // assembled, and OFF unless a surface explicitly says otherwise (see
-  // src/loader/computer-use-gate.ts). The plugin option is an assertion of
-  // enablement only: its schema default makes `false` indistinguishable from
-  // "unset", so the config-file surfaces can still opt in. The resolved reason
-  // is logged unconditionally, so a boot that does NOT expose the family states
-  // why instead of leaving an operator to guess.
+  // Resolve explicit computer-use opt-outs before tool registration.
   const computerUseGate = resolveComputerUseGate({
-    hostOverride: config.computerUse === true ? true : undefined,
+    hostOverride: config.computerUse,
     workspaceDir: process.cwd(),
   });
   log.info("Computer use gate resolved", {
@@ -1315,25 +1303,32 @@ export async function apply(
   const activeRoleStore = new ActiveRoleStore(process.cwd());
   const activeRole = createActiveRoleRef(activeRoleStore);
   let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary> | undefined;
-  const memoryToolNames = new Map<string, string>();
-  const memoryContext = createDshMemoryContext({
+  const contextToolNames = new Map<string, string>();
+  const canonicalToolNames = new Map<string, string>();
+  const contextOptions: DshContextOptions = {
     roles: () => resolvedRoles,
     activeRole: sessionId => activeRole.get(sessionId),
     session: sessionId => ctx.sessions.get(sessionId),
     workspace: session => {
-      const service = ctx.get("workingDirectory") as { get?(session: NonNullable<DshMemoryAgent["session"]>): string } | undefined;
-      return service?.get?.(session);
+      try {
+        const service = ctx.get("workingDirectory") as { get?(session: NonNullable<DshMemoryAgent["session"]>): string } | undefined;
+        return service?.get?.(session);
+      } catch {
+        return undefined;
+      }
     },
-    names: () => memoryToolNames,
+    names: () => contextToolNames,
     tools: agent => {
-      const names = [...memoryToolNames.values()];
+      const names = [...contextToolNames.values()];
       const catalog = ctx.tools.schemas?.(agent);
       return catalog ? names.filter(name => catalog.some(tool => tool.name === name)) : names;
     },
     worker: agent => workerBoundary?.isWorker(agent)
       ? { ...workerBoundary.toolGrantOf(agent), agent: workerBoundary.roleOf(agent) }
       : undefined,
-  });
+  };
+  const memoryContext = createDshMemoryContext(contextOptions);
+  const computerContext = createDshComputerContext(contextOptions);
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -1345,7 +1340,7 @@ export async function apply(
     const activeId = agentId ?? activeRole.get(sessionId);
     if (!activeId) return undefined;
     const functions = roleFunctionsMap.get(activeId);
-    const blocks = [buildAvailableFunctionsBlock(functions ?? []), memoryContext.render({ id: sessionId }, activeId)].filter(Boolean);
+    const blocks = [buildAvailableFunctionsBlock(functions ?? []), memoryContext.render({ id: sessionId }, activeId), computerContext({ id: sessionId }, activeId)].filter(Boolean);
     return blocks.length ? blocks.map(text => ({ type: "text" as const, text })) : undefined;
   };
   // Provider-route safety path: probe the mounted dsh llm service and hand the
@@ -1422,17 +1417,13 @@ export async function apply(
     onActiveRoleChanged: () => refreshSkillCatalog(),
   });
 
-  // 3b. Computer-use policy: ONE boot-time monotonic guard on `ctx.tools.guard`
-  // that denies every `computer_*` call whose session's ACTIVE ROLE does not
-  // grant it (the grant is read from role.yaml `tools:` at call time, so a role
-  // reload is observed). The guard reads the SAME per-session holder the
-  // switcher writes. FAIL CLOSED: when this host exposes no `guard` seam the
-  // policy refuses (`allowRegistration: false`) and logs one explicit reason —
-  // an ungoverned screen-control surface is never registered.
+  // Apply explicit role restrictions through the host registry guard.
   const computerUsePolicy = installDshComputerUsePolicy({
     tools: ctx.tools,
     enabled: computerUseGate.enabled,
     activeRoleOf: (sessionId) => activeRole.get(sessionId),
+    roleOfExecution: execution => resolveDshSessionContext(contextOptions, execution.agent ?? {}).requestedRoleId ?? null,
+    canonicalToolNameOf: name => canonicalToolNames.get(name) ?? name,
     roles: () => resolvedRoles,
   });
   const computerUseEnabled = computerUseGate.enabled && computerUsePolicy.allowRegistration;
@@ -1494,6 +1485,11 @@ export async function apply(
         roleFunctionsMap,
         directory: dirs.roleboxDir,
         isGraphWorker: context => workerBoundary?.isWorker(context.agent ?? undefined) ?? false,
+        computerContext: context => {
+          const agent = context.agent ?? context.scope;
+          return computerContext(agent && typeof agent === "object" ? agent as DshMemoryAgent
+            : { id: context.sessionID ?? context.sessionId });
+        },
         memoryContext: context => {
           const agent = context.agent ?? context.scope;
           return memoryContext.render(agent && typeof agent === "object" ? agent as DshMemoryAgent
@@ -1679,7 +1675,8 @@ export async function apply(
           resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
           request.declaredTools, request.toolPresentation);
         const memory = systemPromptRegistry ? "" : memoryContext.render({ session: { header: { cwd: workspace } } }, request.agent, request);
-        return memory ? `${prompt}\n\n${memory}` : prompt;
+        const computer = systemPromptRegistry ? "" : computerContext({ session: { header: { cwd: workspace } } }, request.agent, request);
+        return [prompt, memory, computer].filter(Boolean).join("\n\n");
       },
       composeRequest: (agent, request, workerPrompt) =>
         registrar.composeSpawnRequest(agent, request, workerPrompt),
@@ -2197,7 +2194,7 @@ export async function apply(
       capabilities: dshCapabilities(),
       // The resolved global gate. FALSE (the default) registers nothing from
       // the computer-use family; TRUE registers it, and the guard installed
-      // above still denies every call an active role does not grant.
+      // above still enforces explicit role restrictions.
       computerUse: computerUseEnabled,
     }),
     ...graphTools,
@@ -2240,7 +2237,8 @@ export async function apply(
     // skip is NOT a namespace-filter drop.
     if (plan.action === "skip") continue;
     const dispose = ctx.tools.register(plan.definition);
-    if (DSH_MEMORY_WORKFLOW_TOOLS.some(name => name === key)) memoryToolNames.set(key, plan.definition.name);
+    canonicalToolNames.set(plan.definition.name, key);
+    if ([...DSH_MEMORY_WORKFLOW_TOOLS, ...COMPUTER_TOOL_NAMES].some(name => name === key)) contextToolNames.set(key, plan.definition.name);
     toolDisposers.push(dispose);
     registeredTools++;
   }

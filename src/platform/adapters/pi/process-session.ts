@@ -5,6 +5,8 @@ import type { OutcomeDispatchRequest } from "../../../graph/outcome/dispatch-eff
 import type { PiWorkerToolConfig } from "./worker-tools.ts";
 import { piWorkerToolAllowed } from "./worker-tools.ts";
 import { buildMemoryContext } from "../../../memory/context.ts";
+import { buildComputerContext } from "../../../computer/context.ts";
+import { COMPUTER_TOOL_NAMES, roleGrantsComputerTool } from "../../../loader/computer-grants.ts";
 import { MEMORY_TOOL_NAMES } from "../../../memory/tool-policy.ts";
 import type { MemoryConfig } from "../../../memory/types.ts";
 import { buildGraphWorkerToolGrantBlock } from "../../../prompt/graph-worker.ts";
@@ -84,6 +86,7 @@ export interface PiProcessAgentConfig {
   /** Prepared role context for graph attempts; ordinary child sessions keep systemPrompt. */
   graphWorkerSystemPrompt?: string;
   memory?: MemoryConfig;
+  toolPolicy?: Record<string, boolean>;
 }
 
 /**
@@ -1078,6 +1081,11 @@ export class PiProcessSessionAdapter implements ISessionClient {
       : systemPrompt ?? record.agentConfig.systemPrompt;
     let effectivePrompt = workerTools ? rolePrompt + "\n\n" + buildGraphWorkerToolGrantBlock(workerTools.grants, workerTools.presentation, workerTools.baseline) : rolePrompt;
     if (workerTools) {
+      const computerTools = COMPUTER_TOOL_NAMES.filter(name => piWorkerToolAllowed(name, workerTools) &&
+        roleGrantsComputerTool(record.agentConfig.toolPolicy, name) &&
+        workerTools.proxies.some(tool => tool.name === name));
+      const computerBlock = buildComputerContext({ tools: computerTools, presentation: workerTools.presentation?.mode });
+      if (computerBlock) effectivePrompt += "\n\n" + computerBlock;
       const memoryTools = MEMORY_TOOL_NAMES.filter((name) => piWorkerToolAllowed(name, workerTools) &&
         workerTools.proxies.some((tool) => tool.name === name));
       const options = {

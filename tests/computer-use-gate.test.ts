@@ -1,27 +1,4 @@
-/**
- * Computer-use policy tests — the global gate, the per-role grants, and the
- * three enforcement surfaces that consume them.
- *
- * Covers:
- *   1. `src/loader/computer-use-gate.ts` — one resolution point, DEFAULT OFF:
- *      absent everywhere is false, any explicit `true` enables, a config typo
- *      fails closed, and the reason says which surface decided.
- *   2. `src/loader/computer-grants.ts` — a role grants with an exact name or
- *      the `computer_*` wildcard; absent, `false` and the opencode `"*"`
- *      wildcard are NOT grants.
- *   3. `src/prompt/agent-config.ts` — with the gate ON, every registered
- *      `computer_*` name a role does not grant is emitted as `false` (only
- *      then; with the gate OFF the map is untouched).
- *   4. `src/platform/adapters/dsh/role-tool-policy.ts` — the boot-time guard
- *      denies an ungranted call with a reason naming the role and the missing
- *      grant, allows a granted one, and FAILS CLOSED (no registration) when the
- *      host exposes no `ctx.tools.guard`.
- *   5. `src/platform/adapters/pi/tool-interceptor.ts` — the same decision per
- *      Pi invocation, returned as an error string (never thrown into Pi), with
- *      every non-computer tool left on the existing pipeline.
- *
- * @module
- */
+/** Shared computer-use defaults and explicit restrictions across host policies. */
 
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -57,7 +34,7 @@ import { interceptToolBefore } from "../src/platform/adapters/pi/tool-intercepto
 import { registerToolSchema } from "../src/hooks/tool-before.ts";
 import { HookState } from "../src/hooks/state.ts";
 import { createComputerTools } from "../src/computer/index.ts";
-import type { ResolvedRole } from "../src/types.ts";
+import type { ResolvedRole, ResolvedSubAgent } from "../src/types.ts";
 import type { CanonicalToolContext } from "../src/platform/types.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -150,89 +127,82 @@ afterEach(() => {
 
 // ── 1. The global gate ──────────────────────────────────────────────────────
 
-describe("computer-use gate — default OFF, one resolution point", () => {
+describe("computer-use gate — default ON, explicit settings can disable", () => {
   const missing = "/nonexistent/rolebox/config-does-not-exist";
 
-  it("is OFF when no surface sets computerUse", () => {
-    const gate = resolveComputerUseGate({
-      globalConfigPath: missing,
-      projectConfigPath: `${missing}.json`,
-    });
-    expect(gate.enabled).toBe(false);
-    expect(gate.host).toBe(false);
-    expect(gate.globalConfig).toBe(false);
-    expect(gate.projectConfig).toBe(false);
-    // The reason names every surface consulted, so a boot log explains itself.
-    expect(gate.reason).toContain("OFF");
-    expect(gate.reason).toContain(missing);
+  it("allows an unconfigured boot and keeps missing source values distinct", () => {
+    const gate = resolveComputerUseGate({ globalConfigPath: missing, projectConfigPath: `${missing}.json` });
+    expect(gate.enabled).toBe(true);
+    expect(gate.host).toBeUndefined();
+    expect(gate.globalConfig).toBeUndefined();
+    expect(gate.projectConfig).toBeUndefined();
+    expect(gate.reason).toContain("default");
   });
 
-  it("is enabled by computerUse: true in the global config.yaml", () => {
-    const globalConfigPath = writeFile("config.yaml", "computerUse: true\nregistries: []\n");
-    const gate = resolveComputerUseGate({
-      globalConfigPath,
-      projectConfigPath: `${missing}.json`,
-    });
-    expect(gate.enabled).toBe(true);
-    expect(gate.globalConfig).toBe(true);
+  it("honors every explicit false regardless of true values in other sources", () => {
+    for (const host of [undefined, false, true]) {
+      for (const global of [undefined, false, true]) {
+        for (const project of [undefined, false, true]) {
+          const gate = resolveComputerUseGate({
+            hostOverride: host,
+            globalConfigPath: writeFile("config.yaml", global === undefined ? "registries: []\n" : `computerUse: ${global}\n`),
+            projectConfigPath: writeFile("config.json", JSON.stringify(project === undefined ? {} : { computerUse: project })),
+          });
+          expect(gate.enabled).toBe(![host, global, project].includes(false));
+          expect(gate.host).toBe(host);
+          expect(gate.globalConfig).toBe(global);
+          expect(gate.projectConfig).toBe(project);
+        }
+      }
+    }
+  });
+
+  it("reports the source that disables registration", () => {
+    const globalConfigPath = writeFile("config.yaml", "computerUse: false\n");
+    const gate = resolveComputerUseGate({ hostOverride: true, globalConfigPath, projectConfigPath: missing });
+    expect(gate.enabled).toBe(false);
+    expect(gate.reason).toContain("OFF");
     expect(gate.reason).toContain(globalConfigPath);
   });
 
-  it("is enabled by computerUse: true in the project .rolebox/config.json", () => {
-    const workspace = makeTmpDir("rolebox-workspace-");
-    writeFileSync(
-      join(workspace, "project.json"),
-      JSON.stringify({ computerUse: true }),
-      "utf-8",
-    );
-    const gate = resolveComputerUseGate({
-      globalConfigPath: missing,
-      projectConfigPath: join(workspace, "project.json"),
-    });
-    expect(gate.enabled).toBe(true);
-    expect(gate.projectConfig).toBe(true);
+  it("uses the workspace project config when no project path is supplied", () => {
+    const workspaceDir = makeTmpDir("rolebox-computer-workspace-");
+    mkdirSync(join(workspaceDir, ".rolebox"));
+    writeFileSync(join(workspaceDir, ".rolebox", "config.json"), JSON.stringify({ computerUse: false }));
+    const gate = resolveComputerUseGate({ hostOverride: true, globalConfigPath: missing, workspaceDir });
+    expect(gate.projectConfig).toBe(false);
+    expect(gate.enabled).toBe(false);
   });
 
-  it("is enabled by the host plugin option, which can only assert enablement", () => {
-    const fromHost = resolveComputerUseGate({
-      hostOverride: true,
-      globalConfigPath: missing,
-      projectConfigPath: `${missing}.json`,
-    });
-    expect(fromHost.enabled).toBe(true);
-    expect(fromHost.host).toBe(true);
-
-    // A schema-defaulted `false` means "unset", so it never vetoes a user's
-    // explicit config-file opt-in.
-    const configOnly = resolveComputerUseGate({
-      hostOverride: false,
-      globalConfigPath: writeFile("config.yaml", "computerUse: true\n"),
-      projectConfigPath: `${missing}.json`,
-    });
-    expect(configOnly.enabled).toBe(true);
+  it("treats an invalid explicit value as disabling even if another source enables", () => {
+    for (const value of ["true", 1, null, {}, []]) {
+      const config = JSON.stringify({ computerUse: value });
+      const yaml = writeFile("config.yaml", config);
+      const json = writeFile("config.json", config);
+      expect(readComputerUseFromYamlFile(yaml)).toBe(false);
+      expect(readComputerUseFromJsonFile(json)).toBe(false);
+      expect(resolveComputerUseGate({ hostOverride: true, globalConfigPath: yaml, projectConfigPath: missing }).enabled).toBe(false);
+      expect(resolveComputerUseGate({ hostOverride: true, globalConfigPath: missing, projectConfigPath: json }).enabled).toBe(false);
+    }
   });
 
-  it("fails CLOSED on a non-boolean value (a config typo is not enablement)", () => {
-    expect(readComputerUseFromYamlFile(writeFile("config.yaml", 'computerUse: "true"\n'))).toBe(false);
-    expect(readComputerUseFromYamlFile(writeFile("config.yaml", "computerUse: 1\n"))).toBe(false);
-    expect(readComputerUseFromJsonFile(writeFile("config.json", '{"computerUse":"yes"}'))).toBe(false);
-    expect(readComputerUseFromJsonFile(writeFile("config.json", '{"computerUse":1}'))).toBe(false);
-  });
-
-  it("treats a missing or malformed file as absent instead of throwing", () => {
-    expect(readComputerUseFromYamlFile("/nonexistent/config.yaml")).toBe(false);
-    expect(readComputerUseFromJsonFile("/nonexistent/config.json")).toBe(false);
-    expect(readComputerUseFromYamlFile(writeFile("config.yaml", "::: not yaml :::\n"))).toBe(false);
+  it("distinguishes missing settings from unreadable or malformed config", () => {
+    expect(readComputerUseFromYamlFile(missing)).toBeUndefined();
+    expect(readComputerUseFromJsonFile(missing)).toBeUndefined();
+    expect(readComputerUseFromYamlFile(writeFile("config.yaml", "registries: []\n"))).toBeUndefined();
+    expect(readComputerUseFromYamlFile(writeFile("config.yaml", ""))).toBeUndefined();
+    expect(readComputerUseFromJsonFile(writeFile("config.json", "{}"))).toBeUndefined();
+    expect(readComputerUseFromYamlFile(writeFile("config.yaml", "computerUse: [\n"))).toBe(false);
     expect(readComputerUseFromJsonFile(writeFile("config.json", "{not json"))).toBe(false);
-    // A non-object root (a bare scalar/list) is not a config either.
     expect(readComputerUseFromYamlFile(writeFile("config.yaml", "- a\n"))).toBe(false);
     expect(readComputerUseFromJsonFile(writeFile("config.json", "[1]"))).toBe(false);
+    expect(readComputerUseFromJsonFile(makeTmpDir("rolebox-config-directory-"))).toBe(false);
   });
 });
 
 // ── 2. Per-role grants ──────────────────────────────────────────────────────
 
-describe("computer-use grants — explicit per-role opt-in", () => {
+describe("computer-use grants — allow by default with explicit role restrictions", () => {
   it("covers every registered computer tool, and no more", () => {
     // Compared as string[]: the matcher's expected parameter is inferred from
     // the received side, which the const annotation widens.
@@ -245,9 +215,9 @@ describe("computer-use grants — explicit per-role opt-in", () => {
     expect(isRegisteredComputerToolName("computer_future_tool")).toBe(false);
   });
 
-  it("grants by exact name or by the computer_* wildcard", () => {
+  it("allows tools without a matching restriction", () => {
     expect(roleGrantsComputerTool({ computer_screenshot: true }, "computer_screenshot")).toBe(true);
-    expect(roleGrantsComputerTool({ computer_screenshot: true }, "computer_click")).toBe(false);
+    expect(roleGrantsComputerTool({ computer_screenshot: true }, "computer_click")).toBe(true);
     expect(roleGrantsComputerTool({ [COMPUTER_TOOL_WILDCARD]: true }, "computer_key")).toBe(true);
   });
 
@@ -258,17 +228,20 @@ describe("computer-use grants — explicit per-role opt-in", () => {
     }
   });
 
-  it("does NOT grant from an absent map, a false value, or the opencode '*' wildcard", () => {
-    expect(roleGrantsComputerTool(undefined, "computer_screenshot")).toBe(false);
-    expect(roleGrantsComputerTool({}, "computer_screenshot")).toBe(false);
-    expect(roleGrantsComputerTool({ computer_screenshot: false }, "computer_screenshot")).toBe(false);
-    // `"*"` is a generic allowance; screen control is never inherited from it.
-    expect(roleGrantsComputerTool({ "*": true }, "computer_screenshot")).toBe(false);
-    expect(roleGrantsComputerTool({ computer: true }, "computer_screenshot")).toBe(false);
+  it("allows missing maps and honors exact and longest-prefix rules", () => {
+    expect(roleGrantsComputerTool(undefined, "computer_screenshot")).toBe(true);
+    expect(roleGrantsComputerTool({}, "computer_screenshot")).toBe(true);
+    expect(roleGrantsComputerTool({ "*": true }, "computer_screenshot")).toBe(true);
+    expect(roleGrantsComputerTool({ computer: false }, "computer_screenshot")).toBe(true);
+    expect(roleGrantsComputerTool({ "*": false }, "computer_screenshot")).toBe(false);
+    expect(roleGrantsComputerTool({ "computer_*": false, "*": true }, "computer_screenshot")).toBe(false);
+    expect(roleGrantsComputerTool({ "computer_sc*": true, "computer_*": false, "*": true }, "computer_screenshot")).toBe(true);
+    expect(roleGrantsComputerTool({ "computer_sc*": false, "computer_*": true }, "computer_screenshot")).toBe(false);
+    expect(roleGrantsComputerTool({ "computer_sc*": true, computer_screenshot: false }, "computer_screenshot")).toBe(false);
   });
 
-  it("denies with a reason naming the role and the missing grant", () => {
-    const roles = [makeRole("tester")];
+  it("denies with a reason naming the role and its disabling rule", () => {
+    const roles = [makeRole("tester", { "computer_*": false })];
     const decision = decideComputerToolGrant({
       toolName: "computer_click",
       roleId: "tester",
@@ -278,17 +251,19 @@ describe("computer-use grants — explicit per-role opt-in", () => {
     if (decision.granted) throw new Error("unreachable");
     expect(decision.reason).toContain('"tester"');
     expect(decision.reason).toContain("computer_click");
-    expect(decision.reason).toContain(`${COMPUTER_TOOL_WILDCARD}: true`);
+    expect(decision.reason).toContain("computer_click: true");
   });
 
-  it("denies the base agent (no active role) and an unknown role", () => {
+  it("allows the base agent but denies an explicitly named unknown role", () => {
     const base = decideComputerToolGrant({
       toolName: "computer_move",
       roleId: null,
       roles: [makeRole("tester", { [COMPUTER_TOOL_WILDCARD]: true })],
     });
-    expect(base.granted).toBe(false);
-    if (!base.granted) expect(base.reason).toContain("no active rolebox role");
+    expect(base.granted).toBe(true);
+    for (const roleId of [undefined, ""]) {
+      expect(decideComputerToolGrant({ toolName: "computer_move", roleId, roles: NO_ROLES }).granted).toBe(true);
+    }
 
     const unknown = decideComputerToolGrant({
       toolName: "computer_move",
@@ -313,11 +288,24 @@ describe("computer-use grants — explicit per-role opt-in", () => {
     });
     expect(wildcard.granted).toBe(true);
   });
+
+  it("resolves nested roles and applies their own effective tools map", () => {
+    const parent = makeRole("parent", { "computer_*": false });
+    const child: ResolvedSubAgent = { ...makeRole("parent--child"), parentId: parent.id, inheritedFrom: {} };
+    const nested: ResolvedSubAgent = { ...makeRole("parent--child--nested", { computer_click: false }), parentId: child.id, inheritedFrom: {} };
+    parent.subagents.push(child);
+    child.subagents.push(nested);
+    const decide = (roleId: string, toolName = "computer_click") => decideComputerToolGrant({ roleId, toolName, roles: [parent] });
+    expect(decide(parent.id).granted).toBe(false);
+    expect(decide(child.id).granted).toBe(true);
+    expect(decide(nested.id).granted).toBe(false);
+    expect(decide(nested.id, "computer_screenshot").granted).toBe(true);
+  });
 });
 
 // ── 3. opencode v1 + v2 emission ────────────────────────────────────────────
 
-describe("opencode agent config — a non-opting role sees no callable computer tool", () => {
+describe("opencode agent config — materializes explicit computer tool restrictions", () => {
   it("leaves the tools map untouched while the gate is OFF", () => {
     const owned = { web_search: false, hashline_read: true };
     expect(withComputerUseDenials(owned, false)).toBe(owned);
@@ -327,15 +315,14 @@ describe("opencode agent config — a non-opting role sees no callable computer 
     expect(config.tools?.computer_screenshot).toBeUndefined();
   });
 
-  it("emits every ungranted registered name as false while the gate is ON", () => {
+  it("keeps unrestricted roles unchanged while the gate is ON", () => {
     const config = buildAgentConfig(makeRole("tester", { web_search: false }), {
       computerUse: true,
     });
     expect(config.tools).toBeDefined();
     expect(config.tools!.web_search).toBe(false);
-    for (const name of COMPUTER_TOOL_NAMES) {
-      expect(config.tools![name]).toBe(false);
-    }
+    for (const name of COMPUTER_TOOL_NAMES) expect(config.tools![name]).toBeUndefined();
+    expect(buildAgentConfig(makeRole("tester"), { computerUse: true }).tools).toBeUndefined();
   });
 
   it("preserves an exact denial alongside a family grant in the host config", () => {
@@ -345,8 +332,8 @@ describe("opencode agent config — a non-opting role sees no callable computer 
     expect(tools.computer_scroll).toBeUndefined();
   });
 
-  it("keeps an exact grant and a wildcard grant, denying only the rest", () => {
-    const exact = withComputerUseDenials({ computer_click: true }, true)!;
+  it("materializes broad denials and keeps exact exceptions", () => {
+    const exact = withComputerUseDenials({ "computer_*": false, computer_click: true }, true)!;
     expect(exact.computer_click).toBe(true);
     expect(exact.computer_screenshot).toBe(false);
 
@@ -359,30 +346,15 @@ describe("opencode agent config — a non-opting role sees no callable computer 
     expect(wildcard[COMPUTER_TOOL_WILDCARD]).toBe(true);
   });
 
-  it("resolves the gate from the workspace's project config when no override is passed", () => {
-    // A workspace whose `.rolebox/config.json` turns the gate on; the emission
-    // must follow the FILE, not a default.
+  it("uses the workspace project gate and honors an explicit override", () => {
     const workspaceDir = makeTmpDir("rolebox-agent-config-workspace-");
     mkdirSync(join(workspaceDir, ".rolebox"), { recursive: true });
-    writeFileSync(
-      join(workspaceDir, ".rolebox", "config.json"),
-      JSON.stringify({ computerUse: true }),
-      "utf-8",
-    );
-    const role = makeRole("tester");
-    const enabled = buildAgentConfig(role, { workspaceDir });
-    expect(enabled.tools?.computer_screenshot).toBe(false);
-
-    const elsewhere = makeTmpDir("rolebox-agent-config-other-");
-    const disabled = buildAgentConfig(role, { workspaceDir: elsewhere });
-    expect(disabled.tools).toBeUndefined();
-
-    // The registered hint is what the opencode entries use; an explicit option
-    // still wins over it.
+    writeFileSync(join(workspaceDir, ".rolebox", "config.json"), JSON.stringify({ computerUse: false }));
+    const role = makeRole("tester", { "computer_*": false });
+    expect(buildAgentConfig(role, { workspaceDir }).tools?.computer_screenshot).toBeUndefined();
+    expect(buildAgentConfig(role, { workspaceDir, computerUse: true }).tools?.computer_screenshot).toBe(false);
     setAgentConfigWorkspace(workspaceDir);
-    expect(buildAgentConfig(makeRole("tester")).tools?.computer_key).toBe(false);
-    setAgentConfigWorkspace(undefined);
-    expect(buildAgentConfig(makeRole("tester")).tools).toBeUndefined();
+    expect(buildAgentConfig(role).tools?.computer_key).toBeUndefined();
   });
 });
 
@@ -399,13 +371,13 @@ describe("dsh computer-use guard — per-role enforcement, fail closed", () => {
     expect(isComputerUseRegistrationAllowed("computer_screenshot", true)).toBe(true);
   });
 
-  it("denies a role without the grant, naming the role and the missing grant", () => {
+  it("denies a role that explicitly disables the family", () => {
     const double = guardDouble();
     const policy = installDshComputerUsePolicy({
       tools: double.registry,
       enabled: true,
       activeRoleOf: (sessionId) => (sessionId === "sess-1" ? "tester" : null),
-      roles: () => [makeRole("tester")],
+      roles: () => [makeRole("tester", { "computer_*": false })],
     });
     expect(policy.guardInstalled).toBe(true);
     expect(policy.allowRegistration).toBe(true);
@@ -438,6 +410,35 @@ describe("dsh computer-use guard — per-role enforcement, fail closed", () => {
     expect(double.evaluate({ name: "computer_key", agent: { id: "a" } })).toBeUndefined();
   });
 
+  it("uses the execution role instead of an inherited parent selection", () => {
+    const parent = makeRole("parent", { "computer_*": false });
+    const child: ResolvedSubAgent = { ...makeRole("parent--child", { computer_click: false }), parentId: parent.id, inheritedFrom: {} };
+    parent.subagents.push(child);
+    let roleId: string | null = child.id;
+    const double = guardDouble();
+    installDshComputerUsePolicy({ tools: double.registry, enabled: true,
+      activeRoleOf: () => parent.id, roleOfExecution: () => roleId, roles: () => [parent] });
+    expect(double.evaluate({ name: "computer_screenshot", agent: { id: "child-session" } })).toBeUndefined();
+    expect(double.evaluate({ name: "computer_click", agent: { id: "child-session" } })).toContain(child.id);
+    roleId = null;
+    expect(double.evaluate({ name: "computer_click", agent: { id: "child-session" } })).toBeUndefined();
+    roleId = "missing-child";
+    expect(double.evaluate({ name: "computer_click", agent: { id: "child-session" } })).toContain("missing-child");
+  });
+
+  it("checks collision aliases against the canonical rule using the live mapping", () => {
+    const names = new Map<string, string>();
+    const double = guardDouble();
+    installDshComputerUsePolicy({ tools: double.registry, enabled: true,
+      activeRoleOf: () => "operator", canonicalToolNameOf: name => names.get(name),
+      roles: () => [makeRole("operator", { computer_click: false })] });
+    names.set("rolebox_computer_click", "computer_click");
+    expect(double.evaluate({ name: "rolebox_computer_click" })).toContain("computer_click");
+    expect(double.evaluate({ name: "computer_click" })).toContain("computer_click");
+    expect(double.evaluate({ name: "computer_screenshot" })).toBeUndefined();
+    expect(double.evaluate({ name: "rolebox_memory_read" })).toBeUndefined();
+  });
+
   it("denies an explicitly disabled input tool even when its role grants the family", () => {
     const double = guardDouble();
     const policy = installDshComputerUsePolicy({
@@ -446,12 +447,12 @@ describe("dsh computer-use guard — per-role enforcement, fail closed", () => {
       activeRoleOf: () => "operator",
       roles: () => [makeRole("operator", { [COMPUTER_TOOL_WILDCARD]: true, computer_drag: false })],
     });
-    expect(double.evaluate({ name: "computer_drag", agent: { id: "a" } })).toContain("an exact false overrides");
+    expect(double.evaluate({ name: "computer_drag", agent: { id: "a" } })).toContain("computer_drag: true");
     expect(double.evaluate({ name: "computer_scroll", agent: { id: "a" } })).toBeUndefined();
     policy.dispose();
   });
 
-  it("denies the base agent and an unknown role", () => {
+  it("allows the base agent and denies an unknown role", () => {
     const double = guardDouble();
     installDshComputerUsePolicy({
       tools: double.registry,
@@ -460,7 +461,7 @@ describe("dsh computer-use guard — per-role enforcement, fail closed", () => {
       roles: () => [makeRole("tester", { [COMPUTER_TOOL_WILDCARD]: true })],
     });
     const baseReason = double.evaluate({ name: "computer_move", agent: { id: "agent-1" } });
-    expect(baseReason).toContain("no active rolebox role");
+    expect(baseReason).toBeUndefined();
 
     const unknown = guardDouble();
     installDshComputerUsePolicy({
@@ -518,13 +519,13 @@ describe("pi tool interceptor — the same grant decision, per call", () => {
     computerUse: { enabled: true, activeRoleFor: () => roleId, roles: () => roles },
   });
 
-  it("denies computer_* for a role without the grant and returns the reason", async () => {
+  it("denies computer_* for a role with a disabling rule and returns the reason", async () => {
     const outcome = await interceptToolBefore(
       "computer_screenshot",
       "call-1",
       { dry_run: true },
       toolContext("sess-deny"),
-      hooks("tester", [makeRole("tester")]),
+      hooks("tester", [makeRole("tester", { "computer_*": false })]),
     );
     expect(outcome.ok).toBe(false);
     if (outcome.ok) throw new Error("unreachable");
@@ -539,7 +540,7 @@ describe("pi tool interceptor — the same grant decision, per call", () => {
       "call-2",
       {},
       toolContext("sess-correct"),
-      hooks("tester", [makeRole("tester")], state),
+      hooks("tester", [makeRole("tester", { "computer_*": false })], state),
     );
     expect(outcome.ok).toBe(false);
     expect(state.pendingCorrections.get("sess-correct")).toContain("computer_click");
@@ -556,6 +557,14 @@ describe("pi tool interceptor — the same grant decision, per call", () => {
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("unreachable");
     expect(outcome.value).toEqual({ dry_run: true });
+  });
+
+  it("allows both a base agent and a role without computer rules", async () => {
+    for (const roleId of [null, "operator"]) {
+      const outcome = await interceptToolBefore("computer_screenshot", "call-default", { dry_run: true },
+        toolContext(), hooks(roleId, [makeRole("operator")]));
+      expect(outcome.ok).toBe(true);
+    }
   });
 
   it("enforces an exact denial before a family grant on new input tools", async () => {
@@ -578,7 +587,7 @@ describe("pi tool interceptor — the same grant decision, per call", () => {
       "call-4",
       { filePath: "/tmp/x" },
       toolContext("sess-other"),
-      hooks("tester", [makeRole("tester")]),
+      hooks("tester", [makeRole("tester", { "computer_*": false })]),
     );
     expect(passthrough.ok).toBe(true);
     if (!passthrough.ok) throw new Error("unreachable");
@@ -591,7 +600,7 @@ describe("pi tool interceptor — the same grant decision, per call", () => {
       "call-5",
       { nonsense: true },
       toolContext("sess-other"),
-      hooks("tester", [makeRole("tester")]),
+      hooks("tester", [makeRole("tester", { "computer_*": false })]),
     );
     expect(rejected.ok).toBe(false);
     if (rejected.ok) throw new Error("unreachable");

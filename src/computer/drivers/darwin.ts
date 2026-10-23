@@ -53,9 +53,9 @@ import { REGION_REFUSAL, usableWindowId, wholeRegion } from "./shared.ts";
 const SCREENCAPTURE = "/usr/sbin/screencapture";
 const OSASCRIPT = "/usr/bin/osascript";
 
-/** Appended to every failure of a plan that needs a macOS privacy grant. */
+/** Remediation for a reported macOS privacy denial. */
 const INPUT_PERMISSION_HINT =
-  "macOS gives input control only to a process the user has trusted with Accessibility (System Settings > Privacy & Security > Accessibility) to synthesize input and with Automation for System Events (System Settings > Privacy & Security > Automation) to script it, and grants both to the process that launched the host, which must be restarted after granting; call computer_permissions with request: true to make macOS show its Accessibility dialog for this app instead of only reporting the status.";
+  "macOS gives input control only to a process the user has trusted with Accessibility (System Settings > Privacy & Security > Accessibility) to synthesize input and with Automation for System Events (System Settings > Privacy & Security > Automation) to script it. Approve the application launching the host and restart it if required. Automation remains a separate grant; computer_permissions cannot grant it automatically.";
 
 const SCREEN_RECORDING_HINT =
   "macOS needs Screen Recording permission for screencapture to include window contents (System Settings > Privacy & Security > Screen Recording); without it the PNG contains only the desktop wallpaper.";
@@ -630,6 +630,17 @@ function capturePermissionProbePlan(): ComputerPlan {
   ].join("\n"), SCREEN_RECORDING_HINT);
 }
 
+function capturePermissionPromptPlan(): ComputerPlan {
+  return javaScriptPlan([
+    "ObjC.import('CoreGraphics');",
+    "try { ObjC.bindFunction('CGRequestScreenCaptureAccess', ['bool', []]); } catch (_) { throw new Error('this macOS version has no Screen Recording permission request API'); }",
+    "var request;",
+    "try { request = $.CGRequestScreenCaptureAccess; } catch (_) { throw new Error('this macOS version has no Screen Recording permission request API'); }",
+    "if (typeof request !== 'function') throw new Error('this macOS version has no Screen Recording permission request API');",
+    `console.log(request() ? '${DARWIN_PROBE_GRANTED}' : '${DARWIN_PROBE_DENIED}');`,
+  ].join("\n"), SCREEN_RECORDING_HINT);
+}
+
 /**
  * The prompt: ask TCC to show its Accessibility dialog for this process and
  * report the answer it gives.
@@ -666,6 +677,9 @@ export const darwinComputerUse: SupportedComputerUse = {
   },
   capturePermissionProbe() {
     return capturePermissionProbePlan();
+  },
+  capturePermissionPrompt() {
+    return capturePermissionPromptPlan();
   },
   permissionPrompt() {
     return permissionPromptPlan();

@@ -546,6 +546,17 @@ function makeSubagent(
 // ---------------------------------------------------------------------------
 
 describe("buildSubagentBlock", () => {
+  it("explains task-specific computer grants and recovery dependencies for both delegation surfaces", () => {
+    for (const result of [buildSubagentBlock([makeSubagent()]), buildPublicAgentsBlock([makePublicAgent()])]) {
+      expect(result).toContain("When a task needs desktop observation or interaction");
+      expect(result).toContain("specific available computer_* tools");
+      expect(result).toContain("computer_screenshot for observation");
+      expect(result).toContain("computer_status and computer_permissions");
+      expect(result).toContain("cannot enable unregistered tools");
+      expect(result).toContain("or grant OS permission");
+    }
+  });
+
   it("returns empty string for empty array", () => {
     expect(buildSubagentBlock([])).toBe("");
   });

@@ -1175,8 +1175,6 @@ describe("dsh plugin apply()", () => {
       };
       disposer = await applyTracked(fixture.ctx, {
         roleboxDir: tmpDir,
-        // The GATE stays OFF, spelled out: `computerUse` is a defaulted boolean
-        // on the schema, so `DshPluginConfig` declares it required.
         computerUse: false,
       } as DshPluginConfig);
       const declare = fixture.tools.registeredTools.find(tool => tool.name === "graph_declare")!;
@@ -1207,7 +1205,7 @@ describe("dsh plugin apply()", () => {
       expect(prompt).toContain("- `schema` — ");
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       expect(workerSections).toEqual([""]);
-      expect(workerContexts).toEqual(["", ""]);
+      expect(workerContexts).toEqual(["", "", ""]);
       expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
     } finally {
       disposer?.();
@@ -2341,7 +2339,7 @@ describe("dsh plugin apply()", () => {
       expect(sections[0].name).toBe("rolebox:role");
       expect(sections[0].order).toBe(50);
       expect(typeof sections[0].text).toBe("function");
-      expect(contexts).toHaveLength(2);
+      expect(contexts).toHaveLength(3);
       expect(contexts[1].name).toBe("rolebox:memory");
       expect(contexts[0].name).toBe("rolebox:context");
       expect(contexts[0].order).toBe(0);
@@ -2381,6 +2379,10 @@ describe("dsh plugin apply()", () => {
       expect(memory).toContain("explicitly requests session consolidation");
       expect(memory).toContain("session_list");
       expect(memory).toContain("session_read");
+      const computer = contexts[2].text({ agent: { id: sessionId } });
+      expect(contexts[2].name).toBe("rolebox:computer");
+      expect(computer).toContain("computer_permissions");
+      expect(computer).toContain("computer_screenshot");
 
       disposer();
     } finally {
@@ -2566,11 +2568,8 @@ describe("dsh plugin apply()", () => {
 
 // ── Computer-use gate: registration ────────────────────────────────────────
 //
-// The family is OFF unless a surface explicitly enabled it, and a wildcard
-// `enabledNamespaces` must never be the thing that turns it on. These boots pin
-// both halves of that: with the gate off all family members are absent even under
-// `["*"]`, with the gate on (host option OR config file) they register, and a
-// host without the `ctx.tools.guard` seam gets nothing at all (fail closed).
+// Tools are available by default; explicit opt-outs and unsupported guard seams
+// still prevent registration, including under wildcard namespace selection.
 
 describe("dsh computer-use gate — registration", () => {
   /**
@@ -2593,7 +2592,7 @@ describe("dsh computer-use gate — registration", () => {
     }
   }
 
-  it('registers no computer_* tool with the gate off, even under enabledNamespaces ["*"]', async () => {
+  it('registers computer_* tools by default under enabledNamespaces ["*"]', async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
@@ -2605,10 +2604,8 @@ describe("dsh computer-use gate — registration", () => {
     );
     const keys = tools.registeredTools.map((t) => t.name);
 
-    // The wildcard still registers the rest of the surface — it simply cannot
-    // enable screen control, which only the resolved gate can.
     expect(keys).toContain("hashline_read");
-    expect(keys.filter((key) => key.startsWith("computer_"))).toEqual([]);
+    expect(keys).toEqual(expect.arrayContaining([...COMPUTER_TOOL_NAMES]));
 
     disposer();
   });
@@ -2633,20 +2630,21 @@ describe("dsh computer-use gate — registration", () => {
     disposer();
   });
 
-  it("registers the family when the global config.yaml enables the gate", async () => {
+  it("respects an explicit global config opt-out even when the host enables computer use", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
     const disposer = await withIsolatedConfigDir(async (configDir) => {
-      writeFileSync(join(configDir, "config.yaml"), "computerUse: true\nregistries: []\n", "utf-8");
+      writeFileSync(join(configDir, "config.yaml"), "computerUse: false\nregistries: []\n", "utf-8");
       return applyTracked(ctx, {
         roleboxDir: tmpDir,
         enabledNamespaces: ["*"],
+        computerUse: true,
       } as DshPluginConfig);
     });
     const keys = tools.registeredTools.map((t) => t.name);
 
-    expect(keys).toEqual(expect.arrayContaining([...COMPUTER_TOOL_NAMES]));
+    expect(keys.filter(key => key.startsWith("computer_"))).toEqual([]);
 
     disposer();
   });

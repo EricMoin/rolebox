@@ -57,9 +57,9 @@ Codex drives rolebox purely over MCP instead of the PluginCore service stack, so
 
 ## Computer use
 
-Rolebox's `computer_*` family drives the real desktop. It is off by default
-(see [compatibility.md](compatibility.md#computer-use)), and these are the
-limits it does not hide.
+Rolebox's `computer_*` family drives the real desktop and is available by default
+on DSH, Pi and Codex (see [compatibility.md](compatibility.md#computer-use)).
+Operating-system permissions and these platform limits still apply.
 
 - **No rollback of delivered input.** A click, a keystroke or a typed string
   that reached an application is already part of the desktop's state; there is
@@ -74,9 +74,9 @@ limits it does not hide.
   `computer_permissions` reads this process's own TCC Accessibility trust
   (`AXIsProcessTrusted` through JXA), never the global `UI elements enabled`
   preference, which is a System Events UI-scripting setting and can answer `true`
-  while the OS is already blocking input; `request: true` asks macOS to show its
-  Accessibility dialog, and the host must be restarted before the grant takes
-  effect. A host that is already granted cannot exercise the denial path in a
+  while the OS is already blocking input. `request: true` requests missing
+  Accessibility and Screen Recording permissions, then probes again; the user
+  must approve OS requests and may need to restart the host. A host that is already granted cannot exercise the denial path in a
   test — that needs the grant revoked in System Settings and the host restarted
   — so the fail-closed reading of an empty or unrecognized probe answer is
   covered by unit tests over the verdict, not by a real denial. The window list
@@ -116,7 +116,7 @@ limits it does not hide.
 - **Registration is host-side.** dsh, Pi and Codex register the 12 tools
   themselves (`src/entries/dsh.ts:2237-2246`, `src/entries/pi.ts:1244`,
   `src/entries/codex.ts:138`); the two opencode entries enforce the gate and the
-  per-role grant as agent-config tool rules
+  explicit role restrictions as agent-config tool rules
   (`src/prompt/agent-config.ts:119-144`). A host that registers no `computer_*`
   tool shows none to any role, whatever that role's `tools:` map says.
 - **Windows needs PowerShell and an interactive session**, and an unlisted

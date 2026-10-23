@@ -18,6 +18,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, win32 as windowsPath } from "node:path";
 import { resolveSpawnCommand, type SpawnCommand } from "../platform/system/spawn-command.ts";
 import type { ComputerPlan } from "../platform/system/types.ts";
+import { deniedComputerPermission, type ComputerPermission } from "./permissions.ts";
 
 /** How long one computer-use command may run before it is killed (15s). */
 export const DEFAULT_COMPUTER_TIMEOUT_MS = 15_000;
@@ -31,7 +32,7 @@ const MAX_DETAIL_CHARS = 400;
 /** What one executed plan produced. */
 export type ComputerRunResult =
   | { readonly ok: true; readonly output: string }
-  | { readonly ok: false; readonly error: string };
+  | { readonly ok: false; readonly error: string; readonly permission?: ComputerPermission };
 
 /** One plan run's bounds. */
 export interface ComputerRunOptions {
@@ -113,7 +114,7 @@ export async function runComputerPlan(
   if (!result.ok && started && plan.cleanupPlan !== undefined) {
     const { cleanupPlan: _nested, ...cleanupPlan } = plan.cleanupPlan;
     const cleanup = await runComputerPlan(cleanupPlan, { env: options.env, cwd: options.cwd, timeoutMs: 2000 });
-    if (!cleanup.ok) return { ok: false, error: `${result.error} Mouse release could not be confirmed: ${cleanup.error}` };
+    if (!cleanup.ok) return { ...result, error: `${result.error} Mouse release could not be confirmed: ${cleanup.error}` };
   }
   return result;
 }
@@ -126,16 +127,12 @@ async function runComputerCommand(
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? DEFAULT_COMPUTER_TIMEOUT_MS;
   const hint = options.installHint !== undefined && options.installHint.length > 0 ? ` ${options.installHint}` : "";
-  const withPermissionHint = (message: string): string =>
-    plan.permissionHint === undefined ? message : `${message} ${plan.permissionHint}`;
 
   const missing = plan.requires.find(helper => !helperAvailable(helper, env));
   if (missing !== undefined) {
     return {
       ok: false,
-      error: withPermissionHint(
-        `Error: the ${plan.driver} driver needs "${missing}", which is not available.${hint}`,
-      ),
+      error: `Error: the ${plan.driver} driver needs "${missing}", which is not available.${hint}`,
     };
   }
   if (options.signal?.aborted === true) {
@@ -202,7 +199,7 @@ async function runComputerCommand(
       if (settled) return;
       settled = true;
       cleanup();
-      resolve({ ok: false, error: withPermissionHint(`Error: could not start "${executable}": ${error.message}`) });
+      resolve({ ok: false, error: `Error: could not start "${executable}": ${error.message}` });
     });
     child.on("close", (code, signal) => {
       if (settled) return;
@@ -212,14 +209,12 @@ async function runComputerCommand(
       if (stopped === "timeout") {
         resolve({
           ok: false,
-          error: withPermissionHint(
-            `Error: the ${plan.driver} command did not finish within ${timeoutMs}ms and was stopped.`,
-          ),
+          error: `Error: the ${plan.driver} command did not finish within ${timeoutMs}ms and was stopped.`,
         });
         return;
       }
       if (stopped === "abort") {
-        resolve({ ok: false, error: withPermissionHint(`Error: the ${plan.driver} command was cancelled.`) });
+        resolve({ ok: false, error: `Error: the ${plan.driver} command was cancelled.` });
         return;
       }
       if (stopped === "output") {
@@ -231,12 +226,13 @@ async function runComputerCommand(
       }
       if (code !== 0) {
         const detail = firstLine(output);
+        const permission = signal === null ? deniedComputerPermission(output) : undefined;
         const outcome = signal === null ? `exited with status ${code}` : `was terminated by signal ${signal}`;
         resolve({
           ok: false,
-          error: withPermissionHint(
-            `Error: the ${plan.driver} command ${outcome}${detail.length === 0 ? "." : `: ${detail}`}`,
-          ),
+          error: `Error: the ${plan.driver} command ${outcome}${detail.length === 0 ? "." : `: ${detail}`}` +
+            (permission !== undefined && plan.permissionHint !== undefined ? ` ${plan.permissionHint}` : ""),
+          ...(permission === undefined ? {} : { permission }),
         });
         return;
       }

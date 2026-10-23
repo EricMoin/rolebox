@@ -5,59 +5,63 @@ native desktop: screenshots, windows, displays, focus, mouse input, text, keys
 and diagnostics. Drivers cover macOS, Windows and Linux X11. Wayland is
 explicitly unsupported.
 
-The family is off by default. dsh, Pi and Codex register it after the global gate
-is enabled; dsh and Pi additionally require an active role with an explicit tool
-grant. Neither OpenCode entry registers the family. See
+DSH, Pi and Codex expose the family by default. No global configuration or
+role YAML opt-in is required. Neither OpenCode entry registers the family. See
 [compatibility](compatibility.md#computer-use) for host support.
 
-## Enable the tools
+## Availability and permissions
 
-Set the boolean `computerUse: true` in the global rolebox config
-(`~/.config/rolebox/config.yaml`), or add it to the project's
-`.rolebox/config.json`:
+Tool availability and operating-system permission are separate. The agent can
+discover the tools immediately; a permission denial explains the next step,
+including `computer_permissions({"request": true})` when the OS supports a
+request. The user approves the OS dialog. A request is not proof of approval;
+check the resulting input and screen-capture statuses before retrying.
 
-```json
-{ "computerUse": true }
-```
+DSH and Pi inject a **Computer use workflow** for the tools actually available
+to the current role or worker. Codex supplies the same guidance through MCP
+initialization instructions. It covers when desktop interaction is useful,
+how to request permission, and how to verify an action against a fresh image.
 
-The dsh plugin option and Codex MCP entry option also accept `computerUse: true`.
-Any one of these sources enables the family. An absent value, a non-boolean
-value, or a host option set to `false` does not enable it; a host option set to
-`false` does not override an enabled config file. Restart the host after changing
-the boot-time gate.
+To disable the family, explicitly set `computerUse: false` in the host option,
+the global rolebox config (`~/.config/rolebox/config.yaml`), or the project's
+`.rolebox/config.json`. Any explicit false wins over true in another source.
+An invalid configured value or unreadable existing config also disables it;
+an absent file or absent key leaves the tools enabled. Restart the host after
+changing this boot-time setting. DSH's `enabledNamespaces` can further filter
+which tools are registered.
 
-On dsh and Pi, grant the required tools in the active role's `role.yaml`:
-
-```yaml
-tools:
-  computer_status: true
-  computer_permissions: true
-  computer_windows: true
-  computer_displays: true
-  computer_screenshot: true
-  computer_focus: true
-  computer_click: true
-```
-
-The family wildcard is available when a role needs the full surface. An exact
-`false` overrides it:
+Roles may optionally restrict tools:
 
 ```yaml
 tools:
-  computer_*: true
   computer_drag: false
 ```
 
-An absent map, an inactive or unknown role, and the generic `"*": true` wildcard
-do not grant computer use. An exact `true` can grant a tool even when the family
-wildcard is `false`. dsh requires its monotonic `ctx.tools.guard` seam; when the
-host lacks that seam, rolebox refuses to register the family.
+Exact entries take precedence over the longest matching wildcard prefix, then
+the default is allow. For example, `computer_*: false` with
+`computer_screenshot: true` exposes screenshots for that role while denying
+other computer tools. The base agent needs no role selection; an unresolved
+named role is refused until its configuration can be resolved. DSH requires
+its `ctx.tools.guard` seam to enforce explicit role restrictions.
 
-### Codex has no permission prompt
+Graph nodes still declare the tools they need in their node `tools` array.
+For desktop interaction, include diagnostic and permission tools as well as
+observation and the required actions, for example:
 
-The Codex MCP transport has no active rolebox role and no per-call permission
-callback. Its global gate is the complete rolebox policy: enabling it makes all
-12 tools available. OS permissions still apply.
+```json
+{
+  "tools": ["computer_status", "computer_permissions", "computer_windows",
+    "computer_displays", "computer_screenshot", "computer_focus", "computer_click"]
+}
+```
+
+Node grants remain subject to host registration and role restrictions. The
+workflow follows native, discover or code presentation. Explicit policy
+restrictions are not OS permission failures: `computer_permissions` does not
+change configuration or grant additional tools to a node.
+
+Codex MCP has no rolebox per-call approval callback. Its client permissions
+and the operating system's own permission checks still apply.
 
 ## Workflow
 
@@ -65,7 +69,7 @@ callback. Its global gate is the complete rolebox policy: enabling it makes all
    the input and screen-capture permission probes. It performs no screenshot, input or permission
    prompt. A planned operation is not proof that the OS will let it run.
 2. Check `computer_permissions`. On macOS, `request: true` asks for the OS
-   Accessibility prompt. Grant the host application the requested permission,
+   missing Accessibility and Screen Recording permissions. Grant the host application the requested permission,
    restart it when required, and probe again. Screen Recording is separate;
    inspect the separate screen-capture verdict, then inspect the image from `computer_screenshot`.
 3. Discover the target with `computer_windows` and `computer_displays`. Focus a
@@ -91,7 +95,7 @@ terminating the host cannot guarantee release.
 | Tool | Additional arguments | Behavior |
 | --- | --- | --- |
 | `computer_status` | None | Diagnose operations, helpers and input permission without capturing or sending input |
-| `computer_permissions` | `request?` | Probe input permission; optionally request the OS grant |
+| `computer_permissions` | `request?` | Probe input and capture permissions; optionally request missing OS grants |
 | `computer_windows` | `app?` | List visible windows and the IDs used by capture/focus |
 | `computer_displays` | None | Return JSON display IDs, bounds, scale and primary flag |
 | `computer_screenshot` | `window_id?`, `region?`, `display?`, `path?` | Capture a PNG and return an image attachment |

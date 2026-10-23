@@ -616,6 +616,7 @@ export default async function(pi: any): Promise<void> {
           systemPrompt: sub.prompt,
           graphWorkerSystemPrompt: buildGraphWorkerRolePrompt(sub),
           memory: sub.config.memory,
+          toolPolicy: sub.config.tools,
         });
         if (sub.subagents.length > 0) {
           registerPiAgentConfigs(sub.subagents, model);
@@ -1225,16 +1226,7 @@ export default async function(pi: any): Promise<void> {
     lspClientManager = new LspClientManager(process.cwd());
     lspDocManager = new LspDocumentManager();
 
-    // ── Computer use (global gate, default OFF) ────────────────────────────
-    //
-    // The family is registered ONLY when the resolved gate is on
-    // (`computerUse: true` in ~/.config/rolebox/config.yaml or
-    // {cwd}/.rolebox/config.json). It rides the SAME extraTools channel the
-    // platform extras use, so the stack's own buildCanonicalTools call stays
-    // untouched; a role must still GRANT each tool in role.yaml tools:
-    // (`computer_screenshot: true`, or the family wildcard `computer_*: true`),
-    // and the interceptor's computer-use policy (wired below) denies every call
-    // an active role does not grant.
+    // Computer tools are available unless explicitly disabled in configuration.
     const computerUseGate = resolveComputerUseGate({ workspaceDir: process.cwd() });
     log.info("Computer use gate resolved", {
       enabled: computerUseGate.enabled,
@@ -1415,6 +1407,7 @@ export default async function(pi: any): Promise<void> {
     }
 
     await serviceStack.init();
+    hookPipeline.deps.availableTools = () => Object.keys(serviceStack.getCanonicalTools());
     workerToolDefinitions = Object.fromEntries(Object.entries(serviceStack.getCanonicalTools()).map(([name, definition]) => [name, {
       ...definition,
       execute: async (args, context) => {

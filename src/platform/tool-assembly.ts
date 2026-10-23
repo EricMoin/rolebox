@@ -79,11 +79,8 @@ export interface BuildToolsOptions {
    * Whether this host wants rolebox's own computer-use family
    * (`computer_*` screenshot, discovery, input and permission tools).
    *
-   * DEFAULT OFF: absent (or false) registers nothing, so a host that never
-   * asked for screen control assembles exactly the tool set it assembled
-   * before this family existed. A host that wants it opts in explicitly,
-   * because driving the user's screen is a capability the user grants, not one
-   * a tool surface assumes.
+   * Host entries pass their resolved availability policy. Omitted or false
+   * keeps the family out of hosts that do not implement it, including OpenCode.
    */
   computerUse?: boolean;
 }
@@ -146,7 +143,7 @@ export function buildCanonicalTools(
 
   Object.assign(tools, buildRoleSnapshotTools(opts.resolvedRoles));
 
-  // 1b. The computer-use family — registered only when the host opted in. The
+  // 1b. The computer-use family — registered when the host enables it. The
   // computer_* keys share no namespace with any other tool, so this merge
   // cannot override one; extraTools/loopToolsOverride still win over it.
   if (opts.computerUse === true) {

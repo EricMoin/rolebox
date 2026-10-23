@@ -1,57 +1,20 @@
+import { resolveDshSessionContext, type DshContextAgent as DshMemoryAgent, type DshContextOptions as DshMemoryOptions } from "./session-context.ts";
 import { isAbsolute } from "node:path";
 import { buildMemoryContext } from "../../../memory/context.ts";
 import { MemoryStore } from "../../../memory/store.ts";
 import { MEMORY_TOOL_NAMES, memoryToolEnabled } from "../../../memory/tool-policy.ts";
-import { findGraphWorkerRole } from "../../../prompt/graph-worker.ts";
 import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
-import type { ResolvedRole } from "../../../types.ts";
 import type { DshWorkerStartupTools } from "./graph-worker.ts";
 import { createSubLogger } from "../../../logger.ts";
 
 const log = createSubLogger("dsh-memory");
 export const DSH_MEMORY_WORKFLOW_TOOLS = [...MEMORY_TOOL_NAMES, "session_list", "session_read"] as const;
 
-export interface DshMemoryAgent {
-  id?: string;
-  session?: {
-    id?: string;
-    header?: { cwd?: string };
-    events?: readonly { type: string; data?: unknown }[];
-    inheritedEventCount?: number;
-  };
-}
-
-export interface DshMemoryOptions {
-  roles(): readonly ResolvedRole[];
-  activeRole(sessionId: string): string | null | undefined;
-  session(sessionId: string): DshMemoryAgent["session"];
-  workspace?(session: NonNullable<DshMemoryAgent["session"]>): string | undefined;
-  tools(agent?: DshMemoryAgent): readonly string[];
-  names?(): ReadonlyMap<string, string>;
-  worker?(agent: DshMemoryAgent): DshWorkerStartupTools | undefined;
-}
+export type { DshContextAgent as DshMemoryAgent, DshContextOptions as DshMemoryOptions } from "./session-context.ts";
 
 export function createDshMemoryContext(options: DshMemoryOptions) {
-  function resolve(agent: DshMemoryAgent, roleOverride?: string, workerOverride?: DshWorkerStartupTools) {
-    const sessionId = agent.session?.id ?? agent.id ?? "";
-    const session = agent.session ?? options.session(sessionId);
-    const worker = workerOverride ?? options.worker?.(agent);
-    const ownEvents = session?.events?.slice(session.inheritedEventCount ?? 0);
-    const descriptor = ownEvents?.find(event => event.type === "subagent/descriptor")?.data;
-    const provider = descriptor && typeof descriptor === "object" && "provider" in descriptor && typeof descriptor.provider === "string"
-      ? descriptor.provider : undefined;
-    const id = roleOverride ?? (worker ? worker.agent ?? provider : options.activeRole(sessionId) ?? provider);
-    const role = id ? findGraphWorkerRole(options.roles(), id) : undefined;
-    let directory = session?.id ? options.workspace?.(session) : undefined;
-    if (directory === undefined) {
-      const change = session?.events?.slice().reverse().find(event => event.type === "working-directory/change");
-      const data = change?.data;
-      directory = change
-        ? data && typeof data === "object" && "cwd" in data && typeof data.cwd === "string" ? data.cwd : undefined
-        : session?.header?.cwd;
-    }
-    return { role, roleId: role?.id ?? "", directory, worker };
-  }
+  const resolve = (agent: DshMemoryAgent, roleOverride?: string, workerOverride?: DshWorkerStartupTools) =>
+    resolveDshSessionContext(options, agent, roleOverride, workerOverride);
 
   return {
     forTool(agent: DshMemoryAgent, name: string) {

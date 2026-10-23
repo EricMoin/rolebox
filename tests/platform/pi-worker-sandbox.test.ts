@@ -184,6 +184,43 @@ describe("Pi graph worker boundary", () => {
           }
         }
       }
+
+      const computerCases = [
+        { name: "ungranted", grants: [], proxies: ["computer_screenshot"] },
+        { name: "unregistered", grants: ["computer_screenshot"], proxies: [] },
+        { name: "denied", grants: ["computer_screenshot"], proxies: ["computer_screenshot"], policy: { computer_screenshot: false } },
+        { name: "observe", grants: ["computer_screenshot"], proxies: ["computer_screenshot", "computer_click"] },
+        { name: "discover", grants: ["computer_screenshot", "computer_permissions"], proxies: ["computer_screenshot", "computer_permissions"], presentation: { mode: "discover" as const } },
+      ];
+      for (const item of computerCases) {
+        adapter.registerAgentConfig("computer-worker", {
+          model: "example/model", tools: [], systemPrompt: "Computer worker context",
+          toolPolicy: item.policy ?? { "computer_*": true },
+        });
+        adapter.setGraphWorkerToolConfig(() => ({
+          baseline: ["bash", "graph_submit_outcome"], grants: item.grants, presentation: item.presentation,
+          proxies: item.proxies.map(name => ({ name, description: name, inputSchema: {} })),
+        }));
+        const worker = await adapter.create({ directory: root, agent: "computer-worker" });
+        if (!worker) throw new Error("the adapter did not create a computer worker");
+        process.env.PI_SPAWN_RECORD = join(root, `computer-${item.name}.txt`);
+        await adapter.runGraphWorker(() => adapter.prompt(worker.id, {
+          agent: "computer-worker", parts: [{ type: "text", text: "Desktop task" }],
+        }));
+        await spawnRecord(process.env.PI_SPAWN_RECORD);
+        const workerPrompt = readFileSync(process.env.PI_SPAWN_RECORD + ".prompt", "utf8");
+        if (item.name === "observe" || item.name === "discover") {
+          expect(workerPrompt).toContain("## Computer use workflow");
+          expect(workerPrompt).not.toContain("computer_click");
+          if (item.name === "discover") {
+            expect(workerPrompt).toContain("computer_permissions(request=true)");
+            expect(workerPrompt).toContain("native tool only after describe");
+            expect(workerPrompt).not.toContain('action="call"');
+          }
+        } else {
+          expect(workerPrompt).not.toContain("## Computer use workflow");
+        }
+      }
     } finally {
       process.chdir(previousCwd);
       if (previousBinary === undefined) delete process.env.PI_BIN_PATH; else process.env.PI_BIN_PATH = previousBinary;

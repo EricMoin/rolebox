@@ -6,6 +6,8 @@ import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
 import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock } from "../prompt/builder.ts";
 import { buildMemoryContext } from "../memory/context.ts";
+import { buildComputerContext } from "../computer/context.ts";
+import { COMPUTER_TOOL_NAMES, decideComputerToolGrant } from "../loader/computer-grants.ts";
 import { MEMORY_TOOL_NAMES, memoryToolEnabled } from "../memory/tool-policy.ts";
 import { buildReminder } from "../prompt/reminder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
@@ -85,6 +87,13 @@ export async function handleSystemTransform(
       }
     }
   }
+
+  const available = new Set(deps.availableTools?.(sid) ?? []);
+  const computerRoles = [...deps.roleMap.values()];
+  const computerTools = COMPUTER_TOOL_NAMES.filter(name => available.has(name) &&
+    decideComputerToolGrant({ toolName: name, roleId: agentId, roles: computerRoles }).granted);
+  const computerBlock = buildComputerContext({ tools: computerTools });
+  if (computerBlock) output.system.push(computerBlock);
 
   if (agentId) {
     const role = findGraphWorkerRole([...deps.roleMap.values()], agentId);

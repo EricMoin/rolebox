@@ -1,40 +1,8 @@
 /**
- * dsh computer-use policy — the boot-time monotonic guard that makes a
- * `computer_*` grant a per-ROLE decision on the dsh host.
- *
- * The family is registered globally (a dsh tool registration is not per
- * session), so registration alone cannot express "this role may not drive the
- * user's screen". The enforcement point dsh provides is
- * `ctx.tools.guard(ToolGuard)`: one monotonic check evaluated after the
- * extensible `tools/pre-execute` waterfall and before the tool body, whose
- * returned string DENIES the call and which no listener can turn back into
- * permission
- * (`@deepseek-ai/dsh-tools/lib/types/index.d.ts:482-490`, `:611-620`).
- * {@link installDshComputerUsePolicy} installs exactly one such guard for the
- * whole boot.
- *
- * The guard is the harness-wide pattern rolebox already uses for graph workers
- * (`installDshGraphWorkerBoundary`, src/platform/adapters/dsh/graph-worker.ts):
- * resolve the session from the execution's agent
- * (`agent.session?.id ?? agent.id`), then read rolebox's OWN per-session
- * active-role state (`ActiveRoleRef.get`, the same holder the switcher writes)
- * and the role's `tools:` map ({@link decideComputerToolGrant}). A denial names
- * the role and the missing grant, so the model and the operator both learn what
- * to add.
- *
- * ── FAIL CLOSED ────────────────────────────────────────────────────────────
- * A host without `ctx.tools.guard` cannot enforce the per-role grant at all.
- * Rather than registering an ungoverned screen-control surface, this module
- * answers `allowRegistration: false` and logs ONE explicit reason; the caller
- * must then register nothing. The gate being off is the same answer for the
- * same reason: no guard, no registration.
- *
- * This module is deliberately separate from the file that registers tools
- * (src/entries/dsh.ts) and from the tool factory it registers through
- * (src/platform/adapters/dsh/tool-factory.ts), so the registration surface and
- * the enforcement surface cannot be edited into disagreement by accident.
- *
- * @module
+ * DSH computer tools are registered globally. A monotonic registry guard applies
+ * the acting role's explicit restrictions before each execution, including
+ * collision-renamed tools. Hosts without a guard cannot enforce those settings
+ * and therefore do not register the family.
  */
 
 import type { ResolvedRole } from "../../../types.ts";
@@ -80,7 +48,7 @@ export interface DshToolGuardRegistry {
 export interface DshComputerUsePolicy {
   /** The resolved global gate this policy was installed with. */
   readonly gateEnabled: boolean;
-  /** A monotonic guard is installed and will deny ungranted computer_* calls. */
+  /** A monotonic guard is installed and will enforce role restrictions. */
   readonly guardInstalled: boolean;
   /**
    * Whether the caller may register the `computer_*` family. TRUE only when the
@@ -130,6 +98,10 @@ export function installDshComputerUsePolicy(options: {
   tools: DshToolGuardRegistry;
   enabled: boolean;
   activeRoleOf(sessionId: string): string | null;
+  /** When supplied, this resolver owns identity, including a null base-agent result. */
+  roleOfExecution?(execution: DshToolGuardExecution): string | null | undefined;
+  /** Resolve names registered under a collision alias back to their canonical name. */
+  canonicalToolNameOf?(name: string): string | undefined;
   roles(): readonly ResolvedRole[];
 }): DshComputerUsePolicy {
   if (!options.enabled) {
@@ -149,7 +121,7 @@ export function installDshComputerUsePolicy(options: {
     // per-role grant, so it does not get an ungoverned screen-control surface.
     const reason =
       "this dsh host exposes no ctx.tools.guard, so rolebox cannot deny computer_* calls for a role " +
-      "that does not grant them; the computer_* family is NOT registered (fail closed).";
+      "that disables them; the computer_* family is NOT registered (fail closed).";
     log.warn("computer use refused on this host", { reason });
     return {
       gateEnabled: true,
@@ -161,10 +133,12 @@ export function installDshComputerUsePolicy(options: {
   }
 
   const disposer = options.tools.guard((execution) => {
-    if (!isComputerToolName(execution.name)) return undefined;
+    const toolName = options.canonicalToolNameOf?.(execution.name) ?? execution.name;
+    if (!isComputerToolName(toolName)) return undefined;
     const decision = decideComputerToolGrant({
-      toolName: execution.name,
-      roleId: options.activeRoleOf(dshGuardSessionId(execution)),
+      toolName,
+      roleId: options.roleOfExecution ? options.roleOfExecution(execution)
+        : options.activeRoleOf(dshGuardSessionId(execution)),
       roles: options.roles(),
     });
     return decision.granted ? undefined : decision.reason;
@@ -186,7 +160,7 @@ export function installDshComputerUsePolicy(options: {
 
   const reason =
     "computer use is enabled and the per-role guard is installed on ctx.tools.guard: a computer_* call " +
-    "is denied unless the session's active role grants it in role.yaml tools:.";
+    "is allowed unless the acting role disables it in role.yaml tools:.";
   log.info("computer use guard installed");
   return {
     gateEnabled: true,

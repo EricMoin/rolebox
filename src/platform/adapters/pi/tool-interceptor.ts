@@ -22,15 +22,9 @@
  * self-correct on the next turn without polluting the session with a
  * thrown error.
  *
- * ── Computer use (per-role grant) ─────────────────────────────────────────
- * When the host wires {@link ToolInterceptorComputerUse}, the interceptor also
- * enforces the computer-use grant for the acting role: a `computer_*` call is
- * denied unless the session's active role declares it in role.yaml `tools:`
- * (`computer_screenshot: true`, or the family wildcard `computer_*: true`).
- * The denial is RETURNED as an error string exactly like a validation failure
- * (and injected into `pendingCorrections` when hook state is wired), so the
- * shared pipeline's throwing contract surfaces to Pi the same way it already
- * does — the model is told which role and which grant are missing. The check
+ * Computer-use calls follow the acting role's optional tool restrictions.
+ * Missing role rules allow the tools; explicit denials return an error and
+ * enter pendingCorrections when hook state is wired. The policy check
  * runs BEFORE `handleToolBefore` so a computer tool that is not (or no longer)
  * in the schema registry cannot slip past it. Nothing changes for every other
  * tool: without the seam, or for a non-computer name, the pipeline below is
@@ -117,8 +111,8 @@ export function denyComputerTool(
  * state is wired, injects it into the session's pendingCorrections so the
  * next system transform carries the correction to the model.
  *
- * A computer_* call whose acting role does not grant it fails the same way,
- * with a reason naming the role and the missing grant.
+ * A computer_* call explicitly denied by the acting role fails the same way,
+ * with a reason naming the role and its restriction.
  *
  * Never throws into Pi.
  */

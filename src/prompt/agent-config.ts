@@ -117,29 +117,19 @@ export function transformPermission(
 }
 
 /**
- * The agent-level `tools:` map a host receives.
- *
- * When the global gate is OFF the role's own map is returned UNCHANGED — the
- * family is not registered at all in that case, so there is nothing to deny and
- * the emitted config is byte-for-byte the pre-gate one. When the gate is ON,
- * every registered `computer_*` name the role does not grant is emitted as
- * `false`, the same `{name: boolean}` shape role.yaml already uses and the
- * opencode v2 transform already maps to a deny rule
- * (src/platform/adapters/opencode2/agents.ts `mapToolRuleset`). A role that
- * grants the family — one exact name or the `computer_*` wildcard — keeps its
- * own entries; a role that grants nothing ends up with all family members
- * denied, so a non-opting role never sees a callable computer tool on either
- * opencode version.
+ * Materialize explicit computer-tool denials for hosts that consume exact tool
+ * names. With the global gate off no family is registered, so the map is left
+ * untouched. Roles with no restrictions retain their original map as well.
  */
 export function withComputerUseDenials(
   tools: Record<string, boolean> | undefined,
   gateEnabled: boolean,
 ): Record<string, boolean> | undefined {
   if (!gateEnabled) return tools;
+  const denied = COMPUTER_TOOL_NAMES.filter(name => !roleGrantsComputerTool(tools, name));
+  if (denied.length === 0) return tools;
   const next: Record<string, boolean> = { ...(tools ?? {}) };
-  for (const name of COMPUTER_TOOL_NAMES) {
-    if (!roleGrantsComputerTool(tools, name)) next[name] = false;
-  }
+  for (const name of denied) next[name] = false;
   return next;
 }
 

@@ -371,17 +371,17 @@ describe("the permission verdict", () => {
     expect(refusal.output.startsWith("Error: osascript reports that input is not permitted; macOS gives input")).toBe(
       true,
     );
-    expect(refusal.output).toBe(`Error: ${plan.driver} reports that input is not permitted; ${plan.permissionHint}`);
+    expect(refusal.output).toContain(plan.permissionHint!);
+    expect(refusal.output).toContain("computer_permissions({request:true})");
     expect(refusal.title).toBe("permissions");
-    expect(refusal.metadata).toEqual({ platform: "darwin", driver: "osascript", action: "permissions", granted: false });
+    expect(refusal.metadata).toMatchObject({ platform: "darwin", driver: "osascript", action: "permissions", granted: false, error_code: "permission_denied", next_action: { tool: "computer_permissions", args: { request: true } } });
   });
 
   it("falls back to the generic remediation sentence when a plan carries no hint", () => {
     setPlatformForTest("darwin");
     const refusal = structuredResult(permissionRefusal("osascript", undefined));
-    expect(refusal.output).toBe(
-      "Error: osascript reports that input is not permitted; grant this process the permission its system requires and try again.",
-    );
+    expect(refusal.output).toContain("grant this process the permission its system requires");
+    expect(refusal.output).toContain("computer_permissions({request:true})");
   });
 
   it("quotes a non-empty probe answer and names the request route when it asked", () => {
@@ -393,12 +393,13 @@ describe("the permission verdict", () => {
       true,
     );
     expect(requested.output).toContain("The probe answered: not granted.");
-    expect(requested.output).toContain("has been asked to show its Accessibility dialog");
-    expect(requested.output).toContain("once per application");
-    expect(requested.output).toContain("restart the host");
-    expect(requested.output).toContain("computer_permissions again");
+    expect(requested.output).toContain("Wait for the user");
+    expect(requested.output).toContain("may not show a repeated prompt");
+    expect(requested.output).toContain("Restart the host if required");
+    expect(requested.output).toContain("computer_permissions({})");
+    expect(requested.output).toContain("do not loop permission requests");
     expect(requested.output).not.toContain("\n");
-    expect(requested.metadata).toEqual({
+    expect(requested.metadata).toMatchObject({
       platform: "darwin",
       driver: "osascript",
       action: "permissions",
@@ -408,10 +409,11 @@ describe("the permission verdict", () => {
     // A probe that printed nothing adds no answer sentence, and a call that did
     // not ask the OS for the grant claims no dialog.
     const silent = structuredResult(permissionRefusal(plan.driver, plan.permissionHint, { answer: "   \n" }));
-    expect(silent.output).toBe(`Error: ${plan.driver} reports that input is not permitted; ${plan.permissionHint}`);
+    expect(silent.output).toContain(plan.permissionHint!);
+    expect(silent.output).toContain("computer_permissions({request:true})");
     expect(silent.output).not.toContain("The probe answered:");
     expect(silent.output).not.toContain("has been asked to show its Accessibility dialog");
-    expect(silent.metadata).toEqual({
+    expect(silent.metadata).toMatchObject({
       platform: "darwin",
       driver: "osascript",
       action: "permissions",

@@ -15,8 +15,7 @@
  * real mouse or keyboard input.
  *
  * Registration is the caller's decision — `buildCanonicalTools` adds this set
- * only when `computerUse: true` is passed, so the default tool surface is
- * unchanged.
+ * when the resolved `computerUse` gate permits registration.
  */
 
 import { dirname, resolve } from "node:path";
@@ -34,6 +33,7 @@ import type {
 import { captureFilePath, captureResult, ensureCaptureDirectory } from "./capture.ts";
 import { DEFAULT_COMPUTER_TIMEOUT_MS, helperAvailable, runComputerPlan, spawnVectorFor } from "./exec.ts";
 import { computerOperationQueue } from "./queue.ts";
+import { permissionRecovery, PERMISSION_REQUEST_GUIDANCE, PERMISSION_USER_GUIDANCE } from "./permissions.ts";
 
 /** The action names every result reports in `metadata.action`. */
 type ActionName = ComputerInputRequest["action"] | "screenshot" | "permissions" | "status";
@@ -100,7 +100,7 @@ const REQUEST_ARG = z
   .boolean()
   .optional()
   .describe(
-    "Ask the OS to show its own permission prompt (macOS Accessibility dialog) instead of only reporting the status",
+    "Request currently missing macOS Accessibility and Screen Recording permissions, then probe again. Requests require user approval and may require restarting the host; false/omitted only probes. Other systems expose diagnostics without an OS prompt.",
   );
 
 // ── Result plumbing ──────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ function prepare(action: ActionName, build: (facts: SupportedComputerUse) => Com
 }
 
 /** The dry-run report: the resolved spawn vector, and nothing executed. */
-function dryRunResult(action: ActionName, plan: ComputerPlan): ToolResult {
+function dryRunResult(action: ActionName, plan: ComputerPlan): Exclude<ToolResult, string> {
   const vector = spawnVectorFor(plan, process.env);
   const report: Record<string, unknown> = {
     argv: vector.argv,
@@ -184,7 +184,11 @@ async function performPlan(
   if (!run.ok) {
     return {
       ok: false,
-      result: { title: `${action} failed`, output: run.error, metadata: metadataFor(action, plan.driver) },
+      result: {
+        title: `${action} failed`,
+        output: run.error + (run.permission === undefined ? "" : ` ${PERMISSION_REQUEST_GUIDANCE}`),
+        metadata: { ...metadataFor(action, plan.driver), ...(run.permission === undefined ? {} : { ...permissionRecovery(), permission: run.permission }) },
+      },
     };
   }
   return { ok: true, output: run.output };
@@ -198,6 +202,8 @@ interface CapturePermission {
   checked: boolean;
   granted?: boolean;
   error?: string;
+  requested?: boolean;
+  request_error?: string;
 }
 
 async function capturePermission(facts: SupportedComputerUse, context: CanonicalToolContext): Promise<CapturePermission> {
@@ -282,8 +288,15 @@ export function createComputerScreenshotTool() {
           const permission = await capturePermission(facts, context);
           if (permission.granted !== true) return {
             title: "Screenshot refused",
-            output: `Error: Screen Recording permission is not granted or could not be verified. Grant the host application Screen Recording access in System Settings and retry.${permission.error ? ` ${permission.error}` : ""}`,
-            metadata: { ...metadataFor("screenshot", prepared.plan.driver), screen_capture: permission },
+            output: permission.checked
+              ? `Error: Screen Recording permission is not granted. ${PERMISSION_REQUEST_GUIDANCE}`
+              : `Error: Screen Recording permission could not be verified. Call computer_permissions({}) to diagnose the probe before retrying.${permission.error ? ` ${permission.error}` : ""}`,
+            metadata: {
+              ...metadataFor("screenshot", prepared.plan.driver), screen_capture: permission,
+              ...(permission.checked ? { ...permissionRecovery(), permission: "screen_capture" } : {
+                error: true, error_code: "permission_unverified", next_action: { tool: "computer_permissions", args: {} },
+              }),
+            },
           };
         }
 
@@ -675,19 +688,7 @@ export interface PermissionRefusalDetail {
   readonly requested?: boolean;
 }
 
-/**
- * The refusal the family returns when the probe reports no permission.
- *
- * `hint` is the plan's own remediation text ({@link ComputerPlan.permissionHint});
- * the generic sentence stands in for a driver that declares none. A non-empty
- * probe answer is quoted verbatim as its own one-line answer, so the caller
- * reads what the probe actually said instead of a paraphrase. When the caller
- * asked the OS for the grant (`detail.requested`), the sentence says macOS has
- * been asked to show its Accessibility dialog, that the prompt appears once per
- * application, and the order to follow: approve it (or use the System Settings
- * pane the hint names), restart the host, then call `computer_permissions`
- * again.
- */
+/** Report a confirmed input denial with the next permission-recovery step. */
 export function permissionRefusal(
   driver: string,
   hint: string | undefined,
@@ -695,33 +696,26 @@ export function permissionRefusal(
 ): ToolResult {
   const answer = detail.answer === undefined ? "" : firstAnswerLine(detail.answer);
   const answered = answer.length === 0 ? "" : ` The probe answered: ${answer}.`;
-  const requested =
-    detail.requested === true
-      ? " macOS has been asked to show its Accessibility dialog, which appears once per application: approve it (or grant this process in the System Settings pane named above), restart the host, then call computer_permissions again."
-      : "";
   return {
     title: "permissions",
     output:
       `Error: ${driver} reports that input is not permitted; ` +
-      (hint ?? "grant this process the permission its system requires and try again.") +
-      answered +
-      requested,
-    metadata: { ...metadataFor("permissions", driver), granted: false },
+      (hint ?? "grant this process the permission its system requires.") + answered + " " +
+      (detail.requested ? PERMISSION_USER_GUIDANCE : PERMISSION_REQUEST_GUIDANCE),
+    metadata: { ...metadataFor("permissions", driver), granted: false, ...permissionRecovery(detail.requested) },
   };
 }
 
-/**
- * `computer_permissions` — report whether this OS reports input as permitted,
- * and ask the OS for the grant when the caller asks for it.
- */
+/** Probe input and capture grants independently; request only missing grants. */
 export function createComputerPermissionsTool() {
   return defineComputerTool("permissions", {
     description:
-      "Report whether this system's input permission is granted to this process right now, and name the permission to grant when it is not. " +
-      "The answer is the permission state the OS reports for this process, never a guess or a machine-wide preference: on macOS it reads this process's own TCC Accessibility trust, Linux X11 whether the session and xdotool allow input, Windows whether the session is interactive. " +
-      "request: true asks the OS itself to show its permission dialog — macOS shows the system Accessibility prompt and registers the app in System Settings — instead of only reporting the status; a system with no requestable grant ignores it. " +
-      "The host process must be restarted after a grant is approved. " +
-      "dry_run returns the exact command without executing it, and shows the request command without showing any dialog.",
+      "Report input permission and independent screen-capture permission. metadata.granted refers only to input; screen_capture.granted is separate. " +
+      "macOS probes this process's Accessibility trust and Screen Recording access. Linux X11 checks session access and xdotool; Windows checks an interactive session. " +
+      "request:true first probes, requests only missing macOS Accessibility and Screen Recording grants, then probes again. A request or dry run is not a grant. " +
+      "Wait for the user to approve OS dialogs or System Settings, restart the application launching the host if required, then call without request to recheck. Do not loop requests. " +
+      "Automation for System Events is separate and may require manual approval. Linux/Windows have no requestable per-app grant here; request:true only diagnoses them. " +
+      "dry_run reports the conditional request/probe commands without running commands or opening dialogs.",
     args: {
       dry_run: DRY_RUN_ARG,
       timeout_ms: TIMEOUT_ARG,
@@ -729,51 +723,79 @@ export function createComputerPermissionsTool() {
     },
     async execute(args, context) {
       const facts = getSystem().computerUse;
-      const wantsPrompt = args.request === true;
-      const prepared = prepare("permissions", loaded =>
-        wantsPrompt && loaded.permissionPrompt !== undefined ? loaded.permissionPrompt() : loaded.permissionProbe(),
-      );
+      const prepared = prepare("permissions", loaded => loaded.permissionProbe());
       if (!prepared.ok) return prepared.result;
-      if (args.dry_run === true) return dryRunResult("permissions", prepared.plan);
+      if (!facts.supported) return { title: "permissions refused", output: `Error: ${facts.refusal}`, metadata: metadataFor("permissions", "unsupported") };
+      const wantsPrompt = args.request === true;
+      if (args.dry_run === true) {
+        const prompt = wantsPrompt ? facts.permissionPrompt?.() : undefined;
+        const result = dryRunResult("permissions", prompt !== undefined && typeof prompt !== "string" ? prompt : prepared.plan);
+        const report = JSON.parse(result.output);
+        if (wantsPrompt) {
+          report.request_only_if_missing = true;
+          report.input_permission_probe = { ...spawnVectorFor(prepared.plan, process.env), script: prepared.plan.script };
+          const capturePrompt = facts.capturePermissionPrompt?.();
+          if (capturePrompt !== undefined) report.capture_permission_request = typeof capturePrompt === "string"
+            ? { refusal: capturePrompt }
+            : { ...spawnVectorFor(capturePrompt, process.env), script: capturePrompt.script };
+        }
+        return { ...result, output: JSON.stringify(report) };
+      }
 
-      // Whether request: true really selected an OS prompt plan: on a system
-      // that declares none the request is ignored and the probe runs instead.
-      const ranPrompt = wantsPrompt && facts.supported && facts.permissionPrompt !== undefined;
-      const run = await runComputerPlan(prepared.plan, {
-        env: process.env,
-        timeoutMs: args.timeout_ms ?? DEFAULT_COMPUTER_TIMEOUT_MS,
-        signal: context.abort,
-        installHint: facts.supported ? facts.installHint : undefined,
-      });
-      const driver = prepared.plan.driver;
-      const screenCapture = facts.supported ? await capturePermission(facts, context) : { checked: false };
-      if (!run.ok) {
-        return withCapturePermission({
-          title: "permissions",
-          output: run.error,
-          metadata: { ...metadataFor("permissions", driver), granted: false },
-        }, screenCapture);
+      const options = { signal: context.abort, timeoutMs: 120_000, installHint: facts.installHint };
+      const probeInput = async (): Promise<CapturePermission & { output?: string }> => {
+        const run = await runComputerPlan(prepared.plan, options);
+        if (!run.ok) return { checked: run.permission !== undefined, granted: false, error: run.error };
+        return { checked: true, granted: facts.readsProbeOutput ? permissionVerdict(run.output) : true, output: run.output };
+      };
+      const requestGrant = async (plan: ComputerPlanOrRefusal): Promise<string | undefined> => {
+        if (typeof plan === "string") return plan;
+        const run = await runComputerPlan(plan, options);
+        return run.ok ? undefined : run.error;
+      };
+      let input = await probeInput();
+      let screenCapture = await capturePermission(facts, context);
+      let inputRequest: Pick<CapturePermission, "requested" | "request_error"> = {};
+      let captureRequest: Pick<CapturePermission, "requested" | "request_error"> = {};
+      if (wantsPrompt && input.checked && input.granted === false && facts.permissionPrompt !== undefined && !context.abort.aborted) {
+        const error = await requestGrant(facts.permissionPrompt());
+        inputRequest = { requested: true, ...(error === undefined ? {} : { request_error: error }) };
       }
-      // Read the answer by the driver's own rule: darwin's probe prints a
-      // machine token and ONLY the exact token is a grant, while a successful
-      // exit on linux and win32 IS the grant and their prose is for the caller.
-      const readsProbeOutput = facts.supported && facts.readsProbeOutput === true;
-      const granted = readsProbeOutput ? permissionVerdict(run.output) : true;
-      if (!granted) {
-        return withCapturePermission(permissionRefusal(driver, prepared.plan.permissionHint, { answer: run.output, requested: ranPrompt }), screenCapture);
+      if (wantsPrompt && screenCapture.checked && screenCapture.granted === false && facts.capturePermissionPrompt !== undefined && !context.abort.aborted) {
+        const error = await requestGrant(facts.capturePermissionPrompt());
+        captureRequest = { requested: true, ...(error === undefined ? {} : { request_error: error }) };
       }
-      const metadata: Record<string, unknown> = { ...metadataFor("permissions", driver), granted: true };
-      if (ranPrompt) metadata.permission_requested = true;
+      if (inputRequest.requested || captureRequest.requested) {
+        input = { ...await probeInput(), ...inputRequest };
+        screenCapture = { ...await capturePermission(facts, context), ...captureRequest };
+      }
+
+      const denied = (input.checked && input.granted === false) || (screenCapture.checked && screenCapture.granted === false);
+      const unverified = !input.checked || (facts.capturePermissionProbe !== undefined && !screenCapture.checked);
+      const userActionRequired = wantsPrompt ||
+        (input.checked && input.granted === false && facts.permissionPrompt === undefined) ||
+        (screenCapture.checked && screenCapture.granted === false && facts.capturePermissionPrompt === undefined);
+      const output = [
+        input.checked
+          ? input.granted
+            ? !facts.readsProbeOutput && input.output ? input.output : "Input is permitted on this system."
+            : "Error: input permission is not granted."
+          : "Error: input permission could not be verified.",
+        input.error,
+        input.request_error,
+        screenCapture.request_error,
+        input.requested || screenCapture.requested ? "OS permission requests were attempted; the reported grants come from fresh probes, not the request responses." : undefined,
+        denied ? userActionRequired ? PERMISSION_USER_GUIDANCE : PERMISSION_REQUEST_GUIDANCE : undefined,
+      ].filter(Boolean).join(" ");
+      const { output: _probeOutput, ...inputPermission } = input;
       return withCapturePermission({
-        title: "permissions",
-        // A granted token-printing probe answers with one sentence, never by
-        // echoing its own raw `granted` marker back as if it were prose.
-        output: readsProbeOutput
-          ? "Input is permitted on this system."
-          : run.output.length === 0
-            ? "Input is permitted on this system."
-            : run.output,
-        metadata,
+        title: "permissions", output,
+        metadata: {
+          ...metadataFor("permissions", prepared.plan.driver),
+          granted: input.granted === true, input_permission: inputPermission,
+          permission_requested: input.requested === true || screenCapture.requested === true,
+          ...(denied ? permissionRecovery(userActionRequired) : unverified ? { error: true, error_code: "permission_unverified" } : {}),
+        },
       }, screenCapture);
     },
   });
@@ -782,8 +804,7 @@ export function createComputerPermissionsTool() {
 /**
  * The computer-use tools, keyed by the names the tool surface uses.
  *
- * `buildCanonicalTools` merges this record only when `computerUse: true`, so
- * the default surface stays exactly what it was before this family existed.
+ * `buildCanonicalTools` merges this record when the resolved gate permits it.
  */
 export function createComputerTools(): Record<string, CanonicalToolDef> {
   return {
