@@ -36,11 +36,54 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import { PROBE_WRITERS, runOnce } from "../../scripts/log-multiprocess-probe.ts";
 import { removeDir, tempDir } from "../helpers/log.ts";
 
 describe("multi-process log writes", () => {
+  it("reaps a follower that exits before readiness without starting writers", async () => {
+    const dir = tempDir("rolebox-multiprocess-startup-exit-");
+    try {
+      await expect(runOnce({
+        dir,
+        records: 24,
+        maxBytes: 1_024,
+        retain: 4_096,
+        delayMs: 0,
+        followerPreload: join(dir, "missing-preload.ts"),
+      })).rejects.toThrow("log follower exited before acknowledging readiness");
+      expect(existsSync(join(dir, "probe-shared.log"))).toBe(false);
+    } finally {
+      removeDir(dir);
+    }
+  }, 60_000);
+
+  it("waits for a slow CLI follower before starting the writers", async () => {
+    const dir = tempDir("rolebox-multiprocess-startup-");
+    try {
+      const run = await runOnce({
+        dir,
+        records: 24,
+        maxBytes: 1_024,
+        retain: 4_096,
+        delayMs: 0,
+        followerPreload: join(import.meta.dir, "fixtures", "follower-slow-start.ts"),
+      });
+
+      expect(Object.entries(run.checks).filter(([, passed]) => !passed)).toEqual([]);
+      expect(run.expected).toBe(72);
+      expect(run.observed).toBe(72);
+      expect(run.followerRecords).toBe(72);
+      expect(run.followerMissing).toBe(0);
+      expect(run.followerDuplicateRecords).toBe(0);
+      expect(run.foreignLines).toBe(0);
+    } finally {
+      removeDir(dir);
+    }
+  }, 60_000);
+
   it("gives every record of three real processes exactly once, across rotations", async () => {
     const dir = tempDir("rolebox-multiprocess-");
     try {

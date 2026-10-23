@@ -76,7 +76,8 @@
 // not part of `bun run typecheck` (tsconfig.json includes only src), and its only
 // job is to produce evidence a reviewer can re-run.
 
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -92,6 +93,9 @@ export const PROBE_MESSAGE = "probe-record";
 
 /** The three real write paths, in the order the report names them. */
 export const PROBE_WRITERS = ["worker", "pipeline", "sink"] as const;
+
+/** Bound the readiness handshake before any writer starts. */
+const FOLLOWER_STARTUP_DEADLINE_MS = 10_000;
 
 /**
  * The HARD CAP, in milliseconds, on how long the follower may still be behind
@@ -177,6 +181,8 @@ export interface ProbeOptions {
   readonly maxBytes: number;
   readonly retain: number;
   readonly delayMs: number;
+  /** Preload a module before the real CLI, for controlled startup regressions. */
+  readonly followerPreload?: string;
 }
 
 /** A writer child's exit report. */
@@ -423,12 +429,24 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   const expectedKeys: string[] = [];
   for (const writer of PROBE_WRITERS) for (let seq = 0; seq < records; seq++) expectedKeys.push(keyOf(writer, seq));
 
-  // The real CLI follower starts FIRST, so it is already polling when the first
-  // record is written: this is the live path an operator uses.
+  const readyChannel = "probe:readiness";
+  const readyToken = randomUUID();
+  const isReadinessRecord = (record: Partial<LogRecord>): boolean =>
+    record.channel === readyChannel && record.fields?.token === readyToken;
+  let followerReady = false;
+
+  // Start the real CLI first, then require an observed record before launching
+  // writers: spawning it does not mean its EOF baseline has been established.
   const follower = Bun.spawn(
-    [process.execPath, join(import.meta.dir, "..", "src", "cli", "main.ts"), "logs", "--log-dir", dir, "--json", "--follow"],
+    [
+      process.execPath,
+      ...(options.followerPreload === undefined ? [] : ["--preload", options.followerPreload]),
+      join(import.meta.dir, "..", "src", "cli", "main.ts"),
+      "logs", "--log-dir", dir, "--json", "--follow",
+    ],
     { env, stdout: "pipe", stderr: "pipe" },
   );
+  const followerErrors = new Response(follower.stderr).text();
   // The follower's stdout is drained WHILE it runs, not only after it exits: the
   // probe has to know how far the follower has got (the bounded catch-up wait
   // below), and a piped stream nobody reads fills up and stalls the writer.
@@ -465,7 +483,9 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
           if (line.trim().length === 0) continue;
           try {
             const record = JSON.parse(line) as Partial<LogRecord>;
-            if (record.channel === PROBE_CHANNEL && typeof record.fields?.seq === "number") {
+            if (isReadinessRecord(record)) {
+              followerReady = true;
+            } else if (record.channel === PROBE_CHANNEL && typeof record.fields?.seq === "number") {
               followerStreamed += 1;
               followerLastRecordAt = Date.now();
             }
@@ -485,7 +505,37 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
       followerStreamClosed = true;
     }
   })();
-  await Bun.sleep(250);
+
+  // Repeat a separate-channel marker until the CLI echoes it. A marker written
+  // before baseline is intentionally skipped; a later echo proves polling has
+  // begun. Keep its file until directory cleanup so its inode cannot be reused
+  // by the probe channel while the follower still remembers its offset.
+  const readyPath = join(dir, logChannelFileName(readyChannel));
+  const readyDeadline = Date.now() + FOLLOWER_STARTUP_DEADLINE_MS;
+  try {
+    while (!followerReady && !followerStreamClosed && Date.now() < readyDeadline) {
+      const marker: LogRecord = {
+        time: Date.now(),
+        level: "info",
+        channel: readyChannel,
+        message: "follower-readiness",
+        fields: { token: readyToken },
+        scope: {},
+        process: { pid: process.pid, role: "probe" },
+      };
+      appendFileSync(readyPath, JSON.stringify(marker) + "\n", "utf8");
+      await Bun.sleep(25);
+    }
+    if (!followerReady) {
+      throw new Error(followerStreamClosed
+        ? "log follower exited before acknowledging readiness"
+        : "log follower did not acknowledge readiness before the startup deadline");
+    }
+  } catch (error) {
+    follower.kill();
+    await Promise.all([follower.exited, followerDrained, followerErrors]);
+    throw error;
+  }
 
   // The rotated copies say WHERE rotation happened; this sampler says what the
   // active file grew to while it happened, which is the operator's own number.
@@ -572,7 +622,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   // complete stdout the old `new Response(follower.stdout).text()` read.
   await followerDrained;
   const followerOut = followerChunks.join("");
-  const followerErr = await new Response(follower.stderr).text();
+  const followerErr = await followerErrors;
 
   // The two other real CLI processes: what files exist, and what a prune would
   // remove. Both are the operator's own commands, run against the same directory.
@@ -695,6 +745,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
     if (line.trim().length === 0) continue;
     try {
       const value = JSON.parse(line) as Partial<LogRecord>;
+      if (isReadinessRecord(value)) continue;
       if (value.channel !== PROBE_CHANNEL || typeof value.fields?.seq !== "number") {
         followerOtherChannels += 1;
         continue;
