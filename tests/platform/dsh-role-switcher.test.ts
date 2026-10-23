@@ -618,6 +618,15 @@ describe("DshRoleSwitcher session/created restore", () => {
 // ── legacy-event adoption (restore precedence path 2) ───────────────────────
 
 describe("DshRoleSwitcher legacy-event adoption", () => {
+  it("restores a published SDK session that exposes only snapshotEvents", async () => {
+    const { ctx, switcher, saves } = await createFixture(
+      [makeAgent("alpha", { mode: RoleMode.Primary })], {}, [],
+    );
+    ctx.emit("session/created", { id: "snapshot-session", snapshotEvents: () => [makeLegacyEvent("alpha")] });
+    expect(switcher.getActive("snapshot-session")).toBe("alpha");
+    expect(saves.at(-1)?.get("snapshot-session")?.roleId).toBe("alpha");
+  });
+
   it("adopts a legacy rolebox/active-role event into the sidecar", async () => {
     const { ctx, switcher, saves } = await createFixture(
       [makeAgent("alpha", { mode: RoleMode.Primary })],

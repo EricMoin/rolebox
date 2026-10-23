@@ -93,6 +93,7 @@ export interface DshSessionLike {
   readonly id: string;
   readonly seq: number;
   readonly events: readonly DshSessionEventLike[];
+  snapshotEvents?(): readonly DshSessionEventLike[];
   readonly header?: {
     readonly cwd?: string;
     /** On-disk format version (rc.6 `SessionHeader.version`, types.d.ts:46). */

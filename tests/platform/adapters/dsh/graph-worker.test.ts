@@ -2,6 +2,21 @@ import { describe, expect, it } from "bun:test";
 import { installDshGraphWorkerBoundary, type DshGraphWorkerRegistry } from "../../../../src/platform/adapters/dsh/graph-worker.ts";
 
 describe("DSH graph worker presentation", () => {
+  it("recognizes restored worker descriptors from SDK session snapshots", async () => {
+    let guard: Parameters<NonNullable<DshGraphWorkerRegistry["guard"]>>[0] | undefined;
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: callback => { guard = callback; return () => {}; },
+    }, () => undefined);
+    try {
+      await boundary.start("restored-attempt", async () => {});
+      const agent = { session: { id: "restored-worker", snapshotEvents: () => [
+        { type: "subagent/descriptor", data: { label: "restored-attempt" } },
+      ] } };
+      expect(boundary.isWorker(agent)).toBe(true);
+      expect(guard!({ name: "team_create", agent })).toContain("Graph workers may only");
+    } finally { boundary.dispose(); }
+  });
+
   it("selects native tools at creation before the first assembly, without affecting unrelated agents", async () => {
     const listeners = new Map<string, (...args: unknown[]) => unknown>();
     let guard: Parameters<NonNullable<DshGraphWorkerRegistry["guard"]>>[0] | undefined;

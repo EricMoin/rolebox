@@ -24,6 +24,20 @@ function fixture() {
 }
 
 describe("DSH computer workflow", () => {
+  it("reads role and workspace from SDK snapshots, excluding inherited descriptors", () => {
+    const f = fixture();
+    f.active("parent");
+    const session = { id: "child-session", header: { cwd: "/initial" }, inheritedEventCount: 1,
+      snapshotEvents: () => [
+        { type: "subagent/descriptor", data: { provider: "parent" } },
+        { type: "subagent/descriptor", data: { provider: "parent--child" } },
+        { type: "working-directory/change", data: { cwd: "/workspace" } },
+      ] };
+    const result = resolveDshSessionContext(f.options, { session });
+    expect(result.roleId).toBe("parent--child");
+    expect(result.directory).toBe("/workspace");
+  });
+
   it("is available to the base agent and a role without configuration, only for registered tools", () => {
     const f = fixture();
     expect(f.render({})).toContain("computer_permissions");

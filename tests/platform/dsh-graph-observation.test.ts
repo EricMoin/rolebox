@@ -8,6 +8,11 @@ const descriptor = event("subagent/descriptor", { version: 2, mode: "one-shot", 
 const ended = (kind: string) => event("turn/end", { reason: { kind } });
 const observe = (events: readonly DshSessionEventLike[]) => observeDshExecutionEvents(events, "graph/dispatch:work#1");
 
+it("reads resident SDK session snapshots without requiring a legacy events field", async () => {
+  const sessions = { get: () => ({ snapshotEvents: () => [descriptor, ended("completed")] }) } as unknown as DshSessionStoreLike;
+  expect(observe((await readDshExecutionEvents(sessions, undefined, "worker"))!).kind).toBe("completed");
+});
+
 it("requires a terminal turn after the exact one-shot execution descriptor", () => {
   expect(observe([descriptor, ended("completed")])).toEqual({ kind: "completed" });
   for (const kind of ["aborted", "error", "max-tokens", "refusal"]) expect(observe([descriptor, ended(kind)]).kind).toBe("failed");

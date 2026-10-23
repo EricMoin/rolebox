@@ -3,7 +3,7 @@ import type { DshSessionEventLike, DshSessionStoreLike } from "./session.ts";
 
 export async function readDshExecutionEvents(sessions: DshSessionStoreLike, persistence: unknown, id: string): Promise<readonly DshSessionEventLike[] | undefined> {
   const live = sessions.get(id);
-  if (live) return live.events;
+  if (live) return live.snapshotEvents?.() ?? live.events;
   const storage = persistence as {
     inspect?(id: string): Promise<{ events: readonly DshSessionEventLike[] }>;
     open?(id: string, access: "read"): Promise<{ read(): Promise<{ events: readonly DshSessionEventLike[] }>; close(): Promise<void> }>;

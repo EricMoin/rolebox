@@ -14,6 +14,7 @@ import { DshToolFactory, type DshToolDefinition, type DshToolRunContext } from "
 import type { DshContentBlock } from "./agent-registrar.ts";
 import { executeGraphWorkerCommand } from "../../sandbox/worker-exec.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
+import { readDshSessionEvents, type DshEventSource } from "./session-events.ts";
 
 /**
  * THE GRAPH FACE A DSH WORKER'S OWN CALLS ARE JUDGED BY: the delivery channel
@@ -237,7 +238,7 @@ export function createDshGraphWorkerTools(resolve: (context: CanonicalToolContex
 
 export interface DshWorkerAgent {
   readonly id?: string;
-  readonly session?: { readonly id?: string; readonly events?: readonly { type: string; data?: unknown }[] };
+  readonly session?: DshEventSource & { readonly id?: string };
   readonly ctx?: { readonly tools?: {
     presentAs(mode: "native"): () => void;
     register?(definition: DshToolDefinition): () => void;
@@ -304,7 +305,7 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     if (prepared.has(agent)) return true;
     const sessionId = agent.session?.id ?? agent.id ?? "";
     if (workerSessions.has(sessionId) || host.workerPrincipalOf(sessionId)) return true;
-    return agent.session?.events?.some(event => event.type === "subagent/descriptor" && event.data !== null && typeof event.data === "object" &&
+    return readDshSessionEvents(agent.session).some(event => event.type === "subagent/descriptor" && event.data !== null && typeof event.data === "object" &&
       "label" in event.data && typeof event.data.label === "string" && labels.has(event.data.label)) ?? false;
   };
   const grantOf = (agent?: DshWorkerAgent): DshWorkerStartupTools => {

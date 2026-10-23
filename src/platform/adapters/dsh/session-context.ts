@@ -1,13 +1,13 @@
 import { findGraphWorkerRole } from "../../../prompt/graph-worker.ts";
 import type { ResolvedRole } from "../../../types.ts";
 import type { DshWorkerStartupTools } from "./graph-worker.ts";
+import { readDshSessionEvents, type DshEventSource } from "./session-events.ts";
 
 export interface DshContextAgent {
   id?: string;
-  session?: {
+  session?: DshEventSource & {
     id?: string;
     header?: { cwd?: string };
-    events?: readonly { type: string; data?: unknown }[];
     inheritedEventCount?: number;
   };
 }
@@ -26,7 +26,8 @@ export function resolveDshSessionContext(options: DshContextOptions, agent: DshC
   const sessionId = agent.session?.id ?? agent.id ?? "";
   const session = agent.session ?? options.session(sessionId);
   const worker = workerOverride ?? options.worker?.(agent);
-  const ownEvents = session?.events?.slice(session.inheritedEventCount ?? 0);
+  const events = readDshSessionEvents(session);
+  const ownEvents = events.slice(session?.inheritedEventCount ?? 0);
   const descriptor = ownEvents?.find(event => event.type === "subagent/descriptor")?.data;
   const provider = descriptor && typeof descriptor === "object" && "provider" in descriptor && typeof descriptor.provider === "string"
     ? descriptor.provider : undefined;
@@ -34,7 +35,7 @@ export function resolveDshSessionContext(options: DshContextOptions, agent: DshC
   const role = id ? findGraphWorkerRole(options.roles(), id) : undefined;
   let directory = session?.id ? options.workspace?.(session) : undefined;
   if (directory === undefined) {
-    const change = session?.events?.slice().reverse().find(event => event.type === "working-directory/change");
+    const change = events.slice().reverse().find(event => event.type === "working-directory/change");
     const data = change?.data;
     directory = change
       ? data && typeof data === "object" && "cwd" in data && typeof data.cwd === "string" ? data.cwd : undefined

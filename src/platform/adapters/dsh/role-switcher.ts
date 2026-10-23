@@ -522,7 +522,7 @@ export class DshRoleSwitcher {
    */
   private readPersistedRole(session: DshSessionLike): string | null | undefined {
     if (this.activeRole.has(session.id)) return this.activeRole.get(session.id);
-    return scanLegacyActiveRole(session.events);
+    return scanLegacyActiveRole(session.snapshotEvents?.() ?? session.events);
   }
 }
 
@@ -545,7 +545,7 @@ function resolveSession(
   store: DshSessionStoreLike,
 ): DshSessionLike | undefined {
   if (isRecord(payload)) {
-    if (typeof payload.id === "string" && Array.isArray(payload.events)) {
+    if (typeof payload.id === "string" && (typeof payload.snapshotEvents === "function" || Array.isArray(payload.events))) {
       return payload as unknown as DshSessionLike;
     }
     if (typeof payload.sessionID === "string") {
