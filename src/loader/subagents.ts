@@ -18,6 +18,7 @@ import { ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { Logger, ILogObj } from "../logger.ts";
 import { validateRoleId } from "./role-loader.ts";
+import { parseMemoryConfig } from "../memory/config.ts";
 
 let log: Logger<ILogObj> = createSubLogger("role-loader");
 
@@ -58,6 +59,13 @@ async function resolveSubagentEntry(
     return null;
   }
 
+  try {
+    parseMemoryConfig(entry.memory);
+  } catch (error) {
+    log.warn(`Skipping ${context} "${entry.name}": ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+
   if (
     typeof entry.prompt_file === "string" &&
     entry.prompt_file.trim() !== ""
@@ -93,10 +101,12 @@ function buildSubAgentFields(
   entry: Record<string, unknown>,
   resolvedPrompt: string,
 ): Omit<SubAgentConfig, "subagents"> {
+  const memory = parseMemoryConfig(entry.memory);
   return {
     name: entry.name as string,
     description: (entry.description as string) ?? "",
     prompt: resolvedPrompt,
+    ...(memory === undefined ? {} : { memory }),
     ...(typeof entry.prompt_file === "string"
       ? { prompt_file: entry.prompt_file }
       : {}),

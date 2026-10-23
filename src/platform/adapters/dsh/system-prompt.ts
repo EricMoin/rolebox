@@ -1,52 +1,7 @@
 /**
- * DshSystemPromptAdapter — rolebox's session-level contribution to dsh's
- * model-facing system-prompt registry.
- *
- * dsh composes the model-facing system prompt EXCLUSIVELY from the mounted
- * `@deepseek-ai/dsh-system-prompt` registry — the `systemPrompt` service that
- * `ctx.tools` waits for (`static inject: ["systemPrompt"]`, contract §3.1;
- * satisfied in a full profile by the `system-prompt` bundle row, §5.5).
- * rolebox never registered into it:
- *
- *   - `src/dsh-plugin.ts:97` injects only `tools` / `sessions` / `subagents`
- *   - `DshHookProvider` makes `system-transform` a documented no-op
- *     (hook-provider.ts:182 — dsh has no per-turn prompt transform hook)
- *   - `DshAgentRegistrar` applies the active role's system prompt only at
- *     SUBAGENT spawn (agent-registrar.ts:541-567)
- *
- * Net effect of the gap: the main session's model never saw the switched
- * role's system prompt or its available-functions context — only spawned
- * agents did. This adapter closes that at the SESSION level by registering
- * two contributions into the structural {@link DshSystemPromptRegistry}:
- *
- *   - `rolebox:role` section (order 50) — the ACTIVE role's full
- *     systemPrompt for the current session (`resolveActiveRolePrompt`),
- *     read through the shared per-session {@link ActiveRoleRef} so a web-UI
- *     role switch reaches the next model turn. Returns `''` when no role is
- *     active; the registry's `renderPrompt` drops empty sections.
- *   - `rolebox:context` context entry (order 0) — the available-functions
- *     block for the active role (`buildAvailableFunctionsBlock`), the
- *     session-level analog of the spawn-time context provider wired in
- *     `src/dsh-plugin.ts:386-393`. Also `''` when nothing applies.
- *
- * The context entry (order 0) renders ahead of the role section (order 50),
- * mirroring the spawn-time ordering where the injected context leads and the
- * role prompt follows (agent-registrar.ts composePrompt).
- *
- * ── Memory is deliberately NOT injected ─────────────────────────────────────
- * The section/context `text` providers are SYNCHRONOUS, while
- * `MemoryStore.create` is async (`src/memory/store.ts`) — an async read
- * cannot happen inside a sync provider without blocking the prompt assembly
- * or racing a fire-and-forget update. Memory therefore stays out of this
- * seam; on the spawn path it is covered by the async-capable spawn-time
- * context provider. A future synchronous memory source (or an async registry
- * API) could add it here — the `directory` option is carried for exactly
- * that.
- *
- * The registry surface is consumed structurally (duck typing). This module
- * does NOT import `@deepseek-ai/*` (or `@opencode-ai/*`).
- *
- * @module
+ * Registers active-role instructions, available functions and live memory context
+ * with the DSH prompt service. Memory uses the caller's session workspace and
+ * role identity; its provider opens and closes a synchronous store per refresh.
  */
 
 import { buildAvailableFunctionsBlock } from "../../../prompt/builder.ts";
@@ -92,6 +47,7 @@ export type DshSystemPromptContextEntry = {
   name: string;
   order: number;
   text: (ctx: DshSystemPromptContext) => string;
+  interpolate?: boolean;
 };
 
 /**
@@ -113,6 +69,7 @@ export type DshSystemPromptRegistry = {
 
 /** Options for constructing a DshSystemPromptAdapter. */
 export interface DshSystemPromptAdapterOptions {
+  memoryContext?: (ctx: DshSystemPromptContext) => string;
   /** Graph workers receive their target role through the dispatch prompt. */
   isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry holding all resolved agent definitions (roles + subagents). */
@@ -125,12 +82,7 @@ export interface DshSystemPromptAdapterOptions {
   activeRole: ActiveRoleRef;
   /** Role id → resolved functions (the module-level `roleFunctionsMap`). */
   roleFunctionsMap: Map<string, ResolvedFunction[]>;
-  /**
-   * The rolebox directory. Carried for parity with the spawn-time context
-   * injection options and reserved for a future SYNCHRONOUS memory injector;
-   * the current providers never read it (memory is async — see the module
-   * docstring).
-   */
+  /** Compatibility field; memory resolves its workspace from the live session. */
   directory: string;
 }
 
@@ -147,6 +99,7 @@ export class DshSystemPromptAdapter {
   private readonly roleFunctionsMap: Map<string, ResolvedFunction[]>;
   private readonly directory: string;
   private readonly isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
+  private readonly memoryContext?: (ctx: DshSystemPromptContext) => string;
   /** Registry disposers returned by `section()`/`context()` — released by `dispose()`. */
   private readonly disposers: Array<() => void> = [];
   private readonly _log;
@@ -160,6 +113,7 @@ export class DshSystemPromptAdapter {
     this.roleFunctionsMap = options.roleFunctionsMap;
     this.directory = options.directory;
     this.isGraphWorker = options.isGraphWorker;
+    this.memoryContext = options.memoryContext;
     this._log = createSubLogger("dsh-system-prompt");
   }
 
@@ -195,6 +149,14 @@ export class DshSystemPromptAdapter {
         text: (ctx) => this.isGraphWorker?.(ctx) ? "" : buildContextBlock(ctx, this.activeRole, this.roleFunctionsMap),
       }),
     );
+    if (this.memoryContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:memory",
+        order: 10,
+        interpolate: false,
+        text: this.memoryContext,
+      }));
+    }
   }
 
   /**

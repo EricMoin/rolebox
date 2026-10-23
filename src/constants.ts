@@ -153,6 +153,7 @@ export const INHERITABLE_FIELDS: readonly string[] = [
   "top_p",
   "permission",
   "tools",
+  "memory",
 ] as const;
 
 // ── Notification defaults ──────────────────────────────────────────────

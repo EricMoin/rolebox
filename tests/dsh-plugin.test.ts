@@ -1207,7 +1207,7 @@ describe("dsh plugin apply()", () => {
       expect(prompt).toContain("- `schema` — ");
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       expect(workerSections).toEqual([""]);
-      expect(workerContexts).toEqual([""]);
+      expect(workerContexts).toEqual(["", ""]);
       expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
     } finally {
       disposer?.();
@@ -2337,13 +2337,12 @@ describe("dsh plugin apply()", () => {
       const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
       const stats = disposer.stats;
 
-      // The prompt double recorded the two contributions at their documented
-      // shape (section `rolebox:role` order 50, context `rolebox:context` order 0).
       expect(sections).toHaveLength(1);
       expect(sections[0].name).toBe("rolebox:role");
       expect(sections[0].order).toBe(50);
       expect(typeof sections[0].text).toBe("function");
-      expect(contexts).toHaveLength(1);
+      expect(contexts).toHaveLength(2);
+      expect(contexts[1].name).toBe("rolebox:memory");
       expect(contexts[0].name).toBe("rolebox:context");
       expect(contexts[0].order).toBe(0);
       expect(typeof contexts[0].text).toBe("function");
@@ -2376,6 +2375,12 @@ describe("dsh plugin apply()", () => {
       expect(
         sections[0].text({ agent: { id: sessionId }, sessionID: sessionId }),
       ).toBe("## Role instructions\n\nYou are a test role.");
+      const memory = contexts[1].text({ agent: { id: sessionId } });
+      expect(memory).toContain("## Memory workflow");
+      expect(memory).toContain("memory_read");
+      expect(memory).toContain("explicitly requests session consolidation");
+      expect(memory).toContain("session_list");
+      expect(memory).toContain("session_read");
 
       disposer();
     } finally {

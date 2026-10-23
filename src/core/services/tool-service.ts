@@ -1,7 +1,6 @@
 import type { PluginService, ServiceHealth } from "../service.ts";
 import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
-import { createMemoryUpdateTool } from "../../memory/tools.ts";
 import { registerToolSchema } from "../../hooks/tool-before.ts";
 import { createSubLogger } from "../../logger.ts";
 import type { DispatchService } from "./dispatch-service.ts";
@@ -91,8 +90,6 @@ export class ToolService implements PluginService {
       // (undefined for a host without one: then no graph_* tool registers).
       outcomeGraphTools: ctx.outcomeGraphTools,
       extraTools: {
-        // OpenCode-only memory update (write/recall/list are in the shared set)
-        memory_update: createMemoryUpdateTool(),
         // LSP tools are OpenCode-only
         ...lspService.getTools(),
         // OpenCode-only function/asset extras

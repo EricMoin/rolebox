@@ -4,7 +4,9 @@ import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
-import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock, buildMemoryBlock } from "../prompt/builder.ts";
+import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock } from "../prompt/builder.ts";
+import { buildMemoryContext } from "../memory/context.ts";
+import { MEMORY_TOOL_NAMES, memoryToolEnabled } from "../memory/tool-policy.ts";
 import { buildReminder } from "../prompt/reminder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
@@ -84,29 +86,28 @@ export async function handleSystemTransform(
     }
   }
 
-  // Memory injection — runs in BOTH code paths (functions active and inactive)
   if (agentId) {
-    const role = deps.roleMap?.get(agentId);
-    const memConfig = role?.config?.memory ?? { inject: true, max_inject: 10, min_relevance: "medium", scope: "both" };
-
-    if (memConfig.inject !== false) {
-      try {
-        const { MemoryStore } = await import("../memory/store.ts");
-        const store = await MemoryStore.create(deps.dir);
-        const memories = store.list({
-          scope: memConfig.scope ?? "both",
-          limit: memConfig.max_inject ?? 10,
-          minRelevance: memConfig.min_relevance ?? "medium",
-        });
-        store.close();
-        const block = buildMemoryBlock(memories);
-        if (block) {
-          output.system.push(block);
+    const role = findGraphWorkerRole([...deps.roleMap.values()], agentId);
+    if (role) {
+      const tools = MEMORY_TOOL_NAMES.filter((name) => memoryToolEnabled(name, role.config.tools));
+      const options = { roleId: agentId, config: role.config.memory, tools };
+      let block = buildMemoryContext(options);
+      if (role.config.memory?.inject !== false && (role.config.memory?.max_inject ?? 10) > 0 &&
+        tools.some((name) => name === "memory_recall" || name === "memory_read" || name === "memory_list")) {
+        try {
+          const { MemoryStore } = await import("../memory/store.ts");
+          const store = await MemoryStore.create(deps.dir);
+          try {
+            block = buildMemoryContext({ ...options, store });
+          } finally {
+            store.close();
+          }
+        } catch (err) {
+          withLogScope({ sessionId: sid }, () =>
+            logEvent("sys-xform.memory-inject-failed", { error: String(err) }));
         }
-      } catch (err) {
-        withLogScope({ sessionId: sid }, () =>
-          logEvent("sys-xform.memory-inject-failed", { error: String(err) }));
       }
+      if (block) output.system.push(block);
     }
   }
 

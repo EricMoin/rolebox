@@ -1,11 +1,14 @@
 import type { DatabaseDriver } from "./db-driver.ts";
 import type { MemoryEntry } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
+import { memoryVisibility } from "./visibility.ts";
 
 const log = createSubLogger("memory:search");
 
 export interface MemorySearchOptions {
   query: string;
+  /** Undefined allows administrative access; an empty string allows only workspace entries. */
+  roleId?: string;
   scope?: string;
   category?: string;
   limit?: number;
@@ -20,12 +23,13 @@ export function searchMemories(db: DatabaseDriver, options: MemorySearchOptions)
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  // Escape double quotes in the query to prevent FTS syntax errors
-  const ftsQuery = options.query.replace(/"/g, "\"\"");
-  params.push(ftsQuery);
+  params.push(options.query);
 
   // Use a JOIN with the FTS table to access the `rank` column for ordering
   conditions.push("memories_fts MATCH ?");
+  const visibility = memoryVisibility(options.roleId, "m.");
+  conditions.push(visibility.sql);
+  params.push(...visibility.params);
 
   // Scope filtering
   if (options?.scope && options.scope !== "both") {
@@ -45,7 +49,21 @@ export function searchMemories(db: DatabaseDriver, options: MemorySearchOptions)
   params.push(limit);
 
   try {
-    const rows = db.query(sql).all(...params) as Record<string, unknown>[];
+    const statement = db.query(sql);
+    let rows: Record<string, unknown>[];
+    try {
+      rows = statement.all(...params) as Record<string, unknown>[];
+    } catch (error) {
+      if (!/fts5: syntax error|no such column:|unterminated string|malformed MATCH expression/i.test(String(error))) {
+        throw error;
+      }
+      // Ordinary titles contain punctuation that FTS interprets as operators.
+      // Retain explicit valid FTS queries; retry invalid ones as literal AND terms.
+      const terms = options.query.match(/[\p{L}\p{N}\p{M}]+/gu) ?? [];
+      if (terms.length === 0) return [];
+      params[0] = terms.map(term => `"${term}"`).join(" AND ");
+      rows = statement.all(...params) as Record<string, unknown>[];
+    }
     return rows.map((row) => ({
       ...row,
       tags: parseJsonArray(row.tags),

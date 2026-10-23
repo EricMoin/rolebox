@@ -64,7 +64,6 @@ import { DispatchAdapter } from "../loop/dispatch-adapter.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
 import { createTaskTools } from "../dispatch/query/task-tools.ts";
-import { createMemoryUpdateTool } from "../memory/tools.ts";
 import { createFunctionGraphTool } from "../function/function-graph.ts";
 import { createSkillComposeTool } from "../asset/skill-compose.ts";
 import { createLoadRoleSkillTool } from "../asset/skill-tool.ts";
@@ -121,7 +120,7 @@ export const PI_SUBAGENT_TOOLS: string[] = [
   "load_role_skill", "skill_compose", "reference_search",
   "asset_search", "asset_inspect", "asset_validate",
   "hashline_read", "hashline_edit",
-  "memory_recall", "memory_list", "memory_write",
+  "memory_recall", "memory_list", "memory_read", "memory_write", "memory_update",
   "lsp_diagnostics", "lsp_hover", "lsp_find_references",
   "lsp_goto_definition", "lsp_servers",
   "session_read", "session_list", "session_info",
@@ -616,6 +615,7 @@ export default async function(pi: any): Promise<void> {
           tools: PI_SUBAGENT_TOOLS,
           systemPrompt: sub.prompt,
           graphWorkerSystemPrompt: buildGraphWorkerRolePrompt(sub),
+          memory: sub.config.memory,
         });
         if (sub.subagents.length > 0) {
           registerPiAgentConfigs(sub.subagents, model);
@@ -1242,7 +1242,6 @@ export default async function(pi: any): Promise<void> {
     });
 
     const extraTools = {
-      memory_update: createMemoryUpdateTool(),
       function_graph: createFunctionGraphTool(resolvedRoles),
       skill_compose: createSkillComposeTool(resolvedRoles),
       // load_role_skill is Pi-only (opencode has its own native skill tool).
@@ -1306,6 +1305,7 @@ export default async function(pi: any): Promise<void> {
       // The OUTCOME run path's tool face (host layer above). Absent → the
       // stack registers no graph tools.
       outcomeGraphTools,
+      () => activeAgent.get(),
     );
 
     // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────

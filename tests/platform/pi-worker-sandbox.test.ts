@@ -19,6 +19,9 @@ import { PiProcessSessionAdapter } from "../../src/platform/adapters/pi/process-
 import { childSessionFile } from "../../src/platform/adapters/pi/child-session.ts";
 import { getSystem } from "../../src/platform/system/index.ts";
 import { buildGraphWorkerRolePrompt } from "../../src/prompt/graph-worker.ts";
+import { MemoryStore } from "../../src/memory/store.ts";
+import type { MemoryConfig } from "../../src/memory/types.ts";
+import type { PiWorkerToolConfig } from "../../src/platform/adapters/pi/worker-tools.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -125,6 +128,62 @@ describe("Pi graph worker boundary", () => {
       await adapter.prompt(ordinary.id, { parts: [{ type: "text", text: "Ordinary task" }] });
       await spawnRecord(process.env.PI_SPAWN_RECORD);
       expect(readFileSync(process.env.PI_SPAWN_RECORD + ".prompt", "utf8")).toBe("Ordinary agent context");
+
+      const store = await MemoryStore.create(root);
+      try {
+        for (const [scope, roleId, title] of [
+          ["role", "memory-worker", "Worker remembered decision"],
+          ["workspace", "shared", "Workspace remembered decision"],
+          ["role", "other-worker", "Other worker private decision"],
+        ]) {
+          store.write({ scope, role_id: roleId, title, content: title, category: "fact", relevance: "high", tags: [], session_id: null, source_sessions: [] });
+        }
+      } finally {
+        store.close();
+      }
+      const cases: Array<{ name: string; tools: string[]; config?: MemoryConfig; presentation?: PiWorkerToolConfig["presentation"] }> = [
+        { name: "ungranted", tools: [] },
+        { name: "read", tools: ["memory_recall", "memory_read"] },
+        { name: "write", tools: ["memory_write"] },
+        { name: "disabled", tools: ["memory_recall"], config: { inject: false } },
+        { name: "discover", tools: ["memory_recall"], presentation: { mode: "discover" } },
+      ];
+      for (const item of cases) {
+        adapter.registerAgentConfig("memory-worker", {
+          model: "example/model", tools: [], systemPrompt: "Worker context", memory: item.config,
+        });
+        adapter.setGraphWorkerToolConfig(() => ({
+          baseline: ["bash", "graph_submit_outcome"], grants: item.tools, presentation: item.presentation,
+          proxies: ["memory_recall", "memory_read", "memory_write", "memory_update"].map(name => ({ name, description: name, inputSchema: {} })),
+        }));
+        const worker = await adapter.create({ directory: root, agent: "memory-worker" });
+        if (!worker) throw new Error("the adapter did not create a memory worker");
+        process.env.PI_SPAWN_RECORD = join(root, `memory-${item.name}.txt`);
+        await adapter.runGraphWorker(() => adapter.prompt(worker.id, {
+          agent: "memory-worker", parts: [{ type: "text", text: "Memory task" }],
+        }));
+        await spawnRecord(process.env.PI_SPAWN_RECORD);
+        const workerPrompt = readFileSync(process.env.PI_SPAWN_RECORD + ".prompt", "utf8");
+        expect(workerPrompt).not.toContain("Other worker private decision");
+        expect(workerPrompt).not.toContain("memory_update");
+        if (item.name === "ungranted") {
+          expect(workerPrompt).not.toContain("## Memory workflow");
+          expect(workerPrompt).not.toContain("## Available memory");
+        } else {
+          expect(workerPrompt).toContain("## Memory workflow");
+          if (item.name === "read" || item.name === "discover") {
+            expect(workerPrompt).toContain("Worker remembered decision");
+            expect(workerPrompt).toContain("Workspace remembered decision");
+          } else {
+            expect(workerPrompt).not.toContain("## Available memory");
+          }
+          if (item.name === "write") expect(workerPrompt).not.toContain("memory_recall");
+          if (item.name === "discover") {
+            expect(workerPrompt).toContain("graph_worker_tools");
+            expect(workerPrompt).not.toContain('action="call"');
+          }
+        }
+      }
     } finally {
       process.chdir(previousCwd);
       if (previousBinary === undefined) delete process.env.PI_BIN_PATH; else process.env.PI_BIN_PATH = previousBinary;

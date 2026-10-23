@@ -190,7 +190,7 @@ session client and no dispatch backend, plus `load_role_skill` — 15 tools:
 | Group | Tools |
 |---|---|
 | Files | `hashline_read`, `hashline_edit` |
-| Memory | `memory_write`, `memory_recall`, `memory_list` |
+| Memory | `memory_write`, `memory_recall`, `memory_read`, `memory_list`, `memory_update` |
 | Web | `web_search`, `web_read`, `web_fetch` |
 | Assets and references | `asset_search`, `asset_inspect`, `asset_validate`, `reference_search`, `load_role_skill` |
 | Runtime | `signal`, `interactive_terminal` |

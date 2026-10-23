@@ -93,6 +93,7 @@ import {
 } from "../platform/adapters/dsh/role-tool-policy.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
 import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
+import { createDshMemoryContext, DSH_MEMORY_WORKFLOW_TOOLS, type DshMemoryAgent } from "../platform/adapters/dsh/memory-context.ts";
 import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/system-prompt.ts";
 import {
   createDshSkillProviderFactory,
@@ -1314,6 +1315,25 @@ export async function apply(
   const activeRoleStore = new ActiveRoleStore(process.cwd());
   const activeRole = createActiveRoleRef(activeRoleStore);
   let workerBoundary: ReturnType<typeof installDshGraphWorkerBoundary> | undefined;
+  const memoryToolNames = new Map<string, string>();
+  const memoryContext = createDshMemoryContext({
+    roles: () => resolvedRoles,
+    activeRole: sessionId => activeRole.get(sessionId),
+    session: sessionId => ctx.sessions.get(sessionId),
+    workspace: session => {
+      const service = ctx.get("workingDirectory") as { get?(session: NonNullable<DshMemoryAgent["session"]>): string } | undefined;
+      return service?.get?.(session);
+    },
+    names: () => memoryToolNames,
+    tools: agent => {
+      const names = [...memoryToolNames.values()];
+      const catalog = ctx.tools.schemas?.(agent);
+      return catalog ? names.filter(name => catalog.some(tool => tool.name === name)) : names;
+    },
+    worker: agent => workerBoundary?.isWorker(agent)
+      ? { ...workerBoundary.toolGrantOf(agent), agent: workerBoundary.roleOf(agent) }
+      : undefined,
+  });
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -1325,9 +1345,8 @@ export async function apply(
     const activeId = agentId ?? activeRole.get(sessionId);
     if (!activeId) return undefined;
     const functions = roleFunctionsMap.get(activeId);
-    if (!functions || functions.length === 0) return undefined;
-    const block = buildAvailableFunctionsBlock(functions);
-    return block ? [{ type: "text", text: block }] : undefined;
+    const blocks = [buildAvailableFunctionsBlock(functions ?? []), memoryContext.render({ id: sessionId }, activeId)].filter(Boolean);
+    return blocks.length ? blocks.map(text => ({ type: "text" as const, text })) : undefined;
   };
   // Provider-route safety path: probe the mounted dsh llm service and hand the
   // registrar a live route list, so a split definition model whose provider has
@@ -1475,6 +1494,11 @@ export async function apply(
         roleFunctionsMap,
         directory: dirs.roleboxDir,
         isGraphWorker: context => workerBoundary?.isWorker(context.agent ?? undefined) ?? false,
+        memoryContext: context => {
+          const agent = context.agent ?? context.scope;
+          return memoryContext.render(agent && typeof agent === "object" ? agent as DshMemoryAgent
+            : { id: context.sessionID ?? context.sessionId });
+        },
       });
       promptAdapter.register(systemPromptRegistry);
       promptDisposers.push(() => promptAdapter.dispose());
@@ -1566,7 +1590,9 @@ export async function apply(
   // the host store and reaches the model as a real image block instead of a
   // text line. Absent → the factory keeps its text-only output.
   const attachments = probeAttachments(ctx);
-  const factory = new DshToolFactory(attachments === undefined ? {} : { attachments });
+  const factory = new DshToolFactory({ attachments,
+    memoryContext: (exec, name) => memoryContext.forTool(exec.agent ?? {}, name),
+  });
 
   // ── dsh dispatch path (subtask 8) ────────────────────────────────────────
   //
@@ -1649,9 +1675,11 @@ export async function apply(
         // The attempt's materialized input view reaches the worker through the
         // attempt-delivery prompt the adapter appends after this block, so this
         // hook does not read it.
-        return prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
+        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
           resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
           request.declaredTools, request.toolPresentation);
+        const memory = systemPromptRegistry ? "" : memoryContext.render({ session: { header: { cwd: workspace } } }, request.agent, request);
+        return memory ? `${prompt}\n\n${memory}` : prompt;
       },
       composeRequest: (agent, request, workerPrompt) =>
         registrar.composeSpawnRequest(agent, request, workerPrompt),
@@ -2212,6 +2240,7 @@ export async function apply(
     // skip is NOT a namespace-filter drop.
     if (plan.action === "skip") continue;
     const dispose = ctx.tools.register(plan.definition);
+    if (DSH_MEMORY_WORKFLOW_TOOLS.some(name => name === key)) memoryToolNames.set(key, plan.definition.name);
     toolDisposers.push(dispose);
     registeredTools++;
   }

@@ -9,7 +9,7 @@ import { collectOpenRoles, type OpenRoleEntry } from "./open-roles.ts";
 import { subagentDir, globalFunctionsPath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, SubAgentConfig } from "../types.ts";
-import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR } from "../constants.ts";
+import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS } from "../constants.ts";
 
 const log = createSubLogger("orchestrator");
 
@@ -144,8 +144,7 @@ async function resolveSubagents(
       const inheritedFrom: Record<string, unknown> = {};
       const parentObj = inheritedParent as unknown as Record<string, unknown>;
       const childObj = saConfig as unknown as Record<string, unknown>;
-      const inheritableKeys = ["model", "color", "variant", "temperature", "top_p", "permission", "tools"] as const;
-      for (const key of inheritableKeys) {
+      for (const key of INHERITABLE_FIELDS) {
         if (parentObj[key] !== undefined && childObj[key] === parentObj[key]) {
           inheritedFrom[key] = parentObj[key];
         }

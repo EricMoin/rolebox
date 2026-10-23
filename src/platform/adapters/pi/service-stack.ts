@@ -152,10 +152,11 @@ export class PiLightweightServiceStack implements IHookProvider {
     stateDir: string = process.cwd(),
     interceptorHooks?: ToolInterceptorHooks,
     outcomeGraphTools?: Record<string, CanonicalToolDef>,
+    memoryRoleFor?: (sessionID: string) => string | null | undefined,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
-    this._toolFactory = new PiToolFactory(interceptorHooks);
+    this._toolFactory = new PiToolFactory(interceptorHooks, memoryRoleFor);
     this._sessionAdapter = new PiSessionAdapter(sessionDir);
     this._dispatchTools = dispatchTools;
     this._loopTools = loopTools;
@@ -228,7 +229,7 @@ export class PiLightweightServiceStack implements IHookProvider {
         ? this._taskTools
         : undefined,
       // Platform-extra tools (opencode-only surface adapted for Pi, e.g.
-      // memory_update, function_graph, skill_compose, context_assemble).
+      // function_graph, skill_compose, context_assemble).
       // Same `.length > 0` degradation guard as the other overrides: an empty
       // record registers nothing rather than overriding the shared surface.
       extraTools: this._extraTools && Object.keys(this._extraTools).length > 0

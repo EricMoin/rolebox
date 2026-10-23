@@ -283,7 +283,7 @@ describe("handleSystemTransform — memory injection", () => {
       makeState(),
       minimalDeps({
         roleFunctionsMap: new Map([["agent-a", [] as any]]),
-        roleMap: new Map([["agent-a", { config: { memory: { inject: true } } } as any]]),
+        roleMap: new Map([["agent-a", { id: "agent-a", config: { memory: { inject: true } }, subagents: [] } as any]]),
       }),
     );
 

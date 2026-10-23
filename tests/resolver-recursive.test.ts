@@ -74,6 +74,22 @@ function setup(): { ctx: ResolveContext; roleMap: Map<string, RoleConfig>; clean
 }
 
 describe("Recursive subagent resolution", () => {
+  it("tracks inherited memory settings for nested agents", async () => {
+    const { ctx, roleMap, cleanup } = setup();
+    try {
+      const parent = roleMap.get("emperor")!;
+      const memory = { inject: false };
+      parent.memory = memory;
+      parent.subagents![0].memory = memory;
+      parent.subagents![0].subagents![0].memory = memory;
+      const resolved = await resolveAllRoles(roleMap, ctx);
+      expect(resolved[0].subagents[0].inheritedFrom.memory).toBe(memory);
+      expect(resolved[0].subagents[0].subagents[0].inheritedFrom.memory).toBe(memory);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("resolves nested subagents with hierarchical IDs", async () => {
     const { ctx, roleMap, cleanup } = setup();
     try {

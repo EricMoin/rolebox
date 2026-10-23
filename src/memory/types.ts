@@ -10,12 +10,12 @@
 export interface MemoryConfig {
   /** Whether to auto-inject the `## Available memory` block at session start (default: true) */
   inject?: boolean;
-  /** Max memory summaries to inject into system prompt (default: 10) */
+  /** Max memory summaries to inject into system prompt, from 0 to 100 (default: 10) */
   max_inject?: number;
   /** Minimum relevance level to inject: "high" | "medium" | "low" (default: "medium") */
-  min_relevance?: string;
+  min_relevance?: "high" | "medium" | "low";
   /** Which scope to inject: "role" | "workspace" | "both" (default: "both") */
-  scope?: string;
+  scope?: "role" | "workspace" | "both";
 }
 
 /**

@@ -18,6 +18,7 @@ import type { IToolFactory } from "../../ports/tool-factory.ts";
 import type { CanonicalToolDef, CanonicalToolContext, ToolResult } from "../../types.ts";
 import { interceptToolBefore } from "./tool-interceptor.ts";
 import type { ToolInterceptorHooks } from "./tool-interceptor.ts";
+import { MEMORY_TOOL_NAMES } from "../../../memory/tool-policy.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -188,9 +189,11 @@ function toCanonicalContext(
 export class PiToolFactory implements IToolFactory {
   /** Optional hook wiring for the tool-execution interceptor (subtask S9). */
   #hooks: ToolInterceptorHooks | undefined;
+  #memoryRoleFor: ((sessionID: string) => string | null | undefined) | undefined;
 
-  constructor(hooks?: ToolInterceptorHooks) {
+  constructor(hooks?: ToolInterceptorHooks, memoryRoleFor?: (sessionID: string) => string | null | undefined) {
     this.#hooks = hooks;
+    this.#memoryRoleFor = memoryRoleFor;
   }
 
   compile<Args extends z.ZodRawShape>(def: CanonicalToolDef<Args>): unknown {
@@ -211,6 +214,7 @@ export class PiToolFactory implements IToolFactory {
     // Capture the interceptor wiring — the returned execute closure runs in
     // the context of the tool object, not the factory, so `this` is unsafe.
     const hooks = this.#hooks;
+    const memoryRoleFor = this.#memoryRoleFor;
 
     return {
       name,
@@ -225,6 +229,9 @@ export class PiToolFactory implements IToolFactory {
         ctx: Record<string, unknown>,
       ): Promise<{ content: PiContentBlock[]; details: Record<string, unknown> }> {
         const context = toCanonicalContext(toolCallId, signal, onUpdate, ctx);
+        if (!context.agent && (name === "context_assemble" || MEMORY_TOOL_NAMES.some(tool => tool === name))) {
+          context.agent = memoryRoleFor?.(context.sessionID) ?? "";
+        }
         // Subtask S9 — tool-execution interceptor: run the shared
         // handleToolBefore pipeline (strict zod validation, deprecated
         // warnings, custom-hook before/after phases, correction injection)

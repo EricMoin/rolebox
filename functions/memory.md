@@ -13,7 +13,7 @@ The `{scope}` parameter controls what gets processed:
 
 | Value | Behavior |
 |---|---|
-| `all` (default) | Incremental — skip sessions already captured in existing memories |
+| `all` (default) | Incremental — prioritize sessions not represented in existing memories |
 | `full` | Full rescan — re-process ALL sessions, deduplicate and merge |
 | `recent` | Only the 5 most recent sessions |
 | `session:<id>` | Only the specified session ID |
@@ -22,7 +22,7 @@ The `{scope}` parameter controls what gets processed:
 
 ### 1. Discover Existing Memories
 
-Start by running **`memory_list`** to see what memories already exist. Inspect each memory's `source_sessions` field — this tells you which sessions have already been processed.
+Start by running **`memory_list(format="json", limit=100, offset=0)`** to see workspace and current-role memories. Continue with offsets 100, 200, and so on until a page contains fewer than 100 entries, before writing any changes. Inspect `source_sessions` to identify sessions that supplied existing memories, and use **`memory_read(id=...)`** for the full content of entries you may revise.
 
 ### 2. Discover Sessions
 
@@ -30,7 +30,7 @@ Use **`session_list`** to list all sessions in this project. The returned sessio
 
 ### 3. Select Sessions to Process
 
-- **Incremental (default `all`):** Compare each session ID from `session_list` against the `source_sessions` fields of every existing memory. Skip sessions already represented. Only process sessions not yet captured.
+- **Incremental (default `all`):** Compare each session ID from `session_list` against the existing memories' `source_sessions`. Prioritize unrepresented sessions. A source session is provenance, not proof of a complete consolidation pass: revisit a represented session when it contains newer material or was only partially captured. A session that produced no durable memory may be revisited; do not create an empty memory just to mark it processed.
 - **Full (`full`):** Include every session. Before writing, use `memory_recall` to check for existing similar memories and merge instead of duplicating.
 - **Recent (`recent`):** Take the 5 most recent sessions from `session_list` by timestamp.
 - **Session (`session:<id>`):** Process only the exact session ID provided.
@@ -45,13 +45,14 @@ Before creating any new memory:
 
 1. Identify the key terms from the knowledge you intend to record.
 2. Use **`memory_recall`** with those terms to search for an existing similar memory.
-3. If a match exists — do not write a duplicate. Use **`memory_update`** to merge the new information into the existing entry. Update the title, content, tags, or relevance as needed, and add the new session ID to `source_sessions`.
+3. If a match exists, read it with **`memory_read`** before deciding. For the same supported conclusion, use **`memory_update`** to merge the useful information and pass the supporting session IDs in `source_sessions`; existing source IDs are retained automatically. A keyword match alone does not justify replacing a conclusion. Preserve unresolved disagreements separately with their evidence.
 4. If no match exists, proceed to write.
 
 ### 6. Write or Update
 
 - Use **`memory_write`** to create new memories.
 - Use **`memory_update`** to revise existing ones when new information supersedes or refines an earlier recording.
+- Pass the reviewed session IDs as `source_sessions` on both tools. The current session is recorded automatically; it does not replace the sessions that supplied the evidence.
 
 ## What to Remember
 
@@ -71,6 +72,7 @@ Avoid storing ephemeral or redundant information:
 - Temporary debugging steps that did not yield insights
 - Information already captured in code, comments, or documentation
 - Transient state or one-time observations
+- Secrets, credentials, or sensitive personal information
 
 ## Scope for Memories
 

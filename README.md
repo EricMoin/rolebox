@@ -333,7 +333,7 @@ Unrecognized values pass through unchanged with a warning. Full resolution chain
 | | | |
 |---|---|---|
 | [Graph outcome protocol](docs/graph-outcome-protocol.md) | [Graph v3 operations](docs/graph-v3-operations.md) | [Graph engine architecture](docs/graph-engine-architecture.md) |
-| [Memory strategy](docs/memory-strategy.md) | [Session tools](docs/session-tools-strategy.md) | [Copilot (turn-end)](docs/copilot.md) |
+| [Memory usage](docs/memory.md) | [Session tools](docs/session-tools-strategy.md) | [Copilot (turn-end)](docs/copilot.md) |
 | [Functions](docs/functions.md) | [Hooks](docs/hooks.md) | [Extensions](docs/extensions.md) |
 
 **Build a role**

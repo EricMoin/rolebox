@@ -36,6 +36,8 @@ const REQUIRED_TOOLS = [
   "memory_write",
   "memory_recall",
   "memory_list",
+  "memory_read",
+  "memory_update",
   "web_search",
   "web_read",
   "web_fetch",

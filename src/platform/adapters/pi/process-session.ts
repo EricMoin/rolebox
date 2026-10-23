@@ -3,6 +3,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { WorkerChannelGrant } from "../../../graph/application/worker-channel.ts";
 import type { OutcomeDispatchRequest } from "../../../graph/outcome/dispatch-effects.ts";
 import type { PiWorkerToolConfig } from "./worker-tools.ts";
+import { piWorkerToolAllowed } from "./worker-tools.ts";
+import { buildMemoryContext } from "../../../memory/context.ts";
+import { MEMORY_TOOL_NAMES } from "../../../memory/tool-policy.ts";
+import type { MemoryConfig } from "../../../memory/types.ts";
 import { buildGraphWorkerToolGrantBlock } from "../../../prompt/graph-worker.ts";
 import { childSessionFile } from "./child-session.ts";
 import { readPiGraphObservation } from "./graph-observation.ts";
@@ -79,6 +83,7 @@ export interface PiProcessAgentConfig {
   systemPrompt: string;
   /** Prepared role context for graph attempts; ordinary child sessions keep systemPrompt. */
   graphWorkerSystemPrompt?: string;
+  memory?: MemoryConfig;
 }
 
 /**
@@ -1071,7 +1076,33 @@ export class PiProcessSessionAdapter implements ISessionClient {
     const rolePrompt = graphDispatch
       ? record.agentConfig.graphWorkerSystemPrompt ?? systemPrompt ?? record.agentConfig.systemPrompt
       : systemPrompt ?? record.agentConfig.systemPrompt;
-    const effectivePrompt = workerTools ? rolePrompt + "\n\n" + buildGraphWorkerToolGrantBlock(workerTools.grants, workerTools.presentation, workerTools.baseline) : rolePrompt;
+    let effectivePrompt = workerTools ? rolePrompt + "\n\n" + buildGraphWorkerToolGrantBlock(workerTools.grants, workerTools.presentation, workerTools.baseline) : rolePrompt;
+    if (workerTools) {
+      const memoryTools = MEMORY_TOOL_NAMES.filter((name) => piWorkerToolAllowed(name, workerTools) &&
+        workerTools.proxies.some((tool) => tool.name === name));
+      const options = {
+        roleId: agentId ?? graphDispatch?.request?.agent ?? "",
+        config: record.agentConfig.memory,
+        tools: memoryTools,
+        presentation: workerTools.presentation?.mode,
+      };
+      let block = buildMemoryContext(options);
+      if (options.config?.inject !== false && (options.config?.max_inject ?? 10) > 0 &&
+        memoryTools.some((name) => name === "memory_recall" || name === "memory_read" || name === "memory_list")) {
+        try {
+          const { MemoryStore } = await import("../../../memory/store.ts");
+          const store = await MemoryStore.create(process.cwd());
+          try {
+            block = buildMemoryContext({ ...options, store });
+          } finally {
+            store.close();
+          }
+        } catch (error) {
+          this.log.debug("Worker memory summaries unavailable", { error: String(error) });
+        }
+      }
+      if (block) effectivePrompt += "\n\n" + block;
+    }
     await writeFile(sysPromptPath, effectivePrompt, "utf-8");
 
     // Persist the effective system prompt NEXT TO the transcript

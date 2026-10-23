@@ -1,21 +1,32 @@
 import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { type DatabaseDriver, createDatabase } from "./db-driver.ts";
-import { memoryDbPath, shortHash } from "../utils/state-paths.ts";
+import { type DatabaseDriver, createDatabase, createDatabaseSync } from "./db-driver.ts";
+import { memoryDbPath } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 import { logEvent } from "../log/index.ts";
 import type { MemoryEntry, MemorySummary } from "../types.ts";
 import { ensureMemorySchema } from "./schema.ts";
 import { searchMemories, type MemorySearchOptions } from "./search.ts";
+import { memoryVisibility } from "./visibility.ts";
 
 const log = createSubLogger("memory:store");
 
 export interface MemoryListOptions {
+  /** Undefined allows administrative access; an empty string allows only workspace entries. */
+  roleId?: string;
   scope?: string;
   category?: string;
   limit?: number;
+  offset?: number;
   sort?: "recent" | "relevance" | "accessed";
   minRelevance?: string;
+}
+
+export interface MemoryListSummary extends MemorySummary {
+  scope: string;
+  role_id: string;
+  source_sessions: string[];
 }
 
 export type { MemorySearchOptions } from "./search.ts";
@@ -35,11 +46,27 @@ export class MemoryStore {
     const path = memoryDbPath(workspaceDir);
     mkdirSync(dirname(path), { recursive: true });
     const db = await createDatabase(path);
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA foreign_keys = ON");
-    const store = new MemoryStore(db);
-    store.ensureSchema();
-    return store;
+    return MemoryStore.initialize(db);
+  }
+
+  /** Open synchronously for host prompt providers that cannot await. */
+  static open(workspaceDir: string): MemoryStore {
+    const path = memoryDbPath(workspaceDir);
+    mkdirSync(dirname(path), { recursive: true });
+    return MemoryStore.initialize(createDatabaseSync(path));
+  }
+
+  private static initialize(db: DatabaseDriver): MemoryStore {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA foreign_keys = ON");
+      const store = new MemoryStore(db);
+      store.ensureSchema();
+      return store;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
   }
 
   // ── Schema ──────────────────────────────────────────────────────────────
@@ -51,13 +78,13 @@ export class MemoryStore {
   // ── CRUD ────────────────────────────────────────────────────────────────
 
   /**
-   * Write a new memory entry. Generates the ID from title + timestamp,
+   * Write a new memory entry. Generates an independent ID,
    * sets timestamps, and inserts atomically. Returns the new ID.
    */
   write(
     entry: Omit<MemoryEntry, "id" | "created_at" | "updated_at" | "accessed_at" | "access_count">,
   ): string {
-    const id = shortHash(`${entry.title}${Date.now()}`);
+    const id = randomUUID();
     const now = new Date().toISOString();
 
     const doWrite = this.db.transaction((): string => {
@@ -87,11 +114,12 @@ export class MemoryStore {
    * Read a memory entry by ID. Returns null if not found.
    * Parses `tags` and `source_sessions` from JSON strings to arrays.
    */
-  read(id: string): MemoryEntry | null {
+  read(id: string, roleId?: string): MemoryEntry | null {
     try {
+      const visibility = memoryVisibility(roleId);
       const row = this.db
-        .query("SELECT * FROM memories WHERE id = ?")
-        .get(id) as Record<string, unknown> | undefined;
+        .query(`SELECT * FROM memories WHERE id = ? AND ${visibility.sql}`)
+        .get(id, ...visibility.params) as Record<string, unknown> | undefined;
 
       if (!row) return null;
 
@@ -110,10 +138,15 @@ export class MemoryStore {
   /**
    * Update an existing memory entry. Only the provided fields are changed.
    * Automatically sets `updated_at` to the current time.
-   * Serializes `tags` and `source_sessions` to JSON strings if present.
+   * Merges source sessions so provenance survives later updates.
    */
-  update(id: string, fields: Partial<MemoryEntry>): void {
+  update(id: string, fields: Partial<MemoryEntry>, roleId?: string): boolean {
     const doUpdate = this.db.transaction(() => {
+      const existing = this.read(id, roleId);
+      if (!existing) return false;
+      if (roleId !== undefined &&
+          ((fields.scope !== undefined && fields.scope !== existing.scope) ||
+           (fields.role_id !== undefined && fields.role_id !== existing.role_id))) return false;
       const now = new Date().toISOString();
       const sets: string[] = [];
       const params: unknown[] = [];
@@ -142,24 +175,19 @@ export class MemoryStore {
 
       if (fields.source_sessions !== undefined) {
         sets.push("source_sessions = ?");
-        params.push(JSON.stringify(fields.source_sessions));
+        params.push(JSON.stringify([...new Set([...existing.source_sessions, ...fields.source_sessions])]));
       }
 
       sets.push("updated_at = ?");
       params.push(now);
 
-      if (sets.length === 1) {
-        // Only updated_at was pushed — nothing to update beyond that
-        this.db.run("UPDATE memories SET updated_at = ? WHERE id = ?", now, id);
-        return;
-      }
-
       const sql = `UPDATE memories SET ${sets.join(", ")} WHERE id = ?`;
       params.push(id);
       this.db.run(sql, ...params);
+      return true;
     });
 
-    doUpdate();
+    return doUpdate();
   }
 
   /**
@@ -173,11 +201,12 @@ export class MemoryStore {
 
   /**
    * List memory summaries with optional filters.
-   * Returns only summary fields (id, title, category, relevance, updated_at).
+   * Includes identity and provenance, but not memory content.
    */
-  list(options?: MemoryListOptions): MemorySummary[] {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
+  list(options?: MemoryListOptions): MemoryListSummary[] {
+    const visibility = memoryVisibility(options?.roleId);
+    const conditions: string[] = [visibility.sql];
+    const params: unknown[] = [...visibility.params];
 
     // Scope filtering
     if (options?.scope && options.scope !== "both") {
@@ -220,12 +249,13 @@ export class MemoryStore {
     const limit = options?.limit ?? 20;
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const sql = `SELECT id, title, category, relevance, updated_at FROM memories ${where} ${orderClause} LIMIT ?`;
+    const sql = `SELECT id, title, category, relevance, updated_at, scope, role_id, source_sessions FROM memories ${where} ${orderClause}, id LIMIT ? OFFSET ?`;
 
-    params.push(limit);
+    params.push(limit, options?.offset ?? 0);
 
     try {
-      return this.db.query(sql).all(...params) as MemorySummary[];
+      const rows = this.db.query(sql).all(...params) as Record<string, unknown>[];
+      return rows.map(row => ({ ...row, source_sessions: parseJsonArray(row.source_sessions) })) as MemoryListSummary[];
     } catch (err) {
       log.warn("memory list query failed", { error: String(err) });
       return [];

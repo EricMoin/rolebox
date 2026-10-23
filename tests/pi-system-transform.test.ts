@@ -196,7 +196,7 @@ describe("runPiSystemTransform — memory injection", () => {
     expect(result).toContain("Pi runs on Bun");
   });
 
-  it("does not crash and injects no memory block when the role has no memory config", async () => {
+  it("teaches memory use without injecting summaries when the store is empty", async () => {
     const sid = "sess-mem";
     const role = makeRole(); // no config.memory → defaults (inject: true), empty store
 
@@ -209,7 +209,8 @@ describe("runPiSystemTransform — memory injection", () => {
       makeDeps(tmpDir, { roleMap: new Map([["agent-a", role]]) }),
     );
 
-    expect(result).toBe("base");
+    expect(result).toStartWith("base");
+    expect(result).toContain("## Memory workflow");
     expect(result).not.toContain("## Available memory");
   });
 });

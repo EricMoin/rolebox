@@ -64,6 +64,8 @@ export interface SubAgentConfig {
   permission?: PermissionConfig;
   /** Map of tool names to enabled/disabled state override */
   tools?: Record<string, boolean>;
+  /** Memory injection settings; an explicit block replaces the parent's settings. */
+  memory?: MemoryConfig;
   /** Names of rolebox-local skills to load for this sub-agent */
   skills?: string[];
   /** Names of opencode-global skills to load for this sub-agent */

@@ -203,6 +203,10 @@ export function buildMemoryBlock(memories: MemorySummary[]): string {
   });
 }
 
+const MEMORY_GRANT_INSTRUCTIONS = "Declare extra host tools in each node's tools array. When prior decisions or lessons matter, " +
+  "grant memory_recall and memory_read if available. Grant memory_write or memory_update when the " +
+  "worker should persist verified, reusable findings. Do not assume a worker inherits your tool access.";
+
 const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents through the graph outcome protocol.\n" +
   "Declare the work as a graph with graph_declare: a version-3 declaration naming each\n" +
   "node\u0027s agent, prompt and the outcomes it may report, plus the edges that route an\n" +
@@ -216,7 +220,8 @@ const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents throug
   "include_output=true) and inventory the store with graph_audit; both are read-only,\n" +
   "and a node\u0027s status changes only when a settlement commits. A transition comes\n" +
   "from a declared outcome and edge only: free-form reports are never ranked, merged\n" +
-  "or interpreted as progress.";
+  "or interpreted as progress.\n" +
+  MEMORY_GRANT_INSTRUCTIONS;
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,
@@ -246,7 +251,7 @@ const PUBLIC_AGENT_INSTRUCTIONS = "You can dispatch tasks to these open roles of
   "inventory the store with graph_audit; both are read-only, and a node\u0027s status\n" +
   "changes only when a settlement commits. A transition comes from a declared outcome\n" +
   "and edge only: free-form reports are never ranked, merged or interpreted as\n" +
-  "progress.";
+  "progress.\n" + MEMORY_GRANT_INSTRUCTIONS;
 
 export function buildPublicAgentsBlock(
   agents: Array<{ id: string; name: string; description: string }>,

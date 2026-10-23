@@ -19,6 +19,8 @@ import {
   createMemoryWriteTool,
   createMemoryRecallTool,
   createMemoryListTool,
+  createMemoryReadTool,
+  createMemoryUpdateTool,
 } from "../memory/tools.ts";
 import { createWebSearchTool } from "../web/web-search.ts";
 import { createPageReadTool } from "../web/page-read.ts";
@@ -126,7 +128,7 @@ export function buildCanonicalTools(
 
   // 1. Core standalone + asset/reference tools (always)
   // These are the intersection tools common to both OpenCode and Pi.
-  // OpenCode-only tools (e.g., memory_update, function_state, context_assemble,
+  // OpenCode-only tools (e.g., function_state, context_assemble,
   // todowrite, task_*, bash, etc.) are intentionally excluded from this set and
   // are passed via extraTools by the platform-specific assembly layer.
   tools.hashline_read = createHashlineReadTool();
@@ -134,6 +136,8 @@ export function buildCanonicalTools(
   tools.memory_write = createMemoryWriteTool();
   tools.memory_recall = createMemoryRecallTool();
   tools.memory_list = createMemoryListTool();
+  tools.memory_read = createMemoryReadTool();
+  tools.memory_update = createMemoryUpdateTool();
   tools.web_search = createWebSearchTool();
   tools.web_read = createPageReadTool();
   tools.web_fetch = createWebFetchTool();

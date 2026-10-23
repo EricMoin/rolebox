@@ -15,7 +15,8 @@ import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "../resolver/env-resolver.ts";
 import { resolveModel } from "../resolver/model-resolver.ts";
-import type { RoleConfig, SubAgentConfig, DispatchRoleConfig, GraphRoleConfig } from "../types.ts";
+import type { RoleConfig, SubAgentConfig, DispatchRoleConfig, GraphRoleConfig, MemoryConfig } from "../types.ts";
+import { parseMemoryConfig } from "../memory/config.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { Logger, ILogObj } from "../logger.ts";
@@ -152,10 +153,25 @@ export function applyInheritance(
     Object.entries(merged).filter(([, v]) => v !== undefined),
   ) as unknown as SubAgentConfig;
 
+  if (config.subagents) {
+    config.subagents = config.subagents.map((nested) => inheritSubagentMemory(nested, config.memory));
+  }
+
   if (trackInheritance) {
     return { config, inheritedFields };
   }
   return config;
+}
+
+function inheritSubagentMemory(child: SubAgentConfig, parentMemory: MemoryConfig | undefined): SubAgentConfig {
+  const memory = child.memory ?? parentMemory;
+  return {
+    ...child,
+    ...(memory === undefined ? {} : { memory }),
+    ...(child.subagents === undefined ? {} : {
+      subagents: child.subagents.map((nested) => inheritSubagentMemory(nested, memory)),
+    }),
+  };
 }
 
 // ── Dispatch parsing ───────────────────────────────────────────────────
@@ -305,6 +321,7 @@ function buildRoleConfig(
   prompt: string,
   dispatchConfig: DispatchRoleConfig | undefined,
   graphConfig: GraphRoleConfig | undefined,
+  memoryConfig: MemoryConfig | undefined,
 ): RoleConfig {
   return {
     name: resolved.name as string,
@@ -355,6 +372,7 @@ function buildRoleConfig(
       : {}),
     ...(dispatchConfig ? { dispatch: dispatchConfig } : {}),
     ...(graphConfig ? { graph: graphConfig } : {}),
+    ...(memoryConfig === undefined ? {} : { memory: memoryConfig }),
     ...(Array.isArray(resolved.auto_activate)
       ? { auto_activate: resolved.auto_activate as string[] }
       : {}),
@@ -394,6 +412,14 @@ async function loadOneRole(
 
   const resolved = resolveEnvVarsDeep(obj) as Record<string, unknown>;
 
+  let memoryConfig: MemoryConfig | undefined;
+  try {
+    memoryConfig = parseMemoryConfig(resolved.memory);
+  } catch (error) {
+    log.warn(`Skipping "${roleId}": ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+
   const dispatchConfig = parseDispatchConfig(
     resolved.dispatch as Record<string, unknown> | null | undefined,
     roleId,
@@ -423,7 +449,7 @@ async function loadOneRole(
     }
   }
 
-  const config = buildRoleConfig(resolved, prompt, dispatchConfig, graphConfig);
+  const config = buildRoleConfig(resolved, prompt, dispatchConfig, graphConfig, memoryConfig);
 
   const mergedSubagents = mergedMap.size > 0 ? Array.from(mergedMap.values()) : undefined;
   if (mergedSubagents) {

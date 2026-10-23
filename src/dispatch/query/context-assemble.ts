@@ -5,6 +5,7 @@ import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import type { ResolvedRole } from "../../types.ts";
 import { MemoryStore } from "../../memory/store.ts";
 import { createSubLogger } from "../../logger.ts";
+import { isAbsolute } from "node:path";
 
 const log = createSubLogger("context-assemble");
 
@@ -38,7 +39,7 @@ export function createContextAssembleTool(deps: ContextAssembleDeps) {
         .default(["memory", "asset", "task", "session"])
         .describe("Which domains to search"),
     },
-    async execute(input) {
+    async execute(input, context) {
       const activeSources = input.sources ?? ["memory", "asset", "task", "session"];
       const maxTokens = input.max_tokens ?? 4000;
       const budgetPerSource = Math.floor(maxTokens / activeSources.length);
@@ -51,15 +52,20 @@ export function createContextAssembleTool(deps: ContextAssembleDeps) {
       let memorySection = "";
       if (activeSources.includes("memory")) {
         try {
-          const store = await MemoryStore.create(deps.directory);
-          const results = store.search({ query: topic, limit: 5 });
-          store.close();
-
-          if (results.length > 0) {
-            memorySection = "### Memory Matches\n" +
-              results
-                .map((r) => `- **${r.title}** [${r.category}]: ${r.content.slice(0, 200)}`)
-                .join("\n");
+          if (!context.directory || !isAbsolute(context.directory)) {
+            throw new Error("Memory search requires the current session's absolute workspace directory");
+          }
+          const store = await MemoryStore.create(context.directory);
+          try {
+            const results = store.search({ query: topic, limit: 5, roleId: context.agent ?? "" });
+            if (results.length > 0) {
+              memorySection = "### Memory Matches\n" +
+                results
+                  .map((r) => `- **${r.title}** [${r.category}]: ${r.content.slice(0, 200)}`)
+                  .join("\n");
+            }
+          } finally {
+            store.close();
           }
         } catch (err) {
           log.warn("memory search failed", { topic, error: String(err) });

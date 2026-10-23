@@ -269,6 +269,7 @@ export type DshGraphWorkerGrantHost = Pick<OutcomeHost, "workerPrincipalOf"> &
   Partial<Pick<OutcomeHost, "workerDeclaredToolsOf" | "workerToolPresentationOf" | "workerToolGrantOf">>;
 
 export interface DshWorkerStartupTools {
+  readonly agent?: string;
   readonly declaredTools?: readonly string[];
   readonly toolPresentation?: WorkerToolPresentation;
 }
@@ -460,6 +461,8 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
   if (stop) disposers.push(stop);
   return {
     isWorker,
+    toolGrantOf: grantOf,
+    roleOf: (agent?: DshWorkerAgent) => agent ? prepared.get(agent)?.startup.agent : undefined,
     async start<T>(label: string, create: () => Promise<T>, startup: DshWorkerStartupTools = {}): Promise<T> {
       if (!guard) throw new Error("This dsh host cannot enforce the graph worker execution guard");
       labels.add(label);

@@ -1006,6 +1006,11 @@ export interface DshToolPresentation {
  * has no truthful view to declare.
  */
 export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>> = {
+  memory_recall: { presentCall: presentSearchCall },
+  memory_list: { presentCall: () => ({ card: "generic", title: "Browse memories", kind: "read" }) },
+  memory_read: { presentCall: args => ({ card: "generic", title: `Read memory ${(args as { id?: string } | undefined)?.id ?? ""}`, kind: "read" }) },
+  memory_write: { presentCall: args => ({ card: "generic", title: `Remember: ${(args as { title?: string } | undefined)?.title ?? ""}`, kind: "edit" }) },
+  memory_update: { presentCall: args => ({ card: "generic", title: `Update memory ${(args as { id?: string } | undefined)?.id ?? ""}`, kind: "edit" }) },
   // File read: a `read` generic card (dsh analogue:
   // fs/tool-fs/src/read.ts `presentCall`). The body only reads the file and
   // formats it, so it may join a parallel group.
@@ -1074,6 +1079,7 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
  * which only the record key provides (same constraint as the Pi adapter).
  */
 export interface DshToolFactoryOptions {
+  memoryContext?: (exec: DshToolRunContext, name: string) => Pick<CanonicalToolContext, "agent" | "directory" | "worktree">;
   /**
    * The mounted harness image-attachment service, in the structural shape of
    * {@link DshAttachmentService} (the dsh entry passes the host's
@@ -1093,9 +1099,11 @@ export class DshToolFactory implements IToolFactory {
    * directly, so there is no per-call seam to resolve it later.
    */
   readonly #attachments: DshAttachmentService | undefined;
+  readonly #memoryContext: DshToolFactoryOptions["memoryContext"];
 
   constructor(options: DshToolFactoryOptions = {}) {
     this.#attachments = options.attachments;
+    this.#memoryContext = options.memoryContext;
   }
 
   compile<Args extends z.ZodRawShape>(def: CanonicalToolDef<Args>): unknown {
@@ -1132,6 +1140,7 @@ export class DshToolFactory implements IToolFactory {
     // Compiled once per tool (not per call) — the SAME zod object root drives
     // incoming-args validation in execute().
     const argsSchema = z.object(def.args);
+    const memoryContext = this.#memoryContext;
     // Optional native-presentation surface. Absent for tools rolebox has no
     // truthful view for — they fall back to dsh's generic presentation. Members
     // are spread individually so an entry declaring only some of them never
@@ -1196,6 +1205,9 @@ export class DshToolFactory implements IToolFactory {
           return formatArgCorrection(parsed.error.issues, args);
         }
         const context = toCanonicalContext(exec);
+        if ((name.startsWith("memory_") || name === "context_assemble") && memoryContext) {
+          Object.assign(context, memoryContext(exec, name));
+        }
         const result = await def.execute(parsed.data as never, context);
         // Canonical tools whose body returns a JSON-object string (e.g. the
         // graph tools' `json(...)`) must stay byte-identical as MODEL-VISIBLE
