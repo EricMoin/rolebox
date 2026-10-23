@@ -1384,11 +1384,22 @@ describe("opencode graph host — the declaring session's wake-up channel", () =
     const tools = host.createTools();
     const delivery = await declareAndDeliver(host, session, workspace);
 
-    // A THIRD session — neither the declarer nor the dispatched worker — READS
-    // the run. The notification target is the graph's recorded invocation origin,
-    // so a read can never move it.
+    // A THIRD session — neither the declarer nor the dispatched worker — cannot
+    // READ the run: a host-attributed graph_status is scoped to the graphs its
+    // own session declared. The notification target is the graph's recorded
+    // invocation origin, so a read can never move it.
     const observer = makeContext("session-observer", "agent.observer", workspace);
-    const reading = await readStatus(tools, delivery.graphId, observer);
+    const refused = await callTool(
+      tools,
+      "graph_status",
+      { graph_id: delivery.graphId, format: "json" },
+      observer,
+    );
+    expect(refused).toContain("Unknown graph in the selected scope");
+
+    // The declaring session still reads its own run.
+    const declarer = makeContext("session-parent", "agent.parent", workspace);
+    const reading = await readStatus(tools, delivery.graphId, declarer);
     expect(reading.phase).not.toBe("complete");
     expect(nodeOf(reading, "solo").status).toBe("dispatched");
 

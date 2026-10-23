@@ -104,16 +104,17 @@ export interface GraphQueryResult {
 }
 
 /** Read-only inventory. Never initializes a missing store or repairs an unreadable one. */
-export function queryGraphs(storeDirectory: string): GraphQueryResult {
+export function queryGraphs(storeDirectory: string, sessionId?: string): GraphQueryResult {
   const loaded = loadGraphStoreSync(storeDirectory);
   if (loaded.kind === "absent") return { graphs: [], refused: [] };
-  if (loaded.kind !== "valid") return { graphs: [], refused: [], blocked: describeStoreVerdict(loaded) };
+  if (loaded.kind !== "valid") return { graphs: [], refused: [], blocked: sessionId ? "Graph store unavailable for this session" : describeStoreVerdict(loaded) };
   const store = loaded.value;
   try {
     return store.transaction(() => {
       const graphs: GraphView[] = [];
       const refused: { graphId: string; reason: string }[] = [];
       for (const graphId of store.definitionGraphIds()) {
+        if (sessionId && store.readInvocationOrigin(graphId)?.sessionId !== sessionId) continue;
         try { graphs.push(readGraphView(store, graphId)); }
         catch (error) { refused.push({ graphId, reason: errorText(error) }); }
       }
@@ -121,7 +122,7 @@ export function queryGraphs(storeDirectory: string): GraphQueryResult {
       return { graphs, refused };
     });
   } catch (error) {
-    return { graphs: [], refused: [], blocked: errorText(error) };
+    return { graphs: [], refused: [], blocked: sessionId ? "Graph inventory unavailable for this session" : errorText(error) };
   } finally {
     store.close();
   }

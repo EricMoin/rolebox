@@ -246,7 +246,7 @@ describe("auditGraphStore — the surviving store evidence", () => {
     const output = await auditTool.execute(
       {},
       {
-        sessionID: "s1",
+        sessionID: "",
         messageID: "m1",
         agent: "test-agent",
         directory: dir,

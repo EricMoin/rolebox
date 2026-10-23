@@ -231,8 +231,12 @@ export class GraphToolSet {
     );
   }
 
-  graph_status(args: GraphStatusArgs): string {
-    return renderGraphQuery(queryGraphs(this.storeDirectory() ?? engineStateDir(process.cwd())), args, new Set(this.declaredGraphs.keys()));
+  graph_status(args: GraphStatusArgs, invokingSessionId?: string): string {
+    const query = queryGraphs(this.storeDirectory() ?? engineStateDir(process.cwd()), invokingSessionId);
+    const sessionGraphs = invokingSessionId
+      ? new Set([...query.graphs, ...query.refused].map(graph => graph.graphId))
+      : new Set(this.declaredGraphs.keys());
+    return renderGraphQuery(query, args, sessionGraphs);
   }
   private storeDirectory(): string | undefined {
     const isolation = readCredentialIsolationAdapter(this.deps.credentialIsolation);
@@ -241,9 +245,10 @@ export class GraphToolSet {
     return engineStateDir(this.deps.stateDir);
   }
 
-  async graph_audit(): Promise<DrainAuditReport> {
+  async graph_audit(invokingSessionId?: string): Promise<DrainAuditReport> {
     return auditGraphStore({
       directory: this.deps.stateDir ?? process.cwd(),
+      sessionId: invokingSessionId,
       ...(this.storeDirectory() === undefined
         ? {}
         : { ledgerDirectory: this.storeDirectory() }),

@@ -651,7 +651,7 @@ describe("a dispatched worker cannot reach the declarer/store face", () => {
 // ── The boundary does not over-block ────────────────────────────────────────
 
 describe("the boundary refuses only a bound worker", () => {
-  it("leaves the declaring session and an unrelated session the full face", async () => {
+  it("keeps the declaring session's face and restricts unrelated observations to their own graphs", async () => {
     const fixture = await openFaceFixture(FAN_OUT);
     try {
       const declarer = fixture.contextOf("session-declarer", "agent.declarer");
@@ -686,24 +686,20 @@ describe("the boundary refuses only a bound worker", () => {
       expect(declared.graph_id).toBe(OTHER.name);
       expect(readStoredDefinition(fixture.storeRoot, OTHER.name).kind).toBe("ok");
 
-      // An UNRELATED session was never bound by this host, so this boundary
-      // does not touch it. (Its SUBMISSIONS are the submission ingress's
-      // business — tests/graph/submit-ingress-credentials.test.ts — not this
-      // face's.) Its status read is a REAL body answer too, parsed.
       const unrelated = fixture.contextOf("unrelated-session", "unrelated-agent");
-      const unrelatedStatus = JSON.parse(
-        String(
-          await fixture.tools.graph_status.execute(
-            { graph_id: FAN_OUT.name, format: "json" },
-            unrelated,
-          ),
+      const unrelatedStatus = String(
+        await fixture.tools.graph_status.execute(
+          { graph_id: FAN_OUT.name, format: "json" },
+          unrelated,
         ),
-      ) as { graph_id?: string; nodes?: Array<{ node_id?: string }> };
-      expect(unrelatedStatus.graph_id).toBe(FAN_OUT.name);
-      expect(unrelatedStatus.nodes?.map((node) => node.node_id).sort()).toEqual([
-        "alpha",
-        "beta",
-      ]);
+      );
+      expect(unrelatedStatus).toBe("graph_status failed: Unknown graph in the selected scope");
+      const unrelatedAudit = JSON.parse(String(await fixture.tools.graph_audit.execute({}, unrelated))) as {
+        entries: unknown[];
+        totals: { graphs: number };
+      };
+      expect(unrelatedAudit.entries).toEqual([]);
+      expect(unrelatedAudit.totals.graphs).toBe(0);
     } finally {
       fixture.host.close();
     }

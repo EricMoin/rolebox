@@ -352,7 +352,7 @@ function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
 function createGraphAuditTool(toolset: GraphToolSet): CanonicalToolDef {
   return defineTool({
     description:
-      "Read-only drain/migration audit of the persisted graph store. Reports every " +
+      "Read-only drain/migration audit of the current session's persisted graphs. Reports each owned " +
       "graph with its executionProtocolVersion, whether it is TERMINAL (quiescent) or " +
       "still IN FLIGHT, the work it still owes (nodes in flight, effects still " +
       "pending/started), and — as explicit BLOCKERS — every record that cannot be read " +
@@ -363,13 +363,13 @@ function createGraphAuditTool(toolset: GraphToolSet): CanonicalToolDef {
       "file is written, and the acceptance ledger is opened read-only (never created or " +
       "initialized).",
     args: {},
-    async execute() {
+    async execute(_args, context) {
       try {
         // The PUBLIC JSON keeps its `drained` field (F-08): it is PROJECTED
         // here from the report's one authority, `verdict`, so a caller sees the
         // same bytes as before while the internal report can no longer carry
         // two encodings of the same decision.
-        const report = await toolset.graph_audit();
+        const report = await toolset.graph_audit(context?.sessionID);
         return json({ ...report, drained: report.verdict === "drained" });
       } catch (err) {
         return `graph_audit failed: ${errorText(err)}`;
@@ -386,7 +386,7 @@ function createGraphStatusTool(
   return defineTool({
     description:
       "Unified observability endpoint — query node, loop, or graph state. " +
-      "With no target, lists all graphs. format=tree renders the node " +
+      "With no target, lists the current session's graphs, including restored graphs. format=tree renders the node " +
       "dependency tree; format=json returns a machine-readable snapshot.",
     args: {
       graph_id: z
@@ -397,7 +397,7 @@ function createGraphStatusTool(
       loop_id: z.string().optional().describe("Query a loop group's state."),
       run_id: z.string().optional().describe("Read an archived run by its durable id."),
       scope: z.enum(["session", "persisted", "all"]).optional().describe(
-        "Session lists graphs declared in this process; persisted/all reads the shared graph store.",
+        "For a host session, every scope is restricted to its own persisted graphs. Unattributed administrative calls use session for this process or persisted/all for the shared store.",
       ),
       format: statusFormatEnum
         .optional()
@@ -452,9 +452,9 @@ function createGraphStatusTool(
         "Atomically export the selected query rendering to this path. The exported content follows format and filters.",
       ),
     },
-    async execute(args) {
+    async execute(args, context) {
       try {
-        return toolset.graph_status(args);
+        return toolset.graph_status(args, context?.sessionID);
       } catch (err) {
         return `graph_status failed: ${errorText(err)}`;
       }

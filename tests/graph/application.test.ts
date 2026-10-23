@@ -156,7 +156,8 @@ describe("GraphApplication registered tools", () => {
     const { sent, call } = setup();
     await Promise.all([call("graph_declare", { declaration: chain("one") }, "parent-1"), call("graph_declare", { declaration: chain("two") }, "parent-2")]);
     expect(sent.map((item) => item.request.graphId).sort()).toEqual(["one", "two"]);
-    expect((await call("graph_status", { scope: "all", format: "json" })).graphs).toHaveLength(2);
+    expect((await call("graph_status", { scope: "all", format: "json" }, "parent-1")).graphs.map((graph: { graph_id: string }) => graph.graph_id)).toEqual(["one"]);
+    expect((await call("graph_status", { scope: "all", format: "json" }, "")).graphs).toHaveLength(2);
     expect((await call("graph_control", { graph_id: "one", command: "cancel", reason: "test" }, "parent-2")).kind).toBe("refused");
   });
 });

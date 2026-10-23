@@ -320,6 +320,8 @@ export interface DrainAuditReport {
 export interface DrainAuditOptions {
   /** Workspace directory the audit is addressed to (names the report). */
   readonly directory: string;
+  /** Host-attributed caller; absent/empty retains the administrative store-wide audit. */
+  readonly sessionId?: string;
   /**
    * The directory the graph store is opened from. Defaults to the workspace
    * state directory (`engineStateDir(directory)`).
@@ -753,6 +755,7 @@ export async function auditGraphStore(
   const defaultStateDirectory = engineStateDir(options.directory);
   const storeDirectory = options.ledgerDirectory ?? defaultStateDirectory;
   const retiredDirectory = options.retiredRecordDirectory ?? defaultStateDirectory;
+  const sessionId = options.sessionId || undefined;
   const filePath = ledgerFilePath(storeDirectory);
   // "Now" is read ONCE: every entry in one report is classified against the
   // same instant, so two entries with the same age cannot land on opposite sides
@@ -766,7 +769,7 @@ export async function auditGraphStore(
   // 1. The retired per-graph containers, BEFORE the store is opened: they are
   //    the records this build refuses to interpret, and a workspace that still
   //    holds one is never drained whatever the store says.
-  for (const name of retiredRecordFiles(retiredDirectory)) {
+  for (const name of sessionId ? [] : retiredRecordFiles(retiredDirectory)) {
     blockers.push(
       blocker(
         "retired-state-record",
@@ -799,8 +802,8 @@ export async function auditGraphStore(
     blockers.push(
       blocker(
         "ledger-refused",
-        "graph store " + filePath + " is not a store this build may read (" +
-        describeStoreVerdict(loaded) + ")",
+        sessionId ? "Graph store unavailable for this session" :
+          "graph store " + filePath + " is not a store this build may read (" + describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
@@ -811,8 +814,8 @@ export async function auditGraphStore(
     blockers.push(
       blocker(
         "ledger-unreadable",
-        "graph store " + filePath + " could not be read (" +
-        describeStoreVerdict(loaded) + ")",
+        sessionId ? "Graph store unavailable for this session" :
+          "graph store " + filePath + " could not be read (" + describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
@@ -825,8 +828,8 @@ export async function auditGraphStore(
     blockers.push(
       blocker(
         "ledger-refused",
-        "graph store " + filePath + " needs a registered conversion (" +
-        describeStoreVerdict(loaded) + ")",
+        sessionId ? "Graph store unavailable for this session" :
+          "graph store " + filePath + " needs a registered conversion (" + describeStoreVerdict(loaded) + ")",
         {},
         "ledger",
       ),
@@ -839,13 +842,14 @@ export async function auditGraphStore(
   let graphIds: readonly string[] = [];
   if (store !== undefined) {
     try {
-      graphIds = store.definitionGraphIds();
+      graphIds = store.definitionGraphIds().filter(graphId =>
+        !sessionId || store!.readInvocationOrigin(graphId)?.sessionId === sessionId);
     } catch (error) {
       blockers.push(
         blocker(
           "state-store-unreadable",
-          "the graph store " + storeDirectory + " could not be listed: " +
-          errorText(error),
+          sessionId ? "Graph inventory unavailable for this session" :
+            "the graph store " + storeDirectory + " could not be listed: " + errorText(error),
           {},
           "storage",
         ),
