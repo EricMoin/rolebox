@@ -4,18 +4,18 @@
  * Verifies the optional `extraTools?: Record<string, CanonicalToolDef>`
  * constructor param (7th positional arg, after taskTools):
  *   1. init() merges the extra tools into the assembled surface via
- *      buildCanonicalTools({ extraTools }) — all five register through
- *      pi.registerTool with their canonical names (memory_update,
- *      function_graph, skill_compose, load_role_skill, context_assemble).
+ *      buildCanonicalTools({ extraTools }) — all four register through
+ *      pi.registerTool with their canonical names (function_graph,
+ *      skill_compose, load_role_skill, context_assemble).
  *   2. Each extra tool executes with a mock CanonicalToolContext.
  *   3. dispatch_* and loop_* stay disabled (bare-dispatch prevention holds
  *      when extraTools is present).
+ *   4. An extra memory_update replaces the shared definition without a
+ *      duplicate registration.
  *
- * Mirrors the opencode-side wiring at src/core/services/tool-service.ts:91-106,
- * restricted to the five Pi-eligible tools (LSP + asset_hot_reload are
- * opencode-only and intentionally not forwarded). load_role_skill is the
- * Pi-only skill loader (src/entries/pi.ts:952-953; opencode has its own
- * native skill tool).
+ * Covers the Pi entry's non-LSP, non-computer extras. load_role_skill is
+ * Pi-only; OpenCode has its own native skill tool. Memory tools belong to
+ * the shared surface rather than the extraTools channel.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -44,22 +44,23 @@ import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 
 // ── Expected tool surface ───────────────────────────────────────────────────
 
-/** The five extra tools this channel forwards (mirrors tool-service.ts:91-106 + load_role_skill). */
+/** The Pi entry's non-LSP, non-computer extras. */
 const EXTRA_TOOL_NAMES = [
-  "memory_update",
   "function_graph",
   "skill_compose",
   "load_role_skill",
   "context_assemble",
 ];
 
-/** Legacy no-manager tool set (mirrors tests/pi-service-stack.test.ts). */
+/** Shared no-manager tool set (mirrors tests/pi-service-stack.test.ts). */
 const REQUIRED_TOOLS = [
   "hashline_read",
   "hashline_edit",
   "memory_write",
   "memory_recall",
   "memory_list",
+  "memory_read",
+  "memory_update",
   "web_search",
   "web_read",
   "web_fetch",
@@ -93,7 +94,7 @@ const LOOP_TOOLS_WITHHELD = [
   "loop_cancel",
 ];
 
-const BASE_TOOL_COUNT = REQUIRED_TOOLS.length + OPTIONAL_TOOLS.length; // 20
+const BASE_TOOL_COUNT = REQUIRED_TOOLS.length + OPTIONAL_TOOLS.length;
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -172,11 +173,10 @@ function makeSessionClient(): ISessionClient {
   } as unknown as ISessionClient;
 }
 
-/** Build the exact extraTools record pi-extension.ts forwards. */
+/** Build the Pi entry's extras without LSP or computer-use dependencies. */
 function buildExtraTools() {
   const role = makeRole();
   return {
-    memory_update: createMemoryUpdateTool(),
     function_graph: createFunctionGraphTool([role]),
     skill_compose: createSkillComposeTool([role]),
     load_role_skill: createLoadRoleSkillTool([role]),
@@ -206,7 +206,7 @@ describe("PiLightweightServiceStack extraTools channel", () => {
     }
   });
 
-  it("registers the 5 extra tools via pi.registerTool and keeps dispatch_*/loop_* disabled", async () => {
+  it("registers the 4 extra tools via pi.registerTool and keeps dispatch_*/loop_* disabled", async () => {
     const registeredNames: string[] = [];
     const mockPi = {
       registerTool: (toolDef: any) => {
@@ -227,8 +227,12 @@ describe("PiLightweightServiceStack extraTools channel", () => {
 
     const count = await stack.init();
 
-    // Additive merge: legacy 20-tool surface + the 5 extra tools = 25.
     expect(count).toBe(BASE_TOOL_COUNT + EXTRA_TOOL_NAMES.length);
+    expect([...registeredNames].sort()).toEqual([
+      ...REQUIRED_TOOLS,
+      ...OPTIONAL_TOOLS,
+      ...EXTRA_TOOL_NAMES,
+    ].sort());
 
     for (const name of EXTRA_TOOL_NAMES) {
       expect(registeredNames).toContain(name);
@@ -248,6 +252,31 @@ describe("PiLightweightServiceStack extraTools channel", () => {
     for (const name of registeredNames) {
       expect(allKnown.has(name)).toBe(true);
     }
+  });
+
+  it("overrides shared memory_update without registering it twice", async () => {
+    const registeredNames: string[] = [];
+    const override = createMemoryUpdateTool();
+    const stack = new PiLightweightServiceStack(
+      {
+        registerTool: (toolDef: any) => registeredNames.push(toolDef.name),
+        on: () => {},
+      },
+      [makeRole()],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { memory_update: override },
+    );
+
+    expect(await stack.init()).toBe(BASE_TOOL_COUNT);
+    expect(stack.getCanonicalTools().memory_update).toBe(override);
+    expect(registeredNames.filter(name => name === "memory_update")).toHaveLength(1);
+    expect([...registeredNames].sort()).toEqual([
+      ...REQUIRED_TOOLS,
+      ...OPTIONAL_TOOLS,
+    ].sort());
   });
 
   it("memory_update executes with a mock CanonicalToolContext", async () => {

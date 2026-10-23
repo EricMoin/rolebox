@@ -71,7 +71,7 @@ const GRAPH_TOOLS = [
  * not change how many other tools are registered. A change to the canonical
  * toolset is a change this number must be updated with.
  */
-const NON_GRAPH_TOOL_COUNT = 62;
+const NON_GRAPH_TOOL_COUNT = 63;
 
 // ── The fake Context ────────────────────────────────────────────────────────
 
@@ -420,6 +420,13 @@ describe("opencode v2 entry — the declared-graph face registers through the re
     // the count is unchanged.
     const others = fake.tools.filter((name) => !name.startsWith("graph_"));
     expect(others.length).toBe(NON_GRAPH_TOOL_COUNT);
+    expect(others.filter((name) => name.startsWith("memory_")).sort()).toEqual([
+      "memory_list",
+      "memory_read",
+      "memory_recall",
+      "memory_update",
+      "memory_write",
+    ]);
     // A tool name is registered once.
     expect(new Set(fake.tools).size).toBe(fake.tools.length);
 

@@ -35,7 +35,6 @@ import { PiLightweightServiceStack } from "../src/platform/adapters/pi/service-s
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
 import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import { createTaskTools } from "../src/dispatch/query/task-tools.ts";
-import { createMemoryUpdateTool } from "../src/memory/tools.ts";
 import { createFunctionGraphTool } from "../src/function/function-graph.ts";
 import { createSkillComposeTool } from "../src/asset/skill-compose.ts";
 import { createLoadRoleSkillTool } from "../src/asset/skill-tool.ts";
@@ -61,7 +60,7 @@ import type { CanonicalToolDef } from "../src/platform/types.ts";
  *   3. task_* surface          — src/core/services/tool-service.ts
  *      (createTaskTools minus task_retry)
  *   4. Opencode extras shared  — src/core/services/tool-service.ts
- *      (memory_update, function_graph, skill_compose, context_assemble;
+ *      (function_graph, skill_compose, context_assemble;
  *      LSP derived below from the shared createAllLspTools factory)
  *
  * The graph orchestration surface is deliberately NOT part of this list. The
@@ -80,6 +79,7 @@ const OPENCODE_SURFACE: readonly string[] = [
   "memory_recall",
   "memory_list",
   "memory_read",
+  "memory_update",
   "web_search",
   "web_read",
   "web_fetch",
@@ -105,7 +105,6 @@ const OPENCODE_SURFACE: readonly string[] = [
   "task_export",
   // 4. Opencode-side extras forwarded to Pi (pi-extension.ts mirrors
   //    tool-service.ts)
-  "memory_update",
   "function_graph",
   "skill_compose",
   "context_assemble",
@@ -200,7 +199,6 @@ function buildTaskTools(): Record<string, CanonicalToolDef> {
 function buildExtraTools(): Record<string, CanonicalToolDef> {
   const role = makeRole();
   return {
-    memory_update: createMemoryUpdateTool(),
     function_graph: createFunctionGraphTool([role]),
     skill_compose: createSkillComposeTool([role]),
     context_assemble: createContextAssembleTool({

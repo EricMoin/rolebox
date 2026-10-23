@@ -42,4 +42,3 @@ export function resolveDshSessionContext(options: DshContextOptions, agent: DshC
   }
   return { requestedRoleId: id, role, roleId: role?.id ?? "", directory, worker };
 }
-

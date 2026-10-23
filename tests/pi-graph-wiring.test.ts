@@ -70,13 +70,15 @@ const LEGACY_GRAPH_KEYS = [
   "graph_approve",
 ];
 
-/** Legacy no-manager tool set (mirrors tests/pi-service-stack.test.ts). */
+/** Shared no-manager tool set (mirrors tests/pi-service-stack.test.ts). */
 const REQUIRED_TOOLS = [
   "hashline_read",
   "hashline_edit",
   "memory_write",
   "memory_recall",
   "memory_list",
+  "memory_read",
+  "memory_update",
   "web_search",
   "web_read",
   "web_fetch",
@@ -102,7 +104,7 @@ const DISPATCH_TOOLS_WITHHELD = [
   "dispatch_status",
 ];
 
-const BASE_TOOL_COUNT = REQUIRED_TOOLS.length + OPTIONAL_TOOLS.length; // 20
+const BASE_TOOL_COUNT = REQUIRED_TOOLS.length + OPTIONAL_TOOLS.length;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -172,6 +174,11 @@ describe("PiLightweightServiceStack graph_* wiring", () => {
     );
 
     expect(count).toBe(BASE_TOOL_COUNT + OUTCOME_GRAPH_KEYS.length);
+    expect([...registeredNames].sort()).toEqual([
+      ...REQUIRED_TOOLS,
+      ...OPTIONAL_TOOLS,
+      ...OUTCOME_GRAPH_KEYS,
+    ].sort());
 
     const graphKeys = registeredNames.filter((name) => name.startsWith("graph_"));
     expect(graphKeys.sort()).toEqual([...OUTCOME_GRAPH_KEYS].sort());
@@ -184,15 +191,23 @@ describe("PiLightweightServiceStack graph_* wiring", () => {
     const { registeredNames, count } = await initStack(makeDispatchManager());
 
     expect(count).toBe(BASE_TOOL_COUNT);
+    expect([...registeredNames].sort()).toEqual([
+      ...REQUIRED_TOOLS,
+      ...OPTIONAL_TOOLS,
+    ].sort());
 
     const graphKeys = registeredNames.filter((name) => name.startsWith("graph_"));
     expect(graphKeys).toEqual([]);
   });
 
-  it("keeps the legacy no-manager tool surface intact", async () => {
+  it("registers the shared no-manager tool surface exactly once", async () => {
     const { registeredNames, count } = await initStack();
 
     expect(count).toBe(BASE_TOOL_COUNT);
+    expect([...registeredNames].sort()).toEqual([
+      ...REQUIRED_TOOLS,
+      ...OPTIONAL_TOOLS,
+    ].sort());
 
     for (const toolName of REQUIRED_TOOLS) {
       expect(registeredNames).toContain(toolName);
