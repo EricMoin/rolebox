@@ -326,7 +326,8 @@ describe("DSH memory prompt and execution integration", () => {
     try {
       for (const cwd of [undefined, "relative-workspace"]) {
         const agent = f.agent();
-        agent.session.header.cwd = cwd;
+        if (cwd === undefined) Reflect.deleteProperty(agent.session.header, "cwd");
+        else agent.session.header.cwd = cwd;
         f.active.set(agent.id, "role-a");
         await expect(f.call("memory_write", { title: "Refused", content: "Refused content" }, agent)).rejects.toThrow("absolute workspace");
       }

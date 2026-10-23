@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { load, dump } from "js-yaml";
+import { CANCEL_SYMBOL as CANCEL, isCancel } from "@clack/prompts";
 import type { RegistryManifest, LockEntry } from "../../../src/cli/types.ts";
 import type { PromptApi } from "../../../src/cli/pick.ts";
 
@@ -14,7 +15,6 @@ import type { PromptApi } from "../../../src/cli/pick.ts";
 type SelectOptionsAny = Parameters<PromptApi["select"]>[0];
 
 function createFakePrompts() {
-  const CANCEL = Symbol("clack:cancel");
   // The scripted double resolves to an offered role/registry id, or to CANCEL to
   // model clack's cancel symbol. The parameter is declared (prompt options are
   // what the pickers pass, per pick.ts `PromptApi`) so `mockImplementation` and
@@ -30,14 +30,15 @@ function createFakePrompts() {
     // actually offered — the double can only return an offered value or CANCEL.
     select: async (opts) => {
       const picked = await select(opts);
-      if (typeof picked === "symbol") return picked;
+      if (isCancel(picked)) return picked;
       const offered = opts.options.find((o) => String(o.value) === picked);
-      if (offered === undefined) throw new Error(`fake select: option "${picked}" was not offered`);
+      if (offered === undefined) throw new Error(`fake select: option "${String(picked)}" was not offered`);
       return offered.value;
     },
     confirm,
-    spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
-    isCancel: (v: unknown) => v === CANCEL,
+    spinner: () => ({ start: () => {}, stop: () => {}, message: () => {},
+      cancel: () => {}, error: () => {}, clear: () => {}, isCancelled: false }),
+    isCancel,
     log: { error: () => {} },
   };
   return { prompts, CANCEL, select, confirm };

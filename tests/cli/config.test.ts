@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
+import { CANCEL_SYMBOL as CANCEL, isCancel } from "@clack/prompts";
 import type { RoleboxConfig, LockEntry } from "../../src/cli/types.ts";
 import type { PromptApi } from "../../src/cli/pick.ts";
 
@@ -422,7 +423,6 @@ describe("getLockPath", () => {
 type SelectOptionsAny = Parameters<PromptApi["select"]>[0];
 
 function createFakePrompts(picked: string) {
-  const CANCEL = Symbol("clack:cancel");
   // The parameter is declared (prompt options are what the pickers pass, per
   // pick.ts `PromptApi`) so `mock.calls` is typed against the real call shape.
   const select = mock(async (_opts: SelectOptionsAny): Promise<string | symbol> => picked);
@@ -435,14 +435,15 @@ function createFakePrompts(picked: string) {
     // actually offered — the double can only return an offered value or CANCEL.
     select: async (opts) => {
       const chosen = await select(opts);
-      if (typeof chosen === "symbol") return chosen;
+      if (isCancel(chosen)) return chosen;
       const offered = opts.options.find((o) => String(o.value) === chosen);
-      if (offered === undefined) throw new Error(`fake select: option "${chosen}" was not offered`);
+      if (offered === undefined) throw new Error(`fake select: option "${String(chosen)}" was not offered`);
       return offered.value;
     },
     confirm: async () => true,
-    spinner: () => ({ start: () => {}, stop: () => {}, message: () => {} }),
-    isCancel: (v: unknown) => v === CANCEL,
+    spinner: () => ({ start: () => {}, stop: () => {}, message: () => {},
+      cancel: () => {}, error: () => {}, clear: () => {}, isCancelled: false }),
+    isCancel,
     log: { error: () => {} },
   };
   return { prompts, select, CANCEL };

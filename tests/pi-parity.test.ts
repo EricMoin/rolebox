@@ -79,6 +79,7 @@ const OPENCODE_SURFACE: readonly string[] = [
   "memory_write",
   "memory_recall",
   "memory_list",
+  "memory_read",
   "web_search",
   "web_read",
   "web_fetch",

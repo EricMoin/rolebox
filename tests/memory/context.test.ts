@@ -4,13 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configureLogging, createMemorySink } from "../../src/log/index.ts";
 import { buildMemoryContext } from "../../src/memory/context.ts";
-import { MemoryStore } from "../../src/memory/store.ts";
-import type { MemoryConfig, MemorySummary } from "../../src/memory/types.ts";
+import { MemoryStore, type MemoryListSummary } from "../../src/memory/store.ts";
+import type { MemoryConfig } from "../../src/memory/types.ts";
 import { beginLogTest, endLogTest } from "../helpers/log.ts";
 
 const allTools = ["memory_recall", "memory_read", "memory_list", "memory_write", "memory_update"];
-const summary: MemorySummary = {
+const summary: MemoryListSummary = {
   id: "known-memory",
+  scope: "workspace",
+  role_id: "shared",
+  source_sessions: [],
   title: "Use the project formatter",
   category: "lesson",
   relevance: "high",

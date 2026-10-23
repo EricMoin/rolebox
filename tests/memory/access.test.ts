@@ -42,8 +42,10 @@ describe("memory access and provenance", () => {
   });
 
   function context(agent?: string, sessionID = "current-session"): CanonicalToolContext {
-    return { directory, worktree: directory, agent, sessionID, messageID: "message",
-      abort: new AbortController().signal, metadata: () => {} };
+    const caller: CanonicalToolContext = { directory, worktree: directory, agent: agent ?? "", sessionID, messageID: "message",
+      abort: new AbortController().signal, metadata: () => {}, ask: async () => {} };
+    if (agent === undefined) Reflect.deleteProperty(caller, "agent");
+    return caller;
   }
 
   it("intersects scope with workspace/current-role visibility for listing and search", () => {

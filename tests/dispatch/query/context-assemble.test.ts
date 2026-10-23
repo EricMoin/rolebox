@@ -35,8 +35,10 @@ describe("context_assemble memory visibility", () => {
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
   function context(agent?: string, workspace = directory): CanonicalToolContext {
-    return { agent, directory: workspace, worktree: workspace, sessionID: "session", messageID: "message",
-      abort: new AbortController().signal, metadata: () => {} };
+    const caller: CanonicalToolContext = { agent: agent ?? "", directory: workspace, worktree: workspace, sessionID: "session", messageID: "message",
+      abort: new AbortController().signal, metadata: () => {}, ask: async () => {} };
+    if (agent === undefined) Reflect.deleteProperty(caller, "agent");
+    return caller;
   }
 
   function tool() {
