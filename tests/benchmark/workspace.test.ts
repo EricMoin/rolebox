@@ -29,7 +29,7 @@ describe("benchmark workspace snapshots", () => {
     await chmod(join(source, "run"), 0o755);
     const snapshot = await snapshotBenchmarkFiles(source);
     expect(snapshot.files.map(file => file.path)).toEqual(["run", "src/main.ts"]);
-    expect(snapshot.files[0]!.executable).toBe(true);
+    expect(snapshot.files[0]!.executable).toBe(process.platform !== "win32");
     await materializeBenchmarkFiles(snapshot, join(directory, "copy"));
     expect((await snapshotBenchmarkFiles(join(directory, "copy"))).digest).toBe(snapshot.digest);
     await write("src/main.ts", "export const value = 2;\n");
@@ -52,16 +52,22 @@ describe("benchmark workspace snapshots", () => {
     await expect(materializeBenchmarkFiles(snapshot, left)).rejects.toThrow("empty directory");
   });
 
-  it("changes its digest for executable permission changes", async () => {
+  it("tracks supported executable permission changes in its digest and evidence", async () => {
     await write("script", "echo example\n");
     await chmod(join(source, "script"), 0o600);
     const before = await snapshotBenchmarkFiles(source);
     await chmod(join(source, "script"), 0o700);
     const after = await snapshotBenchmarkFiles(source);
-    expect(after.digest).not.toBe(before.digest);
     const diff = describeBenchmarkWorkspace(before, after, "artifacts/trial");
-    expect(diff.changes[0]).toMatchObject({ kind: "modified", beforeExecutable: false, afterExecutable: true, contentOmitted: false });
-    expect(diff.changes[0]!.beforeDigest).toBe(diff.changes[0]!.afterDigest);
+    if (process.platform === "win32") {
+      expect(after.files[0]!.executable).toBe(false);
+      expect(after.digest).toBe(before.digest);
+      expect(diff.changes).toEqual([]);
+    } else {
+      expect(after.digest).not.toBe(before.digest);
+      expect(diff.changes[0]).toMatchObject({ kind: "modified", beforeExecutable: false, afterExecutable: true, contentOmitted: false });
+      expect(diff.changes[0]!.beforeDigest).toBe(diff.changes[0]!.afterDigest);
+    }
   });
 
   it("rejects symlinks both as a source and inside its tree", async () => {
@@ -93,7 +99,7 @@ describe("benchmark workspace snapshots", () => {
       expect(safeBenchmarkRelativePath(path)).toBe(false);
     }
     expect(safeBenchmarkRelativePath("src/文件 name.ts")).toBe(true);
-    await write("private\nname", "example");
+    await write("private\u200bname", "example");
     try { await snapshotBenchmarkFiles(source); throw new Error("accepted invalid path"); }
     catch (error) {
       expect(String(error)).toContain("unsafe relative path");

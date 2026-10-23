@@ -15,7 +15,7 @@ afterEach(async () => { await Promise.all(temporaryRoots.splice(0).map(root => r
 const available = doctorDshRuntime().available;
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
-async function execute(mode: string, options: { model?: string; config?: Record<string, unknown>; allowedEnv?: string[]; sourceDigest?: string } = {}): Promise<BenchmarkWorkerResult> {
+async function execute(mode: string, options: { model?: string; config?: Record<string, unknown>; allowedEnv?: string[]; sourceDigest?: string; timeoutMs?: number } = {}): Promise<BenchmarkWorkerResult> {
   const root = await mkdtemp(join(tmpdir(), "rolebox-benchmark-dsh-"));
   temporaryRoots.push(root);
   const workspace = join(root, "workspace");
@@ -37,7 +37,7 @@ async function execute(mode: string, options: { model?: string; config?: Record<
     host: { plugins: [{ module: join(fixtures, "scripted-dsh-provider.mjs"), sourceDigest: options.sourceDigest, config: {
       runtimeAnchor: resolveDshRuntime().anchor, mode, ...options.config,
     } }], env: options.allowedEnv ?? [] },
-    prompt: "Complete the task.", timeoutMs: mode.includes("timeout") ? 100 : 5_000,
+    prompt: "Complete the task.", timeoutMs: options.timeoutMs ?? (mode.includes("timeout") ? 100 : 5_000),
   };
   const requestPath = join(root, "request.json");
   const resultPath = join(root, "result.json");
@@ -55,7 +55,16 @@ async function execute(mode: string, options: { model?: string; config?: Record<
       timer = setTimeout(() => { process.kill(); reject(new Error("Worker fixture exceeded its outer deadline.")); }, 15_000);
     })]);
     expect(await stderr).not.toContain("Unhandled");
-    if (mode.startsWith("child-")) expect(JSON.parse(await readFile(join(workspace, "child-stopped.json"), "utf8"))).toEqual({ stopped: true });
+    const result = JSON.parse(await readFile(resultPath, "utf8")) as BenchmarkWorkerResult;
+    if (mode.startsWith("child-")) {
+      const diagnostic = `Worker status: ${result.status}; termination confirmed: ${result.terminationConfirmed}; ${result.diagnostic ?? "no diagnostic"}`;
+      for (const [file, expected] of [["child-started.json", { started: true }], ["child-stopped.json", { stopped: true }]] as const) {
+        const evidence = await readFile(join(workspace, file), "utf8").catch(cause => {
+          throw new Error(`Missing descendant evidence ${file}. ${diagnostic}`, { cause });
+        });
+        expect(JSON.parse(evidence), diagnostic).toEqual(expected);
+      }
+    }
     if (mode === "graph") {
       const graphs = queryGraphs(graphStoreRoot(join(root, "data"), workspace));
       expect(graphs.blocked).toBeUndefined();
@@ -63,7 +72,7 @@ async function execute(mode: string, options: { model?: string; config?: Record<
       expect(graphs.graphs[0]?.phase).toBe("complete");
       expect(graphs.graphs[0]?.current?.attempts).toHaveLength(2);
     }
-    return JSON.parse(await readFile(resultPath, "utf8")) as BenchmarkWorkerResult;
+    return result;
   } finally { clearTimeout(timer); }
 }
 
@@ -179,7 +188,7 @@ describe.skipIf(!available)("dsh benchmark with a real host and scripted provide
   }, 20_000);
 
   it("cancels active descendants and drains their owned handles", async () => {
-    const result = await execute("child-timeout");
+    const result = await execute("child-timeout", { timeoutMs: 2_000 });
     expect(result.status).toBe("task_timeout");
     expect(result.terminationConfirmed).toBe(true);
   }, 20_000);

@@ -83,6 +83,9 @@ export async function apply(ctx, config) {
           return;
         }
       }
+      if (config.mode?.startsWith("child-") && options.sessionId?.startsWith("child-")) {
+        await writeFile(join(process.cwd(), "child-started.json"), JSON.stringify({ started: true }));
+      }
       if (config.mode?.startsWith("child-") && options.sessionId?.startsWith("benchmark-")) {
         const child = await ctx.agents.create({ sessionId: `child-${randomUUID()}`,
           parentAgent: ctx.agents.get(options.sessionId), meta: { cwd: process.cwd(), parentSession: options.sessionId },

@@ -182,7 +182,9 @@ describe("benchmark suite validation", () => {
     expect((await loadBenchmarkSuite(directory)).digest).not.toBe(edited.digest);
     const beforeMode = await loadBenchmarkSuite(directory);
     await chmod(join(directory, "fixture", "sum.ts"), 0o700);
-    expect((await loadBenchmarkSuite(directory)).digest).not.toBe(beforeMode.digest);
+    const afterMode = await loadBenchmarkSuite(directory);
+    if (process.platform === "win32") expect(afterMode.digest).toBe(beforeMode.digest);
+    else expect(afterMode.digest).not.toBe(beforeMode.digest);
   });
 
   it("hashes workspace contents independently of fixture and checks directory names", async () => {

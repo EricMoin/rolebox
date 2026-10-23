@@ -44,17 +44,21 @@ describe("benchmark role snapshot", () => {
   it("has a path-independent digest", async () => {
     expect((await snapshotBenchmarkRole(await fixture())).digest).toBe((await snapshotBenchmarkRole(await fixture())).digest);
   });
-  it("freezes default functions and preserves executable assets", async () => {
+  it("freezes default functions and preserves supported executable bits", async () => {
     const role = await fixture();
     const script = join(role, "check.sh");
     await writeFile(script, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     const snapshot = await snapshotBenchmarkRole(role);
     expect(snapshot.files.has("functions/plan.md")).toBe(true);
+    expect(snapshot.executableFiles.has("check.sh")).toBe(process.platform !== "win32");
     const destination = join(roots[0], "frozen");
     await materializeBenchmarkRole(snapshot, destination);
-    expect((await stat(join(destination, "reviewer", "check.sh"))).mode & 0o700).toBe(0o500);
+    expect((await stat(join(destination, "reviewer", "check.sh"))).mode & 0o700).toBe(process.platform === "win32" ? 0o400 : 0o500);
     await chmod(script, 0o600);
-    expect((await snapshotBenchmarkRole(role)).digest).not.toBe(snapshot.digest);
+    const withoutExecute = await snapshotBenchmarkRole(role);
+    expect(withoutExecute.executableFiles.has("check.sh")).toBe(false);
+    if (process.platform === "win32") expect(withoutExecute.digest).toBe(snapshot.digest);
+    else expect(withoutExecute.digest).not.toBe(snapshot.digest);
   });
   it("rejects prompt-file environment substitutions", async () => {
     const role = await fixture("name: Reviewer\nprompt_file: prompt.md\n");
