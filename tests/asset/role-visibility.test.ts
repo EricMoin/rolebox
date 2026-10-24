@@ -93,7 +93,7 @@ describe("role asset visibility", () => {
   it("applies the same scope to reference search, validation, and skill composition", async () => {
     const roles = fixture();
     const context = makeToolContext({ agent: "engineer" });
-    const references = await createReferenceSearchTool(roles).execute({ query: "visibility marker", case_sensitive: false, limit: 50, context_lines: 0 }, context);
+    const references = await createReferenceSearchTool(roles).execute({ query: "visibility marker", case_sensitive: false, limit: 50, context_lines: 0, format: "markdown" }, context);
     expect(references).toContain("own-skill");
     expect(references).not.toContain("private-skill");
     const validation = await createAssetValidateTool(roles).execute({}, context);
@@ -129,7 +129,7 @@ describe("role asset visibility", () => {
     expect(await loader.execute({ name: "designer-public" }, caller)).toContain("Skill not found");
     expect(await loader.execute({ name: "missing" }, caller)).not.toContain("designer-public");
     expect(await createAssetSearchTool(roles).execute({ ...search, query: "designer" }, caller)).not.toContain("designer--private");
-    expect(await createReferenceSearchTool(roles).execute({ query: "Delegate", case_sensitive: false, limit: 50, context_lines: 0 }, caller)).not.toContain("designer--private");
+    expect(await createReferenceSearchTool(roles).execute({ query: "Delegate", case_sensitive: false, limit: 50, context_lines: 0, format: "markdown" }, caller)).not.toContain("designer--private");
     const own = await loader.execute({ name: "designer-public" }, makeToolContext({ agent: "designer" }));
     expect(JSON.stringify(own)).toContain("Delegate to designer--private");
   });
