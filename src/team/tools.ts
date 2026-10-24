@@ -24,19 +24,21 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.add(context, args.team_id, args.role_id)); },
     }),
     team_send_event: defineTool({
-      description: "Publish a peer message or task event. task_claim atomically reserves a task; act only after success. Claim leases last 30 minutes and can be renewed. Complete/release only tasks you own. Messages, offered/completed/released tasks wake peers; claims and turn notices do not. Recipients affect wake routing; every event is readable by the whole team.",
+      description: "Publish a peer message or task event. task_claim atomically reserves a task; act only after success. Claim leases last 30 minutes and can be renewed. Complete/release only tasks you own. Messages, offered/completed/released tasks wake peers; claims and turn notices do not. task_offer normally wakes every member: pass wake:false to register the task without waking anyone, and/or set recipient to wake one member. Recipients affect wake routing; every event is readable by the whole team.",
       args: { team_id: teamId, kind: z.enum(["message", "task_offer", "task_claim", "task_complete", "task_release"]),
-        content: z.string().min(1).max(16000), task_id: z.string().min(1).max(200).optional(), recipient: z.string().min(1).optional() },
+        content: z.string().min(1).max(16000), task_id: z.string().min(1).max(200).optional(), recipient: z.string().min(1).optional(),
+        wake: z.boolean().optional().describe("Wake peers for this event; task_claim never wakes. Defaults to true") },
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.send(context, args.team_id, args)); },
     }),
     team_status: defineTool({
-      description: "Read your teams or one team's roster, claims, delivery errors and durable event stream. Closed teams are hidden from the team list unless include_deleted is set; reading one by team_id always works. Reading does not acknowledge or discard pending events.",
+      description: "Read your teams or one team's roster, claims, delivery errors and durable event stream. Closed teams are hidden from the team list unless include_deleted is set; reading one by team_id always works. A single team also reports budgetExhausted when its turn budget is spent. Reading does not acknowledge or discard pending events.",
       args: { team_id: teamId.optional(), after_seq: z.number().int().min(0).optional(), include_deleted: z.boolean().optional() },
       async execute(args, context) {
         const runtime = resolve(context);
         if (!args.team_id) return JSON.stringify(runtime.list(context, args.include_deleted).map(s => ({ id: s.id, name: s.name, status: s.status, turns: s.turns, maxTurns: s.maxTurns })));
         const state = runtime.status(context, args.team_id);
-        return JSON.stringify({ ...state, events: state.events.filter(e => e.seq > (args.after_seq ?? 0)) });
+        return JSON.stringify({ ...state, budgetExhausted: state.turns >= state.maxTurns,
+          events: state.events.filter(e => e.seq > (args.after_seq ?? 0)) });
       },
     }),
     team_remove: defineTool({

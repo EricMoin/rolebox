@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
-import type { Message, SessionStatus } from "../../src/platform/types.ts";
+import type { CanonicalToolContext, Message, SessionStatus } from "../../src/platform/types.ts";
 import type { ResolvedRole } from "../../src/types.ts";
 import { TeamRuntime } from "../../src/team/runtime.ts";
 import { TeamStore } from "../../src/team/store.ts";
+import { createTeamTools } from "../../src/team/tools.ts";
+import type { TeamMember } from "../../src/team/types.ts";
 
 const owner = { sessionID: "owner", agent: "developer" };
 const directories: string[] = [];
@@ -19,9 +21,11 @@ afterEach(async () => {
 /**
  * Build a team fixture. `memberProblem` models the host's role-model gate (the
  * dsh entry's "no usable provider/model" check) so its precedence against
- * authorization and team state can be pinned.
+ * authorization and team state can be pinned. `memberAuthorized` models the
+ * dsh entry's role binding: a session switched to another role is unauthorized.
  */
-function setup(memberProblem?: (roleId: string) => string | undefined) {
+function setup(memberProblem?: (roleId: string) => string | undefined,
+  memberAuthorized?: (member: TeamMember) => boolean) {
   const directory = mkdtempSync(join(tmpdir(), "team-runtime-"));
   directories.push(directory);
   const roles = ["developer", "designer", "reviewer"].map(id => ({ id, config: { name: id }, subagents: [] }) as unknown as ResolvedRole);
@@ -31,6 +35,7 @@ function setup(memberProblem?: (roleId: string) => string | undefined) {
   let nextSession = 0;
   let accept = true;
   let aborted = true;
+  let onAbort: ((id: string) => void | Promise<void>) | undefined;
   const session = {
     async create() { const id = `peer-${++nextSession}`; statuses.set(id, { type: "idle" }); return { id }; },
     async prompt(id: string, options: { parts: Array<{ text: string }> }) {
@@ -46,11 +51,11 @@ function setup(memberProblem?: (roleId: string) => string | undefined) {
     },
     async status(id: string) { return statuses.get(id) ?? null; },
     async messages(id: string) { return messages.get(id) ?? []; },
-    async abort(id: string) { if (aborted) statuses.set(id, { type: "idle" }); return aborted; },
+    async abort(id: string) { await onAbort?.(id); if (aborted) statuses.set(id, { type: "idle" }); return aborted; },
   } as unknown as ISessionClient;
   function make(platformId = "opencode") {
     const runtime = new TeamRuntime({ directory, platformId, session, roles: () => roles, canPollStatus: true,
-      ...(memberProblem ? { memberProblem } : {}) });
+      ...(memberProblem ? { memberProblem } : {}), ...(memberAuthorized ? { memberAuthorized } : {}) });
     runtimes.push(runtime);
     return runtime;
   }
@@ -77,7 +82,8 @@ function setup(memberProblem?: (roleId: string) => string | undefined) {
         time: { created: 1, completed: 2 } }, parts: [] }]);
   }
   return { runtime, team, make, finish, fail, wake, wakePeer, prompts, messages, statuses, directory,
-    accept(value: boolean) { accept = value; }, abort(value: boolean) { aborted = value; } };
+    accept(value: boolean) { accept = value; }, abort(value: boolean) { aborted = value; },
+    onAbort(hook: (id: string) => void | Promise<void>) { onAbort = hook; } };
 }
 
 describe("durable team runtime", () => {
@@ -332,7 +338,7 @@ describe("durable team runtime", () => {
     expect(state.events.filter(event => event.type === "turn_completed")).toHaveLength(1);
   });
 
-  it.each(["owner", "peer-1"])("does not refund a failed %s turn without a team delivery", async sessionId => {
+  it("does not refund a failed peer turn without a team delivery", async () => {
     const f = setup();
     f.runtime.add(owner, f.team.id, "designer");
     await f.wakePeer();
@@ -340,16 +346,155 @@ describe("durable team runtime", () => {
     await f.runtime.tick();
     expect(f.runtime.status(owner, f.team.id).turns).toBe(1);
 
-    f.fail(sessionId, "Ordinary turn failed");
+    f.fail("peer-1", "Ordinary turn failed");
     await f.runtime.tick();
     const failed = f.runtime.status(owner, f.team.id);
     expect(failed.status).toBe("paused");
-    expect(failed.members.find(member => member.sessionId === sessionId)?.delivery).toBeUndefined();
+    expect(failed.members[1].delivery).toBeUndefined();
     expect(failed.turns).toBe(1);
 
     await f.runtime.resume(owner, f.team.id);
     await f.runtime.tick();
     expect(f.runtime.status(owner, f.team.id).turns).toBe(1);
     expect(f.prompts).toHaveLength(1);
+  });
+
+  it("does not record the creator's ordinary turns as team turns", async () => {
+    const f = setup();
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    const before = f.runtime.status(owner, f.team.id);
+
+    // The creator's own chat turn: a final answer with no team delivery.
+    f.finish("owner", "owner-final");
+    await f.runtime.tick();
+    let state = f.runtime.status(owner, f.team.id);
+    expect(state.nextSeq).toBe(before.nextSeq);
+    expect(state.events.some(event => event.type === "turn_completed")).toBe(false);
+
+    // A failed ordinary turn is equally not a team turn: nothing is recorded.
+    f.fail("owner", "Ordinary turn failed");
+    await f.runtime.tick();
+    state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("active");
+    expect(state.nextSeq).toBe(before.nextSeq);
+    expect(state.members[0].error).toBeUndefined();
+    expect(state.events.some(event => event.type === "member_failed")).toBe(false);
+  });
+
+  it("stops reconciling a member whose session switched to another role", async () => {
+    let authorized = true;
+    const f = setup(undefined, () => authorized);
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    expect(f.runtime.status(owner, f.team.id).members[1].delivery).toBeDefined();
+
+    // The session was switched to another role while its team turn was running.
+    authorized = false;
+    f.finish("peer-1");
+    await f.runtime.tick();
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.status).toBe("paused");
+    expect(state.members[1].error).toBe("Member session is no longer the assigned role; restore its assigned role before resuming the team");
+    expect(state.events.some(event => event.type === "turn_completed")).toBe(false);
+    expect(state.events.filter(event => event.type === "member_failed")).toHaveLength(1);
+    expect(state.members[1].cursor).toBe(0);
+  });
+
+  it("removes a busy member without recording its intentional abort as a failure", async () => {
+    const f = setup();
+    const peer = f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    const offer = f.runtime.send(owner, f.team.id, { kind: "task_offer", content: "Design" });
+    f.runtime.send({ sessionID: "peer-1", agent: "designer" }, f.team.id, { kind: "task_claim", content: "Claim", task_id: offer.taskId });
+    // The host reports the aborted turn end while the removal is aborting it.
+    f.onAbort(id => { f.fail(id, "DSH turn ended: aborted"); return f.runtime.tick(); });
+
+    await f.runtime.remove(owner, f.team.id, peer.id);
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.events.some(event => event.type === "member_left")).toBe(true);
+    expect(state.events.some(event => event.type === "task_release")).toBe(true);
+    expect(state.events.some(event => event.type === "member_failed")).toBe(false);
+    expect(await f.runtime.resume(owner, f.team.id)).toEqual([]);
+  });
+
+  it("notices a silent member completion without disclosing its private answer", async () => {
+    const f = setup();
+    const peer = f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.finish("peer-1");
+    const final = f.messages.get("peer-1")!.at(-1)!;
+    final.parts = [{ type: "text", id: "private", messageID: final.info.id, sessionID: "peer-1",
+      text: "Internal work used designer--private-review and its private skill." }];
+    await f.runtime.tick();
+    const state = f.runtime.status(owner, f.team.id);
+    const notices = state.events.filter(event => event.type === "member_silent");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ sender: peer.id, recipient: state.members[0].id, wake: true });
+    expect(notices[0].content).toBe("Member completed a turn without publishing a team event; its answer stays private. " +
+      "Ask it to publish with team_send_event if you need the result.");
+    expect(JSON.stringify(state.events)).not.toContain("designer--private-review");
+  });
+
+  it("does not notice a member that published during its turn", async () => {
+    const f = setup();
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.runtime.send({ sessionID: "peer-1", agent: "designer" }, f.team.id, { kind: "message", content: "Design ready" });
+    f.finish("peer-1");
+    await f.runtime.tick();
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.events.filter(event => event.type === "turn_completed")).toHaveLength(1);
+    expect(state.events.some(event => event.type === "member_silent")).toBe(false);
+  });
+
+  it("still notices a member that only claimed a task during its turn", async () => {
+    const f = setup();
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    const offer = f.runtime.send(owner, f.team.id, { kind: "task_offer", content: "Design quietly", wake: false });
+    f.runtime.send({ sessionID: "peer-1", agent: "designer" }, f.team.id, { kind: "task_claim", content: "Claim", task_id: offer.taskId });
+    f.finish("peer-1");
+    await f.runtime.tick();
+    const state = f.runtime.status(owner, f.team.id);
+    expect(state.events.filter(event => event.type === "member_silent")).toHaveLength(1);
+  });
+
+  it("reports budget exhaustion in the single-team status", async () => {
+    const f = setup();
+    const tools = createTeamTools(f.runtime);
+    const read = async () => JSON.parse(String(await tools.team_status.execute({ team_id: f.team.id },
+      owner as unknown as CanonicalToolContext)));
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    expect(await read()).toMatchObject({ turns: 1, maxTurns: 40, budgetExhausted: false });
+
+    const store = new TeamStore(join(f.directory, ".rolebox", "team"));
+    store.update(f.team.id, state => { state.maxTurns = 1; });
+    store.close();
+    expect(await read()).toMatchObject({ turns: 1, maxTurns: 1, budgetExhausted: true });
+  });
+
+  it("registers a quiet task offer without waking anyone while a normal offer still wakes", async () => {
+    const f = setup();
+    f.runtime.add(owner, f.team.id, "designer");
+    await f.wakePeer();
+    f.finish("peer-1");
+    await f.runtime.tick();
+    expect(f.prompts).toHaveLength(1);
+
+    const quiet = f.runtime.send(owner, f.team.id, { kind: "task_offer", content: "Design quietly", wake: false });
+    await f.runtime.tick();
+    expect(f.prompts).toHaveLength(1);
+    // The offer is recorded, so the offerer can claim it without a wake-up.
+    f.runtime.send(owner, f.team.id, { kind: "task_claim", content: "I will take it", task_id: quiet.taskId });
+    expect(f.runtime.status(owner, f.team.id).tasks.find(task => task.id === quiet.taskId))
+      .toMatchObject({ status: "claimed", owner: f.runtime.status(owner, f.team.id).members[0].id });
+
+    const loud = f.runtime.send(owner, f.team.id, { kind: "task_offer", content: "Design loudly" });
+    await f.runtime.tick();
+    expect(f.prompts).toHaveLength(2);
+    expect(f.prompts[1].text).toContain("Design loudly");
+    expect(f.runtime.status(owner, f.team.id).tasks.find(task => task.id === loud.taskId)?.status).toBe("offered");
   });
 });

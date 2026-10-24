@@ -1813,7 +1813,12 @@ export async function apply(
         readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, sessionPersistence, id),
       });
       const runtime = new TeamRuntime({ directory: workspace, platformId: "dsh", session,
-        roles: () => resolvedRoles, canPollStatus: true, memberProblem });
+        roles: () => resolvedRoles, canPollStatus: true, memberProblem,
+        // A session switched to another role must not keep acting for its team
+        // member; the reconciler pauses the team instead of recording its turns.
+        // The role holder is the binding the session switcher maintains, so this
+        // check costs one map lookup per pump tick instead of re-reading events.
+        memberAuthorized: member => !member.sessionId || activeRole.get(member.sessionId) === member.roleId });
       entry = { runtime, session };
       teamRuntimes.set(workspace, entry);
       if (teamReady) runtime.start();

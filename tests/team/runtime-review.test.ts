@@ -163,9 +163,10 @@ describe("team runtime concurrency review", () => {
 
   it("acknowledges a durable completed turn before resuming another member failure", async () => {
     let prompts = 0;
+    const prompted: string[] = [];
     const cancelled: string[] = [];
     const { runtime, transcripts } = await fixture({
-      prompt: async () => ({ id: `prompt-${++prompts}` }),
+      prompt: async id => { prompted.push(id); return { id: `prompt-${++prompts}` }; },
       abort: async id => { cancelled.push(id); return true; },
     });
     const instance = runtime();
@@ -183,7 +184,9 @@ describe("team runtime concurrency review", () => {
     expect(completed.delivery).toBeUndefined();
     expect(cancelled).not.toContain("peer-session");
     await instance.tick();
-    expect(prompts).toBe(1);
+    // The acknowledged turn is not replayed to the member; the only further
+    // prompt is the creator's notice that the private answer was not published.
+    expect(prompted).toEqual(["peer-session", actor.sessionID]);
   });
 
   it("does not acknowledge an unrelated final that arrived before the delivery marker", async () => {
