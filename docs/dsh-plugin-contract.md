@@ -1807,6 +1807,7 @@ defaults alone (`roleboxDir` / `skillsDir` resolved on top of
 | `roleboxDir` | `string` | `{dsh home}/rolebox` | Directory containing `role.yaml` files |
 | `skillsDir` | `string` | `{dsh home}/skills` | Global skills directory |
 | `defaultRole` | `string` | — | Role id (directory name) promoted to primary mode |
+| `activeRole` | `string` | — | Top-level role id activated for new sessions that have no persisted selection. Useful for headless hosts with no role picker; a persisted selection or an explicit switch wins, and a team member session keeps its assigned role |
 | `enabledNamespaces` | `string[]` | all | Composable tool filter: exact tool names or namespace prefixes (e.g. `hashline`, `graph`) allow, a `!` entry (e.g. `!web`) excludes, `"*"` allows everything; absent/empty registers every assembled tool. An exclusion always beats an allow, a negatives-only list means "all except those", and entries match CANONICAL tool names — the filter runs before the collision fallback (§5.4.2). A tool name the host already registered is registered as `rb_<name>` and logged instead of failing registration |
 
 Set them by patching the rolebox row's `config` from the profile's own

@@ -9,7 +9,7 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
   const resolve = (context: CanonicalToolContext) => typeof source === "function" ? source(context) : source;
   return {
     team_list_roles: defineTool({
-      description: "Discover top-level roles available for peer collaboration. Private subroles are not team candidates.",
+      description: "Discover top-level roles available for peer collaboration. Works without an active role. Private subroles are not team candidates.",
       args: {},
       async execute(_args, context) { const runtime = resolve(context); return JSON.stringify(runtime.roles()); },
     }),
@@ -19,7 +19,7 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.create(context, args.name, args.goal, args.max_turns)); },
     }),
     team_add: defineTool({
-      description: "Creator only: add a top-level role; its dedicated session receives the goal and team events. Membership is broadcast.",
+      description: "Creator only: record a top-level role as a team member. This does not start a turn; the member's first woken event (a message or task event addressed to it) starts it with the goal, roster and tasks.",
       args: { team_id: teamId, role_id: z.string().min(1) },
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.add(context, args.team_id, args.role_id)); },
     }),
@@ -30,11 +30,11 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
       async execute(args, context) { const runtime = resolve(context); return JSON.stringify(runtime.send(context, args.team_id, args)); },
     }),
     team_status: defineTool({
-      description: "Read your teams, roster, claims, delivery errors and durable event stream. Reading does not acknowledge or discard pending events.",
-      args: { team_id: teamId.optional(), after_seq: z.number().int().min(0).optional() },
+      description: "Read your teams or one team's roster, claims, delivery errors and durable event stream. Closed teams are hidden from the team list unless include_deleted is set; reading one by team_id always works. Reading does not acknowledge or discard pending events.",
+      args: { team_id: teamId.optional(), after_seq: z.number().int().min(0).optional(), include_deleted: z.boolean().optional() },
       async execute(args, context) {
         const runtime = resolve(context);
-        if (!args.team_id) return JSON.stringify(runtime.list(context).map(s => ({ id: s.id, name: s.name, status: s.status, turns: s.turns, maxTurns: s.maxTurns })));
+        if (!args.team_id) return JSON.stringify(runtime.list(context, args.include_deleted).map(s => ({ id: s.id, name: s.name, status: s.status, turns: s.turns, maxTurns: s.maxTurns })));
         const state = runtime.status(context, args.team_id);
         return JSON.stringify({ ...state, events: state.events.filter(e => e.seq > (args.after_seq ?? 0)) });
       },
@@ -52,7 +52,11 @@ export function createTeamTools(source: TeamRuntime | ((context: CanonicalToolCo
     team_resume: defineTool({
       description: "Creator only: resume a paused team after inspecting errors and existing artifacts. Unacknowledged events may be replayed. Does not reset the turn budget.",
       args: { team_id: teamId },
-      async execute(args, context) { const runtime = resolve(context); await runtime.resume(context, args.team_id); return "Team resumed"; },
+      async execute(args, context) {
+        const runtime = resolve(context);
+        const unresolved = await runtime.resume(context, args.team_id);
+        return unresolved.length ? `Team resumed with unresolved members: ${unresolved.join("; ")}` : "Team resumed";
+      },
     }),
   };
 }

@@ -197,6 +197,7 @@ async function createFixture(
   s1Events: DshSessionEventLike[] = [],
   options: {
     onActiveRoleChanged?: (sessionId: string, roleId: string | null) => void;
+    defaultRoleId?: string;
   } = {},
 ) {
   const { ctx, listeners } = createFakeCtx();
@@ -215,6 +216,7 @@ async function createFixture(
     ...(options.onActiveRoleChanged
       ? { onActiveRoleChanged: options.onActiveRoleChanged }
       : {}),
+    ...(options.defaultRoleId ? { defaultRoleId: options.defaultRoleId } : {}),
   });
   return { ctx, listeners, registrar, subagents, store, s1, switcher, activeRole, persistence, saves };
 }
@@ -377,7 +379,10 @@ describe("DshRoleSwitcher onActiveRoleChanged", () => {
 
   it("fires on a session/created restore (the active set changed too)", async () => {
     const calls: Array<{ sessionId: string; roleId: string | null }> = [];
-    const { ctx } = await createFixture(
+    // The sidecar selection is hydrated into the holder BEFORE the session is
+    // published, so this pins that a hydrated role still reaches the hook: the
+    // restore re-applies it and fires exactly once.
+    const { ctx, saves } = await createFixture(
       [makeAgent("alpha", { mode: RoleMode.Primary })],
       { s1: "alpha" },
       [],
@@ -387,6 +392,7 @@ describe("DshRoleSwitcher onActiveRoleChanged", () => {
     ctx.emit("session/created", "s1");
 
     expect(calls).toEqual([{ sessionId: "s1", roleId: "alpha" }]);
+    expect(saves.at(-1)?.get("s1")).toMatchObject({ sessionId: "s1", roleId: "alpha" });
   });
 
   it("a throwing hook never fails the switch", async () => {
@@ -558,6 +564,135 @@ describe("DshRoleSwitcher session/created restore", () => {
     ctx.emit("session/created", s1);
 
     expect(switcher.getActive("s1")).toBe("alpha");
+  });
+
+  it("activates the configured default role for a new session", async () => {
+    const { ctx, switcher, saves } = await createFixture(
+      [makeAgent("alpha", { mode: RoleMode.Primary })],
+      {},
+      [],
+      { defaultRoleId: "alpha" },
+    );
+
+    ctx.emit("session/created", "s1");
+
+    expect(switcher.getActive("s1")).toBe("alpha");
+    expect(saves.at(-1)?.get("s1")).toMatchObject({ sessionId: "s1", roleId: "alpha" });
+  });
+
+  it("ignores a default role that is unknown or not primary", async () => {
+    for (const defaultRoleId of ["ghost", "gamma"]) {
+      const { ctx, switcher, saves } = await createFixture(
+        [makeAgent("gamma", { mode: RoleMode.Subagent })],
+        {},
+        [],
+        { defaultRoleId },
+      );
+
+      ctx.emit("session/created", "s1");
+
+      expect(switcher.getActive("s1")).toBeNull();
+      expect(saves).toHaveLength(0);
+    }
+  });
+
+  it("never overwrites an already-bound active role with the default", async () => {
+    const calls: Array<{ sessionId: string; roleId: string | null }> = [];
+    const { ctx, switcher, saves } = await createFixture(
+      [
+        makeAgent("alpha", { mode: RoleMode.Primary }),
+        makeAgent("designer", { mode: RoleMode.Primary }),
+      ],
+      {},
+      [],
+      {
+        defaultRoleId: "alpha",
+        onActiveRoleChanged: (sessionId, roleId) => calls.push({ sessionId, roleId }),
+      },
+    );
+    // A team peer is bound by the team session adapter before its session is
+    // published, so the restore listener sees an already-selected role.
+    switcher.activeRole.set("member", "designer");
+
+    ctx.emit("session/created", makeSession("member"));
+
+    expect(switcher.getActive("member")).toBe("designer");
+    expect(saves.every((save) => save.get("member")?.roleId !== "alpha")).toBe(true);
+    // The restore re-applies the bound role and reports it once, so the skill
+    // catalog is still invalidated for a hydrated selection.
+    expect(saves.at(-1)?.get("member")?.roleId).toBe("designer");
+    expect(calls).toEqual([{ sessionId: "member", roleId: "designer" }]);
+  });
+
+  it("does not apply the default role to a subagent session (header.origin)", async () => {
+    const { ctx, switcher, saves } = await createFixture(
+      [makeAgent("alpha", { mode: RoleMode.Primary })],
+      {},
+      [],
+      { defaultRoleId: "alpha" },
+    );
+
+    ctx.emit(
+      "session/created",
+      makeSession("sub-1", [], { cwd: process.cwd(), origin: "subagent" }),
+    );
+
+    expect(switcher.getActive("sub-1")).toBeNull();
+    expect(saves).toHaveLength(0);
+  });
+
+  it("does not apply the default role to a delegated session (header.delegationDepth)", async () => {
+    const { ctx, switcher, saves } = await createFixture(
+      [makeAgent("alpha", { mode: RoleMode.Primary })],
+      {},
+      [],
+      { defaultRoleId: "alpha" },
+    );
+
+    ctx.emit(
+      "session/created",
+      makeSession("delegated", [], { cwd: process.cwd(), delegationDepth: 1 }),
+    );
+
+    expect(switcher.getActive("delegated")).toBeNull();
+    expect(saves).toHaveLength(0);
+  });
+
+  it("does not apply the default role when the log carries subagent/descriptor", async () => {
+    const { ctx, switcher, saves } = await createFixture(
+      [makeAgent("alpha", { mode: RoleMode.Primary })],
+      {},
+      [],
+      { defaultRoleId: "alpha" },
+    );
+
+    const descriptor: DshSessionEventLike = {
+      type: "subagent/descriptor",
+      seq: 0,
+      time: 1,
+      data: { provider: "rolebox", agent: "designer" },
+    };
+    ctx.emit("session/created", makeSession("sub-2", [descriptor]));
+
+    expect(switcher.getActive("sub-2")).toBeNull();
+    expect(saves).toHaveLength(0);
+  });
+
+  it("a persisted sidecar selection wins over the default role", async () => {
+    const { ctx, switcher, saves } = await createFixture(
+      [
+        makeAgent("alpha", { mode: RoleMode.Primary }),
+        makeAgent("beta", { mode: RoleMode.Primary }),
+      ],
+      { s1: "beta" },
+      [],
+      { defaultRoleId: "alpha" },
+    );
+
+    ctx.emit("session/created", "s1");
+
+    expect(switcher.getActive("s1")).toBe("beta");
+    expect(saves.every((save) => save.get("s1")?.roleId !== "alpha")).toBe(true);
   });
 
   it("a fork inherits its parent's active role (header.parentSession)", async () => {

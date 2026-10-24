@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import SessionStore, { SessionId } from "@deepseek-ai/dsh-session";
 import { MessageId } from "@deepseek-ai/dsh-llm";
-import { DshTeamSessionAdapter, type DshTeamAgent, type DshTeamAgents } from "../../src/platform/adapters/dsh/team-session.ts";
+import { DshTeamSessionAdapter, type DshTeamAgent, type DshTeamAgentOptions, type DshTeamAgents } from "../../src/platform/adapters/dsh/team-session.ts";
 import type { DshSessionEventLike, DshSessionLike, DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
+import { TeamRuntime } from "../../src/team/runtime.ts";
+import type { ResolvedRole } from "../../src/types.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+type PendingPrompt = Omit<Parameters<DshTeamAgent["followup"]>[0], "source"> & { source: { kind: string; form?: string; summary?: string } };
+type RequestHook = Parameters<NonNullable<NonNullable<DshTeamAgent["ctx"]>["on"]>>[1];
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "rolebox-dsh-team-"));
@@ -18,12 +23,15 @@ function fixture() {
   const sessions = new Map<string, DshSessionLike>();
   const agents = new Map<string, DshTeamAgent>();
   const roles = new Map<string, string>();
-  const pending = new Map<string, Array<Parameters<DshTeamAgent["followup"]>[0]>>();
+  const pending = new Map<string, PendingPrompt[]>();
+  const requestHooks = new Map<string, RequestHook[]>();
   const created: Array<Parameters<DshTeamAgents["create"]>[0]> = [];
   const resumed: Array<Parameters<DshTeamAgents["resume"]>[0]> = [];
   const cleared: string[] = [];
   let flushAccepted = true;
   let cancellationAccepted = true;
+  let disposalAccepted = true;
+  let designerOptions: { provider?: string; model?: string } | undefined = { provider: "example-provider", model: "design-model" };
 
   function makeSession(id: string, initial: readonly DshSessionEventLike[] = []): DshSessionLike {
     const events = structuredClone(initial) as DshSessionEventLike[];
@@ -33,7 +41,13 @@ function fixture() {
   function makeAgent(session: DshSessionLike) {
     let status: "idle" | "running" = "idle";
     pending.set(session.id, []);
+    requestHooks.set(session.id, []);
     const agent: DshTeamAgent = { id: session.id, session, get status() { return status; },
+      ctx: { on(_event, listener) {
+        const hooks = requestHooks.get(session.id)!;
+        hooks.push(listener);
+        return () => { hooks.splice(hooks.indexOf(listener), 1); };
+      } },
       inbox: { get nextTurn() { return pending.get(session.id)!; }, nextStep: [],
         remove(messageId) { const messages = pending.get(session.id)!; const index = messages.findIndex(message => message.id === messageId);
           if (index < 0) return false; messages.splice(index, 1); cleared.push(session.id); return true; } },
@@ -45,6 +59,12 @@ function fixture() {
     return { agent, setIdle() { status = "idle"; } };
   }
   const idle = new Map<string, () => void>();
+  async function dispose(id: string) {
+    if (!disposalAccepted) throw new Error("Peer disposal failed");
+    agents.delete(id);
+    sessions.delete(id);
+    requestHooks.delete(id);
+  }
   const registry: DshTeamAgents = {
     get: id => agents.get(id),
     async create(options) {
@@ -56,7 +76,7 @@ function fixture() {
       sessions.set(session.id, session);
       agents.set(session.id, made.agent);
       idle.set(session.id, made.setIdle);
-      return { agent: made.agent, async dispose() { agents.delete(session.id); sessions.delete(session.id); } };
+      return { agent: made.agent, dispose: () => dispose(session.id) };
     },
     async resume(options) {
       resumed.push(options);
@@ -73,7 +93,7 @@ function fixture() {
       sessions.set(session.id, session);
       agents.set(session.id, made.agent);
       idle.set(session.id, made.setIdle);
-      return { agent: made.agent, async dispose() { agents.delete(session.id); sessions.delete(session.id); } };
+      return { agent: made.agent, dispose: () => dispose(session.id) };
     },
   };
   const store: DshSessionStoreLike = {
@@ -85,7 +105,7 @@ function fixture() {
   const options = { directory, sessions: store, agents: registry,
     bindRole(id: string, role: string) { roles.set(id, role); },
     roleOf(id: string) { return roles.get(id); },
-    resolveRole(role: string) { return role === "designer" ? { agentOptions: { provider: "example-provider", model: "design-model" } } : undefined; },
+    resolveRole(role: string) { return role === "designer" ? { agentOptions: designerOptions } : undefined; },
     async readExecutionEvents(id: string) { return stored.get(id); },
   };
   const makeAdapter = () => { const adapter = new DshTeamSessionAdapter(options); cleanups.push(() => adapter.dispose()); return adapter; };
@@ -98,8 +118,15 @@ function fixture() {
     session.append("turn/end", { turn: 1, reason: { kind: reason } });
     idle.get(id)!();
   }
-  return { directory, sessions, store, agents, registry, roles, pending, created, resumed, cleared, stored, makeAdapter, complete,
-    setFlush(value: boolean) { flushAccepted = value; }, setCancellation(value: boolean) { cancellationAccepted = value; } };
+  async function requestOptions(id: string): Promise<DshTeamAgentOptions> {
+    const selected = [...created, ...resumed].reverse().find(input => ("sessionId" in input ? input.sessionId : input.resumeSessionId) === id)?.agentOptions;
+    const seed = async () => ({ ...selected });
+    return requestHooks.get(id)!.reduceRight<() => Promise<DshTeamAgentOptions>>((next, listener) => () => listener({}, next), seed)();
+  }
+  return { directory, sessions, store, agents, registry, roles, pending, created, resumed, cleared, stored, makeAdapter, complete, requestOptions,
+    setFlush(value: boolean) { flushAccepted = value; }, setCancellation(value: boolean) { cancellationAccepted = value; },
+    setDisposal(value: boolean) { disposalAccepted = value; },
+    setRoleOptions(value: { provider?: string; model?: string } | undefined) { designerOptions = value; } };
 }
 
 describe("DSH team execution sessions", () => {
@@ -184,8 +211,8 @@ describe("DSH team execution sessions", () => {
     const f = fixture(); const adapter = f.makeAdapter();
     const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
     await adapter.prompt(id, { parts: [{ type: "text", text: "[rolebox-team pending]" }] });
-    const userMessage = { id: "user-pending", role: "user", content: [{ type: "text", text: "Please also review this" }], source: { kind: "user" } };
-    f.pending.get(id)!.push(userMessage as never);
+    const userMessage = { id: "user-pending", role: "user", content: [{ type: "text", text: "Please also review this" }], source: { kind: "user" } } satisfies PendingPrompt;
+    f.pending.get(id)!.push(userMessage);
     expect(await adapter.abort(id)).toBe(true);
     expect(f.pending.get(id)).toEqual([userMessage]);
   });
@@ -219,6 +246,174 @@ describe("DSH team execution sessions", () => {
     expect(f.pending.get(id)).toEqual([]);
     expect(await adapter.abort(id)).toBe(true);
   });
+
+  it("repairs an existing peer with the role's current options on the next resume", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    await first.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    f.complete(id); await first.messages(id); await first.dispose();
+    const descriptorPath = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    expect(JSON.parse(readFileSync(descriptorPath, "utf8")).agentOptions).toEqual({ provider: "example-provider", model: "design-model" });
+
+    f.setRoleOptions({ provider: "example-provider", model: "repaired-model" });
+    const restored = f.makeAdapter();
+    await restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team second]" }] });
+
+    expect(f.resumed[0].agentOptions).toEqual({ provider: "example-provider", model: "repaired-model" });
+    expect(JSON.parse(readFileSync(descriptorPath, "utf8")).agentOptions).toEqual({ provider: "example-provider", model: "repaired-model" });
+  });
+
+  it("updates idle resident requests with the current model and preserves history", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    await adapter.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    f.complete(id);
+    const history = await adapter.messages(id);
+    const original = f.agents.get(id);
+    f.setRoleOptions({ provider: "example-provider", model: "repaired-model" });
+
+    await Promise.all(["second", "third"].map(delivery => adapter.prompt(id, {
+      agent: "designer", parts: [{ type: "text", text: `[rolebox-team ${delivery}]` }],
+    })));
+
+    expect(f.created).toHaveLength(1);
+    expect(f.resumed).toHaveLength(0);
+    expect(await f.requestOptions(id)).toMatchObject({ provider: "example-provider", model: "repaired-model" });
+    expect(f.agents.get(id)).toBe(original);
+    expect((await adapter.messages(id)).slice(0, history.length)).toEqual(history);
+    expect(f.pending.get(id)!.map(message => message.content[0].text)).toEqual(["[rolebox-team second]", "[rolebox-team third]"]);
+  });
+
+  it("defers resident model changes until idle without interrupting its running turn", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    await adapter.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    const original = f.agents.get(id);
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    f.setRoleOptions({ provider: "example-provider", model: "repaired-model" });
+    const input = { agent: "designer", parts: [{ type: "text" as const, text: "[rolebox-team retry]" }] };
+
+    await expect(adapter.prompt(id, input)).rejects.toThrow("idle");
+    expect(f.agents.get(id)).toBe(original);
+    expect(await adapter.status(id)).toEqual({ type: "busy" });
+    expect(JSON.parse(readFileSync(path, "utf8")).agentOptions.model).toBe("design-model");
+    f.complete(id);
+    await adapter.prompt(id, input);
+    expect(f.resumed).toHaveLength(0);
+    expect(f.agents.get(id)).toBe(original);
+    expect(await f.requestOptions(id)).toMatchObject({ model: "repaired-model" });
+  });
+
+  it("does not rewrite another host's descriptor when a model change is rejected", async () => {
+    const f = fixture(); const owner = f.makeAdapter(); const other = f.makeAdapter();
+    const id = (await owner.create({ directory: f.directory, agent: "designer" }))!.id;
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    f.setRoleOptions({ provider: "example-provider", model: "repaired-model" });
+
+    await expect(other.prompt(id, { parts: [{ type: "text", text: "[rolebox-team rejected]" }] }))
+      .rejects.toThrow("another running host");
+    expect(JSON.parse(readFileSync(path, "utf8")).agentOptions.model).toBe("design-model");
+    await owner.prompt(id, { parts: [{ type: "text", text: "[rolebox-team accepted]" }] });
+    expect(f.resumed).toHaveLength(0);
+    expect(await f.requestOptions(id)).toMatchObject({ model: "repaired-model" });
+  });
+
+  it("refuses a peer whose role lost its usable provider/model", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    await first.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    f.complete(id); await first.messages(id); await first.dispose();
+
+    f.setRoleOptions(undefined);
+    const restored = f.makeAdapter();
+    await expect(restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team second]" }] }))
+      .rejects.toThrow('role "designer" has no usable provider/model');
+    expect(f.resumed).toHaveLength(0);
+  });
+
+  it("forgets a removed peer's descriptor, handle and lease but never a user session", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    const descriptorPath = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    expect(existsSync(descriptorPath)).toBe(true);
+
+    await adapter.forget(id);
+
+    expect(existsSync(descriptorPath)).toBe(false);
+    expect(f.agents.has(id)).toBe(false);
+    // The role can join a team again as a fresh peer.
+    expect(await adapter.create({ directory: f.directory, agent: "designer" })).not.toBeNull();
+    await expect(adapter.forget("user-session-not-restored")).resolves.toBeUndefined();
+  });
+
+  it("preserves a foreign peer's descriptor and lease until its owner releases it", async () => {
+    const f = fixture(); const owner = f.makeAdapter(); const other = f.makeAdapter();
+    const id = (await owner.create({ directory: f.directory, agent: "designer" }))!.id;
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+
+    await other.forget(id);
+    expect(existsSync(path)).toBe(true);
+    expect(f.agents.has(id)).toBe(true);
+    expect(await other.status(id)).toEqual({ type: "busy" });
+    await owner.forget(id);
+    expect(existsSync(path)).toBe(false);
+    expect(f.agents.has(id)).toBe(false);
+  });
+
+  it("keeps the descriptor, handle and lease when disposal fails so cleanup can retry", async () => {
+    const f = fixture(); const owner = f.makeAdapter(); const other = f.makeAdapter();
+    const id = (await owner.create({ directory: f.directory, agent: "designer" }))!.id;
+    const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+    f.setDisposal(false);
+    try {
+      await expect(owner.forget(id)).rejects.toThrow("Peer disposal failed");
+      expect(existsSync(path)).toBe(true);
+      expect(f.agents.has(id)).toBe(true);
+      expect(await other.status(id)).toEqual({ type: "busy" });
+    } finally { f.setDisposal(true); }
+
+    await owner.forget(id);
+    expect(existsSync(path)).toBe(false);
+    expect(f.agents.has(id)).toBe(false);
+  });
+
+  for (const operation of ["remove", "delete"] as const) {
+    for (const releaseOwner of [false, true]) {
+      it(`retries ${operation} cleanup ${releaseOwner ? "after the owning host exits" : "on the owning host"}`, async () => {
+        const f = fixture(); const owner = f.makeAdapter(); const other = f.makeAdapter();
+        const roles: ResolvedRole[] = ["developer", "designer"].map(id => ({ id, config: { name: id, description: id, prompt: "" },
+          prompt: "", skills: [], functions: [], references: [], subagents: [] }));
+        const creator = { sessionID: "owner", agent: "developer" };
+        const makeRuntime = (session: DshTeamSessionAdapter) => {
+          const runtime = new TeamRuntime({ directory: f.directory, platformId: "dsh", session, roles: () => roles, canPollStatus: true });
+          cleanups.push(() => runtime.dispose());
+          return runtime;
+        };
+        const origin = makeRuntime(owner); const observer = makeRuntime(other);
+        const team = origin.create(creator, "Build", "Prepare the design");
+        const member = origin.add(creator, team.id, "designer");
+        origin.send(creator, team.id, { kind: "message", content: "Prepare the first design" });
+        await origin.tick();
+        const id = origin.status(creator, team.id).members.find(item => item.id === member.id)!.sessionId!;
+        f.complete(id); await origin.tick();
+        const path = join(f.directory, ".rolebox", "team-sessions", `${id}.json`);
+
+        if (operation === "remove") await observer.remove(creator, team.id, member.id);
+        else await observer.delete(creator, team.id);
+        await observer.tick();
+        expect(existsSync(path)).toBe(true);
+        expect(f.agents.has(id)).toBe(true);
+
+        if (releaseOwner) { await owner.dispose(); await observer.tick(); }
+        else await origin.tick();
+        expect(existsSync(path)).toBe(false);
+        expect(f.agents.has(id)).toBe(false);
+        expect(f.created).toHaveLength(1);
+        expect(f.resumed).toHaveLength(0);
+        expect(origin.status(creator, team.id).status).toBe(operation === "delete" ? "deleted" : "paused");
+      });
+    }
+  }
 
   it("maps the installed DSH SessionStore's actual user, assistant and terminal envelopes", async () => {
     const f = fixture(); const adapter = f.makeAdapter();

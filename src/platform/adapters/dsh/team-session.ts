@@ -6,6 +6,7 @@ import type { Message, SessionInfo, SessionStatus } from "../../types.ts";
 import { getSystem } from "../../system/index.ts";
 import { DshSessionAdapter, type DshSessionEventLike, type DshSessionLike, type DshSessionStoreLike } from "./session.ts";
 import { DshTeamSessionLease } from "./team-session-lease.ts";
+import type { DshWorkerAgent } from "./graph-worker.ts";
 
 export interface DshTeamAgentOptions {
   provider?: string;
@@ -32,6 +33,9 @@ export interface DshTeamAgent {
   readonly id: string;
   readonly session: DshSessionLike;
   readonly status: "idle" | "running";
+  readonly ctx?: NonNullable<DshWorkerAgent["ctx"]> & {
+    on?(event: "agent/request", listener: (payload: unknown, next: () => Promise<DshTeamAgentOptions>) => Promise<DshTeamAgentOptions>): () => void;
+  };
   readonly inbox: {
     readonly nextTurn: readonly PendingMessage[];
     readonly nextStep: readonly PendingMessage[];
@@ -76,7 +80,11 @@ export interface DshTeamSessionAdapterOptions {
   bindRole(sessionId: string, roleId: string): void;
   /** Detect user role changes on resident peers without overwriting their selection. */
   roleOf?(sessionId: string): string | null | undefined;
-  /** Return undefined for unknown roles and for another role's subroles. */
+  /**
+   * Resolve a role's CURRENT spawn options. Returning `undefined` means the
+   * role is unknown (or is no longer a top-level candidate); a known role with
+   * no `agentOptions` has no usable provider/model.
+   */
   resolveRole(roleId: string): { agentOptions?: DshTeamAgentOptions } | undefined;
   /** Read resident or persisted history without creating a live agent. */
   readExecutionEvents(id: string): Promise<readonly DshSessionEventLike[] | undefined>;
@@ -93,6 +101,20 @@ interface Descriptor {
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Compare persisted and freshly resolved options so a descriptor is only rewritten on a real change. */
+function sameAgentOptions(a: DshTeamAgentOptions | undefined, b: DshTeamAgentOptions | undefined): boolean {
+  return a?.provider === b?.provider && a?.model === b?.model
+    && a?.reasoningEffort === b?.reasoningEffort && a?.maxTokens === b?.maxTokens;
+}
+
+/** Options for a resolved role, or a clear refusal when the role cannot run a turn. */
+function requireAgentOptions(roleId: string, role: { agentOptions?: DshTeamAgentOptions }): DshTeamAgentOptions {
+  if (!role.agentOptions?.provider || !role.agentOptions.model) {
+    throw new Error(`DSH team member role "${roleId}" has no usable provider/model; set model in its role.yaml or configure a host default model`);
+  }
+  return role.agentOptions;
 }
 
 function sessionEvents(session: DshSessionLike): readonly DshSessionEventLike[] {
@@ -126,6 +148,8 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
   private readonly leases: DshTeamSessionLease;
   private readonly handles = new Map<string, DshTeamAgentHandle>();
   private readonly loading = new Map<string, Promise<DshTeamAgent>>();
+  private readonly forgetting = new Map<string, Promise<void>>();
+  private readonly requestOptions = new Map<string, { agent: DshTeamAgent; options?: DshTeamAgentOptions }>();
   private readonly creating = new Set<Promise<SessionInfo | null>>();
   private stopped = false;
 
@@ -205,7 +229,9 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
   private async createPeer(input: Parameters<ISessionClient["create"]>[0]): Promise<SessionInfo | null> {
     if (this.stopped || resolve(input.directory) !== this.directory || !input.agent) return null;
     const role = this.options.resolveRole(input.agent);
-    if (!role) return null;
+    // A role without a usable provider/model would produce a dead peer session;
+    // refuse it here so the runtime reports the role instead of a silent no-op.
+    if (!role?.agentOptions?.provider || !role.agentOptions.model) return null;
     const id = `rolebox-team-${randomUUID()}`;
     const descriptor: Descriptor = { version: 1, sessionId: id, roleId: input.agent,
       directory: this.directory, createdAt: Date.now(), agentOptions: role.agentOptions };
@@ -229,22 +255,58 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
 
   private async live(id: string, expectedRole?: string): Promise<DshTeamAgent | undefined> {
     if (this.stopped) return undefined;
+    if (this.forgetting.has(id)) throw new Error("DSH team session is being removed");
+    const pending = this.loading.get(id);
+    if (pending) {
+      await pending;
+      return this.live(id, expectedRole);
+    }
     const descriptor = this.descriptor(id);
     if (!descriptor) return this.options.agents.get(id);
     if (expectedRole && descriptor.roleId !== expectedRole) throw new Error("DSH team member role changed");
-    if (!this.options.resolveRole(descriptor.roleId)) throw new Error("DSH team role is no longer available");
+    // The role is resolved FRESH on every load so a repaired role.yaml (or a
+    // newly registered provider route) reaches an existing member on its next
+    // resume instead of being pinned to the options recorded at creation.
+    const role = this.options.resolveRole(descriptor.roleId);
+    if (!role) throw new Error("DSH team role is no longer available");
+    const agentOptions = requireAgentOptions(descriptor.roleId, role);
     if (!this.leases.acquire(id)) throw new Error("DSH team session is owned by another running host");
+    const changed = !sameAgentOptions(descriptor.agentOptions, agentOptions);
     const resident = this.options.agents.get(id);
     if (resident) {
       if (this.options.roleOf && this.options.roleOf(id) !== descriptor.roleId) {
         throw new Error("DSH team member's active role changed; restore its assigned role before resuming the team");
       }
+      if (!changed) return resident;
+      if (resident.status !== "idle") throw new Error("DSH team member must be idle before changing its model");
+      if (!this.handles.has(id)) throw new Error("DSH team session handle is not owned by this adapter");
+      let current = this.requestOptions.get(id);
+      if (!current || current.agent !== resident) {
+        if (!resident.ctx?.on) throw new Error("DSH host cannot update a resident member's model");
+        const override: { agent: DshTeamAgent; options?: DshTeamAgentOptions } = { agent: resident };
+        // The driver reuses logged request config; this hook preserves its inbox while switching models.
+        resident.ctx.on("agent/request", async (_payload, next) => {
+          const proposed = await next();
+          const selected = override.options;
+          if (!selected) return proposed;
+          const updated = { ...proposed, ...selected };
+          if (selected.reasoningEffort === undefined) delete updated.reasoningEffort;
+          if (selected.maxTokens === undefined) delete updated.maxTokens;
+          return updated;
+        });
+        this.requestOptions.set(id, override);
+        current = override;
+      }
+      this.saveDescriptor({ ...descriptor, agentOptions });
+      current.options = { ...agentOptions };
       return resident;
     }
-    const pending = this.loading.get(id);
-    if (pending) return pending;
-    const loading = (async () => {
+    const loading = Promise.resolve().then(async () => {
       try {
+        if (changed) {
+          descriptor.agentOptions = agentOptions;
+          this.saveDescriptor(descriptor);
+        }
         this.options.bindRole(id, descriptor.roleId);
         const handle = await materialize(signal => this.options.agents.resume({ resumeSessionId: id, agentOptions: descriptor.agentOptions,
           setup: this.setup(descriptor, true), signal }));
@@ -258,14 +320,14 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
         this.leases.release(id);
         throw error;
       }
-      finally { this.loading.delete(id); }
-    })();
+    }).finally(() => { this.loading.delete(id); });
     this.loading.set(id, loading);
     return loading;
   }
 
   override async prompt(id: string, input: Parameters<ISessionClient["prompt"]>[1]): Promise<{ id: string } | null> {
     const agent = await this.live(id, input.agent);
+    if (this.forgetting.has(id)) throw new Error("DSH team session is being removed");
     if (!agent || resolve(sessionDirectory(agent.session) ?? "") !== this.directory) return null;
     const text = input.parts.filter(part => part.type === "text").map(part => part.text).join("\n");
     if (!text) return null;
@@ -295,6 +357,35 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
       await this.flush(agent.session);
       return true;
     } catch { return false; }
+  }
+
+  /**
+   * Release a removed or deleted member's durable identity: dispose its live
+   * handle, drop its lease and delete the descriptor, so a later team can add
+   * the same role as a fresh peer. Unknown ids and ordinary user sessions are
+   * untouched. A foreign lease defers cleanup until the owning host releases it.
+   */
+  async forget(id: string): Promise<void> {
+    const path = this.descriptorPath(id);
+    if (!path || this.stopped) return;
+    const pending = this.forgetting.get(id);
+    if (pending) return pending;
+    if (!this.descriptor(id) || !this.leases.acquire(id)) return;
+    const forgetting = Promise.resolve().then(async () => {
+      await this.loading.get(id)?.catch(() => undefined);
+      const handle = this.handles.get(id);
+      if (handle) {
+        await handle.dispose();
+        this.handles.delete(id);
+        this.requestOptions.delete(id);
+      } else if (this.options.agents.get(id)) {
+        throw new Error("DSH team session handle is not owned by this adapter");
+      }
+      rmSync(path, { force: true });
+      this.leases.release(id);
+    }).finally(() => { this.forgetting.delete(id); });
+    this.forgetting.set(id, forgetting);
+    return forgetting;
   }
 
   private async events(id: string): Promise<readonly DshSessionEventLike[] | undefined> {
@@ -368,9 +459,11 @@ export class DshTeamSessionAdapter extends DshSessionAdapter {
     this.stopped = true;
     await Promise.allSettled(this.creating);
     await Promise.allSettled(this.loading.values());
+    await Promise.allSettled(this.forgetting.values());
     const results = await Promise.allSettled([...this.handles.values()].map(handle => handle.dispose()));
     if (results.some(result => result.status === "rejected")) throw new Error("DSH team agents did not finish disposal");
     this.handles.clear();
+    this.requestOptions.clear();
     this.leases.dispose();
   }
 }

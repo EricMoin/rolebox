@@ -44,7 +44,8 @@ async function eventually(check: () => boolean | Promise<boolean>) {
   throw new Error("Expected DSH team progress did not occur");
 }
 
-function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean; flush?: boolean; guard?: boolean; collision?: boolean } = {}) {
+function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean; flush?: boolean; guard?: boolean; collision?: boolean;
+  agentDefaultModel?: { provider: string; model: string; reasoningEffort?: string } } = {}) {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
   const tools = new Map<string, DshToolDefinition>();
   const providers = new Map<string, DshSubagentProvider>();
@@ -53,7 +54,7 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
   const persisted = new Map<string, { cwd: string; events: DshSessionEventLike[] }>();
   const live = new Map<string, DshTeamAgent>();
   const guards: Array<Parameters<NonNullable<DshPluginContext["tools"]["guard"]>>[0]> = [];
-  const created: Array<{ id: string; model?: string; prompt: unknown }> = [];
+  const created: Array<{ id: string; provider?: string; model?: string; prompt: unknown }> = [];
   const resumed: string[] = [];
   const sent: Array<{ id: string; text: string }> = [];
   const disposed: string[] = [];
@@ -87,6 +88,11 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
         status = "idle";
         session.append("turn/end", { reason: { kind: "completed" } });
       },
+      fail(text: string) {
+        session.append("assistant/message", { message: { id: `${session.id}-answer-${session.seq}`, content: [{ type: "text", text }] } });
+        status = "idle";
+        session.append("turn/end", { reason: { kind: "error", error: { message: text, code: "MODEL_ERROR" } } });
+      },
     } as DshTeamAgent;
   };
   const publish = (agent: DshTeamAgent): DshTeamAgentHandle => {
@@ -110,7 +116,7 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
       spawnToolAvailability.push(tools.has("team_create") || tools.has("rb_team_create"));
       const agent = makeAgent(makeSession(input.sessionId, input.meta.cwd));
       input.setup({}, agent);
-      created.push({ id: agent.id, model: input.agentOptions?.model,
+      created.push({ id: agent.id, provider: input.agentOptions?.provider, model: input.agentOptions?.model,
         prompt: sections.find(section => section.name === "rolebox:role")?.text({ agent }) });
       return publish(agent);
     },
@@ -157,6 +163,10 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
       if (name === "agents") return agents;
       if (name === "systemPrompt") return options.prompt === false ? undefined : systemPrompt;
       if (name === "agentLoop") return options.loop === false ? undefined : { createAgent() {}, resume() {} };
+      if (name === "agentDefaultModel") {
+        const selection = options.agentDefaultModel;
+        return selection ? { currentSelection: () => ({ ...selection }) } : undefined;
+      }
       if (name === "sessionPersistence" && options.persistence !== false) return { async inspect(id: string) { return { events: persisted.get(id)?.events ?? [] }; } };
       return undefined;
     },
@@ -178,7 +188,8 @@ function host(options: { persistence?: boolean; prompt?: boolean; loop?: boolean
     return typeof value === "string" && value.startsWith("[") ? JSON.parse(value) : value;
   };
   const finish = (agent: DshTeamAgent, text = "Turn completed") => (agent as DshTeamAgent & { finish(text: string): void }).finish(text);
-  return { ctx, tools, live, owner, call, finish, created, resumed, sent, disposed, persisted, listeners, spawnToolAvailability,
+  const fail = (agent: DshTeamAgent, text: string) => (agent as DshTeamAgent & { fail(text: string): void }).fail(text);
+  return { ctx, tools, live, owner, call, finish, fail, created, resumed, sent, disposed, persisted, listeners, spawnToolAvailability,
     delayDisposal: (barrier: Promise<void>) => { disposalBarrier = barrier; } };
 }
 
@@ -234,6 +245,9 @@ describe("DSH team entry", () => {
     expect(await fixture.call("team_status", {}, other)).toEqual([]);
     await expect(fixture.call("team_status", { team_id: team.id }, other)).rejects.toThrow("not found");
     await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    // Adding records membership only; the first woken event starts the peer.
+    expect(fixture.created).toHaveLength(0);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the first design" }, owner);
     fixture.finish(owner);
     await eventually(() => fixture.created.length === 1 && fixture.sent.some(message => message.id === fixture.created[0]!.id));
     expect(fixture.created[0]!.model).toBe("designer-model");
@@ -258,6 +272,7 @@ describe("DSH team entry", () => {
     await first.activateRole("developer", owner.id);
     const team = await fixture.call("team_create", { name: "Build", goal: "Work together" }, owner) as TeamState;
     await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the first design" }, owner);
     fixture.finish(owner);
     await eventually(() => fixture.created.length === 1 && fixture.sent.some(message => message.id === fixture.created[0]!.id));
     const peerId = fixture.created[0]!.id;
@@ -293,6 +308,111 @@ describe("DSH team entry", () => {
     expect(fixture.created).toHaveLength(0);
   });
 
+  it("lists team roles before any session has an active role", async () => {
+    const fixture = host();
+    const owner = fixture.owner("owner");
+    await boot(fixture);
+
+    const roles = await fixture.call("team_list_roles", {}, owner) as Array<{ id: string }>;
+    expect(roles.map(role => role.id).sort()).toEqual(["designer", "developer"]);
+    // The rest of the team surface still needs a selected top-level role.
+    await expect(fixture.call("team_create", { name: "Build", goal: "Work together" }, owner))
+      .rejects.toThrow("active top-level role");
+    expect(fixture.created).toHaveLength(0);
+  });
+
+  it("rejects a role with no model unless the host supplies a default", async () => {
+    mkdirSync(join(root, "roles", "writer"), { recursive: true });
+    writeFileSync(join(root, "roles", "writer", "role.yaml"), "name: writer\ndescription: writer specialty\nprompt: You are the writer.\n");
+    const fixture = host();
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Draft", goal: "Write the release notes" }, owner) as TeamState;
+
+    await expect(fixture.call("team_add", { team_id: team.id, role_id: "writer" }, owner))
+      .rejects.toThrow('Role "writer" has no usable provider/model');
+    expect((await fixture.call("team_status", { team_id: team.id }, owner) as TeamState).members).toHaveLength(1);
+
+    // The same role is a valid member when the host exposes a default model.
+    const withDefault = host({ agentDefaultModel: { provider: "host-provider", model: "host-model", reasoningEffort: "high" } });
+    const other = withDefault.owner("default-owner", "workspace-b");
+    const second = await boot(withDefault);
+    await second.activateRole("developer", other.id);
+    const defaulted = await withDefault.call("team_create", { name: "Draft", goal: "Write the release notes" }, other) as TeamState;
+    await expect(withDefault.call("team_add", { team_id: defaulted.id, role_id: "writer" }, other)).resolves.toBeDefined();
+    await withDefault.call("team_send_event", { team_id: defaulted.id, kind: "message", content: "Draft the notes" }, other);
+    await eventually(() => withDefault.created.some(peer => peer.model === "host-model"));
+    expect(withDefault.created.find(peer => peer.model === "host-model")).toMatchObject({ provider: "host-provider" });
+  });
+
+  it("activates the configured default role for a session created after boot", async () => {
+    const fixture = host();
+    const beforeBoot = fixture.owner("before-boot");
+    const plugin = await apply(fixture.ctx, { roleboxDir: join(root, "roles"), activeRole: "developer" });
+    plugins.add(plugin);
+
+    // A session that already existed when the plugin booted has no created event.
+    expect(plugin.getActiveRole(beforeBoot.id)).toBeNull();
+    const afterBoot = fixture.owner("after-boot");
+    expect(plugin.getActiveRole(afterBoot.id)).toBe("developer");
+    // An explicit switch still wins over the configured default.
+    await plugin.activateRole("designer", afterBoot.id);
+    expect(plugin.getActiveRole(afterBoot.id)).toBe("designer");
+  });
+
+  it("reports a peer turn's real failure and resumes it", async () => {
+    const fixture = host();
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Build", goal: "Work together" }, owner) as TeamState;
+    await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the design" }, owner);
+    await eventually(() => fixture.created.length === 1 && fixture.sent.some(message => message.id === fixture.created[0]!.id));
+    const peer = fixture.live.get(fixture.created[0]!.id)!;
+
+    fixture.fail(peer, "provider returned 500");
+    await eventually(async () => {
+      const status = await fixture.call("team_status", { team_id: team.id }, owner) as TeamState;
+      return status.status === "paused" && (status.members.find(member => member.sessionId === peer.id)?.error ?? "").includes("provider returned 500");
+    });
+    const failed = await fixture.call("team_status", { team_id: team.id }, owner) as TeamState;
+    expect(failed.events.find(event => event.type === "member_failed")?.content).toContain("provider returned 500");
+    expect(failed.turns).toBe(0);
+
+    const resumed = String(await fixture.call("team_resume", { team_id: team.id }, owner));
+    expect(resumed).toContain("provider returned 500");
+    await eventually(() => fixture.sent.filter(message => message.id === peer.id).length >= 2);
+    fixture.finish(peer, "Design is ready");
+    await eventually(async () => {
+      const status = await fixture.call("team_status", { team_id: team.id }, owner) as TeamState;
+      return status.status === "active" && status.events.some(event => event.type === "turn_completed");
+    });
+  });
+
+  it("closes a team, releases the member descriptor, and hides it from the default list", async () => {
+    const fixture = host();
+    const owner = fixture.owner("owner");
+    const plugin = await boot(fixture);
+    await plugin.activateRole("developer", owner.id);
+    const team = await fixture.call("team_create", { name: "Build", goal: "Work together" }, owner) as TeamState;
+    await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the design" }, owner);
+    await eventually(() => fixture.created.length === 1);
+    const peerId = fixture.created[0]!.id;
+    const descriptor = join(root, "workspace-a", ".rolebox", "team-sessions", `${peerId}.json`);
+    expect(existsSync(descriptor)).toBe(true);
+
+    await fixture.call("team_delete", { team_id: team.id }, owner);
+    await eventually(() => !existsSync(descriptor));
+    expect(await fixture.call("team_status", {}, owner)).toEqual([]);
+    const closed = await fixture.call("team_status", { include_deleted: true }, owner) as Array<{ id: string; name: string; status: string }>;
+    expect(closed.map(entry => ({ id: entry.id, name: entry.name, status: entry.status })))
+      .toEqual([{ id: team.id, name: "Build", status: "deleted" }]);
+    expect((await fixture.call("team_status", { team_id: team.id }, owner) as TeamState).status).toBe("deleted");
+  });
+
   it("stops new tool calls immediately and waits for peer disposal", async () => {
     const fixture = host();
     const owner = fixture.owner("owner");
@@ -300,6 +420,7 @@ describe("DSH team entry", () => {
     await plugin.activateRole("developer", owner.id);
     const team = await fixture.call("team_create", { name: "Build", goal: "Work together" }, owner) as TeamState;
     await fixture.call("team_add", { team_id: team.id, role_id: "designer" }, owner);
+    await fixture.call("team_send_event", { team_id: team.id, kind: "message", content: "Prepare the first design" }, owner);
     fixture.finish(owner);
     await eventually(() => fixture.created.length === 1 && fixture.sent.some(message => message.id === fixture.created[0]!.id));
     const tool = fixture.tools.get("team_list_roles")!;

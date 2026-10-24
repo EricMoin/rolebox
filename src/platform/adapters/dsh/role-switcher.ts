@@ -43,9 +43,17 @@
  *      (including an explicit clear); (2) a read-only scan of its own log for
  *      a previous `rolebox/active-role` event, adopted into the sidecar; (3) a
  *      fork with neither inherits its parent's selection through the durable
- *      `header.parentSession`. The session log is never written. A
- *      stale selection (role no longer registered, or no longer primary) is
- *      cleared rather than restored.
+ *      `header.parentSession`; (4) a TOP-LEVEL session with neither source
+ *      takes {@link DshRoleSwitcherOptions.defaultRoleId} — the headless
+ *      case, where no role picker exists to choose one. A subagent/dispatch
+ *      session is never seeded: it has no top-level selection by design and
+ *      resolves its role from the host's `subagent/descriptor` (or the
+ *      spawning provider). The session log is never written. A stale
+ *      selection (role no longer registered, or no longer primary) is cleared
+ *      rather than restored, and a selection already recorded for the session
+ *      — a team peer bound by the team session adapter before its session is
+ *      published, or a hydrated sidecar entry — is re-set as-is, never
+ *      replaced by the default.
  *
  * The dsh platform has no per-turn system-prompt hook (`system-transform`
  * is a documented no-op at the hook level in hook-provider.ts: dsh composes
@@ -85,6 +93,14 @@ const log = createSubLogger("dsh-active-role");
  * `ignorable` marker — see the module doc).
  */
 const LEGACY_ACTIVE_ROLE_EVENT = "rolebox/active-role";
+
+/**
+ * Host event a dispatch session carries when it was created BY another session
+ * to run one delegated job. A subagent session has no top-level selection by
+ * design: its role comes from this descriptor (or from the spawning provider),
+ * so the {@link DshRoleSwitcherOptions.defaultRoleId} source must skip it.
+ */
+const SUBAGENT_DESCRIPTOR_EVENT = "subagent/descriptor";
 
 /**
  * Upper bound (ms) on a `session/flush` sidecar drain. The harness flush must
@@ -267,6 +283,17 @@ export interface DshRoleSwitcherOptions {
    * the switch. Invoked exactly once per applied change.
    */
   onActiveRoleChanged?: (sessionId: string, roleId: string | null) => void;
+  /**
+   * Default top-level role to activate for a session whose creation carries no
+   * persisted selection and no inherited one. Headless hosts have no role
+   * picker, so without a default a fresh session runs the base agent.
+   *
+   * Applied only to a top-level session: a subagent/dispatch session resolves
+   * its role from the host descriptor and never takes the default. A persisted
+   * sidecar entry always wins — including a team peer's bound role and an
+   * explicit clear — and the id must still be registered and primary.
+   */
+  defaultRoleId?: string;
 }
 
 /**
@@ -290,6 +317,8 @@ export class DshRoleSwitcher {
   private readonly onActiveRoleChanged:
     | ((sessionId: string, roleId: string | null) => void)
     | undefined;
+  /** Fallback selection for a new session with no persisted and no inherited role. */
+  private readonly defaultRoleId: string | undefined;
   /** Cordis disposers returned by `ctx.on` — released by `dispose()`. */
   private readonly disposers: Array<() => void> = [];
   private readonly _log;
@@ -302,6 +331,7 @@ export class DshRoleSwitcher {
     this.store = options.store;
     this.activeRole = options.activeRole ?? createActiveRoleRef();
     this.onActiveRoleChanged = options.onActiveRoleChanged;
+    this.defaultRoleId = options.defaultRoleId;
     this._log = createSubLogger("dsh-role-switcher");
     this.wireRestore(options.ctx);
     this.wireFlush(options.ctx);
@@ -413,7 +443,7 @@ export class DshRoleSwitcher {
 
   /**
    * Subscribe `session/created` and restore the active role for the new
-   * session, honoring the three-source precedence:
+   * session, honoring the fixed precedence:
    *
    *   1. **sidecar entry** — an explicit record for this session (a role id,
    *      or an explicit `null` clear) always wins.
@@ -424,6 +454,10 @@ export class DshRoleSwitcher {
    *   3. **fork inheritance** — a session with neither source inherits its
    *      parent's selection through the durable `header.parentSession`; the
    *      parent is resolved from the store and read with the same 1→2 order.
+   *   4. **host default** — a TOP-LEVEL session with neither source takes
+   *      {@link DshRoleSwitcherOptions.defaultRoleId}. A subagent/dispatch
+   *      session is excluded: it has no top-level selection by design and
+   *      resolves its role from the host descriptor.
    *
    * A restored role is kept only when it still exists in the current catalog
    * and is primary; a stale selection (or an explicit clear) resolves to the
@@ -443,21 +477,36 @@ export class DshRoleSwitcher {
         // (3) fork inheritance — only when this session has no own selection.
         if (restoredId === undefined) {
           const parentId = resolveParentSessionId(session);
-          if (!parentId) return; // nothing persisted for this session
-          const parent = this.store.get(parentId);
-          restoredId = parent
-            ? this.readPersistedRole(parent)
-            : this.activeRole.has(parentId)
-              ? this.activeRole.get(parentId)
-              : undefined;
-          inheritedFrom = parentId;
+          if (parentId) {
+            const parent = this.store.get(parentId);
+            restoredId = parent
+              ? this.readPersistedRole(parent)
+              : this.activeRole.has(parentId)
+                ? this.activeRole.get(parentId)
+                : undefined;
+            inheritedFrom = parentId;
+          }
         }
-        if (restoredId === undefined) return; // nothing persisted for this session
 
-        const role = this.registrar
-          .getRegisteredAgents()
-          .find((a) => a.id === restoredId);
-        if (!role || (role.mode ?? RoleMode.Primary) !== RoleMode.Primary) {
+        if (restoredId === undefined) {
+          // (4) host default — a headless host has no role picker, so a session
+          // created with no persisted and no inherited selection would
+          // otherwise run the base agent forever. A subagent/dispatch session
+          // has no top-level selection BY DESIGN (it runs the role its spawn
+          // descriptor names), so it must never be seeded here.
+          if (isSubagentSession(session)) return;
+          const fallback = this.defaultRoleId ? this.isSwitchable(this.defaultRoleId) : undefined;
+          if (!fallback) return; // nothing persisted for this session
+          this.activeRole.set(session.id, fallback.id);
+          this._log.info("Activated the default role for a new session", {
+            sessionId: session.id,
+            role: fallback.id,
+          });
+          this.notifyActiveRoleChanged(session.id, fallback.id);
+          return;
+        }
+
+        if (!this.isSwitchable(restoredId)) {
           // Role no longer registered, or no longer switchable — clear the
           // stale selection rather than restoring it.
           this.activeRole.set(session.id, null);
@@ -466,8 +515,11 @@ export class DshRoleSwitcher {
         }
 
         // Re-set through the holder so an adopted (legacy) or inherited (fork)
-        // selection is recorded under the new session id in the sidecar. This
-        // never appends to the session event log.
+        // selection is recorded under the new session id in the sidecar, and a
+        // selection already recorded (a hydrated sidecar entry, or a team peer
+        // bound before its session was published) is re-applied unchanged: the
+        // hook still fires exactly once for the applied change. This never
+        // appends to the session event log.
         this.activeRole.set(session.id, restoredId);
         this._log.info(
           inheritedFrom
@@ -487,6 +539,21 @@ export class DshRoleSwitcher {
       }
     });
     if (disposer) this.disposers.push(disposer);
+  }
+
+  /**
+   * The registered definition for a switchable (primary-mode) role id, or
+   * `undefined` when the id is unknown or not a top-level role.
+   *
+   * @param roleId - Candidate role id, or `null` for the base agent.
+   * @returns The matching primary-mode agent definition, when there is one.
+   */
+  private isSwitchable(roleId: string | null): AgentDefinition | undefined {
+    if (!roleId) return undefined;
+    const role = this.registrar.getRegisteredAgents().find((a) => a.id === roleId);
+    return role && (role.mode ?? RoleMode.Primary) === RoleMode.Primary
+      ? role
+      : undefined;
   }
 
   /**
@@ -571,6 +638,28 @@ function resolveSession(
 function resolveParentSessionId(session: DshSessionLike): string | undefined {
   const parent = session.header?.parentSession;
   return typeof parent === "string" && parent.length > 0 ? parent : undefined;
+}
+
+/**
+ * Detect a dispatch/subagent session — a session another session created to run
+ * one delegated job.
+ *
+ * Such a session has no top-level role selection by design: it runs the role
+ * its spawn descriptor (or the spawning provider) names, so activating
+ * {@link DshRoleSwitcherOptions.defaultRoleId} on it would replace the
+ * delegated role with the host default. Recognized from any of the host's three
+ * signals: the rc.6 header markers (`origin`, `delegationDepth`), and — for a
+ * host that only exposes the log — a `subagent/descriptor` event.
+ *
+ * @param session - The session being created.
+ * @returns `true` when the session is a delegated subagent session.
+ */
+function isSubagentSession(session: DshSessionLike): boolean {
+  if (session.header?.origin === "subagent") return true;
+  const depth = session.header?.delegationDepth;
+  if (typeof depth === "number" && depth > 0) return true;
+  const events = session.snapshotEvents?.() ?? session.events;
+  return events.some((evt) => evt.type === SUBAGENT_DESCRIPTOR_EVENT);
 }
 
 /**

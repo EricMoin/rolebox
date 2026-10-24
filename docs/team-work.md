@@ -28,12 +28,12 @@ Graph workers cannot invoke team tools, including through a declared tool grant,
 | --- | --- |
 | `team_list_roles` | Read top-level role IDs and descriptions. |
 | `team_create(name, goal, max_turns?)` | Create a team with the current role/session as creator. |
-| `team_add(team_id, role_id)` | Creator adds a peer and schedules its initial briefing. |
+| `team_add(team_id, role_id)` | Creator records a peer as a member. Adding does not start a turn: the peer starts when the first event addressed to it wakes it, and that delivery already carries the goal, roster and tasks. A role with no usable provider/model is refused (set `model` in its `role.yaml` or configure a host default model). |
 | `team_send_event(team_id, kind, content, task_id?, recipient?)` | Publish a message, offer/claim/complete/release a task. |
-| `team_status(team_id?, after_seq?)` | Read your teams or one team's roster, tasks, errors, and ordered events. |
+| `team_status(team_id?, after_seq?, include_deleted?)` | Read your teams or one team's roster, tasks, errors, and ordered events. Closed teams are hidden from the list unless `include_deleted` is set; reading one by `team_id` always works. |
 | `team_remove(team_id, member_id)` | Creator cancels a peer, broadcasts departure, and releases its claims. The remaining team stays paused until resumed. |
 | `team_delete(team_id)` | Creator cancels managed work and closes the team; history remains inspectable. |
-| `team_resume(team_id)` | Creator resumes a paused team after inspecting the error and existing work. This does not replenish the turn budget. |
+| `team_resume(team_id)` | Creator resumes a paused team after inspecting the error and existing work. The tool reports any member errors it cleared, so an unresolved failure stays visible. This does not replenish the turn budget. |
 
 `recipient` may identify a member or its role. It chooses which peer wakes; it is not a private channel. All team events are readable by every member.
 
@@ -69,7 +69,7 @@ Every membership change and completed turn enters the stream. A completed turn i
 
 Busy members accumulate events. Once idle, a member receives one batch through a fixed sequence number. The reservation is committed before any host prompt. The cursor advances only after a confirmed successful final turn following that delivery's unique marker in the transcript. An unrelated user turn cannot acknowledge a pending delivery.
 
-Each team allows at most eight members and two in-flight deliveries. Each host session also has a durable lease across teams, preventing two coordinators from prompting the same session concurrently. The default autonomous turn budget is 40, configurable to 1–100 when creating the team. A member turn has a 15 minute execution limit. User-published events and new invitations stop after 5,000 stream entries; lifecycle cleanup remains possible.
+Each team allows at most eight members and two in-flight deliveries. Each host session also has a durable lease across teams, preventing two coordinators from prompting the same session concurrently. The default autonomous turn budget is 40, configurable to 1–100 when creating the team. A member turn has a 15 minute execution limit. A failed turn does not spend that budget: the team pauses with the host's actual error, the member's cursor is kept, and `team_resume` replays the pending events. User-published events and new invitations stop after 5,000 stream entries; lifecycle cleanup remains possible.
 
 These limits bound automatic cooperation. They do not measure tokens or monetary cost, and claims coordinate work rather than provide a filesystem sandbox. Members should publish artifact references and review findings, and avoid overlapping edits until ownership is agreed.
 
@@ -85,7 +85,7 @@ These limits bound automatic cooperation. They do not measure tokens or monetary
     leases.sqlite                # exclusive ownership of live DSH peer sessions
 ```
 
-Each physical workspace has its own team store. DSH resolves the caller's role and working directory from its host session, and restores stores for the current workspace and loaded sessions. Peer sessions retain their original role and model configuration across restarts. If a live peer's role is changed manually, the next team delivery pauses instead of mixing that selection with its saved configuration. Plugin shutdown stops new calls and event delivery immediately, then waits for owned peer handles to close.
+Each physical workspace has its own team store. DSH resolves the caller's role and working directory from its host session, and restores stores for the current workspace and loaded sessions. Peer sessions retain their original role configuration across restarts; the role's model is re-resolved on every resume, so a repaired `role.yaml` reaches an existing member instead of being pinned to its creation-time options. An idle resident peer applies the updated model to its next turn while preserving its session and pending input. Removing or deleting a member releases its session record and lease, so the same role can join again as a fresh peer. When another host owns the peer, its record remains until that host releases it; cleanup is retried automatically, including after the owning host exits. If a live peer's role is changed manually, the next team delivery pauses instead of mixing that selection with its saved configuration. Plugin shutdown stops new calls and event delivery immediately, then waits for owned peer handles to close.
 
 Team state is committed synchronously in SQLite transactions. A new team is built in a reserved staging directory and atomically published after commit. Every update rereads committed state under a write transaction; another process cannot overwrite it with an old in-memory snapshot. Unknown versions and corrupt records are reported rather than reset.
 

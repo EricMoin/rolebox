@@ -110,4 +110,13 @@ export interface ISessionClient {
    * support context compaction return false.
    */
   compact?(id: string): Promise<boolean>;
+
+  /**
+   * Release the durable identity a removed or deleted team member used, so the
+   * same role can be added to a team again. Implemented only by platforms that
+   * keep their own member-session records; a user session is never forgotten.
+   * May defer while another host owns the session; the runtime retries cleanup
+   * for removed members and deleted teams on subsequent ticks.
+   */
+  forget?(id: string): Promise<void>;
 }

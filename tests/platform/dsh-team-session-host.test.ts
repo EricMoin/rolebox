@@ -10,7 +10,7 @@ import SessionStore, { type SessionEvent, type SessionHeader } from "@deepseek-a
 import SessionProjectionRegistry from "@deepseek-ai/dsh-session-projection";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
 import ToolRuntime from "@deepseek-ai/dsh-tools";
-import { DshTeamSessionAdapter, type DshTeamAgents } from "../../src/platform/adapters/dsh/team-session.ts";
+import { DshTeamSessionAdapter, type DshTeamAgentOptions, type DshTeamAgents } from "../../src/platform/adapters/dsh/team-session.ts";
 import type { DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
 
 interface StoredSession {
@@ -85,9 +85,11 @@ async function fixture() {
   }
   const bound = new Map<string, string>();
   const published: string[] = [];
+  let agentOptions: DshTeamAgentOptions = { provider: "example-provider", model: "example-model" };
   ctx.on("agent/created", ({ agent }) => {
     expect(bound.get(agent.id)).toBe("designer");
     published.push(agent.id);
+    return undefined;
   });
   const adapter = () => {
     const instance = new DshTeamSessionAdapter({
@@ -95,13 +97,14 @@ async function fixture() {
       sessions: ctx.sessions as unknown as DshSessionStoreLike,
       agents: ctx.agents as unknown as DshTeamAgents,
       bindRole(id, role) { bound.set(id, role); },
-      resolveRole(role) { return role === "designer" ? { agentOptions: { provider: "example-provider", model: "example-model" } } : undefined; },
+      resolveRole(role) { return role === "designer" ? { agentOptions: { ...agentOptions } } : undefined; },
       async readExecutionEvents(id) { return persistence.records.get(id)?.events; },
     });
     cleanups.push(() => instance.dispose());
     return instance;
   };
-  return { directory, ctx, persistence, adapter, published };
+  return { directory, ctx, persistence, adapter, published,
+    setRoleOptions(options: DshTeamAgentOptions) { agentOptions = options; } };
 }
 
 describe("DSH team adapter with the installed agent host", () => {
@@ -122,6 +125,54 @@ describe("DSH team adapter with the installed agent host", () => {
     const messages = await adapter.messages(id);
     expect(messages.at(-1)?.info).toMatchObject({ role: "idle", finish: "succeeded" });
     expect(messages.at(-2)?.parts[0]).toMatchObject({ type: "text", text: "Design ready" });
+  });
+
+  it("repairs a resident driver's actual model without losing queued user input", async () => {
+    const f = await fixture();
+    const calls: Array<{ provider: string; model: string; maxTokens?: number }> = [];
+    class ScriptedAdapter extends LlmAdapter {
+      async *stream(options: Parameters<LlmAdapter["stream"]>[0]): AsyncIterable<StreamChunk> {
+        calls.push({ provider: options.provider, model: options.model, maxTokens: options.maxTokens });
+        if (options.model === "example-model") throw new Error("Model is no longer available");
+        yield { type: "block-start", index: 0, blockType: "text" };
+        yield { type: "block-end", index: 0, block: { type: "text", text: options.model } };
+        yield { type: "finish", reason: { kind: "stop" } };
+      }
+    }
+    f.ctx.llm.registerAdapter(["example-provider", "repaired-provider"], new ScriptedAdapter());
+    f.setRoleOptions({ provider: "example-provider", model: "example-model", maxTokens: 1024 });
+    const adapter = f.adapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    await adapter.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team original]" }] });
+    const original = f.ctx.agents.get(id as never)!;
+    await original.whenIdle();
+    expect((await adapter.messages(id)).at(-1)?.info.finish).toBe("failed");
+    original.inject({ id: "user-pending" as never, role: "user", source: { kind: "user" },
+      content: [{ type: "text", text: "Keep this user request" }] });
+    f.setRoleOptions({ provider: "repaired-provider", model: "repaired-model" });
+
+    for (const delivery of ["repaired", "following"]) {
+      await adapter.prompt(id, { agent: "designer", parts: [{ type: "text", text: `[rolebox-team ${delivery}]` }] });
+      await f.ctx.agents.get(id as never)!.whenIdle();
+      expect((await adapter.messages(id)).at(-1)?.info).toMatchObject({ finish: "succeeded" });
+    }
+
+    expect(calls).toEqual([
+      { provider: "example-provider", model: "example-model", maxTokens: 1024 },
+      { provider: "repaired-provider", model: "repaired-model", maxTokens: undefined },
+      { provider: "repaired-provider", model: "repaired-model", maxTokens: undefined },
+    ]);
+    expect(f.ctx.agents.get(id as never)).toBe(original);
+    expect(f.published).toEqual([id]);
+    const messages = await adapter.messages(id);
+    expect(messages.at(-1)?.info.finish).toBe("succeeded");
+    expect(messages.flatMap(message => message.parts).some(part => part.type === "text" && part.text === "Keep this user request")).toBe(true);
+
+    f.setRoleOptions({ provider: "example-provider", model: "other-model" });
+    const other = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    await adapter.prompt(other, { parts: [{ type: "text", text: "[rolebox-team other-member]" }] });
+    await f.ctx.agents.get(other as never)!.whenIdle();
+    expect(calls.at(-1)).toEqual({ provider: "example-provider", model: "other-model", maxTokens: undefined });
   });
 
   it("creates and restores the same real agent, binds before publication, and reports the actual failed model turn", async () => {

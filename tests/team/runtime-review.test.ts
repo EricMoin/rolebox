@@ -12,6 +12,14 @@ const runtimes: TeamRuntime[] = [];
 const actor = { sessionID: "owner-session", agent: "owner" };
 const roles = ["owner", "designer"].map(id => ({ id, config: { name: id } })) as ResolvedRole[];
 
+/**
+ * Wake a member: adding one only records membership, so the first woken event
+ * is what actually starts its session.
+ */
+function wake(instance: TeamRuntime, team: { id: string }, content = "Start the collaboration") {
+  instance.send(actor, team.id, { kind: "message", content });
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });
@@ -67,6 +75,7 @@ describe("team runtime concurrency review", () => {
     const instance = runtime();
     const team = instance.create(actor, "Review", "Review creator lifetime");
     instance.add(actor, team.id, "designer");
+    wake(instance, team);
     await instance.tick();
     instance.send({ agent: "designer", sessionID: "peer-session" }, team.id, { kind: "message", content: "Please review" });
     const pumping = instance.tick();
@@ -99,6 +108,7 @@ describe("team runtime concurrency review", () => {
     const instance = runtime();
     const team = instance.create(actor, "Review", "Review cancellation");
     const member = instance.add(actor, team.id, "designer");
+    wake(instance, team);
     await instance.tick();
     const removing = instance.remove(actor, team.id, member.id);
     try {
@@ -121,6 +131,7 @@ describe("team runtime concurrency review", () => {
     const instance = runtime();
     const team = instance.create(actor, "Review", "Review creation failure");
     const member = instance.add(actor, team.id, "designer");
+    wake(instance, team);
     await instance.tick();
     const failed = instance.status(actor, team.id);
     expect(failed.status).toBe("paused");
@@ -139,6 +150,7 @@ describe("team runtime concurrency review", () => {
     const instance = runtime();
     const team = instance.create(actor, "Review", "Review failed turn retry");
     const member = instance.add(actor, team.id, "designer");
+    wake(instance, team);
     await instance.tick();
     transcripts.get("peer-session")!.push({ info: { id: "failed-turn", role: "assistant", time: { created: 1, completed: 2 }, finish: "error" }, parts: [] } as unknown as Message);
     await instance.tick();
@@ -159,6 +171,7 @@ describe("team runtime concurrency review", () => {
     const instance = runtime();
     const team = instance.create(actor, "Review", "Keep confirmed work acknowledged during resume");
     const member = instance.add(actor, team.id, "designer");
+    wake(instance, team);
     await instance.tick();
     const throughSeq = instance.status(actor, team.id).members.find(item => item.id === member.id)!.delivery!.throughSeq;
     transcripts.get("peer-session")!.push({ info: { id: "completed-turn", role: "assistant", time: { created: 1, completed: 2 }, finish: "stop" }, parts: [] } as unknown as Message);
@@ -181,6 +194,7 @@ describe("team runtime concurrency review", () => {
     const observer = runtime();
     const team = first.create(actor, "Review", "Review completion attribution");
     const member = first.add(actor, team.id, "designer");
+    wake(first, team);
     const pumping = first.tick();
     await entered.promise;
     try {
@@ -233,6 +247,7 @@ describe("team runtime concurrency review", () => {
     const instance = runtime();
     const team = instance.create(actor, "Review", "Review in-flight failure");
     instance.add(actor, team.id, "designer");
+    wake(instance, team);
     const pumping = instance.tick();
     await entered.promise;
     try {
@@ -251,6 +266,7 @@ describe("team runtime concurrency review", () => {
     const first = runtime();
     const team = first.create(actor, "Review", "Review runtime replacement");
     const member = first.add(actor, team.id, "designer");
+    wake(first, team);
     const pumping = first.tick();
     await entered.promise;
     const disposing = first.dispose();

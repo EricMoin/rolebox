@@ -23,6 +23,15 @@ export interface TeamRuntimeOptions {
   session: ISessionClient;
   roles: () => ResolvedRole[];
   canPollStatus: boolean;
+  /**
+   * Reject a role that cannot run a peer turn, returning the reason. Called by
+   * {@link TeamRuntime.add} inside the durable update — after the platform,
+   * team-state and creator checks, before the member-count checks and any
+   * mutation — so an unauthorized or deleted-team call still reports its own
+   * error, while a role with no usable provider/model never becomes a dead
+   * member.
+   */
+  memberProblem?: (roleId: string) => string | undefined;
 }
 export interface SendTeamEvent {
   kind: "message" | "task_offer" | "task_claim" | "task_complete" | "task_release";
@@ -63,6 +72,26 @@ function abandoned(delivery: NonNullable<TeamMember["delivery"]>): boolean {
   return !alive(delivery.ownerPid) || (delivery.ownerPid === process.pid && !runtimes.has(delivery.ownerId));
 }
 
+/**
+ * Render a host failure reason for the durable event stream.
+ *
+ * A dsh `turn/end` carries a structured `{ message, code }` error; other hosts
+ * report a plain string. Both are preserved verbatim so an operator can act on
+ * the real cause instead of a generic "turn failed".
+ */
+function failureText(error: unknown): string {
+  if (typeof error === "string") return error.trim() || "Member turn failed";
+  if (error !== null && typeof error === "object") {
+    const record = error as { message?: unknown; code?: unknown };
+    const message = typeof record.message === "string" ? record.message.trim() : "";
+    const code = typeof record.code === "string" ? record.code.trim() : "";
+    if (message && code) return `${message} (${code})`;
+    if (message) return message;
+    if (code) return code;
+  }
+  return "Member turn failed";
+}
+
 function finalMessage(messages: Message[]): Message | undefined {
   let last = messages.at(-1);
   if (last?.info.role === "idle") {
@@ -74,8 +103,12 @@ function finalMessage(messages: Message[]): Message | undefined {
       if (candidate.info.role === "user" || candidate.info.role === "idle") break;
       if (candidate.info.role === "assistant") { assistant = candidate; break; }
     }
+    // The host's own error survives: an operator needs the real reason, and a
+    // generic string would discard the only diagnosis the host produced.
+    const error = outcome === "succeeded" ? undefined
+      : last.info.error ?? "Host turn failed or was interrupted";
     return { info: { ...last.info, role: "assistant", finish: outcome === "succeeded" ? "stop" : "error",
-      ...(outcome === "succeeded" ? {} : { error: "Host turn failed or was interrupted" }) }, parts: assistant?.parts ?? [] };
+      ...(error === undefined ? {} : { error }) }, parts: assistant?.parts ?? [] };
   }
   if (!last || last.info.role !== "assistant") return undefined;
   if (last.parts.some(p => p.type === "tool" && "state" in p &&
@@ -165,20 +198,31 @@ export class TeamRuntime {
       this.assertPlatform(state);
       active(state);
       const owner = ownerOf(state, actor);
+      // The role-model check runs AFTER authorization and team state: a caller
+      // who may not change membership, or whose team is paused/deleted, is
+      // told that — not a model problem it had no part in. It still runs
+      // inside the durable update and before the count checks and any
+      // mutation, so a rejected role never records a member that cannot run a
+      // turn.
+      const problem = this.options.memberProblem?.(roleId);
+      if (problem) throw new Error(problem);
       if (state.events.length >= MAX_EVENTS) throw new Error("Team event limit reached; create a new team for further work");
       if (state.members.some(m => m.roleId === roleId && m.status === "active")) throw new Error("Role is already a team member");
       if (state.members.filter(m => m.status === "active").length >= MAX_MEMBERS) throw new Error("Team member limit reached");
       const member: TeamMember = { id: randomUUID(), roleId, status: "active", cursor: 0, managed: true };
       state.members.push(member);
+      // Membership is recorded ONLY: adding a peer must not consume a turn.
+      // The first woken event starts it, and that delivery prompt already
+      // carries the goal, roster and tasks.
       append(state, { type: "member_joined", sender: owner.id, content: `${roleId} joined`, wake: false });
-      append(state, { type: "message", sender: owner.id, recipient: member.id,
-        content: `Join this collaboration toward: ${state.goal}. Read the roster and tasks, contribute your specialty, and offer or claim work before implementing it.`, wake: true });
       return member;
     });
   }
 
-  list(actor: Actor): TeamState[] {
-    return this.store.list().filter(s => s.platformId === this.options.platformId && s.members.some(m => m.sessionId === actor.sessionID && m.roleId === actor.agent && m.status === "active"));
+  list(actor: Actor, includeDeleted = false): TeamState[] {
+    return this.store.list().filter(s => s.platformId === this.options.platformId &&
+      (includeDeleted || s.status !== "deleted") &&
+      s.members.some(m => m.sessionId === actor.sessionID && m.roleId === actor.agent && m.status === "active"));
   }
 
   status(actor: Actor, id: string): TeamState {
@@ -219,7 +263,9 @@ export class TeamRuntime {
           task.owner = member.id;
           task.leaseUntil = Date.now() + LEASE_MS;
         } else {
-          if (task.status !== "claimed" || task.owner !== member.id) throw new Error("Only the current task owner can complete or release it");
+          if (task.status === "completed") throw new Error("Task is already completed");
+          if (task.status !== "claimed") throw new Error("Task is not claimed");
+          if (task.owner !== member.id) throw new Error("Only the current task owner can complete or release it");
           task.status = input.kind === "task_complete" ? "completed" : "offered";
           if (input.kind === "task_complete") task.result = input.content;
           else delete task.owner;
@@ -259,6 +305,7 @@ export class TeamRuntime {
         append(current, { type: "member_left", sender: memberId, content: `${target.roleId} left`, wake: false });
         // Membership cancellation leaves the team paused until its creator resumes it.
       });
+      await this.forgetMember(this.store.read(id).members.find(m => m.id === memberId));
     } finally { this.endControl(id, token); }
   }
 
@@ -279,17 +326,35 @@ export class TeamRuntime {
         current.status = "deleted";
         for (const member of current.members) delete member.delivery;
       });
+      for (const member of this.store.read(id).members.filter(m => m.managed)) await this.forgetMember(member);
     } finally { this.endControl(id, token); }
   }
 
-  async resume(actor: Actor, id: string): Promise<void> {
+  /**
+   * Release a managed member's durable session identity after it left the team.
+   *
+   * Membership has already committed, so cleanup failures are retried by the
+   * pump. The creator's user session is never managed and is never forgotten.
+   */
+  private async forgetMember(member: Pick<TeamMember, "managed" | "sessionId"> | undefined): Promise<void> {
+    if (!member?.managed || !member.sessionId || !this.options.session.forget) return;
+    try { await this.options.session.forget(member.sessionId); }
+    catch (error) { log.warn("Team could not release a removed member session", { error: failureText(error) }); }
+  }
+
+  async resume(actor: Actor, id: string): Promise<string[]> {
     const before = this.status(actor, id);
     ownerOf(before, actor);
     if (before.status !== "paused") throw new Error("Only a paused team can resume");
     const token = this.beginControl(actor, id, true);
     try {
+      // Every managed member is reconciled, not only members holding a
+      // delivery: a peer whose turn failed clears its delivery but keeps its
+      // cursor, and its host turn may have finished after the pause.
       for (const member of this.store.read(id).members) {
-        if (member.delivery) await this.reconcile(id, member.id);
+        if (member.status !== "active") continue;
+        if (!member.managed && !member.delivery) continue;
+        await this.reconcile(id, member.id);
       }
       for (const member of this.store.read(id).members) {
         if (member.delivery) {
@@ -317,6 +382,7 @@ export class TeamRuntime {
           this.statuses.set(member.sessionId, "idle");
         }
       }
+      const unresolved: string[] = [];
       this.store.update(id, state => {
         this.assertPlatform(state);
         ownerOf(state, actor);
@@ -324,11 +390,13 @@ export class TeamRuntime {
         if (state.turns >= state.maxTurns) throw new Error("Team turn budget exhausted; create a new team");
         for (const member of state.members) {
           if (member.delivery) throw new Error("A delivery still needs reconciliation; wait for its host turn to end");
+          if (member.error) unresolved.push(`${member.roleId}: ${member.error}`);
           delete member.error;
         }
         state.status = "active";
         append(state, { type: "team_resumed", sender: memberOf(state, actor).id, content: "Resume pending collaboration", wake: false });
       });
+      return unresolved;
     } finally { this.endControl(id, token); }
   }
 
@@ -384,7 +452,12 @@ export class TeamRuntime {
   private async pump(): Promise<void> {
     for (const state of this.store.list()) {
       if (this.stopped) return;
-      if (state.platformId !== this.options.platformId || state.status === "deleted") continue;
+      if (state.platformId !== this.options.platformId) continue;
+      // Durable membership lets the owning host finish cleanup requested elsewhere.
+      for (const member of state.members.filter(m => m.status === "removed" || state.status === "deleted")) {
+        await this.forgetMember(member);
+      }
+      if (state.status === "deleted") continue;
       if (state.status === "active" && state.tasks.some(task => task.status === "claimed" && (task.leaseUntil ?? Infinity) <= Date.now())) {
         this.store.update(state.id, current => {
           if (current.status !== "active") return;
@@ -435,17 +508,36 @@ export class TeamRuntime {
     const finalIndex = last ? messages.findIndex(message => message.info.id === last.info.id) : -1;
     const delivered = !member.delivery || (markerIndex >= 0 && finalIndex > markerIndex);
     if (last && delivered && last.info.id !== member.lastTurnId && !member.delivery?.baselineMessageIds.includes(last.info.id)) {
+      const failed = Boolean(last.info.error) || last.info.finish === "aborted" || last.info.finish === "error";
+      const reason = failed
+        ? failureText(last.info.error ?? (last.info.finish === "aborted" ? "Member turn was stopped" : "Member turn failed"))
+        : undefined;
       this.store.update(id, state => {
         const current = state.members.find(m => m.id === memberId)!;
-        if (state.status === "deleted" || current.status !== "active" || current.lastTurnId === last.info.id || current.delivery?.id !== member.delivery?.id) return;
+        // A known final turn is recorded regardless of the TEAM's status: the
+        // team may already be paused (another member failed, or the creator
+        // paused it) while this member's host turn finished. Only a deleted
+        // team, a removed member, an already-recorded turn or a superseded
+        // delivery is skipped.
+        if (state.status === "deleted" || current.status !== "active" || current.lastTurnId === last.info.id
+          || current.delivery?.id !== member.delivery?.id) return;
         current.lastTurnId = last.info.id;
-        const failed = Boolean(last.info.error) || last.info.finish === "aborted" || last.info.finish === "error";
-        if (current.delivery && !failed) current.cursor = current.delivery.throughSeq;
+        if (reason === undefined) {
+          if (current.delivery) current.cursor = current.delivery.throughSeq;
+          delete current.delivery;
+          delete current.error;
+          append(state, { type: "turn_completed", sender: current.id, wake: false,
+            content: "Member turn completed; shared results are published through explicit team events" });
+          return;
+        }
+        // The real failure is preserved; the cursor is retained so the pending
+        // events replay after resume, and the failed attempt does not spend
+        // budget (a failure is not progress).
+        if (current.delivery && state.turns > 0) state.turns--;
         delete current.delivery;
-        delete current.error;
-        append(state, { type: failed ? "member_failed" : "turn_completed", sender: current.id,
-          content: failed ? "Member turn failed or was stopped" : "Member turn completed; shared results are published through explicit team events", wake: false });
-        if (failed) { current.error = "Member turn failed or was stopped"; state.status = "paused"; }
+        current.error = reason;
+        state.status = "paused";
+        append(state, { type: "member_failed", sender: current.id, content: `Member turn failed: ${reason}`, wake: false });
       });
       if (member.delivery && !this.store.read(id).members.find(m => m.id === memberId)?.delivery) {
         this.store.releaseSession(this.sessionKey(member.sessionId), member.delivery.id);

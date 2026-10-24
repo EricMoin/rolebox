@@ -84,6 +84,7 @@ import { createDshSessionTools } from "../platform/adapters/dsh/session-visibili
 import { DshTeamSessionAdapter, type DshTeamSessionAdapterOptions } from "../platform/adapters/dsh/team-session.ts";
 import { TeamRuntime } from "../team/runtime.ts";
 import { createTeamTools } from "../team/tools.ts";
+import { resolveTeamAgentOptions, type TeamAgentOptions } from "../team/agent-options.ts";
 import { createLoadRoleSkillTool } from "../asset/skill-tool.ts";
 import { bindRoleVisibility } from "../platform/role-visibility.ts";
 import type {
@@ -217,6 +218,12 @@ export const Config = z.object({
     .string()
     .optional()
     .describe("Role id (directory name) to promote to primary"),
+  activeRole: z
+    .string()
+    .optional()
+    .describe(
+      "Default top-level role to activate for new sessions that have no persisted selection. Useful for headless hosts with no role picker; an explicit switch or a persisted selection still wins, and team member sessions keep their assigned role.",
+    ),
   computerUse: z
     .boolean()
     .optional()
@@ -1227,6 +1234,82 @@ function probeLlmRoutes(
 // ── apply ───────────────────────────────────────────────────────────────────
 
 /**
+ * Minimal structural surface of the host's default model service
+ * (`ctx.get("agentDefaultModel")`).
+ *
+ * Only `currentSelection()` is read: the CURRENT default is what a peer without
+ * a usable role model inherits, and a host may change it while rolebox runs, so
+ * the value is read lazily per use rather than captured at boot.
+ */
+interface DshAgentDefaultModelLike {
+  currentSelection(): { provider?: unknown; model?: unknown; reasoningEffort?: unknown } | undefined;
+}
+
+/**
+ * Structurally probe the cordis ctx for the host default model service.
+ *
+ * The service is OPTIONAL — a minimal or headless test double has no such
+ * service, and a host that mounts it from a sibling plugin fiber throws on the
+ * property walk — so every failure degrades to "no host default" instead of
+ * gating plugin activation.
+ */
+function probeAgentDefaultModel(
+  ctx: DshPluginContext,
+): DshAgentDefaultModelLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  let service: unknown;
+  try {
+    service = ctx.get("agentDefaultModel");
+  } catch {
+    return undefined;
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { currentSelection?: unknown }).currentSelection === "function"
+  ) {
+    return service as DshAgentDefaultModelLike;
+  }
+  return undefined;
+}
+
+/**
+ * Read the host's current default selection as agent options.
+ *
+ * Only a complete provider+model pair is usable: a partial selection cannot be
+ * paired with a role's own model without inventing a route.
+ *
+ * @returns The default selection, or `undefined` when the host exposes none.
+ */
+function readHostAgentDefaults(
+  ctx: DshPluginContext,
+): TeamAgentOptions | undefined {
+  const service = probeAgentDefaultModel(ctx);
+  if (!service) return undefined;
+  let selection: unknown;
+  try {
+    selection = service.currentSelection();
+  } catch {
+    return undefined;
+  }
+  if (selection === null || typeof selection !== "object") return undefined;
+  const { provider, model, reasoningEffort } = selection as {
+    provider?: unknown;
+    model?: unknown;
+    reasoningEffort?: unknown;
+  };
+  if (typeof provider !== "string" || !provider) return undefined;
+  if (typeof model !== "string" || !model) return undefined;
+  return {
+    provider,
+    model,
+    ...(typeof reasoningEffort === "string" && reasoningEffort
+      ? { reasoningEffort }
+      : {}),
+  };
+}
+
+/**
  * Cordis plugin `apply(ctx, config)` — boots rolebox on the dsh platform.
  *
  * Flow (mirroring `src/index.ts`):
@@ -1424,8 +1507,44 @@ export async function apply(
     store: ctx.sessions,
     ctx,
     activeRole,
+    // `rolebox.activeRole` seeds a NEW session that has no persisted selection —
+    // the headless case, where nothing else can pick a top-level role.
+    defaultRoleId: config.activeRole,
     onActiveRoleChanged: () => refreshSkillCatalog(),
   });
+
+  // Resolve the CURRENT agent options for a team candidate role.
+  //
+  // The role's own model comes from `role.yaml` through the registrar's spawn
+  // composition; the host's default model is the fallback for a role that
+  // declares none (headless hosts have no model picker). `resolveTeamAgentOptions`
+  // owns the pairing rules, so a role whose provider route was unregistered is
+  // never routed to the default provider with a foreign model id.
+  //
+  // `undefined` means "not a team candidate"; a candidate with no usable
+  // provider/model returns `{ agentOptions: undefined }` so callers can explain
+  // the difference between a missing role and a missing model.
+  const fallbackWarned = new Set<string>();
+  function resolveTeamRole(roleId: string): { agentOptions?: TeamAgentOptions } | undefined {
+    const role = resolvedRoles.find(candidate => candidate.id === roleId);
+    if (!role) return undefined;
+    const composed = registrar.composeSpawnRequest(roleId, {
+      prompt: [], parent: undefined, signal: new AbortController().signal,
+    }).agentOptions;
+    const resolved = resolveTeamAgentOptions({ roleModel: role.config.model, composed, fallback: readHostAgentDefaults(ctx) });
+    if (resolved.usedFallback && !fallbackWarned.has(roleId)) {
+      fallbackWarned.add(roleId);
+      log.warn("Team role runs on the host default model", { role: roleId });
+    }
+    return { agentOptions: resolved.agentOptions };
+  }
+  // A team member is only useful if its session can actually run a turn; `add`
+  // refuses the role instead of recording a member that can never start.
+  function memberProblem(roleId: string): string | undefined {
+    const role = resolveTeamRole(roleId);
+    if (role?.agentOptions?.provider && role.agentOptions.model) return undefined;
+    return `Role "${roleId}" has no usable provider/model; set model in its role.yaml or configure a host default model.`;
+  }
 
   // Apply explicit role restrictions through the host registry guard.
   const computerUsePolicy = installDshComputerUsePolicy({
@@ -1683,25 +1802,26 @@ export async function apply(
         bindRole: (sessionId, roleId) => {
           activeRole.set(sessionId, roleId);
           activeRoleStore.saveSync(activeRole.snapshot());
+          // A peer's role is bound BEFORE its session is published, so the
+          // switcher's restore listener leaves it untouched (the binding is
+          // already in force). Refresh the candidate role set here instead, or
+          // the peer's skills would be missing from the shared catalog.
+          refreshSkillCatalog();
         },
         roleOf: sessionId => activeRole.get(sessionId),
-        resolveRole: roleId => {
-          if (!resolvedRoles.some(role => role.id === roleId)) return undefined;
-          return { agentOptions: registrar.composeSpawnRequest(roleId, {
-            prompt: [], parent: undefined, signal: new AbortController().signal,
-          }).agentOptions };
-        },
+        resolveRole: roleId => resolveTeamRole(roleId),
         readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, sessionPersistence, id),
       });
       const runtime = new TeamRuntime({ directory: workspace, platformId: "dsh", session,
-        roles: () => resolvedRoles, canPollStatus: true });
+        roles: () => resolvedRoles, canPollStatus: true, memberProblem });
       entry = { runtime, session };
       teamRuntimes.set(workspace, entry);
       if (teamReady) runtime.start();
     }
     return entry.runtime;
   }
-  function teamContext(context: CanonicalToolContext, toolName: string): CanonicalToolContext {
+  /** Common caller checks for every team tool: lifecycle, session identity, worker boundary. */
+  function teamCaller(context: CanonicalToolContext, toolName: string): { roleId: string; directory: string } {
     if (teamStopping) throw new Error("Team runtime is shutting down");
     if (!teamReady) throw new Error("Team runtime is still initializing");
     const live = teamAgents?.get(context.sessionID);
@@ -1710,14 +1830,32 @@ export async function apply(
     const agent = live ?? { id: context.sessionID, session };
     if (workerBoundary?.isWorker(agent)) throw new Error("Graph workers cannot use team tools");
     const resolved = resolveDshSessionContext(contextOptions, agent);
-    if (!resolvedRoles.some(role => role.id === resolved.roleId)) throw new Error("Team tools require an active top-level role");
     if (resolved.role?.config.tools?.[toolName] === false) throw new Error(`Tool ${toolName} is disabled for the active role`);
     if (!resolved.directory) throw new Error("Team tools require a session workspace");
+    return { roleId: resolved.roleId, directory: resolved.directory };
+  }
+  function teamContext(context: CanonicalToolContext, toolName: string): CanonicalToolContext {
+    const resolved = teamCaller(context, toolName);
+    if (!resolvedRoles.some(role => role.id === resolved.roleId)) throw new Error(
+      "Team tools require an active top-level role; select one for this session, or configure rolebox.activeRole for headless hosts");
     return { ...context, agent: resolved.roleId, directory: resolved.directory, worktree: resolved.directory };
   }
+  // Role discovery is useful BEFORE a role is selected (a headless host cannot
+  // pick one otherwise), so `team_list_roles` uses this narrower gate: the same
+  // lifecycle, session, worker and tool-permission checks, minus the active-role
+  // requirement.
+  function teamDiscoveryContext(context: CanonicalToolContext, toolName: string): CanonicalToolContext {
+    const resolved = teamCaller(context, toolName);
+    return { ...context, agent: resolved.roleId || context.agent, directory: resolved.directory, worktree: resolved.directory };
+  }
+  // `team_list_roles` is the one discovery tool; every other team tool keeps the
+  // full active-role requirement.
+  const teamContexts: Record<string, (context: CanonicalToolContext, toolName: string) => CanonicalToolContext> = {
+    team_list_roles: teamDiscoveryContext,
+  };
   const teamTools: Record<string, CanonicalToolDef> = teamWired ? Object.fromEntries(
     Object.entries(createTeamTools(context => teamRuntime(context.directory))).map(([name, tool]) => [name, {
-      ...tool, execute: (args, context) => tool.execute(args, teamContext(context, name)),
+      ...tool, execute: (args, context) => tool.execute(args, (teamContexts[name] ?? teamContext)(context, name)),
     } satisfies CanonicalToolDef]),
   ) : {};
   const restoreTeamWorkspace = (directory: string | undefined) => {
