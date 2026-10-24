@@ -607,6 +607,7 @@ async function applyTracked(
       activateRole: boot.activateRole,
       getActiveRole: boot.getActiveRole,
       getLoopPhases: boot.getLoopPhases,
+      whenDisposed: boot.whenDisposed,
       registerRoleSnapshotTools: boot.registerRoleSnapshotTools,
     },
   );

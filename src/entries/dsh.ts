@@ -58,7 +58,7 @@ import { INPUT_DELIVERY_DIR, inputConsumerDirectory } from "../graph/host/input-
  */
 
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { CanonicalToolContext, CanonicalToolDef } from "../platform/types.ts";
 import { createOutcomeGraphTools } from "../graph/tools/index.ts";
@@ -80,6 +80,12 @@ import { DshDispatchAdapter } from "../platform/adapters/dsh/dispatch.ts";
 import { DshToolFactory } from "../platform/adapters/dsh/tool-factory.ts";
 import type { DshToolDefinition } from "../platform/adapters/dsh/tool-factory.ts";
 import { DshSessionAdapter } from "../platform/adapters/dsh/session.ts";
+import { createDshSessionTools } from "../platform/adapters/dsh/session-visibility.ts";
+import { DshTeamSessionAdapter, type DshTeamSessionAdapterOptions } from "../platform/adapters/dsh/team-session.ts";
+import { TeamRuntime } from "../team/runtime.ts";
+import { createTeamTools } from "../team/tools.ts";
+import { createLoadRoleSkillTool } from "../asset/skill-tool.ts";
+import { bindRoleVisibility } from "../platform/role-visibility.ts";
 import type {
   DshPromptInjector,
   DshSessionStoreLike,
@@ -452,6 +458,8 @@ export interface DshPluginStats {
    * degraded reminder instead of delivering one.
    */
   graphNotifyWired: boolean;
+  /** Durable peer teams are available only with resumable agents and role prompts. */
+  teamWired: boolean;
 }
 
 /**
@@ -461,12 +469,14 @@ export interface DshPluginStats {
  */
 export interface DshPluginDisposer {
   /** Clean up tool registrations, hook listeners, and agent registrations. */
-  (): void;
+  (): void | Promise<void>;
   /** Bootstrap + wiring statistics for this apply() run. */
   stats: DshPluginStats;
   activateRole: DshRoleSwitcher["activate"];
   getActiveRole: DshRoleSwitcher["getActive"];
   getLoopPhases(): readonly LoopPhase[];
+  /** Await asynchronous team-session shutdown after invoking the disposer. */
+  whenDisposed(): Promise<void>;
   /**
    * In-process role-reload seam: replace the four role-snapshot tools
    * (`asset_search` / `asset_inspect` / `asset_validate` / `reference_search`)
@@ -1476,6 +1486,7 @@ export async function apply(
   // webServer seam above. The adapter's registry disposers are collected
   // into the fiber disposer below via `promptDisposers`.
   const promptDisposers: Array<() => void> = [];
+  let rolePromptWired = false;
   const systemPromptRegistry = probeSystemPrompt(ctx);
   if (systemPromptRegistry) {
     try {
@@ -1498,6 +1509,7 @@ export async function apply(
       });
       promptAdapter.register(systemPromptRegistry);
       promptDisposers.push(() => promptAdapter.dispose());
+      rolePromptWired = true;
       log.info("Rolebox system-prompt contributions registered", {
         section: "rolebox:role",
         context: "rolebox:context",
@@ -1512,8 +1524,8 @@ export async function apply(
   }
 
   // Optional skills service seam — register rolebox's LAZY skill provider on
-  // dsh's global `ctx.skills` registry so every skill name in the role prompt's
-  // `## Available skills` block is resolvable by the `skill` tool under dsh.
+  // dsh's global `ctx.skills` registry for top-level role skills. Private
+  // child skills use the scoped loader or the worker's private resource copies.
   // The registry's plugin seam is `registerProvider(create)` — a FACTORY — fed
   // the `(control) => SkillProvider` factory built from the resolved roles (the
   // candidate pool, narrowed by the provider to the active ∪ default roles),
@@ -1642,13 +1654,112 @@ export async function apply(
     createDshGraphWorkerGrantHost(() => [...graphRuntimes.values()].map(runtime => runtime.host)),
     ctx.tools, (event, listener) => ctx.on(event, listener),
   );
+  let sessionPersistence: unknown;
+  try { sessionPersistence = ctx.get("sessionPersistence"); } catch { /* Optional host service. */ }
+  let agentLoop: { createAgent?: unknown; resume?: unknown } | undefined;
+  try { agentLoop = ctx.get("agentLoop") as typeof agentLoop; } catch { /* Optional host service. */ }
+  const teamAgents = agentRegistry as DshTeamSessionAdapterOptions["agents"] | undefined;
+  const persistence = sessionPersistence as { open?: unknown; inspect?: unknown } | undefined;
+  const teamWired = rolePromptWired && typeof ctx.tools.guard === "function" && typeof ctx.sessions.flush === "function" &&
+    typeof teamAgents?.create === "function" && typeof teamAgents?.resume === "function" &&
+    typeof agentLoop?.createAgent === "function" && typeof agentLoop?.resume === "function" &&
+    (typeof persistence?.open === "function" || typeof persistence?.inspect === "function");
+  let teamStopping = false;
+  let teamReady = false;
+  let teamShutdown = Promise.resolve();
+  const teamRuntimes = new Map<string, { runtime: TeamRuntime; session: DshTeamSessionAdapter }>();
+  const teamSubscriptions: Array<() => void> = [];
+  function teamRuntime(directory: string) {
+    if (teamStopping) throw new Error("Team runtime is shutting down");
+    if (!teamWired || !teamAgents) throw new Error("This DSH host cannot run durable team sessions");
+    if (!isAbsolute(directory)) throw new Error("Team tools require an absolute session workspace");
+    const workspace = realpathSync(directory);
+    let entry = teamRuntimes.get(workspace);
+    if (!entry) {
+      const session = new DshTeamSessionAdapter({
+        directory: workspace,
+        sessions: ctx.sessions,
+        agents: teamAgents,
+        bindRole: (sessionId, roleId) => {
+          activeRole.set(sessionId, roleId);
+          activeRoleStore.saveSync(activeRole.snapshot());
+        },
+        roleOf: sessionId => activeRole.get(sessionId),
+        resolveRole: roleId => {
+          if (!resolvedRoles.some(role => role.id === roleId)) return undefined;
+          return { agentOptions: registrar.composeSpawnRequest(roleId, {
+            prompt: [], parent: undefined, signal: new AbortController().signal,
+          }).agentOptions };
+        },
+        readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, sessionPersistence, id),
+      });
+      const runtime = new TeamRuntime({ directory: workspace, platformId: "dsh", session,
+        roles: () => resolvedRoles, canPollStatus: true });
+      entry = { runtime, session };
+      teamRuntimes.set(workspace, entry);
+      if (teamReady) runtime.start();
+    }
+    return entry.runtime;
+  }
+  function teamContext(context: CanonicalToolContext, toolName: string): CanonicalToolContext {
+    if (teamStopping) throw new Error("Team runtime is shutting down");
+    if (!teamReady) throw new Error("Team runtime is still initializing");
+    const live = teamAgents?.get(context.sessionID);
+    const session = ctx.sessions.get(context.sessionID) ?? live?.session;
+    if (!session) throw new Error("Team tools require a known DSH session");
+    const agent = live ?? { id: context.sessionID, session };
+    if (workerBoundary?.isWorker(agent)) throw new Error("Graph workers cannot use team tools");
+    const resolved = resolveDshSessionContext(contextOptions, agent);
+    if (!resolvedRoles.some(role => role.id === resolved.roleId)) throw new Error("Team tools require an active top-level role");
+    if (resolved.role?.config.tools?.[toolName] === false) throw new Error(`Tool ${toolName} is disabled for the active role`);
+    if (!resolved.directory) throw new Error("Team tools require a session workspace");
+    return { ...context, agent: resolved.roleId, directory: resolved.directory, worktree: resolved.directory };
+  }
+  const teamTools: Record<string, CanonicalToolDef> = teamWired ? Object.fromEntries(
+    Object.entries(createTeamTools(context => teamRuntime(context.directory))).map(([name, tool]) => [name, {
+      ...tool, execute: (args, context) => tool.execute(args, teamContext(context, name)),
+    } satisfies CanonicalToolDef]),
+  ) : {};
+  const restoreTeamWorkspace = (directory: string | undefined) => {
+    if (!teamWired || teamStopping || !directory || !isAbsolute(directory) || !existsSync(join(directory, ".rolebox", "team"))) return;
+    try { teamRuntime(directory); }
+    catch (error) { log.warn("dsh team recovery failed", { error: error instanceof Error ? error.message : String(error) }); }
+  };
+  if (teamWired) {
+    restoreTeamWorkspace(process.cwd());
+    for (const session of ctx.sessions.list()) {
+      restoreTeamWorkspace(resolveDshSessionContext(contextOptions, { id: session.id, session }).directory);
+    }
+    const created = ctx.on("session/created", (...args) => {
+      const session = args[0] as ReturnType<DshSessionStoreLike["get"]>;
+      if (session) restoreTeamWorkspace(resolveDshSessionContext(contextOptions, { id: session.id, session }).directory);
+    });
+    if (created) teamSubscriptions.push(created);
+    const events = ctx.on("session/event", (...args) => {
+      const session = args[0] as ReturnType<DshSessionStoreLike["get"]>;
+      const event = args[1] as { type?: string } | undefined;
+      if (!session || !event?.type || teamStopping || !teamReady) return;
+      if (event.type === "working-directory/change") {
+        restoreTeamWorkspace(resolveDshSessionContext(contextOptions, { id: session.id, session }).directory);
+      }
+      const type = event.type === "turn/start" ? "session.status" : event.type === "turn/end" ? "session.idle" : "session.updated";
+      for (const { runtime } of teamRuntimes.values()) {
+        void runtime.handleEvent({ type, rawType: event.type, properties: { sessionID: session.id,
+          ...(type === "session.status" ? { status: { type: "busy" } } : {}) } }).catch(error => {
+          log.warn("dsh team event handling failed", { error: error instanceof Error ? error.message : String(error) });
+        });
+      }
+    });
+    if (events) teamSubscriptions.push(events);
+  }
   function openGraphRuntime(workspace: string) {
     let outcomeHost: OutcomeHost | undefined;
     const outcomeDelivery = new DshOutcomeDelivery({
       subscribeExecutionEvents: (id, listener) => ctx.on("session/event", (...args: unknown[]) => {
-        const session = args[0] as { id: string; events: import("../platform/adapters/dsh/session.ts").DshSessionEventLike[] };
+        const session = args[0] as { id: string; events?: readonly import("../platform/adapters/dsh/session.ts").DshSessionEventLike[];
+          snapshotEvents?(): readonly import("../platform/adapters/dsh/session.ts").DshSessionEventLike[] };
         const event = args[1] as { type: string };
-        if (session.id === id && event.type === "turn/end") listener(session.events);
+        if (session.id === id && event.type === "turn/end") listener(session.snapshotEvents?.() ?? session.events ?? []);
       }) ?? (() => { }),
       readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
       // THE WORKER'S COMPLETE PROMPT, composed at the CALL SITE. On dsh 0.2.x
@@ -2015,7 +2126,7 @@ export async function apply(
       ? (toolName: string) => ctx.tools.get?.(toolName)
       : undefined;
 
-  // Role-snapshot registration seam (in-process role reload). The four tools
+  // Role-snapshot registration seam (in-process role reload). The tools
   // whose behavior is bound to the resolved-role snapshot are registered as
   // ONE disposable generation: a reload disposes the previous generation and
   // registers a fresh one from the re-resolved roles. Disposal MUST precede
@@ -2041,7 +2152,11 @@ export async function apply(
         });
       }
     }
-    const compiled = factory.compileAll(buildRoleSnapshotTools(roles));
+    const getEffectiveAgent = (sessionID?: string) => sessionID ? activeRole.get(sessionID) ?? undefined : undefined;
+    const compiled = factory.compileAll({
+      ...buildRoleSnapshotTools(roles, getEffectiveAgent),
+      ...bindRoleVisibility({ load_role_skill: createLoadRoleSkillTool(roles) }, roles, getEffectiveAgent),
+    });
     let registered = 0;
     for (const [key, def] of Object.entries(compiled)) {
       // Order: the computer-use gate FIRST, then the namespace filter
@@ -2189,15 +2304,17 @@ export async function apply(
   const tools = {
     ...buildCanonicalTools({
       resolvedRoles,
+      getEffectiveAgent: sessionID => sessionID ? activeRole.get(sessionID) ?? undefined : undefined,
+      outcomeGraphTools: graphTools,
+      teamTools,
       directory: process.cwd(),
-      sessionClient: sessionAdapter,
+      extraTools: createDshSessionTools(sessionAdapter),
       capabilities: dshCapabilities(),
       // The resolved global gate. FALSE (the default) registers nothing from
       // the computer-use family; TRUE registers it, and the guard installed
       // above still enforces explicit role restrictions.
       computerUse: computerUseEnabled,
     }),
-    ...graphTools,
     ...loopTools,
   };
   const compiled = factory.compileAll(tools);
@@ -2316,6 +2433,22 @@ export async function apply(
 
   // Fiber disposer (cordis convention) + stats for callers/tests.
   const disposer = (() => {
+    if (teamStopping) return teamShutdown;
+    teamStopping = true;
+    for (const stop of teamSubscriptions) stop();
+    teamSubscriptions.length = 0;
+    teamShutdown = Promise.allSettled([...teamRuntimes.values()].map(async entry => {
+      try { await entry.runtime.dispose(); }
+      finally { await entry.session.dispose(); }
+    })).then(async results => {
+      teamRuntimes.clear();
+      if (teamWired) await activeRole.flush();
+      const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+      if (errors.length) throw new AggregateError(errors, "DSH team shutdown did not complete");
+    });
+    void teamShutdown.catch(error => {
+      log.warn("dsh team shutdown failed", { error: error instanceof Error ? error.message : String(error) });
+    });
     stopGraphSessions?.();
     for (const runtime of graphRuntimes.values()) {
       runtime.delivery.close();
@@ -2410,8 +2543,7 @@ export async function apply(
       }
     }
     // Best-effort agent-catalog cleanup (dsh providers are removed via the
-    // registrar's unregister → disposer chain). Fire-and-forget: fiber
-    // unload is synchronous in cordis.
+    // registrar's unregister → disposer chain).
     registrar
       .list()
       .then((ids) => (ids.length > 0 ? registrar.unregister(ids) : undefined))
@@ -2420,6 +2552,7 @@ export async function apply(
           error: err instanceof Error ? err.message : String(err),
         });
       });
+    return teamShutdown;
   }) as DshPluginDisposer;
   disposer.stats = {
     discovered,
@@ -2432,6 +2565,7 @@ export async function apply(
     loopWired: true,
     webRouteRegistered,
     graphNotifyWired,
+    teamWired,
     monitorRouteRegistered,
     logsRouteRegistered,
   };
@@ -2439,6 +2573,9 @@ export async function apply(
   disposer.activateRole = roleSwitcher.activate.bind(roleSwitcher);
   disposer.getActiveRole = roleSwitcher.getActive.bind(roleSwitcher);
   disposer.getLoopPhases = () => [...loopCoordinator.getAllLoopStates().values()].map(loop => loop.phase);
+  disposer.whenDisposed = () => teamShutdown;
+  teamReady = true;
+  for (const { runtime } of teamRuntimes.values()) runtime.start();
   return disposer;
 }
 

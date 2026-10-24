@@ -36,6 +36,18 @@ describe("worker tool catalog", () => {
     await expect(session.call("dup", {})).rejects.toThrow("not authorized");
   });
 
+  test("team tools cannot be discovered or executed through a declared host-tool grant", async () => {
+    for (const mode of ["native", "discover", "code"] as const) {
+      const session = createWorkerToolSession({
+        registry: { list: () => [descriptor("team_create"), descriptor("rb_team_send_event")], async invoke() { throw new Error("must not call"); } },
+        allowedTools: ["team_*", "rb_*", "team_create"], presentation: { mode },
+      });
+      expect((await session.list()).tools).toEqual([]);
+      await expect(session.call("team_create", {})).rejects.toThrow("not authorized");
+      await expect(session.call("rb_team_send_event", {})).rejects.toThrow("not authorized");
+    }
+  });
+
   test("rechecks both changing grants and registration on every invocation", async () => {
     let names = ["docs_search"];
     let registered = [descriptor("docs_search")];

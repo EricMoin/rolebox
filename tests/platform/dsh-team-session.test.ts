@@ -1,0 +1,241 @@
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Context } from "@deepseek-ai/cordis";
+import SessionStore, { SessionId } from "@deepseek-ai/dsh-session";
+import { MessageId } from "@deepseek-ai/dsh-llm";
+import { DshTeamSessionAdapter, type DshTeamAgent, type DshTeamAgents } from "../../src/platform/adapters/dsh/team-session.ts";
+import type { DshSessionEventLike, DshSessionLike, DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
+
+const cleanups: Array<() => void | Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+function fixture() {
+  const directory = mkdtempSync(join(tmpdir(), "rolebox-dsh-team-"));
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+  const stored = new Map<string, DshSessionEventLike[]>();
+  const sessions = new Map<string, DshSessionLike>();
+  const agents = new Map<string, DshTeamAgent>();
+  const roles = new Map<string, string>();
+  const pending = new Map<string, Array<Parameters<DshTeamAgent["followup"]>[0]>>();
+  const created: Array<Parameters<DshTeamAgents["create"]>[0]> = [];
+  const resumed: Array<Parameters<DshTeamAgents["resume"]>[0]> = [];
+  const cleared: string[] = [];
+  let flushAccepted = true;
+  let cancellationAccepted = true;
+
+  function makeSession(id: string, initial: readonly DshSessionEventLike[] = []): DshSessionLike {
+    const events = structuredClone(initial) as DshSessionEventLike[];
+    return { id, get seq() { return events.length; }, events, header: { cwd: directory }, deriveMessages: () => [],
+      append(type, data) { const event = { type, data, seq: events.length, time: 100 + events.length }; events.push(event); return event; } };
+  }
+  function makeAgent(session: DshSessionLike) {
+    let status: "idle" | "running" = "idle";
+    pending.set(session.id, []);
+    const agent: DshTeamAgent = { id: session.id, session, get status() { return status; },
+      inbox: { get nextTurn() { return pending.get(session.id)!; }, nextStep: [],
+        remove(messageId) { const messages = pending.get(session.id)!; const index = messages.findIndex(message => message.id === messageId);
+          if (index < 0) return false; messages.splice(index, 1); cleared.push(session.id); return true; } },
+      followup(message) { pending.get(session.id)!.push(message); status = "running"; },
+      inject(message) { pending.get(session.id)!.push(message); },
+      cancel(_cause, options) { if (cancellationAccepted) { if (!options?.keepInbox) pending.set(session.id, []); status = "idle"; } },
+      async whenIdle() {},
+    };
+    return { agent, setIdle() { status = "idle"; } };
+  }
+  const idle = new Map<string, () => void>();
+  const registry: DshTeamAgents = {
+    get: id => agents.get(id),
+    async create(options) {
+      created.push(options);
+      const session = makeSession(options.sessionId);
+      const made = makeAgent(session);
+      options.setup({}, made.agent);
+      expect(roles.get(session.id)).toBe("designer");
+      sessions.set(session.id, session);
+      agents.set(session.id, made.agent);
+      idle.set(session.id, made.setIdle);
+      return { agent: made.agent, async dispose() { agents.delete(session.id); sessions.delete(session.id); } };
+    },
+    async resume(options) {
+      resumed.push(options);
+      const saved = stored.get(options.resumeSessionId);
+      if (!saved) throw new Error("No persisted session");
+      const session = makeSession(options.resumeSessionId, saved);
+      let open = false;
+      for (const event of saved) { if (event.type === "turn/start") open = true; if (event.type === "turn/end") open = false; }
+      if (open) session.append("turn/end", { turn: 1, reason: { kind: "interrupted" } });
+      const made = makeAgent(session);
+      pending.get(session.id)!.push({ id: "stale", role: "user", content: [{ type: "text", text: "[rolebox-team stale] old queued turn" }],
+        source: { kind: "rolebox", form: "notice", summary: "old" } });
+      options.setup({}, made.agent);
+      sessions.set(session.id, session);
+      agents.set(session.id, made.agent);
+      idle.set(session.id, made.setIdle);
+      return { agent: made.agent, async dispose() { agents.delete(session.id); sessions.delete(session.id); } };
+    },
+  };
+  const store: DshSessionStoreLike = {
+    get: id => sessions.get(id), list: () => [...sessions.values()],
+    create() { throw new Error("SessionStore.create must never execute team work"); },
+    fork() { throw new Error("unused"); },
+    async flush(session) { if (!flushAccepted) return false; stored.set(session.id, structuredClone(session.events) as DshSessionEventLike[]); return true; },
+  };
+  const options = { directory, sessions: store, agents: registry,
+    bindRole(id: string, role: string) { roles.set(id, role); },
+    roleOf(id: string) { return roles.get(id); },
+    resolveRole(role: string) { return role === "designer" ? { agentOptions: { provider: "example-provider", model: "design-model" } } : undefined; },
+    async readExecutionEvents(id: string) { return stored.get(id); },
+  };
+  const makeAdapter = () => { const adapter = new DshTeamSessionAdapter(options); cleanups.push(() => adapter.dispose()); return adapter; };
+  function complete(id: string, reason = "completed") {
+    const session = sessions.get(id)!;
+    session.append("turn/start", { turn: 1 });
+    for (const message of pending.get(id)!.splice(0)) session.append("user/message", message);
+    session.append("assistant/message", { turn: 1, step: 1, stream: [], message: { id: `answer-${session.seq}`, role: "assistant",
+      content: [{ type: "text", text: "Design ready" }], source: { kind: "model", provider: "example-provider", model: "design-model" } } });
+    session.append("turn/end", { turn: 1, reason: { kind: reason } });
+    idle.get(id)!();
+  }
+  return { directory, sessions, store, agents, registry, roles, pending, created, resumed, cleared, stored, makeAdapter, complete,
+    setFlush(value: boolean) { flushAccepted = value; }, setCancellation(value: boolean) { cancellationAccepted = value; } };
+}
+
+describe("DSH team execution sessions", () => {
+  it("creates a live peer with role/model configured before publication and durable acknowledgement", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    expect(await adapter.create({ directory: f.directory, agent: "designer--private" })).toBeNull();
+    const session = await adapter.create({ directory: f.directory, agent: "designer" });
+    expect(session).not.toBeNull();
+    expect(f.created[0].agentOptions).toEqual({ provider: "example-provider", model: "design-model" });
+    expect(f.created[0].meta).toEqual({ cwd: f.directory });
+    expect(f.stored.has(session!.id)).toBe(true);
+    expect(await adapter.status(session!.id)).toEqual({ type: "idle" });
+  });
+
+  it("queues separate waking turns and preserves only actually claimed delivery markers", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    const text = "[rolebox-team delivery-1]\nPrepare a design";
+    const receipt = await adapter.prompt(id, { agent: "designer", noReply: false, parts: [{ type: "text", text }] });
+    expect(receipt?.id).toBe(f.pending.get(id)![0].id);
+    expect(await adapter.status(id)).toEqual({ type: "busy" });
+    expect(await adapter.messages(id)).toEqual([]);
+    f.complete(id);
+    const messages = await adapter.messages(id);
+    expect(messages.find(message => message.info.id === receipt!.id)?.parts[0]).toMatchObject({ type: "text", text });
+    expect(messages.at(-1)?.info).toMatchObject({ role: "idle", finish: "succeeded" });
+    expect(messages.at(-2)?.parts[0]).toMatchObject({ type: "text", text: "Design ready" });
+    await adapter.prompt(id, { noReply: true, parts: [{ type: "text", text: "context only" }] });
+    expect(await adapter.status(id)).toEqual({ type: "idle" });
+  });
+
+  it("reads cold history without execution, then restores the same peer and configured model", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    await first.prompt(id, { parts: [{ type: "text", text: "[rolebox-team first]" }] });
+    f.complete(id); await first.messages(id); await first.dispose();
+    const restored = f.makeAdapter();
+    expect(await restored.status(id)).toEqual({ type: "idle" });
+    expect((await restored.get(id))?.id).toBe(id);
+    expect((await restored.messages(id)).at(-1)?.info.finish).toBe("succeeded");
+    expect(f.resumed).toHaveLength(0);
+    await restored.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team second]" }] });
+    expect(f.resumed).toHaveLength(1);
+    expect(f.resumed[0].resumeSessionId).toBe(id);
+    expect(f.resumed[0].agentOptions).toEqual(f.created[0].agentOptions);
+    expect(f.pending.get(id)).toHaveLength(1);
+    expect(f.pending.get(id)![0].content[0].text).toBe("[rolebox-team second]");
+    expect(f.created).toHaveLength(1);
+    expect(await restored.status("user-session-not-restored")).toBeNull();
+    expect(await restored.prompt("user-session-not-restored", { parts: [{ type: "text", text: "wake" }] })).toBeNull();
+    expect(await restored.abort("user-session-not-restored")).toBe(false);
+    expect(f.resumed).toHaveLength(1);
+  });
+
+  it("repairs a crash-interrupted peer only under explicit cancellation, preserving a failed outcome", async () => {
+    const f = fixture(); const first = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    f.sessions.get(id)!.append("turn/start", { turn: 1 });
+    await first.messages(id); await first.dispose();
+    const restored = f.makeAdapter();
+    expect(await restored.status(id)).toEqual({ type: "busy" });
+    expect(f.resumed).toHaveLength(0);
+    expect(await restored.abort(id)).toBe(true);
+    expect(f.resumed).toHaveLength(1);
+    expect((await restored.messages(id)).at(-1)?.info).toMatchObject({ role: "idle", finish: "interrupted" });
+    expect(f.pending.get(id)).toEqual([]);
+  });
+
+  it("does not acknowledge unconfirmed cancellation or durability", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    await adapter.prompt(id, { parts: [{ type: "text", text: "start" }] });
+    f.setCancellation(false);
+    expect(await adapter.abort(id)).toBe(false);
+    f.setCancellation(true); f.setFlush(false);
+    expect(await adapter.abort(id)).toBe(false);
+    await expect(adapter.messages(id)).rejects.toThrow("durable team session storage");
+    await expect(adapter.prompt(id, { parts: [{ type: "text", text: "again" }] })).rejects.toThrow("durable team session storage");
+  });
+
+  it("preserves non-team input while cancelling the managed peer", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    await adapter.prompt(id, { parts: [{ type: "text", text: "[rolebox-team pending]" }] });
+    const userMessage = { id: "user-pending", role: "user", content: [{ type: "text", text: "Please also review this" }], source: { kind: "user" } };
+    f.pending.get(id)!.push(userMessage as never);
+    expect(await adapter.abort(id)).toBe(true);
+    expect(f.pending.get(id)).toEqual([userMessage]);
+  });
+
+  it("holds residency across idle turns so another host cannot recreate the same peer", async () => {
+    const f = fixture(); const first = f.makeAdapter(); const second = f.makeAdapter();
+    const id = (await first.create({ directory: f.directory, agent: "designer" }))!.id;
+    expect(await second.status(id)).toEqual({ type: "busy" });
+    await expect(second.prompt(id, { parts: [{ type: "text", text: "race" }] })).rejects.toThrow("another running host");
+    expect(await second.abort(id)).toBe(false);
+    await first.dispose();
+    await second.prompt(id, { parts: [{ type: "text", text: "accepted after release" }] });
+    expect(f.resumed).toHaveLength(1);
+  });
+
+  it("refuses delivery after the peer's effective working directory changes", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    f.sessions.get(id)!.append("working-directory/change", { cwd: join(f.directory, "another-project") });
+    expect(await adapter.prompt(id, { parts: [{ type: "text", text: "[rolebox-team workspace-change]" }] })).toBeNull();
+    expect(f.pending.get(id)).toEqual([]);
+  });
+
+  it("refuses a resident peer after a user role change without replacing the user's selection", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const id = (await adapter.create({ directory: f.directory, agent: "designer" }))!.id;
+    f.roles.set(id, "developer");
+    await expect(adapter.prompt(id, { agent: "designer", parts: [{ type: "text", text: "[rolebox-team role-change]" }] }))
+      .rejects.toThrow("active role changed");
+    expect(f.roles.get(id)).toBe("developer");
+    expect(f.pending.get(id)).toEqual([]);
+    expect(await adapter.abort(id)).toBe(true);
+  });
+
+  it("maps the installed DSH SessionStore's actual user, assistant and terminal envelopes", async () => {
+    const f = fixture(); const adapter = f.makeAdapter();
+    const ctx = new Context();
+    const fiber = await ctx.plugin(SessionStore as never, {} as never);
+    cleanups.push(() => fiber.dispose());
+    const session = ctx.sessions.create(SessionId("actual-session"), { meta: { cwd: f.directory } });
+    session.append("turn/start", { turn: 1 });
+    session.append("user/message", { id: MessageId("actual-prompt"), role: "user", source: { kind: "user" },
+      content: [{ type: "text", text: "[rolebox-team actual-delivery]" }] }, { surfaceOp: "append" });
+    session.append("assistant/message", { turn: 1, step: 1, stream: [], message: { id: MessageId("actual-answer"), role: "assistant",
+      source: { kind: "model", provider: "example-provider", model: "example-model" }, content: [{ type: "text", text: "Actual output" }] } }, { surfaceOp: "append" });
+    session.append("turn/end", { turn: 1, reason: { kind: "error", error: { message: "model failed", code: "UNKNOWN" } } });
+    f.stored.set(session.id, [...session.snapshotEvents()]);
+    const messages = await adapter.messages(session.id);
+    expect(messages.find(message => message.info.id === "actual-prompt")?.parts[0]).toMatchObject({ text: "[rolebox-team actual-delivery]" });
+    expect(messages.find(message => message.info.id === "actual-answer")?.parts[0]).toMatchObject({ text: "Actual output" });
+    expect(messages.at(-1)?.info).toMatchObject({ role: "idle", finish: "failed", error: { message: "model failed" } });
+  });
+});
