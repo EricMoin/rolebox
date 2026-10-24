@@ -48,7 +48,7 @@
 
 A general coding agent is one agent with one prompt. rolebox turns it into *your* configured team: specialists defined in YAML, each with its own prompt, model, skills and permissions, working the same task together. What they learn survives the session — decisions, conventions and lessons persist in memory and come back at the next session start.
 
-The team is not a prompt chain. Work is **declared**: `graph_declare` writes a version-3 declaration naming each node's agent, its brief, and the outcomes it may report; the host dispatches the entry nodes and a worker settles its node with `graph_submit_outcome`. A node advances only through an accepted outcome — a free-form report is never read as progress. Loops are bounded and declared, and every step is inspectable while it runs.
+On DSH, roles can collaborate through [persistent peer teams](docs/team-work.md): invite complementary specialists, exchange events, claim tasks, and continue work across turns. Team execution on other hosts is deferred. Structured workflows use **declared** graphs: `graph_declare` names each node's agent, brief, and permitted outcomes; the host dispatches entry nodes and workers settle them with `graph_submit_outcome`. Graph nodes advance only through accepted outcomes, with bounded loops and inspectable state.
 
 **At a glance**
 
@@ -277,7 +277,9 @@ A role is a directory: `role.yaml` (name, model, mode, permissions, subagents, s
 
 ## How the team runs
 
-The graph engine is how the team runs. `graph_declare` writes a version-3 declaration — each node's agent, brief and the outcomes it may report, plus the edges that route an accepted outcome — and reports persistence separately from the host's initial start decision. The host dispatches the entry nodes; a worker settles its node with `graph_submit_outcome`, which commits the node's state and arms the next node.
+For complementary specialties, [role teams on DSH](docs/team-work.md) provide persistent membership, an ordered event stream, exclusive task claims, and automatic peer wakeups. Members use independent agent sessions with their own role configuration; private child roles stay within their owning role. Team execution on OpenCode, Pi, and Codex is deferred.
+
+For structured workflows, `graph_declare` writes a version-3 declaration — each node's agent, brief and the outcomes it may report, plus the edges that route an accepted outcome — and reports persistence separately from the host's initial start decision. The host dispatches the entry nodes; a worker settles its node with `graph_submit_outcome`, which commits the node's state and arms the next node.
 
 `graph_control` applies the trusted lifecycle commands (failure, timeout, cancel, retry, `budget-stop`, and approval requests with their decisions); `graph_status` reads the recorded state back; `graph_audit` inventories the persisted store. Loops live in declared loop groups with a traversal cap, so a repair can repeat but never forever.
 
