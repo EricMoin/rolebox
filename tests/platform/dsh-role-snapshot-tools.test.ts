@@ -278,7 +278,7 @@ describe("role-snapshot tool registration seam", () => {
     // four names reject here.
     const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
-    for (const key of EXPECTED_ROLE_SNAPSHOT_KEYS) {
+    for (const key of [...EXPECTED_ROLE_SNAPSHOT_KEYS, "load_role_skill"]) {
       expect(
         tools.registeredTools.filter((tool) => tool.name === key),
       ).toHaveLength(1);
@@ -306,8 +306,8 @@ describe("role-snapshot tool registration seam", () => {
     const registered = disposer.registerRoleSnapshotTools([
       makeResolvedRole("snapshot-role", "beta-skill"),
     ]);
-    expect(registered).toBe(EXPECTED_ROLE_SNAPSHOT_KEYS.length);
-    for (const key of EXPECTED_ROLE_SNAPSHOT_KEYS) {
+    expect(registered).toBe(EXPECTED_ROLE_SNAPSHOT_KEYS.length + 1);
+    for (const key of [...EXPECTED_ROLE_SNAPSHOT_KEYS, "load_role_skill"]) {
       expect(
         tools.registeredTools.filter((tool) => tool.name === key),
       ).toHaveLength(1);
@@ -316,8 +316,34 @@ describe("role-snapshot tool registration seam", () => {
     // The CURRENTLY registered definition serves the new snapshot only.
     expect(await runAssetSearch(tools, "beta")).toContain("beta-skill");
     expect(await runAssetSearch(tools, "alpha")).not.toContain("alpha-skill");
+    expect(await currentTool(tools, "load_role_skill").execute({ name: "alpha-skill" }, makeExec())).toContain("Skill not found");
+    expect(await currentTool(tools, "load_role_skill").execute({ name: "missing" }, makeExec())).toContain("beta-skill");
 
     disposer();
     expect(tools.registeredTools).toHaveLength(0);
+  });
+
+  it("attributes private skill loads to the active role in the caller's session", async () => {
+    writeRoleWithSkills("snapshot-role", ["alpha-skill"]);
+    const { ctx, tools } = createFakeCtx();
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    try {
+      const role = makeResolvedRole("snapshot-role", "alpha-skill");
+      const child = makeResolvedRole("snapshot-role--worker", "private-skill");
+      const privatePath = join(tmpDir, "private.md");
+      writeFileSync(privatePath, "Private worker skill body");
+      child.skills[0].filePath = privatePath;
+      role.subagents = [{ ...child, parentId: role.id, inheritedFrom: {} }];
+      disposer.registerRoleSnapshotTools([role]);
+      await disposer.activateRole(role.id, "owner-session");
+      const loader = currentTool(tools, "load_role_skill");
+      const own = await loader.execute({ name: "private-skill" }, { ...makeExec(), agent: { id: "owner-session", session: { id: "owner-session" } } });
+      expect(JSON.stringify(own)).toContain("Private worker skill body");
+      const foreign = await loader.execute({ name: "private-skill" }, { ...makeExec(), agent: { id: "peer-session", session: { id: "peer-session" } } });
+      expect(foreign).toContain("Role assets require an active role");
+      expect(foreign).not.toContain("Private worker skill body");
+    } finally {
+      await disposer();
+    }
   });
 });

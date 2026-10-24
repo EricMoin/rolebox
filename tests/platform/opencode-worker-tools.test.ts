@@ -12,6 +12,19 @@ const context: CanonicalToolContext = {
 };
 
 describe("OpenCode graph tool presentation", () => {
+  it("withholds independent team execution from graph workers even with wildcard grants", () => {
+    const controller = new OpencodeWorkerTools({ host: () => undefined, nativeActivation: true, catalog: async () => [] });
+    const { toolPresentation: _presentation, ...legacy } = request("native", ["*"]);
+    controller.bind("worker", legacy);
+    for (const tool of ["team_create", "team_add", "team_send_event", "team_resume"]) {
+      expect(() => controller.assertAllowed("worker", tool)).toThrow("not granted");
+    }
+    const catalog = { team_create: { description: "Create a team", input: {} }, bash: { description: "Shell", input: {} } };
+    controller.filterContext("worker", catalog);
+    expect(Object.keys(catalog)).toEqual(["bash"]);
+    expect(() => controller.assertAllowed("creator", "team_create")).not.toThrow();
+  });
+
   it("uses the complete model context catalog for MCP discovery and validates before model use", async () => {
     const controller = new OpencodeWorkerTools({ host: () => undefined, nativeActivation: true,
       contextCatalogOnly: true, catalog: async () => { throw new Error("Incomplete registry must not be used"); } });

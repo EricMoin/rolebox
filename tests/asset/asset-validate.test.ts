@@ -132,7 +132,7 @@ describe("asset-validate — missing dependencies", () => {
       }],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({}, makeToolContext()) as string;
+    const result: string = await tool.execute({}, makeToolContext({ agent: "test-role" })) as string;
     expect(result).toContain("nonexistent-in-parent");
     expect(result).toContain("requires nonexistent function");
   });
@@ -223,7 +223,7 @@ describe("asset-validate — unknown transition conditions", () => {
       }],
     });
     const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({}, makeToolContext()) as string;
+    const result: string = await tool.execute({}, makeToolContext({ agent: "test-role" })) as string;
     expect(result).toContain("unknown condition");
     expect(result).toContain("not_a_real_condition");
   });

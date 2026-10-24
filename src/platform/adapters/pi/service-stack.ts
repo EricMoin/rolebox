@@ -131,6 +131,7 @@ export class PiLightweightServiceStack implements IHookProvider {
    * runnable graph path).
    */
   private _outcomeGraphTools?: Record<string, CanonicalToolDef>;
+  private _roleFor?: (sessionID: string) => string | null | undefined;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
   private _canonicalTools: Record<string, CanonicalToolDef> = {};
@@ -167,6 +168,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._stateDir = stateDir;
     this._interceptorHooks = interceptorHooks;
     this._outcomeGraphTools = outcomeGraphTools;
+    this._roleFor = memoryRoleFor;
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -207,6 +209,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     // 2. Assemble all tools via the shared canonical builder
     const allTools = buildCanonicalTools({
       resolvedRoles: this._resolvedRoles,
+      getEffectiveAgent: sessionID => this._roleFor?.(sessionID ?? "") ?? undefined,
       sessionClient: this._sessionAdapter,
       directory: process.cwd(),
       capabilities: piCapabilities(),

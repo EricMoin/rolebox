@@ -86,16 +86,19 @@ interface MockPi {
   pi: any;
   /** pi.on handlers keyed by event name. */
   handlers: Map<string, (...args: any[]) => any>;
+  allHandlers: Map<string, Array<(...args: any[]) => any>>;
   /** Tool names passed to pi.registerTool. */
   registeredTools: string[];
 }
 
 function createMockPi(sessionDir: string): MockPi {
   const handlers = new Map<string, (...args: any[]) => any>();
+  const allHandlers = new Map<string, Array<(...args: any[]) => any>>();
   const registeredTools: string[] = [];
   const pi: any = {
     on: (event: string, handler: (...args: any[]) => any) => {
       handlers.set(event, handler);
+      allHandlers.set(event, [...(allHandlers.get(event) ?? []), handler]);
     },
     registerTool: (toolDef: { name: string }) => {
       registeredTools.push(toolDef.name);
@@ -106,7 +109,7 @@ function createMockPi(sessionDir: string): MockPi {
     setModel: async () => true,
     ctx: { sessionDir },
   };
-  return { pi, handlers, registeredTools };
+  return { pi, handlers, allHandlers, registeredTools };
 }
 
 // ── Hermetic environment + full extension run ──────────────────────────────
@@ -232,6 +235,20 @@ afterAll(() => {
 // ── Assertions ──────────────────────────────────────────────────────────────
 
 describe("pi-extension skill path registration", () => {
+  it("advertises top-level teammates without exposing another role's children", async () => {
+    let systemPrompt = "Base prompt";
+    for (const handler of mockPi.allHandlers.get("before_agent_start") ?? []) {
+      const result = await handler({ systemPrompt, sessionID: "catalog-session" }, {});
+      systemPrompt = result?.systemPrompt ?? systemPrompt;
+    }
+    expect(systemPrompt).toContain("- `doctor` — ");
+    expect(systemPrompt).toContain("- `engineer` — ");
+    expect(systemPrompt).toContain("team_list_roles");
+    expect(systemPrompt).toContain("team_create(name, goal)");
+    expect(systemPrompt).not.toContain("doctor--assistant");
+    expect(systemPrompt).not.toContain("A test subagent");
+  });
+
   it("registers the resources_discover handler on pi.on", () => {
     expect(mockPi.handlers.has("resources_discover")).toBe(true);
   });

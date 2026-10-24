@@ -132,11 +132,11 @@ export interface RoleConfig {
   auto_activate?: string[];
   /** When true, auto-activated functions cannot be deactivated by transition or user. Prevents accidental deactivation of critical functions. */
   locked?: boolean;
-  /** When true, the role is "open": its subagents can be exposed to consumers via exports. When false/absent, the role is private (only the role id is addressable). */
+  /** @deprecated Accepted for compatibility; all top-level roles are discoverable. */
   open?: boolean;
-  /** Subagent names/slugs to expose when the role is open. Absent = only the role id is exposed; subagents are NOT exposed. */
+  /** @deprecated Accepted for compatibility and ignored; child roles stay private. */
   exports?: string[];
-  /** Open role ids (producers) whose public agents this consumer role may discover and dispatch to. Absent = no cross-role discoverability. */
+  /** @deprecated Accepted for compatibility; teammate discovery needs no allowlist. */
   open_roles?: string[];
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;

@@ -1,3 +1,4 @@
+import { visibleRolesForAgent } from "../resolver/role-visibility.ts";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type {
@@ -154,30 +155,30 @@ function renderPayload(payload: LoadedSkillPayload, ownerId: string): string {
  * payload so a harness with no other skill machinery can act on it.
  *
  * Deliberately named `load_role_skill` (not `skill`) to avoid collision with
- * any harness-native skill tool. Registered only on the Pi platform via
- * pi-extension.ts extraTools — NOT on opencode's tool-service.ts, which has
- * its own native skill mechanism.
+ * any harness-native skill tool. Pi, Codex, and DSH register this scoped
+ * loader; OpenCode uses its own native skill mechanism.
  */
 export function createLoadRoleSkillTool(resolvedRoles: ResolvedRole[]) {
-  const availableNames = collectSkillNames(resolvedRoles);
 
   return defineTool({
     description:
-      "Load a skill by exact name from the loaded roles and their nested sub-agents (deepest-first priority). Returns the full SKILL.md content plus resolved reference metadata as a complete, self-contained payload. Use this instead of any harness-native skill mechanism when you need the raw skill content and its references. Not-found errors list the available skill names.",
+      "Load a skill by exact name from the current role and its own nested sub-agents (deepest-first priority). Returns the full SKILL.md content plus resolved reference metadata. Other roles' workflow bodies are private. Prefer this tool over the harness-native skill mechanism for role skills. Not-found errors list the current role's available skills.",
     args: {
       name: z
         .string()
         .min(1)
         .describe("Exact name of the skill to load"),
     },
-    async execute(input) {
+    async execute(input, context) {
+      const visibleRoles = visibleRolesForAgent(resolvedRoles, context?.agent);
       if (resolvedRoles.length === 0) {
         return "No roles loaded. Cannot load skills.";
       }
 
-      const match = findSkill(resolvedRoles, input.name);
+      const match = findSkill(visibleRoles, input.name);
 
       if (!match) {
+        const availableNames = collectSkillNames(visibleRoles);
         const list =
           availableNames.length > 0 ? availableNames.join(", ") : "(none)";
         return (

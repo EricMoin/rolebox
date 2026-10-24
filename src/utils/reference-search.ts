@@ -1,3 +1,4 @@
+import { visibleRolesForAgent } from "../resolver/role-visibility.ts";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedReference } from "../types.ts";
@@ -111,25 +112,11 @@ async function searchInFile(
   return matches;
 }
 
-/**
- * Create the reference_search tool.
- *
- * Index design: the reference index (`allRefs`) is captured ONCE at tool
- * creation time from the live roles array. There is deliberately NO
- * module-level cache (unlike asset-search.ts's `_cachedAssets`), so hot-reload
- * needs no `invalidateReferenceIndex()` hook: the full-reload path rebuilds
- * this tool instance via the dispatch-service restart cascade (tool-service
- * re-init re-assembles buildCanonicalTools with the in-place-mutated
- * resolvedRoles). Reference file CONTENTS are read fresh from disk on every
- * execute() — only the metadata snapshot (which references exist) lives in the
- * closure, and that is refreshed whenever the tool is re-created.
- */
 export function createReferenceSearchTool(roles: ResolvedRole[]) {
-  const allRefs = collectReferences(roles);
 
   return defineTool({
     description:
-      "Full-text search across all reference documents (markdown files) loaded by resolved roles and sub-agents. Searches file contents, not just metadata. Returns matched lines with surrounding context. Use this to find specific knowledge within reference documents.",
+      "Full-text search across references belonging to the current role and its own sub-agents. Returns matched lines with surrounding context. Other roles' workflow references are private.",
     args: {
       query: z
         .string()
@@ -166,7 +153,8 @@ export function createReferenceSearchTool(roles: ResolvedRole[]) {
         .default("markdown")
         .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
-    async execute(input) {
+    async execute(input, context) {
+      const allRefs = collectReferences(visibleRolesForAgent(roles, context?.agent));
       if (allRefs.length === 0) {
         return "No reference documents found. Make sure roles have references loaded.";
       }

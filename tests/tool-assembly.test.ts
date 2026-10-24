@@ -113,6 +113,15 @@ const DISPATCH_KEYS = [
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("buildCanonicalTools", () => {
+  it("only adds team tools when a host supplies an executable team runtime", () => {
+    const opts = makeBaseOpts();
+    const absent = buildCanonicalTools(opts);
+    expect(Object.keys(absent).filter(name => name.startsWith("team_"))).toEqual([]);
+    const teamCreate = makeDummyTool("team_create");
+    const present = buildCanonicalTools({ ...opts, teamTools: { team_create: teamCreate } });
+    expect(present.team_create).toBe(teamCreate);
+  });
+
   it("returns a Record with expected core tool keys when given valid options", () => {
     const tools = buildCanonicalTools(makeBaseOpts());
 

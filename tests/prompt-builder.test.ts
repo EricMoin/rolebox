@@ -111,15 +111,27 @@ describe("blockTag", () => {
 });
 
 describe("buildAgentPrompt", () => {
+  it("advertises teammates independently of graph delegation for top-level roles", () => {
+    const result = buildAgentPrompt(makeRole(), [], {
+      canDelegate: false, canTeam: true,
+      subagents: [{ id: "role--worker", name: "Worker", description: "Private" }],
+      publicAgents: [{ id: "designer", name: "Designer", description: "Designs screens" }],
+    });
+    expect(result).toContain("team_create");
+    expect(result).toContain("designer");
+    expect(result).not.toContain("role--worker");
+  });
+
   it("does not advertise dispatch when the role cannot declare graphs", () => {
     const result = buildAgentPrompt(makeRole(), [], {
       canDelegate: false,
       subagents: [{ id: "parent--reviewer", name: "Reviewer", description: "Reviews" }],
-      publicAgents: [{ id: "other--worker", name: "Worker", description: "Works" }],
+      publicAgents: [{ id: "other-role", name: "Worker", description: "Works" }],
     });
     expect(result).not.toContain("## Available sub-agents");
     expect(result).not.toContain("## Available public agents");
     expect(result).not.toContain("graph_declare");
+    expect(result).not.toContain("team_create");
   });
 
   it("labels the role prompt when no skills are provided (empty array)", () => {
@@ -196,7 +208,7 @@ describe("buildAgentPrompt", () => {
     const section = [
       "## Available skills",
       "",
-      "Skills provide specialized instructions. Use the skill tool to load when task matches.",
+      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the skill tool. Role workflow skills are scoped to their owning role.",
       "",
       "- `alpha` — Alpha description",
     ].join("\n");
@@ -232,7 +244,7 @@ describe("buildAgentPrompt", () => {
     const result = buildAgentPrompt(role, skills);
 
     expect(result).toContain(
-      "Skills provide specialized instructions. Use the skill tool to load when task matches.",
+      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the skill tool. Role workflow skills are scoped to their owning role.",
     );
   });
 
@@ -253,7 +265,7 @@ describe("buildAgentPrompt", () => {
     expect(result).toContain("- `` we`ird `` — Has a backtick");
   });
 
-  it("renders the same single bullet in the graph_worker_exec variant", () => {
+  it("locates the private skill copy in the graph_worker_exec variant", () => {
     const role = makeRole();
     const skills = [makeSkill({ name: "located-skill", filePath: "/attempt/role-resources-x/located/SKILL.md" })];
     const result = buildAgentPrompt(role, skills, { resourceTool: "graph_worker_exec" });
@@ -263,8 +275,7 @@ describe("buildAgentPrompt", () => {
       "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory.\n\n" +
       "- `located-skill` — A test skill",
     );
-    // The private-copy path is dropped here too, not just in the `skill` tool variant.
-    expect(result).not.toContain("/attempt/role-resources-x/located/SKILL.md");
+    expect(result).toContain("  File: `/attempt/role-resources-x/located/SKILL.md`");
   });
 
   it("renders a bullet for a skill without a filePath", () => {
@@ -336,10 +347,10 @@ describe("buildAgentPrompt", () => {
   it("appends the `## Available public agents` section when publicAgents are present but skills are empty", () => {
     const role = makeRole();
     const result = buildAgentPrompt(role, [], {
-      publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
+      publicAgents: [{ id: "other-role", name: "Open Role", description: "A public open role" }],
     });
     expect(result).toContain("## Available public agents");
-    expect(result).toContain("- `other-role--open` — A public open role");
+    expect(result).toContain("- `other-role` — A public open role");
     expect(result).not.toContain("## Available skills");
   });
 
@@ -359,7 +370,7 @@ describe("buildAgentPrompt", () => {
     const role = makeRole();
     const result = buildAgentPrompt(role, [], {
       subagents: [{ id: "parent--child", name: "Child", description: "Does work" }],
-      publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
+      publicAgents: [{ id: "other-role", name: "Open Role", description: "A public open role" }],
     });
     expect(result).toContain("## Available sub-agents");
     expect(result).toContain("## Available public agents");
@@ -371,13 +382,14 @@ describe("buildAgentPrompt", () => {
   it("includes static public-agents instruction text", () => {
     const role = makeRole();
     const result = buildAgentPrompt(role, [], {
-      publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
+      publicAgents: [{ id: "other-role", name: "Open Role", description: "A public open role" }],
     });
     expect(result).toContain(
-      "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.",
+      "These top-level roles can collaborate as teammates with complementary expertise.",
     );
-    expect(result).toContain('agent="<open-role-id>"');
-    expect(result).toContain("graph_submit_outcome(");
+    expect(result).toContain("team_create(name, goal)");
+    expect(result).toContain("team_list_roles");
+    expect(result).toContain("only when they are available in your current tool set");
   });
 });
 
@@ -546,15 +558,14 @@ function makeSubagent(
 // ---------------------------------------------------------------------------
 
 describe("buildSubagentBlock", () => {
-  it("explains task-specific computer grants and recovery dependencies for both delegation surfaces", () => {
-    for (const result of [buildSubagentBlock([makeSubagent()]), buildPublicAgentsBlock([makePublicAgent()])]) {
-      expect(result).toContain("When a task needs desktop observation or interaction");
-      expect(result).toContain("specific available computer_* tools");
-      expect(result).toContain("computer_screenshot for observation");
-      expect(result).toContain("computer_status and computer_permissions");
-      expect(result).toContain("cannot enable unregistered tools");
-      expect(result).toContain("or grant OS permission");
-    }
+  it("explains task-specific computer grants and recovery dependencies for graph delegation", () => {
+    const result = buildSubagentBlock([makeSubagent()]);
+    expect(result).toContain("When a task needs desktop observation or interaction");
+    expect(result).toContain("specific available computer_* tools");
+    expect(result).toContain("computer_screenshot for observation");
+    expect(result).toContain("computer_status and computer_permissions");
+    expect(result).toContain("cannot enable unregistered tools");
+    expect(result).toContain("or grant OS permission");
   });
 
   it("returns empty string for empty array", () => {
@@ -604,7 +615,7 @@ function makePublicAgent(
   overrides: Partial<{ id: string; name: string; description: string }> = {},
 ): { id: string; name: string; description: string } {
   return {
-    id: "other-role--open",
+    id: "other-role",
     name: "Open Role",
     description: "A public open role of another role",
     ...overrides,
@@ -623,36 +634,62 @@ describe("buildPublicAgentsBlock", () => {
   it("generates the `## Available public agents` section with one public agent", () => {
     const result = buildPublicAgentsBlock([makePublicAgent()]);
     expect(result).toContain("## Available public agents");
-    expect(result).toContain("- `other-role--open` — A public open role of another role");
+    expect(result).toContain("- `other-role` — A public open role of another role");
   });
 
   it("includes all public agents when multiple are provided", () => {
     const agents = [
-      makePublicAgent({ id: "alpha--open", name: "Alpha", description: "First open role" }),
-      makePublicAgent({ id: "beta--open", name: "Beta", description: "Second open role" }),
-      makePublicAgent({ id: "gamma--open", name: "Gamma", description: "Third open role" }),
+      makePublicAgent({ id: "alpha", name: "Alpha", description: "First open role" }),
+      makePublicAgent({ id: "beta", name: "Beta", description: "Second open role" }),
+      makePublicAgent({ id: "gamma", name: "Gamma", description: "Third open role" }),
     ];
     const result = buildPublicAgentsBlock(agents);
 
-    expect(result).toContain("- `alpha--open` — First open role");
-    expect(result).toContain("- `beta--open` — Second open role");
-    expect(result).toContain("- `gamma--open` — Third open role");
+    expect(result).toContain("- `alpha` — First open role");
+    expect(result).toContain("- `beta` — Second open role");
+    expect(result).toContain("- `gamma` — Third open role");
   });
 
   it("contains the static instruction text", () => {
     const result = buildPublicAgentsBlock([makePublicAgent()]);
     expect(result).toContain(
-      "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.",
+      "These top-level roles can collaborate as teammates with complementary expertise.",
     );
-    expect(result).toContain('agent="<open-role-id>"');
-    expect(result).toContain("graph_submit_outcome(");
+    expect(result).toContain("team_create(name, goal)");
+    expect(result).toContain("team_list_roles");
+    expect(result).toContain("only when they are available in your current tool set");
+  });
+
+  it("omits other roles' child ids even if accidentally supplied", () => {
+    const result = buildPublicAgentsBlock([
+      makePublicAgent({ id: "designer" }),
+      makePublicAgent({ id: "designer--helper", description: "Private child" }),
+    ]);
+    expect(result).toContain("- `designer` — ");
+    expect(result).not.toContain("designer--helper");
+    expect(result).not.toContain("Private child");
+    expect(buildPublicAgentsBlock([makePublicAgent({ id: "designer--helper" })])).toBe("");
+  });
+
+  it("describes the complete team lifecycle and task claim protocol", () => {
+    const result = buildPublicAgentsBlock([makePublicAgent()]);
+    for (const tool of ["team_list_roles", "team_create", "team_add", "team_send_event",
+      "team_status", "team_remove", "team_delete", "team_resume"]) {
+      expect(result).toContain(tool);
+    }
+    for (const event of ["message", "task_offer", "task_claim", "task_complete", "task_release"]) {
+      expect(result).toContain(event);
+    }
+    expect(result).toContain("after the claim succeeds");
+    expect(result).toContain("avoid acknowledgment loops");
+    expect(result).toContain("persists across process restarts");
   });
 
   it("keeps special characters in the description as prose", () => {
     const result = buildPublicAgentsBlock([
       makePublicAgent({ description: "Handles <script> & <style> tags" }),
     ]);
-    expect(result).toContain("- `other-role--open` — Handles <script> & <style> tags");
+    expect(result).toContain("- `other-role` — Handles <script> & <style> tags");
   });
 });
 

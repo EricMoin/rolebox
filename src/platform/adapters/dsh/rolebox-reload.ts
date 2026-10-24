@@ -248,9 +248,7 @@ export class DshRoleboxReloader {
         this.roleFunctionsMap.set(key, value);
       }
 
-      // 5.6. Rebuild the open-roles registry from the freshly resolved roles
-      //      (:336-343). roleOpenRegistry is module-level shared state and
-      //      this reloader is its only writer on the dsh path.
+      // 5.6. Refresh the shared top-level teammate directory.
       const newOpenRegistry = collectOpenRoles(newResolvedRoles);
       roleOpenRegistry.clear();
       for (const [key, value] of newOpenRegistry) {

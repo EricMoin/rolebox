@@ -12,5 +12,5 @@ import type { OpenRoleEntry } from "./open-roles.ts";
 /** Map of roleId/subagentId → resolved functions for that agent. */
 export const roleFunctionsMap = new Map<string, ResolvedFunction[]>();
 
-/** Map of roleId → open-role registry entry (subagents exposed via exports). */
+/** Top-level teammate directory; legacy name retained for compatibility. */
 export const roleOpenRegistry = new Map<string, OpenRoleEntry>();

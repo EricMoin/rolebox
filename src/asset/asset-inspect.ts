@@ -1,3 +1,4 @@
+import { visibleRolesForAgent } from "../resolver/role-visibility.ts";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type {
@@ -264,19 +265,19 @@ function formatCondition(cond: unknown): string {
 export function createAssetInspectTool(resolvedRoles: ResolvedRole[]) {
   return defineTool({
     description:
-      "Inspect a single rolebox asset (skill, function, or reference) by exact name and type. Returns the complete frontmatter metadata for the matched asset, or a clear error if not found. Searches across all resolved roles and their sub-agents.",
+      "Inspect a single asset (skill, function, or reference) belonging to the current role or its own sub-agents. Returns the complete frontmatter metadata for the matched asset, or a clear error if not found.",
     args: {
       name: z.string().min(1).describe("Exact name of the asset to inspect"),
       type: z
         .enum(["skill", "function", "reference"])
         .describe("Type of asset to inspect"),
     },
-    async execute(input) {
+    async execute(input, context) {
       if (resolvedRoles.length === 0) {
         return "No roles loaded. Cannot inspect assets.";
       }
 
-      const match = findAsset(resolvedRoles, input.name, input.type);
+      const match = findAsset(visibleRolesForAgent(resolvedRoles, context?.agent), input.name, input.type);
 
       if (!match) {
         return `Asset not found: no ${input.type} named "${input.name}" exists in any loaded role or sub-agent.`;

@@ -3,7 +3,7 @@
 /**
  * DshSkillProvider tests — rolebox's lazy pull-style skill source for dsh's
  * global `ctx.skills` registry (`src/platform/adapters/dsh/skill-provider.ts`),
- * exercised against a hand-rolled fake skill registry double plus a real
+ * exercised directly and through the installed skill registry with a real
  * temp-dir role fixture whose SKILL.md files live on disk.
  *
  * The provider is consumed structurally (no platform SDK import), so the
@@ -30,12 +30,11 @@
  *   (a) the active role's skills appear in `list()` and `get()` returns the
  *       real SKILL.md body from the temp-dir fixture;
  *   (b) a NON-active role's skills are absent from `list()`;
- *   (c) subagent skills are included recursively for the active role,
- *       including a 3-level nest;
+ *   (c) private subagent skills are absent from the global registry, including
+ *       a 3-level nest, and remain available to their owning role;
  *   (d) a skill name violating the kebab grammar (`~` / `--`) is filtered out
  *       with a warning and does NOT abort the whole `list()`;
- *   (e) duplicate names across a role and its subagent are deduped first-wins
- *       with deterministic ordering (role before subagent; roles by id);
+ *   (e) duplicate names are deduped first-wins with deterministic role order;
  *   (f) a deleted SKILL.md yields `get() === undefined` rather than a throw;
  *   (g) `rank` is 450 and `resourceBase` is the SKILL.md's dirname;
  *   (h) an aborted `options.signal` settles promptly;
@@ -45,6 +44,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { Context } from "@deepseek-ai/cordis";
+import SkillRegistry from "@deepseek-ai/dsh-skill";
 import {
   mkdirSync,
   mkdtempSync,
@@ -68,6 +69,8 @@ import type {
 } from "../../src/platform/adapters/dsh/skill-provider.ts";
 import { SkillScope } from "../../src/constants.ts";
 import type { ResolvedRole, ResolvedSkill, ResolvedSubAgent } from "../../src/types.ts";
+import { createLoadRoleSkillTool } from "../../src/asset/skill-tool.ts";
+import { makeToolContext } from "../asset/helpers.ts";
 
 // ── Fixture helpers ─────────────────────────────────────────────────────────
 
@@ -134,6 +137,7 @@ let originalLogLevel: string | undefined;
 let originalLogFile: string | undefined;
 
 let roles: ResolvedRole[];
+let standaloneRoles: ResolvedRole[];
 let activeSkillPath: string;
 let dupSkillPath: string;
 let childDupSkillPath: string;
@@ -147,7 +151,7 @@ function alphaActive(): DshActiveRoleSnapshot {
 /** A provider wired to the fixture, with an optional dep override. */
 function makeProvider(overrides: Partial<DshSkillProviderDeps> = {}): DshSkillProvider {
   return new DshSkillProvider({
-    roles,
+    roles: standaloneRoles,
     activeRole: alphaActive(),
     defaultRoleId: "primary",
     ...overrides,
@@ -265,6 +269,9 @@ beforeAll(() => {
 
   // Deliberately scrambled so ordering-by-id (not input order) is observable.
   roles = [primaryRole, betaRole, alphaRole];
+  // Catalog mechanics use standalone roles; boundary cases below use the
+  // actual alpha tree, whose root workflow is private as well.
+  standaloneRoles = roles.map(role => ({ ...role, subagents: [] }));
 
   // Redirect platform paths + cwd into the fixture (restored in afterAll).
   process.env.ROLEBOX_LOG_LEVEL = "warn";
@@ -312,14 +319,65 @@ describe("DshSkillProvider (b) non-active roles", () => {
   });
 });
 
-// ── (c) recursive subagent skills ───────────────────────────────────────────
+// ── (c) private subagent skills ───────────────────────────────────────────
 
-describe("DshSkillProvider (c) recursive subagent skills", () => {
-  it("includes subagent skills for the active role, 3 levels deep", async () => {
-    const names = (await makeProvider().list({})).map((c) => c.name);
-    expect(names).toContain("child-skill");
-    expect(names).toContain("grandchild-skill");
-    expect(names).toContain("great-grandchild-skill");
+describe("DshSkillProvider (c) private subagent skills", () => {
+  it("omits private subagent skills at every depth", async () => {
+    const names = (await makeProvider({ roles }).list({})).map((c) => c.name);
+    expect(names).not.toContain("active-skill");
+    expect(names).not.toContain("child-skill");
+    expect(names).not.toContain("grandchild-skill");
+    expect(names).not.toContain("great-grandchild-skill");
+  });
+
+  it("rejects private and stale locators, including a private skill sharing a public name", async () => {
+    const provider = makeProvider();
+    const root = (await provider.list({})).find(candidate => candidate.name === "active-skill")!;
+    const child = roles.find(role => role.id === "alpha")!.subagents[0];
+    for (const skill of child.skills) {
+      expect(await provider.get({ ...root, name: skill.name, path: skill.filePath, locator: skill }, {})).toBeUndefined();
+    }
+    expect(await makeProvider({ activeRole: undefined }).get(root, {})).toBeUndefined();
+    expect(await makeProvider({ roles }).get(root, {})).toBeUndefined();
+    expect(await provider.get({ ...root, description: "untrusted metadata", resourceBase: { kind: "directory", path: "/outside" } }, {}))
+      .toMatchObject({ description: "active-skill description", resourceBase: { kind: "directory", path: dirname(activeSkillPath) } });
+  });
+
+  it("keeps the installed global registry public while the scoped loader serves only the owning role tree", async () => {
+    const ctx = new Context();
+    const fiber = await ctx.plugin(SkillRegistry, {});
+    const activeRole = { snapshot: () => new Map([["owner", { roleId: "alpha" }], ["peer", { roleId: "beta" }]]) };
+    const workflow = writeSkill(join(workspace, "workflow"), "private-workflow", "Delegate to alpha--child.");
+    const scopedRoles = roles.map(role => role.id === "alpha" ? { ...role, skills: [...role.skills, workflow] } : role);
+    const dispose = ctx.skills.registerProvider(control => new DshSkillProvider({ roles: scopedRoles, activeRole }, control) as never);
+    try {
+      const catalog = await ctx.skills.list({ cwd: workspace });
+      expect(catalog.map(skill => skill.name)).not.toContain("active-skill");
+      expect(catalog.map(skill => skill.name)).toContain("beta-skill");
+      expect(catalog.map(skill => skill.name)).not.toContain("child-skill");
+      expect(catalog.map(skill => skill.name)).not.toContain("great-grandchild-skill");
+      expect(await ctx.skills.get("active-skill", { cwd: workspace })).toBeUndefined();
+      expect(await ctx.skills.get("child-skill", { cwd: workspace })).toBeUndefined();
+      expect(await ctx.skills.get("private-workflow", { cwd: workspace })).toBeUndefined();
+
+      const loader = createLoadRoleSkillTool(scopedRoles);
+      expect(JSON.stringify(await loader.execute({ name: "active-skill" }, makeToolContext({ agent: "alpha" })))).toContain("Active skill body line.");
+      expect(await loader.execute({ name: "active-skill" }, makeToolContext({ agent: "beta" }))).toContain("Skill not found");
+      expect(JSON.stringify(await loader.execute({ name: "private-workflow" }, makeToolContext({ agent: "alpha" })))).toContain("Delegate to alpha--child");
+      expect(await loader.execute({ name: "private-workflow" }, makeToolContext({ agent: "beta" }))).not.toContain("alpha--child");
+      for (const agent of ["alpha", "alpha--child", "alpha--child--grandchild"]) {
+        const own = await loader.execute({ name: "great-grandchild-skill" }, makeToolContext({ agent }));
+        expect(typeof own).toBe("object");
+        expect(JSON.stringify(own)).toContain("# great-grandchild-skill");
+      }
+      const denied = await loader.execute({ name: "child-skill" }, makeToolContext({ agent: "beta" }));
+      expect(denied).toContain("Skill not found");
+      expect(denied).not.toContain("# child-skill");
+      expect(denied).not.toContain("grandchild-skill");
+    } finally {
+      dispose();
+      await fiber.dispose();
+    }
   });
 });
 
@@ -352,19 +410,16 @@ describe("DshSkillProvider (d) invalid skill-name grammar", () => {
 // ── (e) duplicate dedupe + deterministic ordering ───────────────────────────
 
 describe("DshSkillProvider (e) dedupe and deterministic ordering", () => {
-  it("dedupes first-wins and orders role-before-subagent, roles by id", async () => {
+  it("dedupes first-wins and orders top-level roles by id", async () => {
     const candidates = await makeProvider().list({});
     const names = candidates.map((c) => c.name);
 
-    // Role skills first (alpha), then the subagent tree, then the default
+    // Role skills first (alpha), then the default
     // primary role — even though `roles` was supplied [primary, beta, alpha].
     expect(names).toEqual([
       "active-skill",
       "dup-skill",
       "vanishing",
-      "child-skill",
-      "grandchild-skill",
-      "great-grandchild-skill",
       "primary-skill",
     ]);
 

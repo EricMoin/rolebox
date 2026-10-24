@@ -1,5 +1,6 @@
 import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
 import { buildGraphWorkerRolePrompt } from "../prompt/graph-worker.ts";
+import { buildPublicAgentsBlock } from "../prompt/builder.ts";
 import { renderInjectBlock } from "../prompt/blocks.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
@@ -1556,10 +1557,7 @@ export default async function(pi: any): Promise<void> {
 
     // ── 7. Agent system prompt injection ────────────────────────────────
     //
-    // Before Pi starts an agent, inject markdown sections listing all
-    // registered rolebox roles as available agents (plus the loop tool).
-    // This makes the role hierarchy visible to the active agent's system
-    // prompt.
+    // Before Pi starts an agent, advertise only top-level teammates.
     //
     // Skipped entirely in child-process mode (subtask S2): the spawned
     // subagent already received its dispatch prompt via
@@ -1569,8 +1567,7 @@ export default async function(pi: any): Promise<void> {
     if (!isChildProcess && typeof pi.on === "function") {
       pi.on("before_agent_start" satisfies PiEventType, async (event: any, ctx: unknown) => {
         try {
-          const agents = registrar.getRegisteredAgents();
-          if (agents.length === 0) return;
+          if (resolvedRoles.length === 0) return;
 
           // ── Loop tool availability ────────────────────────────────────
           //
@@ -1596,14 +1593,11 @@ export default async function(pi: any): Promise<void> {
           // id-first bullet intentionally omits the display name.
           const agentSection = [
             "",
-            renderInjectBlock({
-              title: "Available roles",
-              instruction: "The following rolebox agent roles are available for delegation.\nUse dispatch() to route work to a specific role.",
-              items: agents.map((agent) => ({
-                label: agent.id,
-                value: `${agent.description} [model: ${agent.model ?? "default"}]`,
-              })),
-            }),
+            buildPublicAgentsBlock(resolvedRoles.map((role) => ({
+              id: role.id,
+              name: role.config.name,
+              description: role.config.description,
+            }))),
             "",
             renderInjectBlock({ title: "Loop tool", instruction: loopToolGuidance }),
             "",

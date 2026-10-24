@@ -1,28 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { resolveAllRoles, type ResolveContext } from "../src/resolver/orchestrator.ts";
-import { collectOpenRoles, __setLoggerForTest } from "../src/resolver/open-roles.ts";
+import { collectOpenRoles } from "../src/resolver/open-roles.ts";
 import type { RoleConfig, ResolvedFunction } from "../src/types.ts";
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const TEST_DIR = join(import.meta.dirname, ".tmp-resolver-recursive");
-
-// Capture warns emitted by the open-roles registry collector (collectOpenRoles
-// warns on unknown export names — mirroring the seam pattern in
-// tests/open-roles.test.ts). Swapping the module logger is safe here because
-// the test runner uses `--isolate` (per-file processes).
-const capturedWarns: unknown[][] = [];
-__setLoggerForTest({
-  warn: (...args: unknown[]) => { capturedWarns.push(args); },
-  debug: () => {},
-  error: () => {},
-  info: () => {},
-  silly: () => {},
-  trace: () => {},
-  fatal: () => {},
-  getSubLogger: () => ({}),
-  attachTransport: () => {},
-} as any);
 
 function setup(): { ctx: ResolveContext; roleMap: Map<string, RoleConfig>; cleanup: () => void } {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -226,7 +209,7 @@ describe("Recursive subagent resolution", () => {
   });
 });
 
-describe("Open-role consumer wiring", () => {
+describe("Top-level teammate prompt wiring", () => {
   function setupConsumerScenario(): {
     ctx: ResolveContext;
     roleMap: Map<string, RoleConfig>;
@@ -243,7 +226,7 @@ describe("Open-role consumer wiring", () => {
       roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
     };
 
-    // Producer: open role exposing a helper subagent via exports.
+    // Legacy export declarations must not expose the producer's child.
     const producer: RoleConfig = {
       name: "Producer Role",
       description: "Exposes a helper subagent",
@@ -272,6 +255,7 @@ describe("Open-role consumer wiring", () => {
       name: "Plain Role",
       description: "Declares nothing",
       prompt: "You are the plain role.",
+      open: false,
     };
 
     const roleMap = new Map<string, RoleConfig>();
@@ -282,7 +266,7 @@ describe("Open-role consumer wiring", () => {
     return { ctx, roleMap, cleanup: () => rmSync(TEST_DIR, { recursive: true }) };
   }
 
-  it("injects the public-agents section into a consumer role's prompt listing the declared producer", async () => {
+  it("injects the teammate catalog into the consumer prompt", async () => {
     const { ctx, roleMap, cleanup } = setupConsumerScenario();
     try {
       const resolved = await resolveAllRoles(roleMap, ctx);
@@ -296,15 +280,20 @@ describe("Open-role consumer wiring", () => {
     }
   });
 
-  it("does not inject the block into a non-declaring role's prompt", async () => {
+  it("discovers other top-level roles without an open_roles declaration", async () => {
     const { ctx, roleMap, cleanup } = setupConsumerScenario();
     try {
       const resolved = await resolveAllRoles(roleMap, ctx);
       const plain = resolved.find((r) => r.id === "plain")!;
       const producer = resolved.find((r) => r.id === "producer")!;
 
-      expect(plain.prompt).not.toContain("## Available public agents");
-      expect(producer.prompt).not.toContain("## Available public agents");
+      expect(plain.prompt).toContain("## Available public agents");
+      expect(plain.prompt).toContain("- `producer` — ");
+      expect(plain.prompt).toContain("- `consumer` — ");
+      expect(plain.prompt).not.toContain("- `plain` — ");
+      expect(producer.prompt).toContain("- `plain` — ");
+      expect(producer.prompt).toContain("- `consumer` — ");
+      expect(producer.prompt).not.toContain("- `producer` — ");
     } finally {
       cleanup();
     }
@@ -338,7 +327,7 @@ describe("Open-role consumer wiring", () => {
     }
   });
 
-  it("open-role ids (no '--') and subagent full ids (always '--') are disjoint namespaces that coexist in one consumer prompt", async () => {
+  it("teammates and owned children coexist without exposing another role's children", async () => {
     const { ctx, roleMap, cleanup } = setupConsumerScenario();
     // The consumer gains its OWN subagent, whose full id is always built with
     // the separator (orchestrator.ts:119-120) — coexisting in the same prompt
@@ -359,8 +348,7 @@ describe("Open-role consumer wiring", () => {
       expect(consumer.prompt).toContain("## Available sub-agents");
       expect(consumer.prompt).toContain("- `consumer--worker` — Does consumer work");
 
-      // The public-agents block lists the open role itself (id and
-      // description) — exports are registry metadata, not consumer entries.
+      // The teammate block lists only the top-level role.
       expect(consumer.prompt).toContain("## Available public agents");
       expect(consumer.prompt).toContain("- `producer` — Exposes a helper subagent");
       expect(consumer.prompt).not.toContain("`producer--helper`");
@@ -448,7 +436,7 @@ describe("Circular open_roles declarations", () => {
   });
 });
 
-describe("Open-role exports validation at resolution level", () => {
+describe("Legacy exports compatibility", () => {
   function setupExportsScenario(): {
     ctx: ResolveContext;
     roleMap: Map<string, RoleConfig>;
@@ -494,8 +482,7 @@ describe("Open-role exports validation at resolution level", () => {
     return { ctx, roleMap, cleanup: () => rmSync(TEST_DIR, { recursive: true }) };
   }
 
-  it("warns on unknown export names but never fails resolution", async () => {
-    capturedWarns.length = 0;
+  it("ignores legacy exports and exposes only the top-level role", async () => {
     const { ctx, roleMap, cleanup } = setupExportsScenario();
     try {
       const resolved = await resolveAllRoles(roleMap, ctx);
@@ -506,15 +493,10 @@ describe("Open-role exports validation at resolution level", () => {
       const consumer = resolved.find((r) => r.id === "consumer")!;
       expect(consumer.prompt).toContain("- `producer` — Exports a known and an unknown subagent");
 
-      // The registry entry exports only the known subagent id — the unknown
-      // name is dropped, not fatal.
       const registry = collectOpenRoles(resolved);
-      expect(registry.get("producer")!.exports).toEqual(["producer--helper"]);
-
-      // A warn was emitted naming the unknown export and its owning role.
-      const warnMessages = capturedWarns.flatMap((args) => args.map(String));
-      expect(warnMessages.some((m) => m.includes("missing-agent"))).toBe(true);
-      expect(warnMessages.some((m) => m.includes("producer"))).toBe(true);
+      expect(registry.get("producer")!.exports).toEqual([]);
+      expect(consumer.prompt).not.toContain("producer--helper");
+      expect(consumer.prompt).not.toContain("missing-agent");
     } finally {
       cleanup();
     }

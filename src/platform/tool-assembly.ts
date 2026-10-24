@@ -1,3 +1,4 @@
+import { bindRoleVisibility, type RoleForSession } from "./role-visibility.ts";
 /**
  * tool-assembly.ts — Cross-platform tool assembly.
  *
@@ -55,6 +56,7 @@ export interface BuildToolsOptions {
   resolvedSubagents?: Map<string, { parentFullId: string }>;
   subagentModelKey?: Map<string, string>;
   resolvedRoles: ResolvedRole[];
+  getEffectiveAgent?: RoleForSession;
   directory: string;
   // Accepted for future use; not consulted in Phase 1 tool assembly.
   capabilities: PlatformCapabilities;
@@ -75,6 +77,8 @@ export interface BuildToolsOptions {
    * would be a second execution path the outcome protocol does not serve.
    */
   outcomeGraphTools?: Record<string, CanonicalToolDef>;
+  /** Team tools supplied only by a host with a live member-session runtime. */
+  teamTools?: Record<string, CanonicalToolDef>;
   /**
    * Whether this host wants rolebox's own computer-use family
    * (`computer_*` screenshot, discovery, input and permission tools).
@@ -109,13 +113,14 @@ export const ROLE_SNAPSHOT_TOOL_KEYS = {
  */
 export function buildRoleSnapshotTools(
   resolvedRoles: ResolvedRole[],
+  getEffectiveAgent?: RoleForSession,
 ): Record<string, CanonicalToolDef> {
-  return {
+  return bindRoleVisibility({
     asset_search: createAssetSearchTool(resolvedRoles),
     asset_inspect: createAssetInspectTool(resolvedRoles),
     asset_validate: createAssetValidateTool(resolvedRoles),
     reference_search: createReferenceSearchTool(resolvedRoles),
-  };
+  }, resolvedRoles, getEffectiveAgent);
 }
 
 export function buildCanonicalTools(
@@ -207,7 +212,9 @@ export function buildCanonicalTools(
     Object.assign(tools, opts.outcomeGraphTools);
   }
 
-  return tools;
+  if (opts.teamTools) {
+    Object.assign(tools, opts.teamTools);
+  }
 
-  return tools;
+  return bindRoleVisibility(tools, opts.resolvedRoles, opts.getEffectiveAgent);
 }

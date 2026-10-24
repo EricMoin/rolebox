@@ -225,6 +225,7 @@ export function declaredToolsAllow(
   declared: readonly string[] | undefined,
 ): boolean {
   if (isGraphFaceToolName(toolName)) return false;
+  if (toolName.startsWith("team_") || toolName.startsWith("rb_team_")) return false;
   if (declared === undefined) return false;
   return declared.some(
     (entry) => typeof entry === "string" && declaredToolAllows(entry, toolName),

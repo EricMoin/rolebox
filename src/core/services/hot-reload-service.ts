@@ -247,15 +247,15 @@ export class HotReloadService implements PluginService {
         description: sa.config.description,
       }));
 
-      // Recompute the open-role registry from the currently cached resolved
-      // roles and re-resolve this role's public-agents metadata, so the
-      // `## Available public agents` block survives skill-only reloads.
+      // Preserve the current teammate directory during skill-only reloads.
       const openRegistry = collectOpenRoles(this.ctx.resolvedRoles);
-      const publicAgents = resolvePublicAgents(existingRole.config, openRegistry);
+      const publicAgents = resolvePublicAgents(existingRole.config, openRegistry, existingRole.id);
 
       const newPrompt = buildAgentPrompt(existingRole.config, newSkills, {
         subagents: subagentMetadata,
         references: existingRole.references,
+        canDelegate: existingRole.config.tools?.graph_declare !== false,
+        canTeam: true,
         ...(publicAgents.length > 0 ? { publicAgents } : {}),
       });
 
@@ -335,9 +335,7 @@ export class HotReloadService implements PluginService {
       this.ctx.roleFunctionsMap.set(k, v);
     }
 
-    // 5.6. Rebuild the open-roles registry from the freshly resolved roles.
-    // role.yaml open/exports/open_roles edits route here via the medium/full
-    // path, so this keeps the shared registry in sync with the resolved set.
+    // 5.6. Refresh the top-level teammate directory.
     const newOpenRegistry = collectOpenRoles(newResolvedRoles);
     roleOpenRegistry.clear();
     for (const [k, v] of newOpenRegistry) {

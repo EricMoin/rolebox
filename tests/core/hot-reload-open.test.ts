@@ -1,17 +1,4 @@
-/**
- * Hot-reload open-roles wiring tests (subtask 5 of the open-role strategy).
- *
- * Covers:
- *   1. Fast reload (skill-only change) rebuilds a consumer role's prompt WITH
- *      the `## Available public agents` block intact — the block must survive
- *      skill-only reloads for roles declaring open_roles.
- *   2. Full reload recomputes the shared open-roles registry from the freshly
- *      resolved roles (stale entries removed, open producers re-registered).
- *
- * The OpencodeAgentRegistrar is mocked to avoid writing agent files to the
- * real ~/.claude/agents during tests. mock.module is safe here because the
- * test runner uses `--isolate` (per-file processes).
- */
+/** Top-level teammate discovery must survive both fast and full reloads. */
 
 mock.module("../../src/platform/adapters/opencode/agent-registrar.ts", () => ({
   OpencodeAgentRegistrar: class {
@@ -79,7 +66,7 @@ function makeSubagent(name: string, id: string): ResolvedSubAgent {
   };
 }
 
-/** Consumer role declaring open_roles: [producer]. */
+/** Consumer without legacy open-role configuration. */
 function makeConsumerRole(): ResolvedRole {
   return {
     id: "consumer",
@@ -87,7 +74,6 @@ function makeConsumerRole(): ResolvedRole {
       name: "Consumer Role",
       description: "Consumes the producer",
       prompt: "You are the consumer.",
-      open_roles: ["producer"],
     },
     prompt: "You are the consumer.",
     skills: [],
@@ -97,7 +83,7 @@ function makeConsumerRole(): ResolvedRole {
   };
 }
 
-/** Open producer role exposing one helper subagent via exports. */
+/** Producer carrying legacy exports that must not expose its child. */
 function makeProducerRole(): ResolvedRole {
   return {
     id: "producer",
@@ -119,7 +105,7 @@ function makeProducerRole(): ResolvedRole {
   };
 }
 
-describe("HotReloadService open-roles wiring", () => {
+describe("HotReloadService teammate catalog", () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -137,7 +123,7 @@ describe("HotReloadService open-roles wiring", () => {
     roleOpenRegistry.clear();
   });
 
-  it("fast reload retains the public-agents block in the rebuilt prompt for a role declaring open_roles", async () => {
+  it("fast reload retains teammates without a legacy open_roles declaration", async () => {
     const svc = new HotReloadService();
     const core = makeMockCore();
     const ctx = makeCtx(tempDir, core);
@@ -150,7 +136,7 @@ describe("HotReloadService open-roles wiring", () => {
     expect(result.success).toBe(true);
 
     // The rebuilt prompt must retain the `## Available public agents` block
-    // listing the declared producer with its id and description.
+    // listing the producer with its id and description.
     const consumer = ctx.resolvedRoles.find((r: ResolvedRole) => r.id === "consumer")!;
     expect(consumer.prompt).toContain("## Available public agents");
     expect(consumer.prompt).toContain("- `producer` — Exposes a helper subagent");
@@ -158,7 +144,25 @@ describe("HotReloadService open-roles wiring", () => {
     await svc.dispose();
   });
 
-  it("full reload recomputes the open-roles registry from freshly resolved roles", async () => {
+  it("fast reload keeps team guidance available when graph delegation is disabled", async () => {
+    const svc = new HotReloadService();
+    const ctx = makeCtx(tempDir);
+    const consumer = makeConsumerRole();
+    consumer.config.tools = { graph_declare: false };
+    ctx.resolvedRoles = [consumer, makeProducerRole()];
+    await svc.init(ctx);
+    try {
+      const result = await (svc as any).performFastReload("consumer");
+      expect(result.success).toBe(true);
+      expect(consumer.prompt).toContain("## Available public agents");
+      expect(consumer.prompt).toContain("team_create");
+      expect(consumer.prompt).not.toContain("## Available sub-agents");
+    } finally {
+      await svc.dispose();
+    }
+  });
+
+  it("full reload recomputes the top-level role catalog", async () => {
     // Real role.yaml fixtures on disk so discoverRoles + resolveAllRoles run.
     mkdirSync(join(tempDir, "producer"), { recursive: true });
     writeFileSync(
@@ -208,15 +212,15 @@ describe("HotReloadService open-roles wiring", () => {
     expect(result.discovered).toBe(2);
     expect(result.resolved).toBe(2);
 
-    // Stale entry evicted; open producer re-registered with resolved exports.
+    // Stale entries disappear and legacy exports remain private.
     expect(roleOpenRegistry.has("stale-role")).toBe(false);
     expect(roleOpenRegistry.has("producer")).toBe(true);
     const producerEntry = roleOpenRegistry.get("producer")!;
     expect(producerEntry.name).toBe("Producer Role");
     expect(producerEntry.description).toBe("Exposes a helper subagent");
-    expect(producerEntry.exports).toEqual(["producer--helper"]);
-    // Consumer is not open → absent from the registry.
-    expect(roleOpenRegistry.has("consumer")).toBe(false);
+    expect(producerEntry.exports).toEqual([]);
+    expect(roleOpenRegistry.has("consumer")).toBe(true);
+    expect(roleOpenRegistry.has("producer--helper")).toBe(false);
 
     await svc.dispose();
   });

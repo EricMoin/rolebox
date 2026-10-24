@@ -174,7 +174,7 @@ describe("createLoadRoleSkillTool", () => {
     const role = makeRole({ id: "root", skills: [roleLevel], subagents: [alpha] });
 
     const tool = createLoadRoleSkillTool([role]);
-    const result = await tool.execute({ name: "shared-skill" }, makeContext(dir));
+    const result = await tool.execute({ name: "shared-skill" }, { ...makeContext(dir), agent: "root" });
 
     // Deepest subagent (beta) wins over alpha and over role-level.
     const payload = payloadOf(result);

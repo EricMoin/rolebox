@@ -3,6 +3,7 @@ import type { MemorySummary, ResolvedFunction, ResolvedReference, ResolvedSkill 
 import type { FnState } from "../function/runtime-state.ts";
 import { createSubLogger } from "../logger.ts";
 import { injectCode, renderInjectBlock } from "./blocks.ts";
+import { SUBAGENT_ID_SEPARATOR } from "../constants.ts";
 
 const PROMPT_SIZE_WARN_THRESHOLD = 400000;
 
@@ -57,6 +58,7 @@ export interface AgentPromptOptions {
   publicAgents?: Array<{ id: string; name: string; description: string }>;
   references?: ResolvedReference[];
   canDelegate?: boolean;
+  canTeam?: boolean;
   resourceTool?: "graph_worker_exec";
 }
 
@@ -82,7 +84,7 @@ export function buildAgentPrompt(
     parts.push(subagentBlock);
   }
 
-  const publicAgentsBlock = buildPublicAgentsBlock(options.canDelegate === false ? [] : publicAgents ?? []);
+  const publicAgentsBlock = buildPublicAgentsBlock((options.canTeam ?? options.canDelegate) === false ? [] : publicAgents ?? []);
   if (publicAgentsBlock) {
     parts.push(publicAgentsBlock);
   }
@@ -114,15 +116,17 @@ export function buildSkillBlock(skills: ResolvedSkill[], resourceTool?: "graph_w
   if (skills.length === 0) return "";
   const instruction = resourceTool
     ? "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory."
-    : "Skills provide specialized instructions. Use the skill tool to load when task matches.";
-  // One bullet per skill: the name in inline code, then the description as
-  // prose, for both instruction variants. Neither `scope` nor the absolute
-  // `<location>` path is rendered: the path was the single largest cost of
-  // the block and follows from the skill name and its directory.
+    : "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the skill tool. Role workflow skills are scoped to their owning role.";
+  // Workers read private copies with unpredictable paths, so name-based
+  // loading is insufficient for their command-only tool surface.
   return renderInjectBlock({
     title: "Available skills",
     instruction,
-    items: skills.map((s) => ({ label: s.name, value: s.description })),
+    items: skills.map((s) => ({
+      label: s.name,
+      value: s.description,
+      ...(resourceTool && s.filePath ? { sub: `File: ${injectCode(s.filePath)}` } : {}),
+    })),
   });
 }
 
@@ -243,31 +247,37 @@ export function buildSubagentBlock(
   });
 }
 
-const PUBLIC_AGENT_INSTRUCTIONS = "You can dispatch tasks to these open roles of other roles through the graph outcome protocol.\n" +
-  "Declare the work as a graph with graph_declare: a version-3 declaration naming each\n" +
-  "node\u0027s agent (for an open role, the open-role id, e.g. agent=\"<open-role-id>\"),\n" +
-  "prompt and the outcomes it may report, plus the edges that route an accepted\n" +
-  "outcome to the next node. Declaring persists the plan and starts nothing itself:\n" +
-  "the host dispatches the entry nodes and hands each worker the attempt credential it\n" +
-  "settles with, so end your turn after graph_declare. A worker settles its node with\n" +
-  "graph_submit_outcome(graph_id=..., node_id=..., outcome_id=..., credential=...); the\n" +
-  "accepted outcome commits the node\u0027s state together with the graph\u0027s, and the\n" +
-  "declared edge arms the next node — no further call is needed to advance the graph.\n" +
-  "Read the recorded state with graph_status(graph_id=..., include_output=true) and\n" +
-  "inventory the store with graph_audit; both are read-only, and a node\u0027s status\n" +
-  "changes only when a settlement commits. A transition comes from a declared outcome\n" +
-  "and edge only: free-form reports are never ranked, merged or interpreted as\n" +
-  "progress.\n" + MEMORY_GRANT_INSTRUCTIONS + "\n" + COMPUTER_GRANT_INSTRUCTIONS;
+const PUBLIC_AGENT_INSTRUCTIONS = "These top-level roles can collaborate as teammates with complementary expertise.\n" +
+  "When a task needs skills beyond your role, use a team to separate responsibilities, " +
+  "such as design decisions and implementation. A role's child agents belong to that " +
+  "role: never discover, invite, or address another role's children. Share deliverables " +
+  "and review findings, keeping your private child roster and internal transcripts out of team events.\n" +
+  "Use the following tools only when they are available in your current tool set. " +
+  "Call team_list_roles to discover current top-level roles, team_create(name, goal) " +
+  "to establish a shared goal, and team_add(team_id, role_id) to invite a role. " +
+  "Use team_send_event(team_id, kind, content, task_id?, recipient?) to communicate; " +
+  "kind is message, task_offer, task_claim, task_complete, or task_release. " +
+  "Offer work with task_offer, claim its task_id with task_claim, and start only " +
+  "after the claim succeeds. Share results with task_complete or release a claim " +
+  "with task_release. Use message for questions and coordination, and recipient " +
+  "when only one teammate should act.\n" +
+  "Read team_status to inspect members, events, and tasks. Membership changes " +
+  "and completed turns are shared events; act only on new work relevant to your " +
+  "expertise, and avoid acknowledgment loops. Use team_remove to remove a member " +
+  "and team_delete to end a team. Team state persists across process restarts; " +
+  "inspect existing state before creating a replacement, and use team_resume " +
+  "when a suspended team should continue.";
 
 export function buildPublicAgentsBlock(
   agents: Array<{ id: string; name: string; description: string }>,
 ): string {
-  if (agents.length === 0) return "";
+  const topLevelAgents = agents.filter((agent) => !agent.id.includes(SUBAGENT_ID_SEPARATOR));
+  if (topLevelAgents.length === 0) return "";
   // Same id-first bullet as the sub-agent block; `name` is not rendered.
   return renderInjectBlock({
     title: "Available public agents",
     instruction: PUBLIC_AGENT_INSTRUCTIONS,
-    items: agents.map((a) => ({ label: a.id, value: a.description })),
+    items: topLevelAgents.map((a) => ({ label: a.id, value: a.description })),
   });
 }
 

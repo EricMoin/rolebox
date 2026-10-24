@@ -7,7 +7,7 @@ import { createWorkerCapabilityTools, createWorkerToolSession, type WorkerToolDe
 
 const BASELINE = ["bash", "graph_submit_outcome"];
 const forbidden = (name: string) => (name.startsWith("graph_") && name !== "graph_submit_outcome") ||
-  name.startsWith("dispatch_") || name.startsWith("loop_") || name === "task_retry";
+  name.startsWith("dispatch_") || name.startsWith("loop_") || name.startsWith("team_") || name === "task_retry";
 
 export interface OpencodeWorkerToolOptions {
   host(): OutcomeHost | undefined;

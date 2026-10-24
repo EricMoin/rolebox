@@ -59,11 +59,6 @@ export function createDispatchTool(
         ),
     },
     async execute(input, context) {
-      if (!resolvedSubagents.has(input.subagent)) {
-        const available = [...resolvedSubagents.keys()].join(", ");
-        return `Invalid subagent: '${input.subagent}'. Available subagents: ${available}`;
-      }
-
       // Resolve the effective acting agent. On opencode `context.agent` is
       // populated natively. On Pi it is always empty, so fall back to the
       // platform-provided resolver (role switcher / child-process seed).
@@ -71,6 +66,13 @@ export function createDispatchTool(
         context.agent && context.agent.length > 0
           ? context.agent
           : getEffectiveAgent?.() ?? "";
+
+      if (!resolvedSubagents.has(input.subagent)) {
+        const available = [...resolvedSubagents]
+          .filter(([, entry]) => entry.parentFullId === effectiveAgent)
+          .map(([id]) => id).join(", ");
+        return `Invalid subagent: '${input.subagent}'. Available subagents: ${available || "(none)"}`;
+      }
 
       const entry = resolvedSubagents.get(input.subagent);
       if (entry && entry.parentFullId !== effectiveAgent) {

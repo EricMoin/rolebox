@@ -100,11 +100,11 @@ describe("asset-inspect", () => {
         }],
       });
       const tool = createAssetInspectTool([role]);
-      const fnResult: string = await tool.execute({ name: "sub-fn", type: "function" }, makeToolContext()) as string;
+      const fnResult: string = await tool.execute({ name: "sub-fn", type: "function" }, makeToolContext({ agent: "parent" })) as string;
       expect(fnResult).toContain("`parent/child`");
-      const skillResult: string = await tool.execute({ name: "sub-skill", type: "skill" }, makeToolContext()) as string;
+      const skillResult: string = await tool.execute({ name: "sub-skill", type: "skill" }, makeToolContext({ agent: "parent" })) as string;
       expect(skillResult).toContain("`parent/child`");
-      const refResult: string = await tool.execute({ name: "sub-ref", type: "reference" }, makeToolContext()) as string;
+      const refResult: string = await tool.execute({ name: "sub-ref", type: "reference" }, makeToolContext({ agent: "parent" })) as string;
       expect(refResult).toContain("`parent/child`");
     });
   });
@@ -170,7 +170,7 @@ describe("asset-inspect", () => {
         }],
       });
       const tool = createAssetInspectTool([role]);
-      const result: string = await tool.execute({ name: "deep-fn", type: "function" }, makeToolContext()) as string;
+      const result: string = await tool.execute({ name: "deep-fn", type: "function" }, makeToolContext({ agent: "parent" })) as string;
       expect(result).toContain("`parent/child`");
     });
   });

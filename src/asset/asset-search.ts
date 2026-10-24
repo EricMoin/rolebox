@@ -1,3 +1,4 @@
+import { visibleRolesForAgent } from "../resolver/role-visibility.ts";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedFunction, ResolvedSkill, ResolvedReference } from "../types.ts";
@@ -150,7 +151,7 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
   const allAssets = _cachedAssets;
   return defineTool({
     description:
-      "Search rolebox assets (skills, functions, references) by keyword. Searches asset names and descriptions across all resolved roles and sub-agents. Returns matching assets sorted by relevance. Use this to discover which skill, function, or reference to load for a given task.",
+      "Search the current role's assets and its own sub-agents by keyword. Returns matching skills, functions, and references sorted by relevance. Other roles' workflow assets are private; use team_list_roles for peer discovery.",
     args: {
       query: z
         .string()
@@ -180,7 +181,13 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
         .default("markdown")
         .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
-    async execute(input) {
+    async execute(input, context) {
+      const visibleRoles = visibleRolesForAgent(roles, context?.agent);
+      const visibleRoots = new Set(visibleRoles.map(role => role.id));
+      const ownedRoots = new Set(visibleRoles
+        .filter(role => role.subagents.length > 0).map(role => role.id));
+      const visibleAssets = allAssets.filter(asset => visibleRoots.has(asset.roleId.split("/")[0]) &&
+        (!asset.roleId.includes("/") || ownedRoots.has(asset.roleId.split("/")[0])));
       if (allAssets.length === 0) {
         return "No assets found. Make sure roles are properly loaded.";
       }
@@ -196,7 +203,7 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
         input.type === "reference" || input.type === "all"
           ? input.type
           : "all";
-      let candidates = allAssets;
+      let candidates = visibleAssets;
       if (type !== "all") {
         candidates = candidates.filter((a) => a.type === type);
       }

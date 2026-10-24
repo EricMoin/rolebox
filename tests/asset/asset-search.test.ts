@@ -220,7 +220,7 @@ describe("asset-search", () => {
         }],
       });
       const tool = createAssetSearchTool([role]);
-      const result: string = await tool.execute({ query: "child", type: "all", limit: 20, format: "markdown" }, makeToolContext()) as string;
+      const result: string = await tool.execute({ query: "child", type: "all", limit: 20, format: "markdown" }, makeToolContext({ agent: "parent" })) as string;
       expect(result).toContain("child-fn");
       expect(result).toContain("parent/child");
     });

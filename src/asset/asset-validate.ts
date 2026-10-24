@@ -1,3 +1,4 @@
+import { visibleRolesForAgent } from "../resolver/role-visibility.ts";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { KNOWN_CONDITIONS } from "../function/conditions.ts";
@@ -280,26 +281,26 @@ function checkSubagentTransitions(
 // ── Public factory ───────────────────────────────────────────────────────────
 
 export function createAssetValidateTool(resolvedRoles: ResolvedRole[]) {
-  const functionMap = collectAllFunctions(resolvedRoles);
-  const knownFunctionNames = new Set(functionMap.keys());
 
   return defineTool({
     description:
-      "Validate asset integrity across all resolved roles and sub-agents. Checks three categories: (1) missing dependencies — function.requires references a function that does not exist; (2) broken reference paths — reference.filePath points to a file that does not exist on disk; (3) unknown transition conditions — transition.when references a condition name not in the registered condition vocabulary. Results are sorted by severity (errors first).",
+      "Validate the current role's assets and its own sub-agents. Checks three categories: (1) missing dependencies — function.requires references a function that does not exist; (2) broken reference paths — reference.filePath points to a file that does not exist on disk; (3) unknown transition conditions — transition.when references a condition name not in the registered condition vocabulary. Results are sorted by severity (errors first).",
     args: {
       role_id: z.string().optional()
         .describe("Limit validation to assets of a specific role (by role ID). When omitted, validates all roles and their sub-agents."),
 
     },
-    async execute(input) {
+    async execute(input, context) {
+      const visibleRoles = visibleRolesForAgent(resolvedRoles, context?.agent);
+      const knownFunctionNames = new Set(collectAllFunctions(visibleRoles).keys());
       if (resolvedRoles.length === 0) {
         return "No roles loaded. Cannot validate assets.";
       }
 
       const issues: ValidationIssue[] = [];
-      issues.push(...checkMissingDependencies(resolvedRoles, knownFunctionNames, input.role_id));
-      issues.push(...(await checkBrokenReferences(resolvedRoles, input.role_id)));
-      issues.push(...checkTransitionConditions(resolvedRoles, KNOWN_CONDITIONS, input.role_id));
+      issues.push(...checkMissingDependencies(visibleRoles, knownFunctionNames, input.role_id));
+      issues.push(...(await checkBrokenReferences(visibleRoles, input.role_id)));
+      issues.push(...checkTransitionConditions(visibleRoles, KNOWN_CONDITIONS, input.role_id));
 
       return renderIssues(issues, input.role_id);
     },

@@ -32,9 +32,11 @@
  *
  * ── Candidate role set ─────────────────────────────────────────────────────
  * The provider advertises the skills of {roles currently active in the
- * workspace} ∪ {the promoted default/primary role}, walking each role's own
- * `skills` first and then, recursively, its `subagents[].skills`
- * (`ResolvedSubAgent` nests arbitrarily). The active set is read through the
+ * workspace} ∪ {the promoted default/primary role}, using only each top-level
+ * role's own `skills`, excluding roles with private children: their workflow
+ * bodies can name those children, and this global API has no caller identity.
+ * Those roles use `load_role_skill`; workers receive private resource copies.
+ * The active set is read through the
  * injected per-session {@link DshActiveRoleSnapshot} (the rolebox dsh
  * `ActiveRoleRef`, `role-switcher.ts:131`, satisfies it structurally). The
  * provider contract exposes no session id (`index.d.ts:88-93`), so the union
@@ -49,8 +51,8 @@
  *      (`index.js:17`, `:29-31`); rejected names are dropped with ONE warning
  *      each. rolebox role names like `emperor--chancellor` are NOT valid dsh
  *      skill names — only grammar-valid skills can be surfaced.
- *   2. dedupe by name, first-wins in deterministic order (role skills before
- *      subagent skills; roles in stable id order) — one provider must never
+ *   2. dedupe by name, first-wins in deterministic order (roles in stable
+ *      id order) — one provider must never
  *      return a duplicate name.
  *   3. skip skills whose `filePath` no longer exists.
  *   4. honor `options.signal`, settling promptly on abort.
@@ -68,7 +70,7 @@ import { dirname } from "node:path";
 import { fileExists } from "../../../utils/fs.ts";
 import { createSubLogger, formatError } from "../../../logger.ts";
 import { loadSkillContent } from "../../../resolver/skill-resolver.ts";
-import type { ResolvedRole, ResolvedSkill, ResolvedSubAgent } from "../../../types.ts";
+import type { ResolvedRole, ResolvedSkill } from "../../../types.ts";
 
 const log = createSubLogger("dsh-skill-provider");
 
@@ -304,7 +306,6 @@ export class DshSkillProvider implements DshSkillProviderLike {
     for (const role of roles) {
       if (signal?.aborted) break;
       await this.collectSkills(role.skills, candidates, seen, warned, signal);
-      await this.collectSubAgentSkills(role.subagents, candidates, seen, warned, signal);
     }
     return candidates;
   }
@@ -313,7 +314,7 @@ export class DshSkillProvider implements DshSkillProviderLike {
    * Load a candidate's body lazily via `loadSkillContent`.
    *
    * Returns `undefined` (never throws) when the locator is not a resolved
-   * skill or the SKILL.md vanished after listing.
+   * skill, no longer belongs to the public catalog, or vanished after listing.
    */
   async get(
     candidate: DshSkillCandidate,
@@ -322,8 +323,13 @@ export class DshSkillProvider implements DshSkillProviderLike {
     const signal = options?.signal;
     if (signal?.aborted) return undefined;
 
-    const skill = asResolvedSkill(candidate?.locator);
-    if (!skill) return undefined;
+    const locator = asResolvedSkill(candidate?.locator);
+    if (!locator) return undefined;
+    const published = (await this.list(options)).find(entry =>
+      entry.name === candidate.name && entry.name === locator.name && entry.path === locator.filePath,
+    );
+    const skill = asResolvedSkill(published?.locator);
+    if (!published || !skill || signal?.aborted) return undefined;
 
     let content: string;
     try {
@@ -338,15 +344,15 @@ export class DshSkillProvider implements DshSkillProviderLike {
     if (signal?.aborted) return undefined;
 
     const definition: DshSkillDefinition = {
-      name: candidate.name,
-      description: candidate.description || candidate.name,
-      invocation: candidate.invocation,
-      source: candidate.source,
-      provider: candidate.provider,
+      name: published.name,
+      description: published.description || published.name,
+      invocation: published.invocation,
+      source: published.source,
+      provider: published.provider,
       content,
       path: skill.filePath,
-      ...(candidate.resourceBase !== undefined
-        ? { resourceBase: candidate.resourceBase }
+      ...(published.resourceBase !== undefined
+        ? { resourceBase: published.resourceBase }
         : {}),
     };
     return definition;
@@ -377,26 +383,8 @@ export class DshSkillProvider implements DshSkillProviderLike {
     if (this.deps.defaultRoleId) ids.add(this.deps.defaultRoleId);
 
     return all
-      .filter((role) => ids.has(role.id))
+      .filter((role) => !role.id.includes("--") && role.subagents.length === 0 && ids.has(role.id))
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  }
-
-  /**
-   * Walk a subagent subtree depth-first (pre-order): each subagent's own
-   * skills, then its nested subagents. `ResolvedSubAgent` nests arbitrarily.
-   */
-  private async collectSubAgentSkills(
-    subagents: readonly ResolvedSubAgent[],
-    out: DshSkillCandidate[],
-    seen: Set<string>,
-    warned: Set<string>,
-    signal: AbortSignal | undefined,
-  ): Promise<void> {
-    for (const subagent of subagents) {
-      if (signal?.aborted) return;
-      await this.collectSkills(subagent.skills, out, seen, warned, signal);
-      await this.collectSubAgentSkills(subagent.subagents, out, seen, warned, signal);
-    }
   }
 
   /**

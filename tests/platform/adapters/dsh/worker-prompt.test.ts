@@ -117,8 +117,7 @@ describe("DSH graph worker prompt", () => {
     // no second `` `name`: `path` `` line, and the base stated once.
     expect(countMatches(prompt, /^- `schema` — /gm)).toBe(1);
     expect(prompt).not.toMatch(/^ {2}`schema`: /m);
-    // The skill bullet carries name and description only; its private copy is
-    // delivered under the attempt's input directory and readable from there.
+    // The skill bullet locates its private copy for the command-only worker.
     expect(prompt).toContain("## Available skills");
     expect(prompt).toContain("- `research` — Research");
     const reference = referencePath(prompt, "schema");
@@ -131,6 +130,7 @@ describe("DSH graph worker prompt", () => {
     const copies = filesUnder(f.inputDirectory);
     const skillCopy = copies.find((path) => basename(path) === "SKILL.md")!;
     expect(skillCopy.startsWith(f.inputDirectory)).toBe(true);
+    expect(prompt).toContain(`  File: \`${skillCopy}\``);
     expect(readFileSync(skillCopy, "utf8")).toBe("Read scripts/check.sh beside this skill.");
     expect(readFileSync(join(dirname(skillCopy), "scripts", "check.sh"), "utf8")).toBe("printf checked");
     writeFileSync(join(f.refs, "schema.md"), "changed after dispatch");

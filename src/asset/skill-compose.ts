@@ -1,3 +1,4 @@
+import { visibleRolesForAgent } from "../resolver/role-visibility.ts";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedSkill, ResolvedReference, ResolvedSubAgent } from "../types.ts";
@@ -192,12 +193,10 @@ function renderSummary(
 // ── Public factory ──────────────────────────────────────────────────────────
 
 export function createSkillComposeTool(resolvedRoles: ResolvedRole[]) {
-  // Pre-collect all skills at tool creation time
-  const allSkills = resolvedRoles.flatMap(collectSkills);
 
   return defineTool({
     description:
-      "Analyze skill combinations for conflicts and reference deduplication. Given a list of skill names, scans all loaded roles and their sub-agents to find matching skills, deduplicates their references by file path, and detects reference-path conflicts where two skills reference the same document name at different file paths.",
+      "Analyze skill combinations for conflicts and reference deduplication within the current role and its own sub-agents. Finds matching skills, deduplicates their references by file path, and detects reference-path conflicts where two skills reference the same document name at different file paths.",
     args: {
       skill_names: z
         .array(z.string())
@@ -209,7 +208,8 @@ export function createSkillComposeTool(resolvedRoles: ResolvedRole[]) {
         .default(true)
         .describe("Check for tool permission conflicts"),
     },
-    async execute(input) {
+    async execute(input, context) {
+      const allSkills = visibleRolesForAgent(resolvedRoles, context?.agent).flatMap(collectSkills);
       if (resolvedRoles.length === 0) {
         return "No roles loaded. Cannot analyze skills.";
       }
