@@ -15,13 +15,25 @@
  *   - prune() applies the TTL and the session cap (newest kept)
  *   - the store is workspace-scoped (distinct directories → distinct files)
  *   - async saves are serialized and leave no orphan `.tmp` files
+ *   - cross-process writes: a save merges over what another writer already put
+ *     on disk instead of clobbering it (sync and async), the entry with the
+ *     larger `updatedAt` wins, the `.lock` file is released after every write,
+ *     and a stale lock is taken over instead of wedging the write
  *   - the module stays free of `@deepseek-ai/*` / `@opencode-ai/*` imports
  *
  * @module
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -47,6 +59,16 @@ function makeEntry(overrides: Partial<ActiveRoleEntry> = {}): ActiveRoleEntry {
 /** Path the store uses for `dir` — recomputed independently of the store. */
 function stateFileFor(dir: string): string {
   return join(dir, ".rolebox", "state", `activerole-${shortHash(dir)}.json`);
+}
+
+/** Path of the cross-process write lock for `dir` — `<statePath>.lock`. */
+function lockFileFor(dir: string): string {
+  return `${stateFileFor(dir)}.lock`;
+}
+
+/** Files under `dir`'s state directory with the given suffix. */
+function stateFilesEndingWith(dir: string, suffix: string): string[] {
+  return readdirSync(join(dir, ".rolebox", "state")).filter((f) => f.endsWith(suffix));
 }
 
 describe("ActiveRoleStore persistence", () => {
@@ -184,6 +206,113 @@ describe("ActiveRoleStore persistence", () => {
     expect(store.load()!.get("s1")!.roleId).toBe("role-2");
     const stateDir = join(tempDir, ".rolebox", "state");
     expect(readdirSync(stateDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("ActiveRoleStore cross-process writes", () => {
+  let tempDir: string;
+  let store: ActiveRoleStore;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "active-role-shared-"));
+    store = new ActiveRoleStore(tempDir);
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("saveSync merges over a session another writer put on disk", () => {
+    // A second writer (a sibling dsh process sharing the cwd) adds session-b.
+    const external = new ActiveRoleStore(tempDir);
+    external.saveSync(
+      new Map([["session-b", makeEntry({ sessionId: "session-b", roleId: "role-b" })]]),
+    );
+
+    const a = makeEntry({ sessionId: "session-a", roleId: "role-a" });
+    store.saveSync(new Map([[a.sessionId, a]]));
+
+    const loaded = store.load()!;
+    expect([...loaded.keys()].sort()).toEqual(["session-a", "session-b"]);
+    expect(loaded.get("session-a")).toEqual(a);
+    expect(loaded.get("session-b")!.roleId).toBe("role-b");
+  });
+
+  it("two stores for the same directory each keep their own session", async () => {
+    const storeA = new ActiveRoleStore(tempDir);
+    const storeB = new ActiveRoleStore(tempDir);
+    const a = makeEntry({ sessionId: "store-a-session", roleId: "role-a" });
+    const b = makeEntry({ sessionId: "store-b-session", roleId: "role-b" });
+
+    await storeA.save(new Map([[a.sessionId, a]]));
+    await storeB.save(new Map([[b.sessionId, b]]));
+
+    const loaded = store.load()!;
+    expect([...loaded.keys()].sort()).toEqual(["store-a-session", "store-b-session"]);
+    expect(loaded.get("store-a-session")).toEqual(a);
+    expect(loaded.get("store-b-session")).toEqual(b);
+  });
+
+  it("concurrent async saves from two instances keep both sessions", async () => {
+    const storeA = new ActiveRoleStore(tempDir);
+    const storeB = new ActiveRoleStore(tempDir);
+    const a = makeEntry({ sessionId: "async-a", roleId: "role-a" });
+    const b = makeEntry({ sessionId: "async-b", roleId: "role-b" });
+
+    await Promise.all([
+      storeA.save(new Map([[a.sessionId, a]])),
+      storeB.save(new Map([[b.sessionId, b]])),
+    ]);
+
+    const loaded = store.load()!;
+    expect([...loaded.keys()].sort()).toEqual(["async-a", "async-b"]);
+    expect(loaded.get("async-a")!.roleId).toBe("role-a");
+    expect(loaded.get("async-b")!.roleId).toBe("role-b");
+  });
+
+  it("keeps the newer entry when both sides know the same session", () => {
+    store.saveSync(
+      new Map([["ses", makeEntry({ sessionId: "ses", roleId: "role-new", updatedAt: 2_000 })]]),
+    );
+
+    // A stale in-memory copy from another process must not roll the value back,
+    // but it still gets merged (and thereby cannot erase the newer row).
+    store.saveSync(
+      new Map([["ses", makeEntry({ sessionId: "ses", roleId: "role-old", updatedAt: 1_000 })]]),
+    );
+
+    const written = JSON.parse(readFileSync(stateFileFor(tempDir), "utf-8"));
+    expect(written.sessions).toEqual([
+      { sessionId: "ses", roleId: "role-new", updatedAt: 2_000 },
+    ]);
+  });
+
+  it("releases the lock after every write", async () => {
+    const first = makeEntry({ sessionId: "first" });
+    store.saveSync(new Map([[first.sessionId, first]]));
+    expect(stateFilesEndingWith(tempDir, ".lock")).toEqual([]);
+
+    const second = makeEntry({ sessionId: "second" });
+    await store.save(new Map([[second.sessionId, second]]));
+    expect(stateFilesEndingWith(tempDir, ".lock")).toEqual([]);
+
+    // A write after the locked ones still lands, so the lock really was freed.
+    const third = makeEntry({ sessionId: "third" });
+    store.saveSync(new Map([[third.sessionId, third]]));
+    expect([...store.load()!.keys()].sort()).toEqual(["first", "second", "third"]);
+  });
+
+  it("takes over a stale lock instead of wedging the write", () => {
+    mkdirSync(join(tempDir, ".rolebox", "state"), { recursive: true });
+    writeFileSync(lockFileFor(tempDir), "");
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(lockFileFor(tempDir), longAgo, longAgo);
+
+    const entry = makeEntry({ sessionId: "after-stale-lock" });
+    store.saveSync(new Map([[entry.sessionId, entry]]));
+
+    expect(store.load()!.get("after-stale-lock")).toEqual(entry);
+    expect(stateFilesEndingWith(tempDir, ".lock")).toEqual([]);
   });
 });
 

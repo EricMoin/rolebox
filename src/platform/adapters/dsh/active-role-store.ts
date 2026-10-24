@@ -13,8 +13,40 @@
  * `roleId: null` records an explicit clear back to the base agent (distinct
  * from a session that was never written).
  *
+ * Multi-process safety: the file is shared, not private. `src/entries/dsh.ts`
+ * builds the store from `process.cwd()`, so two dsh web processes serving the
+ * same workspace resolve to the same path — and a whole-map write from either
+ * one used to erase the sessions the other had just added. Therefore:
+ *   - **every write is a read-merge-write while holding a cross-process lock.**
+ *     The lock is the existence of `<statePath>.lock`, created with
+ *     `openSync(path, "wx", 0o600)`. Under it, the current file is read with the
+ *     same tolerant parser `load()` uses, the caller's entries are merged in by
+ *     `sessionId` (the larger `updatedAt` wins; the caller wins a tie, so a
+ *     repeated save in one process still lands last), disk-only entries are
+ *     kept, and the `maxSessions` cap is applied newest-first before writing.
+ *   - the locked section is **fully synchronous on both paths** — the merge
+ *     read and the replace happen with no `await` between them, and the lock is
+ *     released in the same tick. Holding a file lock across a promise boundary
+ *     deadlocks this process against itself: a sibling `saveSync` blocks the
+ *     event loop while spinning, so the async holder can never be resumed to
+ *     release, and both end up writing from stale reads. The lock is therefore
+ *     held for microseconds and always released in a `finally`.
+ *   - the wait is **bounded**, because one caller is a shutdown path: async
+ *     writes retry every 10ms for ~2s, `saveSync` spins up to ~250ms (only ever
+ *     waiting on another PROCESS, now that a same-process holder cannot be
+ *     preempted mid-write), and a lock file older than 10s belongs to a writer
+ *     that is not coming back, so it is taken over (unlink, then retry). A
+ *     caller that exhausts its wait proceeds unlocked rather than dropping its
+ *     data; the merge narrows that window to one read.
+ *   - the write itself is **one atomic replace**: a unique temp sibling is
+ *     renamed over the target, so a concurrent reader sees the old file or the
+ *     new one and never a moment with no file. The shared `atomicWriteSync`
+ *     helper is deliberately not used — it unlinks the target first, which is
+ *     exactly that no-file window.
+ *   - `load()` takes no lock: readers only ever see a whole file, so an unlocked
+ *     read is safe and a stalled writer cannot block a reader.
+ *
  * Behaviour mirrors the house stores:
- *   - atomic writes via `src/function/fs-util.ts` (no torn reads)
  *   - `load()` fails soft — missing/corrupt/out-of-range files return `null`
  *   - version-range migration: files older than the current schema version are
  *     normalized forward instead of rejected; unknown future versions are
@@ -36,9 +68,18 @@
  * @module
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { atomicWrite, atomicWriteSync } from "../../../function/fs-util.ts";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { uniqueTmpPath } from "../../../function/fs-util.ts";
 import { shortHash } from "../../../utils/state-paths.ts";
 import { createSubLogger } from "../../../logger.ts";
 
@@ -73,6 +114,123 @@ export interface ActiveRoleEntry {
 interface FileShape {
   version: number;
   sessions: ActiveRoleEntry[];
+}
+
+/** Suffix of the cross-process write lock guarding a state file. */
+const LOCK_SUFFIX = ".lock";
+
+/** A lock file older than this belongs to a writer that is not coming back. */
+const LOCK_STALE_MS = 10_000;
+
+/** Retry interval while an async write waits for the cross-process lock. */
+const LOCK_RETRY_MS = 10;
+
+/** Bounded wait for the cross-process lock on the async path. */
+const LOCK_ASYNC_TIMEOUT_MS = 2_000;
+
+/**
+ * Bounded wait for the cross-process lock on the synchronous path. `saveSync`
+ * runs from flush/shutdown handlers, so it must finish even when another
+ * process is wedged; a busy spin keeps it independent of any timer/event loop
+ * that may already be torn down. Short because the holder's critical section is
+ * synchronous (a read, a write and a rename): a live writer never needs more
+ * than that, so time spent here means a wedged process, and shutdown should not
+ * pay a second for it.
+ */
+const LOCK_SYNC_TIMEOUT_MS = 250;
+
+/**
+ * Parse a persisted envelope tolerantly — the one reader used by both
+ * {@link ActiveRoleStore.load} and the merge in each write.
+ *
+ * Answers `null` when nothing usable can be read: malformed JSON, no
+ * `sessions` array, or a version outside `[MIN, CURRENT]`. Rows without a
+ * string `sessionId` are skipped; a missing/non-string `roleId` becomes `null`
+ * and a missing/invalid `updatedAt` becomes `0`, which is what lets a version-0
+ * file migrate forward instead of being rejected.
+ */
+function parseFile(raw: string): Map<string, ActiveRoleEntry> | null {
+  let parsed: FileShape;
+  try {
+    parsed = JSON.parse(raw) as FileShape;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed?.sessions)) return null;
+  const version = parsed.version;
+  if (
+    typeof version !== "number" ||
+    !Number.isInteger(version) ||
+    version < ACTIVE_ROLE_STORE_MIN_VERSION ||
+    version > ACTIVE_ROLE_STORE_VERSION
+  ) {
+    return null;
+  }
+
+  const out = new Map<string, ActiveRoleEntry>();
+  for (const entry of parsed.sessions) {
+    if (typeof entry?.sessionId !== "string") continue;
+    const roleId = typeof entry.roleId === "string" ? entry.roleId : null;
+    const updatedAt =
+      typeof entry.updatedAt === "number" && Number.isFinite(entry.updatedAt)
+        ? entry.updatedAt
+        : 0;
+    out.set(entry.sessionId, { sessionId: entry.sessionId, roleId, updatedAt });
+  }
+  if (version < ACTIVE_ROLE_STORE_VERSION) {
+    log.info("Migrated active-role store", {
+      fromVersion: version,
+      toVersion: ACTIVE_ROLE_STORE_VERSION,
+      sessions: out.size,
+    });
+  }
+  return out;
+}
+
+/**
+ * Rename `temporary` over `target`, replacing it in one step.
+ *
+ * POSIX rename replaces an existing file atomically. Windows refuses a rename
+ * onto an existing file, so only for `EEXIST`/`EPERM` does the old target get
+ * unlinked first — a fallback that keeps Windows working without giving POSIX
+ * the no-file window.
+ */
+function renameOver(temporary: string, target: string): void {
+  try {
+    renameSync(temporary, target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "EPERM") throw err;
+    try {
+      unlinkSync(target);
+    } catch {
+      // Already gone: the rename below is then the plain POSIX case.
+    }
+    renameSync(temporary, target);
+  }
+}
+
+/**
+ * Atomically replace `target` with `content`: write a unique sibling temp file,
+ * then rename it over the target. Nothing is unlinked before the rename, so a
+ * concurrent reader always sees a complete file.
+ *
+ * Deliberately synchronous, and used by BOTH save paths: the locked critical
+ * section then contains no `await`, so a sibling `saveSync` in this same process
+ * cannot block the event loop under a holder that is waiting to be resumed — it
+ * would spin out its budget and then write unlocked from a stale view.
+ */
+function replaceFileSync(target: string, content: string): void {
+  mkdirSync(dirname(target), { recursive: true });
+  const temporary = uniqueTmpPath(target);
+  try {
+    writeFileSync(temporary, content, "utf-8");
+    renameOver(temporary, target);
+  } catch (err) {
+    // Best-effort cleanup so a failed write never leaves an orphan `.tmp`
+    try { unlinkSync(temporary); } catch {}
+    throw err;
+  }
 }
 
 /**
@@ -130,6 +288,11 @@ export class ActiveRoleStore {
     return join(this.directory, ".rolebox", "state", `activerole-${this.dirHash}.json`);
   }
 
+  /** Path of the cross-process write lock guarding {@link statePath}. */
+  private lockPath(): string {
+    return `${this.statePath()}${LOCK_SUFFIX}`;
+  }
+
   /** Serialize the in-memory map into the versioned envelope. */
   private toFile(sessions: Map<string, ActiveRoleEntry>): string {
     const entries = [...sessions.values()].map((e) => ({
@@ -145,8 +308,13 @@ export class ActiveRoleStore {
   }
 
   /**
-   * Persist `sessions` atomically. Async writes are serialized through an
-   * internal lock; a write failure is logged and swallowed (best-effort).
+   * Persist `sessions`, merged over whatever another process has already
+   * written.
+   *
+   * Async writes are serialized through the in-process `_lock` (so two calls in
+   * one process cannot interleave), and the read-merge-write runs under the
+   * cross-process lock file so a sibling dsh process's sessions survive. A
+   * write failure is logged and swallowed (best-effort).
    */
   async save(sessions: Map<string, ActiveRoleEntry>): Promise<void> {
     this._lock = this._lock.then(
@@ -157,19 +325,170 @@ export class ActiveRoleStore {
   }
 
   private async _doSave(sessions: Map<string, ActiveRoleEntry>): Promise<void> {
+    const target = this.statePath();
     try {
-      await atomicWrite(this.statePath(), this.toFile(sessions));
+      // The lock lives beside the target, so the directory must exist first.
+      mkdirSync(dirname(target), { recursive: true });
+      const lockPath = this.lockPath();
+      const locked = await this.acquireLock(lockPath);
+      try {
+        // Synchronous on purpose: no `await` between the merge read and the
+        // replace, so nothing in this process can interleave with the write.
+        replaceFileSync(target, this.toFile(this.mergeWithDisk(sessions)));
+      } finally {
+        if (locked) this.releaseLock(lockPath);
+      }
     } catch (err) {
       log.warn("ActiveRoleStore._doSave failed", err);
     }
   }
 
-  /** Synchronous variant of {@link save}. Best-effort; failures are logged. */
+  /**
+   * Synchronous variant of {@link save}: same read-merge-write under the
+   * cross-process lock, with a bounded spin instead of an async wait.
+   * Best-effort; failures are logged.
+   */
   saveSync(sessions: Map<string, ActiveRoleEntry>): void {
+    const target = this.statePath();
     try {
-      atomicWriteSync(this.statePath(), this.toFile(sessions));
+      // The lock lives beside the target, so the directory must exist first.
+      mkdirSync(dirname(target), { recursive: true });
+      const lockPath = this.lockPath();
+      const locked = this.acquireLockSync(lockPath);
+      try {
+        replaceFileSync(target, this.toFile(this.mergeWithDisk(sessions)));
+      } finally {
+        if (locked) this.releaseLock(lockPath);
+      }
     } catch (err) {
       log.warn("ActiveRoleStore.saveSync failed", err);
+    }
+  }
+
+  /**
+   * Merge this caller's map over the entries currently on disk.
+   *
+   * The disk read is tolerant — a missing, corrupt, or future-version file
+   * simply contributes nothing, so the write still lands. For a `sessionId`
+   * present on both sides the larger `updatedAt` wins, and the caller wins a
+   * tie so a repeated save in one process still lands last. Disk-only entries
+   * are kept: they belong to another process and are not this caller's to
+   * drop. Finally the `maxSessions` cap is applied newest-first, matching
+   * {@link load}'s bound. TTL pruning is deliberately NOT applied here — the
+   * caller's map may legitimately still reference an older session, and the
+   * load-time prune is the single place that decides expiry.
+   *
+   * @param incoming - The caller's map (never mutated).
+   * @returns The merged map, bounded by the session cap.
+   */
+  private mergeWithDisk(
+    incoming: Map<string, ActiveRoleEntry>,
+  ): Map<string, ActiveRoleEntry> {
+    const merged = new Map<string, ActiveRoleEntry>();
+    const onDisk = this.readEntries();
+    if (onDisk !== null) {
+      for (const [sessionId, entry] of onDisk) merged.set(sessionId, entry);
+    }
+    for (const [sessionId, entry] of incoming) {
+      const existing = merged.get(sessionId);
+      if (existing !== undefined && existing.updatedAt > entry.updatedAt) continue;
+      merged.set(sessionId, entry);
+    }
+    this.applyCap(merged, this.maxSessions);
+    return merged;
+  }
+
+  /**
+   * Try once to take the cross-process lock.
+   *
+   * `wx` is the whole mutex: the open fails with `EEXIST` exactly when the lock
+   * file exists. Answers `"held"` on success, `"busy"` when another writer
+   * holds it, and `"failed"` for anything else (permissions, a missing
+   * directory), which the caller treats as "write unlocked, best effort".
+   */
+  private tryLock(lockPath: string): "held" | "busy" | "failed" {
+    try {
+      closeSync(openSync(lockPath, "wx", 0o600));
+      return "held";
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return "busy";
+      log.warn("ActiveRoleStore could not create its lock", err);
+      return "failed";
+    }
+  }
+
+  /**
+   * Take over a lock whose mtime is older than {@link LOCK_STALE_MS} — the
+   * writer that made it is not coming back to release it — and report whether
+   * the caller should retry immediately. A lock that vanished between the
+   * failed create and this stat is also a retry, not a wait.
+   */
+  private breakStaleLock(lockPath: string): boolean {
+    let age: number;
+    try {
+      age = Date.now() - statSync(lockPath).mtimeMs;
+    } catch {
+      return true;
+    }
+    if (age <= LOCK_STALE_MS) return false;
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // Another writer broke it first; either way the next create decides.
+    }
+    return true;
+  }
+
+  /**
+   * Wait for the cross-process lock, retrying every {@link LOCK_RETRY_MS} for
+   * at most {@link LOCK_ASYNC_TIMEOUT_MS}.
+   *
+   * @returns Whether the lock is held. On timeout the caller proceeds unlocked:
+   *   dropping the save would lose the caller's own entry, while the unlocked
+   *   merge-write still preserves everything it read.
+   */
+  private async acquireLock(lockPath: string): Promise<boolean> {
+    const deadline = Date.now() + LOCK_ASYNC_TIMEOUT_MS;
+    for (;;) {
+      const attempt = this.tryLock(lockPath);
+      if (attempt === "held") return true;
+      if (attempt === "failed") return false;
+      if (this.breakStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        log.warn("ActiveRoleStore lock wait timed out; writing unlocked", { lockPath });
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+    }
+  }
+
+  /**
+   * Synchronous counterpart of {@link acquireLock}: a bounded busy spin, so a
+   * wedged sibling process cannot hold a flush or shutdown path open. Answers
+   * `false` after {@link LOCK_SYNC_TIMEOUT_MS}, and the caller proceeds
+   * unlocked for the reason given there.
+   */
+  private acquireLockSync(lockPath: string): boolean {
+    const deadline = Date.now() + LOCK_SYNC_TIMEOUT_MS;
+    for (;;) {
+      const attempt = this.tryLock(lockPath);
+      if (attempt === "held") return true;
+      if (attempt === "failed") return false;
+      if (this.breakStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        log.warn("ActiveRoleStore lock spin timed out; writing unlocked", { lockPath });
+        return false;
+      }
+    }
+  }
+
+  /** Release the cross-process lock; one that cannot be removed is left to the stale rule. */
+  private releaseLock(lockPath: string): void {
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // A lock file that outlives its write is broken by the stale rule.
     }
   }
 
@@ -185,56 +504,34 @@ export class ActiveRoleStore {
    * Lifecycle/GC: the returned map is passed through {@link prune} (TTL + cap)
    * before it is returned, so a file cannot grow without bound across restarts.
    * Passing `liveSessionIds` (from `ctx.sessions.list()`) additionally protects
-   * a still-live session from TTL eviction. Pruning is in-memory only — persist
-   * the compacted map via {@link save}/{@link saveSync} if compaction on disk
-   * is desired.
+   * a still-live session from TTL eviction. Pruning is in-memory only: a write
+   * merges over the file instead of replacing it, so an expired row leaves the
+   * file when the `maxSessions` cap evicts it, not when it expires.
    *
    * @param options - Per-call prune overrides (TTL, cap, live-session census).
    * @returns A session-keyed map, or `null` when nothing usable was read.
    */
   load(options: ActiveRoleStoreOptions = {}): Map<string, ActiveRoleEntry> | null {
+    const entries = this.readEntries();
+    if (entries === null) return null;
+    return this.prune(entries, options);
+  }
+
+  /**
+   * Read the state file tolerantly and answer its entries, or `null` when
+   * nothing usable was read (see {@link parseFile}). Shared by {@link load}
+   * and the merge inside every write, so a write can never interpret the file
+   * differently from a read. Takes no lock: the write side replaces the file
+   * atomically, so an unlocked read always sees a whole file.
+   */
+  private readEntries(): Map<string, ActiveRoleEntry> | null {
     let raw: string;
     try {
       raw = readFileSync(this.statePath(), "utf-8");
     } catch {
       return null;
     }
-
-    try {
-      const parsed = JSON.parse(raw) as FileShape;
-      if (!Array.isArray(parsed.sessions)) return null;
-      const version = parsed.version;
-      if (
-        typeof version !== "number" ||
-        !Number.isInteger(version) ||
-        version < ACTIVE_ROLE_STORE_MIN_VERSION ||
-        version > ACTIVE_ROLE_STORE_VERSION
-      ) {
-        return null;
-      }
-
-      const migrating = version < ACTIVE_ROLE_STORE_VERSION;
-      const out = new Map<string, ActiveRoleEntry>();
-      for (const entry of parsed.sessions) {
-        if (typeof entry?.sessionId !== "string") continue;
-        const roleId = typeof entry.roleId === "string" ? entry.roleId : null;
-        const updatedAt =
-          typeof entry.updatedAt === "number" && Number.isFinite(entry.updatedAt)
-            ? entry.updatedAt
-            : 0;
-        out.set(entry.sessionId, { sessionId: entry.sessionId, roleId, updatedAt });
-      }
-      if (migrating) {
-        log.info("Migrated active-role store", {
-          fromVersion: version,
-          toVersion: ACTIVE_ROLE_STORE_VERSION,
-          sessions: out.size,
-        });
-      }
-      return this.prune(out, options);
-    } catch {
-      return null;
-    }
+    return parseFile(raw);
   }
 
   /**
@@ -298,15 +595,27 @@ export class ActiveRoleStore {
       sessions.delete(sessionId);
     }
 
-    if (sessions.size > maxSessions) {
-      const sorted = [...sessions.values()].sort(
-        (a, b) => b.updatedAt - a.updatedAt || a.sessionId.localeCompare(b.sessionId),
-      );
-      for (let i = Math.max(0, maxSessions); i < sorted.length; i++) {
-        sessions.delete(sorted[i].sessionId);
-      }
-    }
+    this.applyCap(sessions, maxSessions);
 
     return sessions;
+  }
+
+  /**
+   * Bound a map at `maxSessions`, keeping the newest entries by `updatedAt`
+   * (ties broken by `sessionId`, so the result is deterministic). Shared by
+   * {@link prune} and the write-time merge, which must not let a merge grow the
+   * file past the same cap a load enforces.
+   */
+  private applyCap(
+    sessions: Map<string, ActiveRoleEntry>,
+    maxSessions: number,
+  ): void {
+    if (sessions.size <= maxSessions) return;
+    const sorted = [...sessions.values()].sort(
+      (a, b) => b.updatedAt - a.updatedAt || a.sessionId.localeCompare(b.sessionId),
+    );
+    for (let i = Math.max(0, maxSessions); i < sorted.length; i++) {
+      sessions.delete(sorted[i].sessionId);
+    }
   }
 }
