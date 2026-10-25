@@ -136,7 +136,7 @@ import type { DeliveredInputView } from "../../../graph/host/input-view.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
 
-/** Direct-child catalog fields used to correlate one-shot graph workers. */
+/** Direct-child catalog fields used to correlate graph workers. */
 export interface DshSubagentChildRow {
   readonly kind?: string;
   readonly id: string;
@@ -146,7 +146,9 @@ export interface DshSubagentChildRow {
 }
 
 function isGraphWorkerChild(child: DshSubagentChildRow): boolean {
-  return child.mode === "one-shot" || (child.mode === undefined && child.kind === "child");
+  // rc3 startActivation publishes local workers as continuable children.
+  return child.mode === "one-shot" || child.mode === "continuable" ||
+    (child.mode === undefined && child.kind === "child");
 }
 
 /**

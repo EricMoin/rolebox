@@ -4,8 +4,9 @@ import {
   type DshGraphWorkerRegistry, type DshWorkerAgent, type DshWorkerStartupTools,
 } from "../../../../src/platform/adapters/dsh/graph-worker.ts";
 import type { DshToolDefinition, DshToolRunContext } from "../../../../src/platform/adapters/dsh/tool-factory.ts";
+import type { DshWorkerToolExecutor } from "../../../../src/platform/adapters/dsh/worker-executor.ts";
 
-function fixture(startup: DshWorkerStartupTools) {
+function createFixture(startup: DshWorkerStartupTools, executorMode: boolean) {
   const listeners = new Map<string, (...args: unknown[]) => unknown>();
   const definitions = new Map<string, DshToolDefinition>();
   const local = new Map<string, DshToolDefinition>();
@@ -16,6 +17,8 @@ function fixture(startup: DshWorkerStartupTools) {
   let confirmed = false;
   let grantReads = 0;
   let grantUnavailable = false;
+  let scopedExecutor: DshWorkerToolExecutor | undefined;
+  const toolSet = {};
   const principal = { graphId: "graph", attemptId: "attempt", executionId: "worker", workerSessionId: "worker" };
   const rich = { isError: false, value: { count: 2 }, content: [
     { type: "text", text: "Two matches" },
@@ -28,7 +31,10 @@ function fixture(startup: DshWorkerStartupTools) {
   });
   for (const name of [...DSH_GRAPH_WORKER_TOOLS, "graph_control", "custom_search", "mcp_docs_lookup", "private_lookup"]) register(name);
   const agent: DshWorkerAgent = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: {
-    presentAs: () => () => {},
+    ...(executorMode ? { setExecutor: (executor: DshWorkerToolExecutor) => {
+      scopedExecutor = executor;
+      return () => { scopedExecutor = undefined; };
+    } } : { presentAs: () => () => {} }),
     register: definition => { local.set(definition.name, definition); return () => { local.delete(definition.name); }; },
   } } };
   const registry: DshGraphWorkerRegistry = {
@@ -54,29 +60,52 @@ function fixture(startup: DshWorkerStartupTools) {
       if (grantUnavailable) throw new Error("worker grant unavailable");
       return startup;
     },
-  }, registry, (event, listener) => { listeners.set(event, listener); return () => { listeners.delete(event); }; });
+  }, registry, (event, listener) => { listeners.set(event, listener); return () => { listeners.delete(event); }; },
+  executorMode ? () => ({ executor: { describe: tools => ({ schemas: tools }), execute: async () => undefined },
+    invoke: execution => registry.execute!(execution) }) : undefined);
   const start = async () => {
     await boundary.start("attempt", async () => { await listeners.get("agent/created")!({ agent }); }, startup);
   };
+  const startAfterScope = async () => {
+    await boundary.start("attempt", async () => {}, startup);
+    (agent.session!.events as Array<{ type: string; data: unknown }>).push({ type: "subagent/descriptor", data: { label: "attempt" } });
+    await listeners.get("agent/created")!({ agent });
+  };
   const assemble = async () => {
-    const assembly = { tools: registry.schemas!(agent), sections: [], contexts: [], variables: {} };
+    const assembly = { ...(!executorMode ? { tools: registry.schemas!(agent) } : {}), sections: [], contexts: [], variables: {} };
     const result = await listeners.get("system-prompt/assemble")!(assembly, { scope: agent }, async () => assembly) as typeof assembly;
     return result;
   };
-  const visible = async () => (await assemble()).tools.map(tool => tool.name);
+  const visible = async () => {
+    const assembly = await assemble();
+    const tools = executorMode
+      ? scopedExecutor!.describe([...definitions.values(), ...local.values()].filter(tool => !hidden.has(tool.name))).schemas
+      : assembly.tools!;
+    return tools.map(tool => tool.name);
+  };
   const call = (name: string, args: Record<string, unknown>, signal = new AbortController().signal) => {
     const execution: DshToolRunContext & { token: object } = {
-      agent, callId: "call-1", rootCallId: "root-1", token: {}, signal,
+      agent, callId: "call-1", rootCallId: "root-1", token: {}, toolSet, signal,
       deferContext: () => {}, concludeTurn: () => {},
     };
     return local.get(name)!.execute(args, execution);
   };
-  return { start, visible, assemble, registry, call, boundary, local, rich, executions, agent, register, hidden, denied,
+  return { start, startAfterScope, visible, assemble, registry, call, boundary, local, rich, executions, agent, register, hidden, denied, toolSet,
     confirm: () => { confirmed = true; }, guard: (name: string) => guard({ name, agent }),
     grantReads: () => grantReads, failGrant: () => { grantUnavailable = true; } };
 }
 
-describe("dsh worker capability integration", () => {
+describe.each(["presentation switch", "scoped executor"])("dsh worker capability integration with %s", mode => {
+  const fixture = (startup: DshWorkerStartupTools) => createFixture(startup, mode === "scoped executor");
+  it("recovers startup grants from the descriptor when publication leaves the async start scope", async () => {
+    const f = fixture({ agent: "worker-role", declaredTools: ["custom_*"], toolPresentation: { mode: "discover" } });
+    try {
+      await f.startAfterScope();
+      expect(f.boundary.roleOf(f.agent)).toBe("worker-role");
+      expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS, "graph_worker_tools"]);
+      expect(f.guard("custom_search")).toBeUndefined();
+    } finally { f.boundary.dispose(); }
+  });
   it("reads one coherent grant for the entire catalog and rechecks it for each invocation", async () => {
     const startup = { declaredTools: ["custom_*"] };
     const f = fixture(startup);
@@ -88,7 +117,7 @@ describe("dsh worker capability integration", () => {
       const visible = await f.visible();
       expect(visible).toContain("custom_99");
       expect(visible).not.toContain("private_lookup");
-      expect(f.grantReads() - before).toBe(1);
+      expect(f.grantReads() - before).toBe(mode === "scoped executor" ? 2 : 1);
       expect(f.guard("custom_search")).toBeUndefined();
       startup.declaredTools = [];
       expect(f.guard("custom_search")).toContain("Graph workers may only");
@@ -141,6 +170,7 @@ describe("dsh worker capability integration", () => {
       expect(execution.agent).toBe(f.agent);
       expect(execution.rootCallId).toBe("root-1");
       expect(execution.parent).toBeDefined();
+      expect(execution.toolSet).toBe(f.toolSet);
       expect(f.local.get("graph_worker_tools")!.output.render({}, result)).toEqual(f.rich.content);
       f.confirm();
       expect(f.guard("graph_worker_tools")).toBeUndefined();

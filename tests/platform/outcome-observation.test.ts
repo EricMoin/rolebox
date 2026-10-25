@@ -223,12 +223,12 @@ describe("the dsh execution query port", () => {
     delivery.close();
   });
 
-  it("correlates current mode-only child catalog rows and reads their terminal events", async () => {
-    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, createdAt: 1, mode: "one-shot", label: STABLE_KEY }] });
+  it.each(["one-shot", "continuable"])("correlates %s child catalog rows and reads their terminal events", async mode => {
+    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, createdAt: 1, mode, label: STABLE_KEY }] });
     const reads: string[] = [];
     const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
       readExecutionEvents: async id => { reads.push(id); return [
-        { type: "subagent/descriptor", time: 1, data: { version: 2, mode: "one-shot", label: STABLE_KEY } },
+        { type: "subagent/descriptor", time: 1, data: { version: 3, provider: "worker", mode, label: STABLE_KEY } },
         { type: "turn/start", time: 2, data: { turn: 1 } },
         { type: "assistant/message", time: 3, data: { turn: 1, step: 1,
           message: { content: [{ type: "text", text: '```json\n{"outcome_id":"done"}\n```' }] }, stream: [] } },
@@ -243,10 +243,10 @@ describe("the dsh execution query port", () => {
     delivery.close();
   });
 
-  it("keeps duplicate current one-shot catalog matches ambiguous", async () => {
+  it("keeps duplicate catalog matches ambiguous across supported child modes", async () => {
     const { runtime } = makeDshRuntime({ children: [
       { id: "modern-a", createdAt: 1, mode: "one-shot", label: STABLE_KEY },
-      { id: "modern-b", createdAt: 2, mode: "one-shot", label: STABLE_KEY },
+      { id: "modern-b", createdAt: 2, mode: "continuable", label: STABLE_KEY },
     ] });
     const delivery = dshDelivery(runtime);
     await delivery.executionQuery.prime?.([probe()]);
@@ -254,9 +254,9 @@ describe("the dsh execution query port", () => {
     delivery.close();
   });
 
-  for (const mode of ["continuable", "external", "unknown"]) {
+  for (const mode of ["external", "unknown"]) {
     for (const kind of [undefined, "child"]) {
-      it("rejects a non-one-shot row even with the matching label: mode=" + mode + ", kind=" + kind, async () => {
+      it("rejects an unsupported child mode even with the matching label: mode=" + mode + ", kind=" + kind, async () => {
         const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, mode, label: STABLE_KEY,
           ...(kind === undefined ? {} : { kind }) }] });
         const reads: string[] = [];
@@ -271,8 +271,8 @@ describe("the dsh execution query port", () => {
     }
   }
 
-  it("rejects a current one-shot catalog row with another stable label", async () => {
-    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, mode: "one-shot", label: "other-effect" }] });
+  it("rejects a continuable catalog row with another stable label", async () => {
+    const { runtime } = makeDshRuntime({ children: [{ id: EXECUTION_ID, mode: "continuable", label: "other-effect" }] });
     const reads: string[] = [];
     const delivery = new DshOutcomeDelivery({ subagents: runtime, onSettled: () => {}, onStartFailed: () => {},
       readExecutionEvents: async id => { reads.push(id); return []; },

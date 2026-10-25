@@ -1,5 +1,6 @@
 import { createDshGraphWorkerGrantHost } from "../platform/adapters/dsh/graph-worker-host.ts";
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
+import { loadDshWorkerExecutorFactory } from "../platform/adapters/dsh/worker-executor.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, resolveDshWorkerCommandBoundary, type DshGraphWorkerRegistry, type DshSandboxPolicyService, type DshSandboxService, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
 import { prepareDshGraphWorkerPrompt } from "../platform/adapters/dsh/worker-prompt.ts";
@@ -1841,6 +1842,7 @@ export async function apply(
   workerBoundary = installDshGraphWorkerBoundary(
     createDshGraphWorkerGrantHost(() => [...graphRuntimes.values()].map(runtime => runtime.host)),
     ctx.tools, (event, listener) => ctx.on(event, listener),
+    ctx.tools.setExecutor ? await loadDshWorkerExecutorFactory(ctx) : undefined,
   );
   let sessionPersistence: unknown;
   try { sessionPersistence = ctx.get("sessionPersistence"); } catch { /* Optional host service. */ }

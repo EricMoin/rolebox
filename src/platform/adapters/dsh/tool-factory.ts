@@ -225,6 +225,7 @@ export interface DshToolRunContext {
   /** REQUIRED provider-issued call id (`index.d.ts:197`). */
   callId: string;
   rootCallId?: string;
+  toolSet?: unknown;
   /** The agent on whose behalf the call runs (scope routing key). */
   agent?: {
     id?: string;

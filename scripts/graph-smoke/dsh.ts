@@ -1,12 +1,23 @@
 import { approvalPolicy, controlScenarios, eventually, assertRestored, verifyHostProcessRestart } from "./scenarios.ts";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, globSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { strict as assert } from "node:assert";
 import { createRequire } from "node:module";
 const hostRequire = createRequire(import.meta.resolve("@deepseek-ai/dsh-agent-loop"));
-const hostModule = (name: string) => import(hostRequire.resolve("@deepseek-ai/" + name));
+const sourcePackages = new Map<string, string>();
+if (process.env.DSH_SOURCE_DIR) {
+  for (const file of globSync(["packages/*/*/package.json", "vendor/*/package.json"], { cwd: process.env.DSH_SOURCE_DIR })) {
+    const path = join(process.env.DSH_SOURCE_DIR, file);
+    sourcePackages.set(JSON.parse(readFileSync(path, "utf8")).name, path);
+  }
+}
+const hostImport = (specifier: string) => {
+  const source = sourcePackages.get(specifier.split("/").slice(0, 2).join("/"));
+  return import((source ? createRequire(source) : hostRequire).resolve(specifier));
+};
+const hostModule = (name: string) => hostImport("@deepseek-ai/" + name);
 const { Context } = await hostModule("cordis");
 const { default: SessionStore, SessionId } = await hostModule("dsh-session");
 const { default: SessionProjections } = await hostModule("dsh-session-projection");
@@ -20,12 +31,16 @@ const { default: AgentRegistry } = await hostModule("dsh-agent");
 const { default: AgentLoop } = await hostModule("dsh-agent-loop");
 const { default: SystemPrompt } = await hostModule("dsh-system-prompt");
 const { default: ToolRegistry } = await hostModule("dsh-tools");
+const nativeExecutor = ToolRegistry.prototype.setExecutor ? await hostModule("dsh-tool-executor-native") : undefined;
 const { default: LlmService, LlmAdapter } = await hostModule("dsh-llm");
 const { default: SubagentService } = await hostModule("dsh-subagent");
-const spawn = await hostModule("dsh-subagent-spawn-in-process");
+const spawn = nativeExecutor ? undefined : await hostModule("dsh-subagent-spawn-in-process");
 import * as rolebox from "../../src/entries/dsh.ts";
 import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import { graphStoreRoot } from "../../src/graph/store/schema.ts";
+import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
+import { readDshExecutionEvents } from "../../src/platform/adapters/dsh/graph-observation.ts";
+import { dispatchEffectKeyOf, dispatchIdempotencyKeyOf } from "../../src/graph/outcome/dispatch-effects.ts";
 
 const original = process.cwd();
 const restoreRoot = process.env.ROLEBOX_SMOKE_RESTORE_ROOT;
@@ -50,6 +65,8 @@ let unsafeCalls = 0;
 let sandboxProbes = 0;
 let deniedProbes = 0;
 let consumedInputs = 0;
+let capabilityProbes = 0;
+const capabilitySteps = new Map<string, number>();
 const parentNotices: string[] = [];
 const hostErrors: string[] = [];
 let modelRequests = 0;
@@ -64,9 +81,15 @@ class ScriptedAdapter extends LlmAdapter {
     const credential = texts.match(/credential:\s+([^\s]+)/)?.[1];
     const history = JSON.stringify(options.messages);
     const graphNotice = last.includes("[GRAPH COMPLETE]") || last.includes("[GRAPH BLOCKED]");
+    const capabilityMode = graphId === "dsh.discover" ? "discover" : graphId === "dsh.code" ? "code" : undefined;
+    const capabilityStep = capabilityMode ? capabilitySteps.get(graphId!) ?? 0 : 0;
     if (!graphId && graphNotice) parentNotices.push(last);
     if (graphId) {
-      assert.deepEqual(options.tools.map((tool: any) => tool.name).sort(), ["graph_submit_outcome", "graph_worker_exec"], "Worker's first and subsequent requests must expose only native graph tools");
+      const expected = ["graph_submit_outcome", "graph_worker_exec"];
+      if (capabilityMode) expected.push("graph_worker_tools");
+      if (capabilityMode === "code") expected.push("graph_worker_code");
+      if (capabilityMode === "discover" && capabilityStep > 0) expected.push("custom_probe");
+      assert.deepEqual(options.tools.map((tool: any) => tool.name).sort(), expected.sort(), "Worker requests must expose exactly their granted tool presentation");
     }
     if (graphId) writeFileSync(join(root, graphId + ".ready"), "ready");
     if (graphId && texts.includes("FAIL_FIXTURE") && !existsSync(join(root, graphId + ".failed"))) {
@@ -83,7 +106,16 @@ class ScriptedAdapter extends LlmAdapter {
     if (!graphNotice && !(graphId && texts.includes("NATURAL_FIXTURE")) && ((graphId && !history.includes('"name":"graph_submit_outcome"')) || lastMessage?.role !== "tool")) {
       let tool = graphId ? "graph_submit_outcome" : parentAction?.tool ?? "graph_declare";
       let args: unknown = graphId ? { graph_id: graphId, node_id: nodeId, outcome_id: "done", credential, ...(graphId === "dsh.explicit" && nodeId === "work" ? { data: { marker: "accepted-upstream" } } : {}) } : parentAction?.args ?? { declaration: parentDeclaration };
-      if (graphId && !history.includes('"name":"graph_worker_exec"')) {
+      if (capabilityMode) {
+        capabilitySteps.set(graphId!, capabilityStep + 1);
+        if (capabilityMode === "discover" && capabilityStep === 0) {
+          tool = "graph_worker_tools"; args = { action: "describe", name: "custom_probe" };
+        } else if (capabilityMode === "discover" && capabilityStep === 1) {
+          tool = "custom_probe"; args = {};
+        } else if (capabilityMode === "code" && capabilityStep === 0) {
+          tool = "graph_worker_code"; args = { source: 'const result = await tools.call("custom_probe", {}); emit(result); return result.value;' };
+        }
+      } else if (graphId && !history.includes('"name":"graph_worker_exec"')) {
         tool = "graph_worker_exec";
         const manifestPath = nodeId === "review" ? JSON.parse(texts.match(/manifest:\s+([^\n]+)/)?.[1] ?? "null") : undefined;
         const readInput = manifestPath ? "cat '" + manifestPath.replaceAll("'", "'\\''") + "'; " : "";
@@ -116,9 +148,13 @@ try {
   fibers.push(ctx.plugin(WorkingDirectory, { defaultDirectory: root }));
   fibers.push(ctx.plugin(Sandbox));
   fibers.push(ctx.plugin(SandboxPolicy, { mode: "workspace-write", workspaceRoot: root }));
-  fibers.push(ctx.plugin(ToolRegistry, { mode: "ptc" }));
+  fibers.push(ctx.plugin(ToolRegistry, nativeExecutor ? {} : { mode: "ptc" }));
+  if (nativeExecutor) {
+    ctx.provide("loader", { import: hostImport });
+    fibers.push(ctx.plugin(nativeExecutor));
+  }
   fibers.push(ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 }));
-  fibers.push(ctx.plugin(spawn, { providerName: "spawn" }));
+  if (spawn) fibers.push(ctx.plugin(spawn, { providerName: "spawn" }));
 
   let mountTimer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -132,9 +168,12 @@ try {
   ctx.on("tools/result", (execution: any, result: any) => { if (execution.name === "unsafe_probe" && result.isError) deniedProbes++; if (execution.name.startsWith("graph_")) results.set(execution.agent?.id + ":" + execution.name, result.value); });
   ctx.tools.register({ name: "unsafe_probe", description: "A forbidden worker fixture", parameters: { type: "object", properties: {} },
     output: { schema: {}, render: () => [{ type: "text", text: "unsafe" }] }, execute: async () => { unsafeCalls++; return "unsafe"; } });
+  ctx.tools.register({ name: "custom_probe", description: "An explicitly granted worker fixture", parameters: { type: "object", properties: {} },
+    output: { schema: {}, render: () => [{ type: "text", text: "capability-output" }] }, execute: async () => { capabilityProbes++; return "capability-output"; } },
+  { when: () => true });
   let dispose = await rolebox.apply(ctx as unknown as rolebox.DshPluginContext, rolebox.Config.parse({ roleboxDir: join(root, "rolebox") }));
   const parentOptions = {
-    setup: (scope: any) => { scope.tools.presentAs("native"); },
+    setup: (scope: any) => { scope.tools.presentAs?.("native"); },
     agentOptions: { provider: "example-provider", model: "deterministic" },
   };
   const handle = restoreRoot
@@ -179,6 +218,23 @@ try {
   assert.equal(unsafeCalls, 0, "Worker reached an unfiltered host tool");
   assert.equal(sandboxProbes, 2, "Worker sandbox probe did not run through the real registry");
   assert.equal(deniedProbes, 2, "Host did not report denial of the forbidden tool");
+  const recoveredEffect = dispatchEffectKeyOf("dsh.explicit", "work#1");
+  const recoveredChild = (await ctx.subagents.listChildren(handle.agent.id))
+    .find((child: any) => child.label === dispatchIdempotencyKeyOf(recoveredEffect));
+  assert.equal(recoveredChild?.mode, "continuable", "rc3 local activations must appear in the durable child catalog");
+  const recoveryDelivery = new DshOutcomeDelivery({
+    subagents: ctx.subagents,
+    readExecutionEvents: id => readDshExecutionEvents(ctx.sessions, ctx.sessionPersistence, id),
+    onSettled: () => {}, onStartFailed: () => {},
+  });
+  try {
+    const probe = { effect: recoveredEffect, invocation: { sessionId: handle.agent.id } };
+    await recoveryDelivery.executionQuery.prime?.([probe]);
+    assert.deepEqual(recoveryDelivery.executionQuery.lookup(probe), {
+      kind: "created", execution: { executionId: recoveredChild.id },
+    }, "Recovery without an execution binding must find the existing rc3 worker");
+    assert.deepEqual(recoveryDelivery.observeExecution({ executionId: recoveredChild.id }), { kind: "completed" });
+  } finally { recoveryDelivery.close(); }
   await eventually(() => parentNotices.some(text => text.includes("[GRAPH COMPLETE]") && text.includes("dsh.explicit")),
     notified => notified, "Real dsh parent did not process graph completion");
   await handle.agent.whenIdle();
@@ -197,7 +253,18 @@ try {
   await eventually(() => parentNotices.some(text => text.includes("[GRAPH COMPLETE]") && text.includes("dsh.natural")),
     notified => notified, "Real dsh parent did not process natural graph completion");
   await handle.agent.whenIdle();
-  const other = await ctx.agents.create({ sessionId: SessionId("dsh-other"), meta: { cwd: root }, setup: (scope: any) => { scope.tools.presentAs("native"); }, agentOptions: { provider: "example-provider", model: "deterministic" } });
+  for (const mode of ["discover", "code"]) {
+    const name = "dsh." + mode;
+    parentDeclaration = { version: 3, name, nodes: [{ id: "work", agent: "smoke--worker", prompt: "Exercise granted capabilities.",
+      tools: ["custom_probe"], toolPresentation: { mode }, outcomes: [{ id: "done" }] }], edges: [] };
+    handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Execute capability presentation." }] });
+    await handle.agent.whenIdle();
+    await eventually(() => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === name),
+      graph => graph?.phase === "complete", "dsh worker capability presentation did not finish: " + mode);
+    await handle.agent.whenIdle();
+  }
+  assert.equal(capabilityProbes, 2, "Native discovery and program subcalls must each execute the granted host tool");
+  const other = await ctx.agents.create({ sessionId: SessionId("dsh-other"), meta: { cwd: root }, setup: (scope: any) => { scope.tools.presentAs?.("native"); }, agentOptions: { provider: "example-provider", model: "deterministic" } });
   const controls = await controlScenarios({ host: "dsh", workspace: root, approver: "dsh-other",
     read: id => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === id),
     async call(tool, args, actor = "owner") {
@@ -232,7 +299,7 @@ try {
   await handle.dispose();
   await dispose();
   await verifyHostProcessRestart(import.meta.filename, root, queryGraphs(graphStoreRoot(data, root)).graphs);
-  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
+  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", unconfirmedExecutionRecovery: "verified", workerDiscovery: "verified", workerCode: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
   }
 } catch (error) { console.error(error); throw error; } finally {
   for (const fiber of fibers.reverse()) await fiber.dispose();

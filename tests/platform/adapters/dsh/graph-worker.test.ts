@@ -58,6 +58,47 @@ describe("DSH graph worker presentation", () => {
     expect(guard).toBeUndefined();
   });
 
+  it("admits a worker on a host without the per-scope presentation switch", async () => {
+    // dsh's scoped tool-executor model dropped `ctx.tools.presentAs`; the
+    // worker's scope inherits the nearest executor selection instead. Starting
+    // a worker must therefore not require the switch — only the scoped tool
+    // registry it hangs off.
+    const listeners = new Map<string, (...args: unknown[]) => unknown>();
+    let guard: Parameters<NonNullable<DshGraphWorkerRegistry["guard"]>>[0] | undefined;
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: callback => {
+        guard = callback;
+        return () => { guard = undefined; };
+      },
+    }, (event, listener) => {
+      listeners.set(event, listener);
+      return () => { listeners.delete(event); };
+    });
+    const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: {} } };
+    await boundary.start("attempt-label", async () => {
+      await listeners.get("agent/created")!({ agent: worker });
+      expect(guard!({ name: "run_code", agent: worker })).toContain("Graph workers may only");
+      expect(guard!({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
+    });
+    expect(boundary.isWorker({ id: "worker" })).toBe(true);
+    boundary.dispose();
+  });
+
+  it("still refuses a worker with no scoped tool registry at all", async () => {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>();
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: () => () => {},
+    }, (event, listener) => {
+      listeners.set(event, listener);
+      return () => { listeners.delete(event); };
+    });
+    const worker = { id: "worker", session: { id: "worker", events: [] } };
+    await expect(boundary.start("attempt-label", async () => {
+      await listeners.get("agent/created")!({ agent: worker });
+    })).rejects.toThrow("scoped tool registry");
+    boundary.dispose();
+  });
+
   it("refuses a start without an execution guard", async () => {
     const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {}, () => undefined);
     let started = false;

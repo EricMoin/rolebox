@@ -1,4 +1,39 @@
-# dsh (DeepSeek Harness) Plugin Contract — verified against the 0.1.5-rc.1 source checkout
+# dsh (DeepSeek Harness) Plugin Contract
+
+## Current rc3 compatibility
+
+The runtime is verified against both the installed `0.2.1-rc.3` packages and
+a built source checkout at that version. Source hosts have changed several
+extension points without changing the version string, so the adapter selects
+the available API:
+
+- Published rc3 exposes `ctx.tools.presentAs("native")` and includes `tools`
+  in the `system-prompt/assemble` waterfall.
+- Newer source hosts expose `ctx.tools.setExecutor`. Their assembly waterfall
+  carries text presentation only; provider-owned tool schemas are assembled
+  separately. Each graph worker selects the host's native executor and filters
+  its `describe` input by the node grant. The execution guard remains active.
+- Worker discovery and code subcalls use the host invocation pipeline, keeping
+  the original agent, parent token, cancellation and step tool admission.
+  Executor modules resolve through the host plugin loader.
+- Local `startActivation` children are `continuable`. Recovery correlates both
+  `one-shot` and `continuable` catalog rows by the stable dispatch label;
+  duplicate matches remain ambiguous.
+- A worker published outside its async start scope recovers its startup role
+  and tool grant from that descriptor label before its first prompt assembly.
+
+Run the deterministic SDK graph smoke against the installed packages:
+
+```sh
+node --import tsx scripts/graph-smoke/dsh.ts
+```
+
+To verify a built source checkout, set `DSH_SOURCE_DIR=/path/to/harness-checkout`
+for the same command. It covers native, discovery and code tools, downstream
+inputs, execution recovery, cancellation, retry, approval and process restart.
+The earlier source contract below records its own historical baseline.
+
+## Historical source baseline: 0.1.5-rc.1
 
 > Contract gate for "Adapt rolebox to run as a `@deepseek-ai/dsh` cordis plugin".
 > **The reference of record is the dsh SOURCE checkout**, not published npm
@@ -746,9 +781,9 @@ Direct-child catalog rows are `{id, createdAt, mode, label?}` with mode
 `one-shot`, `continuable`, `external` or `unknown`
 (`source:packages/subagent/subagent/src/projection-types.ts`). They carry no
 `kind`; that discriminator belongs to descendant-list rows. Graph recovery
-correlates the stable dispatch label on `one-shot` rows. Legacy rows with
-`kind: "child"` and no mode remain compatible; an explicit different mode is
-refused even when its label matches.
+correlates the stable dispatch label on `one-shot` and `continuable` rows.
+Legacy rows with `kind: "child"` and no mode remain compatible; `external`
+and `unknown` modes are refused even when their labels match.
 
 **`SubagentProvider`** (`source:packages/subagent/subagent/src/types.ts`):
 
