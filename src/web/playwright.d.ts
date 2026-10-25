@@ -24,6 +24,7 @@ declare module "playwright" {
   }
 
   export const chromium: {
+    executablePath(): string;
     launch(options?: { headless?: boolean }): Promise<Browser>;
   };
 }

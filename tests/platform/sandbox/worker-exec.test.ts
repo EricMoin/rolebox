@@ -2,6 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { chromium } from "playwright";
 import { browserDiscoveryEnvironment, executeGraphWorkerCommand } from "../../../src/platform/sandbox/worker-exec.ts";
 import { getSystem, setPlatformForTest } from "../../../src/platform/system/index.ts";
 
@@ -267,7 +268,7 @@ it("keeps browser discovery pointed at installed caches", () => {
   expect(browserDiscoveryEnvironment("/workspace", { PLAYWRIGHT_BROWSERS_PATH: "0" }, "/home/example").PLAYWRIGHT_BROWSERS_PATH).toBe("0");
 });
 
-const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const chrome = chromium.executablePath();
 it.skipIf(process.platform !== "darwin" || !existsSync(chrome))("renders, screenshots and closes an installed browser through the caller's argv", async () => {
   const root = workspace("graph-worker-browser-");
   copyFileSync(new URL("./fixtures/browser-probe.ts", import.meta.url), join(root, "browser-probe.ts"));

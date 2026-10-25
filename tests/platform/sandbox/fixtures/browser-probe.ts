@@ -6,6 +6,7 @@ import type { Readable, Writable } from "node:stream";
 const browser = spawn(process.argv[2]!, [
   "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking", "--disable-component-update",
   "--disable-sync", "--use-mock-keychain", "--password-store=basic", "--no-first-run", "--no-default-browser-check",
+  "--no-startup-window",
   `--user-data-dir=${join(process.env.TMPDIR!, "profile")}`, "--remote-debugging-pipe",
 ], { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
 const writer = browser.stdio[3] as Writable;
@@ -47,6 +48,8 @@ try {
   const { data } = await send("Page.captureScreenshot", {}, sessionId);
   writeFileSync("screenshot.png", Buffer.from(data, "base64"));
   console.log(result.value);
+  await send("Target.detachFromTarget", { sessionId });
+  await send("Target.closeTarget", { targetId });
   await send("Browser.close");
   await exited;
   console.log("browser-closed");

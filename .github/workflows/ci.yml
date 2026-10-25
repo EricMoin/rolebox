@@ -25,6 +25,9 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
+      - name: Install Chromium for worker acceptance
+        if: matrix.os == 'macos-latest'
+        run: npx playwright install chromium
       - run: npm run typecheck
       - run: npm run typecheck:tests
       - run: npm run build
