@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const npmCli = process.env.npm_execpath;
 assert(npmCli, "Run package acceptance with npm run test:package");
-const scratch = await mkdtemp(join(tmpdir(), "rolebox-package-test-"));
+const scratch = await mkdtemp(join(process.env.RUNNER_TEMP || tmpdir(), "rolebox-package-test-"));
 const environment: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: "", CI: "1", ROLEBOX_NO_WELCOME: "1" };
 environment.ROLEBOX_CONFIG_DIR = join(scratch, "config");
 environment.ROLEBOX_DATA_DIR = join(scratch, "data");
