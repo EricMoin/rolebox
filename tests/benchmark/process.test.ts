@@ -75,13 +75,13 @@ describe.skipIf(process.platform === "win32")("benchmark process worker", () => 
 
   it("preserves a worker-confirmed task timeout", async () => {
     const result = await runBenchmarkWorker(request("task-timeout"), { workerPath });
-    expect(result.status).toBe("task_timeout");
+    expect(result.status, result.diagnostic).toBe("task_timeout");
     expect(result.terminationConfirmed).toBe(true);
   });
 
   it("preserves a worker-confirmed task failure", async () => {
     const result = await runBenchmarkWorker(request("task-failure"), { workerPath });
-    expect(result.status).toBe("task_failure");
+    expect(result.status, result.diagnostic).toBe("task_failure");
     expect(result.terminationConfirmed).toBe(true);
   });
 
@@ -91,7 +91,7 @@ describe.skipIf(process.platform === "win32")("benchmark process worker", () => 
     const input = request(mode);
     input.host.env = ["BENCHMARK_TEST_ALLOWED"];
     const result = await runBenchmarkWorker(input, { workerPath });
-    expect(result.status).toBe("invalid");
+    expect(result.status, result.diagnostic).toBe("invalid");
     expect(JSON.stringify(result)).not.toContain(secret);
     expect(result.usage).toEqual({ inputTokens: 2, outputTokens: 3, costUsd: null, source: "host" });
     expect(result.diagnostic).toContain("redacted");
@@ -106,7 +106,7 @@ describe.skipIf(process.platform === "win32")("benchmark process worker", () => 
     const input = request("environment");
     input.host.env = ["BENCHMARK_TEST_ALLOWED", "HOME", "ROLEBOX_HOT_RELOAD"];
     const result = await runBenchmarkWorker(input, { workerPath });
-    expect(result.status).toBe("completed");
+    expect(result.status, result.diagnostic).toBe("completed");
     const output = JSON.parse(result.output);
     expect(output.allowed).toBe(true);
     expect(output.unexpected).toBe(false);

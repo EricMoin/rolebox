@@ -66,4 +66,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium firefox webkit
+      - name: Allow sandboxed Playwright Chromium
+        run: |
+          cat > "$RUNNER_TEMP/rolebox-playwright.apparmor" <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile rolebox-playwright "${HOME}/.cache/ms-playwright/**/chrome{,-headless-shell}" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "$RUNNER_TEMP/rolebox-playwright.apparmor"
       - run: npm run test:browse:e2e

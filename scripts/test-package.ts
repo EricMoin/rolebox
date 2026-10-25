@@ -11,6 +11,8 @@ const environment: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: "", CI: "
 environment.ROLEBOX_CONFIG_DIR = join(scratch, "config");
 environment.ROLEBOX_DATA_DIR = join(scratch, "data");
 environment.ROLEBOX_LOG_DIR = join(scratch, "logs");
+const npmCli = process.env.npm_execpath;
+assert(npmCli, "Run package acceptance with npm run test:package");
 
 // Nested npm reads the original allow-scripts policy from its configuration file.
 for (const key of Object.keys(environment)) if (/^npm_config_allow_scripts$/i.test(key)) delete environment[key];
@@ -18,13 +20,14 @@ for (const key of Object.keys(environment)) if (/^npm_config_allow_scripts$/i.te
 function command(program: string, args: string[], cwd: string): string {
   const result = spawnSync(program, args, {
     cwd, env: environment, encoding: "utf8", timeout: 120_000,
-    maxBuffer: 8 * 1024 * 1024, shell: process.platform === "win32" && program.endsWith(".cmd"),
+    maxBuffer: 8 * 1024 * 1024,
   });
-  if (result.error) throw result.error;
+  if (result.error) throw new Error(`${args[0] ?? program} failed: ${result.error.message}\n${result.stderr || result.stdout}`, { cause: result.error });
   if (result.status !== 0) throw new Error(`${program} failed (${result.status}): ${result.stderr || result.stdout}`);
   return result.stdout;
 }
 
+let verificationError: unknown;
 try {
   const packedProject = join(scratch, "source");
   const consumer = join(scratch, "consumer");
@@ -36,8 +39,7 @@ try {
   await symlink(join(repository, "node_modules"), join(packedProject, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   const gitDirectory = command("git", ["rev-parse", "--absolute-git-dir"], repository).trim();
   await symlink(gitDirectory, join(packedProject, ".git"), process.platform === "win32" ? "junction" : "dir");
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const packed = command(npm, ["pack", "--json", "--pack-destination", scratch], packedProject);
+  const packed = command(process.execPath, [npmCli, "pack", "--json", "--pack-destination", scratch], packedProject);
   const manifest = JSON.parse(packed.slice(packed.indexOf("[\n"), packed.lastIndexOf("]") + 1)) as Array<{ filename: string; files: Array<{ path: string }> }>;
   const archive = join(scratch, manifest[0]!.filename);
   assert(manifest[0]!.files.some(file => file.path === "dist/cli/main.js"));
@@ -47,7 +49,7 @@ try {
   await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module" }));
   const development = JSON.parse(await readFile(join(repository, "package.json"), "utf8")).devDependencies as Record<string, string>;
   const peers = ["@opencode-ai/plugin", "@opencode/plugin", "@opentui/core", "@opentui/solid", "solid-js", "@earendil-works/pi-coding-agent"].map(name => `${name}@${development[name]}`);
-  command(npm, ["install", "--omit=optional", "--no-audit", "--no-fund", archive, ...peers], consumer);
+  command(process.execPath, [npmCli, "install", "--omit=optional", "--no-audit", "--no-fund", archive, ...peers], consumer);
   const probe = join(consumer, "probe.mjs");
   await writeFile(probe, `
     import assert from "node:assert/strict";
@@ -111,6 +113,11 @@ try {
   await writeFile(tuiProbe, 'import assert from "node:assert/strict"; import tui from "rolebox/tui"; assert.equal(tui.id, "rolebox-tui"); console.log("packed TUI import: PASS");');
   process.stdout.write(command(process.execPath, ["--experimental-ffi", tuiProbe], consumer));
   console.log("packed Node CLI and npm install lifecycle: PASS");
+} catch (error) {
+  verificationError = error;
+  throw error;
 } finally {
-  await rm(scratch, { recursive: true, force: true });
+  await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(error => {
+    throw verificationError === undefined ? error : new AggregateError([verificationError, error], "Package acceptance and cleanup failed");
+  });
 }

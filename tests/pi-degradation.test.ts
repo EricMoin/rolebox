@@ -477,11 +477,7 @@ describe("Pi extension log messages — degradation verification", () => {
 
     // Register via PiLightweightServiceStack
     const piMock: any = { registerTool: () => {} };
-    let stackInitResult = 0;
-    expect(async () => {
-      const stack = new PiLightweightServiceStack(piMock, [], undefined, dispatchStubTools);
-      stackInitResult = await stack.init();
-    }).not.toThrow();
-    expect(stackInitResult).toBeGreaterThan(0);
+    const stack = new PiLightweightServiceStack(piMock, [], undefined, dispatchStubTools);
+    await expect(stack.init()).resolves.toBeGreaterThan(0);
   });
 });

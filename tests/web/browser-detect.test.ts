@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+const available = { playwright: false, crawlee: false };
 
 describe("browser-detect", () => {
   let detectBrowserCapabilities: () => Promise<{
@@ -13,15 +15,22 @@ describe("browser-detect", () => {
   };
   let __resetBrowserDetection: () => void;
 
-  beforeAll(async () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    available.playwright = false;
+    available.crawlee = false;
+    vi.doMock("playwright", () => {
+      if (!available.playwright) throw new Error("Playwright fixture is unavailable");
+      return {};
+    });
+    vi.doMock("crawlee", () => {
+      if (!available.crawlee) throw new Error("Crawlee fixture is unavailable");
+      return {};
+    });
     const mod = await import("../../src/web/browser-detect.ts");
     detectBrowserCapabilities = mod.detectBrowserCapabilities;
     getCachedCapabilities = mod.getCachedCapabilities;
     __resetBrowserDetection = mod.__resetBrowserDetection;
-  });
-
-  beforeEach(() => {
-    __resetBrowserDetection();
   });
 
   // -----------------------------------------------------------------------
@@ -41,11 +50,14 @@ describe("browser-detect", () => {
 
   it("detectBrowserCapabilities reports no backends when packages are absent", async () => {
     const caps = await detectBrowserCapabilities();
-    // In the test environment, playwright and crawlee are not installed
-    // (they are optional peer dependencies)
     expect(caps.playwright).toBe(false);
     expect(caps.crawlee).toBe(false);
     expect(caps.checked).toBe(true);
+  });
+
+  it.each([[true, false], [false, true], [true, true]])("detects installed backends: playwright=%s, crawlee=%s", async (playwright, crawlee) => {
+    Object.assign(available, { playwright, crawlee });
+    expect(await detectBrowserCapabilities()).toEqual({ playwright, crawlee, checked: true });
   });
 
   // -----------------------------------------------------------------------
