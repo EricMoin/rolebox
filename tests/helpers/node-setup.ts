@@ -5,7 +5,7 @@ import { join } from "node:path";
 import "./log-dir-preload.ts";
 
 const temporaryEnvironment = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
-const temporaryDirectory = mkdtempSync(join(realpathSync(process.env.RUNNER_TEMP || tmpdir()), "rolebox-test-worker-"));
+const temporaryDirectory = mkdtempSync(join(realpathSync.native(process.env.RUNNER_TEMP || tmpdir()), "rolebox-test-worker-"));
 process.env.TMPDIR = process.env.TMP = process.env.TEMP = temporaryDirectory;
 afterAll(() => {
   for (const [key, value] of Object.entries(temporaryEnvironment)) {

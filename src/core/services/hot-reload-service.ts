@@ -123,7 +123,7 @@ export class HotReloadService implements PluginService {
     for (const dir of dirsToWatch) {
       try {
         // Windows notifications resolve 8.3 aliases, so the watcher must use their canonical path.
-        const watchDirectory = process.platform === "win32" ? realpathSync(dir) : dir;
+        const watchDirectory = process.platform === "win32" ? realpathSync.native(dir) : dir;
         const watcher = watch(watchDirectory, { recursive: true }, (eventType, filename) => {
           if (!filename) return;
           const ext = filename.slice(filename.lastIndexOf("."));
