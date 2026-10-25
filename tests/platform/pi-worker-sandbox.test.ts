@@ -11,7 +11,7 @@
  * spawn path (`PI_BIN_PATH`), so it pins what the child actually receives: the
  * worker delivery grant, and no rolebox profile.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,12 +25,19 @@ import type { MemoryConfig } from "../../src/memory/types.ts";
 import type { PiWorkerToolConfig } from "../../src/platform/adapters/pi/worker-tools.ts";
 
 const roots: string[] = [];
+beforeAll(async () => {
+  // Initialize process-wide SDK helpers before entering a disposable worktree.
+  await import("@earendil-works/pi-coding-agent");
+});
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     try {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     } catch (error) {
-      throw new Error(`Pi fixture cleanup failed; cwd=${process.cwd()}; remaining=${JSON.stringify(readdirSync(root, { recursive: true }))}`, { cause: error });
+      const report = process.report.getReport() as { libuv: Array<Record<string, unknown>> };
+      const handles = report.libuv.filter(handle => ["process", "fs_event", "fs_poll"].includes(String(handle.type)))
+        .map(({ type, pid, filename, is_active, is_referenced }) => ({ type, pid, filename, is_active, is_referenced }));
+      throw new Error(`Pi fixture cleanup failed; cwd=${process.cwd()}; handles=${JSON.stringify(handles)}; remaining=${JSON.stringify(readdirSync(root, { recursive: true }))}`, { cause: error });
     }
   }
 });
