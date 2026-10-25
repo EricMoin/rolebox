@@ -285,9 +285,16 @@ describe("RoleboxPlugin config hook", () => {
 
     const keys = Object.keys(cfg.agent ?? {}).sort();
     expect(keys).toEqual(["alpha", "beta", "gamma"]);
-    expect(cfg.agent!.alpha!.prompt).toBe("## Role instructions\n\nI am alpha.");
-    expect(cfg.agent!.beta!.prompt).toBe("## Role instructions\n\nI am beta.");
-    expect(cfg.agent!.gamma!.prompt).toBe("## Role instructions\n\nI am gamma.");
+    for (const [role, peers] of [
+      ["alpha", ["- `beta` — Second role", "- `gamma` — Third role"]],
+      ["beta", ["- `alpha` — First role", "- `gamma` — Third role"]],
+      ["gamma", ["- `alpha` — First role", "- `beta` — Second role"]],
+    ] as const) {
+      const prompt = cfg.agent![role]!.prompt!;
+      expect(prompt).toStartWith(`## Role instructions\n\nI am ${role}.`);
+      expect(prompt).toContain("## Available public agents");
+      expect(prompt.split("\n").filter(line => line.startsWith("- `"))).toEqual(peers);
+    }
   });
 
   // Scenario 5: all optional fields populated → all mapped
