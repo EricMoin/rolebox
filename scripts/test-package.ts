@@ -50,7 +50,7 @@ try {
   await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module" }));
   const development = JSON.parse(await readFile(join(repository, "package.json"), "utf8")).devDependencies as Record<string, string>;
   const peers = ["@opencode-ai/plugin", "@opencode/plugin", "@opentui/core", "@opentui/solid", "solid-js", "@earendil-works/pi-coding-agent"].map(name => `${name}@${development[name]}`);
-  command(process.execPath, [npmCli, "install", "--omit=optional", "--no-audit", "--no-fund", "--foreground-scripts", archive, ...peers], consumer, 300_000);
+  command(process.execPath, [npmCli, "install", "--omit=optional", "--no-audit", "--no-fund", "--prefer-offline", "--foreground-scripts", "--loglevel=verbose", archive, ...peers], consumer, 300_000);
   const probe = join(consumer, "probe.mjs");
   await writeFile(probe, `
     import assert from "node:assert/strict";
