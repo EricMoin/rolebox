@@ -200,7 +200,8 @@ export async function runBenchmarkWorker(request: BenchmarkWorkerRequest,
       deadline = setTimeout(() => { expired = true; void stop(); }, request.timeoutMs + startupAllowanceMs);
       const outcome = await Promise.race([exit, unconfirmed]);
       clearTimeout(deadline);
-      const lingering = child.pid !== undefined && groupExists(child.pid);
+      // Loader helpers may need a scheduling turn to exit after their worker.
+      const lingering = child.pid !== undefined && !await waitForGroupExit(child.pid, terminationGraceMs);
       if (lingering) await stop();
       terminationConfirmed = stopped ? await stopped : true;
       if (!terminationConfirmed) {

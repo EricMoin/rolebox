@@ -79,6 +79,14 @@ describe.skipIf(process.platform === "win32")("benchmark process worker", () => 
     expect(result.terminationConfirmed).toBe(true);
   });
 
+  it("waits for short-lived helper descendants to drain after worker exit", async () => {
+    const result = await runBenchmarkWorker(request("draining-descendant"), { workerPath });
+    expect(result.status, result.diagnostic).toBe("completed");
+    expect(result.terminationConfirmed).toBe(true);
+    const descendant = JSON.parse(readFileSync(join(workspace, "descendant.json"), "utf8"));
+    expect(processExists(descendant.pid)).toBe(false);
+  });
+
   it("preserves a worker-confirmed task failure", async () => {
     const result = await runBenchmarkWorker(request("task-failure"), { workerPath });
     expect(result.status, result.diagnostic).toBe("task_failure");

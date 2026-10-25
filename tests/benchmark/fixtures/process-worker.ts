@@ -68,5 +68,11 @@ switch (request.prompt) {
     await write(result);
     process.exit(0);
   }
+  case "draining-descendant": {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { stdio: "ignore" });
+    await writeFile(join(request.workspace, "descendant.json"), JSON.stringify({ pid: child.pid }));
+    await write(result);
+    process.exit(0);
+  }
   default: process.exit(3);
 }
