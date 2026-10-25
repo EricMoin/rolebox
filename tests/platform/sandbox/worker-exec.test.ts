@@ -272,7 +272,7 @@ const chrome = chromium.executablePath();
 it.skipIf(process.platform !== "darwin" || !existsSync(chrome))("renders, screenshots and closes an installed browser through the caller's argv", async () => {
   const root = workspace("graph-worker-browser-");
   copyFileSync(new URL("./fixtures/browser-probe.ts", import.meta.url), join(root, "browser-probe.ts"));
-  const result = await executeGraphWorkerCommand({ argv: [process.execPath, "browser-probe.ts", chrome], workspace: root, timeoutMs: 20_000 });
+  const result = await executeGraphWorkerCommand({ argv: [process.execPath, "browser-probe.ts", import.meta.resolve("playwright")], workspace: root, timeoutMs: 20_000 });
   expect(result.exitCode, result.output).toBe(0);
   expect(result.output).toContain("worker-browser-ok\nbrowser-closed\n");
   expect(readFileSync(join(root, "screenshot.png")).subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
