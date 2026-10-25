@@ -1223,14 +1223,16 @@ drives the mounted handler (`GET` = `200` view JSON, `POST` = `405`);
 
 #### 4.4.7 Client entries: the `settings.section` "Rolebox" page and the right-Sidebar tabs
 
-The client bundle now contributes **four** entries — the dock
+The client bundle now contributes **five** surfaces — the dock
 (`conversation.input.dock`, §4.4.4, unchanged), the "Rolebox" settings page, the
-monitoring tab and the log view tab — and `apply()` returns one disposer that
+monitoring tab, the log view tab, and one keyed transcript row per rolebox tool
+name (`tool.call.toolview`, §4.4.7(d)) — and `apply()` returns one disposer that
 tears every one of them down: the dock declaration wait, the settings declaration
-wait, the two tab-type registrations (`ctx.sidebarRightTabs.register`) and the
-two tab-body declaration waits (both keyed into the SAME
-`sidebar.right.pane.tab` seat under their own type ids,
-`src/platform/adapters/dsh/web-ui/client.ts`).
+wait, the two tab-type registrations (`ctx.sidebarRightTabs.register`), the two
+tab-body declaration waits (both keyed into the SAME
+`sidebar.right.pane.tab` seat under their own type ids), the tool-row
+dictionaries and the tool-row declaration waits,
+`src/platform/adapters/dsh/web-ui/client.ts`.
 
 **(a) The `settings.section` page — "Rolebox" (what roles are loaded)**
 
@@ -1544,6 +1546,53 @@ degradation shape as the `webServer` seam (§4.4.1). The service is
 deliberately NOT in the `inject` roster, so it can never gate plugin
 activation. Each `section()` / `context()` call returns a disposer; the
 adapter collects them and releases them on fiber unload (`dispose()`).
+
+
+**(d) The transcript Tool rows — `tool.call.toolview` (what a rolebox call is
+doing)**
+
+Without a registration the Web client falls back to its generic row — the title
+map in `ui-tool` is hardcoded per HOST tool name, so every rolebox call renders
+as `工具调用 · graph_declare · {…}` (the tool name plus the first line of its
+arguments). The host does NOT consume a tool's `presentCall`/`presentResult`
+there (`source:docs/cookbook/adding-a-tool.md:95`: session history carries raw
+events; the Client owns presentation), so the only extension point is the keyed
+seat declared by `@deepseek-ai/dsh-client-ui-tool`:
+
+```ts
+ctx.slots.inject("tool.call.toolview", () =>
+  ctx.slots.register(
+    { name: "tool.call.toolview", key: "<wire tool name>", locale: "rolebox.tools" },
+    RoleboxToolRow,
+  ),
+);
+```
+
+One registration per wire name (the seat has no prefix routing), all sharing one
+row component; the row derives its title from the call's stage
+(`preparing`/`start`/`result`) and the arguments:
+
+```text
+preparing/start:  正在声明图结构   (Declaring graph)     ← running tense + spinner
+result:           已声明图结构     (Declared graph)      ← completed tense + disclosure
+                  build · 2 个节点 · 1 条边
+```
+
+The catalog lives in `src/platform/adapters/dsh/web-ui/tool-view-descriptors.ts`
+(icon + verb + noun + salient-argument projection per tool), the glyphs are
+inline SVG (`tool-view-icons.tsx` — the bundle imports no host UI package), and
+the copy is derived from one table into `en` + `zh` dictionaries
+(`tool-view-locales.ts`, registered under `rolebox.tools`). The row's `t` seat is
+synthesized by the slot from that `locale` declaration, so the rows follow the
+active dsh UI locale with no per-component switch; every other installed
+language resolves per key to English through the locale fallback chain.
+
+Host-owned wire names are deliberately EXCLUDED (`web_search`, `web_fetch`,
+`session_search`): the host's copies shadow rolebox's, and registering a rolebox
+row for them would replace the host's dedicated card for a tool rolebox did not
+provide. A host without `@deepseek-ai/dsh-client-ui-tool` never declares the seat,
+so the injection callback never runs and the generic row stays — the same
+degradation shape as every other contribution.
 
 ### 4.6 Skill registry: `ctx.skills` — the rolebox skill-provider seam
 

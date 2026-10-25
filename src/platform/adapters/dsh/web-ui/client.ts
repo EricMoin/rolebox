@@ -2,7 +2,7 @@
  * dsh web-UI slot plugin — browser half (`src/platform/adapters/dsh/web-ui/client.ts`)
  *
  * This module is the client entry of the rolebox web-UI integration: a dsh
- * client plugin that contributes four components to the dsh web app:
+ * client plugin that contributes the rolebox surfaces to the dsh web app:
  *
  *   - {@link RoleSwitchDock} → the `'conversation.input.dock'` slot (the
  *     list/session-scoped full-width row above the composer card);
@@ -20,11 +20,18 @@
  *     the live log view is a sibling page of the run console rather than a
  *     section inside it. The two bodies are independent registrations in one
  *     seat: each is keyed by its own type id, and neither can blank the other.
+ *   - {@link RoleboxToolRow} → the keyed `'tool.call.toolview'` seat (declared
+ *     by `@deepseek-ai/dsh-client-ui-tool`), once per rolebox wire tool name:
+ *     the transcript row that says WHAT the call is doing ("正在声明图结构")
+ *     with the family glyph, the localized action and the salient argument,
+ *     instead of the generic "Tool call · graph_declare · {…}". The rows
+ *     follow the active dsh UI locale through the namespace seat
+ *     ({@link TOOL_VIEW_NS}).
  *
  * Each contribution follows the same posture (see below); the sections that
- * follow document the three slot contracts, the tab-type registry, and the
- * graceful-degradation rule that keeps the plugin healthy when a declaration
- * is absent.
+ * follow document the four slot contracts, the tab-type registry, the locale
+ * namespace the tool rows bind to, and the graceful-degradation rule that keeps
+ * the plugin healthy when a declaration is absent.
  *
  * ── Plugin shape ──────────────────────────────────────────────────────────
  * The export mirrors the canonical registrant-plugin posture of
@@ -172,6 +179,9 @@ import { RoleboxLogsPanel } from "./rolebox-logs-panel.tsx";
 import { RoleboxMonitorPanel } from "./rolebox-monitor-panel.tsx";
 import { RoleboxRolesPanel } from "./rolebox-roles-panel.tsx";
 import type { RoleboxRolesPanelProps } from "./rolebox-roles-panel.tsx";
+import { RoleboxToolRow } from "./tool-view-row.tsx";
+import { ROLEBOX_TOOL_VIEW_NAMES } from "./tool-view-descriptors.ts";
+import { TOOL_VIEW_NS, en as toolViewEn, zh as toolViewZh } from "./tool-view-locales.ts";
 
 // ── Plugin metadata ────────────────────────────────────────────────────────
 
@@ -190,7 +200,10 @@ export const name = "rolebox";
  * src/client/index.ts:52); declaring the services also delays activation
  * until the client runtime has provided them.
  */
-export const inject: string[] = ["slots", "sidebarRightTabs", "sidebarRight"];
+export const inject: string[] = ["slots", "sidebarRightTabs", "sidebarRight", "locale"];
+
+/** The keyed per-tool transcript-view seat (declared by dsh-client-ui-tool). */
+export const TOOL_VIEW_SLOT = "tool.call.toolview";
 
 /** The slot this plugin contributes into (the input dock above the composer). */
 export const DOCK_SLOT_NAME = "conversation.input.dock";
@@ -398,6 +411,24 @@ export interface DshSidebarRightService {
 }
 
 /**
+ * Structural locale registry — duck of `@deepseek-ai/dsh-client-locale`'s
+ * `LocaleRuntime.register(ns, localeOrDicts, dict?)`
+ * (packages/client/locale/src/client/index.ts:403-404), restricted to the one
+ * overload this plugin uses. `en` is the registry's fallback locale, so a
+ * namespace registering only `en` + `zh` still resolves every key in `ja`,
+ * `es`, `fr`, … through the per-key fallback chain.
+ */
+export interface DshLocaleService {
+  /**
+   * Register one namespace's dictionaries for the caller's lifetime.
+   * @param namespace - the namespace a slot entry declares as its `locale`.
+   * @param dictionaries - locale id → flat key/value dictionary.
+   * @returns the idempotent disposer that unregisters the namespace.
+   */
+  register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void;
+}
+
+/**
  * Structural client context — duck of the cordis `Context` after the
  * `@deepseek-ai/dsh-client-ui-slots` module augmentation
  * (lib/types/index.d.ts:106-110 declares `ctx.slots: SlotRegistry`) and the
@@ -412,6 +443,8 @@ export interface DshClientContext {
   sidebarRightTabs: DshSidebarRightTabsService;
   /** The right-Sidebar navigation/presentation face. */
   sidebarRight: DshSidebarRightService;
+  /** The browser locale registry (dictionary registration for the tool rows). */
+  locale: DshLocaleService;
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
@@ -612,6 +645,42 @@ export function apply(ctx: DshClientContext): (() => void) | void {
       ],
     }),
   );
+
+  // ── Rolebox Tool-call rows (`tool.call.toolview`) ──────────────────────
+  //
+  // ONE registration per rolebox wire tool name — the keyed slot dispatches by
+  // name and has no prefix routing. The dictionaries are registered FIRST: the
+  // row's `t` seat resolves against this namespace, and a late dictionary would
+  // render raw `verb.declare.run` keys during the first paint.
+  //
+  // The namespace carries `en` (the registry fallback) and `zh`; every other
+  // installed language resolves per key through its fallback chain, which is
+  // why the rows follow whichever locale the user picked in dsh Settings.
+  //
+  // A host WITHOUT the ui-tool package never declares `tool.call.toolview`, so
+  // the injection callback never runs and the transcript keeps the host's
+  // generic row — the same graceful degradation every other contribution has.
+  contribute("tool view dictionaries", () =>
+    ctx.locale.register(TOOL_VIEW_NS, { en: toolViewEn, zh: toolViewZh }),
+  );
+
+  contribute("tool call rows", () => {
+    const registered = ROLEBOX_TOOL_VIEW_NAMES.map(toolName =>
+      ctx.slots.inject(TOOL_VIEW_SLOT, () =>
+        ctx.slots.register(
+          {
+            name: TOOL_VIEW_SLOT,
+            key: toolName,
+            locale: TOOL_VIEW_NS,
+          },
+          RoleboxToolRow,
+        ),
+      ),
+    );
+    return () => {
+      for (const dispose of registered) dispose();
+    };
+  });
 
   return () => {
     for (const dispose of disposers) dispose();

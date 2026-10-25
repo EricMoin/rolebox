@@ -4,11 +4,11 @@
  * integration (`src/platform/adapters/dsh/web-ui/`).
  *
  * The plugin's `apply(ctx)` is exercised against fake `ctx.slots` /
- * `ctx.sidebarRightTabs` / `ctx.sidebarRight` doubles (platform-test
- * convention: structural fakes, no `@deepseek-ai/*` imports). Verifies:
+ * `ctx.sidebarRightTabs` / `ctx.sidebarRight` / `ctx.locale` doubles (platform-
+ * test convention: structural fakes, no `@deepseek-ai/*` imports). Verifies:
  *   - the plugin entry metadata: `name === 'rolebox'`,
- *     `inject === ['slots', 'sidebarRightTabs', 'sidebarRight']`, `apply` is a
- *     function (and the default object export carries them)
+ *     `inject === ['slots', 'sidebarRightTabs', 'sidebarRight', 'locale']`,
+ *     `apply` is a function (and the default object export carries them)
  *   - the UNCHANGED dock contribution: `ctx.slots.inject` is called with
  *     `'conversation.input.dock'`, and the injected callback registers
  *     `{ name, id: 'rolebox', order: 40, locale: 'conversation' }` with the
@@ -24,8 +24,13 @@
  *     guide entry names loops / engine graphs / metrics / sessions
  *   - the right-Sidebar tab BODY: `'sidebar.right.pane.tab'` is injected and
  *     its callback registers `RoleboxMonitorPanel` keyed by the tab id
- *   - the returned disposer tears down every registration (the three
- *     injection effects and the tab-type registration)
+ *   - the Tool-call rows: the locale dictionaries land in the tool namespace
+ *     BEFORE the rows, every rolebox wire name gets its own keyed
+ *     `tool.call.toolview` entry carrying the shared `RoleboxToolRow`, and
+ *     host-owned names (`web_search`, `web_fetch`, `session_search`) are left
+ *     to the host card
+ *   - the returned disposer tears down every registration (the declaration
+ *     waits, the tab types, the dictionaries and the tool rows)
  *   - the dock module's same-origin API contract (`GET /rolebox/roles`,
  *     `POST /rolebox/roles/switch`)
  *
@@ -82,6 +87,9 @@ const dock = await import("../../src/platform/adapters/dsh/web-ui/role-switch-do
 const monitor = await import("../../src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx");
 const logs = await import("../../src/platform/adapters/dsh/web-ui/rolebox-logs-panel.tsx");
 const roles = await import("../../src/platform/adapters/dsh/web-ui/rolebox-roles-panel.tsx");
+const toolRow = await import("../../src/platform/adapters/dsh/web-ui/tool-view-row.tsx");
+const descriptors = await import("../../src/platform/adapters/dsh/web-ui/tool-view-descriptors.ts");
+const toolLocales = await import("../../src/platform/adapters/dsh/web-ui/tool-view-locales.ts");
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -152,12 +160,31 @@ function createFakeSidebarRight() {
   };
 }
 
+/** Fake `ctx.locale` double capturing namespace registrations and disposal. */
+function createFakeLocale() {
+  const registered: Array<{
+    namespace: string;
+    dictionaries: Record<string, Record<string, string>>;
+  }> = [];
+  let disposed = 0;
+  const locale = {
+    register(namespace: string, dictionaries: Record<string, Record<string, string>>) {
+      registered.push({ namespace, dictionaries });
+      return () => {
+        disposed += 1;
+      };
+    },
+  };
+  return { locale, registered, disposed: () => disposed };
+}
+
 /** A complete fake client context. */
 function createFakeContext() {
   const slots = createFakeSlots();
   const tabs = createFakeSidebarRightTabs();
   const right = createFakeSidebarRight();
-  return { slots, tabs, right };
+  const locale = createFakeLocale();
+  return { slots, tabs, right, locale };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -169,11 +196,11 @@ describe("dsh web-UI client plugin entry", () => {
     // `ctx.slots` / `ctx.sidebarRight*` in apply() requires declaring them
     // ("cannot get property ... without inject" otherwise) — mirrors
     // dsh-client-ui-plan's roster.
-    expect(client.inject).toEqual(["slots", "sidebarRightTabs", "sidebarRight"]);
+    expect(client.inject).toEqual(["slots", "sidebarRightTabs", "sidebarRight", "locale"]);
     expect(typeof client.apply).toBe("function");
     // object plugin shape (default export) carries the same metadata
     expect(client.default.name).toBe("rolebox");
-    expect(client.default.inject).toEqual(["slots", "sidebarRightTabs", "sidebarRight"]);
+    expect(client.default.inject).toEqual(["slots", "sidebarRightTabs", "sidebarRight", "locale"]);
     expect(typeof client.default.apply).toBe("function");
   });
 
@@ -181,10 +208,12 @@ describe("dsh web-UI client plugin entry", () => {
     const { slots, injected, registered } = createFakeSlots();
     const tabs = createFakeSidebarRightTabs();
     const right = createFakeSidebarRight();
+    const locale = createFakeLocale();
     const disposer = client.apply({
       slots,
       sidebarRightTabs: tabs.sidebarRightTabs,
       sidebarRight: right.sidebarRight,
+      locale: locale.locale,
     });
 
     // apply waits on every seat declaration; pick the dock one by key.
@@ -219,6 +248,7 @@ describe("dsh web-UI client plugin entry", () => {
       slots: ctx.slots.slots,
       sidebarRightTabs: ctx.tabs.sidebarRightTabs,
       sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
     });
 
     const settingsInject = ctx.slots.injected.find((i) => i.key === "settings.section");
@@ -258,6 +288,7 @@ describe("dsh web-UI client plugin entry", () => {
       slots: ctx.slots.slots,
       sidebarRightTabs: ctx.tabs.sidebarRightTabs,
       sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
     });
 
     // The types are registered eagerly (not declaration-waited): a page type
@@ -292,6 +323,7 @@ describe("dsh web-UI client plugin entry", () => {
       slots: ctx.slots.slots,
       sidebarRightTabs: ctx.tabs.sidebarRightTabs,
       sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
     });
 
     const definition = ctx.tabs.registered.find((entry) => entry.id === client.LOGS_TAB_ID)!;
@@ -317,6 +349,7 @@ describe("dsh web-UI client plugin entry", () => {
       slots: ctx.slots.slots,
       sidebarRightTabs: ctx.tabs.sidebarRightTabs,
       sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
     });
 
     // ONE keyed seat, two bodies: the seat is declared once and each tab type
@@ -354,6 +387,7 @@ describe("dsh web-UI client plugin entry", () => {
       slots: ctx.slots.slots,
       sidebarRightTabs: ctx.tabs.sidebarRightTabs,
       sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
     });
 
     const bodyInject = ctx.slots.injected.find((i) => i.key === "sidebar.right.pane.tab");
@@ -378,18 +412,101 @@ describe("dsh web-UI client plugin entry", () => {
       slots: ctx.slots.slots,
       sidebarRightTabs: ctx.tabs.sidebarRightTabs,
       sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
     }) as () => void;
 
-    // Four declaration waits (dock, settings, monitor body, logs body) + both
-    // tab types.
-    expect(ctx.slots.injected).toHaveLength(4);
+    // Four declaration waits (dock, settings, monitor body, logs body), both
+    // tab types, the tool-row dictionaries, and ONE declaration wait per
+    // rolebox tool name.
+    const declarationWaits = 4 + descriptors.ROLEBOX_TOOL_VIEW_NAMES.length;
+    expect(ctx.slots.injected).toHaveLength(declarationWaits);
     expect(ctx.tabs.registered).toHaveLength(2);
-    expect(ctx.slots.injectedDisposers).toEqual([0, 0, 0, 0]);
+    expect(ctx.slots.injectedDisposers).toEqual(Array(declarationWaits).fill(0));
     expect(ctx.tabs.disposed()).toBe(0);
+    expect(ctx.locale.disposed()).toBe(0);
 
     disposer();
-    expect(ctx.slots.injectedDisposers).toEqual([1, 1, 1, 1]);
+    expect(ctx.slots.injectedDisposers).toEqual(Array(declarationWaits).fill(1));
     expect(ctx.tabs.disposed()).toBe(2);
+    expect(ctx.locale.disposed()).toBe(1);
+  });
+
+  it("registers one localized tool-call row per rolebox tool name", () => {
+    const ctx = createFakeContext();
+    client.apply({
+      slots: ctx.slots.slots,
+      sidebarRightTabs: ctx.tabs.sidebarRightTabs,
+      sidebarRight: ctx.right.sidebarRight,
+      locale: ctx.locale.locale,
+    });
+
+    // The dictionaries land in the namespace the rows declare as `locale`,
+    // BEFORE the first row renders (a late dictionary would paint raw keys).
+    expect(ctx.locale.registered).toHaveLength(1);
+    const dictionaries = ctx.locale.registered[0]!;
+    expect(dictionaries.namespace).toBe(toolLocales.TOOL_VIEW_NS);
+    expect(Object.keys(dictionaries.dictionaries)).toEqual(["en", "zh"]);
+    expect(dictionaries.dictionaries.en!["title.run"]).toBe("{verb} {noun}");
+    expect(dictionaries.dictionaries.zh!["title.run"]).toBe("正在{verb}{noun}");
+    expect(dictionaries.dictionaries.zh!["title.done"]).toBe("已{verb}{noun}");
+    expect(dictionaries.dictionaries.zh!["verb.declare.run"]).toBe("声明");
+    expect(dictionaries.dictionaries.zh!["noun.graph"]).toBe("图结构");
+    expect(dictionaries.dictionaries.en!["noun.graph"]).toBe("graph");
+
+    // The keyed slot dispatches by wire name, so every listed tool gets its
+    // own injection and registers the shared row under that exact key.
+    const toolInjections = ctx.slots.injected.filter(
+      (entry) => entry.key === client.TOOL_VIEW_SLOT,
+    );
+    expect(toolInjections).toHaveLength(descriptors.ROLEBOX_TOOL_VIEW_NAMES.length);
+    for (const injection of toolInjections) injection.callback();
+    expect(ctx.slots.registered.map((call) => call.options.key))
+      .toEqual([...descriptors.ROLEBOX_TOOL_VIEW_NAMES]);
+    for (const call of ctx.slots.registered) {
+      expect(call.options.name).toBe(client.TOOL_VIEW_SLOT);
+      expect(call.options.locale).toBe(toolLocales.TOOL_VIEW_NS);
+      expect(call.component).toBe(toolRow.RoleboxToolRow);
+    }
+
+    // Host-owned wire names keep the host card: rolebox must not replace the
+    // host's web/session presentation for tools rolebox did not register.
+    const names = descriptors.ROLEBOX_TOOL_VIEW_NAMES;
+    expect(names).toContain("graph_declare");
+    expect(names).toContain("team_send_event");
+    expect(names).toContain("browse_open");
+    expect(names).not.toContain("web_search");
+    expect(names).not.toContain("web_fetch");
+    expect(names).not.toContain("session_search");
+  });
+
+  it("composes the running row title and argument line through the locale seat", () => {
+    const calls: Array<{ key: string; params?: Record<string, unknown> }> = [];
+    const t = (key: string, params?: Record<string, unknown>) => {
+      calls.push({ key, ...(params === undefined ? {} : { params }) });
+      return key;
+    };
+    const element = toolRow.RoleboxToolRow({
+      callId: "call-1",
+      toolName: "graph_declare",
+      phase: "start",
+      block: {
+        argsRaw: JSON.stringify({
+          declaration: { name: "build", nodes: [{ id: "a" }], edges: [] },
+        }),
+      },
+      t,
+    });
+
+    // The row renders (no throw) and asks the seat for the running tense, the
+    // descriptor's verb/noun, and the node-count unit.
+    expect(element).toBeDefined();
+    expect(calls).toContainEqual({ key: "verb.declare.run" });
+    expect(calls).toContainEqual({ key: "noun.graph" });
+    expect(calls.find((call) => call.key === "title.run")?.params).toEqual({
+      verb: "verb.declare.run",
+      noun: "noun.graph",
+    });
+    expect(calls).toContainEqual({ key: "count.nodes", params: { n: 1 } });
   });
 
   it("keeps the tab body registered when a sibling contribution fails", () => {
@@ -413,6 +530,7 @@ describe("dsh web-UI client plugin entry", () => {
         slots: ctx.slots.slots,
         sidebarRightTabs: ctx.tabs.sidebarRightTabs,
         sidebarRight: ctx.right.sidebarRight,
+        locale: ctx.locale.locale,
       });
 
       // Every declaration-waited contribution is still installed.

@@ -18,9 +18,11 @@
  *   - `SessionEvent` envelope keys,
  *   - the cordis `Plugin.Base.Config` type,
  *   - the `dsh.bundle.patch` row shape,
- *   - the three client slot keys (`conversation.input.dock`, `settings.section`,
- *     `sidebar.right.pane.tab`), the tab-type registration behind the third
- *     (the `ctx.sidebarRightTabs` definition mirror).
+ *   - the four client slot keys (`conversation.input.dock`, `settings.section`,
+ *     `sidebar.right.pane.tab`, `tool.call.toolview`), the tab-type
+ *     registration behind the third (the `ctx.sidebarRightTabs` definition
+ *     mirror), the owner share of the keyed tool view, and the locale
+ *     registry the tool rows bind their `t` seat to.
  *
  * Developer-local by design (decision Q5): it is NOT wired into CI and never
  * vendors or clones dsh. When `DSH_SOURCE_DIR` is unset it prints a notice and
@@ -337,11 +339,17 @@ const MIRROR = {
   agentRegistrar: "src/platform/adapters/dsh/agent-registrar.ts",
   session: "src/platform/adapters/dsh/session.ts",
   plugin: "src/entries/dsh.ts",
+  client: "src/platform/adapters/dsh/web-ui/client.ts",
+  toolViewContract: "src/platform/adapters/dsh/web-ui/tool-view-contract.ts",
+  workerExecutor: "src/platform/adapters/dsh/worker-executor.ts",
 } as const
 
 // dsh-checkout relative paths (source root = $DSH_SOURCE_DIR).
 const DSH = {
   toolsIndex: "packages/core/tools/src/index.ts",
+  toolsContracts: "packages/core/tools/src/contracts.ts",
+  toolsExecutor: "packages/core/tools/src/executor.ts",
+  toolsPipeline: "packages/core/tools/src/pipeline.ts",
   llmTypes: "packages/llm/llm/src/types.ts",
   skill: "packages/skill/skill/src/index.ts",
   subagent: "packages/subagent/subagent/src/types.ts",
@@ -353,14 +361,34 @@ const DSH = {
   settingsSlots: "packages/client/ui-settings/src/client/contract/slots.ts",
   sidebarRightSlots: "packages/client/ui-sidebar-right/src/client/contract/slots.ts",
   sidebarRightTabRegistry: "packages/client/ui-sidebar-right/src/client/tab-registry.ts",
+  toolSlots: "packages/client/ui-tool/src/client/contract/slots.ts",
+  localeClient: "packages/client/locale/src/client/index.ts",
 } as const
 
 const MEMBER_SEAMS: MembersSeam[] = [
   {
+    id: "tool.ToolExecutor",
+    mirrorFiles: [MIRROR.workerExecutor],
+    mirrorDecl: "DshWorkerToolExecutor",
+    sourceFiles: [DSH.toolsExecutor],
+    sourceDecl: "ToolExecutor",
+    mode: "subset",
+    methodsOnly: true,
+  },
+  {
+    id: "tool.ToolExecutionPipeline",
+    mirrorFiles: [MIRROR.workerExecutor],
+    mirrorDecl: "WorkerPipeline",
+    sourceFiles: [DSH.toolsPipeline],
+    sourceDecl: "ToolExecutionPipeline",
+    mode: "subset",
+    methodsOnly: true,
+  },
+  {
     id: "tool.ToolDefinition",
     mirrorFiles: [MIRROR.toolFactory],
     mirrorDecl: "DshToolDefinition",
-    sourceFiles: [DSH.toolsIndex, DSH.llmTypes],
+    sourceFiles: [DSH.toolsIndex, DSH.toolsContracts, DSH.llmTypes],
     sourceDecl: "ToolDefinition",
     mode: "subset",
   },
@@ -368,7 +396,7 @@ const MEMBER_SEAMS: MembersSeam[] = [
     id: "tool.ToolOutputDefinition",
     mirrorFiles: [MIRROR.toolFactory],
     mirrorDecl: "DshToolDefinition.output",
-    sourceFiles: [DSH.toolsIndex],
+    sourceFiles: [DSH.toolsIndex, DSH.toolsContracts],
     sourceDecl: "ToolOutputDefinition",
     mode: "subset",
   },
@@ -448,6 +476,29 @@ const MEMBER_SEAMS: MembersSeam[] = [
     sourceDecl: "SessionEvent",
     mode: "require",
     require: ["type", "seq", "time", "data"],
+  },
+  {
+    // The owner share a keyed `tool.call.toolview` entry receives. `t` is a
+    // synthetic locale seat, so the seam requires only the four host members
+    // (present on both sides) rather than comparing member sets.
+    id: "client.toolView.owner",
+    mirrorFiles: [MIRROR.toolViewContract],
+    mirrorDecl: "RoleboxToolViewProps",
+    sourceFiles: [DSH.toolSlots],
+    sourceDecl: "ToolCallOwnerProps",
+    mode: "require",
+    require: ["callId", "toolName", "phase", "block"],
+  },
+  {
+    // `ctx.locale.register(ns, dicts)` — the mirror is the one overload the
+    // tool rows use; the host's LocaleRuntime carries the implementation.
+    id: "client.locale.register",
+    mirrorFiles: [MIRROR.client],
+    mirrorDecl: "DshLocaleService",
+    sourceFiles: [DSH.localeClient],
+    sourceDecl: "LocaleRuntime",
+    mode: "subset",
+    methodsOnly: true,
   },
 ]
 
@@ -699,11 +750,13 @@ function checkSlots(dshRoot: string): void {
   const dockName = extractConstString(clientSource, "DOCK_SLOT_NAME")
   const settingsName = extractConstString(clientSource, "SETTINGS_SLOT_NAME")
   const tabSlotName = extractConstString(clientSource, "MONITOR_TAB_SLOT_NAME")
+  const toolSlotName = extractConstString(clientSource, "TOOL_VIEW_SLOT")
 
   const seams: Array<{ id: string; roleboxKey: string | undefined; sourceFile: string }> = [
     { id: "slot.conversation.input.dock", roleboxKey: dockName, sourceFile: DSH.conversationSlots },
     { id: "slot.settings.section", roleboxKey: settingsName, sourceFile: DSH.settingsSlots },
     { id: "slot.sidebar.right.pane.tab", roleboxKey: tabSlotName, sourceFile: DSH.sidebarRightSlots },
+    { id: "slot.tool.call.toolview", roleboxKey: toolSlotName, sourceFile: DSH.toolSlots },
   ]
 
   for (const seam of seams) {
