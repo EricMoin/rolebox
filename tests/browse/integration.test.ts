@@ -28,6 +28,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { createBrowseTools } from "../../src/browse/tools.ts";
@@ -200,7 +201,7 @@ describe("browse_* one canonical turn over the driver port", () => {
     const shot = await h.call("browse_screenshot", {}, context);
     const shotMetadata = expectOk(shot, "browse_screenshot");
     const path = String(shotMetadata.path);
-    expect(path).toContain(`${h.worktree}/.rolebox/browse/`);
+    expect(dirname(path)).toBe(join(h.worktree, ".rolebox", "browse"));
     expect(path.endsWith(".png")).toBe(true);
     expect(existsSync(path)).toBe(true);
     const written = readFileSync(path);

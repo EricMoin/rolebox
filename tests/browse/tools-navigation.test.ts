@@ -8,6 +8,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
+import { join } from "node:path";
 import {
   createBrowseHarness,
   HARNESS_TITLE,
@@ -97,7 +98,7 @@ describe("browse_open", () => {
     expect(harness.factory.launchOptions[0].engine).toBe("firefox");
     expect(harness.factory.launchOptions[0].headless).toBe(false);
     expect(harness.factory.launchOptions[0].viewport).toEqual({ width: 800, height: 600 });
-    expect(harness.factory.launchOptions[0].downloadsDirectory).toContain(".rolebox/browse/downloads");
+    expect(harness.factory.launchOptions[0].downloadsDirectory).toBe(join(harness.worktree, ".rolebox", "browse", "downloads"));
   });
 
   it("defaults the viewport to 1440x900", async () => {

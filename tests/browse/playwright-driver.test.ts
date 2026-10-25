@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 
 
@@ -719,7 +719,7 @@ describe("browseScreenshotResult", () => {
       expect(attachment.type).toBe("file");
       expect(attachment.mime).toBe("image/png");
       expect(attachment.url.startsWith("data:image/png;base64,")).toBe(true);
-      expect(attachment.filename).toBe(path.split("/").pop()!);
+      expect(attachment.filename).toBe(basename(path));
     } finally {
       rmSync(worktree, { recursive: true, force: true });
     }

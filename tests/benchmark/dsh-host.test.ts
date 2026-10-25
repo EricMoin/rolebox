@@ -74,7 +74,11 @@ async function execute(mode: string, options: { model?: string; config?: Record<
       expect(graphs.graphs[0]?.current?.attempts).toHaveLength(2);
     }
     return result;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (process.exitCode === null && process.signalCode === null) process.kill("SIGKILL");
+    await process.exited;
+  }
 }
 
 describe("dsh benchmark runtime resolution", () => {

@@ -105,7 +105,7 @@ describe("Pi graph worker boundary", () => {
         routeFile: join(root, "route.json") }));
       const info = await adapter.create({ directory: root, agent: "worker" });
       if (!info) throw new Error("the adapter did not create a session");
-      await adapter.runGraphWorker(() => adapter.prompt(info.id, { parts: [{ type: "text", text: "Task: fixture" }] }));
+      await adapter.runGraphWorker(() => adapter.promptSync(info.id, { parts: [{ type: "text", text: "Task: fixture" }] }));
       const output = await spawnRecord(record);
       // The child's argv[0] is the resolved fixture binary itself. Compared as
       // the file it names: cmd may quote %0, and Windows may report a short
@@ -125,7 +125,7 @@ describe("Pi graph worker boundary", () => {
       const ordinary = await adapter.create({ directory: root, agent: "worker" });
       if (!ordinary) throw new Error("the adapter did not create an ordinary session");
       process.env.PI_SPAWN_RECORD = join(root, "ordinary-record.txt");
-      await adapter.prompt(ordinary.id, { parts: [{ type: "text", text: "Ordinary task" }] });
+      await adapter.promptSync(ordinary.id, { parts: [{ type: "text", text: "Ordinary task" }] });
       await spawnRecord(process.env.PI_SPAWN_RECORD);
       expect(readFileSync(process.env.PI_SPAWN_RECORD + ".prompt", "utf8")).toBe("Ordinary agent context");
 
@@ -159,7 +159,7 @@ describe("Pi graph worker boundary", () => {
         const worker = await adapter.create({ directory: root, agent: "memory-worker" });
         if (!worker) throw new Error("the adapter did not create a memory worker");
         process.env.PI_SPAWN_RECORD = join(root, `memory-${item.name}.txt`);
-        await adapter.runGraphWorker(() => adapter.prompt(worker.id, {
+        await adapter.runGraphWorker(() => adapter.promptSync(worker.id, {
           agent: "memory-worker", parts: [{ type: "text", text: "Memory task" }],
         }));
         await spawnRecord(process.env.PI_SPAWN_RECORD);
@@ -204,7 +204,7 @@ describe("Pi graph worker boundary", () => {
         const worker = await adapter.create({ directory: root, agent: "computer-worker" });
         if (!worker) throw new Error("the adapter did not create a computer worker");
         process.env.PI_SPAWN_RECORD = join(root, `computer-${item.name}.txt`);
-        await adapter.runGraphWorker(() => adapter.prompt(worker.id, {
+        await adapter.runGraphWorker(() => adapter.promptSync(worker.id, {
           agent: "computer-worker", parts: [{ type: "text", text: "Desktop task" }],
         }));
         await spawnRecord(process.env.PI_SPAWN_RECORD);
@@ -235,6 +235,6 @@ describe("Pi graph worker boundary", () => {
     expect(await childSessionFile(root, "fixture-session")).toBe(path);
     const header = JSON.parse(readFileSync(path, "utf8")); header.id = "replacement";
     writeFileSync(path, JSON.stringify(header) + "\n");
-    expect(childSessionFile(root, "fixture-session")).rejects.toThrow("identity mismatch");
+    await expect(childSessionFile(root, "fixture-session")).rejects.toThrow("identity mismatch");
   });
 });
