@@ -50,7 +50,8 @@ try {
   console.log(result.value);
   await send("Target.detachFromTarget", { sessionId });
   await send("Target.closeTarget", { targetId });
-  await send("Browser.close");
+  // Chrome can exit before replying to Browser.close; confirm shutdown through its exit.
+  writer.write(JSON.stringify({ id: ++nextId, method: "Browser.close" }) + "\0");
   await exited;
   console.log("browser-closed");
 } finally {

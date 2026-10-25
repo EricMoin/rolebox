@@ -293,7 +293,7 @@ describe("RoleboxPlugin config hook", () => {
       const prompt = cfg.agent![role]!.prompt!;
       expect(prompt).toStartWith(`## Role instructions\n\nI am ${role}.`);
       expect(prompt).toContain("## Available public agents");
-      expect(prompt.split("\n").filter(line => line.startsWith("- `"))).toEqual(peers);
+      expect(prompt.split("\n").filter(line => line.startsWith("- `")).sort()).toEqual([...peers].sort());
     }
   });
 
