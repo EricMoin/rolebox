@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, spyOn } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -182,7 +182,7 @@ describe("acquireStateLock", () => {
       "utf-8",
     );
 
-    const killSpy = spyOn(process, "kill").mockImplementation(() => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
       const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
       err.code = "EPERM";
       throw err;
@@ -209,7 +209,7 @@ describe("acquireStateLock", () => {
       "utf-8",
     );
 
-    const killSpy = spyOn(process, "kill").mockImplementation(() => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
       const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
       err.code = "EPERM";
       throw err;

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The accepted revision survives the path changing — and a restart.
@@ -13,7 +12,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

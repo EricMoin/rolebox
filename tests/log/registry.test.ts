@@ -26,7 +26,7 @@
  *    lets a call site migrate without its sentence drifting.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   LOG_EVENTS,

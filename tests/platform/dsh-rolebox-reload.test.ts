@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshRoleboxReloader — src/platform/adapters/dsh/rolebox-reload.ts
@@ -19,7 +18,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

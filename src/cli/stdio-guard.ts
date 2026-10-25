@@ -4,7 +4,7 @@
  * A CLI's reader can disappear while the CLI is still writing: `rolebox list |
  * head` stops reading after a few lines, a terminal window is closed in the
  * middle of an interactive picker, and an agent PTY that launched the command
- * is torn down. The next write then fails with EPIPE. Bun (like Node) treats a
+ * is torn down. The next write then fails with EPIPE. Node.js treats a
  * stream `error` that nobody listens for — and an unhandled promise rejection —
  * as fatal, so the command dies with a runtime crash report (`EPIPE: broken
  * pipe, write` plus a stack trace) instead of ending quietly. The interactive
@@ -90,7 +90,7 @@ export interface BrokenPipeGuardOptions {
 /**
  * True when `error` is the OS's "the reader is gone" failure (EPIPE).
  *
- * Bun and Node both attach `code` to the system error; the message is never
+ * Node.js attaches `code` to the system error; the message is never
  * parsed, so a wrapped or renamed error cannot be mistaken for a broken pipe.
  */
 export function isBrokenPipeError(error: unknown): boolean {

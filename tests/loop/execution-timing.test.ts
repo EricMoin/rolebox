@@ -14,7 +14,7 @@
  * - onOriginIdle never advances the loop (advancement is push-chain only).
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import {
   createStatefulAdapter,

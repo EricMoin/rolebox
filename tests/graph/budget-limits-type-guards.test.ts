@@ -1,25 +1,5 @@
-/**
- * F-24 (A-10) — `NodeBudgetLimits` is a READING, not a shape.
- *
- * The pre-fix interface was four OPTIONAL numbers, so `const limits:
- * NodeBudgetLimits = raw` compiled for a raw `Record<string, unknown>` and the
- * budget API (`hasBudgetLimits`, `budgetOverrunsOf`, the report builder) could
- * not require that `nodeBudgetLimitsOf` — the only reader that turns raw limits
- * into checked ones — had run. The fix brands the reader's output with a
- * module-private `unique symbol`, so only a value that came out of the reader
- * (or was extended from one) is a `NodeBudgetLimits`.
- *
- * WHY THIS FILE EXISTS. `bun test` is transpile-only, so the pre-fix probe
- * (`.rolebox/evidence/graph-type-audit/probe-index-to-optional.ts`) COMPILED
- * and its two assignments were exactly the defect. The authority for every
- * `expectTypeOf` pin below is `bun run typecheck:tests`; the runtime cases
- * beside them pin that a declared budget still reads and reserves exactly as it
- * did — the fix is type-level, and no persisted column, SQL or value moved.
- *
- * @module
- */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

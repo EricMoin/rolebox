@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * THE LOG SOURCE WATCHER — the file-system edge of the live log surfaces.
@@ -31,7 +30,7 @@
  * @module
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

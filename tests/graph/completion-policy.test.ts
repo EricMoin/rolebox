@@ -28,7 +28,7 @@
  * afterEach; the test file writes nothing outside a temp dir.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

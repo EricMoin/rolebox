@@ -7,7 +7,7 @@
  * error signatures with category and errorType).
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import { PatternRegistry, createDefaultPatterns } from "../../src/recovery/error-detection.ts";
 import type { RecoveryErrorCategory } from "../../src/recovery/types.ts";
 

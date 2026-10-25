@@ -1,10 +1,11 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // Mock state-hash for predictable filenames (same pattern as monitor-reader.test.ts)
-mock.module("../../../src/cli/state-hash", () => ({
+vi.doMock("../../../src/cli/state-hash", () => ({
   stateFileHash: () => "testhash123456",
 }));
 
@@ -1551,3 +1552,5 @@ describe("monitor CLI arg parsing", () => {
     expect(output).toContain("no tasks match filters");
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

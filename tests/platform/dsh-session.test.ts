@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { DshSessionAdapter } from "../../src/platform/adapters/dsh/session.ts";
 import type {
   DshPromptInjector,

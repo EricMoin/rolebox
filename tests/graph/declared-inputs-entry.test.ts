@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Node `inputs` enter through the REAL declaration entry (D8).
@@ -18,7 +17,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

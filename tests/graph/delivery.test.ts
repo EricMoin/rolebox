@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import { buildAttemptDeliveryPrompt } from "../../src/graph/host/delivery.ts";
 import type { DeliveredInputView } from "../../src/graph/host/input-view.ts";

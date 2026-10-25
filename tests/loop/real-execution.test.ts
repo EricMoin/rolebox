@@ -18,9 +18,8 @@
  *     prompt: "Do the thing", mode: "inherit", iterations: 3 }
  */
 
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants.ts";
 import {

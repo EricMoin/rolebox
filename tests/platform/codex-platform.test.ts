@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -49,10 +48,6 @@ describe("codexPlatformPaths", () => {
     expect(paths.sessionsDir).toBeUndefined();
   });
 
-  // The fallback is asserted against os.homedir(), exactly like the dsh/pi
-  // cases in tests/platform/paths.test.ts: Bun's os.homedir() resolves the real
-  // passwd entry and ignores a faked $HOME, so the honest contract is
-  // "${homedir()}/.codex". Nothing here touches the filesystem.
   it("treats a blank CODEX_HOME as unset and falls back to ~/.codex", () => {
     const fallback = join(homedir(), ".codex");
 

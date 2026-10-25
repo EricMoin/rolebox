@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import type { ResolvedFunction } from "../src/types.js";
 
 function makeFn(overrides: Partial<ResolvedFunction> & { name: string }): ResolvedFunction {
@@ -65,7 +65,6 @@ describe("Inject Order — priority sorting", () => {
     ];
 
     const sorted = sortByPriority(fns);
-    // Sort is stable in V8/bun, so input order preserved for ties
     expect(sorted.map((f) => f.name)).toEqual(["a", "b", "c"]);
   });
 });

@@ -1,11 +1,12 @@
-import { describe, test, expect, jest, mock, beforeEach, afterEach } from "bun:test";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../src/utils/timeout.ts";
 import type { Logger } from "../../src/logger.ts";
 
 // ── Mock Logger ──────────────────────────────────────────────────────
 // Only warn() is called by withTimeout; the rest are filler for the type.
 function fakeLogger(): Logger<any> {
-  return { warn: mock(() => {}) } as unknown as Logger<any>;
+  return { warn: vi.fn(() => {}) } as unknown as Logger<any>;
 }
 
 test("settled guards release their timers so a host process can exit", async () => {
@@ -13,7 +14,7 @@ test("settled guards release their timers so a host process can exit", async () 
     const log = { warn() {} };
     await withTimeout(Promise.resolve("done"), 10000, "success", log);
     await withTimeout(Promise.reject(new Error("failed")), 10000, "failure", log).catch(() => {});`;
-  const child = Bun.spawn([process.execPath, "-e", source], { stdout: "ignore", stderr: "pipe" });
+  const child = spawnProcess([process.execPath, "-e", source], { stdout: "ignore", stderr: "pipe" });
   const timer = setTimeout(() => child.kill(), 2000);
   try { expect(await child.exited).toBe(0); }
   finally { clearTimeout(timer); }
@@ -22,11 +23,11 @@ test("settled guards release their timers so a host process can exit", async () 
 // ── withTimeout ──────────────────────────────────────────────────────
 describe("withTimeout", () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test("resolves with value when promise settles before timeout", async () => {
@@ -44,7 +45,7 @@ describe("withTimeout", () => {
     const never = new Promise<string>(() => {}); // intentionally never settles
     const promise = withTimeout(never, 1000, "slow-task", log);
 
-    jest.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(1000);
 
     const result = await promise;
     expect(result).toBeNull();

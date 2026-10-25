@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { OpencodeWorkerTools } from "../../src/platform/adapters/opencode/worker-tools.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
 import type { CanonicalToolContext } from "../../src/platform/types.ts";

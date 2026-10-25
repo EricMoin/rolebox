@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DshHookProvider } from "../../src/platform/adapters/dsh/hook-provider.ts";
@@ -35,7 +34,7 @@ function createFakeCtx() {
 describe("DshHookProvider", () => {
   it("maps tool-before → tools/pre-execute on the fake ctx", () => {
     const ctx = createFakeCtx();
-    const toolBefore = mock((_p: DshHookPayload) => {});
+    const toolBefore = vi.fn((_p: DshHookPayload) => {});
 
     new DshHookProvider(ctx, { toolBefore });
 
@@ -58,7 +57,7 @@ describe("DshHookProvider", () => {
 
   it("maps tool-after → tools/post-execute on the fake ctx", () => {
     const ctx = createFakeCtx();
-    const toolAfter = mock((_p: DshHookPayload) => {});
+    const toolAfter = vi.fn((_p: DshHookPayload) => {});
 
     new DshHookProvider(ctx, { toolAfter });
 
@@ -83,11 +82,11 @@ describe("DshHookProvider", () => {
     // undefined clobbers the waterfall, so dsh-tools' `gate.kind` read throws
     // "Cannot read properties of undefined (reading 'kind')" on every tool call.
     const ctx = createFakeCtx();
-    const toolBefore = mock((_p: DshHookPayload) => {});
+    const toolBefore = vi.fn((_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { toolBefore });
 
     const listener = ctx.listeners.get("tools/pre-execute")![0] as (...a: unknown[]) => unknown;
-    const next = mock(() => ({ kind: "allow" }));
+    const next = vi.fn(() => ({ kind: "allow" }));
 
     const out = listener({ name: "bash", callId: "c1" }, next);
 
@@ -98,11 +97,11 @@ describe("DshHookProvider", () => {
 
   it("chains tools/post-execute and awaits an async observer before next()", async () => {
     const ctx = createFakeCtx();
-    const toolAfter = mock(async (_p: DshHookPayload) => {});
+    const toolAfter = vi.fn(async (_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { toolAfter });
 
     const listener = ctx.listeners.get("tools/post-execute")![0] as (...a: unknown[]) => unknown;
-    const next = mock(() => ({ kind: "accept" }));
+    const next = vi.fn(() => ({ kind: "accept" }));
 
     const out = await listener(
       { name: "bash", callId: "c1" },
@@ -117,11 +116,11 @@ describe("DshHookProvider", () => {
 
   it("does not treat a trailing function on a plain event as a waterfall next", () => {
     const ctx = createFakeCtx();
-    const toolAfter = mock((_p: DshHookPayload) => {});
+    const toolAfter = vi.fn((_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { toolAfter });
 
     const listener = ctx.listeners.get("tools/result")![0] as (...a: unknown[]) => unknown;
-    const notNext = mock(() => ({ kind: "nope" }));
+    const notNext = vi.fn(() => ({ kind: "nope" }));
 
     const out = listener({ name: "bash", callId: "c1" }, { isError: false }, notNext);
 
@@ -132,7 +131,7 @@ describe("DshHookProvider", () => {
 
   it("routes tools/result to tool-after as the frozen-outcome observation", () => {
     const ctx = createFakeCtx();
-    const toolAfter = mock((_p: DshHookPayload) => {});
+    const toolAfter = vi.fn((_p: DshHookPayload) => {});
 
     new DshHookProvider(ctx, { toolAfter });
 
@@ -146,7 +145,7 @@ describe("DshHookProvider", () => {
 
   it("maps chat-message → session/event for message appends only", () => {
     const ctx = createFakeCtx();
-    const chatMessage = mock((_p: DshHookPayload) => {});
+    const chatMessage = vi.fn((_p: DshHookPayload) => {});
 
     new DshHookProvider(ctx, { chatMessage });
 
@@ -185,7 +184,7 @@ describe("DshHookProvider", () => {
 
   it("regression: two-arg user/message fires chat-message with sub-type and arg0 sessionID", () => {
     const ctx = createFakeCtx();
-    const chatMessage = mock((_p: DshHookPayload) => {});
+    const chatMessage = vi.fn((_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { chatMessage });
 
     // arg0 is a Session-like record with `id` (no `type`); arg1 is the event.
@@ -207,7 +206,7 @@ describe("DshHookProvider", () => {
 
   it("regression: two-arg turn/end does NOT fire chat-message", () => {
     const ctx = createFakeCtx();
-    const chatMessage = mock((_p: DshHookPayload) => {});
+    const chatMessage = vi.fn((_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { chatMessage });
 
     ctx.emit(
@@ -221,7 +220,7 @@ describe("DshHookProvider", () => {
 
   it("regression: tools/post-execute and tools/result deliver the result argument", () => {
     const ctx = createFakeCtx();
-    const toolAfter = mock((_p: DshHookPayload) => {});
+    const toolAfter = vi.fn((_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { toolAfter });
 
     const postExec = ctx.listeners.get("tools/post-execute")![0] as (
@@ -245,13 +244,13 @@ describe("DshHookProvider", () => {
     // Guards the existing waterfall contract: post-execute strips the trailing
     // `next`, still delivers the result, and returns next()'s decision.
     const ctx = createFakeCtx();
-    const toolAfter = mock((_p: DshHookPayload) => {});
+    const toolAfter = vi.fn((_p: DshHookPayload) => {});
     new DshHookProvider(ctx, { toolAfter });
 
     const listener = ctx.listeners.get("tools/post-execute")![0] as (
       ...a: unknown[]
     ) => unknown;
-    const next = mock(() => ({ kind: "accept" }));
+    const next = vi.fn(() => ({ kind: "accept" }));
 
     const out = listener(
       { name: "bash", callId: "c1" },
@@ -312,7 +311,7 @@ describe("DshHookProvider", () => {
 
   it("each unmapped hook kind is documented as a no-op in the module docstring", () => {
     const source = readFileSync(
-      resolve(import.meta.dir, "../../src/platform/adapters/dsh/hook-provider.ts"),
+      resolve(import.meta.dirname, "../../src/platform/adapters/dsh/hook-provider.ts"),
       "utf-8",
     );
     const header = source.slice(0, 3000);
@@ -325,7 +324,7 @@ describe("DshHookProvider", () => {
 
   it("dispose unsubscribes the dsh event listeners", () => {
     const ctx = createFakeCtx();
-    const toolBefore = mock((_p: DshHookPayload) => {});
+    const toolBefore = vi.fn((_p: DshHookPayload) => {});
 
     const provider = new DshHookProvider(ctx, { toolBefore });
     provider.dispose();

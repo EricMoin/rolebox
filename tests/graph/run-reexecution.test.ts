@@ -1,3 +1,4 @@
+import { spawnProcess } from "../../scripts/node-process.ts";
 /**
  * P3 item 2 — TERMINAL-GRAPH RE-EXECUTION: a NEW run, the old one untouched.
  *
@@ -29,11 +30,11 @@
  *
  * STRENGTH: adapter + real store, one process. The retry's RESTART half is additionally
  * driven across REAL OS processes by `tests/graph/retry-restart-cross-process.test.ts`,
- * which spawns the checked-in worker with `Bun.spawn(process.execPath, …)`. No real dsh/Pi
+ * which spawns the checked-in worker with `spawnProcess(process.execPath, …)`. No real dsh/Pi
  * SDK runs here, so nothing in this file is real-host evidence.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

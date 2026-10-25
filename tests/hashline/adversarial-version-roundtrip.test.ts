@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,32 +9,6 @@ import {
 } from "../../src/hashline/index.ts";
 import { makeToolContext } from "./fixtures/tool-context.ts";
 
-// ---------------------------------------------------------------------------
-// D1 (defect under test): version skew between hashline_edit's returned
-// version and the version hashline_read computes after the edit lands.
-//
-// Root cause:
-//   - src/hashline/hashline-read.ts:65  — version = computeFileVersion(content),
-//     where `content` is the canonical file content, which RETAINS trailing
-//     newlines (canonicalizeFileText only strips BOM and normalizes EOLs).
-//   - src/hashline/hashline-edit.ts:218 — version = computeFileVersion(resultContent),
-//     where `resultContent` is applyEditsWithReport's `currentLines.join("\n")`
-//     (src/hashline/edit-primitives.ts:275) — a join has NO trailing newline
-//     terminator. The trailing newlines are restored for the WRITE
-//     (hashline-edit.ts:203-207, then restoreFileText at :217), but the
-//     returned version is computed from the join WITHOUT them.
-//
-// Consequence: for any file whose canonical content ends in "\n" (single
-// trailing newline, CRLF, BOM, multiple trailing newlines), the version
-// returned by edit differs from the version a fresh read reports for the
-// same file on disk, and a second edit trusting the edit-returned version is
-// rejected by the version guard (hashline-edit.ts:132-141) with
-// "File version mismatch". Files WITHOUT a trailing newline roundtrip
-// consistently — that is the control boundary.
-//
-// These tests assert the CORRECT contract. A failing assertion is a defect
-// reproduction (bun test exits non-zero — the expected outcome of this file).
-// ---------------------------------------------------------------------------
 
 let tmpDir: string;
 

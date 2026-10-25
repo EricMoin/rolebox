@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { drainHandlerContext } from "../../src/hooks/drain-handler.ts";
 import type { ResolvedFunction } from "../../src/types.ts";
 
@@ -24,13 +24,13 @@ function mockFunctionContext(overrides?: Partial<MockFunctionContext>): MockFunc
 function mockSessionState() {
   const active = new Set<string>();
   return {
-    activate: mock((sid: string, names: string[]) => {
+    activate: vi.fn((sid: string, names: string[]) => {
       for (const n of names) active.add(n);
     }),
-    deactivate: mock((sid: string, name: string) => {
+    deactivate: vi.fn((sid: string, name: string) => {
       active.delete(name);
     }),
-    getActive: mock(() => active),
+    getActive: vi.fn(() => active),
     _active: active,
   };
 }
@@ -38,14 +38,14 @@ function mockSessionState() {
 function mockRuntime() {
   const states = new Map<string, { kv: Record<string, unknown>; phase: string }>();
   return {
-    init: mock((sid: string, name: string) => {
+    init: vi.fn((sid: string, name: string) => {
       const st = { kv: {} as Record<string, unknown>, phase: "active" };
       states.set(name, st);
       return st;
     }),
-    get: mock((sid: string, name: string) => states.get(name)),
-    markDirty: mock(() => {}),
-    all: mock(() => states),
+    get: vi.fn((sid: string, name: string) => states.get(name)),
+    markDirty: vi.fn(() => {}),
+    all: vi.fn(() => states),
     _states: states,
   };
 }

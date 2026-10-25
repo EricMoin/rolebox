@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { spawnProcess } from "../../../scripts/node-process.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -282,16 +283,7 @@ describe("durable graph notifications", () => {
       const notifier = new GraphNotifications(process.argv[1], { clock: () => Number(process.argv[2]), send: async n => { sent.push(n.id); return true; } });
       await notifier.flush(); notifier.close(); console.log(JSON.stringify(sent));`;
     const check = async () => {
-      // The probe names its module and store by absolute path, so its working
-      // directory is irrelevant to what it proves — and running it from the
-      // store directory instead of the checkout keeps an environment-level
-      // `bun` startup notice about an unreadable ancestor directory out of the
-      // stderr this assertion reads. What the child must produce is unchanged.
-      // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-      // the start-time OS environ, not this process's `process.env` — the
-      // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-      // so the child would resolve and append to the workspace's `.rolebox/logs`.
-      const child = Bun.spawn([process.execPath, "--eval", script, f.storeRoot, String(f.clock())],
+      const child = spawnProcess([process.execPath, "--eval", script, f.storeRoot, String(f.clock())],
         { env: { ...process.env }, cwd: f.storeRoot, stdout: "pipe", stderr: "pipe" });
       const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect({ code, error }).toEqual({ code: 0, error: "" });
@@ -401,8 +393,8 @@ describe("notification capture work", () => {
     const f = fixture(async () => true);
     await f.declare(); await f.app.notifications!.flush();
     const store = GraphStore.openFile(f.storeRoot); closers.push(store);
-    const definitions = spyOn(GraphStore.prototype, "readDefinition");
-    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const definitions = vi.spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = vi.spyOn(GraphStore.prototype, "invocationOriginGraphIds");
     try {
       expect(store.recordInvocationOrigin("flow", { sessionId: "parent", agent: "orchestrator" }, f.clock())).toBe(false);
       store.transaction(() => store.readGraphState("flow"));
@@ -421,8 +413,8 @@ describe("notification capture work", () => {
     ], edges: [] } });
     await f.app.notifications!.flush();
     const store = GraphStore.openFile(f.storeRoot); closers.push(store);
-    const definitions = spyOn(GraphStore.prototype, "readDefinition");
-    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const definitions = vi.spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = vi.spyOn(GraphStore.prototype, "invocationOriginGraphIds");
     try {
       store.recordInvocationOrigin("flow", { sessionId: "another-parent", agent: "orchestrator" }, f.clock());
       await f.app.notifications!.flush();
@@ -466,8 +458,8 @@ describe("notification capture work", () => {
     const second = new GraphNotifications(f.storeRoot, { send: async () => true }); closers.push(second);
     await f.app.notifications!.flush(); await second.flush();
     const store = GraphStore.openFile(f.storeRoot); closers.push(store);
-    const definitions = spyOn(GraphStore.prototype, "readDefinition");
-    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const definitions = vi.spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = vi.spyOn(GraphStore.prototype, "invocationOriginGraphIds");
     try {
       store.rememberExecutionObservation("worker", { kind: "completed", reason: "Finished", observedAt: f.clock() });
       expect(definitions.mock.calls.map(([id]) => id)).toEqual(["flow", "flow", "flow", "flow"]);
@@ -485,7 +477,7 @@ describe("notification capture work", () => {
     f.app.host.confirmExecution(f.requests[0]!.effect, { executionId: "worker" });
     await f.app.notifications!.flush();
     const store = GraphStore.openFile(f.storeRoot); closers.push(store);
-    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const inventory = vi.spyOn(GraphStore.prototype, "invocationOriginGraphIds");
     try {
       store.run(`INSERT INTO ${GRAPH_STORE_TABLES.executionObservations} VALUES ('worker', 'completed', 'Finished', ?)`, f.clock());
       await f.app.notifications!.flush();
@@ -503,10 +495,10 @@ describe("notification capture work", () => {
     await f.app.notifications!.flush(); f.app.close();
     const path = GraphStore.openFile(f.storeRoot); closers.push(path);
     const external = createDatabaseSync(path.path); closers.push(external);
-    const inventories = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const inventories = vi.spyOn(GraphStore.prototype, "invocationOriginGraphIds");
     const read = GraphStore.prototype.readDefinition;
     let injected = false;
-    const definitions = spyOn(GraphStore.prototype, "readDefinition").mockImplementation(function (this: GraphStore, id) {
+    const definitions = vi.spyOn(GraphStore.prototype, "readDefinition").mockImplementation(function (this: GraphStore, id) {
       if (id === "flow" && !injected) {
         injected = true;
         setImmediate(() => external.run(`INSERT INTO ${GRAPH_STORE_TABLES.executionObservations}
@@ -534,8 +526,8 @@ describe("notification capture work", () => {
     const f = fixture(async n => { attempts.push(n); return attempts.length > 1; });
     await f.declare(); await f.settle(0); await f.settle(1); await f.app.notifications!.flush();
     expect(attempts).toHaveLength(1);
-    const definitions = spyOn(GraphStore.prototype, "readDefinition");
-    const inventory = spyOn(GraphStore.prototype, "invocationOriginGraphIds");
+    const definitions = vi.spyOn(GraphStore.prototype, "readDefinition");
+    const inventory = vi.spyOn(GraphStore.prototype, "invocationOriginGraphIds");
     try {
       f.advance(); await f.app.notifications!.flush();
       expect(attempts).toHaveLength(2);
@@ -558,7 +550,7 @@ describe("notification capture work", () => {
     const visits: string[] = [];
     let previous = "";
     let callbacks = 0;
-    const definitions = spyOn(GraphStore.prototype, "readDefinition").mockImplementation(function (this: GraphStore, id) {
+    const definitions = vi.spyOn(GraphStore.prototype, "readDefinition").mockImplementation(function (this: GraphStore, id) {
       if (id !== previous) {
         expect(callbacks).toBe(visits.length);
         visits.push(id); previous = id;

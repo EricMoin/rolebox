@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshSystemPromptAdapter tests — the session-level system-prompt contribution
@@ -29,7 +28,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { FunctionSource } from "../../src/constants.ts";
@@ -397,7 +396,7 @@ describe("DshSystemPromptAdapter.dispose", () => {
 // ── Import hygiene ─────────────────────────────────────────────────────────
 
 describe("dsh-system-prompt import hygiene", () => {
-  const FILE = resolve(import.meta.dir, "../../src/platform/adapters/dsh/system-prompt.ts");
+  const FILE = resolve(import.meta.dirname, "../../src/platform/adapters/dsh/system-prompt.ts");
 
   function extractImportSpecifiers(source: string): string[] {
     const importRe =

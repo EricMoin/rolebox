@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 import { hookState } from "../../src/hooks/state.ts";
 import { parseFunctionActivation as _realParseFn } from "../../src/function/parser.ts";
+import * as parser from "../../src/function/parser.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 // Snapshot the real parser implementation at module load time for mock restore
 const realParseFunctionActivation = _realParseFn;
@@ -22,31 +23,31 @@ const realParseFunctionActivation = _realParseFn;
 function createMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-child" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({
           data: { parts: [{ type: "text", text: "ok" }] },
           error: undefined,
         }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test" }, error: undefined }),
       ),
-      delete: mock(() =>
+      delete: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
     },
@@ -281,19 +282,12 @@ describe("loop activation", () => {
 
   it("injects correction when |loop| is parsed but no matching loopCall exists", async () => {
     // Mock parser so "loop" appears in parsedFunctions but NOT in calls
-    mock.module("../../src/function/parser", () => ({
-      parseFunctionActivation: (text: string) => {
-        // Only intercept our test text; delegate everything else to real impl
-        if (text === "|loop| do thing") {
-          return {
-            functions: [LOOP_FUNCTION_NAME],
-            calls: [],
-            cleanedText: "do thing",
-          };
-        }
-        return realParseFunctionActivation(text);
-      },
-    }));
+    const parserSpy = vi.spyOn(parser, "parseFunctionActivation").mockImplementation((text: string) => {
+      if (text === "|loop| do thing") {
+        return { functions: [LOOP_FUNCTION_NAME], calls: [], cleanedText: "do thing" };
+      }
+      return realParseFunctionActivation(text);
+    });
 
     try {
       // Pre-activate loop so isActive returns true
@@ -311,10 +305,7 @@ describe("loop activation", () => {
       expect(correction).toContain("Loop call not found");
       expect(activeLoopManager?.isLoopSession("ses_012")).toBe(false);
     } finally {
-      // Restore real parser implementation so other test files aren't affected
-      mock.module("../../src/function/parser", () => ({
-        parseFunctionActivation: realParseFunctionActivation,
-      }));
+      parserSpy.mockRestore();
     }
   });
 });

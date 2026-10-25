@@ -15,7 +15,7 @@
  *    matching key is replaced.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetLoggingForTest, configureLogging, createLogger, withLogScope } from "../../src/log/index.ts";
 import { REDACTED_VALUE, SENSITIVE_KEY_TERMS, isSensitiveFieldKey, redactFields } from "../../src/log/redact.ts";

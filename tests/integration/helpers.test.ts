@@ -10,7 +10,7 @@
  *   6. Concurrent createTestContext() calls use separate directories
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
 import {
   createTestContext,
@@ -33,13 +33,8 @@ afterEach(() => {
   mockRestoreAll();
 });
 
-/**
- * restoreAll mock wrappers. bun:test's mock.restore() is called via
- * cleanupTestState(), but we also defensive-restore in afterEach.
- */
 function mockRestoreAll(): void {
-  const { mock } = require("bun:test");
-  mock.restore();
+  vi.restoreAllMocks();
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

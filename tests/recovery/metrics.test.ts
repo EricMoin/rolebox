@@ -6,13 +6,13 @@
  * recordErrorType, getSnapshot, flushTo, and reset.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { RecoveryMetricsCollector } from "../../src/recovery/metrics.ts";
 import type { RecoveryMetricsSnapshot } from "../../src/recovery/types.ts";
 
 describe("RecoveryMetricsCollector", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("starts with zeroed snapshots", () => {

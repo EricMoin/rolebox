@@ -1,16 +1,9 @@
-/**
- * Tests for `opencode memory clean`.
- *
- * NOTE: The clean command bypasses MemoryStore for the SQL query and uses
- * `bun:sqlite` directly.  Tests pre-fill data via raw SQL INSERT so the
- * command's own Database() connection can read it.
- */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Database } from "bun:sqlite";
+import { createDatabaseSync, type DatabaseDriver } from "../../../src/memory/db-driver.ts";
 import { memoryDbPath } from "../../../src/utils/state-paths.ts";
 import { ensureMemorySchema } from "../../../src/memory/schema.ts";
 
@@ -38,9 +31,9 @@ let origExit: typeof process.exit;
 let exitCode: number | undefined;
 
 /** Create/open the test DB with schema, at the temp dir's memory.db path. */
-function openDb(): Database {
+function openDb(): DatabaseDriver {
   const dbPath = memoryDbPath(tmpDir);
-  const db = new Database(dbPath);
+  const db = createDatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   ensureMemorySchema(db);
@@ -48,7 +41,7 @@ function openDb(): Database {
 }
 
 /** Insert a single entry using raw SQL (controlled timestamps). */
-function insertEntry(db: Database, overrides: EntryOverrides = {}): void {
+function insertEntry(db: DatabaseDriver, overrides: EntryOverrides = {}): void {
   const now = new Date().toISOString();
   db.run(
     `INSERT INTO memories
@@ -56,7 +49,7 @@ function insertEntry(db: Database, overrides: EntryOverrides = {}): void {
         relevance, created_at, updated_at, accessed_at, access_count,
         session_id, source_sessions)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
+    ...[
       overrides.id ?? "test_" + Math.random().toString(36).slice(2, 10),
       overrides.scope ?? "workspace",
       "",
@@ -95,7 +88,6 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   process.exit = origExit;
-  // Bun keeps the previous exit code when assigned undefined.
   process.exitCode = 0;
   rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -141,7 +133,7 @@ async function invokeClean(
 /** Number of rows currently in the memories table. */
 function countRows(): number {
   const dbPath = memoryDbPath(tmpDir);
-  const db = new Database(dbPath);
+  const db = createDatabaseSync(dbPath);
   try {
     return (db.query("SELECT COUNT(*) AS cnt FROM memories").get() as any).cnt;
   } finally {
@@ -152,7 +144,7 @@ function countRows(): number {
 /** Titles currently in the memories table. */
 function allTitles(): string[] {
   const dbPath = memoryDbPath(tmpDir);
-  const db = new Database(dbPath);
+  const db = createDatabaseSync(dbPath);
   try {
     return (
       db.query("SELECT title FROM memories ORDER BY title").all() as Array<{

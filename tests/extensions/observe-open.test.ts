@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { registerObserveHandler, runCustomObserve } from "../../src/function/observe.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import type { ResolvedFunction } from "../../src/types.ts";

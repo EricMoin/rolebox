@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { shouldCancelLoop } from "../../src/loop/coordinator.ts";
 import {
   DISPATCH_COMPLETION_MARKER,

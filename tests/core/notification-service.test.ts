@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { NotificationService } from "../../src/core/services/notification-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { EventBus } from "../../src/core/event-bus.ts";
@@ -56,7 +56,7 @@ describe("NotificationService", () => {
         delete process.env[key];
       }
     }
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 
@@ -187,9 +187,9 @@ describe("ROLEBOX_NOTIFICATIONS_ENABLED", () => {
       const ctx = makeContext({ bus });
 
       // Spy on bus.on to collect unsub functions
-      const unsubSpy = mock(() => {});
+      const unsubSpy = vi.fn(() => {});
       const originalOn = bus.on.bind(bus);
-      bus.on = mock((event: string, handler: any) => {
+      bus.on = vi.fn((event: string, handler: any) => {
         const unsub = originalOn(event, handler);
         return () => {
           unsubSpy();
@@ -200,7 +200,7 @@ describe("ROLEBOX_NOTIFICATIONS_ENABLED", () => {
       await svc.init(ctx);
 
       // Count how many subscriptions were made
-      const subCount = (bus.on as ReturnType<typeof mock>).mock.calls.length;
+      const subCount = (bus.on as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls.length;
       expect(subCount).toBeGreaterThan(0);
 
       // Clear the spy count from init

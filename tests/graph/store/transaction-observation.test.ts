@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, expect, it } from "vitest";
 import { GraphStore } from "../../../src/graph/store/graph-store.ts";
 import { GRAPH_STORE_TABLES as TABLES } from "../../../src/graph/store/schema.ts";
 

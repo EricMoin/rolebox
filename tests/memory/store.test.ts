@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -197,9 +198,9 @@ describe("MemoryStore", () => {
   it("list sort by recent returns entries in descending updated_at order", async () => {
     // Write three entries with small delays to ensure distinct timestamps
     store.write(makeEntry({ title: "First" }));
-    await Bun.sleep(2);
+    await sleep(2);
     store.write(makeEntry({ title: "Second" }));
-    await Bun.sleep(2);
+    await sleep(2);
     store.write(makeEntry({ title: "Third" }));
 
     const results = store.list();
@@ -300,7 +301,7 @@ describe("MemoryStore", () => {
 
     const id1 = store.write(entry);
     // Small delay so Date.now() produces a different hash seed
-    await Bun.sleep(1);
+    await sleep(1);
     const id2 = store.write(entry);
 
     expect(id1).not.toBe(id2);
@@ -358,15 +359,15 @@ describe("MemoryStore", () => {
 
   it("list with sort=accessed returns entries ordered by accessed_at", async () => {
     const id1 = store.write(makeEntry({ title: "First" }));
-    await Bun.sleep(2);
+    await sleep(2);
     const id2 = store.write(makeEntry({ title: "Second" }));
-    await Bun.sleep(2);
+    await sleep(2);
     const id3 = store.write(makeEntry({ title: "Third" }));
-    await Bun.sleep(2);
+    await sleep(2);
 
     // Touch some entries in a specific order with delays
     store.touch(id3);
-    await Bun.sleep(2);
+    await sleep(2);
     store.touch(id1);
 
     const results = store.list({ sort: "accessed" });

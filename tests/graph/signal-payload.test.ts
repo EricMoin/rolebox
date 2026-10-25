@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { SIGNAL_KEY, asRecord, getSignal } from "../../src/graph/tools/signal-payload.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────

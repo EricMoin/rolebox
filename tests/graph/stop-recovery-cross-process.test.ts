@@ -1,3 +1,4 @@
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 /**
  * CROSS-PROCESS evidence for the P4.3 stop semantics: a run stopped by a DECLARED
  * cap or progress policy is RECOVERABLE, and the recovery is decided in a NEW OS
@@ -33,7 +34,7 @@
  * home-directory path or a session transcript.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,12 +55,7 @@ const WORKER = fileURLToPath(
 /** The parent's deadline for one child process; a child that overruns is killed. */
 const CHILD_DEADLINE_MS = 30_000;
 
-/**
- * The harness budget must exceed this file's own child deadline, so a merely
- * SLOW child is diagnosed by the case instead of being killed by Bun's default
- * budget (the same reasoning as graph-store-cross-process.test.ts).
- */
-setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CHILD_DEADLINE_MS + 15_000 });
 
 interface WorkerReport {
   readonly pid: number;
@@ -114,18 +110,13 @@ function makeFixture(prefix: string): {
   return { dir, storeRoot };
 }
 
-/** Spawn one REAL bun process running the worker and await its report. */
 async function runWorker(
   id: string,
   mode: string,
   fixture: { readonly dir: string; readonly storeRoot: string },
   extra: readonly string[] = [],
 ): Promise<WorkerReport> {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn(
+  const proc = spawnProcess(
     [
       process.execPath,
       WORKER,
@@ -141,18 +132,18 @@ async function runWorker(
     ],
     { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
   children.push({
     pid: proc.pid,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, spyOn, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
@@ -22,25 +22,25 @@ import type { CanonicalToolContext } from "../src/platform/types.ts";
 function createMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-session-1" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({ data: { parts: [{ type: "text", text: "ok" }] }, error: undefined }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test-session-1" }, error: undefined }),
       ),
     },
@@ -105,7 +105,7 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
-  mock.restore();
+  vi.restoreAllMocks();
 });
 
 describe("session.idle CONTINUE", () => {
@@ -126,7 +126,7 @@ describe("session.idle CONTINUE", () => {
     const st = functionRuntime.init(sessionID, "plan", 1);
     st.kv["__todos"] = "- [ ] pending task\n- [ ] another task";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     expect(promptAsyncMock).toHaveBeenCalledTimes(0);
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
@@ -154,7 +154,7 @@ describe("session.idle CONTINUE", () => {
     const st = functionRuntime.init(sessionID, "plan", 1);
     st.kv["__todos"] = "- [x] done\n- [x] also done";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     expect(promptAsyncMock).toHaveBeenCalledTimes(0);
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
@@ -185,7 +185,7 @@ describe("session.idle CONTINUE", () => {
     st.kv["__todos"] = "- [ ] pending";
     st.continuationCount = 5;
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -204,7 +204,7 @@ describe("session.idle CONTINUE", () => {
       directory: tmpDir,
     });
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID: "test-session" } } });
 
@@ -227,7 +227,7 @@ describe("session.idle CONTINUE", () => {
     functionSessionState.activate(sessionID, ["plan"]);
     functionRuntime.init(sessionID, "plan", 1);
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -250,7 +250,7 @@ describe("session.idle CONTINUE", () => {
     functionSessionState.activate(sessionID, ["plan"]);
     // Do NOT init functionRuntime — st will be undefined
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -275,10 +275,10 @@ describe("session.idle CONTINUE", () => {
     st.kv["__todos"] = "- [ ] pending task";
 
     const mgr = managerMap.get(tmpDir)!;
-    const inflightSpy = mock(() => 1);
+    const inflightSpy = vi.fn(() => 1);
     (mgr as unknown as { getInflightCount: () => number }).getInflightCount = inflightSpy;
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -304,9 +304,9 @@ describe("session.idle CONTINUE", () => {
     st.kv["__todos"] = "- [ ] pending task";
 
     const mgr = managerMap.get(tmpDir)!;
-    (mgr as unknown as { getInflightCount: () => number }).getInflightCount = mock(() => 0);
+    (mgr as unknown as { getInflightCount: () => number }).getInflightCount = vi.fn(() => 0);
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -337,7 +337,7 @@ describe("session.idle CONTINUE", () => {
     st.evidenceObserved["paused"] = true;
     const ccBefore = st.continuationCount;
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     expect(promptAsyncMock).toHaveBeenCalledTimes(0);
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
@@ -358,7 +358,7 @@ describe("session.idle CONTINUE", () => {
     // Stub the session adapter's prompt to reject, simulating a transient
     // failure to send the continuation reminder.
     const adapter = new OpencodeSessionAdapter(client);
-    const promptStub = mock(() => Promise.reject(new Error("network down")));
+    const promptStub = vi.fn(() => Promise.reject(new Error("network down")));
     (adapter as unknown as { prompt: (...args: unknown[]) => Promise<unknown> }).prompt = promptStub;
 
     const hooks = await createHealthyPluginHooks({ platformId: "opencode",
@@ -416,7 +416,7 @@ describe("auto-continue counter persistence (regression)", () => {
     const st = functionRuntime.init(sessionID, "synthesize", 1);
     st.kv["__todos"] = "- [ ] pending task";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     const chatMessage = (hooks as unknown as Record<"chat.message", ChatMessageHook>)["chat.message"];
 
     const idle = () =>
@@ -523,7 +523,7 @@ describe("dispatch-notification counter persistence (regression)", () => {
     const st = functionRuntime.init(sessionID, "synthesize", 1);
     st.kv["__todos"] = "- [ ] pending task";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     const chatMessage = (hooks as unknown as Record<"chat.message", ChatMessageHook>)["chat.message"];
 
     const idle = () =>
@@ -585,7 +585,7 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
     const st = functionRuntime.init(sessionID, "synthesize", 1);
     st.kv["__todos"] = "- [ ] pending task";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     const idle = () =>
       hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -627,7 +627,7 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
     const st = functionRuntime.init(sessionID, "synthesize", 1);
     st.kv["__todos"] = "- [ ] pending task";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     const idle = () =>
       hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -670,7 +670,7 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
     const st = functionRuntime.init(sessionID, "synthesize", 1);
     st.kv["__todos"] = "- [ ] pending task";
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     const idle = () =>
       hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
 
@@ -717,7 +717,7 @@ describe("graph-continuation: session-ledger fallback (subtask 4)", () => {
     // The signal was never recorded on the fn state — only the session ledger.
     expect(st.kv["__signals_observed"]).toBeUndefined();
 
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     // idle re-evaluates; signal_observed(answer) has no FnState entry but falls
     // back to the session ledger (subtask 4) → the fn completes with zero

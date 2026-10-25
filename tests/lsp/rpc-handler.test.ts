@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import {
   writeMessage,
   processBuffer,
@@ -31,7 +31,7 @@ function makeServerState(overrides: Partial<LspServerState> = {}): LspServerStat
  * double with that signature so `mock.calls[0]` is a real tuple, not `[]`.
  */
 function makeDispatchMock() {
-  return mock<(languageId: string, state: LspServerState, msg: unknown) => void>(
+  return vi.fn<(languageId: string, state: LspServerState, msg: unknown) => void>(
     () => {},
   );
 }
@@ -196,8 +196,8 @@ describe("processBuffer", () => {
 
 describe("dispatchMessage", () => {
   it("resolves pending request on successful response", () => {
-    const resolve = mock(() => {});
-    const reject = mock<(error: Error) => void>(() => {});
+    const resolve = vi.fn(() => {});
+    const reject = vi.fn<(error: Error) => void>(() => {});
     const timeout = setTimeout(() => {}, 10000);
     const state = makeServerState();
     state.pendingRequests.set(1, { resolve, reject, timeout });
@@ -211,8 +211,8 @@ describe("dispatchMessage", () => {
   });
 
   it("rejects pending request on error response", () => {
-    const resolve = mock(() => {});
-    const reject = mock<(error: Error) => void>(() => {});
+    const resolve = vi.fn(() => {});
+    const reject = vi.fn<(error: Error) => void>(() => {});
     const timeout = setTimeout(() => {}, 10000);
     const state = makeServerState();
     state.pendingRequests.set(1, { resolve, reject, timeout });

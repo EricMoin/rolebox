@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mkdirSync,
   writeFileSync,
@@ -38,7 +39,7 @@ beforeEach(() => {
   // limited-export mock from another test file cannot silently bypass
   // roleId path-traversal sanitization. Only getDataDir/getConfigDir
   // and getSyncTarget are overridden; everything else stays real.
-  mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+  vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
     getDataDir: () => join(dataTmp, "rolebox"),
     getConfigDir: () => join(configTmp, "rolebox"),
     extra: {
@@ -53,10 +54,10 @@ beforeEach(() => {
   // detection (no real opencode config in tests). BOTH module specifiers must
   // be mocked: a partial mock of the consumer's import makes it fail with
   // `SyntaxError: Export named ... not found`.
-  mock.module("../../../src/platform/model-catalog/index", () => ({
+  vi.doMock("../../../src/platform/model-catalog/index", () => ({
     scanModelsForTarget: () => [],
   }));
-  mock.module("../../../src/cli/role-models", () => ({
+  vi.doMock("../../../src/cli/role-models", () => ({
     findPlaceholderRoles: () => [],
   }));
 
@@ -453,3 +454,5 @@ describe("sync", () => {
     expect(backups).toHaveLength(0);
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

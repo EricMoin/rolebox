@@ -1,3 +1,4 @@
+import { spawnProcess } from "../../scripts/node-process.ts";
 import { approvalPolicyFor } from "./helpers/approval-policy.ts";
 /**
  * P3 item 3 — THE APPROVAL RESTART, ACROSS REAL PROCESSES
@@ -10,7 +11,7 @@ import { approvalPolicyFor } from "./helpers/approval-policy.ts";
  * relaunch, never reopening an object.
  *
  * THE SHAPE. Every worker is
- * `Bun.spawn(process.execPath, <this directory>/helpers/approval-restart-xproc-worker.ts, …)`,
+ * `spawnProcess(process.execPath, <this directory>/helpers/approval-restart-xproc-worker.ts, …)`,
  * each prints ONE JSON report, and the parent asserts:
  *
  *   - PROCESS ONE (`raise`): raises a pending request through the SHIPPED control
@@ -38,7 +39,7 @@ import { approvalPolicyFor } from "./helpers/approval-policy.ts";
  * a real home-directory path or a session transcript.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -73,7 +74,7 @@ const CHILD_DEADLINE_MS = 30_000;
  * other cross-process slices carry it: a child that was merely SLOW would
  * otherwise have the CASE killed and its own diagnosis never written.
  */
-setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CHILD_DEADLINE_MS + 15_000 });
 
 /** The declaration the parent persists before spawning any worker. */
 function declaration(): GraphDeclarationV3 {
@@ -142,11 +143,7 @@ function spawnWorker(
   storeRoot: string,
   extra: readonly string[] = [],
 ): LaunchedWorker {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn(
+  const proc = spawnProcess(
     [
       process.execPath,
       WORKER,

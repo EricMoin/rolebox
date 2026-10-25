@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,31 +17,31 @@ import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/ses
 function createMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-child" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({
           data: { parts: [{ type: "text", text: "ok" }] },
           error: undefined,
         }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test" }, error: undefined }),
       ),
-      delete: mock(() =>
+      delete: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
     },
@@ -63,7 +63,7 @@ describe("idle-advance", () => {
     loopManagerMap.clear();
     managerMap.clear();
     rmSync(tmpDir, { recursive: true, force: true });
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("handles idle event for loop session without crashing", async () => {
@@ -93,7 +93,7 @@ describe("idle-advance", () => {
     });
 
     const dm = managerMap.get(tmpDir)!;
-    const inflightSpy = spyOn(dm, "getInflightCount");
+    const inflightSpy = vi.spyOn(dm, "getInflightCount");
     inflightSpy.mockReturnValue(1);
 
     await hooks.event({
@@ -263,7 +263,7 @@ describe("idle-advance", () => {
     expect(beforeState.phase).toBe("activating");
 
     const dm = managerMap.get(tmpDir)!;
-    const inflightSpy = spyOn(dm, "getInflightCount");
+    const inflightSpy = vi.spyOn(dm, "getInflightCount");
     inflightSpy.mockReturnValue(1);
 
     // Fire idle event — the self-start microtask (scheduled by register)
@@ -323,12 +323,12 @@ describe("idle-advance", () => {
 
     // Mock: loop's own worker task is still counted in inflight
     const dm = managerMap.get(tmpDir)!;
-    const inflightSpy = spyOn(dm, "getInflightCount");
+    const inflightSpy = vi.spyOn(dm, "getInflightCount");
     inflightSpy.mockReturnValue(1);
 
     // Mock: the worker task is completed
     const taskId = loopState.activeWorkerTaskId!;
-    const getTaskSpy = spyOn(dm, "getTask");
+    const getTaskSpy = vi.spyOn(dm, "getTask");
     getTaskSpy.mockReturnValue({
       id: taskId,
       sessionId: "worker-session",

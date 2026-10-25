@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { gradeBenchmarkResult } from "../../src/benchmark/grading.ts";
 import type { BenchmarkCase, BenchmarkWorkerResult } from "../../src/benchmark/types.ts";
 

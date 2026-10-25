@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { z } from "zod";
 import { handleToolBefore, registerToolSchema } from "../../src/hooks/tool-before.ts";
 import { HookState } from "../../src/hooks/state.ts";
@@ -19,9 +19,9 @@ beforeEach(() => {
 // The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
 // in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
 // src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
-// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+// tuple; a bare `vi.fn(() => ...)` records `[]` and every `calls[0][n]` read fails.
 function makeCustomRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -32,7 +32,7 @@ function makeCustomRunHooks() {
 }
 
 function makeBuiltInRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -51,7 +51,7 @@ function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
     dir: "/tmp/test",
     dispatchManager: {} as any,
     loopManager: {} as any,
-    customHooks: { runHooks: mock(() => Promise.resolve()) } as any,
+    customHooks: { runHooks: vi.fn(() => Promise.resolve()) } as any,
     ...overrides,
   };
 }
@@ -201,7 +201,7 @@ describe("handleToolBefore — dispatch_output guard", () => {
     registerToolSchema("dispatch_output", { task_id: z.string() });
 
     const mockManager = {
-      getTask: mock((_id: string) => ({ status: "running" })),
+      getTask: vi.fn((_id: string) => ({ status: "running" })),
     };
 
     const output = { args: { task_id: "bg_123" } };
@@ -220,7 +220,7 @@ describe("handleToolBefore — dispatch_output guard", () => {
     registerToolSchema("dispatch_output", { task_id: z.string() });
 
     const mockManager = {
-      getTask: mock((_id: string) => ({ status: "pending" })),
+      getTask: vi.fn((_id: string) => ({ status: "pending" })),
     };
 
     const output = { args: { task_id: "bg_123" } };
@@ -239,7 +239,7 @@ describe("handleToolBefore — dispatch_output guard", () => {
     registerToolSchema("dispatch_output", { task_id: z.string() });
 
     const mockManager = {
-      getTask: mock((_id: string) => ({ status: "completed" })),
+      getTask: vi.fn((_id: string) => ({ status: "completed" })),
     };
 
     const output = { args: { task_id: "bg_123" } };
@@ -258,7 +258,7 @@ describe("handleToolBefore — dispatch_output guard", () => {
     registerToolSchema("dispatch_output", { task_id: z.string() });
 
     const mockManager = {
-      getTask: mock((_id: string) => null),
+      getTask: vi.fn((_id: string) => null),
     };
 
     const output = { args: { task_id: "bg_unknown" } };

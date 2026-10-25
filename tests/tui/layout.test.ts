@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   SIDEBAR_WIDTH,
   RULE_WIDTH_NARROW,

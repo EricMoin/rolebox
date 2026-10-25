@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Downstream inputs are FIXED at compile time (§3.5).
@@ -12,7 +11,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { compileGraph } from "../../src/graph/compiler/compile.ts";
 import { parseGraphDeclarationV3 } from "../../src/graph/compiler/parse-declaration-v3.ts";
 

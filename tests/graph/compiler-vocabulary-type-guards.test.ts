@@ -1,23 +1,5 @@
-/**
- * The compiler/policy/domain vocabulary guards (audit F-02) and the two
- * exhaustiveness fixes beside them (F-15, F-18).
- *
- * WHY A TYPE-LEVEL FILE. `bun test` is transpile-only, so a closed vocabulary
- * that drifts from the type it mirrors keeps every runtime suite green. Each
- * key list below is imported from its source and pinned to the model it
- * guards, so `bun run typecheck:tests` — this file's authority — fails the
- * moment a key is added to, or removed from, one side only.
- *
- * The runtime cases pin the BEHAVIOUR the type-level rewrites had to preserve:
- * every `CompletionReading` member still maps the same way through the real
- * compiler (F-15), and the join-satisfiability rule answers identically whether
- * it is handed a whole plan or the three-field topology it actually reads
- * (F-18).
- *
- * @module
- */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type { ContractRef } from "../../src/graph/contracts/contract-definition.ts";
 import {

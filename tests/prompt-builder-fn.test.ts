@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { lexer } from "marked";
 import { buildFunctionStateBlock, buildActiveArtifactBlock } from "../src/prompt/builder.js";
 import type { FnState } from "../src/function/runtime-state.js";

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The run path BINDS a node's declared inputs to the attempt that produced them (D6).
@@ -27,7 +26,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

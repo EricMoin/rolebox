@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -358,7 +357,7 @@ describe("DshEventBridge import boundary", () => {
     // when documenting the boundary rule.
     const imports = extractImports(
       readFileSync(
-        resolve(import.meta.dir, "../../src/platform/adapters/dsh/event-bridge.ts"),
+        resolve(import.meta.dirname, "../../src/platform/adapters/dsh/event-bridge.ts"),
         "utf-8",
       ),
     );

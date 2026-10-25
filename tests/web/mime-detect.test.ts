@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "bun:test";
+import { describe, it, expect, beforeAll } from "vitest";
 
 describe("detectMimeByMagic", () => {
   let detectMimeByMagic: (buffer: Uint8Array) => string | null;

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -176,7 +176,7 @@ describe("team runtime concurrency review", () => {
     await instance.tick();
     const throughSeq = instance.status(actor, team.id).members.find(item => item.id === member.id)!.delivery!.throughSeq;
     transcripts.get("peer-session")!.push({ info: { id: "completed-turn", role: "assistant", time: { created: 1, completed: 2 }, finish: "stop" }, parts: [] } as unknown as Message);
-    await instance.handleEvent({ type: "session.error", properties: { sessionID: actor.sessionID } });
+    await instance.handleEvent({ type: "session.error", rawType: "session.error", properties: { sessionID: actor.sessionID } });
     expect(instance.status(actor, team.id).status).toBe("paused");
     await instance.resume(actor, team.id);
     const completed = instance.status(actor, team.id).members.find(item => item.id === member.id)!;

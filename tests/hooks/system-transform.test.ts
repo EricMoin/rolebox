@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,9 +36,9 @@ function makeFn(name: string, overrides?: Partial<ResolvedFunction>): ResolvedFu
 // The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
 // in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
 // src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
-// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+// tuple; a bare `vi.fn(() => ...)` records `[]` and every `calls[0][n]` read fails.
 function makeCustomRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -49,7 +49,7 @@ function makeCustomRunHooks() {
 }
 
 function makeBuiltInRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -62,13 +62,13 @@ function makeBuiltInRunHooks() {
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    session: { messages: mock(() => Promise.resolve([])) } as any,
+    session: { messages: vi.fn(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {} as any,
     loopManager: {} as any,
-    customHooks: { runHooks: mock(() => Promise.resolve()) } as any,
+    customHooks: { runHooks: vi.fn(() => Promise.resolve()) } as any,
     ...overrides,
   };
 }

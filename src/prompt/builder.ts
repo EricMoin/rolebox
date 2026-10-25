@@ -217,6 +217,12 @@ const COMPUTER_GRANT_INSTRUCTIONS = "When a task needs desktop observation or in
   "when available so the worker can diagnose failures and request missing OS permissions. A declaration cannot enable " +
   "unregistered tools, override a denied capability, or grant OS permission.";
 
+const BROWSE_GRANT_INSTRUCTIONS = "When a task needs a web page instead of the desktop, declare the specific available browse_* tools " +
+  "in that node's tools array: browse_status first when the browser dependency itself is in doubt, then browse_open with " +
+  "browse_snapshot and browse_read for navigation and page text, and only the action tools the step needs such as browse_click, " +
+  "browse_type or browse_wait. Include browse_close so the worker releases the browser when its step ends. A declaration cannot " +
+  "enable unregistered tools, override a denied capability, or grant browsing on a host whose browse gate is off.";
+
 const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents through the graph outcome protocol.\n" +
   "Declare the work as a graph with graph_declare: a version-3 declaration naming each\n" +
   "node\u0027s agent, prompt and the outcomes it may report, plus the edges that route an\n" +
@@ -231,7 +237,7 @@ const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents throug
   "and a node\u0027s status changes only when a settlement commits. A transition comes\n" +
   "from a declared outcome and edge only: free-form reports are never ranked, merged\n" +
   "or interpreted as progress.\n" +
-  MEMORY_GRANT_INSTRUCTIONS + "\n" + COMPUTER_GRANT_INSTRUCTIONS;
+  MEMORY_GRANT_INSTRUCTIONS + "\n" + COMPUTER_GRANT_INSTRUCTIONS + "\n" + BROWSE_GRANT_INSTRUCTIONS;
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,

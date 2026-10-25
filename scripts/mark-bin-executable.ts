@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 // restored here, directly after tsc and before anything else reads dist/.
 
 // Project root = scripts/.. (this script lives in scripts/)
-const projectRoot = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd();
+const projectRoot = import.meta.dirname ? resolve(import.meta.dirname, "..") : process.cwd();
 const entry = resolve(projectRoot, "dist", "cli", "main.js");
 
 if (!existsSync(entry)) {

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshRoleboxLogsWebRoute tests — the structural adapter exposing the rolebox
@@ -33,7 +32,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -395,7 +394,7 @@ describe("DshRoleboxLogsWebRoute GET /rolebox/logs", () => {
     // The assertion reads the DOC, not a copy of it: the example printed in the
     // live-view section must be the spelling this build answers with, so editing
     // the docs to something no answer produces fails here (review#3 R3).
-    const docs = readFileSync(resolve(import.meta.dir, "../../docs/logging.md"), "utf8");
+    const docs = readFileSync(resolve(import.meta.dirname, "../../docs/logging.md"), "utf8");
     const section = docs.slice(docs.indexOf("### The route: `GET /rolebox/logs`"));
     const documented = /"cursor":\s*"([^"]+)"/.exec(section)?.[1] ?? "";
     expect(documented).not.toBe("");

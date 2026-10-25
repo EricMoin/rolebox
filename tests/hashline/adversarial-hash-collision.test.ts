@@ -1,47 +1,5 @@
-// Adversarial test: hash-collision and fuzzy-misanchor suite.
-//
-// Width-2 anchors have only 4096 buckets (src/hashline/constants.ts:3,6 —
-// BASE64_DICT is 64 chars, so 64^2 = 4096), so with a few thousand distinct
-// content lines a hash collision is guaranteed (pigeonhole: 4097 distinct
-// contents must share a bucket). No existing suite constructs such collisions;
-// this one does, deterministically, and probes how the read → edit pipeline
-// behaves when two DIFFERENT strings carry the same anchor hash.
-//
-// Content lines are unseeded (src/hashline/hash.ts:63-66 — any line containing
-// a letter or digit gets seed ""), so computeLineHash(content, w) is
-// position-independent for our "w2-collide-<n>" candidates — the collision is
-// stable across line numbers.
-//
-// Scenarios:
-//   helper — brute-force a width-2 collision pair within a bounded search
-//            (4096 buckets ⇒ a pair is guaranteed well inside 10000 candidates).
-//            PASS (control).
-//   (a)    — fuzzy decoy: the caller's anchor is stale by +2 lines; a colliding
-//            DECOY line sits at +1 (nearer). detectUniformOffset matches
-//            candidates purely by hash equality within ±FUZZY_SEARCH_WINDOW
-//            (src/hashline/fuzzy.ts:111-167, window at constants.ts:28). The
-//            D5 guard (fuzzy.ts:192-209) detects that the uniform offsets map
-//            the SAME anchor to content-DIFFERENT candidate lines (DECOY at +1
-//            and TARGET at +2) and throws AmbiguousAnchorError rather than
-//            guessing → the edit is rejected with an explicit error, nothing is
-//            written, and the caller is told to re-read. Regression guard.
-//   (b)    — collision accepted inside validateLineRefs (validation.ts:81-114):
-//            an anchor whose line number points at a line whose content was
-//            externally swapped for a colliding string validates cleanly (the
-//            hash is unchanged), and the edit replaces that line. This
-//            DOCUMENTS that anchors are position+hash — collisions at width 2
-//            are accepted by design. Classified per observation (expected PASS).
-//   (c)    — control at width 3 via ROLEBOX_HASHLINE_WIDTH=3 (env-guard
-//            save/restore pattern from adversarial-hashwidth.test.ts:47-59):
-//            the same layout, but the width-2 collision pair is re-verified
-//            width-3 distinct, so the decoy no longer matches and the
-//            correction lands on the TRUE target — width escalation mitigates.
-//            PASS (control).
-//
-// Reproduce:
-//   bun test tests/hashline/adversarial-hash-collision.test.ts
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { buildReminder, type BuildReminderOpts } from "../../src/prompt/reminder.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -22,10 +22,6 @@ function assertNoDoubleSpacesInData(actual: string): void {
     // Only check data lines (key: value or marker), not action lines (which
     // inherently have "→ " as prefix) or body content (free form).
     if (lines[i].startsWith("→ ")) continue;
-    // Skip lines that appear inside body blocks (free form text)
-    // The custom failure message is the second parameter of the expect call
-    // itself (bun-types/test.d.ts:620-625); toMatch takes only the pattern, so
-    // the message was silently ignored where it used to sit.
     expect(
       lines[i],
       `line ${i + 1} has consecutive spaces: "${lines[i]}"`,

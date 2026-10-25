@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { handleEvent } from "../../src/hooks/event-handler.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
@@ -12,9 +12,9 @@ import { functionSessionState } from "../../src/function/session-state.ts";
 // The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
 // in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
 // src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
-// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+// tuple; a bare `vi.fn(() => ...)` records `[]` and every `calls[0][n]` read fails.
 function makeCustomRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -25,7 +25,7 @@ function makeCustomRunHooks() {
 }
 
 function makeBuiltInRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -38,24 +38,24 @@ function makeBuiltInRunHooks() {
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    session: { messages: mock(() => Promise.resolve([])) } as any,
+    session: { messages: vi.fn(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {
-      handleSessionIdle: mock(() => {}),
-      handleSessionStatus: mock(() => {}),
-      handleSessionError: mock(() => Promise.resolve()),
-      handleSessionDeleted: mock(() => Promise.resolve()),
-      handleMessageUpdated: mock(() => {}),
-      isSyncSession: mock(() => false),
-      getInflightCount: mock(() => 0),
+      handleSessionIdle: vi.fn(() => {}),
+      handleSessionStatus: vi.fn(() => {}),
+      handleSessionError: vi.fn(() => Promise.resolve()),
+      handleSessionDeleted: vi.fn(() => Promise.resolve()),
+      handleMessageUpdated: vi.fn(() => {}),
+      isSyncSession: vi.fn(() => false),
+      getInflightCount: vi.fn(() => 0),
     } as any,
     loopManager: {
-      isActiveLoopOrigin: mock(() => false),
-      isLoopSession: mock(() => false),
+      isActiveLoopOrigin: vi.fn(() => false),
+      isLoopSession: vi.fn(() => false),
     } as any,
-    customHooks: { runHooks: mock(() => Promise.resolve()) } as any,
+    customHooks: { runHooks: vi.fn(() => Promise.resolve()) } as any,
     ...overrides,
   };
 }
@@ -125,7 +125,7 @@ describe("handleEvent — hook lifecycle phases", () => {
 
 describe("handleEvent — session.idle", () => {
   it("handles session.idle event without sessionID gracefully", async () => {
-    const handleSessionIdle = mock(() => {});
+    const handleSessionIdle = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleSessionIdle } as any,
     });
@@ -140,10 +140,10 @@ describe("handleEvent — session.idle", () => {
   });
 
   it("calls dispatchManager.handleSessionIdle for valid sessionID", async () => {
-    const handleSessionIdle = mock(() => {});
-    const scheduleIdle = mock(() => {});
+    const handleSessionIdle = vi.fn(() => {});
+    const scheduleIdle = vi.fn(() => {});
     const deps = minimalDeps({
-      dispatchManager: { handleSessionIdle, isSyncSession: mock(() => false), getInflightCount: mock(() => 0) } as any,
+      dispatchManager: { handleSessionIdle, isSyncSession: vi.fn(() => false), getInflightCount: vi.fn(() => 0) } as any,
       notificationManager: { scheduleIdle } as any,
     });
 
@@ -157,10 +157,10 @@ describe("handleEvent — session.idle", () => {
   });
 
   it("skips continuation for sync sessions", async () => {
-    const isSyncSession = mock(() => true);
-    const prompt = mock(() => Promise.resolve({ id: "ok" }));
+    const isSyncSession = vi.fn(() => true);
+    const prompt = vi.fn(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
-      dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession, getInflightCount: mock(() => 0) } as any,
+      dispatchManager: { handleSessionIdle: vi.fn(() => {}), isSyncSession, getInflightCount: vi.fn(() => 0) } as any,
       session: { prompt } as any,
     });
 
@@ -174,10 +174,10 @@ describe("handleEvent — session.idle", () => {
   });
 
   it("skips continuation when there are in-flight dispatches", async () => {
-    const getInflightCount = mock(() => 2);
-    const prompt = mock(() => Promise.resolve({ id: "ok" }));
+    const getInflightCount = vi.fn(() => 2);
+    const prompt = vi.fn(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
-      dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount } as any,
+      dispatchManager: { handleSessionIdle: vi.fn(() => {}), isSyncSession: vi.fn(() => false), getInflightCount } as any,
       session: { prompt } as any,
     });
 
@@ -192,11 +192,11 @@ describe("handleEvent — session.idle", () => {
   });
 
   it("suppresses continuation during loop-owned phases", async () => {
-    const getLoopState = mock(() => ({ phase: "summarizing" }));
-    const isActiveLoopOrigin = mock(() => true);
-    const prompt = mock(() => Promise.resolve({ id: "ok" }));
+    const getLoopState = vi.fn(() => ({ phase: "summarizing" }));
+    const isActiveLoopOrigin = vi.fn(() => true);
+    const prompt = vi.fn(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
-      dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount: mock(() => 0) } as any,
+      dispatchManager: { handleSessionIdle: vi.fn(() => {}), isSyncSession: vi.fn(() => false), getInflightCount: vi.fn(() => 0) } as any,
       loopManager: { isActiveLoopOrigin, getLoopState } as any,
       session: { prompt } as any,
     });
@@ -211,11 +211,11 @@ describe("handleEvent — session.idle", () => {
   });
 
   it("does not suppress continuation when loop phase is not owned", async () => {
-    const getLoopState = mock(() => ({ phase: "awaiting_worker" }));
-    const isActiveLoopOrigin = mock(() => true);
-    const prompt = mock(() => Promise.resolve({ id: "ok" }));
+    const getLoopState = vi.fn(() => ({ phase: "awaiting_worker" }));
+    const isActiveLoopOrigin = vi.fn(() => true);
+    const prompt = vi.fn(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
-      dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount: mock(() => 0) } as any,
+      dispatchManager: { handleSessionIdle: vi.fn(() => {}), isSyncSession: vi.fn(() => false), getInflightCount: vi.fn(() => 0) } as any,
       loopManager: { isActiveLoopOrigin, getLoopState } as any,
       session: { prompt } as any,
     });
@@ -257,15 +257,15 @@ describe("handleEvent — session.idle", () => {
     functionSessionState.activate(sid, [fnName]);
 
     // prompt rejects
-    const prompt = mock(() => Promise.reject(new Error("API down")));
+    const prompt = vi.fn(() => Promise.reject(new Error("API down")));
 
     const deps = minimalDeps({
       roleFunctionsMap,
       session: { prompt } as any,
       dispatchManager: {
-        handleSessionIdle: mock(() => {}),
-        isSyncSession: mock(() => false),
-        getInflightCount: mock(() => 0),
+        handleSessionIdle: vi.fn(() => {}),
+        isSyncSession: vi.fn(() => false),
+        getInflightCount: vi.fn(() => 0),
       } as any,
     });
 
@@ -290,7 +290,7 @@ describe("handleEvent — session.idle", () => {
 
 describe("handleEvent — session.status", () => {
   it("calls dispatchManager.handleSessionStatus with sessionID and status", async () => {
-    const handleSessionStatus = mock(() => {});
+    const handleSessionStatus = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleSessionStatus } as any,
     });
@@ -305,7 +305,7 @@ describe("handleEvent — session.status", () => {
   });
 
   it("handles status as an object with type field", async () => {
-    const handleSessionStatus = mock(() => {});
+    const handleSessionStatus = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleSessionStatus } as any,
     });
@@ -320,7 +320,7 @@ describe("handleEvent — session.status", () => {
   });
 
   it("handles missing sessionID gracefully", async () => {
-    const handleSessionStatus = mock(() => {});
+    const handleSessionStatus = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleSessionStatus } as any,
     });
@@ -337,7 +337,7 @@ describe("handleEvent — session.status", () => {
 
 describe("handleEvent — session.error", () => {
   it("calls dispatchManager.handleSessionError", async () => {
-    const handleSessionError = mock(() => Promise.resolve());
+    const handleSessionError = vi.fn(() => Promise.resolve());
     const deps = minimalDeps({
       dispatchManager: { handleSessionError } as any,
     });
@@ -352,7 +352,7 @@ describe("handleEvent — session.error", () => {
   });
 
   it("handles missing sessionID gracefully", async () => {
-    const handleSessionError = mock(() => Promise.resolve());
+    const handleSessionError = vi.fn(() => Promise.resolve());
     const deps = minimalDeps({
       dispatchManager: { handleSessionError } as any,
     });
@@ -369,8 +369,8 @@ describe("handleEvent — session.error", () => {
 
 describe("handleEvent — session.deleted", () => {
   it("calls dispatchManager.handleSessionDeleted", async () => {
-    const handleSessionDeleted = mock(() => Promise.resolve());
-    const handleSessionDeletedNotification = mock(() => {});
+    const handleSessionDeleted = vi.fn(() => Promise.resolve());
+    const handleSessionDeletedNotification = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleSessionDeleted } as any,
       notificationManager: { handleSessionDeleted: handleSessionDeletedNotification } as any,
@@ -386,7 +386,7 @@ describe("handleEvent — session.deleted", () => {
   });
 
   it("handles missing info gracefully", async () => {
-    const handleSessionDeleted = mock(() => Promise.resolve());
+    const handleSessionDeleted = vi.fn(() => Promise.resolve());
     const deps = minimalDeps({
       dispatchManager: { handleSessionDeleted } as any,
     });
@@ -403,8 +403,8 @@ describe("handleEvent — session.deleted", () => {
 
 describe("handleEvent — message.updated", () => {
   it("calls dispatchManager.handleMessageUpdated", async () => {
-    const handleMessageUpdated = mock(() => {});
-    const handleMessageUpdatedNotification = mock(() => {});
+    const handleMessageUpdated = vi.fn(() => {});
+    const handleMessageUpdatedNotification = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleMessageUpdated } as any,
       notificationManager: { handleMessageUpdated: handleMessageUpdatedNotification } as any,
@@ -420,7 +420,7 @@ describe("handleEvent — message.updated", () => {
   });
 
   it("handles missing info gracefully", async () => {
-    const handleMessageUpdated = mock(() => {});
+    const handleMessageUpdated = vi.fn(() => {});
     const deps = minimalDeps({
       dispatchManager: { handleMessageUpdated } as any,
     });
@@ -458,7 +458,7 @@ describe("handleEvent — registration/unregister pattern", () => {
       makeState(),
       minimalDeps({
         builtInHooks: { runHooks: builtInRunHooks } as any,
-        dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount: mock(() => 0) } as any,
+        dispatchManager: { handleSessionIdle: vi.fn(() => {}), isSyncSession: vi.fn(() => false), getInflightCount: vi.fn(() => 0) } as any,
       }),
     );
 

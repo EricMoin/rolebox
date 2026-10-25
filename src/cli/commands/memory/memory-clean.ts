@@ -49,7 +49,7 @@ export const cleanCommand = defineCommand({
         process.exit(1);
       }
 
-      // Direct SQL query for efficiency — uses runtime driver (Bun or Node).
+      // Direct SQL query for efficiency — uses Node SQLite driver.
       const dbPath = memoryDbPath(projectDir);
       const db = await createDatabase(dbPath);
 
@@ -85,7 +85,7 @@ export const cleanCommand = defineCommand({
           const del = db.transaction(() => {
             let count = 0;
             for (const c of filtered) {
-              db.run("DELETE FROM memories WHERE id = ?", [c.id]);
+              db.run("DELETE FROM memories WHERE id = ?", c.id);
               count++;
             }
             return count;

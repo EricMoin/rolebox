@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { spawnProcess, findExecutable } from "../../scripts/node-process.ts";
+import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,8 +30,8 @@ async function execute(mode: string, options: { model?: string; config?: Record<
     "name: Fixture", "description: Isolated benchmark fixture", "prompt: Follow the isolated benchmark role.",
     `model: example-provider/${options.model ?? "scripted"}`, "",
     "skills: [fixture-note]",
-    "subagents:", "  - name: Worker", "    description: Isolated fixture worker",
-    "    prompt: Complete the assigned graph fixture.", "    model: example-provider/scripted", "",
+    ...(mode === "skill" ? [] : ["subagents:", "  - name: Worker", "    description: Isolated fixture worker",
+      "    prompt: Complete the assigned graph fixture.", "    model: example-provider/scripted", ""]),
   ].join("\n"));
   const request: BenchmarkWorkerRequest = {
     protocolVersion: 1, workspace, rolesDirectory, roleId: "fixture", provider: "example-provider", model: "scripted",
@@ -42,7 +43,7 @@ async function execute(mode: string, options: { model?: string; config?: Record<
   const requestPath = join(root, "request.json");
   const resultPath = join(root, "result.json");
   await writeFile(requestPath, JSON.stringify(request));
-  const process = Bun.spawn([Bun.which("bun")!, resolve("src/benchmark/hosts/dsh-worker.ts"), requestPath, resultPath], {
+  const process = spawnProcess([findExecutable("node")!, resolve("src/benchmark/hosts/dsh-worker.ts"), requestPath, resultPath], {
     cwd: workspace,
     env: { PATH: globalThis.process.env.PATH, HOME: root, ROLEBOX_DATA_DIR: join(root, "data"),
       ROLEBOX_CONFIG_DIR: join(root, "config"), ROLEBOX_ENGINE_RECOVERY: "off", ROLEBOX_LOG_LEVEL: "fatal" },

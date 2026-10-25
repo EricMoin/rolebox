@@ -42,20 +42,20 @@ export function renderPulse(props: {
   return (
     <>
       <text>
-        <span fg={rgbaToCSS(hd.color)} attributes={hd.glyphBold ? BOLD : 0}>{hd.glyph}</span>
-        <span fg={rgbaToCSS(hd.color)} attributes={hd.labelBold ? BOLD : 0}>{" " + hd.label}</span>
+        <span style={{ fg: rgbaToCSS(hd.color), attributes: hd.glyphBold ? BOLD : 0 }}>{hd.glyph}</span>
+        <span style={{ fg: rgbaToCSS(hd.color), attributes: hd.labelBold ? BOLD : 0 }}>{" " + hd.label}</span>
       </text>
       {showConcurrency && (
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + "concurrency: "}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{String(active)}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"/"}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{String(limit)}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT + "concurrency: "}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{String(active)}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"/"}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{String(limit)}</span>
           {queued > 0 && (
             <>
-              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + G_SUB + " "}</span>
-              <span fg={rgbaToCSS(c.warning)} attributes={DIM}>{String(queued)}</span>
-              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"q"}</span>
+              <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" " + G_SUB + " "}</span>
+              <span style={{ fg: rgbaToCSS(c.warning), attributes: DIM }}>{String(queued)}</span>
+              <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"q"}</span>
             </>
           )}
         </text>

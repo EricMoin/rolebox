@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * One model, one declaration (F-08).
@@ -18,7 +17,7 @@
  *
  * 1. Every alias equals the ONE declaration it names (`expectTypeOf`), and its
  *    KEY SET equals the canonical key set, so a restatement that quietly drops
- *    or omits a field fails `bun run typecheck:tests` rather than this suite.
+ *    or omits a field fails `npm run typecheck:tests` rather than this suite.
  * 2. Adding a field to a canonical type surfaces at the alias site. The
  *    mechanism differs by leg and is stated at each site: a direct alias has
  *    the field by construction; a `Pick` (the validator contract) does not,
@@ -36,7 +35,7 @@
  * @module
  */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

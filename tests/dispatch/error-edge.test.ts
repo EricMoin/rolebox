@@ -4,7 +4,7 @@
  * Covers: unrecoverable session errors, timeout cascading edge cases,
  * task ID conflicts — additive, no modifications to existing tests.
  */
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { DispatchService } from "../../src/core/services/dispatch-service.ts";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import { createTaskTools } from "../../src/dispatch/query/task-tools.ts";
@@ -46,7 +45,7 @@ function makeContext(overrides?: Partial<PluginContext>): PluginContext {
 describe("task tool surface (opencode path)", () => {
   beforeEach(() => __resetForTest());
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 

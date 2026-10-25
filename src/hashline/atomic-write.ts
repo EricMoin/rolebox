@@ -200,7 +200,7 @@ export async function verifyFileUnchanged(filePath: string, expectedVersion: str
       return `File ${filePath} was deleted since the edit was computed (expected version ${expectedVersion}). Re-read the file with hashline_read and retry.`;
     }
     // D6: non-ENOENT read failures (e.g. EISDIR when the file was replaced by a
-    // directory, EACCES) carry no path in Bun's own message. Wrap with the path
+    // directory, EACCES) may carry no path in their message. Wrap with the path
     // so the caller can tell WHICH file failed.
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Pre-write re-check failed for ${filePath}: ${msg}. Re-read the file with hashline_read and retry.`);

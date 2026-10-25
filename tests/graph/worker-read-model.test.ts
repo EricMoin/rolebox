@@ -1,4 +1,5 @@
-import { afterEach, expect, it, spyOn } from "bun:test";
+import { spawnProcessSync } from "../../scripts/node-process.ts";
+import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,12 +86,12 @@ it("indexes all worker identities once per committed revision and caches both gr
       }
     });
   }
-  const bulk = spyOn(GraphStore.prototype, "readWorkerExecutions");
-  const execution = spyOn(GraphStore.prototype, "readExecution");
-  const definitions = spyOn(GraphStore.prototype, "readDefinition");
-  const pending = spyOn(GraphStore.prototype, "pendingEffects");
-  const accepted = spyOn(GraphStore.prototype, "acceptedEvents");
-  const inventory = spyOn(GraphStore.prototype, "definitionGraphIds");
+  const bulk = vi.spyOn(GraphStore.prototype, "readWorkerExecutions");
+  const execution = vi.spyOn(GraphStore.prototype, "readExecution");
+  const definitions = vi.spyOn(GraphStore.prototype, "readDefinition");
+  const pending = vi.spyOn(GraphStore.prototype, "pendingEffects");
+  const accepted = vi.spyOn(GraphStore.prototype, "acceptedEvents");
+  const inventory = vi.spyOn(GraphStore.prototype, "definitionGraphIds");
   try {
     for (let i = 0; i < 100; i++) {
       expect(fx.reader.workerPrincipalOf("unrelated:" + i)).toBeUndefined();
@@ -120,9 +121,9 @@ it("shares typed dispatch and recorded-state inputs across distinct workers of o
   const fx = await fixture();
   const principals = fx.dispatched.map(request => ({ graphId: fx.graphId, attemptId: request.attemptId,
     executionId: "worker:" + request.attemptId, workerSessionId: "worker:" + request.attemptId }));
-  const pending = spyOn(GraphStore.prototype, "pendingEffects");
-  const state = spyOn(GraphStore.prototype, "readGraphState");
-  const definitions = spyOn(GraphStore.prototype, "readDefinition");
+  const pending = vi.spyOn(GraphStore.prototype, "pendingEffects");
+  const state = vi.spyOn(GraphStore.prototype, "readGraphState");
+  const definitions = vi.spyOn(GraphStore.prototype, "readDefinition");
   try {
     for (const principal of principals) fx.reader.workerToolGrantOf(principal);
     expect(pending).toHaveBeenCalledTimes(1);
@@ -159,7 +160,7 @@ it("invalidates a negative identity after a same-process writer commits and afte
   // file URL is "/D:/a/rolebox/…", which the child runtime cannot import (the
   // leading separator makes it root-relative on the current drive).
   const driverUrl = new URL("../../src/memory/db-driver.ts", import.meta.url).href;
-  const child = Bun.spawnSync([process.execPath, "-e", `
+  const child = spawnProcessSync([process.execPath, "-e", `
     import { createDatabaseSync } from ${JSON.stringify(driverUrl)};
     const db = createDatabaseSync(process.argv[1]);
     db.run("UPDATE host_dispatch_executions SET execution_id = ? WHERE graph_id = ? AND attempt_id = ?", "external-worker", process.argv[2], process.argv[3]);
@@ -217,7 +218,7 @@ it("does not publish uncommitted grant changes or keep grants after a rolled bac
 
 it.each(["before", "after"] as const)("keeps worker identity when a writer commits %s the read transaction", async phase => {
   const fx = await fixture();
-  const acquire = spyOn(GraphStore, "acquireReadOnlyConnection");
+  const acquire = vi.spyOn(GraphStore, "acquireReadOnlyConnection");
   let driver: ReturnType<typeof createDatabaseSync>;
   try {
     expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toEqual(fx.principal);
@@ -238,7 +239,7 @@ it.each(["before", "after"] as const)("keeps worker identity when a writer commi
       payload, fx.graphId, fx.request.attemptId);
   };
   const transaction = driver.transaction.bind(driver);
-  const hook = spyOn(driver, "transaction").mockImplementation(<R>(read: () => R) => {
+  const hook = vi.spyOn(driver, "transaction").mockImplementation(<R>(read: () => R) => {
     const run = transaction(read);
     return () => {
       if (phase === "before") commit();
@@ -373,7 +374,7 @@ it("reopens a fenced shared reader while another host retains the old connection
   writeFileSync(file, replacement);
   expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({});
   writeFileSync(file, saved);
-  const acquire = spyOn(GraphStore, "acquireReadOnlyConnection");
+  const acquire = vi.spyOn(GraphStore, "acquireReadOnlyConnection");
   try {
     expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
     const first = acquire.mock.results[0];
@@ -399,7 +400,7 @@ it("lets a cold host replace a stale pooled reader without waiting for its old o
     return;
   }
   writeFileSync(file, saved);
-  const acquire = spyOn(GraphStore, "acquireReadOnlyConnection");
+  const acquire = vi.spyOn(GraphStore, "acquireReadOnlyConnection");
   try {
     expect(cold.workerToolGrantOf(fx.principal)).toEqual({});
     expect(cold.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
@@ -415,13 +416,13 @@ it("lets a cold host replace a stale pooled reader without waiting for its old o
 
 it("releases its retained read-only connection and does not reopen after close", async () => {
   const fx = await fixture();
-  const acquire = spyOn(GraphStore, "acquireReadOnlyConnection");
+  const acquire = vi.spyOn(GraphStore, "acquireReadOnlyConnection");
   try {
     expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toEqual(fx.principal);
     expect(acquire).toHaveBeenCalledTimes(1);
     const result = acquire.mock.results[0];
     if (result?.type !== "return") throw new Error("fixture read-only connection missing");
-    const close = spyOn(result.value.connection.db, "close");
+    const close = vi.spyOn(result.value.connection.db, "close");
     try {
       fx.reader.close();
       expect(close).toHaveBeenCalledTimes(1);

@@ -12,7 +12,7 @@
  * These tests drive the REAL DispatchManager → launch → startBackgroundTask path
  * with stub ISessionClient.create implementations.
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

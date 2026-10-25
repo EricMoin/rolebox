@@ -1,3 +1,4 @@
+import { spawnProcess } from "../../scripts/node-process.ts";
 /**
  * P3 item 3 — THE DISPATCH BUDGET ACROSS REAL PROCESSES
  * (plan §4 P3 "使用记录可恢复", §5 A13 "并行预算与重启 | 预留/对账不重计；超限停止新派发").
@@ -9,7 +10,7 @@
  * exit and relaunch, never reopening an object.
  *
  * THE SHAPE. Every worker is
- * `Bun.spawn(process.execPath, <this directory>/helpers/budget-restart-xproc-worker.ts, …)`,
+ * `spawnProcess(process.execPath, <this directory>/helpers/budget-restart-xproc-worker.ts, …)`,
  * each prints ONE JSON report, and the parent asserts:
  *
  *   - PROCESS ONE (the parent): declares the graph and starts it. The entry
@@ -37,7 +38,7 @@
  * home-directory path or a session transcript.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -76,7 +77,7 @@ const BARRIER_DEADLINE_MS = 15_000;
  * other cross-process slices carry it: a child that was merely SLOW would
  * otherwise have the CASE killed and its own diagnosis never written.
  */
-setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CHILD_DEADLINE_MS + 15_000 });
 
 /**
  * The declaration: ONE budgeted entry node, plus a SECOND budgeted node that is
@@ -176,11 +177,7 @@ async function runWorker(
   workspaceDir: string,
   extra: readonly string[] = [],
 ): Promise<WorkerReport> {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn(
+  const proc = spawnProcess(
     [
       process.execPath,
       WORKER,
@@ -394,7 +391,7 @@ describe("the dispatch budget across real processes", () => {
       const markerDir = join(fixture.dir, "barrier");
       mkdirSync(markerDir, { recursive: true });
       const launch = (id: string) =>
-        Bun.spawn(
+        spawnProcess(
           [
             process.execPath,
             WORKER,

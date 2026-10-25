@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -648,7 +647,7 @@ describe("DshToolFactory reserved run_code guard", () => {
     ];
     const names = new Set<string>();
     for (const { path, pattern } of registrySources) {
-      const source = readFileSync(resolve(import.meta.dir, "../..", path), "utf-8");
+      const source = readFileSync(resolve(import.meta.dirname, "../..", path), "utf-8");
       for (const match of source.matchAll(pattern)) names.add(match[1]);
     }
     // Sanity: the scan actually found the rolebox tool registry.
@@ -660,7 +659,7 @@ describe("DshToolFactory reserved run_code guard", () => {
 // ── Import hygiene ────────────────────────────────────────────────────────
 
 describe("dsh tool-factory adapter import hygiene", () => {
-  const FILE = resolve(import.meta.dir, "../../src/platform/adapters/dsh/tool-factory.ts");
+  const FILE = resolve(import.meta.dirname, "../../src/platform/adapters/dsh/tool-factory.ts");
 
   function extractImportSpecifiers(source: string): string[] {
     const importRe =

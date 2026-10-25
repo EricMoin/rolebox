@@ -378,7 +378,7 @@ export async function fetchRegistryManifest(
  * Tests inject recording/spying spawn functions here; production callers
  * omit it and get the real spawn/spawnSync from node:child_process. This
  * seam exists because mocking the node:child_process builtin (or a re-export)
- * via mock.module hangs in Bun when a real child is spawned.
+ * is covered through real subprocess fixtures rather than module mocks.
  */
 export interface DownloadRoleProcess {
   spawn: typeof spawn;

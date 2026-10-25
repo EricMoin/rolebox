@@ -118,8 +118,8 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
     const display = cells > 0 ? truncate(value, cells) : "";
     return (
       <text>
-        <span fg={muted} attributes={DIM}>{prefix}</span>
-        <span fg={color}>{display}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{prefix}</span>
+        <span style={{ fg: color }}>{display}</span>
       </text>
     );
   };
@@ -129,7 +129,7 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
     const totalBudget = Math.min(secondaryBudget, label.length + 2 + VALUE_BUDGET);
     return (
       <text>
-        <span fg={muted} attributes={DIM}>{INDENT + labelValue(label, value, totalBudget)}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{INDENT + labelValue(label, value, totalBudget)}</span>
       </text>
     );
   };
@@ -145,8 +145,8 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
     >
       {/* ── Header ── */}
       <text>
-        <span fg={info} attributes={BOLD} on:click={() => props.onClose?.()}>{"[Back] "}</span>
-        <span attributes={BOLD} fg={norm}>{"  Task Detail"}</span>
+        <span   on:click={() => props.onClose?.()} style={{ fg: info, attributes: BOLD }}>{"[Back] "}</span>
+        <span style={{ attributes: BOLD, fg: norm }}>{"  Task Detail"}</span>
       </text>
 
       {/* Separator */}
@@ -154,8 +154,8 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
 
       {/* Status: glyph + agent (primary) */}
       <text>
-        <span fg={sg.color}>{sg.glyph + " "}</span>
-        <span fg={norm}>{truncate(agentName, valueBudget(SIDEBAR_WIDTH, GLYPH_CELLS + 1))}</span>
+        <span style={{ fg: sg.color }}>{sg.glyph + " "}</span>
+        <span style={{ fg: norm }}>{truncate(agentName, valueBudget(SIDEBAR_WIDTH, GLYPH_CELLS + 1))}</span>
       </text>
 
       {/* Status: duration (secondary, dimmed) */}
@@ -196,7 +196,7 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
         <text>{" "}</text>
         <text fg={muted} attributes={DIM}>{"result preview:"}</text>
         <text>
-          <span fg={norm}>{previewLine}</span>
+          <span style={{ fg: norm }}>{previewLine}</span>
         </text>
       </Show>
 
@@ -205,19 +205,19 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
         <text>{" "}</text>
         <text fg={muted} attributes={DIM}>{"result text:"}</text>
         <text>
-          <span fg={norm}>{detail.fullText}</span>
+          <span style={{ fg: norm }}>{detail.fullText}</span>
         </text>
       </Show>
 
       <Show when={(!detail.fullText || detail.fullText.length === 0) && totalChars > 0}>
         <text>
-          <span fg={muted} attributes={DIM_ITALIC}>{"(empty window \u2014 try scrolling)"}</span>
+          <span style={{ fg: muted, attributes: DIM_ITALIC }}>{"(empty window \u2014 try scrolling)"}</span>
         </text>
       </Show>
 
       <Show when={totalChars === 0}>
         <text>
-          <span fg={muted} attributes={DIM_ITALIC}>{"(no result text)"}</span>
+          <span style={{ fg: muted, attributes: DIM_ITALIC }}>{"(no result text)"}</span>
         </text>
       </Show>
 
@@ -225,11 +225,11 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
       <text>{" "}</text>
       <text fg={border}>{"\u2500".repeat(RULE_WIDTH_NARROW)}</text>
       <text>
-        <span fg={muted} attributes={DIM}>{"chars "}</span>
-        <span fg={info}>{String(windowStart)}\u2013{String(windowEnd)}</span>
-        <span fg={muted} attributes={DIM}>{" of "}</span>
-        <span fg={norm}>{String(totalChars)}</span>
-        <span fg={muted} attributes={DIM}>{" (" + pct + "%)"}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{"chars "}</span>
+        <span style={{ fg: info }}>{String(windowStart)}\u2013{String(windowEnd)}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{" of "}</span>
+        <span style={{ fg: norm }}>{String(totalChars)}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{" (" + pct + "%)"}</span>
       </text>
 
     </scrollbox>

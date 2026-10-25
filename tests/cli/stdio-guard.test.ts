@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,6 @@ function brokenPipe(): NodeJS.ErrnoException {
 describe("isBrokenPipeError", () => {
   it("recognizes the OS's EPIPE code", () => {
     expect(isBrokenPipeError(brokenPipe())).toBe(true);
-    // Bun reports it as a plain object-shaped error on some paths; only `code` matters.
     expect(isBrokenPipeError({ code: "EPIPE" })).toBe(true);
   });
 
@@ -249,10 +248,6 @@ describe("installBrokenPipeGuard — process-fatal events", () => {
   });
 });
 
-// ── Cross-process regression ──────────────────────────────────────────────
-// The unit tests above prove the plumbing; these prove the actual failures a
-// user reported in a real Bun process: a broken pipe must end the process
-// quietly instead of producing Bun's `EPIPE: broken pipe, write` crash report.
 const FIXTURE = fileURLToPath(new URL("./fixtures/broken-pipe-writer.ts", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -263,7 +258,7 @@ interface WriterResult {
 
 function runWriter(mode: "stream" | "rejection"): Promise<WriterResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["run", FIXTURE, mode], {
+    const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), FIXTURE, mode], {
       cwd: REPO_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
     });

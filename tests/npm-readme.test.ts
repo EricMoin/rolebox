@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * UNIT TESTS for `scripts/npm-readme.ts` — the pack-time README rewriter that
@@ -20,7 +19,7 @@
  * its own existence check.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import {
   MissingLocalImagesError,

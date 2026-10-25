@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { KNOWN_STRATEGIES, addKnownStrategy } from "../../src/recovery/config.ts";
 
 describe("Recovery Strategies YAML Gate", () => {

@@ -1,50 +1,11 @@
-/// <reference types="bun-types" />
+import { build as bundle } from "esbuild";
 
-/**
- * dsh web client bundle LOADABILITY probe — the browser half's own guard.
- *
- * ── Why this test exists ───────────────────────────────────────────────────
- * The dsh web client bundle is built with Bun `target: "browser"`
- * (`scripts/build-dsh-web-client.ts`), where a node builtin is not an error at
- * build time: Bun substitutes an EMPTY module for it, and the failure surfaces
- * only when the shipped bundle is evaluated in a browser. Stage 2 measured
- * exactly that for the platform kernel — `src/log/context.ts` imports
- * `node:async_hooks`, whose browser stub is `{}`, so `new AsyncLocalStorage`
- * throws `TypeError: undefined is not a constructor` on the first line of
- * `storage` initialisation, i.e. the whole bundle dies before any slot
- * registers (`.rolebox/tmp/stage2b/browser-kernel-probe.log`).
- *
- * The log view panel is the surface MOST exposed to that regression: it is
- * written beside the kernel, it consumes the kernel's record shape, and the
- * obvious "improvement" — importing `src/log/**` (or a shared type from it)
- * instead of reading `GET /rolebox/logs` over HTTP — is the exact mistake that
- * would put `node:async_hooks` back into the bundle.
- *
- * So this suite does what Stage 2's probe did, against the REAL entrypoint:
- *
- *   1. build `src/platform/adapters/dsh/web-ui/client.ts` with the build
- *      script's own options (asserted against the script's source, so the two
- *      cannot drift apart silently);
- *   2. SCAN the bundle for the kernel's and node's tell-tale strings;
- *   3. EVALUATE it the way the dsh module loader does — as a CommonJS factory
- *      with `require` supplied — with a shim that THROWS on any external other
- *      than react (so an unnoticed dependency is a failure, not a silent
- *      substitution);
- *   4. run `apply(ctx)` against a structural ctx double and assert BOTH
- *      right-Sidebar tab bodies register, the log view among them.
- *
- * The probe's machine-readable report is written to
- * `.rolebox/tmp/webview/bundle-probe.json` (a git-ignored path) so a reviewer
- * can read the numbers this run produced.
- *
- * @module
- */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const REPO_ROOT = resolve(import.meta.dir, "../..");
+const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 /** The client entry the shipped bundle is built from. */
 const CLIENT_ENTRY = resolve(REPO_ROOT, "src/platform/adapters/dsh/web-ui/client.ts");
@@ -55,21 +16,14 @@ const BUILD_SCRIPT = resolve(REPO_ROOT, "scripts/build-dsh-web-client.ts");
 /** The probe report's path (git-ignored; the reviewer reads it as evidence). */
 const REPORT_PATH = resolve(REPO_ROOT, ".rolebox/tmp/webview/bundle-probe.json");
 
-/**
- * The build options — deliberately the same object the build script passes.
- * `react/jsx-dev-runtime` is listed in addition to `jsx-runtime` because a test
- * process runs with NODE_ENV unset (Bun then selects the development JSX
- * runtime, as the build script's header documents); the emulated loader below
- * serves whichever one the bundle asks for.
- */
 const BUILD_OPTIONS: {
-  entrypoints: string[];
-  target: "browser";
+  entryPoints: string[];
+  platform: "browser";
   format: "cjs";
   external: string[];
 } = {
-  entrypoints: [CLIENT_ENTRY],
-  target: "browser",
+  entryPoints: [CLIENT_ENTRY],
+  platform: "browser",
   format: "cjs",
   external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "@deepseek-ai/*"],
 };
@@ -95,13 +49,8 @@ const FORBIDDEN_MARKERS: readonly string[] = [
 
 // ── Build once, evaluate per test ──────────────────────────────────────────
 
-const build = await Bun.build(BUILD_OPTIONS);
-
-if (!build.success) {
-  for (const log of build.logs) console.error(String(log));
-}
-
-const bundleText = build.success ? await build.outputs[0]!.text() : "";
+const build = await bundle({ ...BUILD_OPTIONS, bundle: true, write: false, jsx: "automatic", jsxImportSource: "react" });
+const bundleText = build.outputFiles![0]!.text;
 
 // ── The emulated dsh module loader ─────────────────────────────────────────
 
@@ -188,18 +137,18 @@ function createFakeClientContext() {
 describe("dsh web client bundle probe (target: browser)", () => {
   it("builds the client entry with the same options the build script passes", () => {
     const script = readFileSync(BUILD_SCRIPT, "utf8");
-    expect(script).toContain('target: "browser"');
+    expect(script).toContain('platform: "browser"');
     expect(script).toContain('format: "cjs"');
     expect(script).toContain('"react"');
     expect(script).toContain('"react/jsx-runtime"');
     expect(script).toContain('"@deepseek-ai/*"');
     expect(script).toContain("src/platform/adapters/dsh/web-ui/client.ts");
 
-    expect(BUILD_OPTIONS.target).toBe("browser");
+    expect(BUILD_OPTIONS.platform).toBe("browser");
     expect(BUILD_OPTIONS.format).toBe("cjs");
-    expect(BUILD_OPTIONS.entrypoints[0]).toBe(CLIENT_ENTRY);
-    expect(build.success).toBe(true);
-    expect(build.outputs).toHaveLength(1);
+    expect(BUILD_OPTIONS.entryPoints[0]).toBe(CLIENT_ENTRY);
+    expect(build.errors).toHaveLength(0);
+    expect(build.outputFiles).toHaveLength(1);
     expect(bundleText.length).toBeGreaterThan(1000);
   });
 
@@ -268,11 +217,11 @@ describe("dsh web client bundle probe (target: browser)", () => {
       probe: "dsh-web-client-bundle-loadability",
       entry: "src/platform/adapters/dsh/web-ui/client.ts",
       buildOptions: {
-        target: BUILD_OPTIONS.target,
+        target: BUILD_OPTIONS.platform,
         format: BUILD_OPTIONS.format,
         external: BUILD_OPTIONS.external,
       },
-      buildSucceeded: build.success,
+      buildSucceeded: build.errors.length === 0,
       bundleBytes: bundleText.length,
       forbiddenMarkers: FORBIDDEN_MARKERS,
       forbiddenMarkersFound: FORBIDDEN_MARKERS.filter((marker) => bundleText.includes(marker)),

@@ -461,11 +461,8 @@ function globalDocumentPaths(configDir?: string): string[] {
  *
  * Read at CALL time, never at module load, so a caller can point the layer at
  * another directory. A non-blank `HOME` wins over {@link homedir}: on POSIX
- * that is exactly the directory opencode's own `os.homedir()` resolves, and
- * Bun freezes `os.homedir()` at the environment the process STARTED with
- * (measured on Bun 1.3.14 — a later `process.env.HOME` assignment never
- * reaches it), so the explicit read is what keeps this module isomorphic with
- * the host it models. An unset or blank `HOME` falls back to {@link homedir}.
+ * that is the directory opencode's own `os.homedir()` resolves. An unset or
+ * blank `HOME` falls back to {@link homedir}.
  */
 function osHomeDir(): string {
   const home = process.env.HOME?.trim() ?? "";

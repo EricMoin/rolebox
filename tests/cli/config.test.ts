@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { rmSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -425,7 +425,7 @@ type SelectOptionsAny = Parameters<PromptApi["select"]>[0];
 function createFakePrompts(picked: string) {
   // The parameter is declared (prompt options are what the pickers pass, per
   // pick.ts `PromptApi`) so `mock.calls` is typed against the real call shape.
-  const select = mock(async (_opts: SelectOptionsAny): Promise<string | symbol> => picked);
+  const select = vi.fn(async (_opts: SelectOptionsAny): Promise<string | symbol> => picked);
   const prompts: PromptApi = {
     intro: () => {},
     outro: () => {},

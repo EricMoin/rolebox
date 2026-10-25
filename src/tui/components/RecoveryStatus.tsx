@@ -1,3 +1,4 @@
+import type { JSX } from "solid-js";
 /**
  * TUI recovery status panel.
  *
@@ -35,7 +36,7 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
     ? Math.round((successes / totalAttempts) * 100)
     : 0;
 
-  const parts: unknown[] = [];
+  const parts: JSX.Element[] = [];
 
   // Summary rows — one `label: value` fact per row.
   const rateColor = successRate >= 80 ? c.success : successRate >= 50 ? c.warning : c.error;
@@ -46,8 +47,8 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
     const display = cells > 0 ? truncate(value, cells) : "";
     return (
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + prefix}</span>
-        <span fg={rgbaToCSS(color)}>{display}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT + prefix}</span>
+        <span style={{ fg: rgbaToCSS(color) }}>{display}</span>
       </text>
     );
   };
@@ -69,9 +70,9 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
       const rate = entry.attempts > 0 ? Math.round((entry.successes / entry.attempts) * 100) : 0;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + truncate(cat, VALUE_BUDGET)}</span>
-          <span fg={rgbaToCSS(c.info)}>{" " + String(entry.attempts) + "/" + String(entry.successes)}</span>
-          <span fg={rgbaToCSS(c.textMuted)}>{" " + String(rate) + "%"}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT + truncate(cat, VALUE_BUDGET)}</span>
+          <span style={{ fg: rgbaToCSS(c.info) }}>{" " + String(entry.attempts) + "/" + String(entry.successes)}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted) }}>{" " + String(rate) + "%"}</span>
         </text>,
       );
     }
@@ -88,9 +89,9 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
       const rate = entry.attempts > 0 ? Math.round((entry.successes / entry.attempts) * 100) : 0;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + truncate(strat, VALUE_BUDGET)}</span>
-          <span fg={rgbaToCSS(c.info)}>{" " + String(entry.attempts) + "/" + String(entry.successes)}</span>
-          <span fg={rgbaToCSS(c.textMuted)}>{" " + String(rate) + "%"}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT + truncate(strat, VALUE_BUDGET)}</span>
+          <span style={{ fg: rgbaToCSS(c.info) }}>{" " + String(entry.attempts) + "/" + String(entry.successes)}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted) }}>{" " + String(rate) + "%"}</span>
         </text>,
       );
     }
@@ -109,8 +110,8 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
     for (const err of sorted) {
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + truncate(err.type, VALUE_BUDGET)}</span>
-          <span fg={rgbaToCSS(c.warning)}>{" " + String(err.count)}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT + truncate(err.type, VALUE_BUDGET)}</span>
+          <span style={{ fg: rgbaToCSS(c.warning) }}>{" " + String(err.count)}</span>
         </text>,
       );
     }

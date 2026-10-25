@@ -9,7 +9,7 @@
  * and `parseJsonc` keeps `JSON.parse`'s throw-on-malformed contract, so callers
  * own their fallback policy.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { parseJsonc, stripJsonComments } from "../../src/utils/jsonc.ts";
 
 /** The four characters JSON accepts as a line terminator. */

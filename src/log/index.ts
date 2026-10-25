@@ -90,7 +90,7 @@ export { FILE_ENV, LOG_DIR_ENV, MAX_BYTES_ENV, RETAIN_ENV } from "./sinks/file.t
 
 // The read side of the same files: what an operator, a CLI or a TUI asks for.
 // It depends on the writer's conventions (./sinks/file.ts) and on nothing that
-// is browser-safe, because it is a Node/Bun-side operations surface.
+// is browser-safe, because it is a Node-side operations surface.
 export {
   DEFAULT_FOLLOW_POLL_MS,
   DEFAULT_LOG_QUERY_LIMIT,

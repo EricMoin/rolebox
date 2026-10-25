@@ -477,8 +477,7 @@ export class HotReloadService implements PluginService {
 
   /** Compute a content-addressable hash string from role.yaml content.
    *  Only compared in-process (roleHashCache) — NOT persisted.
-   *  Changed from Bun.hash to node:crypto sha1-hex for Node portability;
-   *  format differs but in-process comparison is self-consistent. */
+   */
   private hashContent(content: string): string {
     return createHash("sha1").update(content).digest("hex");
   }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { createDshGraphWorkerGrantHost } from "../../../../src/platform/adapters/dsh/graph-worker-host.ts";
 import type { OutcomeWorkerPrincipal, OutcomeWorkerToolGrant } from "../../../../src/graph/host/tool-binding.ts";
 

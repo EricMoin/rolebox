@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -41,7 +41,7 @@ describe("DispatchService", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 
@@ -217,10 +217,10 @@ describe("DispatchService", () => {
       const dir = mkdtempSync(join(tmpdir(), "dsp-flush-"));
       const ctx = makeContext({ rawDirectory: dir, directory: dir });
       const mockManager = {
-        dispose: mock(async () => {}),
-        updateDispatchConfigs: mock(() => {}),
-        isOperational: mock(() => true),
-        flushPersistSync: mock(() => {}),
+        dispose: vi.fn(async () => {}),
+        updateDispatchConfigs: vi.fn(() => {}),
+        isOperational: vi.fn(() => true),
+        flushPersistSync: vi.fn(() => {}),
       };
       hookState.managerMap.set(ctx.rawDirectory, mockManager as any);
       const svc = new DispatchService({ sessionClient: createMockClient() });
@@ -271,9 +271,9 @@ describe("DispatchService", () => {
       const dir = mkdtempSync(join(tmpdir(), "dsp-injected-"));
       const ctx = makeContext({ rawDirectory: dir, directory: dir });
       const mockManager = {
-        dispose: mock(async () => {}),
-        updateDispatchConfigs: mock(() => {}),
-        isOperational: mock(() => true),
+        dispose: vi.fn(async () => {}),
+        updateDispatchConfigs: vi.fn(() => {}),
+        isOperational: vi.fn(() => true),
       };
       hookState.managerMap.set(ctx.rawDirectory, mockManager as any);
       const svc = new DispatchService({ sessionClient: createMockClient() });

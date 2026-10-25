@@ -42,7 +42,9 @@ import { wireRoleSwitcher } from "../platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "../platform/adapters/pi/active-agent.ts";
 import type { ToolInterceptorHooks } from "../platform/adapters/pi/tool-interceptor.ts";
 import { createComputerTools } from "../computer/index.ts";
+import { createBrowseTools } from "../browse/tools.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
+import { resolveBrowseUseGate } from "../loader/browse-use-gate.ts";
 import { piCapabilities } from "../platform/capabilities.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type {
@@ -1234,6 +1236,15 @@ export default async function(pi: any): Promise<void> {
       reason: computerUseGate.reason,
     });
 
+    // Browse tools follow their own gate: explicit setting first, AUTO (the
+    // optional playwright driver resolves from rolebox) when none is given.
+    const browseUseGate = resolveBrowseUseGate({ workspaceDir: process.cwd() });
+    log.info("Browse use gate resolved", {
+      enabled: browseUseGate.enabled,
+      driverAvailable: browseUseGate.driver.available,
+      reason: browseUseGate.reason,
+    });
+
     const extraTools = {
       function_graph: createFunctionGraphTool(resolvedRoles),
       skill_compose: createSkillComposeTool(resolvedRoles),
@@ -1251,6 +1262,9 @@ export default async function(pi: any): Promise<void> {
       ...createAllLspTools(lspClientManager, lspDocManager),
       // Computer use — the canonical family, present ONLY when the gate is on.
       ...(computerUseGate.enabled ? createComputerTools() : {}),
+      // Browse — the 22-tool browser family, likewise present ONLY when its own
+      // gate is on (an explicit opt-in, or AUTO with the driver installed).
+      ...(browseUseGate.enabled ? createBrowseTools() : {}),
     };
 
     // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
@@ -1353,6 +1367,12 @@ export default async function(pi: any): Promise<void> {
       activeRoleFor: () => activeAgent.get() ?? null,
       roles: () => resolvedRoles,
     };
+    // The browse family's enforcement seam — same semantics, its own gate.
+    interceptorHooks.browseUse = {
+      enabled: browseUseGate.enabled,
+      activeRoleFor: () => activeAgent.get() ?? null,
+      roles: () => resolvedRoles,
+    };
 
     // ── 5. Tool registration via PiLightweightServiceStack ──────────────
     //
@@ -1416,6 +1436,9 @@ export default async function(pi: any): Promise<void> {
           ...interceptorHooks,
           computerUse: interceptorHooks.computerUse ? {
             ...interceptorHooks.computerUse, activeRoleFor: () => context.agent ?? null,
+          } : undefined,
+          browseUse: interceptorHooks.browseUse ? {
+            ...interceptorHooks.browseUse, activeRoleFor: () => context.agent ?? null,
           } : undefined,
         });
         if (!before.ok) throw new Error(before.error);

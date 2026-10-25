@@ -31,7 +31,7 @@
  * block; nothing here writes outside a temp dir.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   openTrackedCredentialVault,

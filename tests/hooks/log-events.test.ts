@@ -21,7 +21,7 @@
  *    cap and its activation cap — rather than by calling logEvent directly.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   LOG_EVENTS,
@@ -90,18 +90,18 @@ function makeContext(injects: string[], activate: string[]): FunctionContext {
 
 function makeSessionState(): FunctionSessionState {
   return {
-    activate: mock(() => {}),
-    deactivate: mock(() => {}),
-    getActive: mock(() => new Set<string>()),
+    activate: vi.fn(() => {}),
+    deactivate: vi.fn(() => {}),
+    getActive: vi.fn(() => new Set<string>()),
   } as unknown as FunctionSessionState;
 }
 
 function makeRuntime(): FunctionRuntimeManager {
   return {
-    init: mock(() => ({})),
-    get: mock(() => undefined),
-    markDirty: mock(() => {}),
-    all: mock(() => new Map()),
+    init: vi.fn(() => ({})),
+    get: vi.fn(() => undefined),
+    markDirty: vi.fn(() => {}),
+    all: vi.fn(() => new Map()),
   } as unknown as FunctionRuntimeManager;
 }
 
@@ -212,6 +212,6 @@ describe("the hooks slice's events come from the modules that own them", () => {
     expect(record?.scope).toEqual({ sessionId: sessionID });
     expect(record?.fields).toEqual({ fn: "activation-handler" });
     // The three activations under the cap still happened; the fourth did not.
-    expect((sessionState.activate as ReturnType<typeof mock>).mock.calls.length).toBe(3);
+    expect((sessionState.activate as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls.length).toBe(3);
   });
 });

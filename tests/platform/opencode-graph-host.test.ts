@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * opencode family — the host capability layer behind the declared-graph tool face.
@@ -32,7 +31,7 @@
  * tree, so nothing outside those temp dirs is written.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

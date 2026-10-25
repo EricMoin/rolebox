@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { parseBenchmarkRunRecord, renderBenchmarkHtml, summarizeBenchmarkRun } from "../../src/benchmark/report.ts";
 import type { BenchmarkRunRecord, BenchmarkTrial } from "../../src/benchmark/types.ts";
 

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Opt-in native screen captures on macOS. ROLEBOX_CUA_NATIVE_TESTS=1 requires
@@ -6,7 +5,7 @@
  * temporary directory. Default module test runs skip both tests.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,7 +43,7 @@ describe("host runtime lifecycle", () => {
   it("releases a ledger that finishes opening after close", async () => {
     const { root, runtimes } = runtimeFixture();
     const ledger = await SqliteAcceptanceLedger.create(root);
-    const create = spyOn(SqliteAcceptanceLedger, "create").mockResolvedValue(ledger);
+    const create = vi.spyOn(SqliteAcceptanceLedger, "create").mockResolvedValue(ledger);
     try {
       const pending = runtimes.get(PLAIN_GRAPH_ID);
       runtimes.close();
@@ -59,7 +59,7 @@ describe("host runtime lifecycle", () => {
   it("releases the ledger when runtime construction fails", async () => {
     const { root, options, runtimes } = runtimeFixture();
     const ledger = await SqliteAcceptanceLedger.create(root);
-    const create = spyOn(SqliteAcceptanceLedger, "create").mockResolvedValue(ledger);
+    const create = vi.spyOn(SqliteAcceptanceLedger, "create").mockResolvedValue(ledger);
     Object.defineProperty(options, "validators", {
       get: () => { throw new Error("capability unavailable"); },
     });

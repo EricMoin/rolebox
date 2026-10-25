@@ -1,44 +1,4 @@
-/**
- * Cross-process worker for the P3 item 2 RETRY restart evidence.
- *
- * WHY THIS FILE EXISTS. Plan §4 (P3) requires every control command to be covered
- * through "重启后继续" (continue after restart), and §5 says a temporary probe can
- * never be the sole acceptance evidence. The tracked restart case in
- * `tests/graph/run-reexecution.test.ts` replaces the host OBJECT inside one
- * process — the same connection, the same memory — so it is not a process
- * boundary. This worker is spawned with `Bun.spawn(process.execPath, …)` by
- * `tests/graph/retry-restart-cross-process.test.ts`: the retry is DECIDED in one
- * OS process and honoured in another that has never seen its memory.
- *
- *     bun tests/graph/helpers/retry-restart-xproc-worker.ts --mode <mode> ...
- *
- * Modes:
- *   - `seed`   declares the fixture graph, starts it (attempt `work#1` is
- *              dispatched and confirmed), applies a NODE-SCOPED `retry` through
- *              the shipped control entry WITHOUT the host's follow-up, and
- *              EXITS — exactly the crash window a restart leaves behind.
- *   - `resume` opens a fresh host over the same store root and resumes the
- *              declared graph, reporting which attempt it delivered and whether
- *              the delivered credential matches the PERSISTED digest.
- *   - `order`  completes the first run through the shipped submission ingress and
- *              records a RUN-SCOPED `retry` order WITHOUT the follow-up that
- *              would mint the successor run: the terminal run is closed and its
- *              order is owed, which is the state the two racers below need.
- *   - `mint-race` reads the owed order and the current run, waits on the parent's
- *              barrier, then runs the two conditionals a re-execution is built
- *              from (`mintNextRun` + `markReexecutionExecuted`) in ONE
- *              transaction. Exactly one of two such processes can win; the loser
- *              names the conditional that refused it and writes nothing.
- *
- * Every mode prints exactly ONE JSON line on stdout — `{"pid":n,"ok":true,…}` on
- * success, `{"pid":n,"ok":false,…}` plus a non-zero exit on failure.
- *
- * PRIVACY. This fixture receives store roots under the OS temp directory, the
- * deterministic attempt ids the graph mints, and one declaring session id. It
- * never prints a credential VALUE, a real home-directory path or a session
- * transcript: the report carries ids, counts, booleans and the RESULT of the
- * digest comparison only.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

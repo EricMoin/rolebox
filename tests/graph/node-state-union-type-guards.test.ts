@@ -1,34 +1,5 @@
-/**
- * F-17 (first leg) — `OutcomeNodeState` is a discriminated union.
- *
- * The persisted-state model used to be one all-optional interface: `status` was
- * a discriminant with no relation to the attempt fields, so `{status:"settled"}`
- * with no `attemptId`, `outcomeId` or timestamps — and `{status:"pending",
- * attemptId:"x"}` — were representable even though the versioned codec refuses
- * both on the next read. The arms below make the compiler enforce what
- * `state-codec.ts` already enforces, per status:
- *
- *   - `pending`    — `arrivals` required; no attempt identity, credential
- *                    digest, host binding, outcome, timestamp or bound input
- *                    view;
- *   - `dispatched` — `attemptId`, `attemptSeq`, `attemptCredentialDigest`,
- *                    `dispatchedAt` and `arrivals` required;
- *   - `settled`    — the same dispatch facts, plus `outcomeId` and `settledAt`.
- *
- * A field the codec REFUSES for a status is declared `never` on that arm rather
- * than omitted, so it stays addressable (and `undefined`) across the union —
- * which is what every existing reader sees — while a value that CARRIES it is a
- * compile error. The codec's accepted field sets, the persisted JSON shape, the
- * body versions and the plan digest are unchanged.
- *
- * `bun test` is transpile-only, so the authority for every `expectTypeOf` pin
- * below is `bun run typecheck:tests`; the runtime cases beside them pin the
- * behaviour the types describe against the REAL run path and the codec.
- *
- * @module
- */
 
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

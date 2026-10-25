@@ -12,7 +12,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach, afterAll, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -58,12 +58,12 @@ async function waitForPhase(
  * Mock Pi ExtensionAPI with recorded sendMessage / sendUserMessage calls.
  */
 function createMockPi(): {
-  sendMessage: ReturnType<typeof mock>;
-  sendUserMessage: ReturnType<typeof mock>;
+  sendMessage: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+  sendUserMessage: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 } {
   return {
-    sendMessage: mock((_message: any, _opts?: any) => {}),
-    sendUserMessage: mock((_text: string) => {}),
+    sendMessage: vi.fn((_message: any, _opts?: any) => {}),
+    sendUserMessage: vi.fn((_text: string) => {}),
   };
 }
 
@@ -80,27 +80,27 @@ function createMockInner(processIds: string[] = []): ISessionClient & {
 
   return {
     processes,
-    list: mock(async (_dir?: string) => []),
-    get: mock(async (_id: string, _dir?: string) => null),
-    messages: mock(async (_id: string, _opts?: { directory?: string; limit?: number }) => []),
-    children: mock(async (_id: string, _dir?: string) => []),
-    todo: mock(async (_id: string, _dir?: string) => []),
-    diff: mock(async (_id: string, _opts?: { directory?: string; messageID?: string }) => []),
-    fork: mock(async (_id: string, _opts?: { directory?: string; messageID?: string }) => null),
-    status: mock(async (_id: string, _dir?: string) => null),
-    prompt: mock(async (_id: string, _opts: any) => ({ id: _id })),
-    promptSync: mock(async (_id: string, _opts: any) => ({ parts: [{ type: "text", text: "response" }] })),
-    create: mock(async (_opts: { directory: string; agent?: string; parentID?: string }) => null),
-    abort: mock(async (_id: string) => true),
+    list: vi.fn(async (_dir?: string) => []),
+    get: vi.fn(async (_id: string, _dir?: string) => null),
+    messages: vi.fn(async (_id: string, _opts?: { directory?: string; limit?: number }) => []),
+    children: vi.fn(async (_id: string, _dir?: string) => []),
+    todo: vi.fn(async (_id: string, _dir?: string) => []),
+    diff: vi.fn(async (_id: string, _opts?: { directory?: string; messageID?: string }) => []),
+    fork: vi.fn(async (_id: string, _opts?: { directory?: string; messageID?: string }) => null),
+    status: vi.fn(async (_id: string, _dir?: string) => null),
+    prompt: vi.fn(async (_id: string, _opts: any) => ({ id: _id })),
+    promptSync: vi.fn(async (_id: string, _opts: any) => ({ parts: [{ type: "text", text: "response" }] })),
+    create: vi.fn(async (_opts: { directory: string; agent?: string; parentID?: string }) => null),
+    abort: vi.fn(async (_id: string) => true),
   };
 }
 
 function createMockLogger(): Logger<ILogObj> {
   return {
-    debug: mock(() => {}),
-    info: mock(() => {}),
-    warn: mock(() => {}),
-    error: mock(() => {}),
+    debug: vi.fn(() => {}),
+    info: vi.fn(() => {}),
+    warn: vi.fn(() => {}),
+    error: vi.fn(() => {}),
   } as unknown as Logger<ILogObj>;
 }
 
@@ -150,7 +150,7 @@ function createMockDispatchAdapter(): MockDispatchAdapter {
   let nextTaskStatus = "running";
   let summaryText = "Summary from completed round";
 
-  const injectNoteMock = mock(async (_sessionId: string, _text: string) => {});
+  const injectNoteMock = vi.fn(async (_sessionId: string, _text: string) => {});
 
   const adapter: MockDispatchAdapter = {
     dispatchRoundCalls,
@@ -340,7 +340,7 @@ describe("PI Dispatch — Notification & DispatchAdapter", () => {
   it("falls back to sendUserMessage when sendMessage is unavailable (legacy Pi)", async () => {
     const inner = createMockInner();
     const legacyPi = {
-      sendUserMessage: mock((_text: string) => {}),
+      sendUserMessage: vi.fn((_text: string) => {}),
     } as any;
     const log = createMockLogger();
     const client = new PiNotificationSessionClient(inner as any, legacyPi, log);
@@ -389,14 +389,14 @@ describe("PI Dispatch — DispatchAdapter", () => {
 
   it("DispatchAdapter.dispatchRound launches a background task via dispatchManager", async () => {
     const dispatchManager = {
-      launch: mock(async (_input: any, _ctx: any) => ({
+      launch: vi.fn(async (_input: any, _ctx: any) => ({
         id: "task-dispatch-1",
         sessionId: "ses-dispatch-1",
       })),
     } as any;
     const client = {
-      prompt: mock(async () => ({ id: "x" })),
-      messages: mock(async () => []),
+      prompt: vi.fn(async () => ({ id: "x" })),
+      messages: vi.fn(async () => []),
     } as any;
 
     const adapter = new DispatchAdapter(dispatchManager, client, "/tmp/test");
@@ -413,7 +413,7 @@ describe("PI Dispatch — DispatchAdapter", () => {
     expect(result.workerSessionId).toBe("ses-dispatch-1");
     expect(dispatchManager.launch).toHaveBeenCalledTimes(1);
 
-    const launchCall = (dispatchManager.launch as ReturnType<typeof mock>).mock.calls[0];
+    const launchCall = (dispatchManager.launch as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0];
     expect(launchCall[0].subagent).toBe("test-agent");
     expect(launchCall[0].prompt).toBe("Execute task");
     expect(launchCall[0].run_in_background).toBe(true);
@@ -425,14 +425,14 @@ describe("PI Dispatch — DispatchAdapter", () => {
 
   it("DispatchAdapter.getRoundResult returns text, hadError, errorReason", async () => {
     const dispatchManager = {
-      getResult: mock(async (_taskId: string) => ({
+      getResult: vi.fn(async (_taskId: string) => ({
         kind: "ok",
         text: "Round output here",
         error: undefined,
       })),
     } as any;
     const client = {
-      messages: mock(async () => []),
+      messages: vi.fn(async () => []),
     } as any;
     const adapter = new DispatchAdapter(dispatchManager, client, "/tmp/test");
 
@@ -446,14 +446,14 @@ describe("PI Dispatch — DispatchAdapter", () => {
 
   it("DispatchAdapter.getRoundResult detects hadError from dispatch error", async () => {
     const dispatchManager = {
-      getResult: mock(async (_taskId: string) => ({
+      getResult: vi.fn(async (_taskId: string) => ({
         kind: "ok",
         text: "",
         error: "Sub-agent crashed",
       })),
     } as any;
     const client = {
-      messages: mock(async () => []),
+      messages: vi.fn(async () => []),
     } as any;
     const adapter = new DispatchAdapter(dispatchManager, client, "/tmp/test");
 
@@ -466,9 +466,9 @@ describe("PI Dispatch — DispatchAdapter", () => {
 
   it("DispatchAdapter.cancelRound calls dispatchManager.cancelTask", async () => {
     const dispatchManager = {
-      cancelTask: mock(async (_taskId: string) => true),
+      cancelTask: vi.fn(async (_taskId: string) => true),
     } as any;
-    const client = { messages: mock(async () => []) } as any;
+    const client = { messages: vi.fn(async () => []) } as any;
     const adapter = new DispatchAdapter(dispatchManager, client, "/tmp/test");
 
     await adapter.cancelRound("task-to-cancel");
@@ -479,9 +479,9 @@ describe("PI Dispatch — DispatchAdapter", () => {
 
   it("DispatchAdapter.getTaskStatus returns status from dispatchManager", async () => {
     const dispatchManager = {
-      getTask: mock((_taskId: string) => ({ status: "running" })),
+      getTask: vi.fn((_taskId: string) => ({ status: "running" })),
     } as any;
-    const client = { messages: mock(async () => []) } as any;
+    const client = { messages: vi.fn(async () => []) } as any;
     const adapter = new DispatchAdapter(dispatchManager, client, "/tmp/test");
 
     const status = await adapter.getTaskStatus("task-running");
@@ -492,9 +492,9 @@ describe("PI Dispatch — DispatchAdapter", () => {
 
   it("DispatchAdapter.getTaskStatus returns undefined for unknown task", async () => {
     const dispatchManager = {
-      getTask: mock((_taskId: string) => undefined),
+      getTask: vi.fn((_taskId: string) => undefined),
     } as any;
-    const client = { messages: mock(async () => []) } as any;
+    const client = { messages: vi.fn(async () => []) } as any;
     const adapter = new DispatchAdapter(dispatchManager, client, "/tmp/test");
 
     const status = await adapter.getTaskStatus("nonexistent");

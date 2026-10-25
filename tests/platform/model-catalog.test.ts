@@ -18,7 +18,7 @@
  * otherwise climbs to the filesystem root; the injected trees absorb that, as
  * in tests/platform/opencode-config.test.ts.)
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";

@@ -1,4 +1,4 @@
-/// <reference types="bun-types" />
+import { beforeEach as resetBeforeEach } from "vitest";
 
 /**
  * RoleboxRolesPanel behavior tests — the browser-half "Rolebox" settings page
@@ -47,11 +47,10 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // ── Stateful react double + tree harness ───────────────────────────────────
 
-/** One rendered JSX element (bun's automatic runtime passes children via props). */
 interface VNode {
   type: unknown;
   props: Record<string, unknown>;
@@ -225,9 +224,9 @@ function useRef<T>(initial: T): { current: T } {
   return rs.states[slot] as { current: T };
 }
 
-mock.module("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 
 // ── Module under test (dynamic import: mocks must precede the graph) ───────
 
@@ -828,3 +827,5 @@ describe("RoleboxRolesPanel", () => {
     });
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

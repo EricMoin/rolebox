@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { KNOWN_CONDITIONS } from "../../src/function/conditions.ts";
 import { GRAPH_TEMPLATE_VALUES } from "../../src/constants.ts";
 import { KNOWN_STRATEGIES } from "../../src/recovery/config.ts";

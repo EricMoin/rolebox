@@ -660,18 +660,14 @@ export function createSidebarRenderer(workspaceDir: string) {
         const active = view();
         return (
           <text>
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"view "}</span>
-            <span
-              fg={rgbaToCSS(active === "activity" ? c.text : c.textMuted)}
-              attributes={active === "activity" ? BOLD : DIM}
+            <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"view "}</span>
+            <span style={{ fg: rgbaToCSS(active === "activity" ? c.text : c.textMuted), attributes: active === "activity" ? BOLD : DIM }}
             >{"activity"}</span>
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" \u00b7 "}</span>
-            <span
-              fg={rgbaToCSS(active === "logs" ? c.text : c.textMuted)}
-              attributes={active === "logs" ? BOLD : DIM}
+            <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" \u00b7 "}</span>
+            <span style={{ fg: rgbaToCSS(active === "logs" ? c.text : c.textMuted), attributes: active === "logs" ? BOLD : DIM }}
             >{"logs"}</span>
             {active === "logs" && (
-              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>
+              <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>
                 {(logPaused() ? "  paused" : "  live") + "  " + logsStore.filters.minLevel}
               </span>
             )}
@@ -732,16 +728,16 @@ export function createSidebarRenderer(workspaceDir: string) {
             <text>{" ──"}</text>
             <text attributes={BOLD} fg={norm}>{"Dispatch Metrics"}</text>
             <text>
-              <span fg={norm}>{"  active: "}</span>
-              <span fg={info} attributes={BOLD}>{String(concurrency.active)}</span>
-              <span fg={muted}>{"/"}</span>
-              <span fg={norm}>{String(concurrency.limit)}</span>
+              <span style={{ fg: norm }}>{"  active: "}</span>
+              <span style={{ fg: info, attributes: BOLD }}>{String(concurrency.active)}</span>
+              <span style={{ fg: muted }}>{"/"}</span>
+              <span style={{ fg: norm }}>{String(concurrency.limit)}</span>
             </text>
-            <text><span fg={norm}>{"  queued: "}</span><span fg={warn}>{String(concurrency.queued)}</span></text>
-            <text><span fg={norm}>{"  running: "}</span><span fg={info}>{String(dispatchSummary.running)}</span></text>
-            <text><span fg={norm}>{"  pending: "}</span><span fg={warn}>{String(dispatchSummary.pending)}</span></text>
-            <text><span fg={norm}>{"  completed: "}</span><span fg={rgbaToCSS(c.success)}>{String(dispatchSummary.completed)}</span></text>
-            <text><span fg={norm}>{"  errors: "}</span><span fg={err}>{String(dispatchSummary.error)}</span></text>
+            <text><span style={{ fg: norm }}>{"  queued: "}</span><span style={{ fg: warn }}>{String(concurrency.queued)}</span></text>
+            <text><span style={{ fg: norm }}>{"  running: "}</span><span style={{ fg: info }}>{String(dispatchSummary.running)}</span></text>
+            <text><span style={{ fg: norm }}>{"  pending: "}</span><span style={{ fg: warn }}>{String(dispatchSummary.pending)}</span></text>
+            <text><span style={{ fg: norm }}>{"  completed: "}</span><span style={{ fg: rgbaToCSS(c.success) }}>{String(dispatchSummary.completed)}</span></text>
+            <text><span style={{ fg: norm }}>{"  errors: "}</span><span style={{ fg: err }}>{String(dispatchSummary.error)}</span></text>
           </box>
         );
       }

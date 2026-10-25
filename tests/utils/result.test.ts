@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { err, isErr, isOk, ok, type Result } from "../../src/utils/result.ts";
 
 describe("result", () => {

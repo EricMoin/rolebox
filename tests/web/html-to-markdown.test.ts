@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "bun:test";
+import { describe, it, expect, beforeAll } from "vitest";
 
 describe("convertHtmlToMarkdown", () => {
   let convertHtmlToMarkdown: (html: string, url?: string) => string;

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { extractSessionErrorMessage } from "../../src/dispatch/core/manager.ts";
 
 describe("extractSessionErrorMessage", () => {

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh plugin-level skill-registration integration test —
@@ -40,7 +39,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   mkdirSync,
   mkdtempSync,

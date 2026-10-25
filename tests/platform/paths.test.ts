@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -171,8 +170,8 @@ describe("existing platform path helpers", () => {
 
 describe("platform path modules stay free of platform SDK imports", () => {
   const FILES = [
-    resolve(import.meta.dir, "../../src/platform/paths.ts"),
-    resolve(import.meta.dir, "../../src/platform/factory.ts"),
+    resolve(import.meta.dirname, "../../src/platform/paths.ts"),
+    resolve(import.meta.dirname, "../../src/platform/factory.ts"),
   ];
 
   function extractImportSpecifiers(source: string): string[] {

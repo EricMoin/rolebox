@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * `layoutGraphTopology` — the pure geometry behind the Rolebox monitor's
@@ -27,7 +26,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   layoutGraphTopology,
   TOPOLOGY_BOX_HEIGHT,

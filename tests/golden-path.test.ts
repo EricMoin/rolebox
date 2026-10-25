@@ -1,13 +1,5 @@
-/**
- * Golden-Path Integration Test
- *
- * Simulates the full plan→approve→execute→continue-until-done loop
- * using real stores (not mocks) to verify the agent workflow contract.
- *
- * Run: bun test tests/golden-path.test.ts
- */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -138,7 +130,7 @@ Steps:
 - [ ] 3. Write unit tests for all endpoints
 - [ ] 4. Run lsp_diagnostics and the test suite
 
-Verification: lsp_diagnostics on all changed files, bun test passes.
+Verification: lsp_diagnostics on all changed files, npm test passes.
 \`\`\`
 
 The plan is ready for your review.`;
@@ -407,7 +399,7 @@ The plan is ready for your review.`;
     ];
 
     const outputPath = join(
-      import.meta.dir,
+      import.meta.dirname,
       "..",
       ".rolebox",
       "evidence",

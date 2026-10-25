@@ -174,7 +174,7 @@ Steps:
     Do: ...
     References:
       - path/to/other.ts:Type — <contract to implement against>
-    Verify: bun test path/to.test.ts -> PASS
+    Verify: npm test -- path/to.test.ts -> PASS
 
 Final Verification:
 - Build/types: <command> -> exit 0, lsp_diagnostics clean on changed files

@@ -1,19 +1,4 @@
 #!/usr/bin/env node
-/**
- * Render rolebox brand assets (logo + banner) from SVG to PNG.
- *
- * Uses @resvg/resvg-js with system fonts (Space Grotesk Bold expected).
- * Outputs 2x-resolution PNGs for crisp display on high-DPI screens.
- *
- * Usage:
- *   bun run scripts/render-assets.mjs
- *   node scripts/render-assets.mjs
- *
- * Font requirement: Space Grotesk Bold must be discoverable via fontDirs
- * below. On macOS it lives at ~/Library/Fonts/SpaceGrotesk-Bold.ttf (if
- * installed globally). For CI portability, drop SpaceGrotesk-Bold.ttf into
- * assets/fonts/.
- */
 import { Resvg } from "@resvg/resvg-js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Accepted data has an EXPLICIT presence, and a ceiling it never crosses (D1).
@@ -20,7 +19,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

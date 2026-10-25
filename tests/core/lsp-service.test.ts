@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { LspService } from "../../src/core/services/lsp-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { __resetForTest } from "../../src/logger.ts";
@@ -34,7 +34,7 @@ describe("LspService", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { handleChatMessage } from "../../src/hooks/chat-message.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
@@ -23,9 +23,9 @@ beforeEach(() => {
 // The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
 // in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
 // src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
-// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+// tuple; a bare `vi.fn(() => ...)` records `[]` and every `calls[0][n]` read fails.
 function makeCustomRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -36,7 +36,7 @@ function makeCustomRunHooks() {
 }
 
 function makeBuiltInRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -49,13 +49,13 @@ function makeBuiltInRunHooks() {
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    session: { messages: mock(() => Promise.resolve([])) } as any,
+    session: { messages: vi.fn(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {} as any,
     loopManager: {} as any,
-    customHooks: { runHooks: mock(() => Promise.resolve()) } as any,
+    customHooks: { runHooks: vi.fn(() => Promise.resolve()) } as any,
     ...overrides,
   };
 }
@@ -163,15 +163,15 @@ describe("handleChatMessage — synthetic injection filtering", () => {
   });
 
   it("classifies COPILOT_MARKER messages as synthetic injection", async () => {
-    const cancelNow = mock(() => Promise.resolve());
-    const shouldCancelOnUserMessage = mock(() => true);
+    const cancelNow = vi.fn(() => Promise.resolve());
+    const shouldCancelOnUserMessage = vi.fn(() => true);
     const state = makeState();
     state.activeLoopManager = {
       shouldCancelOnUserMessage,
       cancelNow,
-      isLoopSession: mock(() => false),
-      getLoopState: mock(() => null),
-      register: mock(() => {}),
+      isLoopSession: vi.fn(() => false),
+      getLoopState: vi.fn(() => null),
+      register: vi.fn(() => {}),
     } as any;
 
     // Activate a function with a non-zero continuation counter.
@@ -200,7 +200,7 @@ describe("handleChatMessage — synthetic injection filtering", () => {
 
   it("registers real user messages in userMessagedSessions", async () => {
     const state = makeState();
-    const notificationManager = { handleChatMessage: mock(() => {}) };
+    const notificationManager = { handleChatMessage: vi.fn(() => {}) };
 
     await handleChatMessage(
       { sessionID: "sess-1" },
@@ -351,15 +351,15 @@ describe("handleChatMessage — function parsing and activation", () => {
 
 describe("handleChatMessage — loop cancellation", () => {
   it("cancels loop when user message triggers cancellation", async () => {
-    const cancelNow = mock(() => Promise.resolve());
-    const shouldCancelOnUserMessage = mock(() => true);
-    const getLoopState = mock(() => null);
-    const register = mock(() => {});
+    const cancelNow = vi.fn(() => Promise.resolve());
+    const shouldCancelOnUserMessage = vi.fn(() => true);
+    const getLoopState = vi.fn(() => null);
+    const register = vi.fn(() => {});
     const state = makeState();
     state.activeLoopManager = {
       shouldCancelOnUserMessage,
       cancelNow,
-      isLoopSession: mock(() => false),
+      isLoopSession: vi.fn(() => false),
       getLoopState,
       register,
     } as any;
@@ -376,15 +376,15 @@ describe("handleChatMessage — loop cancellation", () => {
   });
 
   it("does not cancel when shouldCancelOnUserMessage returns false", async () => {
-    const cancelNow = mock(() => Promise.resolve());
-    const shouldCancelOnUserMessage = mock(() => false);
-    const getLoopState = mock(() => null);
-    const register = mock(() => {});
+    const cancelNow = vi.fn(() => Promise.resolve());
+    const shouldCancelOnUserMessage = vi.fn(() => false);
+    const getLoopState = vi.fn(() => null);
+    const register = vi.fn(() => {});
     const state = makeState();
     state.activeLoopManager = {
       shouldCancelOnUserMessage,
       cancelNow,
-      isLoopSession: mock(() => false),
+      isLoopSession: vi.fn(() => false),
       getLoopState,
       register,
     } as any;
@@ -404,10 +404,10 @@ describe("handleChatMessage — loop function activation", () => {
   it("injects correction when loop registration is rejected (nested/same-origin)", async () => {
     // Nested-loop rejection now happens inside coordinator.register, which
     // returns a RegisterResult. The hook surfaces the rejection as a correction.
-    const isLoopSession = mock(() => true);
-    const shouldCancelOnUserMessage = mock(() => false);
-    const getLoopState = mock(() => null);
-    const register = mock(() => ({
+    const isLoopSession = vi.fn(() => true);
+    const shouldCancelOnUserMessage = vi.fn(() => false);
+    const getLoopState = vi.fn(() => null);
+    const register = vi.fn(() => ({
       ok: false,
       error: "loop already active for this session",
     }));
@@ -433,10 +433,10 @@ describe("handleChatMessage — loop function activation", () => {
   });
 
   it("parses and activates loop function from user text", async () => {
-    const isLoopSession = mock(() => false);
-    const shouldCancelOnUserMessage = mock(() => false);
-    const getLoopState = mock(() => null);
-    const register = mock(() => ({ ok: true }));
+    const isLoopSession = vi.fn(() => false);
+    const shouldCancelOnUserMessage = vi.fn(() => false);
+    const getLoopState = vi.fn(() => null);
+    const register = vi.fn(() => ({ ok: true }));
     const state = makeState();
     state.activeLoopManager = {
       isLoopSession,

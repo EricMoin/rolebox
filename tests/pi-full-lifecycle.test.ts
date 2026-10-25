@@ -1,27 +1,5 @@
-/**
- * PI Extension Full Lifecycle Integration Tests.
- *
- * Covers the end-to-end lifecycle of the PI extension:
- *   1. Initialization — PiLightweightServiceStack.init() with real resolved roles,
- *      verifying tool registration count and per-tool structure.
- *   2. Extension Point Registration — tools registered via pi.registerTool() with
- *      correct names, descriptions, and execute functions.
- *   3. Hook Wiring — PiEventBridge normalization and emission: Pi events are
- *      mapped to canonical events, general and type-specific handlers fire.
- *   4. Asset Hot-Reload Trigger — createAssetHotReloadTool can be instantiated
- *      with a mock HotReloadService and executed, verifying completion status.
- *   5. Agent Registrar Sync — full PiAgentRegistrar.sync() cycle: add new agents,
- *      remove stale agents, detect unchanged agents.
- *   6. Graceful Degradation — PiLightweightServiceStack handles missing
- *      pi.registerTool, missing pi.on, and empty role lists without throwing.
- *
- * Follows bun:test conventions from tests/integration/helpers.ts and matches
- * the style of tests/pi-service-stack.test.ts.
- *
- * @module
- */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PiLightweightServiceStack } from "../src/platform/adapters/pi/service-stack.ts";
 import { PiEventBridge, mapPiEventType } from "../src/platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "../src/platform/adapters/pi/agent-registrar.ts";
@@ -80,7 +58,7 @@ function createRecordingPi(): {
     registerTool: (toolDef: any) => {
       registeredNames.push(toolDef.name);
     },
-    on: mock(async () => {}),
+    on: vi.fn(async () => {}),
   };
   return { pi, registeredNames };
 }
@@ -90,7 +68,7 @@ function createRecordingPi(): {
  */
 function createBarePi(): Record<string, any> {
   return {
-    on: mock(async () => {}),
+    on: vi.fn(async () => {}),
   };
 }
 
@@ -101,11 +79,11 @@ function createMockHotReloadService(): HotReloadService {
   return {
     name: "hot-reload-service",
     dependencies: [],
-    init: mock(async () => {}),
-    dispose: mock(async () => {}),
+    init: vi.fn(async () => {}),
+    dispose: vi.fn(async () => {}),
     health: () => ({ status: "healthy" as const }),
     isDegraded: () => false,
-    triggerReload: mock(async () => ({
+    triggerReload: vi.fn(async () => ({
       success: true,
       disabled: false,
       discovered: 2,
@@ -122,11 +100,11 @@ function createFailingHotReloadService(): HotReloadService {
   return {
     name: "hot-reload-service",
     dependencies: [],
-    init: mock(async () => {}),
-    dispose: mock(async () => {}),
+    init: vi.fn(async () => {}),
+    dispose: vi.fn(async () => {}),
     health: () => ({ status: "healthy" as const }),
     isDegraded: () => false,
-    triggerReload: mock(async () => ({
+    triggerReload: vi.fn(async () => ({
       success: false,
       error: "Simulated reload failure",
     })),
@@ -293,7 +271,7 @@ describe("PI Extension — Extension Point Registration", () => {
       registerTool: (toolDef: any) => {
         compiledDefs.push(toolDef);
       },
-      on: mock(async () => {}),
+      on: vi.fn(async () => {}),
     };
 
     const stack = new PiLightweightServiceStack(pi, [emptyRole]);
@@ -435,8 +413,8 @@ describe("PI Extension — Hook Wiring", () => {
 
   it("PiEventBridge emit aggregates errors but continues dispatching", async () => {
     const bridge = new PiEventBridge();
-    const goodHandler = mock(async () => {});
-    const badHandler = mock(async () => {
+    const goodHandler = vi.fn(async () => {});
+    const badHandler = vi.fn(async () => {
       throw new Error("Handler failure");
     });
 
@@ -643,7 +621,7 @@ describe("PI Extension — Graceful Degradation", () => {
   it("PiLightweightServiceStack handles pi.on missing gracefully", async () => {
     // This matches the pattern used in pi-extension.ts where pi.on is guarded
     const pi: Record<string, any> = {
-      registerTool: mock(() => {}),
+      registerTool: vi.fn(() => {}),
       // Intentionally no 'on' method
     };
 
@@ -661,7 +639,7 @@ describe("PI Extension — Graceful Degradation", () => {
   });
   it("PiLightweightServiceStack with throwing registerTool propagates error", async () => {
     const pi: Record<string, any> = {
-      registerTool: mock(() => {
+      registerTool: vi.fn(() => {
         throw new Error("Pi registration error");
       }),
     };

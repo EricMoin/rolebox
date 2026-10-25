@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { filterNodes } from "../../src/graph/query/render.ts";
 import type { GraphNodeView } from "../../src/graph/query/graph-query.ts";
 

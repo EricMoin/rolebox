@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 // ── Which registered events actually flood the log? ─────────────────────────
 //
 // THE EVIDENCE BEHIND EVERY `throttleMs` IN src/log/registry.ts. Throttling is
@@ -36,7 +36,7 @@
 // An entry WITHOUT `throttleBy` is computed exactly as it was before.
 //
 // USAGE
-//   bun scripts/log-event-density.ts [--dir <logDir>] [--json] [--window <ms>]
+//   node --import tsx scripts/log-event-density.ts [--dir <logDir>] [--json] [--window <ms>]
 //
 // Without `--dir` the read layer's own resolution decides (ROLEBOX_LOG_FILE,
 // then ROLEBOX_LOG_DIR, then the workspace's `.rolebox/logs`).

@@ -10,17 +10,19 @@
  * Tool surface (deliberately NOT expanded here): the canonical intersection set
  * that buildCanonicalTools() assembles for a harness with no session client and
  * no dispatch backend, plus load_role_skill, plus rolebox's computer-use family
- * by default, unless a host or config-file computerUse option disables it.
- * This transport has no role and no permission prompt (docs/limitations.md: it
- * carries no `context.ask` callback), so the computer-use gate here is the
- * GLOBAL one only — a per-role grant cannot be resolved on stdio MCP, and none
- * is invented. There are no session_* tools (the
- * stdio transport exposes no rolebox session client) and no dispatch_/loop_/
- * task_/graph_* tools — orchestration needs a dispatch backend, which this
- * entry does not construct, so buildCanonicalTools() registers no graph_* tools
- * either. No stubs stand in for any of them.
+ * by default, unless a host or config-file computerUse option disables it, plus
+ * the browse_* family when its own gate resolves on (an explicit opt-in, or
+ * AUTO with the optional playwright dependency installed). This transport has
+ * no role and no permission prompt (docs/limitations.md: it carries no
+ * `context.ask` callback), so both family gates here are the GLOBAL ones only —
+ * a per-role grant cannot be resolved on stdio MCP, and none is invented.
+ * There are no session_* tools (the stdio transport exposes no rolebox session
+ * client) and no dispatch_/loop_/task_/graph_* tools — orchestration needs a
+ * dispatch backend, which this entry does not construct, so
+ * buildCanonicalTools() registers no graph_* tools either. No stubs stand in
+ * for any of them.
  *
- * Run directly with `node dist/entries/codex.js` (or `bun src/entries/codex.ts`).
+ * Run directly with `node dist/entries/codex.js`.
  * Importing the module does NOT start the server or read stdin; the module-level
  * logger does open its log file and install its signal handlers on first
  * evaluation.
@@ -42,7 +44,9 @@ import { installProtocolStdoutGuard } from "../platform/adapters/codex/stdout-gu
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import { buildCanonicalTools } from "../platform/tool-assembly.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
+import { resolveBrowseUseGate } from "../loader/browse-use-gate.ts";
 import { buildComputerContext } from "../computer/context.ts";
+import { buildBrowseContext } from "../browse/context.ts";
 import type { CanonicalToolContext } from "../platform/types.ts";
 import { roleFunctionsMap } from "../resolver/registry.ts";
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
@@ -90,6 +94,20 @@ function resolvePackageVersion(): string {
 }
 
 /**
+ * The MCP `instructions` string: the workflow blocks for the tool families this
+ * server actually registered. Each builder returns `""` when none of its names
+ * is present, so a host whose gate kept a family out ships no instructions for
+ * it — the tool list and the instructions cannot disagree.
+ */
+export function buildCodexInstructions(tools: Record<string, unknown>): string {
+  const names = Object.keys(tools);
+  return [
+    buildComputerContext({ tools: names }),
+    buildBrowseContext({ tools: names }),
+  ].filter(Boolean).join("\n\n");
+}
+
+/**
  * Boot the role runtime and build the MCP server WITHOUT serving it. The
  * returned server is ready for serve() (the entry point) or handleLine()
  * (embedded/tests).
@@ -103,6 +121,11 @@ export async function startCodexMcpServer(
     output?: NodeJS.WritableStream;
     /** False disables computer tools; absence leaves them available by default. */
     computerUse?: boolean;
+    /**
+     * The browse family's host option: true always registers it, false always
+     * disables it, absence AUTO-detects the optional Playwright driver.
+     */
+    browseUse?: boolean;
   } = {},
 ): Promise<CodexMcpServer> {
   const workingDir = process.cwd();
@@ -122,6 +145,10 @@ export async function startCodexMcpServer(
     hostOverride: options.computerUse,
     workspaceDir: workingDir,
   });
+  const browseUseGate = resolveBrowseUseGate({
+    hostOverride: options.browseUse,
+    workspaceDir: workingDir,
+  });
 
   const tools = buildCanonicalTools({
     resolvedRoles,
@@ -129,6 +156,7 @@ export async function startCodexMcpServer(
     capabilities: codexCapabilities(),
     extraTools: { load_role_skill: createLoadRoleSkillTool(resolvedRoles) },
     computerUse: computerUseGate.enabled,
+    browseUse: browseUseGate.enabled,
   });
 
   // The context factory closes over the server so it can read the clientInfo
@@ -156,7 +184,7 @@ export async function startCodexMcpServer(
 
   server = createCodexMcpServer({
     tools,
-    instructions: buildComputerContext({ tools: Object.keys(tools) }),
+    instructions: buildCodexInstructions(tools),
     serverVersion: resolvePackageVersion(),
     output: options.output,
     contextFactory,
@@ -173,6 +201,8 @@ export async function startCodexMcpServer(
     tools: Object.keys(tools).length,
     computerUse: computerUseGate.enabled,
     computerUseReason: computerUseGate.reason,
+    browseUse: browseUseGate.enabled,
+    browseUseReason: browseUseGate.reason,
     roleboxDir: dirs.roleboxDir,
     globalSkillsDir: dirs.globalSkillsDir,
   });

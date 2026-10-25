@@ -1,38 +1,4 @@
-/**
- * Cross-process worker fixture for the P4.2 input-binding evidence (criterion 3).
- *
- * Version: 1.0
- * Date: 2026-09-25
- *
- * WHY THIS FILE EXISTS. Criterion 3 requires that a NEW OS PROCESS recovers a
- * successor's persisted input binding and continues its dispatch. Closing and
- * reopening the runtime in one process is not that boundary: the in-process
- * regression (`tests/graph/runtime-input-binding.test.ts`) proves the recovery
- * RULE, and this fixture proves the process BOUNDARY. The parent
- * (`tests/graph/input-binding-cross-process.test.ts`) arranges the crash window
- * — an accepted producer result with a retained revision, and a successor whose
- * dispatch effect is committed `pending` because its create threw before
- * delivery — and then spawns THIS file with `Bun.spawn(process.execPath, …)`,
- * the pattern `tests/graph/host-restart-cross-process.test.ts` established.
- * Every mode opens its OWN connection to the one store file under an OS temp
- * directory: no `.rolebox` path, no workspace store, and nothing from the
- * parent's memory is reachable from here.
- *
- * THE CREDENTIAL STORE IS `platform-isolated`, AND THAT IS AN ASSERTION, NOT A
- * PROOF. Re-delivering an attempt this process never minted needs the value to
- * be resolvable here, and the shipped default (`"none"`) deliberately retains
- * none. Declaring `platform-isolated` is the host's claim about an OS boundary
- * the test process cannot provide; this fixture exercises the BINDING and the
- * CONSUMPTION, never vault isolation.
- *
- *     bun tests/graph/helpers/input-binding-xproc-worker.ts --mode resume --root <dir>
- *
- * One JSON line on stdout is the parent's evidence, and its `pid` is the parent's
- * proof that the work happened in a different OS process.
- *
- * PRIVACY: store roots are OS temp directories, and every report carries ids,
- * digests, counts and booleans — never a credential value.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

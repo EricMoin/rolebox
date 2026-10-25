@@ -11,7 +11,7 @@
  * whatever the options say.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,8 +42,6 @@ beforeEach(() => {
 afterEach(() => {
   setLogEnv("ROLEBOX_LOG_RETAIN", originalRetain);
   setLogEnv("ROLEBOX_LOG_FILE", originalLogFile);
-  // Bun does not clear `process.exitCode` when it is assigned `undefined`, so
-  // the restore must write a number (the captured value, or 0 when unset).
   process.exitCode = exitCode ?? 0;
   rmSync(dir, { recursive: true, force: true });
 });

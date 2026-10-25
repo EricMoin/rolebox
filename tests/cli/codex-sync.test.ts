@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   appendFileSync,
   existsSync,
@@ -27,7 +27,7 @@ import {
 // XDG dirs rolebox itself uses) are redirected into mkdtemp directories, and
 // the pi/dsh sync targets are redirected too. No test invokes a real sync.
 
-const PACKAGE_ROOT = resolve(import.meta.dir, "..", "..");
+const PACKAGE_ROOT = resolve(import.meta.dirname, "..", "..");
 const PACKAGE_VERSION = (
   JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf-8")) as { version: string }
 ).version;
@@ -200,13 +200,13 @@ describe("writeCodexPluginBundle", () => {
       packageRoot: PACKAGE_ROOT,
       version: "1.0.0",
       serverEntry: customEntry,
-      runtimeCommand: "bun",
+      runtimeCommand: "node",
     };
 
     // A missing artifact is reported, never thrown — the bundle still writes.
     const bundle = writeCodexPluginBundle(opts);
     const mcp = JSON.parse(readFileSync(bundle.mcpConfigPath, "utf-8")) as Record<string, any>;
-    expect(mcp.mcpServers.rolebox.command).toBe("bun");
+    expect(mcp.mcpServers.rolebox.command).toBe("node");
     expect(mcp.mcpServers.rolebox.args).toEqual([customEntry]);
     expect(bundle.serverEntryExists).toBe(false);
 

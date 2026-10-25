@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { createDshSessionTools, DSH_SESSION_ACCESS_DENIED, scopeDshSessionClient } from "../../src/platform/adapters/dsh/session-visibility.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import type { CanonicalToolContext, Message, SessionInfo } from "../../src/platform/types.ts";

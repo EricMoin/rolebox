@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * ActiveRoleStore tests — the per-workspace, session-keyed, versioned JSON
@@ -24,7 +23,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   mkdirSync,
   mkdtempSync,
@@ -559,7 +558,7 @@ describe("ActiveRoleStore lifecycle / GC (prune on load)", () => {
 
 describe("ActiveRoleStore module stays free of platform SDK imports", () => {
   it("contains no @deepseek-ai/* or @opencode-ai/* imports", () => {
-    const file = resolve(import.meta.dir, "../../src/platform/adapters/dsh/active-role-store.ts");
+    const file = resolve(import.meta.dirname, "../../src/platform/adapters/dsh/active-role-store.ts");
     const source = readFileSync(file, "utf-8");
     const importRe =
       /import\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+["']([^"']+)["']/g;

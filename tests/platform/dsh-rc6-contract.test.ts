@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh contract probes against the REAL installed `@deepseek-ai/*` dist.
@@ -88,7 +87,7 @@
  * @module
  */
 
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

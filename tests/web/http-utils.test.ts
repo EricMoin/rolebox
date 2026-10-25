@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   __configureHostPacing,
   __resetHostPacing,
@@ -20,13 +20,10 @@ import {
 // configuration in afterEach.
 __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
 
-// Bun's `fetch` accepts `string | URL | Request` and carries a `preconnect`
-// helper alongside its call signature (bun-types `declare namespace fetch`), so
-// a double installed on `globalThis.fetch` has to match that port shape.
 function fetchDouble(
   impl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
 ): typeof fetch {
-  return Object.assign(mock(impl), { preconnect: (): void => {} });
+  return vi.fn(impl);
 }
 
 const originalFetch = globalThis.fetch;

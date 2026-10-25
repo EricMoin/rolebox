@@ -57,6 +57,7 @@ On DSH, roles can collaborate through [persistent peer teams](docs/team-work.md)
 - **Memory** — SQLite + FTS5, auto-injected at session start and searchable from the CLI.
 - **Tools** — 32 `lsp_*` language-server tools, `hashline_*` edits anchored to content hashes, skills, references, custom functions and hooks.
 - **Desktop** — a 12-tool `computer_*` family: `computer_screenshot`, `computer_windows`, `computer_displays`, `computer_focus`, `computer_click`, `computer_move`, `computer_scroll`, `computer_drag`, `computer_type`, `computer_key`, `computer_status`, `computer_permissions`.
+- **Browser** — a [22-tool `browse_*` family](docs/browser-use.md) for semantic web-page automation: `browse_status`, `browse_open`, `browse_snapshot`, `browse_read`, `browse_click`, `browse_type`, `browse_press`, `browse_select`, `browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`, `browse_screenshot`, `browse_upload`, `browse_downloads`, `browse_dialog`, `browse_tabs`, `browse_history`, `browse_console`, `browse_network`, `browse_cookies`, `browse_close`. Gated by `browseUse`; actions need the optional Playwright peer (`npm install playwright`, then `npx playwright install chromium`).
 - **Visibility** — the dsh Rolebox monitor pane, the `rolebox monitor` TUI, and channel-filtered logs.
 
 ---
@@ -87,11 +88,11 @@ Each card carries the display name, the slug at the right (`ai-designer`, `apk-r
   <em>The TypeScript Engineer loads its own skill, reads the protocol reference, and declares the work with <code>graph_declare</code>.</em>
 </p>
 
-The role does not do the work inline. It inspects the repo and records a baseline before editing — `bun test` → 4 pass / 0 fail, `tsc --noEmit` → exit 0 — then names one real design point: `Task` has no completion state at all, so `removeCompleted()` needs one. It takes the minimal, backward-compatible reading — an optional `completed?: boolean` on `Task` plus `removeCompleted(): number` returning the removed count — and passes that decision to the worker explicitly.
+The role does not do the work inline. It inspects the repo and records a baseline before editing — the sample project’s test command → 4 pass / 0 fail, `tsc --noEmit` → exit 0 — then names one real design point: `Task` has no completion state at all, so `removeCompleted()` needs one. It takes the minimal, backward-compatible reading — an optional `completed?: boolean` on `Task` plus `removeCompleted(): number` returning the removed count — and passes that decision to the worker explicitly.
 
 It then declares `graph_declare · taskstore-remove-completed` and yields the turn so the engine can schedule it. The plan names exactly two nodes and one bounded repair round:
 
-- **`change`** (`change-applier`) — implement `removeCompleted(): number` in `src/store.ts`, add the optional `completed?: boolean` field to `Task` in `src/task.ts`, add a focused test in `tests/task.test.ts`, and run `bun test` and `tsc --noEmit`.
+- **`change`** (`change-applier`) — implement `removeCompleted(): number` in `src/store.ts`, add the optional `completed?: boolean` field to `Task` in `src/task.ts`, add a focused test in `tests/task.test.ts`, and run the sample project’s test command and `tsc --noEmit`.
 - **`review`** (`verification`, independent) — read the actual files and re-run both checks against the same baseline.
 
 The turn closes on the declaration being started (`start.kind: started`, phase `executing`, node `change` dispatched). The capture states no execution budget.
@@ -108,9 +109,9 @@ The turn closes on the declaration being started (`start.kind: started`, phase `
 
 Both nodes ran in their own sessions, and the verifying node is not the node that wrote the code. The closing synthesis reports the test coverage — `tests/task.test.ts:35-61`, importing `TaskStore` at line 4 — as two behavior tests: a mixed store that removes exactly the completed entry and returns `1` while non-completed entries and `get`/`count`/`all` stay consistent, and a no-op path that returns `0` with the store deep-equal to a pre-call snapshot.
 
-A `Checks` table sets each check against its baseline: `bun test` went from `4 pass / 0 fail` to `6 pass / 0 fail, 17 expect() calls, exit 0`, and `tsc --noEmit` stayed at `exit 0` (TypeScript 6.0.3). Both are the project's own scripts; the reviewer additionally ran an independent scratch probe over empty, all-completed and mixed stores plus `add` / `get` / `remove` / `count`, and the parent re-ran the two required commands after the reviewer settled and got the same output.
+A `Checks` table sets each check against its baseline: the sample project’s test command went from `4 pass / 0 fail` to `6 pass / 0 fail, 17 expect() calls, exit 0`, and `tsc --noEmit` stayed at `exit 0` (TypeScript 6.0.3). Both are the project's own scripts; the reviewer additionally ran an independent scratch probe over empty, all-completed and mixed stores plus `add` / `get` / `remove` / `count`, and the parent re-ran the two required commands after the reviewer settled and got the same output.
 
-The `Risk and gaps` list keeps three things open on purpose: the one judgment call still to confirm (whether `completed` should be required, or the return a `Task[]`); the fact that no git repository exists in the workspace, so scope was confirmed from the file inventory plus the pre-change baseline rather than a machine diff; and the fact that the evidence covers Bun 1.3.14 / TypeScript 6.0.3 and claims nothing about other runtimes.
+The `Risk and gaps` list keeps three things open on purpose: the one judgment call still to confirm (whether `completed` should be required, or the return a `Task[]`); the fact that no git repository exists in the workspace, so scope was confirmed from the file inventory plus the pre-change baseline rather than a machine diff; and the fact that the evidence belongs to the recorded sample toolchain and does not establish current runtime compatibility; see [Node runtime](docs/node-runtime.md) for current validation commands.
 
 ### 4 · One brief in, one outcome out
 
@@ -122,7 +123,7 @@ The `Risk and gaps` list keeps three things open on purpose: the one judgment ca
   <em>One brief in, one outcome out: the worker makes the scoped edits, runs both checks, and settles node <code>change</code> with the <code>done</code> outcome.</em>
 </p>
 
-The dsh worker shown here is a one-shot session using the default two tools — `graph_worker_exec` for reads, commands and permitted edits, and `graph_submit_outcome` to settle its node. Nodes can also grant host tools and choose native, discovery or code presentation; see [Worker tools](docs/worker-tools.md). Workers cannot read or steer graph state. Here the worker's whole record is `cat` of its host handoff, the scoped edits, `cat -n` verification of the edited files, `bun test` and `tsc --noEmit`. It notes that this was not a repair round (no revise input was delivered), makes the three scoped edits, reports `6 pass / 0 fail, tsc exit 0`, and closes on `Outcome done accepted (verdict committed, no refusals) — node change is settled`. The banner across the bottom is the one-shot contract: the record does not accept follow-ups.
+The dsh worker shown here is a one-shot session using the default two tools — `graph_worker_exec` for reads, commands and permitted edits, and `graph_submit_outcome` to settle its node. Nodes can also grant host tools and choose native, discovery or code presentation; see [Worker tools](docs/worker-tools.md). Workers cannot read or steer graph state. Here the worker's whole record is `cat` of its host handoff, the scoped edits, `cat -n` verification of the edited files, the sample project’s test command and `tsc --noEmit`. It notes that this was not a repair round (no revise input was delivered), makes the three scoped edits, reports `6 pass / 0 fail, tsc exit 0`, and closes on `Outcome done accepted (verdict committed, no refusals) — node change is settled`. The banner across the bottom is the one-shot contract: the record does not accept follow-ups.
 
 ### 5 · Watch the engine while it runs
 
@@ -170,6 +171,8 @@ The Logs pane polls the workspace's `.rolebox/logs` directory (in the capture `r
 
 ## Install
 
+Rolebox's CLI and development tools require Node.js 26.4+ and npm. For a source checkout, run `npm ci`, `npm run build`, and module-scoped tests with `npm test -- tests/<module>/`. See [Node runtime and development](docs/node-runtime.md). The TUI additionally needs Node's `--experimental-ffi` flag; the test command supplies it.
+
 rolebox runs on four harnesses. A `rolebox/` directory in the **current working directory** takes precedence over the global roles directory; registry roles install with `rolebox install <name>` and deploy with `rolebox sync <opencode|pi|dsh|codex>`. Each harness has a minimum version — [Harness versions](docs/compatibility.md#harness-versions) lists them and why.
 
 | Harness | Config directory | Roles directory | Global skills | Env override |
@@ -214,7 +217,7 @@ Restart the harness. A non-bundle dsh install instead needs one `- insert:` row 
 ### Codex
 
 ```bash
-npm install -g rolebox     # or run from a checkout built with `bun run build`
+npm install -g rolebox     # or run from a checkout built with `npm run build`
 rolebox sync codex
 ```
 

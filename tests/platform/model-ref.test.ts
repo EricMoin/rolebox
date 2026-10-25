@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * model-ref tests — the shared, platform-neutral `splitModel` helper extracted
@@ -11,7 +10,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { splitModel } from "../../src/platform/model-ref.ts";
@@ -58,7 +57,7 @@ describe("splitModel", () => {
 
 describe("pi role-switcher uses the shared helper", () => {
   const switcherSource = readFileSync(
-    resolve(import.meta.dir, "../../src/platform/adapters/pi/role-switcher.ts"),
+    resolve(import.meta.dirname, "../../src/platform/adapters/pi/role-switcher.ts"),
     "utf-8",
   );
 

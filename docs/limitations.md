@@ -127,3 +127,68 @@ Operating-system permissions and these platform limits still apply.
   and host transport. They do not establish live behavior on every operating
   system. The separate macOS capture tests require a GUI session and OS grants.
   No test sends real mouse or keyboard input.
+
+## Browser use
+
+Rolebox's `browse_*` family drives a real Playwright browser and exists only
+when its `browseUse` gate is on (see
+[compatibility.md](compatibility.md#browser-use)). These limits remain:
+
+- **Playwright is optional, so the family can be absent.** With no explicit
+  setting the gate is on only when `playwright` resolves from the rolebox
+  install. An explicit `browseUse: true` registers the 22 tools even without the
+  driver so `browse_status` can report the gap, but every action fails until the
+  driver (`npm install playwright`) and a browser build
+  (`npx playwright install chromium`) are installed. The gate is read at boot;
+  a change needs a restart.
+- **The browser has this machine's network reach.** `browse_open` validates
+  only that the target is an absolute URL with a scheme a browser can load
+  (`http`, `https`, `file`, `about`, `data`); there is no SSRF filter and no
+  block list for loopback, private or link-local addresses. That is what makes a
+  `localhost` development server a normal target, and it also means a page can
+  reach whatever the host can reach.
+- **An attached browser belongs to someone else.** `cdp_url` (Chromium only)
+  reuses the context of a browser that is already running, so its cookies,
+  logins and open tabs are the user's existing state. The family closes only the
+  pages it created and never sends `Browser.close` to a browser it did not
+  launch, which also means the user can see and change that browser between two
+  calls.
+- **CDP attachment uses the Node runtime.** The supported CLI/MCP path runs on
+  Node.js 26.4+. A host that embeds the plugin in another runtime needs its own
+  transport compatibility verification; the Node acceptance suite does not
+  establish compatibility for those hosts.
+- **Refs are not durable identifiers.** A ref exists only in the snapshot that
+  printed it, is per page, is replaced by the next snapshot, and is dropped by
+  navigation. An older ref is refused as `stale_ref` rather than resolved
+  against whatever element now occupies its place. Iframes are reported as a
+  line and not entered, and content inside a shadow root or a canvas has no ref,
+  so a page built that way may have to be read with `browse_read` or driven with
+  `browse_eval`.
+- **A pending dialog blocks every other action on the page.** Only
+  `browse_dialog` (and a non-blocking look through `browse_status`) is usable
+  until the dialog is accepted or dismissed.
+- **No action has rollback, and delivery is not effect.** A click or a
+  keystroke that returned successfully changed the page already, and a
+  successful call proves only that the browser delivered it. `browse_eval` runs
+  arbitrary JavaScript in the page context, with a default 15-second limit.
+  Cancelling or timing out an evaluation closes its page to release the session
+  queue; reopen it with `browse_open`. Verify a change with a snapshot, a
+  read, a console check or a screenshot before reporting it.
+- **Artifacts stay in the worktree.** Screenshots and downloads are written
+  under `.rolebox/browse/` in owner-only files and directories, a screenshot
+  above 32 MiB is refused, and a download's filename is sanitized — but its
+  contents are whatever the page served. A capture can show a page that holds
+  sensitive data, so treat the directory like the page.
+- **Browser builds are per engine, and only Chromium can be checked.**
+  `browse_open` accepts `firefox` and `webkit`, and each fails at launch until
+  its own Playwright build is installed. `browse_status` reports Chromium's
+  presence only when `PLAYWRIGHT_BROWSERS_PATH` names the cache; otherwise the
+  binary state is reported as unknown rather than guessed.
+- **Codex has no per-call approval and no active role.** On the MCP transport
+  the global `browseUse` gate is the whole policy. DSH, Pi and the two OpenCode
+  entries additionally apply per-role rules; OpenCode registers no `browse_*`
+  tool at all, whatever a role's `tools:` map says.
+- **The default test suite never launches a browser.** The family's tests run
+  against an in-memory driver, and the live Playwright check is skipped unless
+  `ROLEBOX_BROWSE_LIVE=1`. Unit tests establish the tool, session and result
+  contracts; they do not establish how any particular site behaves.

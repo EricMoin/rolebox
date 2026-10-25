@@ -1,3 +1,4 @@
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 /**
  * CROSS-PROCESS evidence for the P3 item 2 RETRY restart (plan §4 P3 "重启后继续",
  * §5 A11 "重试和终态重新执行：新 attempt/run；旧回执不变").
@@ -12,7 +13,7 @@
  * process boundary; this case is the real one §4 asks for.
  *
  * WHAT IS ASSERTED, AND BY WHOM. Every worker is
- * `Bun.spawn(process.execPath, <this directory>/helpers/retry-restart-xproc-worker.ts, …)`,
+ * `spawnProcess(process.execPath, <this directory>/helpers/retry-restart-xproc-worker.ts, …)`,
  * each prints ONE JSON report, and the parent asserts:
  *
  *   - PROCESS ONE (`seed`): declares and starts the graph (attempt `work#1`
@@ -36,7 +37,7 @@
  * real home-directory path or a session transcript.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,12 +60,7 @@ const CHILD_DEADLINE_MS = 30_000;
 /** The parent's deadline for one race-barrier round. */
 const BARRIER_DEADLINE_MS = 15_000;
 
-/**
- * The harness budget must exceed this file's own child deadline, so a merely
- * SLOW child is diagnosed by the case instead of being killed by Bun's default
- * 5s test budget (the same reasoning as `graph-store-cross-process.test.ts`).
- */
-setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CHILD_DEADLINE_MS + 15_000 });
 
 interface WorkerReport {
   readonly pid: number;
@@ -134,22 +130,13 @@ interface RunningWorker {
   readonly report: Promise<WorkerReport>;
 }
 
-/**
- * Spawn one REAL bun process running the worker fixture. The caller may await
- * `report` immediately (`runWorker`) or hold several racers and await them
- * together (`startWorker` + a barrier).
- */
 function startWorker(
   id: string,
   mode: string,
   fixture: { readonly dir: string; readonly storeRoot: string },
   extra: readonly string[] = [],
 ): RunningWorker {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn(
+  const proc = spawnProcess(
     [
       process.execPath,
       WORKER,
@@ -165,18 +152,18 @@ function startWorker(
     ],
     { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
   children.push({
     pid: proc.pid,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

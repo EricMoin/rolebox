@@ -1,37 +1,5 @@
-/**
- * F-17 (the ledger legs) — `ControlDecisionRecord` and
- * `BudgetReservationRecord` are discriminated unions.
- *
- * Both records documented a variant relation the type did not carry. A control
- * decision's `successorAttemptId` is present EXACTLY for a `retry` — the durable
- * link from the superseded attempt to the one it minted, and the identity a
- * repeated retry is a replay of — and a reservation's `used` is present EXACTLY
- * once the row is `reconciled`, with `settledAt` present for every settled row.
- * The store already enforced both relations: the DDL's
- * `CHECK ((command = 'retry') = (successor_attempt_id IS NOT NULL))`,
- * `CHECK ((status = 'reconciled') = (used_executions IS NOT NULL))` and
- * `CHECK ((status = 'reserved') = (settled_at IS NULL))`, the writers assert
- * them, and `readControlDecisionRow` / `toReservation` REFUSE a row that
- * disagrees with its own discriminant. Only the type said nothing, so every
- * consumer had to re-derive the variant and invent an answer for a state the
- * invariants forbid.
- *
- * The arms below make the compiler enforce what the store already enforces. A
- * field a variant REFUSES is declared `undefined` on that arm rather than
- * omitted, so it stays ADDRESSABLE (and `undefined`) across the union — which is
- * what every existing reader sees — while a value that CARRIES it is a compile
- * error. The persisted shape, the DDL, the SQL and the row readers are
- * unchanged.
- *
- * `bun test` is transpile-only, so the authority for every `expectTypeOf` pin
- * below is `bun run typecheck:tests`; the runtime cases beside them round-trip a
- * REAL retry decision and a REAL reconciled reservation through the shipped
- * store, including across a reopen.
- *
- * @module
- */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

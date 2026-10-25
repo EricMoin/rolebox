@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { approvalPolicy, controlScenarios, eventually, assertRestored, verifyHostProcessRestart } from "./scenarios.ts";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,7 +42,7 @@ export default async function (pi) {
       const nodeId = texts.match(/node_id:\\s+([^\\s]+)/)?.[1];
       const credential = texts.match(/credential:\\s+([^\\s]+)/)?.[1];
       if (graphId === "pi.explicit" && nodeId === "review") {
-        const manifestPath = texts.match(/manifest:\\s+([^\\n]+)/)?.[1];
+        const manifestPath = JSON.parse(texts.match(/manifest:\\s+([^\\n]+)/)?.[1] ?? "null");
         const input = JSON.parse(readFileSync(manifestPath, "utf8")).inputs[0];
         if (input.from !== "work" || input.payload.value.marker !== "accepted-upstream") throw new Error("Downstream input did not preserve accepted data");
         writeFileSync("pi.explicit.consumed", "verified");
@@ -71,7 +72,7 @@ export default async function (pi) {
 
   const faux = fauxProvider({ provider: "example-provider", models: [{ id: "deterministic" }] });
   const model = faux.getModel();
-  const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), modelNetworkEnabled: false });
+  const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
   runtime.registerNativeProvider(faux.provider);
   const manager = SessionManager.create(root, join(root, "sessions"));
   const otherManager = SessionManager.create(root, join(root, "sessions"));
@@ -148,7 +149,7 @@ export default async function (pi) {
     read: id => queryGraphs(graphStoreRoot(dataDir, root)).graphs.find(graph => graph.graphId === id),
     async call(tool, args, actor = "owner") {
       const target = actor === "owner" ? session! : other!;
-      faux.setResponses([fauxAssistantMessage(fauxToolCall(tool, args), { stopReason: "toolUse" }), fauxAssistantMessage("command complete")]);
+      faux.setResponses([fauxAssistantMessage(fauxToolCall(tool, z.record(z.string(), z.json()).parse(args)), { stopReason: "toolUse" }), fauxAssistantMessage("command complete")]);
       await target.prompt("Execute the next verification command.");
       const result = [...target.messages].reverse().find(message => message.role === "toolResult" && message.toolName === tool);
       assert.ok(result && "content" in result);
@@ -181,7 +182,7 @@ export default async function (pi) {
   }
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   session.dispose(); session = undefined;
-  await verifyHostProcessRestart(import.meta.path, root, queryGraphs(graphStoreRoot(dataDir, root)).graphs);
+  await verifyHostProcessRestart(import.meta.filename, root, queryGraphs(graphStoreRoot(dataDir, root)).graphs);
   console.log(JSON.stringify({ host: "pi", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, sessionIdentity: true, explicitChain: "complete", downstreamInput: "verified", natural: "complete", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
 
   }

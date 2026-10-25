@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The SUBMISSION ingress retains what its gates read (P4 item 5 / A17).
@@ -11,7 +10,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

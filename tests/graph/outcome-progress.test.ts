@@ -8,7 +8,7 @@
  * is kept for the next comparison.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import type { CompiledProgressPolicy } from "../../src/graph/compiler/plan.ts";
 import type { ValidationBinding } from "../../src/graph/outcome/acceptance.ts";

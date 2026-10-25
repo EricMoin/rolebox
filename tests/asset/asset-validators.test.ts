@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -76,8 +76,8 @@ function makeRole(id: string, overrides: Partial<ResolvedRole> = {}): ResolvedRo
  */
 const MISSING_PATH = join(tmpdir(), "rolebox-test-nonexistent-file-xyzzy.test");
 /** A file path that definitely DOES exist (the test file's own source). */
-const EXISTING_PATH = import.meta.dir
-  ? join(import.meta.dir, "..", "..", "src", "asset", "asset-validators.ts")
+const EXISTING_PATH = import.meta.dirname
+  ? join(import.meta.dirname, "..", "..", "src", "asset", "asset-validators.ts")
   : "";
 
 // ── Tests ────────────────────────────────────────────────────────────────

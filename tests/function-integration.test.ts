@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { FunctionSessionState } from "../src/function/session-state.js";
 import { parseFunctionActivation } from "../src/function/parser.js";
 import { buildFunctionBlock } from "../src/prompt/builder.js";

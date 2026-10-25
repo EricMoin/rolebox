@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { resolveAllRoles, type ResolveContext } from "../src/resolver/orchestrator.ts";
 import { collectOpenRoles } from "../src/resolver/open-roles.ts";
 import type { RoleConfig, ResolvedFunction } from "../src/types.ts";

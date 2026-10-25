@@ -16,7 +16,7 @@
  * lands in `scope` and never in `fields`.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   configureLogging,

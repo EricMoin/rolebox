@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { appendCorrection, collectAllFunctions, fetchLastAssistantText } from "../../src/hooks/context.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import type { ResolvedFunction } from "../../src/types.ts";
@@ -91,7 +91,7 @@ describe("collectAllFunctions", () => {
 describe("fetchLastAssistantText", () => {
   it("returns null when messages returns an empty array", async () => {
     const client: ISessionClient = {
-      messages: mock(() => Promise.resolve([])),
+      messages: vi.fn(() => Promise.resolve([])),
     } as unknown as ISessionClient;
     const result = await fetchLastAssistantText(client, "sess-1");
     expect(result).toBeNull();
@@ -99,7 +99,7 @@ describe("fetchLastAssistantText", () => {
 
   it("returns the text from the last assistant message", async () => {
     const client: ISessionClient = {
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve([
           { info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
           { info: { role: "assistant" }, parts: [{ type: "text", text: "I am an assistant" }] },
@@ -112,7 +112,7 @@ describe("fetchLastAssistantText", () => {
 
   it("skips user messages and finds the latest assistant message", async () => {
     const client: ISessionClient = {
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "first reply" }] },
           { info: { role: "user" }, parts: [{ type: "text", text: "follow up" }] },
@@ -125,7 +125,7 @@ describe("fetchLastAssistantText", () => {
 
   it("merges multiple text parts in the last assistant message", async () => {
     const client: ISessionClient = {
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve([
           {
             info: { role: "assistant" },
@@ -144,7 +144,7 @@ describe("fetchLastAssistantText", () => {
 
   it("returns null when no assistant messages exist", async () => {
     const client: ISessionClient = {
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve([
           { info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
           { info: { role: "user" }, parts: [{ type: "text", text: "again" }] },
@@ -157,7 +157,7 @@ describe("fetchLastAssistantText", () => {
 
   it("returns null when messages promise rejects", async () => {
     const client: ISessionClient = {
-      messages: mock(() => Promise.reject(new Error("network error"))),
+      messages: vi.fn(() => Promise.reject(new Error("network error"))),
     } as unknown as ISessionClient;
     const result = await fetchLastAssistantText(client, "sess-1");
     expect(result).toBeNull();
@@ -165,7 +165,7 @@ describe("fetchLastAssistantText", () => {
 
   it("returns null when messages returns null", async () => {
     const client: ISessionClient = {
-      messages: mock(() => Promise.resolve(null)),
+      messages: vi.fn(() => Promise.resolve(null)),
     } as unknown as ISessionClient;
     const result = await fetchLastAssistantText(client, "sess-1");
     expect(result).toBeNull();

@@ -1,57 +1,3 @@
-/**
- * RoleSwitchDock CSS — the rolebox dock strip seated above the dsh composer.
- *
- * The dock answers a STATUS question ("which role is running?"), so the strip
- * leads with the current value rather than with a category label. This module
- * owns the visual system for that strip.
- *
- * Design posture (see docs/dsh-plugin-contract.md):
- *   - One material. `--rolebox-surface` (host `--dsw-specific-tip`) is the
- *     single surface token, shared with the monitor panel so both rolebox
- *     surfaces read as one product.
- *   - Value is the title. `.rolebox-dock-value` renders the active role NAME
- *     in the header; the shipped static label ("Role") is gone.
- *   - Active role is carried by FIVE redundant channels, never by a coloured
- *     side border (a banned anti-slop tell): an inherited font-weight step on
- *     the row, a reserved 20px trailing mark seat holding a check glyph, the
- *     host active-nav fill, `aria-current`, and the spelled-out Active/Base
- *     chip in the header (which survives total loss of hue perception).
- *   - State is never encoded as coloured text. Measured against the host
- *     palette, `label-tertiary` on the tip surface is 3.42:1 and
- *     `state-success-primary` on its own tint is 2.09:1 — both fail. State is
- *     therefore a pale tint fill plus the state WORD in `--dsw-alias-label-primary`.
- *   - Geometry is preserved from the shipped dock replica: the composer
- *     geometry vars and the open-bottom radius (`12px 12px 0 0`) keep the
- *     strip seated on the composer card below it.
- *   - Motion is meaningful only: the disclosure, the chevron, hover, the value
- *     swap, and busy. Focus rings are deliberately instantaneous. The error
- *     path has no shake (refused: decorative, vestibular-triggering, and it
- *     communicates nothing the copy does not). Everything runs on the host's
- *     single easing curve (`--ds-ease-in-out`): an earlier pair of invented
- *     curves made the opening cover half its distance in the first fifth of
- *     its duration and the closing hesitate through the first half, which
- *     reads as a stutter rather than as easing.
- *   - The collapsed region skips its own layout (`content-visibility`), because
- *     a 0fr grid track and `visibility: hidden` clip and skip paint but do NOT
- *     skip layout — the invisible role list was being laid out on every pass.
- *
- * Token discipline: every `var(--rolebox-...)` CONSUMPTION carries a comma and
- * a fallback, because the CSS-contract tests scan for bare `var(--<token>)`
- * and flag anything outside `--dsw-*` (plus the four `--dsh-composer-*` frame
- * vars). Definitions are plain declarations and are never flagged. The test
- * suite enforces that no bare `var(--rolebox-*)` consumption ever appears.
- *
- * Injection: the module injects the CSS into the document on load using the
- * pattern the dsh client packages ship — a guarded `style[data-plugin-css=...]`
- * probe plus a `document.head` append with the `data-plugin` / `data-plugin-css`
- * markers. The `typeof document` guard keeps module load safe in non-DOM
- * environments (the tests mock react and run in bun without a DOM).
- *
- * This module is BROWSER code: no node builtins, no DOM access outside the
- * guarded injection block.
- *
- * @module
- */
 
 /** The namespaced CSS text injected into the document on module load. */
 export const dockCss = `
@@ -625,11 +571,6 @@ export const dockClass = {
   emptyAction: "rolebox-dock-empty-action",
 } as const;
 
-// ── Module-load CSS injection (the exact dsh pattern) ───────────────────────
-// Mirrors the shipped guard+append of QueueDock.module.css: probe for an
-// already-injected style by its data-plugin-css marker, then append the style
-// tag once. `typeof document` guards the non-DOM case (tests run in bun
-// without a document global).
 if (
   typeof document !== "undefined" &&
   document.querySelector(

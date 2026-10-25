@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The validator-version domain has ONE total reader (F-10).
@@ -28,7 +27,7 @@
  * @module
  */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { tmpdir } from "node:os";
 
 import { compileGraph } from "../../src/graph/compiler/compile.ts";

@@ -144,4 +144,4 @@ tool-selection errors and argument retries for each model and workload.
 
 Regression coverage lives under `tests/graph/worker-tool-presentation.test.ts`,
 `tests/platform/worker-tools/`, and the host adapters' scoped test files. Run
-those slices with `bun test --isolate`, followed by `bun run typecheck`.
+those slices with `npm test -- --isolate`, followed by `npm run typecheck`.

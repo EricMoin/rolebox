@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh web-UI client plugin tests — the browser half of the web-UI slot
@@ -38,7 +37,7 @@
  * @module
  */
 
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 
 // ── React surface stubs (subtask 3 installs the real devDeps) ──────────────
 
@@ -72,9 +71,9 @@ function jsxRuntimeDouble() {
   };
 }
 
-mock.module("react", reactDouble);
-mock.module("react/jsx-runtime", jsxRuntimeDouble);
-mock.module("react/jsx-dev-runtime", jsxRuntimeDouble);
+vi.doMock("react", reactDouble);
+vi.doMock("react/jsx-runtime", jsxRuntimeDouble);
+vi.doMock("react/jsx-dev-runtime", jsxRuntimeDouble);
 
 // ── Module under test (dynamic import: mocks must precede the graph) ───────
 

@@ -1,10 +1,5 @@
-/**
- * Tests for BudgetTracker persistence — persist() / restore() and debounced
- * writing from recordUsage().
- *
- * Run: bun test tests/dispatch/budget-persist.test.ts
- */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
+import { shortHash } from "../../src/utils/state-paths.ts";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -29,7 +24,7 @@ describe("BudgetTracker persistence", () => {
   });
 
   function budgetPath(): string {
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     return join(tempDir, ".rolebox", "state", `budget-${shortHash(tempDir)}.json`);
   }
 

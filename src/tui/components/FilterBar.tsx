@@ -78,14 +78,14 @@ function renderStatusToggle(
   if (isActive) {
     // Active: bracketed + bold + colored — looks like a pressed button
     return (
-      <span fg={info} attributes={BOLD} on:click={() => onToggleStatus?.(statusKey)}>
+      <span   on:click={() => onToggleStatus?.(statusKey)} style={{ fg: info, attributes: BOLD }}>
         {"[" + def.glyph + " " + def.label + "]"}
       </span>
     );
   }
   // Inactive: dimmed glyph + label (clickable)
   return (
-    <span fg={muted} attributes={DIM | UNDERLINE} on:click={() => onToggleStatus?.(statusKey)}>
+    <span   on:click={() => onToggleStatus?.(statusKey)} style={{ fg: muted, attributes: DIM | UNDERLINE }}>
       {def.glyph + " " + def.label}
     </span>
   );
@@ -113,15 +113,15 @@ export function renderFilterBar(props: FilterBarProps) {
     <box>
       {/* Line 1: Header + filter indicator + close */}
       <text>
-        <span fg={muted} attributes={BOLD}>{"\u2500 filter"}</span>
+        <span style={{ fg: muted, attributes: BOLD }}>{"\u2500 filter"}</span>
         {hasActiveFilter ? (
-          <span fg={info} attributes={BOLD}>{"  " + filteredItems + "/" + totalItems}</span>
+          <span style={{ fg: info, attributes: BOLD }}>{"  " + filteredItems + "/" + totalItems}</span>
         ) : (
-          <span fg={muted} attributes={DIM}>{"  " + totalItems + " total"}</span>
+          <span style={{ fg: muted, attributes: DIM }}>{"  " + totalItems + " total"}</span>
         )}
         <span
-          fg={muted} attributes={DIM | UNDERLINE}
-          on:click={() => props.onClose?.()}
+
+          on:click={() => props.onClose?.()} style={{ fg: muted, attributes: DIM | UNDERLINE }}
         >
           {"  [close]"}
         </span>
@@ -129,8 +129,8 @@ export function renderFilterBar(props: FilterBarProps) {
 
       {/* Search — its own row */}
       <text>
-        <span fg={muted} attributes={DIM}>{"  search: "}</span>
-        <span fg={norm}>{filterText.length > 0 ? filterText : "\u2026"}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{"  search: "}</span>
+        <span style={{ fg: norm }}>{filterText.length > 0 ? filterText : "\u2026"}</span>
       </text>
 
       {/* Status toggles — one per row */}
@@ -138,7 +138,7 @@ export function renderFilterBar(props: FilterBarProps) {
       <For each={STATUS_FILTERS}>
         {(def) => (
           <text>
-            <span fg={muted} attributes={DIM}>{INDENT}</span>
+            <span style={{ fg: muted, attributes: DIM }}>{INDENT}</span>
             {renderStatusToggle(c, def, activeStatuses.has(def.key), props.onToggleStatus)}
           </text>
         )}
@@ -147,18 +147,18 @@ export function renderFilterBar(props: FilterBarProps) {
       {/* Session selectors — one per row */}
       <text fg={muted} attributes={DIM}>{"  session:"}</text>
       <text>
-        <span fg={muted} attributes={DIM}>{INDENT}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{INDENT}</span>
         {sessionFilterId === null || sessionFilterId === currentSessionId ? (
           <span
-            fg={info} attributes={BOLD}
-            on:click={() => props.onSelectSession?.(currentSessionId)}
+
+            on:click={() => props.onSelectSession?.(currentSessionId)} style={{ fg: info, attributes: BOLD }}
           >
             {"[" + shortSessionId(currentSessionId) + "]"}
           </span>
         ) : (
           <span
-            fg={dim} attributes={DIM | UNDERLINE}
-            on:click={() => props.onSelectSession?.(currentSessionId)}
+
+            on:click={() => props.onSelectSession?.(currentSessionId)} style={{ fg: dim, attributes: DIM | UNDERLINE }}
           >
             {shortSessionId(currentSessionId)}
           </span>
@@ -167,18 +167,18 @@ export function renderFilterBar(props: FilterBarProps) {
       <For each={otherSessions}>
         {(sid) => (
           <text>
-            <span fg={muted} attributes={DIM}>{INDENT}</span>
+            <span style={{ fg: muted, attributes: DIM }}>{INDENT}</span>
             {sessionFilterId === sid ? (
               <span
-                fg={info} attributes={BOLD}
-                on:click={() => props.onSelectSession?.(sid)}
+
+                on:click={() => props.onSelectSession?.(sid)} style={{ fg: info, attributes: BOLD }}
               >
                 {"[" + shortSessionId(sid) + "]"}
               </span>
             ) : (
               <span
-                fg={dim} attributes={DIM | UNDERLINE}
-                on:click={() => props.onSelectSession?.(sid)}
+
+                on:click={() => props.onSelectSession?.(sid)} style={{ fg: dim, attributes: DIM | UNDERLINE }}
               >
                 {shortSessionId(sid)}
               </span>
@@ -188,18 +188,18 @@ export function renderFilterBar(props: FilterBarProps) {
       </For>
       {/* All-sessions toggle */}
       <text>
-        <span fg={muted} attributes={DIM}>{INDENT}</span>
+        <span style={{ fg: muted, attributes: DIM }}>{INDENT}</span>
         {sessionFilterId !== null ? (
           <span
-            fg={info} attributes={BOLD}
-            on:click={() => props.onSelectSession?.(null)}
+
+            on:click={() => props.onSelectSession?.(null)} style={{ fg: info, attributes: BOLD }}
           >
             {"[all]"}
           </span>
         ) : (
           <span
-            fg={dim} attributes={DIM | UNDERLINE}
-            on:click={() => props.onSelectSession?.(null)}
+
+            on:click={() => props.onSelectSession?.(null)} style={{ fg: dim, attributes: DIM | UNDERLINE }}
           >
             {"all"}
           </span>

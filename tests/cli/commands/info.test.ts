@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -24,7 +25,7 @@ function infoTargetBase(target: string): string {
   throw new Error(`Unknown sync target: "${target}". Supported targets: opencode, pi, dsh, codex`);
 }
 
-mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
     getSyncTarget: (target: string) => join(infoTargetBase(target), "rolebox"),
     getTargetConfigDir: (target: string) => infoTargetBase(target),
@@ -288,3 +289,5 @@ describe("info across sources", () => {
     expect(allOutput).toContain("custom");
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

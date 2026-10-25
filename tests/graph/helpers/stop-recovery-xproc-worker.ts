@@ -1,33 +1,4 @@
-/**
- * Cross-process worker for the P4.3 STOP-RECOVERY evidence (G4, R5).
- *
- * WHY THIS FILE EXISTS. The P4.3 gap analysis confirmed R5 is implemented, but
- * its RECOVERABILITY was proven only by a throwaway probe run inside ONE
- * process. A stop that a fresh process cannot read and recover from is not
- * recoverable: this worker is spawned with Bun.spawn(process.execPath, ...) and
- * the DECIDING and the HONOURING halves run in different OS processes that never
- * share memory.
- *
- *   bun tests/graph/helpers/stop-recovery-xproc-worker.ts --mode <mode> ...
- *
- * Modes:
- *   - stop-cap      declares the capped loop, starts it, drives it through the
- *                   shipped submission ingress until the DECLARED cap stops the
- *                   run (loop-exhausted), reports the persisted stop, and EXITS.
- *   - stop-stalled  the same, for the loop whose DECLARED progress policy
- *                   soft-exits on a repeated revision (progress-stalled).
- *   - recover       a FRESH host over the same store root, which applies the
- *                   shipped run-scoped `retry` through graph_control, lets the
- *                   installed follow-up mint and start the successor run, and
- *                   reports both runs as the STORE answers them.
- *
- * Every mode prints exactly ONE JSON line on stdout — {"pid":n,"ok":true,...} on
- * success, {"pid":n,"ok":false,...} plus a non-zero exit on failure.
- *
- * PRIVACY. Store roots live under the OS temp directory; reports carry attempt
- * ids, status tokens and reason codes only — never a credential value, a real
- * home-directory path or a session transcript.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { mkdirSync } from "node:fs";
 

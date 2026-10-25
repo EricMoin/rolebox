@@ -12,9 +12,20 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["bun-types"],
-    "jsx": "preserve"
+    "types": [
+      "node"
+    ],
+    "jsx": "preserve",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ]
   },
-  "include": ["src"],
-  "exclude": ["src/tui"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/tui"
+  ]
 }

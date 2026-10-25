@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The TUI Logs VIEW STATE MACHINE, driven by a REAL log directory.
@@ -17,7 +16,7 @@
  * a later case write into the workspace's own `.rolebox/logs/`.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

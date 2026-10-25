@@ -27,7 +27,7 @@
  * and reported in the test's own summary instead of being guessed at.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
@@ -35,7 +35,7 @@ import { LOG_EVENTS } from "../../src/log/index.ts";
 import { SENSITIVE_KEY_TERMS, isSensitiveFieldKey, redactFields } from "../../src/log/redact.ts";
 
 /** The repository's src/ tree, resolved from this file. */
-const SRC_DIR = join(import.meta.dir, "..", "..", "src");
+const SRC_DIR = join(import.meta.dirname, "..", "..", "src");
 
 /** The registry's own source: the declared `Fields:` keys live in its comments. */
 const REGISTRY_PATH = join(SRC_DIR, "log", "registry.ts");

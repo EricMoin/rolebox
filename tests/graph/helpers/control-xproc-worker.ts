@@ -1,38 +1,3 @@
-/**
- * Cross-process worker fixture for the P3 FAILURE / TIMEOUT restart evidence.
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * WHY THIS FILE EXISTS. The plan's §4 P3 failure clause is "the host's failure
- * fact is written to the ATTEMPT, with its reason" — the stop is ATTEMPT-scoped
- * and claims no run control fact, so the run keeps executing — and §5 forbids a
- * temporary probe as the sole acceptance evidence. The tracked single-process
- * case reads the durable rows back through a SECOND CONNECTION; it proves the
- * write is durable but not that a process boundary leaves the same fact standing.
- * This worker IS that boundary: the parent test
- * `tests/graph/control-entry.test.ts` spawns THIS file as a REAL separate OS
- * process, it declares and starts the graph through the SHIPPED assembly with a
- * platform that NEVER confirms the create (so the execution row stays
- * `creating` — an unconfirmed external task), applies `graph_control
- * failure|timeout` for `work`, reads the durable rows back with a fresh
- * connection, writes its reading to {@link CONTROL_REPORT_MARKER} and exits.
- *
- *     bun tests/graph/helpers/control-xproc-worker.ts \
- *       --dir <workspace> --store <root> --graph <id> --command failure|timeout
- *
- * WHAT THE PARENT THEN PINS. A FRESH host over the same store root runs the
- * production boot sweep: the run is still EXECUTING (the stop claimed no run
- * control fact), the effect the stopped attempt left `started` is refused by name
- * instead of being launched a second time, nothing is dispatched, no settlement
- * is possible and a node-scoped retry of the stopped node still applies. The
- * attempt's own stopping decision outlives the process that decided it.
- *
- * PRIVACY: this worker receives only a store root and a workspace directory under
- * the OS temp directory, plus graph ids minted by the test. Its marker carries
- * ids, statuses, counts and its own pid — never a credential value, a real
- * home-directory path or a session transcript.
- */
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";

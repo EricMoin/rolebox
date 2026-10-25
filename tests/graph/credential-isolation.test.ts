@@ -38,7 +38,7 @@
  * block; nothing here writes outside a temp dir.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { openTrackedCredentialVault, removeTempTrees } from "./helpers/temp-dirs.ts";

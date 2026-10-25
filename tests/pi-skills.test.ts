@@ -28,7 +28,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -193,20 +193,6 @@ afterAll(() => {
     process.env.ROLEBOX_ENGINE_RECOVERY = originalEngineRecovery;
   }
   process.chdir(originalCwd);
-  // Windows-only hardening: rmSync on a freshly-written tree transiently
-  // fails with EBUSY/EPERM (Defender/AV scanning a just-closed file, or the
-  // OS still releasing a directory handle). POSIX tolerates this because
-  // open/locked files can still be unlinked there; Windows cannot. The
-  // extension init writes engine state, dispatch/loop stores and the
-  // graph-events log under the workspace, so this cleanup is the hotspot.
-  //
-  // IMPORTANT: bun's node:fs rmSync does NOT honor `maxRetries`/`retryDelay`
-  // (verified against bun's source — src/runtime/node/node_fs.rs parses the
-  // options into `RmDir` but never consumes them; `rm` calls
-  // `zig_delete_tree` directly, whose only internal retry is an
-  // ENOTEMPTY/EEXIST re-iteration, and empirically bun 1.3.14 fails in
-  // ~0-2ms regardless of the options). The retry therefore must be
-  // hand-rolled and runtime-agnostic.
   const rmWithRetry = (target: string, attempts = 8, delayMs = 250): void => {
     let lastErr: unknown;
     for (let i = 0; i < attempts; i++) {
@@ -215,9 +201,6 @@ afterAll(() => {
         return;
       } catch (err) {
         lastErr = err;
-        // Synchronous sleep without runtime-specific APIs: Atomics.wait
-        // blocks this thread for delayMs with a timeout — no setTimeout,
-        // no busy-spin, works on bun and node alike.
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
       }
     }

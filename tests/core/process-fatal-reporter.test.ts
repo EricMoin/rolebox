@@ -1,4 +1,5 @@
-import { describe, it, expect, mock } from "bun:test";
+import { spawnProcessSync, spawnProcess, readableToText } from "../../scripts/node-process.ts";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,10 +18,10 @@ function makeTarget() {
   return {
     listeners,
     removed,
-    on: mock((event: string, listener: (arg: unknown) => void) => {
+    on: vi.fn((event: string, listener: (arg: unknown) => void) => {
       listeners.set(event, listener);
     }),
-    off: mock((event: string, listener: (arg: unknown) => void) => {
+    off: vi.fn((event: string, listener: (arg: unknown) => void) => {
       removed.push({ event, listener });
       listeners.delete(event);
     }),
@@ -36,12 +37,12 @@ function makeCountingTarget() {
   const listeners = new Map<string, Array<(arg: unknown) => void>>();
   return {
     listeners,
-    on: mock((event: string, listener: (arg: unknown) => void) => {
+    on: vi.fn((event: string, listener: (arg: unknown) => void) => {
       const registered = listeners.get(event) ?? [];
       registered.push(listener);
       listeners.set(event, registered);
     }),
-    off: mock((event: string, listener: (arg: unknown) => void) => {
+    off: vi.fn((event: string, listener: (arg: unknown) => void) => {
       const registered = listeners.get(event) ?? [];
       listeners.set(event, registered.filter((entry) => entry !== listener));
     }),
@@ -100,8 +101,8 @@ describe("ProcessFatalReporter", () => {
   it("invoking the registered handler logs one entry, never throws and never exits", () => {
     const target = makeTarget();
     const entries: ProcessFatalEntry[] = [];
-    const flush = mock(() => {});
-    const exitSpy = mock(() => {});
+    const flush = vi.fn(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     (process as any).exit = exitSpy;
 
@@ -150,7 +151,7 @@ describe("ProcessFatalReporter", () => {
   it("a second fatal event is a no-op — flush and log happen exactly once", () => {
     const target = makeTarget();
     const entries: ProcessFatalEntry[] = [];
-    const flush = mock(() => {});
+    const flush = vi.fn(() => {});
     const reporter = new ProcessFatalReporter({
       target: target as any,
       flush,
@@ -235,8 +236,8 @@ describe("ProcessFatalReporter", () => {
   it("exits 1 on a sole-owner uncaughtException — the crash is not swallowed", () => {
     const target = makeCountingTarget();
     const entries: ProcessFatalEntry[] = [];
-    const flush = mock(() => {});
-    const exitSpy = mock(() => {});
+    const flush = vi.fn(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     (process as any).exit = exitSpy;
 
@@ -265,8 +266,8 @@ describe("ProcessFatalReporter", () => {
     const target = makeCountingTarget();
     target.on("uncaughtException", () => {}); // pre-existing host handler
     const entries: ProcessFatalEntry[] = [];
-    const flush = mock(() => {});
-    const exitSpy = mock(() => {});
+    const flush = vi.fn(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     (process as any).exit = exitSpy;
 
@@ -293,7 +294,7 @@ describe("ProcessFatalReporter", () => {
   it("preserveUncaughtExit: false observes only even as sole owner", () => {
     const target = makeCountingTarget();
     const entries: ProcessFatalEntry[] = [];
-    const exitSpy = mock(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     (process as any).exit = exitSpy;
 
@@ -317,7 +318,7 @@ describe("ProcessFatalReporter", () => {
   it("does not exit when a capture callback owns uncaught-exception handling", () => {
     const target = makeCountingTarget();
     const entries: ProcessFatalEntry[] = [];
-    const exitSpy = mock(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     const originalCapture = (process as any).hasUncaughtExceptionCaptureCallback;
     (process as any).exit = exitSpy;
@@ -343,7 +344,7 @@ describe("ProcessFatalReporter", () => {
   it("never exits on an unhandledRejection under the default policy", () => {
     const target = makeCountingTarget();
     const entries: ProcessFatalEntry[] = [];
-    const exitSpy = mock(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     (process as any).exit = exitSpy;
 
@@ -368,7 +369,7 @@ describe("ProcessFatalReporter", () => {
   it("exitOnUnhandledRejection: true opts into the exit", () => {
     const target = makeCountingTarget();
     const entries: ProcessFatalEntry[] = [];
-    const exitSpy = mock(() => {});
+    const exitSpy = vi.fn(() => {});
     const originalExit = (process as any).exit;
     (process as any).exit = exitSpy;
 
@@ -424,7 +425,7 @@ describe("ProcessFatalReporter — real crash in a child process", () => {
   it("exits 1 instead of swallowing the crash and prints the gated stderr line", () => {
     const { dir, module } = writeCrashModule();
     try {
-      const child = Bun.spawnSync([process.execPath, module], {
+      const child = spawnProcessSync([process.execPath, module], {
         cwd: dir,
         env: { ...crashEnv(dir), ROLEBOX_FATAL_STDERR: "1" },
         stdout: "pipe",
@@ -444,13 +445,13 @@ describe("ProcessFatalReporter — real crash in a child process", () => {
     delete env.ROLEBOX_FATAL_STDERR;
 
     try {
-      const child = Bun.spawn([process.execPath, module], {
+      const child = spawnProcess([process.execPath, module], {
         cwd: dir,
         env,
         stdout: "pipe",
         stderr: "pipe",
       });
-      const stderr = await Bun.readableStreamToText(child.stderr);
+      const stderr = await readableToText(child.stderr);
       const exitCode = await child.exited;
 
       expect(exitCode).toBe(1);

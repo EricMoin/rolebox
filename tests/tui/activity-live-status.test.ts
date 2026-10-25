@@ -1,24 +1,10 @@
-/// <reference types="bun-types" />
+import type { JSX } from "solid-js";
 
-/**
- * Component-level tests for the engine-graph live node-status overlay.
- *
- * Subtask 5 of the TUI live-state fix: `renderEngineGraphActivity` folds the
- * node-scoped live-status map (`${graphId}::${nodeId}` → status, fed from the
- * 250ms graph-event poll) over the disk snapshot's `node.status` (which lags
- * up to the 1s snapshot poll). These tests render the real component through
- * @opentui/solid's headless test renderer and assert on the captured frame.
- *
- * The TUI's JSX transform (babel-preset-solid via the build's bun plugin) must
- * be registered before any `.tsx` module loads, so the component is imported
- * dynamically after `Bun.plugin` runs.
- */
 
-import { describe, it, expect, afterEach, beforeAll } from "bun:test";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
 import { RGBA } from "@opentui/core";
 import { testRender } from "@opentui/solid";
 import type { TestRendererSetup } from "@opentui/core/testing";
-import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 import type {
   EngineGraphSnapshot,
   GraphNodeSnapshot,
@@ -27,7 +13,6 @@ import type { ThemeColors } from "../../src/tui/helpers.ts";
 import { G_RUNNING, G_DONE } from "../../src/tui/helpers.ts";
 
 // Same transform the TUI build applies (`scripts/build-tui.ts`).
-Bun.plugin(createSolidTransformPlugin({ moduleName: "@opentui/solid" }));
 
 type EngineGraphActivityProps = {
   c: ThemeColors;
@@ -92,7 +77,7 @@ async function renderWith(
   nodeSignals?: ReadonlyMap<string, string>,
 ): Promise<string> {
   setup = await testRender(
-    () => renderEngineGraphActivity({ c, graph, nodeSignals }),
+    () => renderEngineGraphActivity({ c, graph, nodeSignals }) as JSX.Element,
     { width: 60, height: 12 },
   );
   await setup.renderOnce();

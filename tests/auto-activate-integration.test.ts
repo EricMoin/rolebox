@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
@@ -16,25 +16,25 @@ import { RoleMode } from "../src/constants.js";
 function createMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-session-1" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({ data: { parts: [{ type: "text", text: "ok" }] }, error: undefined }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test-session-1" }, error: undefined }),
       ),
     },
@@ -89,7 +89,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  mock.restore();
+  vi.restoreAllMocks();
 });
 
 // ── 1. auto-activate on first message ────────────────────────────

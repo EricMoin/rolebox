@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { handleToolAfter } from "../../src/hooks/tool-after.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
@@ -10,9 +10,9 @@ import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 // The parameter lists mirror the production methods (`CustomHookRegistry.runHooks`
 // in src/hooks/custom/registry.ts, `BuiltInHookRegistry.runHooks` in
 // src/recovery/builtin/registry.ts) so that `mock.calls` records the real argument
-// tuple; a bare `mock(() => ...)` records `[]` and every `calls[0][n]` read fails.
+// tuple; a bare `vi.fn(() => ...)` records `[]` and every `calls[0][n]` read fails.
 function makeCustomRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -23,7 +23,7 @@ function makeCustomRunHooks() {
 }
 
 function makeBuiltInRunHooks() {
-  return mock(
+  return vi.fn(
     (
       _event: HookEvent,
       _phase: "before" | "after",
@@ -36,13 +36,13 @@ function makeBuiltInRunHooks() {
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    session: { messages: mock(() => Promise.resolve([])) } as any,
+    session: { messages: vi.fn(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
     roleMap: new Map(),
     dir: "/tmp/test",
     dispatchManager: {} as any,
     loopManager: {} as any,
-    customHooks: { runHooks: mock(() => Promise.resolve()) } as any,
+    customHooks: { runHooks: vi.fn(() => Promise.resolve()) } as any,
     ...overrides,
   };
 }
@@ -59,7 +59,7 @@ describe("handleToolAfter — early exit", () => {
   it("returns early when sessionID is missing", async () => {
     const deps = minimalDeps();
     const state = makeState();
-    const customRunHooks = deps.customHooks!.runHooks as ReturnType<typeof mock>;
+    const customRunHooks = deps.customHooks!.runHooks as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await handleToolAfter(
       { sessionID: undefined, tool: "bash" },
@@ -74,7 +74,7 @@ describe("handleToolAfter — early exit", () => {
   it("returns early when tool is missing", async () => {
     const deps = minimalDeps();
     const state = makeState();
-    const customRunHooks = deps.customHooks!.runHooks as ReturnType<typeof mock>;
+    const customRunHooks = deps.customHooks!.runHooks as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     await handleToolAfter(
       { sessionID: "sess-1", tool: undefined },
@@ -256,7 +256,7 @@ describe("handleToolAfter — function observe and handlers", () => {
     const deps = minimalDeps({
       roleFunctionsMap: new Map([["agent-a", [{ name: "fn1", content: "", description: "test", filePath: "/test/fn1.ts", source: "role-local" } as any]]]),
       session: {
-        messages: mock(() => Promise.reject(new Error("network error"))),
+        messages: vi.fn(() => Promise.reject(new Error("network error"))),
       } as any,
     });
     state.sessionAgentRegistry.set("sess-1", "agent-a");

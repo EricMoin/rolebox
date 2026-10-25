@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * THE DURABLE-ROW GATE — the notification payload and the run-state body
@@ -30,7 +29,7 @@
  * @module
  */
 
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -418,8 +417,6 @@ describe("the run view exposes the decoded state instead of a narrowed body", ()
   });
 
   it("no longer names the run-state row or its body in the application layer", () => {
-    // The property is a SOURCE property: the drain must read the view it was
-    // already handed. `bun test` is transpile-only, so this asserts it directly.
     const source = readFileSync(
       new URL("../../src/graph/application/graph-notifications.ts", import.meta.url),
       "utf8",

@@ -1,6 +1,7 @@
+import { beforeEach as resetBeforeEach } from "vitest";
 /** Top-level teammate discovery must survive both fast and full reloads. */
 
-mock.module("../../src/platform/adapters/opencode/agent-registrar.ts", () => ({
+vi.doMock("../../src/platform/adapters/opencode/agent-registrar.ts", () => ({
   OpencodeAgentRegistrar: class {
     async sync() {
       return { added: [], removed: [], unchanged: [] };
@@ -12,23 +13,26 @@ mock.module("../../src/platform/adapters/opencode/agent-registrar.ts", () => ({
     }
   },
 }));
+const { HotReloadService } = await import("../../src/core/services/hot-reload-service.ts");
+const { opencodeCapabilities } = await import("../../src/platform/capabilities.ts");
+const { roleOpenRegistry } = await import("../../src/resolver/registry.ts");
 
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { HotReloadService } from "../../src/core/services/hot-reload-service.ts";
-import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
-import { roleOpenRegistry } from "../../src/resolver/registry.ts";
+
+
+
 import type { ResolvedRole, ResolvedSubAgent } from "../../src/types.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 function makeMockCore() {
   return {
-    getService: mock(() => undefined),
-    getServices: mock(() => new Map()),
-    restartService: mock(() => Promise.resolve()),
+    getService: vi.fn(() => undefined),
+    getServices: vi.fn(() => new Map()),
+    restartService: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -41,7 +45,7 @@ function makeCtx(dir: string, core: any = makeMockCore()): any {
     rawDirectory: dir,
     directory: dir,
     core,
-    bus: { on: mock(), off: mock(), emit: mock(), clear: mock() },
+    bus: { on: vi.fn(), off: vi.fn(), emit: vi.fn(), clear: vi.fn() },
     roleboxDir: dir,
     globalSkillsDir: join(dir, "global-skills"),
     configDir: join(dir, "config"),
@@ -114,7 +118,7 @@ describe("HotReloadService teammate catalog", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     try {
       rmSync(tempDir, { recursive: true, force: true });
     } catch {
@@ -225,3 +229,5 @@ describe("HotReloadService teammate catalog", () => {
     await svc.dispose();
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

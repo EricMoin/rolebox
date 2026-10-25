@@ -19,7 +19,7 @@
  *    lock, rather than by calling logEvent directly.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   LOG_EVENTS,
@@ -75,20 +75,20 @@ afterEach(() => {
 function createFakeAdapter(): IDispatchAdapter {
   let round = 0;
   return {
-    dispatchRound: mock(async () => {
+    dispatchRound: vi.fn(async () => {
       round += 1;
       return { workerTaskId: `task-${round}`, workerSessionId: `session-${round}` };
     }),
-    getRoundResult: mock(async () => ({ text: "worker output", hadError: false })),
-    cancelRound: mock(async () => {}),
-    readOriginSummary: mock(async () => "Round summary."),
-    getLastMessageId: mock(async () => "msg-boundary"),
-    injectNote: mock(async () => {}),
-    registerTerminatedListener: mock(
+    getRoundResult: vi.fn(async () => ({ text: "worker output", hadError: false })),
+    cancelRound: vi.fn(async () => {}),
+    readOriginSummary: vi.fn(async () => "Round summary."),
+    getLastMessageId: vi.fn(async () => "msg-boundary"),
+    injectNote: vi.fn(async () => {}),
+    registerTerminatedListener: vi.fn(
       (_taskId: string, callback: (taskId: string, status: string) => void) => callback,
     ),
-    removeTerminatedListener: mock(() => {}),
-    getTaskStatus: mock(async () => "completed"),
+    removeTerminatedListener: vi.fn(() => {}),
+    getTaskStatus: vi.fn(async () => "completed"),
   };
 }
 

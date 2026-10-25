@@ -20,7 +20,7 @@
  *    rather than by calling logEvent directly.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,7 +199,7 @@ describe("the dispatch slice's events come from the modules that own them", () =
 
   it("reports a refused parent notification from notifyParent", async () => {
     const client = {
-      prompt: mock(() => Promise.reject(new Error("prompt refused"))),
+      prompt: vi.fn(() => Promise.reject(new Error("prompt refused"))),
     } as unknown as ISessionClient;
     const task = makeTask();
 

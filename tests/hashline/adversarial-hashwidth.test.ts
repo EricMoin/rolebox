@@ -1,36 +1,5 @@
-// Adversarial test: hashWidth boundaries (ROLEBOX_HASHLINE_WIDTH override +
-// line-count escalation).
-//
-// These tests assert the CORRECT documented contract:
-//   1. read anchors are directly usable in edit, for every width the schema
-//      allows (edit schema: hashWidth min 2 max 8 — src/hashline/hashline-edit.ts:257);
-//   2. after an edit, the reanchored anchors returned by edit are consistent
-//      with a fresh read of the post-edit file;
-//   3. read reports hashWidth consistent with the documented line-count thresholds.
-//
-// Today (a) and (b) FAIL — they reproduce two live defects:
-//
-//   D2 — HASHLINE_REF_PATTERN accepts only {2,4} hash chars
-//        (src/hashline/constants.ts:18), while hashWidthForLineCount honors a
-//        ROLEBOX_HASHLINE_WIDTH override of 2..8 (src/hashline/hash.ts:41-50,
-//        specifically line 45). With the override ≥ 5, hashline_read emits
-//        width-5..8 anchors (src/hashline/hashline-read.ts:108) that
-//        parseLineRef rejects (src/hashline/validation.ts:33-38) with
-//        "Invalid line reference" — so a read → edit round-trip fails.
-//
-//   D6c — after an edit pushes a file across a width threshold (999 → 1002
-//        lines), edit computes the reanchored anchors with the PRE-EDIT
-//        hashWidth (src/hashline/hashline-edit.ts:223 passes the pre-edit
-//        hashWidth into reanchorChangedLines), while a fresh read escalates
-//        the width (src/hashline/hash.ts:47-49). The width-2 reanchored
-//        anchors can never equal the fresh width-3 anchors.
-//
-// (c) passes today — it pins the correct boundary contract.
-//
-// Reproduce:
-//   bun test --isolate tests/hashline/adversarial-hashwidth.test.ts
 
-import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

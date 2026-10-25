@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { decideContinuation } from "../src/function/continuation.ts";
 import type { SafetyConfig } from "../src/function/continuation.ts";
 import type { FnState } from "../src/function/runtime-state.ts";

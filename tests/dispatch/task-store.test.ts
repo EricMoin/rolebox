@@ -1,19 +1,21 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { shortHash } from "../../src/utils/state-paths.ts";
+
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 import { createPathsMockPayload } from "../helpers/paths-mock.ts";
 
 let currentDataDir = "";
 
-mock.module("../../src/cli/paths", () => createPathsMockPayload({
+vi.doMock("../../src/cli/paths", () => createPathsMockPayload({
   getDataDir: () => currentDataDir,
 }));
+const { shortHash } = await import("../../src/utils/state-paths.ts");
+const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store.ts");
 
-import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
+
 
 function makeTask(overrides?: Partial<DispatchTask>): DispatchTask {
   const now = new Date();
@@ -697,3 +699,5 @@ describe("TaskStateStore", () => {
     });
   });
 });
+
+type TaskStateStore = InstanceType<typeof TaskStateStore>;

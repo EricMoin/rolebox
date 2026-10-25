@@ -1,9 +1,10 @@
+import { spawnProcess } from "../../../scripts/node-process.ts";
 /**
  * Cross-process hashline_edit worker fixture (subtask 2 — adversarial
  * cross-process race suite).
  *
  * Runs as a REAL separate OS process (spawned by the parent test via
- * `Bun.spawn(["bun", <this file>, ...])`) so that the in-process per-path FIFO
+ * `spawnProcess(["node", <this file>, ...])`) so that the in-process per-path FIFO
  * mutex (src/hashline/path-lock.ts:18-88) is NOT shared with any sibling
  * worker — exactly the cross-process scenario the lock documents as
  * unsupported (docs/limitations.md:30).

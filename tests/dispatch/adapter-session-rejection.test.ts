@@ -16,7 +16,7 @@
  *   - BadRequestError = { name: "BadRequest", data: { message, kind? } }
  *                                                       — gen/types.gen.d.ts:617
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import { SessionCreateRejectedError, isSessionCreateRejected } from "../../src/platform/types.ts";
 

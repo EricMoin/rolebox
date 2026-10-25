@@ -1,32 +1,6 @@
-/// <reference types="bun-types" />
 
-/**
- * The store/ledger slice's guards: a malformed `artifacts` column is REFUSED,
- * and the dispatch reservation's statement and its bindings are one value
- * (F-01, F-19, and F-02's store clauses).
- *
- * WHY THIS FILE EXISTS. A guard that is never handed a violating value is
- * indistinguishable from no guard at all, and `bun test` is transpile-only, so
- * neither fix is visible to the rest of the suite. The accepted-results
- * `artifacts` column used to be `JSON.parse`d and `as`-asserted: a hand-edited
- * or foreign row handed a fabricated `readonly AcceptedArtifact[]` outward and
- * made `GraphStore.readAcceptedArtifact` throw a bare `TypeError`. The cases
- * below plant every shape this format does not write — not an array, a null or
- * field-less element, an identity or digest or size the store could not have
- * published — and require a refusal that NAMES the store, the table, the element
- * and the field. The dispatch reservation used to bind an `unknown[]`
- * positionally against a half-literal INSERT, so a catalog change could shift
- * every later value into the wrong column; the case below pins the
- * placeholder/binding pairing the builder now asserts before the statement can
- * run, and round-trips a real claim through the derived statement.
- *
- * STRENGTH: store-level, one process, every fixture in an isolated temp tree
- * that is removed with its connection.
- *
- * @module
- */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -1,4 +1,5 @@
-import { expect, it } from "bun:test";
+import { expect, it } from "vitest";
+import { snapshotSubagentDescriptor, SUBAGENT_DESCRIPTOR_VERSION } from "@deepseek-ai/dsh-subagent";
 import { observeDshExecutionEvents, readDshExecutionEvents, readDshLastTurnDeclaration } from "../../src/platform/adapters/dsh/graph-observation.ts";
 import type { DshTurnDeclarationReading } from "../../src/platform/adapters/dsh/graph-observation.ts";
 import type { DshSessionEventLike, DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
@@ -47,6 +48,23 @@ const began = event("turn/start", { turn: 1 });
 const block = (body: string) => "```json\n" + body + "\n```";
 const other = event("subagent/descriptor", { version: 2, mode: "one-shot", label: "graph/dispatch:other#2" });
 const readTurn = (events: readonly DshSessionEventLike[]) => readDshLastTurnDeclaration(events, "graph/dispatch:work#1");
+
+it("reads terminal turns and declarations from the installed SDK descriptor version", () => {
+  const current = event("subagent/descriptor", snapshotSubagentDescriptor({
+    mode: "continuable", provider: "spawn", label: "graph/dispatch:work#1",
+  }));
+  const events = [current, began, assistant([text(block('{"outcome_id":"done"}'))]), ended("completed")];
+  expect(observe(events)).toEqual({ kind: "completed" });
+  expect(readTurn(events)).toMatchObject({ kind: "declared", declaration: { outcomeId: "done" } });
+  for (const data of [
+    { version: SUBAGENT_DESCRIPTOR_VERSION + 1, mode: "one-shot", label: "graph/dispatch:work#1" },
+    { version: SUBAGENT_DESCRIPTOR_VERSION, mode: "continuable", label: "graph/dispatch:work#1" },
+    { version: SUBAGENT_DESCRIPTOR_VERSION, mode: "one-shot", provider: "spawn", label: "other" },
+  ]) {
+    expect(observe([current, ended("completed"), event("subagent/descriptor", data), ended("completed")]).kind)
+      .toBe("unknown");
+  }
+});
 const reasonOf = (reading: DshTurnDeclarationReading) => reading.kind === "declared" ? "" : reading.reason;
 const absentReason = (reading: DshTurnDeclarationReading) => {
   expect(reading.kind).toBe("absent");
@@ -95,13 +113,13 @@ it("joins text blocks and messages with one newline and ignores reasoning/tool/u
 
 it("is absent without an owned descriptor, without a final completed turn, or without a block", () => {
   const declared = block('{"outcome_id": "done"}');
-  expect(absentReason(readTurn([]))).toContain("No one-shot dsh graph execution descriptor");
+  expect(absentReason(readTurn([]))).toContain("No matching dsh graph execution descriptor");
   expect(absentReason(readTurn([began, assistant([text(declared)]), ended("completed")])))
-    .toContain("No one-shot dsh graph execution descriptor");
+    .toContain("No matching dsh graph execution descriptor");
   expect(absentReason(readTurn([event("subagent/descriptor", { version: 2, mode: "continuable", label: "graph/dispatch:work#1" }), ended("completed")])))
-    .toContain("No one-shot dsh graph execution descriptor");
+    .toContain("No matching dsh graph execution descriptor");
   expect(absentReason(readTurn([event("subagent/descriptor", { version: 2, mode: "one-shot", label: "graph/dispatch:other#2" }), ended("completed")])))
-    .toContain("No one-shot dsh graph execution descriptor");
+    .toContain("No matching dsh graph execution descriptor");
   // `blocked`/`interrupted` are the remaining kinds of the installed TurnEndReasonMap (dsh-session types.d.ts:165-201).
   for (const kind of ["aborted", "error", "max-tokens", "refusal", "blocked", "interrupted", "unknown"]) {
     const events = [descriptor, began, assistant([text(declared)]), ended(kind)];
@@ -130,7 +148,7 @@ it("uses the last turn pair inside the owned window", () => {
 
 it("lets a later descriptor reset the owned window for both readers", () => {
   const work = [descriptor, began, assistant([text(block('{"outcome_id": "done"}'))]), ended("completed")];
-  expect(absentReason(readTurn([...work, other]))).toContain("No one-shot dsh graph execution descriptor");
+  expect(absentReason(readTurn([...work, other]))).toContain("No matching dsh graph execution descriptor");
   expect(observe([...work, other]).kind).toBe("unknown");
   expect(readTurn([other, ...work])).toEqual({
     kind: "declared",
@@ -240,13 +258,13 @@ type ObservedKind = ReturnType<typeof observe>["kind"];
 const ACCESSOR_CASES: Array<[string, readonly DshSessionEventLike[], string, ObservedKind]> = [
   // A proxied EVENT: `isRecord` passes and the `type` read throws.
   ["a proxy event", [throwingGet({ ...descriptor })],
-    "No one-shot dsh graph execution descriptor", "unknown"],
+    "No matching dsh graph execution descriptor", "unknown"],
   // A proxied SESSION: `Array.isArray` passes and the `length` read throws.
   ["a proxy session", throwingGet([descriptor, began, assistant([text(block('{"outcome_id": "done"}'))]), ended("completed")]),
-    "No one-shot dsh graph execution descriptor", "unknown"],
+    "No matching dsh graph execution descriptor", "unknown"],
   // Every index accessor of the session throws.
   ["throwing index accessors", throwingIndexes(4),
-    "No one-shot dsh graph execution descriptor", "unknown"],
+    "No matching dsh graph execution descriptor", "unknown"],
   // A READABLE descriptor followed by throwing indexes: ownership is proven, so
   // the owned window is built by `slice`, which re-reads those indexes.
   ["throwing indexes after the owned descriptor", throwingIndexes(4, [descriptor]),

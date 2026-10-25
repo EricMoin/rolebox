@@ -22,7 +22,7 @@
  * here, so none of this is real-host evidence.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type {

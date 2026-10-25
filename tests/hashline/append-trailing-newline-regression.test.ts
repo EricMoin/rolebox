@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "bun:test";
+import { describe, it, expect, afterAll } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";

@@ -30,7 +30,7 @@
  * pin the real platform wiring, not a synthetic setup.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PiLightweightServiceStack } from "../src/platform/adapters/pi/service-stack.ts";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
 import { opencodeCapabilities } from "../src/platform/capabilities.ts";

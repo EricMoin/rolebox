@@ -4,7 +4,8 @@
   "description": "Agent plugin for major harnesses — DeepSeek Harness (DSH), OpenCode, Pi and Codex: define custom AI agent roles with per-role prompts, models, skills, permissions, memory and multi-agent orchestration.",
   "engines": {
     "opencode": "^1.0.0",
-    "dsh": ">=0.2.1-alpha.3"
+    "dsh": ">=0.2.1-alpha.3",
+    "node": ">=26.4.0"
   },
   "type": "module",
   "bin": {
@@ -14,30 +15,30 @@
   "types": "dist/entries/opencode.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/entries/opencode.js",
       "types": "./dist/entries/opencode.d.ts",
+      "import": "./dist/entries/opencode.js",
       "default": "./dist/entries/opencode.js"
     },
     "./server": {
-      "import": "./dist/entries/opencode2.js",
       "types": "./dist/entries/opencode2.d.ts",
+      "import": "./dist/entries/opencode2.js",
       "default": "./dist/entries/opencode2.js"
     },
     "./tui": {
-      "import": "./dist/tui.js",
-      "types": "./dist/tui.d.ts"
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     },
     "./pi": {
-      "import": "./dist/entries/pi.js",
-      "types": "./dist/entries/pi.d.ts"
+      "types": "./dist/entries/pi.d.ts",
+      "import": "./dist/entries/pi.js"
     },
     "./dsh": {
-      "import": "./dist/entries/dsh.js",
-      "types": "./dist/entries/dsh.d.ts"
+      "types": "./dist/entries/dsh.d.ts",
+      "import": "./dist/entries/dsh.js"
     },
     "./codex": {
-      "import": "./dist/entries/codex.js",
-      "types": "./dist/entries/codex.d.ts"
+      "types": "./dist/entries/codex.d.ts",
+      "import": "./dist/entries/codex.js"
     },
     "./dsh/cordis.patch.yml": "./dsh/cordis.patch.yml",
     "./dsh/package.json": "./package.json",
@@ -51,27 +52,29 @@
     "dist",
     "dsh",
     "examples",
-    "functions",
-    "scripts/patch-opentui-native-entry.mjs"
+    "functions"
   ],
   "scripts": {
-    "build": "bun run build:clean && tsc && bun run build:bin-executable && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client",
-    "build:clean": "bun run scripts/clean-dist.ts",
-    "build:bin-executable": "bun run scripts/mark-bin-executable.ts",
-    "build:entry-aliases": "bun run scripts/build-entry-aliases.ts",
-    "build:tui": "bun run scripts/build-tui.ts",
-    "build:dsh-web-client": "NODE_ENV=production bun run scripts/build-dsh-web-client.ts",
-    "prepack": "bun run scripts/npm-readme.ts absolute",
-    "postpack": "bun run scripts/npm-readme.ts relative",
-    "prepublishOnly": "bun run build",
-    "typecheck": "tsc --noEmit",
+    "build": "node --import tsx scripts/build-all.ts",
+    "build:clean": "node --import tsx scripts/clean-dist.ts",
+    "build:bin-executable": "node --import tsx scripts/mark-bin-executable.ts",
+    "build:entry-aliases": "node --import tsx scripts/build-entry-aliases.ts",
+    "build:tui": "node --import tsx scripts/build-tui.ts",
+    "build:dsh-web-client": "node --import tsx scripts/build-dsh-web-client.ts",
+    "prepack": "node --import tsx scripts/npm-readme.ts absolute",
+    "postpack": "node --import tsx scripts/npm-readme.ts relative",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json && tsc -p tsconfig.tui-tests.json",
     "typecheck:tests": "tsc -p tsconfig.tests.json",
-    "test": "bun run test:core && bun run test:tui",
-    "test:core": "bun test --isolate --path-ignore-patterns=tests/tui",
-    "test:tui": "bun test tests/tui/",
-    "check:hosts": "bun run scripts/host-versions.ts check",
-    "update:hosts": "bun run scripts/host-versions.ts update",
-    "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\" && node scripts/patch-opentui-native-entry.mjs"
+    "test": "node --experimental-ffi --import tsx scripts/test.ts",
+    "test:core": "npm test -- --exclude=tests/tui/**",
+    "test:tui": "npm test -- tests/tui/",
+    "test:browse:e2e": "node --import tsx scripts/test-browse-e2e.ts",
+    "test:hosts:e2e": "node --import tsx scripts/test-hosts-e2e.ts",
+    "check:hosts": "node --import tsx scripts/host-versions.ts check",
+    "update:hosts": "node --import tsx scripts/host-versions.ts update",
+    "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\"",
+    "test:package": "node --import tsx scripts/test-package.ts"
   },
   "keywords": [
     "opencode",
@@ -103,7 +106,9 @@
     "deepseek-harness-plugin"
   ],
   "pi": {
-    "extensions": ["./dist/entries/pi.js"]
+    "extensions": [
+      "./dist/entries/pi.js"
+    ]
   },
   "dsh": {
     "bundle": {
@@ -132,23 +137,23 @@
     "js-yaml": "^4.1.0",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
-    "zod": "^4.1.8"
+    "zod": "4.1.8"
   },
   "optionalDependencies": {
     "node-pty": "^1.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
+    "@earendil-works/pi-coding-agent": ">=0.86.0",
+    "@mozilla/readability": ">=0.5.0",
     "@opencode-ai/plugin": "^1.3.0",
     "@opencode/plugin": "^2.0.18",
-    "@opentui/core": ">=0.2.16",
-    "@opentui/solid": ">=0.2.16",
-    "solid-js": "^1.9.0",
-    "playwright": ">=1.40.0",
+    "@opentui/core": ">=0.6.8",
+    "@opentui/solid": ">=0.6.8",
     "crawlee": ">=3.0.0",
-    "@mozilla/readability": ">=0.5.0",
     "linkedom": ">=0.18.0",
-    "@earendil-works/pi-coding-agent": ">=0.86.0"
+    "playwright": ">=1.40.0",
+    "solid-js": "^1.9.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -183,6 +188,8 @@
     }
   },
   "devDependencies": {
+    "@babel/core": "^7.28.0",
+    "@babel/preset-typescript": "^7.27.1",
     "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
     "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
@@ -190,14 +197,18 @@
     "@deepseek-ai/dsh-client-ui-conversation": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-fs": "0.2.1-rc.2",
     "@deepseek-ai/dsh-fs-local": "0.2.1-rc.2",
     "@deepseek-ai/dsh-fs-observation-policy": "0.2.1-rc.2",
     "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-local": "0.2.1-rc.2",
     "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-query-sqlite": "0.2.1-rc.2",
     "@deepseek-ai/dsh-skill": "0.2.1-rc.2",
     "@deepseek-ai/dsh-subagent": "0.2.1-rc.2",
     "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-rc.2",
@@ -209,14 +220,24 @@
     "@earendil-works/pi-coding-agent": "1.3.0",
     "@opencode-ai/plugin": "1.19.3",
     "@opencode/plugin": "2.0.32",
-    "@opentui/core": "0.2.16",
-    "@opentui/solid": "0.2.16",
+    "@opentui/core": "0.6.8",
+    "@opentui/solid": "0.6.8",
     "@resvg/resvg-js": "^2.6.2",
+    "@types/babel__core": "^7.20.5",
     "@types/js-yaml": "^4.0.0",
+    "@types/node": "^26.6.5",
+    "@types/semver": "^7.7.1",
     "@types/turndown": "^5.0.6",
-    "bun-types": "latest",
+    "babel-plugin-module-resolver": "5.0.2",
+    "babel-preset-solid": "1.9.12",
+    "esbuild": "0.28.2",
+    "playwright": "1.61.1",
+    "semver": "^7.7.3",
     "solid-js": "1.9.12",
+    "tsx": "4.23.15",
     "typescript": "^5.7.0",
+    "vitest": "4.1.6",
     "yaml": "^2.9.0"
-  }
+  },
+  "packageManager": "npm@11.17.0"
 }

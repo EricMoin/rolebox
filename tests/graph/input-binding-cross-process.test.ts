@@ -1,46 +1,6 @@
-/**
- * P4.2 criterion 3 — THE SUCCESSOR'S PERSISTED INPUT BINDING SURVIVES A REAL OS
- * PROCESS BOUNDARY.
- *
- * WHY THIS FILE EXISTS. The committed regression for criterion 3
- * (`tests/graph/runtime-input-binding.test.ts`) rebuilds the runtime in the SAME
- * process: it destroys the durable fact the binding was made of first, which is
- * strong evidence for the RULE, but a second runtime object in one process still
- * shares the module map, the warm caches and the memory of the process that
- * armed the attempt. This case drives the same window across a real boundary,
- * following the harness `tests/graph/host-restart-cross-process.test.ts`
- * established: the test process arranges the crash window, and a spawned
- * `bun` child (a different OS process, asserted by pid) rebuilds the runtime
- * from the persisted state and continues the dispatch.
- *
- * WHAT IS PINNED:
- *
- * 1. The parent accepts the producer's result, retains revision A, and the
- *    acceptance arms the successor with a bound input view — then the
- *    successor's create throws before delivery, so the dispatch effect is left
- *    `pending` exactly as a crash between commit and delivery leaves it.
- * 2. The mutable source path is replaced with B after the acceptance, and the
- *    parent stops: everything the child works from is the store file.
- * 3. The child re-derives the plan from the same declaration, reads the
- *    persisted state, resumes, and re-dispatches the successor with the ORIGINAL
- *    accepted payload and revision A while the source path on disk holds B.
- * 4. The child's recovered binding is byte-equal to the one the parent
- *    persisted (compared against the parent's own JSON), and exactly one
- *    accepted event exists before and after.
- *
- * THE CHILD DECLARES `durableCredentialStore: "platform-isolated"`. Re-delivering
- * an attempt the parent minted needs a process that never held the credential to
- * resolve it, and the shipped default deliberately retains none. That declaration
- * is the host's assertion about an OS boundary this test process cannot provide:
- * this case exercises THE BINDING AND THE CONSUMPTION, and makes no claim about
- * vault isolation.
- *
- * Every store lives under the OS temp directory and is removed by `afterEach`;
- * no `.rolebox` path and no workspace store is touched. Reports carry ids,
- * digests, counts and booleans — never a credential value.
- */
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -123,29 +83,24 @@ afterEach(() => {
   tmpDirs.length = 0;
 });
 
-/** Spawn one REAL bun process running the worker fixture and await its report. */
 async function runWorker(args: readonly string[]): Promise<WorkerReport> {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn([process.execPath, WORKER, ...args], {
+  const proc = spawnProcess([process.execPath, WORKER, ...args], {
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
   children.push({
     pid: proc.pid,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

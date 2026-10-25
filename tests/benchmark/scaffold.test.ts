@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,24 +32,24 @@ describe("benchmark scaffolding", () => {
     expect(loaded.cases[0]!.workspace).toEqual({ fixture: "./fixtures/sum", checks: "./checks/sum" });
     expect(loaded.cases[0]!.assertions).toEqual([
       { kind: "file_exists", path: "src/sum.mjs" },
-      { kind: "command", argv: ["bun", "{checks}/check.mjs", "{workspace}"], timeoutMs: 10_000, expectedExitCode: 0 },
+      { kind: "command", argv: ["node", "{checks}/check.mjs", "{workspace}"], timeoutMs: 10_000, expectedExitCode: 0 },
     ]);
     expect(await readdir(join(suite, "fixtures", "sum"))).toEqual(["src"]);
     expect(await readFile(join(suite, "role", "role.yaml"), "utf8")).toContain("Change the actual files");
     const fixture = join(suite, "fixtures", "sum");
     const check = join(suite, "checks", "sum", "check.mjs");
-    const failing = Bun.spawn([process.execPath, check, fixture], { stdout: "pipe", stderr: "pipe" });
+    const failing = spawnProcess([process.execPath, check, fixture], { stdout: "pipe", stderr: "pipe" });
     expect(await failing.exited).not.toBe(0);
     expect(await new Response(failing.stderr).text()).toContain("empty");
 
     const repaired = join(directory, "repaired");
     await cp(fixture, repaired, { recursive: true });
     await writeFile(join(repaired, "src", "sum.mjs"), "export function sum() { return 0; }\n");
-    const wrong = Bun.spawn([process.execPath, check, repaired], { stdout: "pipe", stderr: "pipe" });
+    const wrong = spawnProcess([process.execPath, check, repaired], { stdout: "pipe", stderr: "pipe" });
     expect(await wrong.exited).not.toBe(0);
     expect(await new Response(wrong.stderr).text()).toContain("AssertionError");
     await writeFile(join(repaired, "src", "sum.mjs"), "export function sum(values) { return values.reduce((total, value) => total + value, 0); }\n");
-    const passing = Bun.spawn([process.execPath, check, repaired], { stdout: "pipe", stderr: "pipe" });
+    const passing = spawnProcess([process.execPath, check, repaired], { stdout: "pipe", stderr: "pipe" });
     expect(await passing.exited).toBe(0);
     expect(await new Response(passing.stdout).text()).toContain("All sum checks passed");
     expect(await readFile(join(fixture, "src", "sum.mjs"), "utf8")).not.toContain(", 0)");

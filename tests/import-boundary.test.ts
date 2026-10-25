@@ -1,10 +1,9 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const SOURCE_PATH = resolve(import.meta.dir, "../src/platform/tool-assembly.ts");
+const SOURCE_PATH = resolve(import.meta.dirname, "../src/platform/tool-assembly.ts");
 
 function readSource(): string {
   return readFileSync(SOURCE_PATH, "utf-8");

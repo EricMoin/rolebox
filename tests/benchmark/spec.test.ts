@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,12 +166,12 @@ describe("benchmark suite validation", () => {
     await writeFile(join(directory, "checks", "test.ts"), "throw new Error('test fixture');\n");
     await writeFile(join(directory, "cases.jsonl"), JSON.stringify({
       ...exampleCase, workspace: { fixture: "./fixture", checks: "./checks" },
-      assertions: [{ kind: "file_exists", path: "sum.ts" }, { kind: "command", argv: ["bun", "{checks}/test.ts", "{workspace}"] }],
+      assertions: [{ kind: "file_exists", path: "sum.ts" }, { kind: "command", argv: ["node", "{checks}/test.ts", "{workspace}"] }],
     }));
     await save();
     const initial = await loadBenchmarkSuite(directory);
     expect(initial.cases[0]!.workspace).toEqual({ fixture: "./fixture", checks: "./checks" });
-    expect(initial.cases[0]!.assertions[1]).toEqual({ kind: "command", argv: ["bun", "{checks}/test.ts", "{workspace}"], timeoutMs: 10_000, expectedExitCode: 0 });
+    expect(initial.cases[0]!.assertions[1]).toEqual({ kind: "command", argv: ["node", "{checks}/test.ts", "{workspace}"], timeoutMs: 10_000, expectedExitCode: 0 });
     expect(initial.workspaces?.one?.fixture.files[0]!.content).toBe(Buffer.from("export const sum = () => 0;\n").toString("base64"));
     expect(initial.workspaces?.one?.checks?.files[0]!.path).toBe("test.ts");
     await writeFile(join(directory, "fixture", "sum.ts"), "export const sum = () => 1;\n");
@@ -260,12 +260,12 @@ describe("benchmark suite validation", () => {
       [{ kind: "file_exists", path: "output.txt" }],
       [{ kind: "file_equals", path: "output.txt", value: "expected" }],
       [{ kind: "file_contains", path: "output.txt", value: "expected" }],
-      [{ kind: "command", argv: ["bun", "test"] }],
+      [{ kind: "command", argv: ["node", "test"] }],
     ]) {
       await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, assertions }));
       await expect(loadBenchmarkSuite(directory)).rejects.toThrow("requires a workspace");
     }
-    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture" }, assertions: [{ kind: "command", argv: ["bun", "{checks}/test.ts"] }] }));
+    await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture" }, assertions: [{ kind: "command", argv: ["node", "{checks}/test.ts"] }] }));
     await expect(loadBenchmarkSuite(directory)).rejects.toThrow("requires workspace.checks");
   });
 
@@ -293,10 +293,10 @@ describe("benchmark suite validation", () => {
       { kind: "file_contains", path: "file", value: "" }, { kind: "file_equals", path: "file", value: "\ud800" },
       { kind: "command", argv: [] }, { kind: "command", argv: [""] }, { kind: "command", argv: [" "] },
       { kind: "command", argv: Array.from({ length: 65 }, () => "arg") },
-      { kind: "command", argv: ["bun", "a\0b"] }, { kind: "command", argv: ["bun", "\ud800"] },
-      { kind: "command", argv: ["bun"], timeoutMs: 99 }, { kind: "command", argv: ["bun"], timeoutMs: 60_001 },
-      { kind: "command", argv: ["bun"], expectedExitCode: -1 }, { kind: "command", argv: ["bun"], expectedExitCode: 256 },
-      { kind: "command", argv: ["bun"], shell: true }, { kind: "command", command: "bun test" },
+      { kind: "command", argv: ["node", "a\0b"] }, { kind: "command", argv: ["node", "\ud800"] },
+      { kind: "command", argv: ["node"], timeoutMs: 99 }, { kind: "command", argv: ["node"], timeoutMs: 60_001 },
+      { kind: "command", argv: ["node"], expectedExitCode: -1 }, { kind: "command", argv: ["node"], expectedExitCode: 256 },
+      { kind: "command", argv: ["node"], shell: true }, { kind: "command", command: "npm test" },
     ]) {
       await writeFile(join(directory, "cases.jsonl"), JSON.stringify({ ...exampleCase, workspace: { fixture: "fixture" }, assertions: [assertion] }));
       await expect(loadBenchmarkSuite(directory)).rejects.toThrow("invalid or unsupported fields");

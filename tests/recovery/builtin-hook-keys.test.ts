@@ -7,7 +7,7 @@
  * hooks actually registered by registerBuiltinHooks.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   createBashFileReadGuardHook,
   createContextWindowMonitorHook,

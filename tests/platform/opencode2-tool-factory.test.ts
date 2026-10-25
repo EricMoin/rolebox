@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Opencode2ToolFactory — compiles rolebox's CanonicalToolDef into the opencode
@@ -10,12 +9,12 @@
  * through the StandardSchemaV1 contract that `Tool.ValueSchema` accepts
  * (node_modules/@opencode/schema/dist/tool.d.ts:32), and the tool context is
  * typed as the real execute() parameter, so a drift in the v2 shape fails the
- * `bun run typecheck:tests` gate instead of silently passing here.
+ * `npm run typecheck:tests` gate instead of silently passing here.
  *
  * No test touches the filesystem, so the working tree stays clean.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import {
   Opencode2ToolFactory,

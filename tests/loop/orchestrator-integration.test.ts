@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,7 +47,7 @@ function createFakeAdapter(
   let msgIdCounter = 0;
 
   const adapter: IDispatchAdapter = {
-    dispatchRound: mock(
+    dispatchRound: vi.fn(
       async (_input: {
         originSessionId: string;
         agent: string;
@@ -66,7 +66,7 @@ function createFakeAdapter(
       },
     ),
 
-    getRoundResult: mock(async (_workerTaskId: string) => {
+    getRoundResult: vi.fn(async (_workerTaskId: string) => {
       calls.push({ method: "getRoundResult", args: [_workerTaskId] });
       return (
         overrides?.getRoundResultResult ?? {
@@ -76,11 +76,11 @@ function createFakeAdapter(
       );
     }),
 
-    cancelRound: mock(async (_workerTaskId: string) => {
+    cancelRound: vi.fn(async (_workerTaskId: string) => {
       calls.push({ method: "cancelRound", args: [_workerTaskId] });
     }),
 
-    readOriginSummary: mock(
+    readOriginSummary: vi.fn(
       async (_originSessionId: string, _sinceMessageId?: string) => {
         calls.push({
           method: "readOriginSummary",
@@ -93,7 +93,7 @@ function createFakeAdapter(
       },
     ),
 
-    getLastMessageId: mock(async (_originSessionId: string) => {
+    getLastMessageId: vi.fn(async (_originSessionId: string) => {
       calls.push({ method: "getLastMessageId", args: [_originSessionId] });
       if (overrides?.lastMessageId !== undefined) {
         return overrides.lastMessageId;
@@ -102,11 +102,11 @@ function createFakeAdapter(
       return `msg-${msgIdCounter}`;
     }),
 
-    injectNote: mock(async (_sessionId: string, _text: string) => {
+    injectNote: vi.fn(async (_sessionId: string, _text: string) => {
       calls.push({ method: "injectNote", args: [_sessionId, _text] });
     }),
 
-    registerTerminatedListener: mock(
+    registerTerminatedListener: vi.fn(
       (
         _taskId: string,
         _callback: (taskId: string, status: string) => void,
@@ -119,7 +119,7 @@ function createFakeAdapter(
       },
     ),
 
-    removeTerminatedListener: mock(
+    removeTerminatedListener: vi.fn(
       (
         _taskId: string,
         _callback: (taskId: string, status: string) => void,
@@ -131,7 +131,7 @@ function createFakeAdapter(
       },
     ),
 
-    getTaskStatus: mock(async (_taskId: string) => {
+    getTaskStatus: vi.fn(async (_taskId: string) => {
       calls.push({ method: "getTaskStatus", args: [_taskId] });
       return "completed";
     }),
@@ -162,31 +162,31 @@ function flushMicrotask(): Promise<void> {
 function pluginMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-child" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({
           data: { parts: [{ type: "text", text: "ok" }] },
           error: undefined,
         }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test" }, error: undefined }),
       ),
-      delete: mock(() =>
+      delete: vi.fn(() =>
         Promise.resolve({ data: true, error: undefined }),
       ),
     },
@@ -197,7 +197,7 @@ function pluginMockClient(): OpencodeClient {
 
 describe("Orchestrator Integration", () => {
   beforeEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   // ── Scenario 1: |loop:1| runs one worker round then completes ────────
@@ -283,7 +283,7 @@ describe("Orchestrator Integration", () => {
         "Round 3 summary: all auth work complete.",
       ];
       const origReadSummary = adapter.readOriginSummary;
-      adapter.readOriginSummary = mock(
+      adapter.readOriginSummary = vi.fn(
         async () => {
           const s = summaries[summaryCallCount % summaries.length]!;
           summaryCallCount += 1;
@@ -662,7 +662,7 @@ describe("Orchestrator Integration", () => {
       loopManagerMap.clear();
       managerMap.clear();
       rmSync(tmpDir, { recursive: true, force: true });
-      mock.restore();
+      vi.restoreAllMocks();
     });
 
     it("isLoopSession returns true for worker session (basis for nested loop detection)", async () => {

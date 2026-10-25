@@ -24,7 +24,7 @@
  * @module
  */
 
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -73,8 +73,8 @@ function makeRole(overrides?: Partial<ResolvedRole>): ResolvedRole {
 }
 
 interface DepsFixture {
-  runHooks: ReturnType<typeof mock>;
-  messages: ReturnType<typeof mock>;
+  runHooks: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+  messages: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 }
 
 /** Minimal HookDeps with observable customHooks + session.messages spies. */
@@ -82,8 +82,8 @@ function makeDeps(
   dir: string,
   overrides?: Partial<HookDeps>,
 ): HookDeps & { __fixture: DepsFixture } {
-  const runHooks = mock(() => Promise.resolve());
-  const messages = mock(() => Promise.resolve([]));
+  const runHooks = vi.fn(() => Promise.resolve());
+  const messages = vi.fn(() => Promise.resolve([]));
   const deps = {
     session: { messages } as never,
     roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
@@ -441,7 +441,7 @@ describe("wirePiChatActivation — Pi wiring", () => {
   it("subscribes pi.on('message_start') and drives the pipeline for role-user events", async () => {
     const handlers: Record<string, (event: unknown, ctx: unknown) => void> = {};
     const pi = {
-      on: mock((name: string, handler: (event: unknown, ctx: unknown) => void) => {
+      on: vi.fn((name: string, handler: (event: unknown, ctx: unknown) => void) => {
         handlers[name] = handler;
       }),
     };
@@ -476,7 +476,7 @@ describe("wirePiChatActivation — Pi wiring", () => {
   it("does not fire the pipeline for assistant message events", async () => {
     const handlers: Record<string, (event: unknown, ctx: unknown) => void> = {};
     const pi = {
-      on: mock((name: string, handler: (event: unknown, ctx: unknown) => void) => {
+      on: vi.fn((name: string, handler: (event: unknown, ctx: unknown) => void) => {
         handlers[name] = handler;
       }),
     };
@@ -502,7 +502,7 @@ describe("wirePiChatActivation — Pi wiring", () => {
   it("swallows handler errors instead of throwing into the Pi runtime", async () => {
     const handlers: Record<string, (event: unknown, ctx: unknown) => void> = {};
     const pi = {
-      on: mock((name: string, handler: (event: unknown, ctx: unknown) => void) => {
+      on: vi.fn((name: string, handler: (event: unknown, ctx: unknown) => void) => {
         handlers[name] = handler;
       }),
     };

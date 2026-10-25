@@ -1,3 +1,4 @@
+import { spawnProcess } from "../node-process.ts";
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,7 +14,7 @@ function recoveryManifest(graphs: readonly GraphView[]) {
 
 export async function verifyHostProcessRestart(script: string, workspace: string, graphs: readonly GraphView[]) {
   writeFileSync(join(workspace, "restore-manifest.json"), JSON.stringify(recoveryManifest(graphs)));
-  const child = Bun.spawn([process.execPath, script], { env: { ...process.env, ROLEBOX_SMOKE_RESTORE_ROOT: workspace }, stdout: "pipe", stderr: "pipe" });
+  const child = spawnProcess([process.execPath, script], { env: { ...process.env, ROLEBOX_SMOKE_RESTORE_ROOT: workspace }, stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => child.kill(), 45_000);
   try {
     const [exit, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -61,12 +62,15 @@ export async function controlScenarios(options: {
   assert.equal(read(`${host}.concurrent-two`)?.phase, "stopped");
 
   await declare("failure", "FAIL_FIXTURE");
-  await eventually(() => read(`${host}.failure`), graph => graph?.phase === "stopped", `Failed ${host} worker remained running`);
-  assert.equal(read(`${host}.failure`)?.current?.control?.command, "failure");
-  const retry = await command("failure", "retry");
+  await eventually(() => read(`${host}.failure`), graph => graph?.current?.decisions.some(decision =>
+    decision.attemptId === "work#1" && decision.command === "failure") === true,
+  `Failed ${host} attempt has no failure decision`);
+  assert.equal(read(`${host}.failure`)?.current?.control, undefined);
+  const retry = await command("failure", "retry", { node_id: "work" });
   assert.equal(retry.kind, "applied", JSON.stringify(retry.refusals));
   await eventually(() => read(`${host}.failure`), graph => graph?.phase === "complete", `${host} retry did not finish`);
-  assert.equal(read(`${host}.failure`)?.runs.length, 2);
+  assert.equal(read(`${host}.failure`)?.runs.length, 1);
+  assert.equal(read(`${host}.failure`)?.current?.attempts.length, 2);
 
   await declare("approval");
   await waitStarted("approval");
@@ -80,5 +84,5 @@ export async function controlScenarios(options: {
   const audit = await call("graph_audit", {});
   assert.deepEqual(status.runs, JSON.parse(JSON.stringify(read(`${host}.approval`)?.runs)));
   assert.deepEqual(audit.entries.find((entry: any) => entry.graphId === `${host}.approval`)?.graph, JSON.parse(JSON.stringify(read(`${host}.approval`))));
-  return { concurrentGraphs: true, crossSession: "refused", cancel: "stopped", failure: "stopped", retry: "complete", approval: "complete", queryAgreement: true };
+  return { concurrentGraphs: true, crossSession: "refused", cancel: "stopped", failure: "attempt-stopped", retry: "complete", approval: "complete", queryAgreement: true };
 }

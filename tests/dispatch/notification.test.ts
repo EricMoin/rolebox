@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from "vitest";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import type { DispatchTask, NotificationPayload } from "../../src/dispatch/types.ts";
 import {
@@ -38,7 +38,7 @@ function createTask(overrides?: Partial<DispatchTask>): DispatchTask {
 
 function createClient() {
   return {
-    prompt: mock(() => Promise.resolve({ id: "prompt-1" })),
+    prompt: vi.fn(() => Promise.resolve({ id: "prompt-1" })),
   } as unknown as ISessionClient;
 }
 
@@ -206,7 +206,7 @@ describe("notifyParent", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     clearSentFinalNotifies();
     clearParentQueues();
     metrics.reset();
@@ -223,8 +223,8 @@ describe("notifyParent", () => {
 
     expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
-    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    const callId = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][1];
     expect(callId).toBe("parent-session-1");
     expect(callOpts.parts[0].type).toBe("text");
     expect(callOpts.parts[0].text).toContain("[BACKGROUND TASK COMPLETED]");
@@ -242,8 +242,8 @@ describe("notifyParent", () => {
 
     expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
-    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    const callId = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][1];
     expect(callOpts.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
     expect(callOpts.noReply).toBe(false);
   });
@@ -264,8 +264,8 @@ describe("notifyParent", () => {
 
     expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
-    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    const callId = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][1];
     const text: string = callOpts.parts[0].text;
 
     expect(text).toContain("bg_check123");
@@ -285,8 +285,8 @@ describe("notifyParent", () => {
 
     expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
-    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    const callId = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][1];
     const text: string = callOpts.parts[0].text;
 
     expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
@@ -298,7 +298,7 @@ describe("notifyParent", () => {
   it("does not throw when promptAsync fails", async () => {
     const client = {
       
-        prompt: mock(() => Promise.reject(new Error("network error"))),
+        prompt: vi.fn(() => Promise.reject(new Error("network error"))),
       
     } as unknown as ISessionClient;
 
@@ -314,7 +314,7 @@ describe("notifyParent", () => {
 
   it("serial queue continues after rejection — next notify to same parent still runs", async () => {
     const client = createClient();
-    const promptAsyncMock = client.prompt as ReturnType<typeof mock>;
+    const promptAsyncMock = client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     // First call rejects (simulates promptAsync failure)
     promptAsyncMock.mockImplementationOnce(() => Promise.reject(new Error("network error")));
@@ -350,7 +350,7 @@ describe("notifyParent", () => {
 
     await new Promise((r) => setTimeout(r, 10));
 
-    const calls = (client.prompt as ReturnType<typeof mock>).mock.calls;
+    const calls = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls;
     expect(calls).toHaveLength(2);
 
     // Both notifications were resolved at send time (inflight=0).
@@ -360,7 +360,7 @@ describe("notifyParent", () => {
 
   it("notifications to the same parent execute in FIFO order", async () => {
     const client = createClient();
-    const promptAsyncMock = client.prompt as ReturnType<typeof mock>;
+    const promptAsyncMock = client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 
     const taskA = createTask({ id: "task-A", description: "first" });
     const taskB = createTask({ id: "task-B", description: "second" });
@@ -378,7 +378,7 @@ describe("notifyParent", () => {
     // Verify FIFO order: calls[0]/calls[1] use intermediate format
     // (task ID in task field); calls[2] uses final format
     // (description in task field).
-    const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
+    const calls = (promptAsyncMock as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls;
     expect(calls[0][1].parts[0].text).toContain("task-A");
     expect(calls[1][1].parts[0].text).toContain("task-B");
     expect(calls[2][1].parts[0].text).toContain("third");
@@ -410,7 +410,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     metrics.reset();
     clearSentFinalNotifies();
     clearParentQueues();
@@ -418,7 +418,7 @@ describe("notifyParent retry and idempotency", () => {
 
   it("retries final notification with bounded exponential backoff, succeeds eventually", async () => {
     let callCount = 0;
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       callCount++;
       if (callCount <= 2) throw new Error("transient error");
       return { data: undefined, error: undefined };
@@ -447,7 +447,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   it("increments notify_failed_total on final give-up after all retries exhausted", async () => {
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       throw new Error("persistent error");
     });
 
@@ -474,7 +474,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   it("final notification is idempotent — second call for same taskId is no-op", async () => {
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       return { data: undefined, error: undefined };
     });
 
@@ -493,7 +493,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   it("intermediate (remaining>0) notification is NOT deduped — multiple sends allowed", async () => {
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       return { data: undefined, error: undefined };
     });
 
@@ -510,7 +510,7 @@ describe("notifyParent retry and idempotency", () => {
 
     expect(promptAsyncMock).toHaveBeenCalledTimes(2);
 
-    const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
+    const calls = (promptAsyncMock as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls;
     expect(calls[0][1].noReply).toBe(true);
     expect(calls[1][1].noReply).toBe(true);
   });
@@ -518,7 +518,7 @@ describe("notifyParent retry and idempotency", () => {
   it("per-parent ordering preserved when final notification is slow", async () => {
     const order: string[] = [];
 
-    const promptAsyncMock = mock(async (id: string, opts: any) => {
+    const promptAsyncMock = vi.fn(async (id: string, opts: any) => {
       const text = opts.parts[0].text;
       if (text.includes("first-task")) {
         order.push("A-start");
@@ -550,7 +550,7 @@ describe("notifyParent retry and idempotency", () => {
     expect(NOTIFY_MAX_RETRIES).toBe(3);
 
     let callCount = 0;
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       callCount++;
       if (callCount <= NOTIFY_MAX_RETRIES) throw new Error("fail");
       return { data: undefined, error: undefined };
@@ -574,7 +574,7 @@ describe("notifyParent retry and idempotency", () => {
 
   it("retry delay obeys maxDelayMs upper bound", async () => {
     const timestamps: number[] = [];
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       timestamps.push(Date.now());
       if (timestamps.length <= 3) throw new Error("fail");
       return { data: undefined, error: undefined };
@@ -607,7 +607,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   it("returns false when all retries are exhausted and does NOT add to sentFinalNotifies", async () => {
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       throw new Error("persistent failure");
     });
 
@@ -628,7 +628,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   it("returns true on successful final send and hasFinalNotifyBeenSent returns true", async () => {
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       return { data: undefined, error: undefined };
     });
 
@@ -645,7 +645,7 @@ describe("notifyParent retry and idempotency", () => {
   });
 
   it("second notifyParent call returns true immediately without calling promptAsync again", async () => {
-    const promptAsyncMock = mock(async () => {
+    const promptAsyncMock = vi.fn(async () => {
       return { data: undefined, error: undefined };
     });
 

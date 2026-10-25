@@ -1,8 +1,7 @@
-/// <reference types="bun-types" />
 
 /**
- * Unit tests for the pure logic behind `bun run check:hosts` and
- * `bun run update:hosts` (scripts/host-versions.ts): the tracked-package
+ * Unit tests for the pure logic behind `npm run check:hosts` and
+ * `npm run update:hosts` (scripts/host-versions.ts): the tracked-package
  * channel table, version comparison with prerelease ordering, and the
  * devDependencies pin planner the updater uses to rewrite package.json.
  *
@@ -10,7 +9,7 @@
  * and is deliberately not exercised by this file.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -79,10 +78,8 @@ describe("host-version policy table", () => {
   });
 
   it("names only guard slices that exist on disk", () => {
-    // `bun test` exits 0 for a path it cannot find, so a slice deleted with its
-    // subject would leave the updater reporting PASS while shrinking the guard.
     for (const slice of VOCABULARY_GUARD_SLICES) {
-      expect(existsSync(join(import.meta.dir, "..", slice))).toBe(true);
+      expect(existsSync(join(import.meta.dirname, "..", slice))).toBe(true);
     }
   });
 });

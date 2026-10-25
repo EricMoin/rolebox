@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { buildComputerContext } from "../../src/computer/context.ts";
 import { COMPUTER_TOOL_NAMES } from "../../src/loader/computer-grants.ts";
 

@@ -26,7 +26,7 @@
  *    unhealthy — rather than by calling logEvent directly.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,12 +199,12 @@ describe("core slice event vocabulary", () => {
 describe("the core slice's events come from the modules that own them", () => {
   /** A core whose supervised restarts always fail. */
   function makeFailingCore(): PluginCoreLike {
-    const restartService = mock(() => Promise.reject(new Error("restart refused")));
+    const restartService = vi.fn(() => Promise.reject(new Error("restart refused")));
     return {
-      getService: mock(() => undefined),
-      getServices: mock(() => new Map()),
+      getService: vi.fn(() => undefined),
+      getServices: vi.fn(() => new Map()),
       restartService,
-      isDegraded: mock(() => false),
+      isDegraded: vi.fn(() => false),
     } satisfies PluginCoreLike as PluginCoreLike;
   }
 
@@ -280,8 +280,8 @@ describe("the core slice's events come from the modules that own them", () => {
       core.registerService({
         name: fakeServiceName("svc-unhealthy"),
         dependencies: [],
-        init: mock(() => Promise.resolve()),
-        dispose: mock(() => Promise.resolve()),
+        init: vi.fn(() => Promise.resolve()),
+        dispose: vi.fn(() => Promise.resolve()),
         health: () => ({ status: "unhealthy", detail: "probe says no" }),
       } satisfies PluginService);
       const monitor = new HealthMonitorService();

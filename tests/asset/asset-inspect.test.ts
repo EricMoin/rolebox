@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import type { ResolvedRole } from "../../src/types.ts";
 import { ReferenceScope, SkillScope, FunctionSource } from "../../src/constants.ts";
 import { createAssetInspectTool } from "../../src/asset/asset-inspect.ts";

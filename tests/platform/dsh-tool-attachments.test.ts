@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh tool-result image transport.
@@ -19,7 +18,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   DSH_IMAGE_ATTACHMENT_REFS_KEY,
   DshToolFactory,

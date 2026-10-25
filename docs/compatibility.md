@@ -4,6 +4,10 @@
 
 Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skills are discoverable by the skill tool. No conflicts.
 
+## Development runtime
+
+The CLI, build, test, and CI commands require Node.js 26.4+ and npm. The TUI additionally requires `--experimental-ffi` on Node. Host-loaded plugins run inside their host's runtime. See [Node runtime and development](node-runtime.md).
+
 ## Harness versions
 
 Each target has a minimum version, and each minimum is a runtime contract rather than a packaging detail. The README badge reports the dsh line — the binding one.
@@ -112,6 +116,7 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
 | [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (default on) | ✓ (default on) |
+| [browse_* (22 tools)](browser-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (when the browseUse gate is on) | ✓ (when the browseUse gate is on) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
@@ -136,3 +141,29 @@ instructions explain the available workflow. The family, per-host image
 transport, and platform requirements are documented in [computer-use.md](computer-use.md).
 
 Remaining platform-inherent gaps (hot reload, extensions, recovery engine, TUI) are explicit non-goals on Pi and Codex — see [limitations.md](limitations.md).
+
+## Browser use
+
+Rolebox's browser family — `browse_status`, `browse_open`, `browse_snapshot`,
+`browse_read`, `browse_click`, `browse_type`, `browse_press`, `browse_select`,
+`browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`,
+`browse_screenshot`, `browse_upload`, `browse_downloads`, `browse_dialog`,
+`browse_tabs`, `browse_history`, `browse_console`, `browse_network`,
+`browse_cookies` and `browse_close` — is the DOM-level counterpart to computer
+use: it reads a page as an ARIA-shaped tree and acts on element refs. It is
+built on Playwright, an optional peer (`playwright >=1.40.0`) that must resolve
+from the rolebox install, and its browser binaries are a separate step
+(`npx playwright install chromium`).
+
+The `browseUse` gate is separate from `computerUse` and fail-closed: an explicit
+`false` in a host option, global config or project config disables the family,
+an explicit `true` registers it even when Playwright is missing (`browse_status`
+then reports the gap), and with no setting it is on exactly when Playwright
+resolves. DSH, Pi and Codex register the family when the gate is on; DSH
+additionally requires its tool-guard seam. Neither OpenCode entry registers it,
+though with the gate on they materialize an explicit per-role denial for every
+browse tool the role's `tools` map does not grant. Role `tools` rules can
+restrict individual tools with exact-over-wildcard precedence, and graph node
+grants still apply. The gate is read when the host loads, so a change needs a
+restart. Targets, ref semantics, artifacts and limits are documented in
+[browser-use.md](browser-use.md).

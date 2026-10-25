@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Guard — every `SessionEvent` sub-type the dsh event bridge maps must be a real member of
@@ -17,7 +16,7 @@
  * @module
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { KNOWN_SESSION_EVENT_TYPES } from "@deepseek-ai/dsh-session";
 import {
   DSH_SESSION_EVENT_TYPE_MAP,

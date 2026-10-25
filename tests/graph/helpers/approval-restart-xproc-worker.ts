@@ -1,45 +1,5 @@
+import { spawnProcess } from "../../../scripts/node-process.ts";
 import { approvalPolicyFor, approvalGrantFor } from "./approval-policy.ts";
-/**
- * Cross-process worker for the P3 item 3 APPROVAL restart evidence.
- *
- * WHY THIS FILE EXISTS. Plan §4 (P3) requires every control command to be covered
- * through "重启后继续" (continue after restart), and §5 A12 requires a persisted
- * request to stay READABLE and ACTIONABLE across one. The in-process cases in
- * approval-lifecycle.test.ts replace the store OBJECT inside one process — the
- * same memory — so they are not a process boundary. This worker is spawned with
- * `Bun.spawn(process.execPath, …)` by
- * tests/graph/approval-restart-cross-process.test.ts: the pause is RAISED in one OS
- * process, the decision is taken in a SECOND that has never seen its memory, and a
- * THIRD re-reads the outcome and is answered the replay.
- *
- *     bun tests/graph/helpers/approval-restart-xproc-worker.ts --mode <mode> ...
- *
- * Modes:
- *   - `raise`   raises a pending approval request through the SHIPPED control entry
- *                (the same function graph_control calls), names the approver and the
- *                deadline it was given, and EXITS — the crash window a restart
- *                leaves behind.
- *   - `approve` opens a fresh connection to the same store, DECIDES the pending
- *                request through the shipped entry as the named approver, and
- *                reports the row it left behind.
- *   - `read`    reports the persisted request row and the durable counts, so a
- *                later process's view is evidence rather than an inference.
- *   - `sweep-race` raises one ALREADY-DUE request per round and sweeps the graph,
- *                gated on two marker files so a SECOND process running this mode
- *                sweeps at the same instant. Each round's request is owned by this
- *                process alone (its pid and round are in the attempt id), so the
- *                two children contend on the same sweep without racing on the
- *                same row; every raised row is due exactly once and whichever
- *                process loses the race is answered no rows for it.
-
- * Every mode prints exactly ONE JSON line on stdout — `{"pid":n,"ok":true,…}` on
- * success, `{"pid":n,"ok":false,…}` plus a non-zero exit on failure.
- *
- * PRIVACY. This fixture receives a store root under the OS temp directory, the
- * deterministic ids the graph mints, and the session ids the case names. It never
- * prints a credential VALUE, a real home-directory path or a session transcript:
- * the report carries ids, status tokens, counts and booleans only.
- */
 
 import { existsSync, writeFileSync } from "node:fs";
 

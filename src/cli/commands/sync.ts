@@ -66,7 +66,7 @@ export function warnIfCodexServerEntryMissing(bundle: {
   if (bundle.serverEntryExists) return;
   console.warn(
     `Warning: the Codex MCP server entry ${bundle.serverEntry} does not exist. ` +
-      "Build or reinstall rolebox before starting Codex (for a source checkout, `bun run build`).",
+      "Build or reinstall rolebox before starting Codex (for a source checkout, `npm run build`).",
   );
 }
 

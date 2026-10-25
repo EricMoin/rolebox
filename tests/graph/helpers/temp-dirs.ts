@@ -1,28 +1,3 @@
-/**
- * Temp-tree teardown for the graph suite: release the fixture stores the tree
- * holds, remove the tree, and never retry a directory that failed.
- *
- * WHY THIS EXISTS. Every graph test builds its fixture in a `mkdtemp` tree and
- * removes it in an `afterEach` sweep. Two things about that sweep matter on a
- * platform where an open handle is observable (Windows: `rm 'C:\\…\\tmp'` ->
- * `EBUSY`):
- *
- * 1. A store connection inside the tree must be RELEASED BEFORE the removal.
- *    `removeTempTree` closes every fixture store registered at or under the
- *    directory first — the credential-isolation vaults the shared helper opens
- *    (`closeTestHostCredentialIsolations`) and the store connections a test
- *    opened through `openTrackedExecutionIndex` / `openTrackedCredentialVault`
- *    / `trackFixtureStore`.
- * 2. A removal that throws must not be retried forever. Bun reports a failing
- *    `afterEach` once per test that follows it, so a shared sweep that kept its
- *    pending list on failure turned ONE leaked handle into 27 reported failures
- *    (`control-entry-vWO1WO`, 20.38 s of retries) and, with fail-fast, canceled
- *    the whole Windows lane.
- *
- * `removeTempTrees` therefore clears the pending list BEFORE the first removal:
- * every directory is attempted exactly once, and the first failure is rethrown
- * so a genuine leak still fails the test it belongs to — once, not 27 times.
- */
 
 import { rmSync } from "node:fs";
 import { resolve, sep } from "node:path";

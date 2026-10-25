@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import {
   DSH_GRAPH_WORKER_TOOLS, installDshGraphWorkerBoundary,
   type DshGraphWorkerRegistry, type DshWorkerAgent, type DshWorkerStartupTools,

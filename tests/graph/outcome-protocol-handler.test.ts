@@ -11,7 +11,7 @@
  * block; nothing here writes outside a temp dir.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

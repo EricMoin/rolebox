@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync,
   readFileSync, readlinkSync, lstatSync,
@@ -8,12 +9,6 @@ import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
 import type { RegistryManifest } from "../../src/cli/types.ts";
 import { createDirSymlink } from "../helpers/symlink.ts";
-// Pre-load the real paths module so the mock spreads its full export surface
-// (including assertSafePathSegment / getRolePath). This file's own mock.module
-// for "../../src/cli/paths" shadows any import of that specifier (bun keys
-// mocks by resolved specifier), so the real module is reached via a distinct,
-// non-cache-busted query-string specifier. The specifier is bound to a const so
-// tsc does not try to resolve the query-string form as a static module.
 const e2eRealPathsSpecifier = "../../src/cli/paths.ts?e2e-real";
 const e2eRealPaths = await import(e2eRealPathsSpecifier);
 
@@ -33,7 +28,7 @@ const pGetConfigDir = () => {
   return join(homedir(), ".config", "rolebox");
 };
 
-mock.module("../../src/cli/paths", () => ({
+vi.doMock("../../src/cli/paths", () => ({
   ...e2eRealPaths,
   // Override only path-root functions so install/update/sync write under
   // the per-test tmp dirs (XDG_* env vars redirect these at file level).
@@ -436,3 +431,5 @@ describe("CLI E2E", () => {
     });
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

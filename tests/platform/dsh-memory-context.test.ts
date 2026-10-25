@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -322,7 +322,7 @@ describe("DSH memory prompt and execution integration", () => {
 
   it("rejects missing or relative workspaces before any store can fall back to process cwd", async () => {
     const f = fixture();
-    const open = spyOn(MemoryStore, "create");
+    const open = vi.spyOn(MemoryStore, "create");
     try {
       for (const cwd of [undefined, "relative-workspace"]) {
         const agent = f.agent();

@@ -1,3 +1,4 @@
+import { compare as compareSemver } from "semver";
 /**
  * host-versions — keep the platform host packages on their published channel.
  *
@@ -19,7 +20,7 @@
  *          is installed, otherwise the exact devDependencies pin) and compare it
  *          with the version at its channel. Exit 1 when any host is behind.
  * update — rewrite the behind devDependencies pins to the channel version, then
- *          run `bun install`, `bun run typecheck` and the event-vocabulary guard
+ *          run `npm install`, `npm run typecheck` and the event-vocabulary guard
  *          slices, and report the guard verdict. `--dry-run` prints the edits it
  *          would make and runs nothing.
  *
@@ -35,8 +36,8 @@
  *   2 — the policy could not be evaluated (registry error, untracked host, bad arguments).
  *
  * Usage:
- *   bun run check:hosts
- *   bun run update:hosts --dry-run
+ *   npm run check:hosts
+ *   npm run update:hosts --dry-run
  */
 
 import { spawnSync } from "node:child_process"
@@ -76,6 +77,10 @@ export const HOST_PACKAGES: readonly HostPackage[] = [
   { name: "@deepseek-ai/dsh-client-ui-slots", channel: "next" },
   { name: "@deepseek-ai/dsh-fs-local", channel: "next" },
   { name: "@deepseek-ai/dsh-fs-observation-policy", channel: "next" },
+  { name: "@deepseek-ai/dsh-fs", channel: "next" },
+  { name: "@deepseek-ai/dsh-sandbox-local", channel: "next" },
+  { name: "@deepseek-ai/dsh-session-query-sqlite", channel: "next" },
+  { name: "@deepseek-ai/dsh-session-persistence-jsonl", channel: "next" },
   { name: "@deepseek-ai/dsh-invariants", channel: "next" },
   { name: "@deepseek-ai/dsh-llm", channel: "next" },
   { name: "@deepseek-ai/dsh-scope", channel: "next" },
@@ -113,7 +118,7 @@ export const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org"
 /**
  * Slices that must stay green for a host bump to count as guard-clean.
  *
- * Every path must name an EXISTING test file: `bun test` exits 0 for a path it
+ * Every path must name an EXISTING test file: The test command must reject a path it
  * cannot find, so a stale entry silently shrinks the guard to whatever still
  * exists. Pinned by the existence test in tests/host-versions.test.ts.
  */
@@ -126,7 +131,7 @@ export const VOCABULARY_GUARD_SLICES: readonly string[] = [
 // ── Version logic (pure) ───────────────────────────────────────────────────
 
 /**
- * Fully-qualified version shape. Bun.semver.order also accepts loose input such
+ * Fully-qualified version shape. Comparators can accept loose input such
  * as "1.2" and even a caret range, none of which is a resolved version, so every
  * value is shape-checked before it reaches the comparator.
  */
@@ -144,10 +149,7 @@ export function isValidVersion(value: string): boolean {
 export function compareVersions(left: string, right: string): number {
   if (!isValidVersion(left)) throw new Error("not a version: " + JSON.stringify(left))
   if (!isValidVersion(right)) throw new Error("not a version: " + JSON.stringify(right))
-  // Probed on Bun 1.3.14: order() implements SemVer 2.0.0 precedence, including
-  // numeric prerelease identifiers (1.0.0-rc.10 > 1.0.0-rc.2), which the dsh
-  // prerelease line depends on.
-  return Bun.semver.order(left, right)
+  return compareSemver(left.trim(), right.trim())
 }
 
 /** How a tracked host version relates to its channel. */
@@ -473,7 +475,7 @@ async function runCheck(root: string, registry: string): Promise<number> {
     console.log("  - " + row.entry.name + "  " + row.current + " -> " + row.channelVersion + "  (" + row.entry.channel + ")")
   }
   console.log("")
-  console.log("remedy: bun run update:hosts")
+  console.log("remedy: npm run update:hosts")
   return 1
 }
 
@@ -485,11 +487,11 @@ interface Step {
 /** The commands an update runs after it rewrites package.json. */
 export function upgradeSteps(): Step[] {
   return [
-    { label: "bun install", args: ["install"] },
-    { label: "bun run typecheck", args: ["run", "typecheck"] },
+    { label: "npm install", args: ["install"] },
+    { label: "npm run typecheck", args: ["run", "typecheck"] },
     {
-      label: "bun test --isolate " + VOCABULARY_GUARD_SLICES.join(" "),
-      args: ["test", "--isolate", ...VOCABULARY_GUARD_SLICES],
+      label: "npm test -- " + VOCABULARY_GUARD_SLICES.join(" "),
+      args: ["test", "--", ...VOCABULARY_GUARD_SLICES],
     },
   ]
 }
@@ -497,7 +499,9 @@ export function upgradeSteps(): Step[] {
 function runStep(step: Step, root: string): boolean {
   console.log("")
   console.log("$ " + step.label)
-  const result = spawnSync(process.execPath, step.args, { cwd: root, stdio: "inherit" })
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) if (/^npm_config_allow_scripts$/i.test(key)) delete environment[key];
+  const result = spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", step.args, { cwd: root, env: environment, stdio: "inherit", shell: process.platform === "win32" })
   if (result.error !== undefined) {
     console.error("host-versions: " + step.label + " could not start: " + result.error.message)
     return false
@@ -542,7 +546,7 @@ async function runUpdate(root: string, registry: string, dryRun: boolean): Promi
 
   if (dryRun) {
     console.log("")
-    console.log("dry run: package.json and bun.lock untouched; bun install, typecheck and the guards were not run")
+    console.log("dry run: package.json and package-lock.json untouched; npm install, typecheck and the guards were not run")
     return 0
   }
 
@@ -592,9 +596,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 }
 
 function usage(): void {
-  console.error("usage: bun run scripts/host-versions.ts <check|update> [--dry-run]")
-  console.error("       bun run check:hosts")
-  console.error("       bun run update:hosts [--dry-run]")
+  console.error("usage: node --import tsx scripts/host-versions.ts <check|update> [--dry-run]")
+  console.error("       npm run check:hosts")
+  console.error("       npm run update:hosts [--dry-run]")
 }
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -609,7 +613,7 @@ async function main(argv: readonly string[]): Promise<number> {
     usage()
     return 2
   }
-  const root = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd()
+  const root = import.meta.dirname ? resolve(import.meta.dirname, "..") : process.cwd()
   const registry = registryBaseUrl()
   if (mode === "check") return runCheck(root, registry)
   if (mode === "update") return runUpdate(root, registry, dryRun)

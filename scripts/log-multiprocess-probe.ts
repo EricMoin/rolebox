@@ -1,80 +1,6 @@
-#!/usr/bin/env bun
-// ── The multi-process log probe ─────────────────────────────────────────────
-//
-// WHAT THIS ANSWERS. Everything the logging platform claims about CONCURRENCY
-// has to be shown with real processes, not with one process pretending to be
-// three: this probe starts three `bun` child processes that write the SAME
-// channel into the SAME log directory at the same time, each one through a
-// different real module path, plus a real `rolebox logs --follow` process that
-// reads the live stream while they write.
-//
-//   • `worker`   — src/logger.ts, the compatibility shell: `createSubLogger`
-//                  is the path the graph worker and the platform adapters use;
-//   • `pipeline` — src/log/index.ts, the kernel API: `configureLogging` +
-//                  `createLogger`, i.e. a caller that talks to the pipeline
-//                  directly;
-//   • `sink`     — src/log/sinks/file.ts, the JSON-lines writer itself, driven
-//                  with hand-built records (the lowest layer that rotates).
-//
-// The writers deliberately cross the rotation limit many times over: the run
-// sets ROLEBOX_LOG_MAX_BYTES small (`--max-bytes`, default 4096) and
-// ROLEBOX_LOG_RETAIN large (`--retain`, default 4096) so that NO probe record
-// can fall out of the retained window by retention — every missing record is
-// therefore a genuine loss and not a window the operator chose to drop.
-//
-// WHAT IT CHECKS, and each check is reported by name:
-//
-//   exactly-once    every (writer, seq) the writers announced appears exactly
-//                   once in the read layer's merged view;
-//   raw-lines       every physical line of every <channel>.log[.N] file is one
-//                   complete JSON record of this probe (a torn or interleaved
-//                   line is a parse failure or a foreign record) and the raw
-//                   file scan agrees with the read layer line for line;
-//   writer-order    within one writer, records appear in ascending `seq` in
-//                   scan order (.N … .1 then the active file), i.e. rotation did
-//                   not reorder a writer's own stream;
-//   merged-order    `readLogRecords({ order: "asc" })` is non-decreasing in
-//                   `time` and the `desc` answer is its exact reverse;
-//   rotation        the run actually rotated (more than one file, and every
-//                   writer's records spread over more than one file) — without
-//                   this the concurrency claim would be untested;
-//   rotation-bound  rotation happened AT ROLEBOX_LOG_MAX_BYTES rather than at
-//                   the writer's own byte count: every rotated copy on disk is
-//                   within THE LIMIT PLUS ONE RECORD PER CONCURRENT WRITER. That
-//                   bound is stated in bytes, not as a fraction of the limit: a
-//                   record that passed the gate an instant before another
-//                   process rotated is IN the copy, and how large that allowance
-//                   is next to the limit depends on the record size. A gate that
-//                   counted only the writing process's own bytes produced copies
-//                   at 2.3x the limit (three writers, 1 KB limit) — this check is
-//                   what fails if that gate comes back;
-//   follower-complete
-//                   the real `rolebox logs --follow --json` process delivered at
-//                   least as many records as the writers announced;
-//   follower-missing
-//                   every (writer, seq) pair the writers announced came out of
-//                   the follower;
-//   follower-duplicates
-//                   no announced (writer, seq) pair came out of the follower
-//                   more than once;
-//   follower-malformed
-//                   every line the follower printed was one parseable record of
-//                   this probe;
-// Cross-poll ordering is diagnostic: concurrent rotation can make an old file
-// arrive in a later poll. Missing or repeated records still fail the probe.
-//
-// USAGE
-//   bun scripts/log-multiprocess-probe.ts [--records 400] [--max-bytes 4096]
-//       [--retain 4096] [--delay-ms 2] [--runs 1] [--dir <path>] [--keep]
-//       [--json]
-//
-// The parent prints a `PROBE SUMMARY` block per run and a final JSON object on
-// stdout; it exits 0 only when every check passed. `--json` prints ONLY the JSON
-// object, which is what a captured evidence file wants.
-//
-// THIS FILE IS A PROBE, NOT PRODUCTION CODE: it is not imported by src/**, it is
-// not part of `bun run typecheck` (tsconfig.json includes only src), and its only
-// job is to produce evidence a reviewer can re-run.
+#!/usr/bin/env node
+import { setTimeout as sleep } from "node:timers/promises";
+import { spawnProcess } from "./node-process.ts";
 
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -101,7 +27,7 @@ const FOLLOWER_STARTUP_DEADLINE_MS = 10_000;
  * The HARD CAP, in milliseconds, on how long the follower may still be behind
  * AFTER the writers finished before the probe stops waiting and SIGINTs it. The
  * follower is a 250 ms poll loop, so under the load of a whole CI suite it can
- * need real time to deliver the tail of the stream: a fixed `Bun.sleep(800)`
+ * need real time to deliver the tail of the stream: a fixed `sleep(800)`
  * here reported a healthy follower that had simply not caught up yet as LOSS
  * (macOS CI: `follower-complete` false with `follower-missing` false, i.e.
  * records still arriving), and a 5 s cap did exactly the same on a Windows
@@ -334,7 +260,7 @@ async function runChild(mode: ProbeWriter | string, options: ProbeOptions, write
     const log = createSubLogger(PROBE_CHANNEL);
     for (let seq = 0; seq < records; seq++) {
       log.info(PROBE_MESSAGE, { writer, seq });
-      if (delayMs > 0) await Bun.sleep(delayMs);
+      if (delayMs > 0) await sleep(delayMs);
     }
   } else if (mode === "pipeline") {
     // The kernel API directly: configure the pipeline, then log through it.
@@ -343,7 +269,7 @@ async function runChild(mode: ProbeWriter | string, options: ProbeOptions, write
     const log = createLogger(PROBE_CHANNEL);
     for (let seq = 0; seq < records; seq++) {
       log.info(PROBE_MESSAGE, { writer, seq });
-      if (delayMs > 0) await Bun.sleep(delayMs);
+      if (delayMs > 0) await sleep(delayMs);
     }
   } else if (mode === "sink") {
     // The JSON-lines writer itself, driven with hand-built records: this is the
@@ -368,7 +294,7 @@ async function runChild(mode: ProbeWriter | string, options: ProbeOptions, write
         scope: {},
         process: { pid: process.pid, role: "sink" },
       });
-      if (delayMs > 0) await Bun.sleep(delayMs);
+      if (delayMs > 0) await sleep(delayMs);
     }
     report.failures = failures;
   } else {
@@ -380,7 +306,7 @@ async function runChild(mode: ProbeWriter | string, options: ProbeOptions, write
 
 /** Run one CLI invocation and answer its stdout, stderr and exit code. */
 async function runCli(argv: readonly string[], env: Record<string, string>): Promise<{ code: number | null; out: string; err: string }> {
-  const child = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "cli", "main.ts"), ...argv], {
+  const child = spawnProcess([process.execPath, join(import.meta.dirname, "..", "src", "cli", "main.ts"), ...argv], {
     env,
     stdout: "pipe",
     stderr: "pipe",
@@ -421,7 +347,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   const started = Date.now();
   const { dir, records } = options;
   const env = childEnv(options);
-  const script = import.meta.path;
+  const script = import.meta.filename;
 
   // Every (writer, seq) pair the writers are about to announce. Built here
   // because the follower's catch-up wait below waits for this many probe
@@ -437,11 +363,11 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
 
   // Start the real CLI first, then require an observed record before launching
   // writers: spawning it does not mean its EOF baseline has been established.
-  const follower = Bun.spawn(
+  const follower = spawnProcess(
     [
       process.execPath,
-      ...(options.followerPreload === undefined ? [] : ["--preload", options.followerPreload]),
-      join(import.meta.dir, "..", "src", "cli", "main.ts"),
+      ...(options.followerPreload === undefined ? [] : ["--import", options.followerPreload]),
+      join(import.meta.dirname, "..", "src", "cli", "main.ts"),
       "logs", "--log-dir", dir, "--json", "--follow",
     ],
     { env, stdout: "pipe", stderr: "pipe" },
@@ -524,7 +450,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
         process: { pid: process.pid, role: "probe" },
       };
       appendFileSync(readyPath, JSON.stringify(marker) + "\n", "utf8");
-      await Bun.sleep(25);
+      await sleep(25);
     }
     if (!followerReady) {
       throw new Error(followerStreamClosed
@@ -552,7 +478,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
 
   const children = await Promise.all(
     PROBE_WRITERS.map(async (mode): Promise<ChildReport> => {
-      const child = Bun.spawn(
+      const child = spawnProcess(
         [
           process.execPath,
           script,
@@ -614,7 +540,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
     Date.now() < catchUpDeadline &&
     !followerStalled()
   ) {
-    await Bun.sleep(25);
+    await sleep(25);
   }
   follower.kill("SIGINT");
   const followerCode = await follower.exited;

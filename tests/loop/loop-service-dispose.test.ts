@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,23 +18,23 @@ import { hookState } from "../../src/hooks/state.ts";
 
 function createMockContext(tmpDir: string) {
   const mockDispatchManager = {
-    getTask: mock(() => undefined),
+    getTask: vi.fn(() => undefined),
   };
 
   const mockDispatchService = {
-    health: mock(() => ({ status: "healthy" })),
-    getDispatchManager: mock(() => mockDispatchManager),
+    health: vi.fn(() => ({ status: "healthy" })),
+    getDispatchManager: vi.fn(() => mockDispatchManager),
   };
 
   // PluginCoreLike — only getService is used by LoopService.init()
   const mockCore = {
-    getService: mock((name: string) => {
+    getService: vi.fn((name: string) => {
       if (name === "dispatch-service") return mockDispatchService;
       return undefined;
     }),
-    getServices: mock(() => new Map()),
-    restartService: mock(() => Promise.resolve()),
-    isDegraded: mock(() => false),
+    getServices: vi.fn(() => new Map()),
+    restartService: vi.fn(() => Promise.resolve()),
+    isDegraded: vi.fn(() => false),
   };
 
   // Cast to PluginContext — only init()-accessed properties are populated
@@ -48,7 +48,7 @@ function createMockContext(tmpDir: string) {
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
-    bus: { on: mock(() => {}), emit: mock(() => {}), off: mock(() => {}) },
+    bus: { on: vi.fn(() => {}), emit: vi.fn(() => {}), off: vi.fn(() => {}) },
   } as any;
 }
 
@@ -69,7 +69,7 @@ describe("LoopService dispose → init recovery", () => {
     hookState.loopStoreMap.clear();
     hookState.activeLoopManager = undefined;
     rmSync(tmpDir, { recursive: true, force: true });
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("dispose clears loopManagerMap and loopStoreMap so re-init creates a fresh coordinator", async () => {
@@ -125,7 +125,7 @@ describe("LoopService dispose → init recovery", () => {
       directory: tmpDir,
       rawDirectory: tmpDir,
       core: {
-        getService: mock(() => undefined), // No dispatch-service
+        getService: vi.fn(() => undefined), // No dispatch-service
       },
       client: { session: {} },
     } as any;

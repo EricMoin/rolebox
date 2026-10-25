@@ -1,4 +1,4 @@
-/// <reference types="bun-types" />
+import { spawnProcessSync } from "../scripts/node-process.ts";
 
 /**
  * UNIT AND END-TO-END TESTS for `scripts/check-logging-boundaries.ts`
@@ -16,11 +16,11 @@
  *    directories, never the workspace) pin the tslog rule in both scopes, the
  *    console rule in every spelling a call can take, and the fact that a
  *    console ASSIGNMENT (the capture pattern) is not a call.
- * 4. THE COMMAND CONTRACT. `bun run scripts/check-logging-boundaries.ts` exits 1
+ * 4. THE COMMAND CONTRACT. `node --import tsx scripts/check-logging-boundaries.ts` exits 1
  *    and names `file:line` on a violating tree, and exits 0 on this one.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -35,7 +35,7 @@ import {
 } from "../scripts/check-logging-boundaries.ts";
 
 /** The repository root: the guard's default subject. */
-const ROOT = resolve(import.meta.dir, "..");
+const ROOT = resolve(import.meta.dirname, "..");
 /** The guard's own entry point, spawned as the CLI by the command tests. */
 const SCRIPT = join(ROOT, "scripts/check-logging-boundaries.ts");
 
@@ -57,7 +57,7 @@ function fixture(files: Record<string, string>): string {
 /** Run the guard as the command does, against `root` (or the workspace). */
 function runCli(root?: string): { exitCode: number; stdout: string; stderr: string } {
   const cmd = root === undefined ? [process.execPath, SCRIPT] : [process.execPath, SCRIPT, "--root", root];
-  const result = Bun.spawnSync({ cmd, stdout: "pipe", stderr: "pipe" });
+  const result = spawnProcessSync({ cmd, stdout: "pipe", stderr: "pipe" });
   return { exitCode: result.exitCode ?? -1, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
 

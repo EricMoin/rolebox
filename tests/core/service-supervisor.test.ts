@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ServiceSupervisor, SUPERVISOR_DEFAULTS } from "../../src/core/service-supervisor.ts";
 import type { PluginCoreLike } from "../../src/core/service.ts";
 import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
@@ -11,14 +11,14 @@ import { fakeServiceName, fakeServiceNames } from "../helpers/service-names.ts";
  */
 function makeMockCore(): {
   core: PluginCoreLike;
-  restartService: ReturnType<typeof mock>;
+  restartService: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 } {
-  const restartService = mock(() => Promise.resolve());
+  const restartService = vi.fn(() => Promise.resolve());
   const core = {
-    getService: mock(() => undefined),
-    getServices: mock(() => new Map()),
+    getService: vi.fn(() => undefined),
+    getServices: vi.fn(() => new Map()),
     restartService,
-    isDegraded: mock(() => false),
+    isDegraded: vi.fn(() => false),
   } satisfies PluginCoreLike as PluginCoreLike;
   return { core, restartService };
 }
@@ -27,7 +27,7 @@ function makeMockCore(): {
 
 describe("ServiceSupervisor", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   describe("tryRestart – first success", () => {
@@ -260,10 +260,10 @@ describe("ServiceSupervisor", () => {
       // The supervisor wraps everything in try/catch, so even broken
       // core objects should not cause uncaught errors.
       const brokenCore = {
-        getService: mock(() => { throw new Error("boom"); }),
-        getServices: mock(() => { throw new Error("boom"); }),
-        restartService: mock(() => { throw new Error("boom"); }),
-        isDegraded: mock(() => { throw new Error("boom"); }),
+        getService: vi.fn(() => { throw new Error("boom"); }),
+        getServices: vi.fn(() => { throw new Error("boom"); }),
+        restartService: vi.fn(() => { throw new Error("boom"); }),
+        isDegraded: vi.fn(() => { throw new Error("boom"); }),
       } satisfies PluginCoreLike as PluginCoreLike;
 
       const supervisor = new ServiceSupervisor(brokenCore);

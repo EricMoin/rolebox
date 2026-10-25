@@ -1,8 +1,7 @@
-/// <reference types="bun-types" />
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/memory/store.ts";
 import {
   createMemoryWriteTool,

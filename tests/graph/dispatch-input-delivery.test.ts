@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The dispatch path materializes a worker's inputs, or does not launch (D7).
@@ -17,7 +16,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { removeTempTree } from "./helpers/temp-dirs.ts";

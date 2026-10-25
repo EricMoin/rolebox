@@ -1,10 +1,11 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // Mock state-hash to return a predictable value
-mock.module("../../../src/cli/state-hash", () => ({
+vi.doMock("../../../src/cli/state-hash", () => ({
   stateFileHash: () => "testhash123456",
 }));
 
@@ -1403,3 +1404,5 @@ describe("readTaskDetail (extended)", () => {
     expect(snapshot.notifications!.enabled).toBe(true);
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

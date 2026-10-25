@@ -1,12 +1,5 @@
-// NOTE: Cache isolation for fetchRegistryManifest is achieved with per-test
-// temp dirs, not mock.module. The suite runs under `bun test --isolate`, so each
-// file gets a fresh module registry and getDataDir() always resolves through the
-// real src/cli/paths module. Each test points the data dir at its OWN mkdtempSync
-// dir (per-test, not per-file) via BOTH XDG_DATA_HOME and ROLEBOX_DATA_DIR — the
-// latter carries the highest precedence in getDataDir() on every platform, so
-// cache isolation holds on Windows regardless of how XDG is handled.
-// Cross-file mock.module leakage is structurally impossible.
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, readdirSync, chmodSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -79,15 +72,12 @@ function capturingFetch(
 ): { urls: string[]; inits: Array<Parameters<typeof fetch>[1]> } {
   const urls: string[] = [];
   const inits: Array<Parameters<typeof fetch>[1]> = [];
-  globalThis.fetch = Object.assign(
-    mock((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       const url = input instanceof Request ? input.url : String(input);
       urls.push(url);
       inits.push(init);
       return Promise.resolve(respond(url));
-    }),
-    { preconnect: () => {} },
-  );
+    });
   return { urls, inits };
 }
 
@@ -116,7 +106,7 @@ describe("resolveVersion", () => {
 describe("fetchRegistryManifest", () => {
   it("fetches and parses a valid registry manifest", async () => {
     const mockResponse = new Response(validYaml, { status: 200 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -136,7 +126,7 @@ describe("fetchRegistryManifest", () => {
 
   it("throws 404 error with 'not found' message", async () => {
     const mockResponse = new Response("Not Found", { status: 404 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -152,7 +142,7 @@ describe("fetchRegistryManifest", () => {
 
   it("throws rate limit error for 403", async () => {
     const mockResponse = new Response("Rate limited", { status: 403 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -167,9 +157,9 @@ describe("fetchRegistryManifest", () => {
   });
 
   it("throws network error on connection failure", async () => {
-    globalThis.fetch = Object.assign(mock(() => {
+    globalThis.fetch = vi.fn(() => {
       throw new Error("network connection refused");
-    }), { preconnect: () => {} });
+    });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -185,7 +175,7 @@ describe("fetchRegistryManifest", () => {
 
   it("throws parse error for invalid YAML", async () => {
     const mockResponse = new Response(": invalid: yaml: [[[]", { status: 200 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -204,10 +194,10 @@ describe("fetchRegistryManifest", () => {
     // Build a fresh Response per fetch call — a Response body can only be
     // consumed once, so a single hoisted Response would fail this test for the
     // wrong reason if the cache ever missed on the second call.
-    globalThis.fetch = Object.assign(mock(() => {
+    globalThis.fetch = vi.fn(() => {
       callCount.value++;
       return Promise.resolve(new Response(validYaml, { status: 200 }));
-    }), { preconnect: () => {} });
+    });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -228,10 +218,10 @@ describe("fetchRegistryManifest", () => {
 
   it("bypasses cache with noCache option", async () => {
     const callCount = { value: 0 };
-    globalThis.fetch = Object.assign(mock(() => {
+    globalThis.fetch = vi.fn(() => {
       callCount.value++;
       return Promise.resolve(new Response(validYaml, { status: 200 }));
-    }), { preconnect: () => {} });
+    });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -254,10 +244,10 @@ describe("fetchRegistryManifest", () => {
 
   it("uses custom ref for URL construction", async () => {
     let fetchedUrl = "";
-    globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+    globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
       fetchedUrl = input instanceof Request ? input.url : String(input);
       return Promise.resolve(new Response(validYaml, { status: 200 }));
-    }), { preconnect: () => {} });
+    });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -278,9 +268,9 @@ describe("fetchRegistryManifest", () => {
 
 describe("downloadRole", () => {
   it("throws network error on connection failure during download", async () => {
-    globalThis.fetch = Object.assign(mock(() => {
+    globalThis.fetch = vi.fn(() => {
       throw new Error("connection reset");
-    }), { preconnect: () => {} });
+    });
 
     await expect(
       downloadRole(
@@ -293,7 +283,7 @@ describe("downloadRole", () => {
 
   it("throws not found on 404 response", async () => {
     const mockResponse = new Response("Not Found", { status: 404 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     await expect(
       downloadRole(
@@ -306,7 +296,7 @@ describe("downloadRole", () => {
 
   it("throws on non-ok response", async () => {
     const mockResponse = new Response("Server Error", { status: 500 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     await expect(
       downloadRole(
@@ -329,13 +319,13 @@ describe("downloadRole", () => {
     writeFileSync(join(topDir, "registry.yaml"), validYaml);
 
     const archivePath = join(tmpDir, "test.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
     const tarExit = await tarProc.exited;
     expect(tarExit).toBe(0);
 
     const archiveBytes = require("node:fs").readFileSync(archivePath);
-    const mockResponse = new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    const mockResponse = new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     const resultDir = await downloadRole(
       { name: "community", url: "https://github.com/example/myrepo" },
@@ -365,13 +355,13 @@ describe("downloadRole", () => {
     writeFileSync(join(topDir, "registry.yaml"), validYaml);
 
     const archivePath = join(tmpDir, "test.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
     const tarExit = await tarProc.exited;
     expect(tarExit).toBe(0);
 
     const archiveBytes = require("node:fs").readFileSync(archivePath);
-    const mockResponse = new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    const mockResponse = new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     // Spy on the spawn dependency passed to downloadRole to capture the tar
     // extraction args while still delegating to the real spawn, so real
@@ -422,13 +412,13 @@ describe("downloadRole", () => {
     writeFileSync(join(topDir, "registry.yaml"), validYaml);
 
     const archivePath = join(tmpDir, "test.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
     const tarExit = await tarProc.exited;
     expect(tarExit).toBe(0);
 
     const archiveBytes = require("node:fs").readFileSync(archivePath);
-    const mockResponse = new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 });
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    const mockResponse = new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     // downloadRole detects a missing tar via spawnSync("tar", ["--version"]).
     // Inject a spawnSync that reports a failure so the tar check throws.
@@ -451,11 +441,11 @@ describe("downloadRole", () => {
 
   it("aborts the download with a timeout error when the fetch stalls", async () => {
     // A fetch that never resolves, but rejects when the AbortController fires.
-    globalThis.fetch = Object.assign(mock((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    globalThis.fetch = vi.fn((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       });
-    }), { preconnect: () => {} });
+    });
 
     await expect(
       downloadRole(
@@ -483,7 +473,7 @@ describe("downloadRole", () => {
       headers: { get: (name: string) => (name.toLowerCase() === "content-length" ? "1000" : null) },
       body: stream,
     };
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(mockResponse)), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(mockResponse));
 
     await expect(
       downloadRole(
@@ -497,7 +487,7 @@ describe("downloadRole", () => {
   it("cleans up the rolebox-out-* temp dir on download failure", async () => {
     const t = tmpdir();
     const before = new Set(readdirSync(t).filter((d) => d.startsWith("rolebox-out-")));
-    globalThis.fetch = Object.assign(mock(() => { throw new Error("connection reset"); }), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => { throw new Error("connection reset"); });
 
     await expect(
       downloadRole(
@@ -524,11 +514,11 @@ describe("downloadRole", () => {
     symlinkSync("/etc/passwd", join(topDir, "evil-link"));
 
     const archivePath = join(tmpDir, "test.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "top"]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "top"]);
     expect(await tarProc.exited).toBe(0);
 
     const archiveBytes = readFileSync(archivePath);
-    globalThis.fetch = Object.assign(mock(() => Promise.resolve(new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }))), { preconnect: () => {} });
+    globalThis.fetch = vi.fn(() => Promise.resolve(new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 })));
 
     await expect(
       downloadRole(
@@ -682,13 +672,10 @@ describe("integration", () => {
 describe("registry-client ref resolution", () => {
   function captureFetchUrl(response: Response): { url: () => string } {
     let fetchedUrl = "";
-    globalThis.fetch = Object.assign(
-      mock((input: Parameters<typeof fetch>[0]) => {
+    globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
         fetchedUrl = input instanceof Request ? input.url : String(input);
         return Promise.resolve(response);
-      }),
-      { preconnect: () => {} },
-    );
+      });
     return { url: () => fetchedUrl };
   }
 
@@ -758,13 +745,10 @@ describe("registry-client ref resolution", () => {
 
   it("keeps sources that share a name but differ in url or ref in separate cache dirs", async () => {
     const callCount = { value: 0 };
-    globalThis.fetch = Object.assign(
-      mock(() => {
+    globalThis.fetch = vi.fn(() => {
         callCount.value++;
         return Promise.resolve(new Response(validYaml, { status: 200 }));
-      }),
-      { preconnect: () => {} },
-    );
+      });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -797,10 +781,7 @@ describe("registry-client ref resolution", () => {
   });
 
   it("sanitizes the name and suffixes a url+ref digest", async () => {
-    globalThis.fetch = Object.assign(
-      mock(() => Promise.resolve(new Response(validYaml, { status: 200 }))),
-      { preconnect: () => {} },
-    );
+    globalThis.fetch = vi.fn(() => Promise.resolve(new Response(validYaml, { status: 200 })));
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -819,10 +800,7 @@ describe("registry-client ref resolution", () => {
   });
 
   it("truncates an over-long name to a safe prefix", async () => {
-    globalThis.fetch = Object.assign(
-      mock(() => Promise.resolve(new Response(validYaml, { status: 200 }))),
-      { preconnect: () => {} },
-    );
+    globalThis.fetch = vi.fn(() => Promise.resolve(new Response(validYaml, { status: 200 })));
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
     setMockDataDir(tmpDir);
@@ -961,7 +939,7 @@ describe("downloadRole for plain HTTP sources", () => {
   /** Build a real tar.gz with the tar binary and return its bytes. */
   async function buildTarGz(tmpDir: string, entries: string[]): Promise<Uint8Array> {
     const archivePath = join(tmpDir, "fixture.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", join(tmpDir, "fixture"), ...entries]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", join(tmpDir, "fixture"), ...entries]);
     expect(await tarProc.exited).toBe(0);
     return new Uint8Array(readFileSync(archivePath));
   }
@@ -978,7 +956,7 @@ describe("downloadRole for plain HTTP sources", () => {
     // contents ARE the role files.
     const archiveBytes = await buildTarGz(tmpDir, ["role-src"]);
 
-    const seen = capturingFetch(() => new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }));
+    const seen = capturingFetch(() => new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 }));
 
     const resultDir = await downloadRole(
       { name: "plain", url: "https://roles.example.com/acme/registry.yaml" },
@@ -1006,7 +984,7 @@ describe("downloadRole for plain HTTP sources", () => {
     writeFileSync(join(roleSource, "role.yaml"), "name: code-reviewer\n");
     const archiveBytes = await buildTarGz(tmpDir, ["."]);
 
-    capturingFetch(() => new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }));
+    capturingFetch(() => new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 }));
 
     const resultDir = await downloadRole(
       { name: "plain", url: "https://roles.example.com/acme/registry.yaml" },
@@ -1032,7 +1010,7 @@ describe("downloadRole for plain HTTP sources", () => {
     const archiveBytes = await buildTarGz(tmpDir, ["roles"]);
 
     const seen = capturingFetch((url) =>
-      url.includes("@") ? new Response("Not Found", { status: 404 }) : new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }),
+      url.includes("@") ? new Response("Not Found", { status: 404 }) : new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 }),
     );
 
     const resultDir = await downloadRole(
@@ -1086,7 +1064,7 @@ describe("downloadRole for plain HTTP sources", () => {
     writeFileSync(join(roleSource, "role.yaml"), "name: code-reviewer\n");
     const archiveBytes = await buildTarGz(tmpDir, ["."]);
 
-    const seen = capturingFetch(() => new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }));
+    const seen = capturingFetch(() => new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 }));
 
     const resultDir = await downloadRole(
       { name: "plain", url: "https://roles.example.com/acme/registry.yaml" },
@@ -1113,17 +1091,14 @@ describe("redirect credential routing", () => {
     location: string | null,
   ): Array<{ url: string; headers: Record<string, string> }> {
     const hops: Array<{ url: string; headers: Record<string, string> }> = [];
-    globalThis.fetch = Object.assign(
-      mock((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
         const url = input instanceof Request ? input.url : String(input);
         hops.push({ url, headers: { ...((init?.headers as Record<string, string>) ?? {}) } });
         if (location !== null && hops.length === 1) {
           return Promise.resolve(new Response(null, { status: 302, headers: { location } }));
         }
         return Promise.resolve(new Response(validYaml, { status: 200 }));
-      }),
-      { preconnect: () => {} },
-    );
+      });
     return hops;
   }
 
@@ -1189,8 +1164,7 @@ describe("fetchRegistryManifest resource bounds", () => {
   it("fails with a timeout instead of hanging on a body that never ends", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-manifest-timeout-"));
     setMockDataDir(tmpDir);
-    globalThis.fetch = Object.assign(
-      mock((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    globalThis.fetch = vi.fn((_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
         const signal = init?.signal;
         return new Promise<Response>((_resolve, reject) => {
           const body = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("name: x\n")); } });
@@ -1198,9 +1172,7 @@ describe("fetchRegistryManifest resource bounds", () => {
           signal?.addEventListener("abort", () => reject(signal.reason));
           void body;
         });
-      }),
-      { preconnect: () => {} },
-    );
+      });
 
     const started = Date.now();
     const err = await fetchRegistryManifest(
@@ -1218,8 +1190,7 @@ describe("fetchRegistryManifest resource bounds", () => {
   it("refuses a manifest larger than the byte cap", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-manifest-cap-"));
     setMockDataDir(tmpDir);
-    globalThis.fetch = Object.assign(
-      mock(() => {
+    globalThis.fetch = vi.fn(() => {
         const body = new ReadableStream({
           start(c) {
             c.enqueue(new TextEncoder().encode("x".repeat(4096)));
@@ -1227,9 +1198,7 @@ describe("fetchRegistryManifest resource bounds", () => {
           },
         });
         return Promise.resolve(new Response(body, { status: 200 }));
-      }),
-      { preconnect: () => {} },
-    );
+      });
 
     await expect(
       fetchRegistryManifest(
@@ -1245,15 +1214,12 @@ describe("fetchRegistryManifest resource bounds", () => {
   it("refuses a declared Content-Length above the cap without reading the body", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-manifest-cap-"));
     setMockDataDir(tmpDir);
-    globalThis.fetch = Object.assign(
-      mock(
+    globalThis.fetch = vi.fn(
         () =>
           Promise.resolve(
             new Response("name: x\n", { status: 200, headers: { "content-length": "1048576" } }),
           ),
-      ),
-      { preconnect: () => {} },
-    );
+      );
 
     await expect(
       fetchRegistryManifest(
@@ -1281,11 +1247,11 @@ describe("downloadRole containment", () => {
     writeFileSync(join(fixture, "pkg", "roles", "real", "role.yaml"), "name: real\n");
     symlinkSync("real", join(fixture, "pkg", "roles", "code-reviewer"));
     const archivePath = join(tmpDir, "fixture.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", join(fixture, "pkg"), "roles"]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", join(fixture, "pkg"), "roles"]);
     expect(await tarProc.exited).toBe(0);
     const archiveBytes = new Uint8Array(readFileSync(archivePath));
 
-    capturingFetch(() => new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }));
+    capturingFetch(() => new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 }));
 
     // Extracting it and renaming it out would deliver a directory that is not
     // the role's own, so it is refused at resolution time.
@@ -1308,7 +1274,7 @@ describe("downloadRole containment", () => {
     // (download, extraction, cleanup) runs as shipped.
     const fsUtils = await import("../../src/cli/fs-utils.ts");
     const realMoveDir = fsUtils.moveDir;
-    mock.module("../../src/cli/fs-utils.ts", () => {
+    vi.doMock("../../src/cli/fs-utils.ts", () => {
       let staged = 0;
       return {
         ...fsUtils,
@@ -1329,7 +1295,7 @@ describe("downloadRole containment", () => {
     writeFileSync(join(fixture, "role.yaml"), "name: code-reviewer\n");
     writeFileSync(join(fixture, "skills", "review.md"), "# review\n");
     const archivePath = join(tmpDir, "fixture.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixture, "."]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", fixture, "."]);
     expect(await tarProc.exited).toBe(0);
     const archiveBytes = new Uint8Array(readFileSync(archivePath));
 
@@ -1353,13 +1319,15 @@ describe("downloadRole containment", () => {
             "name: acme\ndescription: d\nurl: u\nroles:\n  code-reviewer: {version: '1.0.0', description: d, tags: []}\n",
             { status: 200 },
           )
-        : new Response(new Blob([archiveBytes.slice().buffer]), { status: 200 }),
+        : new Response(new Blob([Uint8Array.from(archiveBytes).buffer]), { status: 200 }),
     );
 
     const tempRoot = process.env.TMPDIR ?? tmpdir();
     const before = new Set(readdirSync(tempRoot).filter((name) => name.startsWith("rolebox-")));
 
-    const err = await install("plain:code-reviewer", { quiet: true }).catch((e: Error) => e);
+    vi.resetModules();
+    const { install: installWithPlacementFailure } = await import("../../src/cli/commands/install.ts");
+    const err = await installWithPlacementFailure("plain:code-reviewer", { quiet: true }).catch((e: Error) => e);
     expect((err as Error).message).toMatch(/while placing the new version/);
 
     const leaked = readdirSync(tempRoot).filter(

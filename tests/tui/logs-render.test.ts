@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The Logs PANE as it is actually painted.
@@ -17,11 +16,10 @@
  * restored) and the fixtures live under the OS temp directory.
  */
 
-import { describe, it, expect, afterEach, beforeEach, beforeAll } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach, beforeAll } from "vitest";
 import { RGBA } from "@opentui/core";
 import { testRender } from "@opentui/solid";
 import type { TestRendererSetup } from "@opentui/core/testing";
-import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +33,6 @@ import type { LogsProps } from "../../src/tui/components/Logs.tsx";
 // Same transform the TUI build applies (`scripts/build-tui.ts`). It has to be
 // installed BEFORE the component module is loaded, so `./Logs.tsx` is imported
 // dynamically below and this file imports only its TYPES at the top.
-Bun.plugin(createSolidTransformPlugin({ moduleName: "@opentui/solid" }));
 
 type LogsModule = typeof import("../../src/tui/components/Logs.tsx");
 

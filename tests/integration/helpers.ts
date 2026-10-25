@@ -1,3 +1,4 @@
+import { beforeEach as resetBeforeEach } from "vitest";
 /**
  * Shared integration test harness for rolebox.
  *
@@ -24,7 +25,7 @@
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
-import { mock } from "bun:test";
+import { vi } from "vitest";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap, pendingCorrections } from "../../src/core/composition.ts";
 import { roleFunctionsMap } from "../../src/resolver/registry.ts";
@@ -50,79 +51,79 @@ export const MINIMAL_SUBAGENT_ID = "test-primary--helper";
  * Create a minimal mock OpencodeClient suitable for testing PluginCore.
  *
  * All session methods return resolved promises with a predictable shape.
- * Individual tests can override specific methods via `mock.module()` or
+ * Individual tests can override specific methods via `vi.doMock()` or
  * direct property assignment after receiving the client.
  */
 export function createMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-session-1" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({ data: { parts: [{ type: "text", text: "ok" }] }, error: undefined }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test-session-1" }, error: undefined }),
       ),
-      delete: mock(() =>
+      delete: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      list: mock(() =>
+      list: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      fork: mock(() =>
+      fork: vi.fn(() =>
         Promise.resolve({ data: { id: "forked-session" }, error: undefined }),
       ),
-      init: mock(() =>
+      init: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      command: mock(() =>
+      command: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      shell: mock(() =>
+      shell: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      todo: mock(() =>
+      todo: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      children: mock(() =>
+      children: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      update: mock(() =>
+      update: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      diff: mock(() =>
+      diff: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      summarize: mock(() =>
+      summarize: vi.fn(() =>
         Promise.resolve({ data: { summary: "" }, error: undefined }),
       ),
-      message: mock(() =>
+      message: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      revert: mock(() =>
+      revert: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      unrevert: mock(() =>
+      unrevert: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      unshare: mock(() =>
+      unshare: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      share: mock(() =>
+      share: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
     },
@@ -145,7 +146,7 @@ export function createMockClient(): OpencodeClient {
     tui: {} as any,
     auth: {} as any,
     event: {} as any,
-    postSessionIdPermissionsPermissionId: mock(() =>
+    postSessionIdPermissionsPermissionId: vi.fn(() =>
       Promise.resolve({ data: undefined, error: undefined }),
     ),
   } as unknown as OpencodeClient;
@@ -245,7 +246,7 @@ export function cleanupTestState(): void {
   managerMap.clear();
   pendingCorrections.clear();
   roleFunctionsMap.clear();
-  mock.restore();
+  vi.restoreAllMocks();
 }
 
 // ── Test Context ───────────────────────────────────────────────────────────
@@ -363,3 +364,5 @@ export async function createTestContext(): Promise<TestContext> {
     cleanup,
   };
 }
+
+resetBeforeEach(() => vi.resetModules());

@@ -315,7 +315,7 @@ but `rename(path, path + ".1")` REPLACES an existing `.1`: a second process that
 decided to rotate a moment before the first one finished overwrites the copy the
 first just made, and the records in that copy are gone. Three real processes
 writing one channel through this sink
-(`bun scripts/log-multiprocess-probe.ts`, 3 × 400 records, 4 KB limit, retention
+(`node --import tsx scripts/log-multiprocess-probe.ts`, 3 × 400 records, 4 KB limit, retention
 far above the volume so retention cannot be the cause) lost **70 of 1200**
 records that way, and a replay lost 143 — always a prefix of each writer, exactly
 the records the first rotation had moved aside. The sink therefore creates
@@ -545,15 +545,14 @@ through the pipeline? Two rules:
      published in the guard's JSON report so an exemption can never be silent.
      Today there is exactly one: `src/platform/adapters/dsh/web-ui/client.ts`,
      the dsh web client bundle, where the kernel cannot load
-     (`src/log/context.ts` pulls `node:async_hooks`, stubbed to an empty module
-     under Bun's browser target).
+     (`src/log/context.ts` requires the Node-only `node:async_hooks` module).
 
 `tests/**` is deliberately out of scope for rule 2 — a capture test replaces
 console itself, which is scaffolding, not a diagnostic channel.
 
 ```sh
-bun run scripts/check-logging-boundaries.ts               # this workspace
-bun run scripts/check-logging-boundaries.ts --root <dir>  # a fixture tree
+node --import tsx scripts/check-logging-boundaries.ts               # this workspace
+node --import tsx scripts/check-logging-boundaries.ts --root <dir>  # a fixture tree
 ```
 
 It prints its machine-readable report on stdout, lists the same violations on
@@ -628,11 +627,11 @@ from `createSubLogger(name)`.
 ## Checks to run after touching the pipeline
 
 ```sh
-bun run typecheck                                  # the vocabulary is typed; a bad code fails here
-bun run scripts/check-logging-boundaries.ts        # exit 0, or the violation names file:line
-bun test --isolate tests/log/                      # the kernel's own suite (includes the probe)
-bun test --isolate tests/logger.test.ts            # the compatibility shell's contract
-bun test tests/tui/                                # the Logs pane (no --isolate: @opentui/core)
+npm run typecheck                                  # the vocabulary is typed; a bad code fails here
+node --import tsx scripts/check-logging-boundaries.ts        # exit 0, or the violation names file:line
+npm test -- tests/log/                      # the kernel's own suite (includes the probe)
+npm test -- tests/logger.test.ts            # the compatibility shell's contract
+npm run test:tui                                # the Logs pane (no --isolate: @opentui/core)
 ```
 
 Two probes answer questions a unit test cannot, and both are re-runnable:
@@ -640,12 +639,12 @@ Two probes answer questions a unit test cannot, and both are re-runnable:
 ```sh
 # Three real processes writing one channel, plus a live `rolebox logs --follow`:
 # exactly-once, no torn line, rotation, merged order, follower order.
-bun scripts/log-multiprocess-probe.ts --records 400 --max-bytes 4096 --retain 4096
+node --import tsx scripts/log-multiprocess-probe.ts --records 400 --max-bytes 4096 --retain 4096
 
 # Which registered events flood a log directory, and what a throttle window would
 # cost: the evidence behind every `throttleMs` in the registry.
-bun scripts/log-event-density.ts --dir .rolebox/logs
+node --import tsx scripts/log-event-density.ts --dir .rolebox/logs
 ```
 
-The whole `bun test` suite is CI's job; see `AGENTS.md` for the module-scoped
+The whole `npm test` suite is CI's job; see `AGENTS.md` for the module-scoped
 slices.

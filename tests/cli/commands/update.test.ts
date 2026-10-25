@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -12,7 +13,7 @@ process.env.XDG_DATA_HOME = updDataDir;
 
 import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
-mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
     getSyncTarget: (target: string) => {
       if (target === "opencode") {
@@ -24,17 +25,18 @@ mock.module("../../../src/cli/paths", () => createPathsMockPayload({
     },
   },
 }));
+const { compareVersions } = await import("../../../src/cli/commands/update.ts");
 
 afterAll(() => {
   rmSync(updConfigDir, { recursive: true, force: true });
   rmSync(updDataDir, { recursive: true, force: true });
 });
 
-import { compareVersions } from "../../../src/cli/commands/update.ts";
 
-const mockFetchManifest = mock();
-const mockDownloadRole = mock();
-const mockComputeIntegrity = mock();
+
+const mockFetchManifest = vi.fn();
+const mockDownloadRole = vi.fn();
+const mockComputeIntegrity = vi.fn();
 
 const sampleManifest: RegistryManifest = {
   name: "oh-my-role",
@@ -66,7 +68,8 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
   process.env.XDG_DATA_HOME = tmpDataDir;
 
-  mock.module("../../../src/cli/registry-client", () => ({
+  vi.doMock("../../../src/cli/registry-client", async () => ({
+    ...await vi.importActual<typeof import("../../../src/cli/registry-client.ts")>("../../../src/cli/registry-client.ts"),
     fetchRegistryManifest: mockFetchManifest,
     downloadRole: mockDownloadRole,
     computeIntegrity: mockComputeIntegrity,
@@ -418,3 +421,5 @@ describe("update across sources", () => {
     expect(versionsBySource()).toEqual({ "oh-my-role": "1.0.0", custom: "3.0.0" });
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshRoleSwitcher tests — the in-session active-role switcher for the dsh
@@ -28,7 +27,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { RoleMode } from "../../src/constants.ts";
@@ -995,11 +994,11 @@ describe("createActiveRoleRef snapshot", () => {
 
 describe("dsh role-switcher boundary", () => {
   const ROLE_SWITCHER = resolve(
-    import.meta.dir,
+    import.meta.dirname,
     "../../src/platform/adapters/dsh/role-switcher.ts",
   );
   const BARREL = resolve(
-    import.meta.dir,
+    import.meta.dirname,
     "../../src/platform/adapters/dsh/index.ts",
   );
 

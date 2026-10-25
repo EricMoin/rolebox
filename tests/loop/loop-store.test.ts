@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
+import { shortHash } from "../../src/utils/state-paths.ts";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -47,7 +48,7 @@ describe("LoopStore persistence", () => {
 
   beforeEach(() => {
     store = new LoopStore(tempDir);
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -137,7 +138,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("corrupt JSON → load() returns null", () => {
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -148,7 +149,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("unrecognised version → load() returns null", () => {
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -159,7 +160,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("v2 file is migrated, not rejected", () => {
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -226,7 +227,7 @@ describe("LoopStore persistence", () => {
     const loop = makeLoop({ phase: "complete" });
     await store.save(new Map([["l1", loop]]));
 
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
 
@@ -236,7 +237,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("empty file → load() returns null", () => {
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -485,7 +486,7 @@ describe("LoopStore debounce", () => {
 
   beforeEach(() => {
     store = new LoopStore(tempDir);
-    const { shortHash } = require("../../src/utils/state-paths.ts");
+
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);

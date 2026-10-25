@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * opencode v2 event normalization.
@@ -12,7 +11,7 @@
  * No case uses the network or a host.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   OPENCODE2_EVENT_TYPE_MAP,
   mapOpencode2EventType,

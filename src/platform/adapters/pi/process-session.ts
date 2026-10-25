@@ -6,7 +6,9 @@ import type { PiWorkerToolConfig } from "./worker-tools.ts";
 import { piWorkerToolAllowed } from "./worker-tools.ts";
 import { buildMemoryContext } from "../../../memory/context.ts";
 import { buildComputerContext } from "../../../computer/context.ts";
+import { buildBrowseContext } from "../../../browse/context.ts";
 import { COMPUTER_TOOL_NAMES, roleGrantsComputerTool } from "../../../loader/computer-grants.ts";
+import { BROWSE_TOOL_NAMES, roleGrantsBrowseTool } from "../../../loader/browse-grants.ts";
 import { MEMORY_TOOL_NAMES } from "../../../memory/tool-policy.ts";
 import type { MemoryConfig } from "../../../memory/types.ts";
 import { buildGraphWorkerToolGrantBlock } from "../../../prompt/graph-worker.ts";
@@ -1086,6 +1088,14 @@ export class PiProcessSessionAdapter implements ISessionClient {
         workerTools.proxies.some(tool => tool.name === name));
       const computerBlock = buildComputerContext({ tools: computerTools, presentation: workerTools.presentation?.mode });
       if (computerBlock) effectivePrompt += "\n\n" + computerBlock;
+      // The same three restrictions for the browse family: the worker's node
+      // grant admits the name, the role's tools: map grants it, and this
+      // worker's proxy face actually carries it.
+      const browseTools = BROWSE_TOOL_NAMES.filter(name => piWorkerToolAllowed(name, workerTools) &&
+        roleGrantsBrowseTool(record.agentConfig.toolPolicy, name) &&
+        workerTools.proxies.some(tool => tool.name === name));
+      const browseBlock = buildBrowseContext({ tools: browseTools, presentation: workerTools.presentation?.mode });
+      if (browseBlock) effectivePrompt += "\n\n" + browseBlock;
       const memoryTools = MEMORY_TOOL_NAMES.filter((name) => piWorkerToolAllowed(name, workerTools) &&
         workerTools.proxies.some((tool) => tool.name === name));
       const options = {

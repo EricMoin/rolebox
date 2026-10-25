@@ -1,5 +1,5 @@
 import { approvalPolicy, controlScenarios, eventually, assertRestored, verifyHostProcessRestart } from "./scenarios.ts";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -9,13 +9,20 @@ const hostRequire = createRequire(import.meta.resolve("@deepseek-ai/dsh-agent-lo
 const hostModule = (name: string) => import(hostRequire.resolve("@deepseek-ai/" + name));
 const { Context } = await hostModule("cordis");
 const { default: SessionStore, SessionId } = await hostModule("dsh-session");
+const { default: SessionProjections } = await hostModule("dsh-session-projection");
+const SessionPersistence = await hostModule("dsh-session-persistence-jsonl");
+const { default: SessionQuery } = await hostModule("dsh-session-query-sqlite");
+const { default: FileSystem } = await hostModule("dsh-fs-local");
+const { default: WorkingDirectory } = await hostModule("dsh-working-directory");
+const { default: Sandbox } = await hostModule("dsh-sandbox-local");
+const { default: SandboxPolicy } = await hostModule("dsh-sandbox-policy");
 const { default: AgentRegistry } = await hostModule("dsh-agent");
 const { default: AgentLoop } = await hostModule("dsh-agent-loop");
 const { default: SystemPrompt } = await hostModule("dsh-system-prompt");
 const { default: ToolRegistry } = await hostModule("dsh-tools");
 const { default: LlmService, LlmAdapter } = await hostModule("dsh-llm");
 const { default: SubagentService } = await hostModule("dsh-subagent");
-const spawn = await hostModule("dsh-subagent-spawn");
+const spawn = await hostModule("dsh-subagent-spawn-in-process");
 import * as rolebox from "../../src/entries/dsh.ts";
 import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import { graphStoreRoot } from "../../src/graph/store/schema.ts";
@@ -23,6 +30,7 @@ import { graphStoreRoot } from "../../src/graph/store/schema.ts";
 const original = process.cwd();
 const restoreRoot = process.env.ROLEBOX_SMOKE_RESTORE_ROOT;
 const root = restoreRoot ?? mkdtempSync(join(tmpdir(), "rolebox-dsh-smoke-"));
+const protectedFile = join(original, ".rolebox-smoke-protected-" + randomUUID());
 const previousData = process.env.ROLEBOX_DATA_DIR;
 const previousRecovery = process.env.ROLEBOX_ENGINE_RECOVERY;
 const previousApproval = process.env.ROLEBOX_GRAPH_APPROVAL_POLICY;
@@ -43,10 +51,14 @@ let sandboxProbes = 0;
 let deniedProbes = 0;
 let consumedInputs = 0;
 const parentNotices: string[] = [];
+const hostErrors: string[] = [];
+let modelRequests = 0;
 class ScriptedAdapter extends LlmAdapter {
   async *stream(options: any): AsyncIterable<any> {
+    if (++modelRequests > 200) throw new Error("Scripted smoke provider exceeded its request budget");
     const texts = options.messages.flatMap((message: any) => (message.content ?? []).filter((block: any) => block.type === "text").map((block: any) => block.text)).join("\n");
-    const last = JSON.stringify(options.messages.at(-1));
+    const lastMessage = options.messages.at(-1);
+    const last = JSON.stringify(lastMessage);
     const graphId = texts.match(/graph_id:\s+([^\s]+)/)?.[1];
     const nodeId = texts.match(/node_id:\s+([^\s]+)/)?.[1];
     const credential = texts.match(/credential:\s+([^\s]+)/)?.[1];
@@ -68,14 +80,15 @@ class ScriptedAdapter extends LlmAdapter {
     }
     if (graphId && last.includes("probe-okay")) sandboxProbes++;
     if (nodeId === "review" && last.includes("accepted-upstream")) consumedInputs++;
-    if (!graphNotice && !texts.includes("NATURAL_FIXTURE") && ((graphId && !history.includes('"name":"graph_submit_outcome"')) || !last.includes('"tool-result"'))) {
+    if (!graphNotice && !(graphId && texts.includes("NATURAL_FIXTURE")) && ((graphId && !history.includes('"name":"graph_submit_outcome"')) || lastMessage?.role !== "tool")) {
       let tool = graphId ? "graph_submit_outcome" : parentAction?.tool ?? "graph_declare";
       let args: unknown = graphId ? { graph_id: graphId, node_id: nodeId, outcome_id: "done", credential, ...(graphId === "dsh.explicit" && nodeId === "work" ? { data: { marker: "accepted-upstream" } } : {}) } : parentAction?.args ?? { declaration: parentDeclaration };
       if (graphId && !history.includes('"name":"graph_worker_exec"')) {
         tool = "graph_worker_exec";
-        const manifestPath = nodeId === "review" ? texts.match(/manifest:\s+([^\n]+)/)?.[1] : undefined;
+        const manifestPath = nodeId === "review" ? JSON.parse(texts.match(/manifest:\s+([^\n]+)/)?.[1] ?? "null") : undefined;
         const readInput = manifestPath ? "cat '" + manifestPath.replaceAll("'", "'\\''") + "'; " : "";
-        args = { command: readInput + "if cat data/protected >/dev/null 2>&1; then exit 40; fi; if (echo modified > data/protected) 2>/dev/null; then exit 41; fi; /usr/bin/git --version && echo worker-output > worker-output.txt && echo probe-okay" };
+        const protectedTarget = "'" + protectedFile.replaceAll("'", "'\\''") + "'";
+        args = { command: readInput + "if (echo modified > " + protectedTarget + ") 2>/dev/null; then exit 41; fi; /usr/bin/git --version && echo worker-output > worker-output.txt && echo probe-okay" };
       } else if (graphId && !history.includes('"name":"unsafe_probe"')) {
         tool = "unsafe_probe"; args = {};
       }
@@ -94,10 +107,16 @@ try {
   const launcher = join(root, "launcher");
   mkdirSync(launcher, { recursive: true });
   process.chdir(launcher);
+  writeFileSync(protectedFile, "host-state", { mode: 0o600 });
   mkdirSync(join(root, "rolebox", "smoke"), { recursive: true });
   writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n");
-  for (const plugin of [SessionStore, AgentRegistry, LlmService, SystemPrompt, SubagentService]) fibers.push(ctx.plugin(plugin));
-  fibers.push(ctx.plugin(ToolRegistry, { mode: "code" }));
+  fibers.push(ctx.plugin(SessionPersistence, { root: join(root, "sessions"), compression: "none" }));
+  for (const plugin of [SessionStore, SessionProjections, FileSystem, AgentRegistry, LlmService, SystemPrompt, SubagentService]) fibers.push(ctx.plugin(plugin));
+  fibers.push(ctx.plugin(SessionQuery, { path: join(root, "session-query.sqlite"), openAt: "never" }));
+  fibers.push(ctx.plugin(WorkingDirectory, { defaultDirectory: root }));
+  fibers.push(ctx.plugin(Sandbox));
+  fibers.push(ctx.plugin(SandboxPolicy, { mode: "workspace-write", workspaceRoot: root }));
+  fibers.push(ctx.plugin(ToolRegistry, { mode: "ptc" }));
   fibers.push(ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 }));
   fibers.push(ctx.plugin(spawn, { providerName: "spawn" }));
 
@@ -108,31 +127,38 @@ try {
     })]);
   } finally { clearTimeout(mountTimer); }
   ctx.llm.registerAdapter(["example-provider"], new ScriptedAdapter());
-  mkdirSync(data, { recursive: true }); writeFileSync(join(data, "protected"), "host-state");
+  ctx.on("agent/error", (event: any) => { hostErrors.push(String(event.error?.stack ?? event.error)); });
+  mkdirSync(data, { recursive: true });
   ctx.on("tools/result", (execution: any, result: any) => { if (execution.name === "unsafe_probe" && result.isError) deniedProbes++; if (execution.name.startsWith("graph_")) results.set(execution.agent?.id + ":" + execution.name, result.value); });
   ctx.tools.register({ name: "unsafe_probe", description: "A forbidden worker fixture", parameters: { type: "object", properties: {} },
     output: { schema: {}, render: () => [{ type: "text", text: "unsafe" }] }, execute: async () => { unsafeCalls++; return "unsafe"; } });
   let dispose = await rolebox.apply(ctx as unknown as rolebox.DshPluginContext, rolebox.Config.parse({ roleboxDir: join(root, "rolebox") }));
-  const handle = await ctx.agents.create({ sessionId: SessionId("dsh-parent"), meta: { cwd: root }, setup: (scope: any) => { scope.tools.presentAs("native"); }, agentOptions: { provider: "example-provider", model: "deterministic" } });
+  const parentOptions = {
+    setup: (scope: any) => { scope.tools.presentAs("native"); },
+    agentOptions: { provider: "example-provider", model: "deterministic" },
+  };
+  const handle = restoreRoot
+    ? await ctx.agents.resume({ resumeSessionId: SessionId("dsh-parent"), ...parentOptions })
+    : await ctx.agents.create({ sessionId: SessionId("dsh-parent"), meta: { cwd: root }, ...parentOptions });
   if (restoreRoot) {
     parentAction = { tool: "graph_status", args: { scope: "all", format: "json" } };
-    handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Read restored graphs." }] });
+    handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Read restored graphs." }] });
     await handle.agent.whenIdle();
     assert.ok(results.has(handle.agent.id + ":graph_status"));
     assertRestored(root, queryGraphs(graphStoreRoot(data, root)).graphs);
     console.log(JSON.stringify({ host: "dsh", processRecovery: "verified" }));
     await handle.dispose(); await dispose();
   } else {
-  handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Declare the graph fixture." }] });
+  handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Declare the graph fixture." }] });
   await handle.agent.whenIdle();
   const graph = queryGraphs(graphStoreRoot(data, root)).graphs[0];
-  assert.equal(graph?.graphId, "dsh.smoke");
+  assert.equal(graph?.graphId, "dsh.smoke", JSON.stringify(hostErrors));
   assert.equal(graph.phase, "ready");
   parentDeclaration = { version: 3, name: "dsh.explicit", nodes: [
     { id: "work", agent: "smoke--worker", prompt: "Produce.", outcomes: [{ id: "done" }] },
     { id: "review", agent: "smoke--worker", prompt: "Consume.", inputs: [{ from: "work", outcome: "done" }], outcomes: [{ id: "done" }] },
   ], edges: [{ from: "work", to: "review", outcome: "done" }] };
-  handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Execute the graph chain." }] });
+  handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Execute the graph chain." }] });
   await handle.agent.whenIdle();
   let explicit;
   const deadline = Date.now() + 10_000;
@@ -142,8 +168,11 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.equal(explicit?.phase, "complete", "Real dsh child execution did not complete");
+  assert.ok(explicit?.current, "Completed graph is missing its current attempt");
   assert.equal(explicit.current.attempts.length, 2);
-  assert.ok(existsSync(join(root, "worker-output.txt")));
+  assert.ok(existsSync(join(root, "worker-output.txt")), JSON.stringify(
+    [...results.entries()].filter(([key]) => key.endsWith(":graph_worker_exec"))));
+  assert.equal(readFileSync(protectedFile, "utf8"), "host-state");
   assert.equal(existsSync(join(launcher, "worker-output.txt")), false);
   assert.equal(existsSync(graphStoreRoot(data, launcher)), false);
   assert.equal(consumedInputs, 1, "Real dsh consumer did not read its accepted input manifest");
@@ -155,7 +184,7 @@ try {
   await handle.agent.whenIdle();
   parentDeclaration = { version: 3, name: "dsh.natural", completion_policy: { id: "smoke", revision: "1" },
     nodes: [{ id: "work", agent: "smoke--worker", prompt: "NATURAL_FIXTURE", completion: { mode: "natural", outcome: "done" }, outcomes: [{ id: "done" }] }], edges: [] };
-  handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Execute natural completion." }] });
+  handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Execute natural completion." }] });
   await handle.agent.whenIdle();
   let natural;
   const naturalDeadline = Date.now() + 10_000;
@@ -174,7 +203,7 @@ try {
     async call(tool, args, actor = "owner") {
       parentAction = { tool, args };
       const target = actor === "owner" ? handle : other;
-      target.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Execute the next verification command." }] });
+      target.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Execute the next verification command." }] });
       await target.agent.whenIdle();
       const result = results.get(target.agent.id + ":" + tool);
       return typeof result === "string" ? JSON.parse(result) : result;
@@ -188,7 +217,7 @@ try {
       nodes: [{ id: "work", agent: "smoke--worker", prompt: natural ? "WAIT_FIXTURE NATURAL_FIXTURE" : "WAIT_FIXTURE",
         ...(natural ? { completion: { mode: "natural", outcome: "done" } } : {}), outcomes: [{ id: "done" }] }], edges: [] };
     parentAction = { tool: "graph_declare", args: { declaration } };
-    handle.agent.followup({ role: "user", id: randomUUID(), content: [{ type: "text", text: "Declare restart fixture." }] });
+    handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Declare restart fixture." }] });
     await handle.agent.whenIdle();
     await eventually(() => existsSync(join(root, name + ".ready")), ready => ready, "dsh child did not become ready before reload");
   }
@@ -202,12 +231,13 @@ try {
   }
   await handle.dispose();
   await dispose();
-  await verifyHostProcessRestart(import.meta.path, root, queryGraphs(graphStoreRoot(data, root)).graphs);
+  await verifyHostProcessRestart(import.meta.filename, root, queryGraphs(graphStoreRoot(data, root)).graphs);
   console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
   }
 } catch (error) { console.error(error); throw error; } finally {
   for (const fiber of fibers.reverse()) await fiber.dispose();
   process.chdir(original);
+  rmSync(protectedFile, { force: true });
   if (previousData === undefined) delete process.env.ROLEBOX_DATA_DIR; else process.env.ROLEBOX_DATA_DIR = previousData;
   if (previousRecovery === undefined) delete process.env.ROLEBOX_ENGINE_RECOVERY; else process.env.ROLEBOX_ENGINE_RECOVERY = previousRecovery;
   if (previousPolicies === undefined) delete process.env.ROLEBOX_GRAPH_COMPLETION_POLICIES; else process.env.ROLEBOX_GRAPH_COMPLETION_POLICIES = previousPolicies;

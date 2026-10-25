@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { join } from "node:path";

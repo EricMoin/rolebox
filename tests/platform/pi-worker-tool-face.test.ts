@@ -22,7 +22,7 @@
  * SDK runs in this environment.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import { PI_SUBAGENT_TOOLS } from "../../src/entries/pi.ts";
 import { WORKER_GRANTED_GRAPH_TOOLS } from "../../src/graph/host/outcome-host.ts";

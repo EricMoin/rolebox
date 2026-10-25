@@ -1,12 +1,5 @@
-// ── Config Parsers: Unit Tests ──────────────────────────────────────────
-//
-// Tests every exported function from src/notifications/config-parsers.ts:
-//   asBoolean, asNumber, isObject, parseQuietHoursRange, parseQuietHours,
-//   parseThrottle, parseChannelConfig, parseEventConfig, parseEventConfigs
-//
-// Uses bun:test syntax – describe/it/expect from "bun:test".
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   asBoolean,
   asNumber,

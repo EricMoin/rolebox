@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach } from "vitest";
 import { registerCondition, evaluateCondition, KNOWN_CONDITIONS, type CondEnv } from "../../src/function/conditions.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { ArtifactStore } from "../../src/function/artifact-store.ts";

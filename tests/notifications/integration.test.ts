@@ -1,20 +1,5 @@
-// ── Notification System: Comprehensive Integration Tests ─────────────────
-//
-// Tests every public module in src/notifications/ with realistic scenarios.
-// Uses bun:test syntax — describe/it/expect from "bun:test".
-// Mocks external dependencies (execFile, fetch, fs, env vars, timers)
-// while testing real module code.
 
-import {
-  describe,
-  it,
-  expect,
-  beforeAll,
-  afterAll,
-  beforeEach,
-  afterEach,
-  mock,
-} from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -89,12 +74,12 @@ function tempDir(): string {
 
 function createMockClient() {
   return {
-    get: mock(() =>
+    get: vi.fn(() =>
       Promise.resolve({
         title: "Test Session",
       }),
     ),
-    messages: mock(() =>
+    messages: vi.fn(() =>
       Promise.resolve([
         {
           info: { role: "user" },
@@ -817,7 +802,7 @@ describe("Channels", () => {
   });
 
   it("WebhookChannel POSTs JSON payload", async () => {
-    const fetchMock = mock((_url: string, _init: RequestInit) =>
+    const fetchMock = vi.fn((_url: string, _init: RequestInit) =>
       Promise.resolve({ ok: true, status: 200 }),
     );
     global.fetch = fetchMock as unknown as typeof global.fetch;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { createDispatchTool } from "../../src/dispatch/tools.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { makeToolContext } from "../asset/helpers.ts";

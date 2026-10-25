@@ -5,7 +5,7 @@
  * hardening cases (non-finite input, surrogate pairs, ZWJ sequences, CJK/ANSI
  * width, markdown-cell escaping, zero-total progress bars, locale independence).
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   formatDuration,
   formatTimestamp,

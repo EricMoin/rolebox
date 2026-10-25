@@ -25,7 +25,7 @@
  * booleans.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { openTrackedCredentialVault, openTrackedExecutionIndex } from "./helpers/temp-dirs.ts";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";

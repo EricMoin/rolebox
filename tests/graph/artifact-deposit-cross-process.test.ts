@@ -1,32 +1,7 @@
-/// <reference types="bun-types" />
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 
-/**
- * The content store publishes once — across REAL OS processes (D4).
- *
- * WHY THIS FILE EXISTS. "Depositing the same bytes twice reuses one object" is a
- * same-process observation, and the rule it must hold under is concurrency: two
- * acceptances in two processes may deposit the same bytes at the same moment.
- * The deposit publishes with an exists-refusing link, so at most one process
- * creates the object and every other process must VERIFY and REUSE it rather
- * than overwrite it.
- *
- * The workers here are REAL `bun` processes (`Bun.spawn(process.execPath, ...)`),
- * four of them, released together by a marker-file barrier — each writes
- * `ready-<id>.marker` and the parent writes `go.marker` only after every one is
- * ready — so the deposits start from one controllable point instead of from
- * timing. Each worker deposits the same bytes several times, so the first round
- * is contended and the rest exercise verified reuse; every round must succeed,
- * the object must read back as the exact bytes, and the pids must be real and
- * distinct.
- *
- * Every case runs in its own `mkdtemp` directory and removes it afterwards;
- * the parent kills any surviving child so no test leaves a stray process or a
- * stray file.
- *
- * @module
- */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -61,7 +36,7 @@ const ROUNDS = 8;
  * reported as the store's behaviour rather than as a killed case with no
  * diagnosis.
  */
-setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CHILD_DEADLINE_MS + 15_000 });
 
 interface DepositReport {
   readonly pid: number;
@@ -89,25 +64,20 @@ afterEach(() => {
   children.length = 0;
 });
 
-/** Spawn one REAL bun process running the deposit worker. */
 function spawnWorker(
   id: string,
   args: Readonly<Record<string, string>>,
 ): Child {
   const argv = [process.execPath, WORKER, "--id", id];
   for (const [name, value] of Object.entries(args)) argv.push("--" + name, value);
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn(argv, { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const proc = spawnProcess(argv, { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
 
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
 
   const done = (async (): Promise<DepositReport> => {
@@ -149,7 +119,7 @@ function spawnWorker(
     done,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

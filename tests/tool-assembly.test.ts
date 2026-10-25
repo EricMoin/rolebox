@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
 import type { BuildToolsOptions } from "../src/platform/tool-assembly.ts";
 import type { ResolvedRole } from "../src/types.ts";

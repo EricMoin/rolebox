@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PluginCore, DescriptiveCycleError } from "../../src/core/plugin-core.ts";
 import type { PluginService } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
@@ -12,8 +12,8 @@ function makeService(name: string, deps: string[] = []): PluginService {
   return {
     name: fakeServiceName(name),
     dependencies: fakeServiceNames(deps),
-    init: mock(() => Promise.resolve()),
-    dispose: mock(() => Promise.resolve()),
+    init: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -38,7 +38,7 @@ function makeContext(core: PluginCore): PluginContext {
 
 describe("PluginCore", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   describe("restartService", () => {
@@ -49,8 +49,8 @@ describe("PluginCore", () => {
       await core.init(makeContext(core));
 
       // Reset call counts from init
-      (svc.init as ReturnType<typeof mock>).mockClear();
-      (svc.dispose as ReturnType<typeof mock>).mockClear();
+      (svc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
       await core.restartService(svc.name);
 
@@ -67,10 +67,10 @@ describe("PluginCore", () => {
       await core.init(makeContext(core));
 
       // Reset call counts
-      (svcA.init as ReturnType<typeof mock>).mockClear();
-      (svcA.dispose as ReturnType<typeof mock>).mockClear();
-      (svcB.init as ReturnType<typeof mock>).mockClear();
-      (svcB.dispose as ReturnType<typeof mock>).mockClear();
+      (svcA.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svcA.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svcB.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svcB.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
       // Restart A — B depends on A, so both should restart
       await core.restartService(svcA.name);
@@ -84,8 +84,8 @@ describe("PluginCore", () => {
       expect(svcB.init).toHaveBeenCalledTimes(1);
 
       // Order: A first, then B (topo-sorted: A before B)
-      const aDisposeOrder = (svcA.dispose as ReturnType<typeof mock>).mock.invocationCallOrder[0];
-      const bDisposeOrder = (svcB.dispose as ReturnType<typeof mock>).mock.invocationCallOrder[0];
+      const aDisposeOrder = (svcA.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.invocationCallOrder[0];
+      const bDisposeOrder = (svcB.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.invocationCallOrder[0];
       expect(aDisposeOrder).toBeLessThan(bDisposeOrder);
     });
 
@@ -97,10 +97,10 @@ describe("PluginCore", () => {
       core.registerService(svcC);
       await core.init(makeContext(core));
 
-      (svcA.init as ReturnType<typeof mock>).mockClear();
-      (svcA.dispose as ReturnType<typeof mock>).mockClear();
-      (svcC.init as ReturnType<typeof mock>).mockClear();
-      (svcC.dispose as ReturnType<typeof mock>).mockClear();
+      (svcA.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svcA.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svcC.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+      (svcC.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
       await core.restartService(svcA.name);
 
@@ -127,11 +127,11 @@ describe("PluginCore", () => {
     it("catches dispose errors and continues restart", async () => {
       const core = new PluginCore();
       const svcA = makeService("a");
-      svcA.dispose = mock(() => Promise.reject(new Error("dispose boom")));
+      svcA.dispose = vi.fn(() => Promise.reject(new Error("dispose boom")));
       core.registerService(svcA);
       await core.init(makeContext(core));
 
-      (svcA.init as ReturnType<typeof mock>).mockClear();
+      (svcA.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
       // Should not throw despite dispose failure
       await core.restartService(svcA.name);
@@ -155,7 +155,7 @@ describe("PluginCore", () => {
       const core = new PluginCore();
       let initCalls = 0;
       const svcA = makeService("a");
-      svcA.init = mock(() => {
+      svcA.init = vi.fn(() => {
         initCalls++;
         // First call is from core.init() — succeeds
         // Second call is from restartService — fails
@@ -167,7 +167,7 @@ describe("PluginCore", () => {
       core.registerService(svcA);
       await core.init(makeContext(core));
 
-      (svcA.dispose as ReturnType<typeof mock>).mockClear();
+      (svcA.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
       // The re-init error should propagate
       expect(core.restartService(svcA.name)).rejects.toThrow("init boom");
@@ -179,7 +179,7 @@ describe("PluginCore", () => {
       const core = new PluginCore();
       const svcA = makeService("a");
       svcA.critical = true;
-      svcA.init = mock(() => Promise.reject(new Error("critical boom")));
+      svcA.init = vi.fn(() => Promise.reject(new Error("critical boom")));
       core.registerService(svcA);
 
       await expect(core.init(makeContext(core))).rejects.toThrow("critical boom");
@@ -188,7 +188,7 @@ describe("PluginCore", () => {
     it("resolves when an optional (non-critical) service fails to init, marking it degraded", async () => {
       const core = new PluginCore();
       const svcA = makeService("a");
-      svcA.init = mock(() => Promise.reject(new Error("optional boom")));
+      svcA.init = vi.fn(() => Promise.reject(new Error("optional boom")));
       core.registerService(svcA);
 
       await expect(core.init(makeContext(core))).resolves.toBeUndefined();
@@ -198,9 +198,9 @@ describe("PluginCore", () => {
     it("skips downstream services when their dependency is degraded", async () => {
       const core = new PluginCore();
       const svcA = makeService("a");
-      svcA.init = mock(() => Promise.reject(new Error("optional boom")));
+      svcA.init = vi.fn(() => Promise.reject(new Error("optional boom")));
       const svcB = makeService("b", ["a"]);
-      const bInit = mock(() => Promise.resolve());
+      const bInit = vi.fn(() => Promise.resolve());
       svcB.init = bInit;
       core.registerService(svcA);
       core.registerService(svcB);
@@ -214,9 +214,9 @@ describe("PluginCore", () => {
     it("does not skip independent services when an unrelated service degrades", async () => {
       const core = new PluginCore();
       const svcA = makeService("a");
-      svcA.init = mock(() => Promise.reject(new Error("optional boom")));
+      svcA.init = vi.fn(() => Promise.reject(new Error("optional boom")));
       const svcC = makeService("c"); // independent
-      const cInit = mock(() => Promise.resolve());
+      const cInit = vi.fn(() => Promise.resolve());
       svcC.init = cInit;
       core.registerService(svcA);
       core.registerService(svcC);
@@ -231,9 +231,9 @@ describe("PluginCore", () => {
       const core = new PluginCore();
       const svcA = makeService("a");
       svcA.critical = true;
-      svcA.init = mock(() => Promise.reject(new Error("critical boom")));
+      svcA.init = vi.fn(() => Promise.reject(new Error("critical boom")));
       const svcB = makeService("b"); // optional, will never init
-      const bInit = mock(() => Promise.resolve());
+      const bInit = vi.fn(() => Promise.resolve());
       svcB.init = bInit;
       core.registerService(svcB);
       core.registerService(svcA);

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshSkillProvider tests — rolebox's lazy pull-style skill source for dsh's
@@ -43,7 +42,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import SkillRegistry from "@deepseek-ai/dsh-skill";
 import {

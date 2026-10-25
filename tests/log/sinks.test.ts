@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+import { spawnProcess, type NodeSubprocess } from "../../scripts/node-process.ts";
 /**
  * THE THREE DESTINATIONS AND THE FAN-OUT.
  *
@@ -18,7 +20,7 @@
  * workspace's own log directory is never touched.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -48,11 +50,11 @@ let state: { env: Record<string, string | undefined>; dir: string };
  * rotation lock and watch the sink wait for it (the wait parks the thread), so
  * the holder is spawned. See tests/log/fixtures/sink-lock-holder.ts.
  */
-const LOCK_HOLDER = join(import.meta.dir, "fixtures", "sink-lock-holder.ts");
+const LOCK_HOLDER = join(import.meta.dirname, "fixtures", "sink-lock-holder.ts");
 
 /** Spawn the holder fixture and hand back the child plus its captured stderr. */
-function spawnLockHolder(args: readonly string[]): { child: Bun.Subprocess; stderr: () => Promise<string> } {
-  const child = Bun.spawn(["bun", "run", LOCK_HOLDER, ...args], {
+function spawnLockHolder(args: readonly string[]): { child: NodeSubprocess; stderr: () => Promise<string> } {
+  const child = spawnProcess(["node", LOCK_HOLDER, ...args], {
     stdout: "ignore",
     stderr: "pipe",
     // The legacy single-file variable beats an explicit dir, and this suite's
@@ -512,7 +514,7 @@ describe("file sink", () => {
     ]);
     try {
       const appeared = Date.now() + 10_000;
-      while (!existsSync(lock) && Date.now() < appeared) await Bun.sleep(1);
+      while (!existsSync(lock) && Date.now() < appeared) await sleep(1);
       expect(existsSync(lock)).toBe(true);
 
       const started = Date.now();
@@ -548,7 +550,7 @@ describe("file sink", () => {
     ]);
     try {
       const appeared = Date.now() + 10_000;
-      while (!existsSync(lock) && Date.now() < appeared) await Bun.sleep(1);
+      while (!existsSync(lock) && Date.now() < appeared) await sleep(1);
       expect(existsSync(lock)).toBe(true);
 
       const started = Date.now();
@@ -592,7 +594,7 @@ describe("file sink", () => {
         // The lock is gone: the rotation finished (or never started).
         if (stamps.size > 0 || holder.child.exitCode !== null) break;
       }
-      await Bun.sleep(1);
+      await sleep(1);
     }
     await holder.child.exited;
     rmSync(lock, { force: true });

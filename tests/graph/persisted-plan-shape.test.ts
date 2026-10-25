@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The stored-plan reader's CONSUMER-SHAPE coverage: the fields the predicate
@@ -26,7 +25,7 @@
  * @module
  */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import type { PersistedCompiledPlan } from "../../src/graph/compiler/plan.ts";

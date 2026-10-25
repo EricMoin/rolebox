@@ -1,34 +1,5 @@
-/**
- * C-01 (F-02's store-column leg) — the catalog is the ONE spelling of a column.
- *
- * `src/graph/store/schema.ts` used to spell each of its 141 columns three times:
- * once as DDL text, once as a `GRAPH_STORE_COLUMNS` entry, and once in every
- * query list — with `GraphStoreColumn.name` typed `string`, so the compiler saw
- * no link between them. The measured consequence was that adding a column to the
- * DDL alone made the build REFUSE the store it had just created
- * (`incomplete-store: … column refused_reason is not part of format 9`): a
- * workspace born unopenable.
- *
- * The catalog is now the single source. The DDL text and the gate's expectation
- * are both generated from it, so the drift cannot be expressed, and
- * `GraphStoreColumn.name` is the closed union of the catalog's names, so a name
- * the catalog does not declare cannot be written. The DDL bytes for format 9 are
- * UNCHANGED — a store written before this change still opens, and the file this
- * build creates is the file it verifies.
- *
- * WHY THIS FILE EXISTS. `bun test` is transpile-only, so the type pins below are
- * invisible to the runtime and their authority is `bun run typecheck:tests`. The
- * runtime cases beside them are the backstop that must NOT disappear: a FOREIGN
- * or hand-edited file — the only way a DDL/catalog mismatch can still exist —
- * is refused BY NAME, naming both the offending column and the table it was
- * found in. The last case re-derives every column from the generated DDL text
- * and compares it with the catalog, so a statement that bypassed the generator
- * fails here rather than at the first open.
- *
- * @module
- */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import { createDatabaseSync } from "../../src/memory/db-driver.ts";
 import { GraphStoreFormatError } from "../../src/graph/store/errors.ts";

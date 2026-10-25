@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { formatRoleSpec, parseRoleSpec } from "../../src/cli/role-spec.ts";
 
 describe("parseRoleSpec", () => {

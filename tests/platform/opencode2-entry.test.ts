@@ -1,4 +1,4 @@
-/// <reference types="bun-types" />
+import ts from "typescript";
 
 /**
  * The opencode v2 plugin entry (src/entries/opencode2.ts).
@@ -33,7 +33,7 @@
  */
 
 import { getEventListeners } from "node:events";
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir as osTmpdir } from "node:os";
 import path from "node:path";
@@ -538,7 +538,7 @@ describe("opencode v2 entry — load contract", () => {
     expect(typeof entryDefault.setup).toBe("function");
   });
 
-  it("loads through bun as a module and keeps the shape", async () => {
+  it("loads through Node as a module and keeps the shape", async () => {
     const loaded = (await import("../../src/entries/opencode2.ts")) as {
       default: { id: string; setup: (ctx: Opencode2Plugin.Context) => Promise<Cleanup> };
     };
@@ -556,17 +556,23 @@ describe("opencode v2 entry — load contract", () => {
 
 // ── Runtime import graph ────────────────────────────────────────────────────
 
-/**
- * Walk the entry's RUNTIME import graph (relative specifiers only — bare
- * packages are the host's business) and collect the `@opencode/*` specifiers
- * that survive type erasure. `Bun.Transpiler.scanImports` reports what the
- * runtime actually loads: a type-only import is not emitted as an
- * `import-statement` (verified against src/entries/opencode.ts, whose
- * `@opencode-ai/plugin` import is type-only and therefore absent from its own
- * scan). `.js` specifiers are probed against their `.ts` source.
- */
 function runtimeHostImports(entry: string): { scanned: number; specifiers: Set<string> } {
-  const scan = new Bun.Transpiler({ loader: "ts" });
+  const scan = { scanImports(source: string) {
+    const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext } }).outputText;
+    const file = ts.createSourceFile("entry.js", output, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
+    const imports: Array<{ path: string; kind: string }> = [];
+    const visit = (node: ts.Node) => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        imports.push({ path: node.moduleSpecifier.text, kind: "import-statement" });
+      }
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+        imports.push({ path: node.arguments[0].text, kind: "dynamic-import" });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return imports;
+  } };
   const seen = new Set<string>();
   const queue = [entry];
   const specifiers = new Set<string>();
@@ -605,7 +611,7 @@ function runtimeHostImports(entry: string): { scanned: number; specifiers: Set<s
 describe("opencode v2 entry — runtime import graph", () => {
   it("never imports @opencode-ai/plugin at runtime", () => {
     const { scanned, specifiers } = runtimeHostImports(
-      path.resolve(import.meta.dir, "../../src/entries/opencode2.ts"),
+      path.resolve(import.meta.dirname, "../../src/entries/opencode2.ts"),
     );
 
     expect(scanned).toBeGreaterThan(100);

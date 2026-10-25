@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * P4.3 — the arm set agrees with the dispatches it produces, and every JOIN and
@@ -47,7 +46,7 @@
  * @module
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

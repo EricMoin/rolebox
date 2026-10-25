@@ -1055,7 +1055,7 @@ portable POSIX sh. Windows runs `cmd.exe /d /s /c` (the host's `COMSPEC` when it
 set), where POSIX idioms — single-quoted strings, `$(...)`, `<(...)`, brace
 expansion, arrays, `VAR=x cmd` — are unavailable; use `set VAR=...` and `%VAR%`.
 `perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are available, and
-`git`, `bun` and `node` run inside the workspace with disposable caches. The runner
+`git` and `node` run inside the workspace with disposable caches. The runner
 applies no OS profile of its own and is platform-neutral: whether and how a host
 confines a command is that host's own adapter decision.
 

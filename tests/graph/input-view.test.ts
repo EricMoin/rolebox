@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The worker-facing input view: a retained revision as a real file (D7).
@@ -27,7 +26,7 @@
  * here, so this is not adapter or host evidence.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   existsSync,
   mkdirSync,

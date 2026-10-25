@@ -5,6 +5,12 @@ native desktop: screenshots, windows, displays, focus, mouse input, text, keys
 and diagnostics. Drivers cover macOS, Windows and Linux X11. Wayland is
 explicitly unsupported.
 
+A web page is better served by the [browse_* family](browser-use.md): it acts on
+the page's DOM through element refs and returns page text, while a coordinate
+click depends on the desktop state and the visible window. `computer_*` remains
+the tool for the native desktop — application windows, the menu bar, dialogs and
+anything with no DOM.
+
 DSH, Pi and Codex expose the family by default. No global configuration or
 role YAML opt-in is required. Neither OpenCode entry registers the family. See
 [compatibility](compatibility.md#computer-use) for host support.
@@ -193,11 +199,12 @@ that separate permission as unverified when they expose no probe. A PNG file
 alone is not proof that protected window contents were captured.
 
 The family controls the native desktop; it does not supply browser DOM
-selectors, a general accessibility-tree API or a transaction spanning multiple
-calls. Unit tests cover driver plans, argument validation, queue behavior,
-authorization and host image transport. They do not establish live desktop
-behavior on every operating system, and tests must not send real mouse or
-keyboard input to the developer's desktop.
+selectors — those belong to the [browse_* family](browser-use.md) — a general
+accessibility-tree API, or a transaction spanning multiple calls. Unit tests
+cover driver plans, argument validation, queue behavior, authorization and host
+image transport. They do not establish live desktop behavior on every operating
+system, and tests must not send real mouse or keyboard input to the developer's
+desktop.
 
 ## Optional macOS desktop smoke test
 
@@ -205,7 +212,7 @@ The normal module test command does not operate the desktop or capture its
 contents. Native OS tests are skipped unless explicitly enabled:
 
 ```sh
-bun test --isolate tests/computer/
+npm test -- tests/computer/
 ```
 
 For the additional real permission and main-display screenshot checks on an
@@ -213,7 +220,7 @@ already authorized macOS host, opt in with `ROLEBOX_CUA_NATIVE_TESTS=1`.
 These checks do not request permissions:
 
 ```sh
-ROLEBOX_CUA_NATIVE_TESTS=1 bun test --isolate tests/computer/tools.test.ts tests/computer/capture-darwin.test.ts
+ROLEBOX_CUA_NATIVE_TESTS=1 npm test -- tests/computer/tools.test.ts tests/computer/capture-darwin.test.ts
 ```
 
 Use the smoke runner below for the complete temporary-window verification.
@@ -235,7 +242,7 @@ the absolute directory printed above, then explicitly opt in to desktop input:
 
 ```sh
 cua_tmp=/absolute/path/printed/by/the/first/terminal
-bun scripts/computer-macos-smoke.ts --run --state "$cua_tmp/state.json" --output "$cua_tmp/results"
+node --import tsx scripts/computer-macos-smoke.ts --run --state "$cua_tmp/state.json" --output "$cua_tmp/results"
 ```
 
 The runner requires granted Accessibility and Screen Recording permissions;

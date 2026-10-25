@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { stateRegistry } from "../src/core/state-registry.js";
 import { FunctionRuntimeManager } from "../src/function/runtime-state.js";
 

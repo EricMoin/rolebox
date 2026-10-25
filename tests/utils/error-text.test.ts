@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { errorText } from "../../src/utils/error-text.ts";
 
 const UNPRINTABLE = "<unprintable thrown value>";

@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   currentPlatform,
   detectSystem,

@@ -89,7 +89,7 @@ export interface Opencode2AgentProviderRequestBody {
 /**
  * The agent fields rolebox reads and writes. Guarded below against the host's
  * own mutable agent type: every key here must exist on `DeepMutable<Agent.Info>`
- * (the updater's parameter), so a host rename fails `bun run typecheck` here
+ * (the updater's parameter), so a host rename fails `npm run typecheck` here
  * instead of silently writing nothing at runtime.
  */
 export interface Opencode2MutableAgentInfo {

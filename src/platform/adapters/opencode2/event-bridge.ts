@@ -41,7 +41,7 @@
  * the event group the stream is built from
  * (…/protocol/dist/groups/event.d.ts) lists that name zero times, which is why
  * it cannot appear in the table below without failing the `satisfies` guard
- * (probed: adding it fails `bun run typecheck` with TS2353).
+ * (probed: adding it fails `npm run typecheck` with TS2353).
  *
  * The closest carriers that ARE in the union are the step and usage streams —
  * `session.step.started`, `session.step.ended`, `session.step.streamed`,

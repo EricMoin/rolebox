@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,7 +14,7 @@ process.env.XDG_DATA_HOME = listDataDir;
 
 import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
-mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
     getSyncTarget: (target: string) => {
       if (target === "opencode") {
@@ -206,3 +207,5 @@ describe("list", () => {
     expect(logs.some((c) => c.includes("Installed roles:"))).toBe(false);
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

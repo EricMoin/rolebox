@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SessionService } from "../../src/core/services/session-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { __resetForTest } from "../../src/logger.ts";
@@ -12,18 +12,18 @@ import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
  */
 function makeMinimalContext(): PluginContext {
   const sessionStub = {
-    list: mock(() => Promise.resolve([])),
-    get: mock(() => Promise.resolve(null)),
-    messages: mock(() => Promise.resolve([])),
-    children: mock(() => Promise.resolve([])),
-    todo: mock(() => Promise.resolve([])),
-    diff: mock(() => Promise.resolve([])),
-    fork: mock(() => Promise.resolve(null)),
-    status: mock(() => Promise.resolve(null)),
-    prompt: mock(() => Promise.resolve(null)),
-    promptSync: mock(() => Promise.resolve(null)),
-    create: mock(() => Promise.resolve(null)),
-    abort: mock(() => Promise.resolve(false)),
+    list: vi.fn(() => Promise.resolve([])),
+    get: vi.fn(() => Promise.resolve(null)),
+    messages: vi.fn(() => Promise.resolve([])),
+    children: vi.fn(() => Promise.resolve([])),
+    todo: vi.fn(() => Promise.resolve([])),
+    diff: vi.fn(() => Promise.resolve([])),
+    fork: vi.fn(() => Promise.resolve(null)),
+    status: vi.fn(() => Promise.resolve(null)),
+    prompt: vi.fn(() => Promise.resolve(null)),
+    promptSync: vi.fn(() => Promise.resolve(null)),
+    create: vi.fn(() => Promise.resolve(null)),
+    abort: vi.fn(() => Promise.resolve(false)),
   };
   return {
     session: sessionStub as any,
@@ -48,7 +48,7 @@ describe("SessionService", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 

@@ -1,29 +1,5 @@
-/**
- * Graph Engine v2 — surviving type-level contract pins.
- *
- * Why this file exists: `bun test` is transpile-only, so a contract that only
- * regresses at the type level (a re-widened optional field, a collapsed
- * discriminated union, a renamed JSON key) would keep every runtime suite
- * green. This file is executed by `bun test` like any other test, but its real
- * authority is the compiler: `bun run typecheck:tests`
- * (`tsc -p tsconfig.tests.json`) fails when a pin below drifts.
- *
- * This is the subset of the former `types.type-test.test.ts` whose subjects
- * SURVIVE the legacy runtime's deletion. The pins it dropped
- * (`ApproveReport` / `RejectReport` / `PruneReport`, `CancelScopeReport` and
- * the tool-layer `GraphApproveResult` / `GraphCancelResult` / `GraphRunResult`
- * projections) pinned types that were deleted with the legacy construction and
- * execution tool surface, so there is no contract left to pin.
- *
- * Pinned contracts:
- *   1. `JoinConfig` (C1/R3) — `quorum` exists only on the "quorum" branch, so a
- *      quorum strategy without its required-answer count cannot be declared
- *      (the former `quorum?: number` silently degraded to a count of 1).
- *   2. `GraphStatusSnapshot` (Y27) — which `graph_status` JSON keys are required
- *      and which are conditionally spread (must stay optional).
- */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import type { JoinConfig } from "../../src/graph/domain/join.ts";
 
 /**

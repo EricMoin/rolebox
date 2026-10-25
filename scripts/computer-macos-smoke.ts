@@ -21,7 +21,7 @@ type Step = {
   elapsedMs?: number; result?: unknown; evidence?: unknown; error?: string;
 };
 
-const usage = "Usage: bun scripts/computer-macos-smoke.ts --run --state <fixture-state.json> --output <directory>\n" +
+const usage = "Usage: node --import tsx scripts/computer-macos-smoke.ts --run --state <fixture-state.json> --output <directory>\n" +
   "Start tests/computer/fixtures/macos-cua-app.swift separately. This runner controls only that fixture; it does not request permissions or manage its lifetime.";
 
 function check(condition: unknown, message: string): asserts condition {

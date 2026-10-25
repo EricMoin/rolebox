@@ -991,6 +991,40 @@ function presentScreenshotCall(args: unknown): DshToolCallView {
   return { card: "generic", title: "Screenshot the screen" };
 }
 
+/**
+ * Pure `presentCall` for `browse_open`: the URL the page will load when one is
+ * given, otherwise the named page (or the browser itself) it opens.
+ */
+function presentBrowseOpenCall(args: unknown): DshToolCallView {
+  const a = args as { url?: unknown; page?: unknown };
+  if (typeof a.url === "string" && a.url.length > 0) {
+    return { card: "generic", title: a.url, kind: "fetch", rawInput: a.url };
+  }
+  if (typeof a.page === "string" && a.page.length > 0) {
+    return { card: "generic", title: `Open page ${a.page}`, kind: "fetch" };
+  }
+  return { card: "generic", title: "Open the browser", kind: "fetch" };
+}
+
+/**
+ * Pure `presentCall` for `browse_screenshot`: the file it will write when a
+ * path is given (plus a follow-along location), otherwise the element, the page
+ * or the viewport it captures.
+ */
+function presentBrowseScreenshotCall(args: unknown): DshToolCallView {
+  const a = args as { path?: unknown; selector?: unknown; page?: unknown };
+  if (typeof a.path === "string" && a.path.length > 0) {
+    return { card: "generic", title: `Screenshot ${a.path}`, locations: [{ path: a.path }] };
+  }
+  if (typeof a.selector === "string" && a.selector.length > 0) {
+    return { card: "generic", title: `Screenshot ${a.selector}` };
+  }
+  if (typeof a.page === "string" && a.page.length > 0) {
+    return { card: "generic", title: `Screenshot page ${a.page}` };
+  }
+  return { card: "generic", title: "Screenshot the page" };
+}
+
 /** One tool's optional native-presentation / execution-classifier surface. */
 export interface DshToolPresentation {
   presentCall?(args: unknown): DshToolCallView | undefined;
@@ -1059,6 +1093,34 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   computer_focus: {},
   computer_displays: { isConcurrencySafe: () => true },
   computer_status: { isConcurrencySafe: () => true },
+  // Browse (src/browse/tools.ts, merged only when the host's browse gate
+  // resolved on). One browser session is parent-owned state shared by every
+  // page, so ONLY the read-only dependency/session probe may join a parallel
+  // group: navigation, snapshotting, observation and interaction all touch the
+  // same session and the same page's ref map. `browse_open` names the URL it
+  // will load and `browse_screenshot` the file or element it will capture.
+  browse_open: { presentCall: presentBrowseOpenCall },
+  browse_screenshot: { presentCall: presentBrowseScreenshotCall },
+  browse_status: { isConcurrencySafe: () => true },
+  browse_snapshot: {},
+  browse_read: {},
+  browse_click: {},
+  browse_type: {},
+  browse_press: {},
+  browse_select: {},
+  browse_hover: {},
+  browse_scroll: {},
+  browse_wait: {},
+  browse_eval: {},
+  browse_upload: {},
+  browse_downloads: {},
+  browse_dialog: {},
+  browse_tabs: {},
+  browse_history: {},
+  browse_console: {},
+  browse_network: {},
+  browse_cookies: {},
+  browse_close: {},
 };
 
 // ── Factory ──────────────────────────────────────────────────────────────────
@@ -1257,7 +1319,7 @@ export class DshToolFactory implements IToolFactory {
 }
 
 // ── Compile-time contract guard ──────────────────────────────────────
-// Erased at emit. `bun run typecheck` fails if any rc.6-required member is
+// Erased at emit. `npm run typecheck` fails if any rc.6-required member is
 // loosened to optional: the conditional resolves to `false`, which violates
 // `_AllRequired`'s `readonly true[]` constraint. Mirrors the test-only
 // assertion in tests/platform/dsh-tool-factory.test.ts (tests are not part of

@@ -5,7 +5,7 @@
  * These tests verify invariants that the T7 cancellation and T10 continuation
  * guards depend on. If this test breaks, update the discriminator logic.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   DISPATCH_COMPLETION_MARKER,
   DISPATCH_ALL_COMPLETE_MARKER,

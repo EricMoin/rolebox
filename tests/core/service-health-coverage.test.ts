@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { SERVICE_NAMES, type ServiceName } from "../../src/core/service-names.ts";
 import type { PluginCoreLike, PluginService, ServiceHealth } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
@@ -27,7 +27,7 @@ import { __resetForTest } from "../../src/logger.ts";
  *
  * The `Record<ServiceName, ...>` annotation is the compile-time half of the
  * coverage guard: a name added to SERVICE_NAMES without a row here fails
- * `bun run typecheck`. The runtime probes below fail if any registered class
+ * `npm run typecheck`. The runtime probes below fail if any registered class
  * stops exposing health().
  */
 const REGISTERED_SERVICES: Record<ServiceName, new () => PluginService> = {

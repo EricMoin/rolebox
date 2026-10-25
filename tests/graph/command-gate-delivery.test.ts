@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * A command-gated acceptance DELIVERS the revision the command verified (A1).
@@ -28,7 +27,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   existsSync,
   mkdirSync,

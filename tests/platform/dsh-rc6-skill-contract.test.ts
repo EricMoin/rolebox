@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * rc.6 contract probes for `ctx.skills` against the REAL installed
@@ -52,7 +51,7 @@
  * @module
  */
 
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import { SkillRegistry, isModelInvocable, isSkillName } from "@deepseek-ai/dsh-skill";
 import type {

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, spyOn, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { handleSessionIdle, evaluateAndComplete } from "../../src/dispatch/completion/completion-evaluator.ts";
 import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog.ts";
 import type { TaskLifecycleDeps } from "../../src/dispatch/core/lifecycle-shared.ts";
@@ -117,7 +117,7 @@ function createFixture(inflightCount: number = 0): Fixture {
 
   // ── Client ─────────────────────────────────────────────────────────────
   const client = {
-    messages: mock((_id: string, _options?: unknown) =>
+    messages: vi.fn((_id: string, _options?: unknown) =>
       Promise.resolve([ASSISTANT_MESSAGE]),
     ),
   } as unknown as ISessionClient;
@@ -164,7 +164,7 @@ function createFixture(inflightCount: number = 0): Fixture {
 
 describe("inflight dispatch guard in handleSessionIdle", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   // ── Scenario (a) ──────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
   it("skips debounce when getInflightCount > 0", async () => {
     const { deps, watchdog, sessionId } = createFixture(2);
 
-    const startDebounceSpy = spyOn(watchdog, "startDebounce");
+    const startDebounceSpy = vi.spyOn(watchdog, "startDebounce");
 
     await handleSessionIdle(deps, sessionId);
 
@@ -185,7 +185,7 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
     // NOT block debounce from starting.
     const { deps, watchdog, sessionId } = createFixture(0);
 
-    const startDebounceSpy = spyOn(watchdog, "startDebounce");
+    const startDebounceSpy = vi.spyOn(watchdog, "startDebounce");
 
     await handleSessionIdle(deps, sessionId);
 
@@ -198,7 +198,7 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
   it("proceeds normally when inflight = 0", async () => {
     const { deps, watchdog, sessionId } = createFixture(0);
 
-    const startDebounceSpy = spyOn(watchdog, "startDebounce");
+    const startDebounceSpy = vi.spyOn(watchdog, "startDebounce");
 
     await handleSessionIdle(deps, sessionId);
 
@@ -214,7 +214,7 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
     // Register the watchdog test hook so we can verify the task is registered
     expect(watchdog.getRegisteredTaskIds()).toContain(taskId);
 
-    const startDebounceSpy = spyOn(watchdog, "startDebounce");
+    const startDebounceSpy = vi.spyOn(watchdog, "startDebounce");
 
     await handleSessionIdle(deps, sessionId);
 
@@ -227,7 +227,7 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
   it("eventually starts debounce when inflight drops to 0 on subsequent idle", async () => {
     // Phase 1: inflight = 2 → debounce should be skipped
     const { deps, watchdog, sessionId } = createFixture(2);
-    const startDebounceSpy = spyOn(watchdog, "startDebounce");
+    const startDebounceSpy = vi.spyOn(watchdog, "startDebounce");
 
     await handleSessionIdle(deps, sessionId);
 
@@ -255,7 +255,7 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
   it("is no-op for unknown session", async () => {
     const { deps, watchdog } = createFixture(0);
 
-    const startDebounceSpy = spyOn(watchdog, "startDebounce");
+    const startDebounceSpy = vi.spyOn(watchdog, "startDebounce");
 
     // Call with a session that has no mapping
     await handleSessionIdle(deps, "ses-nonexistent");
@@ -271,7 +271,7 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
   const STALE_MS = 100;
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   interface EvalFixture {
@@ -343,8 +343,8 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
 
     // Client returns "busy" -> detectCompletion returns { type: "not_ready" }
     const client = {
-      messages: mock(() => Promise.resolve([])),
-      status: mock(() => Promise.resolve({ type: "busy" })),
+      messages: vi.fn(() => Promise.resolve([])),
+      status: vi.fn(() => Promise.resolve({ type: "busy" })),
     } as unknown as ISessionClient;
 
     const config = {
@@ -381,17 +381,17 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
       oldestStartedAtByParent,
       // Supporting mocks for timeout path
       pendingNotifications: new Set<string>(),
-      sendNotification: mock(() => Promise.resolve(true)),
-      concurrency: { release: mock(() => {}) },
-      persistState: mock(() => {}),
+      sendNotification: vi.fn(() => Promise.resolve(true)),
+      concurrency: { release: vi.fn(() => {}) },
+      persistState: vi.fn(() => {}),
       cleanupTimers: new Map(),
       notifyOutbox: new Set<string>(),
-      addToOutbox: mock(() => {}),
-      cleanupTask: mock(() => {}),
-      sessionMonitor: { verifyExistence: mock(() => Promise.resolve("exists" as const)) },
-      progressStore: { addProgressEvent: mock(() => {}), clearProgress: mock(() => {}) },
-      clearEmittedThresholds: mock(() => {}),
-      deleteTaskCheckpoint: mock(() => Promise.resolve()),
+      addToOutbox: vi.fn(() => {}),
+      cleanupTask: vi.fn(() => {}),
+      sessionMonitor: { verifyExistence: vi.fn(() => Promise.resolve("exists" as const)) },
+      progressStore: { addProgressEvent: vi.fn(() => {}), clearProgress: vi.fn(() => {}) },
+      clearEmittedThresholds: vi.fn(() => {}),
+      deleteTaskCheckpoint: vi.fn(() => Promise.resolve()),
       taskTerminatedListeners: new Map(),
       sidecarGCTimers: new Map(),
       cancelQueue: new Map(),
@@ -409,7 +409,7 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
   // ── Test (a) ──────────────────────────────────────────────────────────
 
   it("(a) refreshes lastProgressUpdate when all inflight children are healthy", async () => {
-    const nowSpy = spyOn(Date, "now").mockReturnValue(BASE_TIME);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(BASE_TIME);
     try {
       // 2 children, both started 10ms ago (<= 100ms staleMs), lastProgressUpdate recent
       const { deps, taskId } = createEvalFixture(2, -10, -10);
@@ -428,7 +428,7 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
   // ── Test (b) ──────────────────────────────────────────────────────────
 
   it("(b) times out parent when stale children cannot prevent natural staleness", async () => {
-    const nowSpy = spyOn(Date, "now").mockReturnValue(BASE_TIME);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(BASE_TIME);
     try {
       // 1 child started 200ms ago (> 100ms staleMs) - stale
       // lastProgressUpdate is 200ms ago - triggers "Task stalled" before inflight guard
@@ -447,7 +447,7 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
   // ── Test (c) ──────────────────────────────────────────────────────────
 
   it("(c) preserves existing timeout behavior when inflight = 0 (no regression)", async () => {
-    const nowSpy = spyOn(Date, "now").mockReturnValue(BASE_TIME);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(BASE_TIME);
     try {
       // No inflight children, lastProgressUpdate is 200ms ago (> staleMs)
       const { deps, taskId } = createEvalFixture(0, 0, -200);

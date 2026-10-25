@@ -1,21 +1,5 @@
-// ── Copilot Config: Unit Tests ──────────────────────────────────────
-//
-// Tests src/copilot/config.ts (parseCopilotConfig + frozen defaults) and
-// src/copilot/types.ts (action vocabulary). Uses bun:test syntax.
-//
-// Coverage:
-//   1. Defaults when the block is absent / empty / non-object
-//   2. Field coercion (string → boolean / number)
-//   3. Malformed-rule warn-and-skip fallback (missing id, no match criteria)
-//   4. Unknown action rejection
-//   5. Duplicate rule id deduplication
-//   6. LLM defaults (timeout 30000, window_size 20, max_chars 8000,
-//      include_tools true) and llm-block validation
-//   7. Frozen defaults are never mutated by parsing
-//   8. Role-loader integration: a role.yaml with a copilot block loads
-//      through discoverRoles without throwing and carries the block
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";

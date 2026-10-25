@@ -1,37 +1,5 @@
-/**
- * The Wave 0 surface guards on the tool / control / audit / query slice.
- *
- * WHAT THIS FILE PINS, and why each is a guard rather than a restatement:
- *
- *   F-27 — the four report/status fields were bare `string`, so an
- *   out-of-vocabulary value (`graph_status({ status: "settle" })`) type-checked
- *   and was answered by a silent empty filter. They now name the unions that
- *   own them (`OutcomeStopReason`, `ControlCommandName`, `OutcomeGraphPhase`,
- *   `OutcomeNodeStatus`), and the `expectTypeOf` pins below make a re-widening
- *   a compile error.
- *
- *   F-15 — the audit's per-entry blocker vocabulary is a SUBSET of the store's
- *   blocker vocabulary: the four store-level codes are decided once for the
- *   whole store, carry their own axis there, and are not members of
- *   `DrainAuditEntryBlockerCode`. The split is pinned at the type level, and
- *   the store-backed case below proves the runtime classification still names
- *   the entry's code, its axis and the contained reason — never the raw
- *   `graph "<id>": <code>` degradation the old fall-through rendered.
- *
- *   F-30 — `renderGraphQuery` pairs each graph with its own snapshot ONCE. The
- *   tree/compact multi-graph renders are pinned byte-for-byte here, so the
- *   render the index-based association produced is the render the pair
- *   produces.
- *
- * STRENGTH: type pins plus two focused runtime cases — one store-backed audit
- * over an OS temp tree, one pure render of hand-built views. No host SDK and no
- * child process runs, so nothing here is real-host evidence.
- *
- * AUTHORITY: `bun test` is transpile-only, so the `expectTypeOf` pins are
- * enforced by `bun run typecheck:tests`.
- */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

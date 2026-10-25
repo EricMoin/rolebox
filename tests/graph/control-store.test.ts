@@ -21,7 +21,7 @@
  * STRENGTH: pure/unit over a real store file, one process.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

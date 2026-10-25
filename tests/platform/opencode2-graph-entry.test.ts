@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * opencode v2 entry (src/entries/opencode2.ts) — the declared-graph wiring.
@@ -33,7 +32,7 @@
  * crosses the published contract in ONE documented place (`asContext`).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir as osTmpdir } from "node:os";
 import path from "node:path";

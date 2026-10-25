@@ -10,7 +10,7 @@
  * The tests are self-contained: they create no files and mutate nothing.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import {
   contractDigest,

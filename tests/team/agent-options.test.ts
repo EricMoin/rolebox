@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { resolveTeamAgentOptions } from "../../src/team/agent-options.ts";
 
 describe("resolveTeamAgentOptions", () => {

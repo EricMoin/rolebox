@@ -28,7 +28,7 @@
  * non-zero (1) with a per-seam diff on any drift.
  *
  * Usage:
- *   DSH_SOURCE_DIR=/path/to/harness-source bun run scripts/verify-dsh-contract.ts
+ *   DSH_SOURCE_DIR=/path/to/harness-source node --import tsx scripts/verify-dsh-contract.ts
  */
 
 import { existsSync, readFileSync } from "node:fs"
@@ -36,7 +36,7 @@ import { relative, resolve } from "node:path"
 import ts from "typescript"
 import { load as loadYaml } from "js-yaml"
 
-const projectRoot = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd()
+const projectRoot = import.meta.dirname ? resolve(import.meta.dirname, "..") : process.cwd()
 
 // ── Drift ledger ────────────────────────────────────────────────────────────
 

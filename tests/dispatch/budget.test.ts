@@ -1,16 +1,4 @@
-/**
- * Session budget removal — dispatch launches are UNBOUNDED.
- *
- * The `maxTotalSessionsPerRequest` tree-level session cap was removed from
- * src/. Dispatch no longer counts sessions per parent and never rejects with
- * "Session budget exhausted". These tests lock in the new unbounded behavior:
- * many background launches from one parent all reach pending/running, no
- * `/budget/` error appears anywhere, and executeSync does not throw on
- * repeated launches.
- *
- * Run: bun test tests/dispatch/budget.test.ts
- */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification.ts";
 
 afterEach(() => {

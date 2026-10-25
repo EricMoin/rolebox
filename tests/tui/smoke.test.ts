@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -12,7 +11,7 @@ import { resolve } from "node:path";
  * expected contract (id, tui) and that logic.ts has no UI framework imports.
  */
 describe("TUI plugin module", () => {
-  const indexPath = resolve(import.meta.dir, "../../src/tui/index.tsx");
+  const indexPath = resolve(import.meta.dirname, "../../src/tui/index.tsx");
 
   it("has the correct TuiPluginModule export shape via source analysis", () => {
     const source = readFileSync(indexPath, "utf-8");
@@ -44,7 +43,7 @@ describe("TUI plugin module", () => {
   it("has no imports from @opentui/solid or solid-js in logic.ts", () => {
     // Logic.ts should be pure — check source for forbidden imports
     const logicSource = readFileSync(
-      resolve(import.meta.dir, "../../src/tui/logic.ts"),
+      resolve(import.meta.dirname, "../../src/tui/logic.ts"),
       "utf-8",
     );
     expect(logicSource).not.toContain("@opentui/solid");

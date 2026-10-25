@@ -1,49 +1,6 @@
-/**
- * P3 item 1 — A STOPPING CONTROL DECISION IS ATTEMPT-SCOPED.
- *
- * WHAT THIS FILE PROVES BY BEHAVIOUR, through the SHIPPED assembly (a real
- * `OutcomeHost`, the workspace's one SQLite store, the real `createGraphToolSet`
- * and the real `graph_control` / `graph_submit_outcome` tools bound by
- * `OutcomeHost.bindTools`):
- *
- * - a node-scoped `failure` (and `timeout`) records its decision on the ONE
- *   attempt it names and claims NO run control fact: the persisted phase is
- *   still `executing`, the attempt's effect is failed and its budget
- *   reservation released, and a SIBLING still settles and arms its successor —
- *   every assertion reads the durable rows back with a FRESH connection;
- * - the stopped attempt accepts NOTHING: a late submission is refused with the
- *   named `attempt-stopped` refusal, in BOTH directions of the race — a decision
- *   that committed before the submission, and one that commits while the
- *   submission's declared gate runs (a REAL second OS process, spawned
- *   synchronously from inside the gate) — and the store's own receipt INSERT
- *   refuses the same batch;
- * - the attempt is carried forward only by a node-scoped `retry` of its node,
- *   which is APPLIED after a `failure` (the engine's one resolution path) and
- *   mints a SUCCESSOR attempt with a NEW credential that can settle;
- * - a `cancel` and a `budget-stop` still end the RUN: they claim the run's
- *   control fact, a later submission still answers `control-stopped`, and a
- *   node-scoped retry is still refused `run-stopped`;
- * - an approval request never pauses a stopped attempt (`attempt-stopped`), so no
- *   pause lands on an execution that could never settle, while a sibling is
- *   still pausable;
- * - the RUN's control fact and the ATTEMPT's stopping decision are read in
- *   SEPARATE, non-transactional steps, so a run-wide `cancel` that commits
- *   BETWEEN them — a REAL second OS process committing from the state read — is
- *   answered `control-stopped` (the run-level code and message, never a claim
- *   that the run still executes), while a node-scoped `failure` committed in the
- *   same window is still answered `attempt-stopped`; neither writes anything;
- * - recovery refuses to (re-)LAUNCH an effect whose attempt carries a stopping
- *   decision: an attempt-scoped stop leaves the run live, so the boot sweep
- *   reaches the stopped attempt's unsettled effect, and on a substrate whose
- *   query PROVES absence that is exactly the window that would create the
- *   execution again. The sibling in the same window IS launched.
- *
- * STRENGTH: adapter + real store, process-level, with one REAL cross-process
- * race (a `bun` child process with its own store connection). No real dsh/Pi SDK
- * runs in this environment, so nothing here is real-host evidence.
- */
+import { spawnProcessSync, spawnProcess } from "../../scripts/node-process.ts";
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -75,7 +32,7 @@ import type {
 } from "../../src/platform/types.ts";
 import { approvalPolicyFor } from "./helpers/approval-policy.ts";
 
-setDefaultTimeout(30_000);
+vi.setConfig({ testTimeout: 30_000 });
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -549,18 +506,6 @@ interface RaceReport {
   readonly error?: string;
 }
 
-/**
- * Record ONE ATTEMPT-SCOPED stopping decision from a REAL second OS process.
- *
- * WHY SYNCHRONOUS AND WHY A SECOND PROCESS. The acceptance gate runs outside the
- * acceptance transaction, so the only place a test can commit a decision INSIDE
- * that window is a validator — and validation is synchronous by contract.
- * `Bun.spawnSync` starts a second `bun` process with its OWN connection to the
- * same store, which commits the decision before this submission's transaction
- * opens: exactly the interleaving the run path's pre-transaction check cannot
- * see. The racer writes the DECISION ONLY — no run control fact — because that is
- * what an attempt-scoped stop is: the run keeps executing.
- */
 function applyAttemptStopFromAnotherProcess(options: {
   readonly dir: string;
   readonly storeRoot: string;
@@ -595,11 +540,7 @@ function applyAttemptStopFromAnotherProcess(options: {
   ].join("\n");
   const scriptPath = join(options.dir, "attempt-stop-racer.ts");
   writeFileSync(scriptPath, script);
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const result = Bun.spawnSync([process.execPath, scriptPath], {
+  const result = spawnProcessSync([process.execPath, scriptPath], {
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
@@ -684,7 +625,7 @@ function applyControlFromAnotherProcess(options: {
   ].join("\n");
   const scriptPath = join(options.dir, "run-wide-stop-racer.ts");
   writeFileSync(scriptPath, script);
-  const result = Bun.spawnSync([process.execPath, scriptPath], {
+  const result = spawnProcessSync([process.execPath, scriptPath], {
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",

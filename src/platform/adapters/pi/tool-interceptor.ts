@@ -22,13 +22,13 @@
  * self-correct on the next turn without polluting the session with a
  * thrown error.
  *
- * Computer-use calls follow the acting role's optional tool restrictions.
- * Missing role rules allow the tools; explicit denials return an error and
- * enter pendingCorrections when hook state is wired. The policy check
- * runs BEFORE `handleToolBefore` so a computer tool that is not (or no longer)
- * in the schema registry cannot slip past it. Nothing changes for every other
- * tool: without the seam, or for a non-computer name, the pipeline below is
- * byte-for-byte the previous behavior.
+ * Computer-use and browse calls follow the acting role's optional tool
+ * restrictions. Missing role rules allow the tools; explicit denials return an
+ * error and enter pendingCorrections when hook state is wired. The policy
+ * checks run BEFORE `handleToolBefore` so a family tool that is not (or no
+ * longer) in the schema registry cannot slip past them. Nothing changes for
+ * every other tool: without the seam, or for a name outside both families, the
+ * pipeline below is byte-for-byte the previous behavior.
  *
  * @module
  */
@@ -43,6 +43,10 @@ import {
   decideComputerToolGrant,
   isComputerToolName,
 } from "../../../loader/computer-grants.ts";
+import {
+  decideBrowseToolGrant,
+  isBrowseToolName,
+} from "../../../loader/browse-grants.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { err, ok, type Result } from "../../../utils/result.ts";
 
@@ -64,6 +68,25 @@ export interface ToolInterceptorHooks {
    * disagree). See {@link ToolInterceptorComputerUse}.
    */
   computerUse?: ToolInterceptorComputerUse;
+  /**
+   * Browse-use enforcement seam. Absent → no browse policy runs (the family is
+   * then not registered by this host either, so the two cannot disagree). See
+   * {@link ToolInterceptorBrowseUse}.
+   */
+  browseUse?: ToolInterceptorBrowseUse;
+}
+
+/**
+ * The browse policy the Pi entry wires into the interceptor — the same shape as
+ * {@link ToolInterceptorComputerUse}, with the same call-time role lookup.
+ */
+export interface ToolInterceptorBrowseUse {
+  /** The resolved global gate; `false` makes the seam inert. */
+  enabled: boolean;
+  /** The role id acting in a session, or `null` for the base agent. */
+  activeRoleFor(sessionID: string): string | null;
+  /** The CURRENT resolved roles (read at call time so a role reload is seen). */
+  roles(): readonly ResolvedRole[];
 }
 
 /**
@@ -87,19 +110,40 @@ export interface ToolInterceptorComputerUse {
 export type ToolBeforeOutcome = Result<Record<string, unknown>, string>;
 
 /** Surface one denial: the model gets the reason, the log gets the event. */
-export function denyComputerTool(
+function denyFamilyTool(
+  family: "computer" | "browse",
   reason: string,
   sessionID: string,
   tool: string,
   state?: HookState,
 ): ToolBeforeOutcome {
-  log.warn("computer use denied", { tool, sessionID, reason });
+  log.warn(`${family} use denied`, { tool, sessionID, reason });
   // Correction injection: surface the rejection in the next system
   // transform, not only as a tool result.
   if (state) {
     appendCorrection(state.pendingCorrections, sessionID, reason);
   }
   return err(reason);
+}
+
+/** Surface one computer-use denial. */
+export function denyComputerTool(
+  reason: string,
+  sessionID: string,
+  tool: string,
+  state?: HookState,
+): ToolBeforeOutcome {
+  return denyFamilyTool("computer", reason, sessionID, tool, state);
+}
+
+/** Surface one browse-use denial. */
+export function denyBrowseTool(
+  reason: string,
+  sessionID: string,
+  tool: string,
+  state?: HookState,
+): ToolBeforeOutcome {
+  return denyFamilyTool("browse", reason, sessionID, tool, state);
 }
 
 /**
@@ -111,8 +155,8 @@ export function denyComputerTool(
  * state is wired, injects it into the session's pendingCorrections so the
  * next system transform carries the correction to the model.
  *
- * A computer_* call explicitly denied by the acting role fails the same way,
- * with a reason naming the role and its restriction.
+ * A computer_* or browse_* call explicitly denied by the acting role fails the
+ * same way, with a reason naming the role and its restriction.
  *
  * Never throws into Pi.
  */
@@ -123,8 +167,19 @@ export async function interceptToolBefore(
   context: CanonicalToolContext,
   hooks?: ToolInterceptorHooks,
 ): Promise<ToolBeforeOutcome> {
-  // Computer-use policy first: a denial must not depend on the tool being in
-  // the schema registry (an unregistered name returns early below).
+  // Family policies first: a denial must not depend on the tool being in the
+  // schema registry (an unregistered name returns early below).
+  const browseUse = hooks?.browseUse;
+  if (browseUse?.enabled === true && isBrowseToolName(tool)) {
+    const decision = decideBrowseToolGrant({
+      toolName: tool,
+      roleId: browseUse.activeRoleFor(context.sessionID),
+      roles: browseUse.roles(),
+    });
+    if (!decision.granted) {
+      return denyBrowseTool(decision.reason, context.sessionID, tool, hooks?.state);
+    }
+  }
   const computerUse = hooks?.computerUse;
   if (computerUse?.enabled === true && isComputerToolName(tool)) {
     const decision = decideComputerToolGrant({

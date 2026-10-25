@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/resolver/env-resolver.js";
 import { createSubLogger, type Logger } from "../src/logger.js";
 

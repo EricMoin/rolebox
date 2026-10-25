@@ -525,7 +525,7 @@ Markdown format: `# {title}` header, metadata block, `## Messages` section with 
 **Subtask 21** — `tests/session/linking.test.ts`.
 
 ### Phase 6: Verification
-**Subtask 22** — Full test suite run (`bun test tests/session/`), `tsc --noEmit`, regression check on existing tests.
+**Subtask 22** — Full test suite run (`npm test -- tests/session/`), `tsc --noEmit`, regression check on existing tests.
 
 ---
 
@@ -568,7 +568,7 @@ Markdown format: `# {title}` header, metadata block, `## Messages` section with 
 ## 8. Test Plan
 
 ### 8.1 Test Pattern
-Following `tests/dispatch/tools.test.ts`: Use `bun:test` (`describe`, `it`, `expect`, `mock`), mock `OpencodeClient` stubs for all session methods, test each tool for happy path, empty results, error handling, edge cases.
+Following `tests/dispatch/tools.test.ts`: Use Vitest (`describe`, `it`, `expect`, `vi`), mock `OpencodeClient` stubs for all session methods, test each tool for happy path, empty results, error handling, edge cases.
 
 ### 8.2 Mock Client Factory
 ```typescript
@@ -636,8 +636,8 @@ None required. All configuration is via tool parameters.
 
 1. All 10 tools registered as `plugin.tool` hooks in `src/plugin-hooks.ts`
 2. `tsc --noEmit` passes with zero errors
-3. `bun test tests/session/` passes all 5 test files (minimum 40+ test cases)
-4. `bun test tests/dispatch/` and `bun test tests/plugin-hooks.test.ts` pass with no regressions
+3. `npm test -- tests/session/` passes all 5 test files (minimum 40+ test cases)
+4. `npm test -- tests/dispatch/` and `npm test -- tests/plugin-hooks.test.ts` pass with no regressions
 5. All client API calls use correct v2 flat parameter signatures with `directory: context.directory`
 6. All client API calls unwrap the `RequestResult` envelope with error handling
 7. `session_link` tool uses `HookDeps`; all other 9 tools use only `PluginInput["client"]`

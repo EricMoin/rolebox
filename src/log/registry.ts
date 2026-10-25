@@ -44,7 +44,7 @@
 //
 // WHAT MAY OPT IN. An entry earns a `throttleMs` only when the log of a real
 // workspace shows the SAME observation being re-reported in a loop — the counts
-// live in the entry's own comment, and `bun scripts/log-event-density.ts` prints
+// live in the entry's own comment, and `node --import tsx scripts/log-event-density.ts` prints
 // them for any log directory (records, the largest 60 s/10 s/1 s burst, how many
 // records repeat their predecessor's fields, and how many records a window would
 // let through). The window is chosen from the measured cadence: long enough to
@@ -68,7 +68,7 @@
 // entry's own `Fields:` line by tests/log/throttle-policy.test.ts.
 //
 // ENTRIES MEASURED WITHOUT A FLOOD ARE STILL OPTED IN ONLY WHEN THE WINDOW
-// CANNOT HIDE ANOTHER SUBJECT. `bun scripts/log-event-density.ts --dir
+// CANNOT HIDE ANOTHER SUBJECT. `node --import tsx scripts/log-event-density.ts --dir
 // .rolebox/logs` reports 12 codes in this workspace and neither of the two
 // entries below has a single record there, so their windows are NOT earned by a
 // measured burst: they are earned by being per-subject deduplicators — with the
@@ -177,7 +177,7 @@ export const LOG_EVENTS = {
    * THROTTLED: 60s, keyed by SUBJECT — `throttleBy: "code"`, so the window that
    * one drifted code opens cannot swallow another drifted code's first report.
    * Evidence: the drift case is the window's reason for existing rather than a
-   * measured burst — `bun scripts/log-event-density.ts --dir .rolebox/logs`
+   * measured burst — `node --import tsx scripts/log-event-density.ts --dir .rolebox/logs`
    * shows 12 codes in this workspace and this one has 0 records there, because
    * both the platform's own call sites and its vocabulary are closed. The
    * counter is nevertheless unbounded per subject (a call site that drifts into
@@ -1424,7 +1424,7 @@ export const LOG_EVENTS = {
    * which is what keeps one source narrowing on every record from swallowing
    * another source's first report (the pre-subject window was the single channel
    * `log:compat`, i.e. one window for the whole process).
-   * Evidence: `bun scripts/log-event-density.ts --dir .rolebox/logs` shows 12
+   * Evidence: `node --import tsx scripts/log-event-density.ts --dir .rolebox/logs` shows 12
    * codes in this workspace and 0 records for this one — it is emitted at
    * `debug` while the workspace runs at the default `info`, so no measured burst
    * exists here and the window is not claimed to be earned by one. What it

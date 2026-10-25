@@ -114,8 +114,8 @@ export type ConfigPrompts = Omit<PromptApi, "log"> & {
  * `projectDir` selects the directory whose project-level opencode documents
  * contribute models; it is a parameter (not an ambient `process.cwd()` read at
  * the call sites below) so a test can exercise a project config without
- * `process.chdir()`, which is process-global and unsafe under Bun's parallel
- * test files.
+ * `process.chdir()`, which is process-global and unsafe during concurrent
+ * tests.
  */
 export async function runInteractive(
   roleDir: string,

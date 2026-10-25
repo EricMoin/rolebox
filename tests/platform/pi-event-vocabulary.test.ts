@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Guard — the pi adapter maps exactly the event vocabulary the host can deliver.
@@ -16,7 +15,7 @@
  * @module
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import {
   PI_EVENT_TYPE_MAP,
   mapPiEventType,

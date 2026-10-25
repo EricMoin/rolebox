@@ -23,7 +23,7 @@
  * config is never read. The home-dot layer resolves `HOME` at call time, so
  * the per-case assignment is what keeps it isolated.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, sep } from "node:path";

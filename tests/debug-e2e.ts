@@ -1,10 +1,10 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, cpSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
 import { bootstrapRoles } from "../src/resolver/bootstrap.ts";
 
-const examplesDir = path.join(import.meta.dir, "..", "examples");
+const examplesDir = path.join(import.meta.dirname, "..", "examples");
 
 it("debug researcher subagent prompt", async () => {
   const tmpDir = mkdtempSync(path.join(osTmpdir(), "rolebox-debug-"));
@@ -18,7 +18,7 @@ it("debug researcher subagent prompt", async () => {
     roleboxDir,
     globalSkillsDir: path.join(tmpDir, "skills"),
     configDir: tmpDir,
-    builtinDir: path.join(import.meta.dir, "..", "functions"),
+    builtinDir: path.join(import.meta.dirname, "..", "functions"),
     roleFunctionsMap,
   });
 

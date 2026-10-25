@@ -374,7 +374,7 @@ export type DshContinuableCreateSpec = {
 };
 
 // ── Compile-time contract guard ──────────────────────────────────────
-// Erased at emit. Fails `bun run typecheck` when a mirrored surface regresses:
+// Erased at emit. Fails `npm run typecheck` when a mirrored surface regresses:
 //   - `result` → `Promise<unknown>` (which would reintroduce the
 //     dispatch-side cast);
 //   - the provider-facing `descriptor` → optional (which would admit a start

@@ -21,7 +21,7 @@
  * @module
  */
 
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -72,7 +72,7 @@ function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
     dir: "/tmp/test",
     dispatchManager: {} as any,
     loopManager: {} as any,
-    customHooks: { runHooks: mock(() => Promise.resolve()) } as any,
+    customHooks: { runHooks: vi.fn(() => Promise.resolve()) } as any,
     ...overrides,
   };
 }
@@ -159,7 +159,7 @@ describe("Pi tool interceptor — strict parameter validation", () => {
   });
 
   it("does not invoke the canonical def when validation fails", async () => {
-    const execute = mock(async () => "ran");
+    const execute = vi.fn(async () => "ran");
     const def = defineTool({
       description: "spy tool",
       args: { filePath: z.string() },
@@ -318,7 +318,7 @@ describe("Pi tool interceptor — custom hook before phase", () => {
 
   it("does not run custom hooks when no hook wiring is provided", async () => {
     const customHooks = new CustomHookRegistry();
-    const runHooks = mock(() => Promise.resolve());
+    const runHooks = vi.fn(() => Promise.resolve());
     const deps = minimalDeps({ customHooks: { runHooks } as any });
 
     const def = createHashlineReadTool();

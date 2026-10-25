@@ -36,7 +36,7 @@ when the MCP server boots.
 ## Install and use
 
 1. Install rolebox the usual way — `npm install -g rolebox`, or run from a checkout that
-   has been built with `bun run build`. The recorded server entry is the built
+   has been built with `npm run build`. The recorded server entry is the built
    `dist/entries/codex.js` artifact.
 2. Run the sync target:
 
@@ -56,7 +56,7 @@ command prints both halves — `Codex plugin: wrote the marketplace directory
 safe to repeat, and re-raises the error rather than printing the success line. A recorded
 server entry that does not exist (a source checkout that was never built) does not fail
 the sync: the bundle is still written and registered, and a warning names the missing
-`dist/entries/codex.js` path and suggests `bun run build`.
+`dist/entries/codex.js` path and suggests `npm run build`.
 
 ## What `rolebox sync codex` writes
 
@@ -137,10 +137,9 @@ and `SIGTERM` flush handlers on first evaluation.
   bound to `process.stdout` — to stderr, so stray output cannot corrupt the stream. That
   guarantee covers writes through `process.stdout` after the guard is installed (both
   `rolebox mcp` and a direct `node dist/entries/codex.js` go through it); it does not
-  cover bytes written straight to fd 1, and a global `console.log` is diverted only where
-  the runtime routes it through `process.stdout` — Node does (the generated `.mcp.json`
-  launches `command: node`), while Bun writes it to fd 1 natively (the `rolebox` bin's
-  shebang selects Bun). An embedder that calls `startCodexMcpServer()` itself gets no
+  cover bytes written straight to fd 1, and Node routes global `console.log` through
+  `process.stdout`, so it is diverted as well. Both the generated `.mcp.json` and
+  the `rolebox` executable use Node.js. An embedder that calls `startCodexMcpServer()` itself gets no
   guard. Diagnostics go to stderr (`[rolebox codex] ...`) and rolebox's own logger writes
   to its log file.
 - **Methods**: `initialize`, `ping`, `tools/list`, `tools/call`.

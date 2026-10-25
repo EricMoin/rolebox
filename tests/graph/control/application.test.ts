@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { removeTempTrees } from "../helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -153,7 +153,7 @@ describe("control transaction outcomes", () => {
 
   it("rolls back a retry reservation when the decisive write refuses settlement", async () => {
     const f = await fixture();
-    const write = spyOn(f.store, "writeControlDecision").mockReturnValue({
+    const write = vi.spyOn(f.store, "writeControlDecision").mockReturnValue({
       kind: "settled", attemptId: "work#1", runControl: undefined,
     });
     try {
@@ -174,7 +174,7 @@ describe("control transaction outcomes", () => {
     const f = await fixture({ ...declaration, nodes: [work, { ...work, id: "review" }] });
     const original = f.store.writeControlDecision.bind(f.store);
     let calls = 0;
-    const write = spyOn(f.store, "writeControlDecision").mockImplementation((input) =>
+    const write = vi.spyOn(f.store, "writeControlDecision").mockImplementation((input) =>
       ++calls === 2
         ? { kind: "settled", attemptId: input.decision.attemptId, runControl: undefined }
         : original(input),

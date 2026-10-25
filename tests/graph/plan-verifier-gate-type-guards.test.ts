@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The stored-plan reader's guards (F-04, plus A-11's agreement rule).
@@ -31,7 +30,7 @@
  * @module
  */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

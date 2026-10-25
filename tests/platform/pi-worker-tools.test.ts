@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { registerPiGraphWorker } from "../../src/platform/adapters/pi/graph-worker.ts";
 import { piWorkerToolConfig, validatePiWorkerTools } from "../../src/platform/adapters/pi/worker-tools.ts";
 

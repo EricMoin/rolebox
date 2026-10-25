@@ -22,8 +22,8 @@ export function renderHeader(props: { c: ThemeColors; version: string } & Header
   return (
     <>
       <text>
-        <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{"Rolebox"}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" v" + truncate(props.version, LEN_VERSION)}</span>
+        <span style={{ fg: rgbaToCSS(c.primary), attributes: BOLD }}>{"Rolebox"}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" v" + truncate(props.version, LEN_VERSION)}</span>
       </text>
     </>
   );

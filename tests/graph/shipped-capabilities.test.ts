@@ -21,7 +21,7 @@
  * Every case uses its own mkdtemp directory, removed in afterEach.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -565,7 +565,7 @@ describe("the shipped entries assemble the capability set (static wiring check)"
   const entries = ["src/entries/dsh.ts", "src/entries/pi.ts"];
 
   it("calls the one assembly, hands the registry to host and toolset, and constructs no empty registry", () => {
-    const repoRoot = join(import.meta.dir, "..", "..");
+    const repoRoot = join(import.meta.dirname, "..", "..");
     for (const entry of entries) {
       const text = readFileSync(join(repoRoot, entry), "utf8");
       expect(text).toContain("GraphApplication.open({");

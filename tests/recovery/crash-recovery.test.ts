@@ -9,7 +9,7 @@
  * PluginCore.init() NEVER throws in recoverable scenarios.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import {
   existsSync,
   mkdtempSync,
@@ -57,7 +57,7 @@ afterEach(() => {
     }
   }
   tmpDirs.length = 0;
-  mock.restore();
+  vi.restoreAllMocks();
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -77,8 +77,8 @@ function makeService(
     name: fakeServiceName(name),
     dependencies: fakeServiceNames(deps),
     critical,
-    init: mock(() => Promise.resolve()),
-    dispose: mock(() => Promise.resolve()),
+    init: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -305,13 +305,13 @@ describe("(c) Combined corruption + stale lock", () => {
 
 describe("(d) Service init failure — optional vs critical", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("optional service failure: init resolves, health reports degraded", async () => {
     const core = new PluginCore();
     const svcA = makeService("a", [], false);
-    svcA.init = mock(() => Promise.reject(new Error("optional init failed")));
+    svcA.init = vi.fn(() => Promise.reject(new Error("optional init failed")));
     core.registerService(svcA);
 
     await expect(core.init(makeContext(core))).resolves.toBeUndefined();
@@ -321,9 +321,9 @@ describe("(d) Service init failure — optional vs critical", () => {
   it("optional service failure: independent services still initialize", async () => {
     const core = new PluginCore();
     const svcA = makeService("a", [], false);
-    svcA.init = mock(() => Promise.reject(new Error("optional init failed")));
+    svcA.init = vi.fn(() => Promise.reject(new Error("optional init failed")));
     const svcC = makeService("c");
-    const cInit = mock(() => Promise.resolve());
+    const cInit = vi.fn(() => Promise.resolve());
     svcC.init = cInit;
     core.registerService(svcA);
     core.registerService(svcC);
@@ -337,9 +337,9 @@ describe("(d) Service init failure — optional vs critical", () => {
   it("optional service failure: dependent services are skipped", async () => {
     const core = new PluginCore();
     const svcA = makeService("a", [], false);
-    svcA.init = mock(() => Promise.reject(new Error("optional init failed")));
+    svcA.init = vi.fn(() => Promise.reject(new Error("optional init failed")));
     const svcB = makeService("b", ["a"]);
-    const bInit = mock(() => Promise.resolve());
+    const bInit = vi.fn(() => Promise.resolve());
     svcB.init = bInit;
     core.registerService(svcA);
     core.registerService(svcB);
@@ -353,7 +353,7 @@ describe("(d) Service init failure — optional vs critical", () => {
   it("critical service failure: init rejects", async () => {
     const core = new PluginCore();
     const svcCrit = makeService("critical-svc", [], true);
-    svcCrit.init = mock(() => Promise.reject(new Error("critical init failed")));
+    svcCrit.init = vi.fn(() => Promise.reject(new Error("critical init failed")));
     core.registerService(svcCrit);
 
     await expect(core.init(makeContext(core))).rejects.toThrow("critical init failed");
@@ -362,9 +362,9 @@ describe("(d) Service init failure — optional vs critical", () => {
   it("critical failure overrides optional: rejects even when optional services degrade too", async () => {
     const core = new PluginCore();
     const svcOpt = makeService("opt", [], false);
-    svcOpt.init = mock(() => Promise.reject(new Error("opt failed")));
+    svcOpt.init = vi.fn(() => Promise.reject(new Error("opt failed")));
     const svcCrit = makeService("crit", [], true);
-    svcCrit.init = mock(() => Promise.reject(new Error("crit failed")));
+    svcCrit.init = vi.fn(() => Promise.reject(new Error("crit failed")));
     core.registerService(svcOpt);
     core.registerService(svcCrit);
 
@@ -391,7 +391,7 @@ describe("(e) Supervisor crash-loop protection", () => {
 
     // Register a service that fails every restart
     const crashy = makeService("crash-loop-svc");
-    crashy.init = mock(() => Promise.reject(new Error("always crashes")));
+    crashy.init = vi.fn(() => Promise.reject(new Error("always crashes")));
     core.registerService(crashy);
 
     await core.init(makeContext(core));
@@ -443,7 +443,7 @@ describe("(e) Supervisor crash-loop protection", () => {
     const supervisor = core.getSupervisor();
 
     const crashy = makeService("perm-deg-svc");
-    crashy.init = mock(() => Promise.reject(new Error("crashes")));
+    crashy.init = vi.fn(() => Promise.reject(new Error("crashes")));
     core.registerService(crashy);
     await core.init(makeContext(core));
 
@@ -472,12 +472,12 @@ describe("(e) Supervisor crash-loop protection", () => {
       expect(supervisor.getStatus(fakeServiceName("perm-deg-svc")).attempts).toBe(3);
 
       // Capture call count BEFORE the no-op attempt
-      const callsBeforeNoop = (crashy.init as ReturnType<typeof mock>).mock.calls.length;
+      const callsBeforeNoop = (crashy.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls.length;
 
       // Subsequent attempt should be no-op (permanently_degraded → returns immediately)
       await supervisor.tryRestart(fakeServiceName("perm-deg-svc"));
 
-      const callsAfterNoop = (crashy.init as ReturnType<typeof mock>).mock.calls.length;
+      const callsAfterNoop = (crashy.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls.length;
       expect(callsAfterNoop).toBe(callsBeforeNoop);
     } finally {
       Date.now = origDateNow;
@@ -522,7 +522,7 @@ describe("(f) Supervisor error isolation (always-bootable)", () => {
     const throwingCore: PluginCoreLike = {
       getService: () => undefined,
       getServices: () => new Map(),
-      restartService: mock(() => Promise.reject(new Error("unexpected crash"))),
+      restartService: vi.fn(() => Promise.reject(new Error("unexpected crash"))),
       isDegraded: () => false,
     };
 
@@ -549,8 +549,8 @@ describe("(f) Supervisor error isolation (always-bootable)", () => {
     await core.init(makeContext(core));
 
     // Now simulate that restartService throws
-    (svc.init as ReturnType<typeof mock>).mockClear();
-    (svc.dispose as ReturnType<typeof mock>).mockClear();
+    (svc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (svc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     const supervisor = core.getSupervisor();
     await expect(supervisor.tryRestart(fakeServiceName("nonexistent-service"))).resolves.toBeUndefined();
@@ -569,7 +569,7 @@ describe("(g) Backoff timing", () => {
     const core: PluginCoreLike = {
       getService: () => undefined,
       getServices: () => new Map(),
-      restartService: mock(() => Promise.reject(new Error("fail"))),
+      restartService: vi.fn(() => Promise.reject(new Error("fail"))),
       isDegraded: () => false,
     };
     const supervisor = new ServiceSupervisor(core);
@@ -645,7 +645,7 @@ describe("(g) Backoff timing", () => {
     const core: PluginCoreLike = {
       getService: () => undefined,
       getServices: () => new Map(),
-      restartService: mock(() => {
+      restartService: vi.fn(() => {
         failCount++;
         if (failCount <= 1) return Promise.reject(new Error("fail once"));
         return Promise.resolve();
@@ -681,7 +681,7 @@ describe("(g) Backoff timing", () => {
     const core: PluginCoreLike = {
       getService: () => undefined,
       getServices: () => new Map(),
-      restartService: mock(() => Promise.reject(new Error("fail"))),
+      restartService: vi.fn(() => Promise.reject(new Error("fail"))),
       isDegraded: () => false,
     };
     const supervisor = new ServiceSupervisor(core);

@@ -3,7 +3,7 @@ name: Host versions
 # Policy: the platform host packages (@opencode-ai/*, @deepseek-ai/*,
 # @earendil-works/*) are devDependencies and must follow their published
 # channel. scripts/host-versions.ts holds the tracked table and the channel per
-# package; `bun run check:hosts` compares each resolved version against it.
+# package; `npm run check:hosts` compares each resolved version against it.
 #
 # Scheduled, not on push/pull_request: a host publishing a new version is not a
 # defect in whichever pull request happens to be open at that moment, so it must
@@ -28,20 +28,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
         with:
-          bun-version: latest
+          node-version-file: .node-version
+          cache: npm
 
       - name: Install dependencies
         # --frozen-lockfile: never rewrite the committed lockfile while checking.
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: Check host versions (exit 1 = drift)
         id: check
         shell: bash
         run: |
           set +e
-          bun run check:hosts 2>&1 | tee /tmp/host-versions.txt
+          npm run check:hosts 2>&1 | tee /tmp/host-versions.txt
           status=${PIPESTATUS[0]}
           set -e
 
@@ -66,18 +67,18 @@ jobs:
       - name: Attempt the upgrade in this runner
         id: upgrade
         # Only when the check reported drift, and never fatal by itself: the log
-        # must show whether `bun run update:hosts` (bump, install, typecheck,
+        # must show whether `npm run update:hosts` (bump, install, typecheck,
         # vocabulary guards) is clean before the job fails.
         if: steps.check.outputs.drift == 'true'
         continue-on-error: true
-        run: bun run update:hosts
+        run: npm run update:hosts
 
       - name: Fail the job with the drift summary
         if: always() && steps.check.outputs.drift == 'true'
         shell: bash
         run: |
           if [ "${{ steps.upgrade.outcome }}" = "success" ]; then
-            verdict="PASSED: bun run update:hosts installs, typechecks and passes the vocabulary guards"
+            verdict="PASSED: npm run update:hosts installs, typechecks and passes the vocabulary guards"
           else
             verdict="FAILED: the bump is not guard-clean; read the upgrade step above"
           fi
@@ -88,7 +89,7 @@ jobs:
             echo "At least one tracked host package is behind its published channel."
             echo "Upgrade attempt in this runner: $verdict."
             echo
-            echo "Remedy from a clean tree: bun run update:hosts (or bun run update:hosts --dry-run to preview)."
+            echo "Remedy from a clean tree: npm run update:hosts (or npm run update:hosts --dry-run to preview)."
           } >> "$GITHUB_STEP_SUMMARY"
 
           exit 1

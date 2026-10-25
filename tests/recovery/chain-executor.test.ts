@@ -7,7 +7,7 @@
  * global attempt limit, missing strategies, onAttempt callback.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { RecoveryChainExecutor, type ChainResult } from "../../src/recovery/chain-executor.ts";
 import { StrategyRegistry } from "../../src/recovery/strategies/registry.ts";
 import type {
@@ -55,7 +55,7 @@ function fixedStrategy(name: string, result: { status: "success" | "retry" | "ne
 
 describe("RecoveryChainExecutor", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("returns exhausted when chain is disabled", async () => {

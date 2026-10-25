@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { runInNewContext } from "node:vm";
 import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
 import type { ComputerInputRequest, ComputerPlan } from "../../src/platform/system/types.ts";

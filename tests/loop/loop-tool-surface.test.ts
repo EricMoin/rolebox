@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,18 +74,18 @@ function makeAdapter(): IDispatchAdapter {
  * this instance, so the fire-and-forget kickoff is never triggered here.
  */
 function createMockContext(tmpDir: string) {
-  const mockDispatchManager = { getTask: mock(() => undefined) };
+  const mockDispatchManager = { getTask: vi.fn(() => undefined) };
   const mockDispatchService = {
-    health: mock(() => ({ status: "healthy" })),
-    getDispatchManager: mock(() => mockDispatchManager),
+    health: vi.fn(() => ({ status: "healthy" })),
+    getDispatchManager: vi.fn(() => mockDispatchManager),
   };
   const mockCore = {
-    getService: mock((name: string) =>
+    getService: vi.fn((name: string) =>
       name === "dispatch-service" ? mockDispatchService : undefined,
     ),
-    getServices: mock(() => new Map()),
-    restartService: mock(() => Promise.resolve()),
-    isDegraded: mock(() => false),
+    getServices: vi.fn(() => new Map()),
+    restartService: vi.fn(() => Promise.resolve()),
+    isDegraded: vi.fn(() => false),
   };
   return {
     directory: tmpDir,
@@ -96,14 +95,14 @@ function createMockContext(tmpDir: string) {
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
-    bus: { on: mock(() => {}), emit: mock(() => {}), off: mock(() => {}) },
+    bus: { on: vi.fn(() => {}), emit: vi.fn(() => {}), off: vi.fn(() => {}) },
   } as any;
 }
 
 describe("loop tool surface (opencode path)", () => {
   beforeEach(() => __resetForTest());
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 
@@ -164,7 +163,7 @@ describe("loop tool surface (opencode path)", () => {
       await svc.init({
         directory: tmpDir,
         rawDirectory: tmpDir,
-        core: { getService: mock(() => undefined) },
+        core: { getService: vi.fn(() => undefined) },
         client: { session: {} },
       } as any);
 

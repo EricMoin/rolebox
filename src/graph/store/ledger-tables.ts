@@ -32,16 +32,8 @@ import type { AcceptedResultRecord, GraphAcceptanceBatch } from "./records.ts";
 
 // ── Row model ───────────────────────────────────────────────────────────────
 
-/**
- * Whether the driver answered "no row".
- *
- * The two runtimes disagree on the empty case — `bun:sqlite` answers `null`
- * and `node:sqlite` answers `undefined` — so BOTH mean no row here. Reading
- * only one of them would make a first commit look like a malformed receipt
- * under one runtime and work under the other.
- */
 function isNoRow(value: unknown): boolean {
-  return value === undefined || value === null;
+  return value === undefined;
 }
 
 /** Name what was received for a diagnostic, without throwing on the value. */

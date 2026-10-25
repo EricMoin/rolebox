@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterAll } from "bun:test";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
@@ -15,7 +15,7 @@ import {
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as realFs from "node:fs";
-import { moveDir, ensureWritableDir } from "../../src/cli/fs-utils.ts";
+
 
 describe("moveDir", () => {
   it("moves a directory (recursively) and removes the source", () => {
@@ -120,11 +120,11 @@ describe("ensureWritableDir", () => {
 //
 // A cross-device rename (EXDEV) needs two filesystems and EPERM/EROFS need a
 // read-only volume, so node:fs is mocked with delegating overrides driven by the
-// "faults" object below. mock.module() overwrites the exports of the already
+// "faults" object below. vi.doMock() overwrites the exports of the already
 // loaded node:fs namespace in place, so the real implementations are captured
 // first and each override delegates to them unless a fault is set. Faults are
 // only ever set inside the tests below and reset in their finally blocks, so the
-// two suites above keep their real behaviour, and mock.restore() in afterAll
+// two suites above keep their real behaviour, and vi.restoreAllMocks() in afterAll
 // drops the mock again when the suite runs in a shared process.
 
 const faults: { exdev: boolean; mkdirCode: string | undefined } = {
@@ -132,7 +132,7 @@ const faults: { exdev: boolean; mkdirCode: string | undefined } = {
   mkdirCode: undefined,
 };
 
-// Captured before mock.module() replaces the namespace exports (calling
+// Captured before vi.doMock() replaces the namespace exports (calling
 // realFs.renameSync inside an override would otherwise re-enter the override).
 const realRenameSync = realFs.renameSync;
 const realMkdirSync = realFs.mkdirSync;
@@ -146,16 +146,6 @@ function errnoError(
   return Object.assign(new Error(message), { code, errno });
 }
 
-/**
- * Emulate Node's documented cpSync default (verbatimSymlinks: false), which
- * resolves a relative symlink target to an absolute path inside the source tree
- * before creating the link in the destination. Verified on Node v26.4.0: copying
- * a "./real.txt" link yields "/<src>/nested/real.txt" by default and
- * "./real.txt" with verbatimSymlinks: true (Bun 1.3.14 preserves the relative
- * target either way, so this only bites under Node). Without the emulation the
- * relative-symlink test below would pass on Bun even if the source dropped
- * verbatimSymlinks, and a Node user would still get a broken link.
- */
 function emulateNodeSymlinkDefault(src: string, dest: string): void {
   for (const entry of readdirSync(src, { withFileTypes: true })) {
     const srcChild = join(src, entry.name);
@@ -172,7 +162,7 @@ function emulateNodeSymlinkDefault(src: string, dest: string): void {
   }
 }
 
-mock.module("node:fs", () => ({
+vi.doMock("node:fs", () => ({
   ...realFs,
   renameSync: (oldPath: string, newPath: string): void => {
     if (faults.exdev) {
@@ -196,6 +186,7 @@ mock.module("node:fs", () => ({
     if (options?.verbatimSymlinks !== true) emulateNodeSymlinkDefault(src, dest);
   },
 }));
+const { moveDir, ensureWritableDir } = await import("../../src/cli/fs-utils.ts");
 
 const EXDEV_MODULE = "../../src/cli/fs-utils.ts?exdev";
 const exdevFsUtils: typeof import("../../src/cli/fs-utils.ts") = await import(EXDEV_MODULE);
@@ -203,7 +194,7 @@ const moveDirExdev = exdevFsUtils.moveDir;
 const ensureWritableDirExdev = exdevFsUtils.ensureWritableDir;
 
 afterAll(() => {
-  mock.restore();
+  vi.restoreAllMocks();
 });
 
 /** Run "fn" and return the Error it threw, or undefined when it did not throw. */

@@ -1,50 +1,13 @@
-import { describe, it, expect, mock, beforeAll, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { createRequire } from "node:module";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+
 import { makeToolContext } from "./fixtures/tool-context.ts";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SUBTASK 1 — Feasibility probe: can an in-process technique deterministically
-// intercept the `rename` call made by src/hashline/atomic-write.ts:60 through a
-// real createHashlineEditTool().execute() run, i.e. inject an external file
-// mutation BETWEEN verifyFileUnchanged (atomic-write.ts:136-157, invoked from
-// hashline-edit.ts:395-410) and the atomic rename?
-//
-// Why this matters: the existing test-only seam createHashlineEditTool
-// ({beforeWrite}) (hashline-edit.ts:28-33, invoked at :387) fires BEFORE the
-// pre-write recheck while path locks are held — it does NOT cover the
-// recheck→rename window. This probe determines whether bun:test's
-// mock.module("node:fs/promises", ...) can cover that window.
-//
-// Technique under test: mock.module is hoisted by bun above the static imports
-// of this file, so when atomic-write.ts evaluates its
-// `import { writeFile, rename, ... } from "node:fs/promises"` (atomic-write.ts:1),
-// the bindings resolve to the mock. The factory cannot receive the original
-// module (bun 1.3.14 passes nothing), and importing the real module inside the
-// factory via ESM (`import("node:fs")` .promises, or the bare `fs/promises`
-// specifier) deadlocks: bun resolves both to the mocked registry entry. The
-// working technique is to fetch the GENUINE module via CJS —
-// `createRequire(import.meta.url)("node:fs/promises")` — which bypasses the
-// ESM mock registry entirely (verified empirically) — spread it, and override
-// only `rename`.
-//
-// Probe ground truth (the ONLY thing asserted):
-//   - The edit tool call must succeed through whatever rename path was active
-//     (mocked or real) — if the mock broke the tool, that is a failed probe.
-//   - If the mock intercepted, the injected marker is observable (a marker file
-//     written by the hook, plus the hook's recorded rename target), and the
-//     external clobber written into the recheck→rename window is silently lost
-//     (overwritten by the atomic rename) — the adversarial capability proof.
-//   - If interception did not work, the probe records "seam not available" and
-//     PASSES — a negative result is a valid outcome, not a failure.
-//
-// Verdict line for downstream subtasks (parsed by acceptance criteria):
-//   console.log("PROBE RESULT: YES|NO")
-// ─────────────────────────────────────────────────────────────────────────────
 
 interface ProbeState {
   renameIntercepted: boolean;
@@ -58,16 +21,9 @@ const probeState: ProbeState = {
   renameTarget: null,
 };
 
-// Hoisted by bun above the static imports of this file (verified empirically on
-// bun 1.3.14: the consumer chain src/hashline/index.ts → hashline-edit.ts →
-// atomic-write.ts binds its node:fs/promises named imports to this mock).
 const require = createRequire(import.meta.url);
 
-mock.module("node:fs/promises", () => {
-  // CJS require is NOT shadowed by bun's mock.module (which only affects ESM
-  // import resolution), so this yields the GENUINE node:fs/promises exports —
-  // real passthroughs for every export we don't touch (realpath, stat,
-  // readFile, unlink, mkdtemp, rm, ...), with `rename` overridden below.
+vi.doMock("node:fs/promises", () => {
   const real = require("node:fs/promises") as typeof import("node:fs/promises");
   const realRename = real.rename;
   const realWriteFile = real.writeFile;
@@ -93,6 +49,7 @@ mock.module("node:fs/promises", () => {
     },
   };
 });
+const { createHashlineReadTool, createHashlineEditTool } = await import("../../src/hashline/index.ts");
 
 let tmpDir: string;
 
@@ -157,16 +114,18 @@ describe("adversarial fs seam probe (subtask 1)", () => {
           `seam available: rename intercepted ${probeState.renameCalls} time(s), target=${probeState.renameTarget}`,
         );
         console.log(
-          "technique: mock.module(\"node:fs/promises\", ...) with factory spreading createRequire(import.meta.url)(\"node:fs/promises\") and overriding rename",
+          "technique: vi.doMock(\"node:fs/promises\", ...) with factory spreading createRequire(import.meta.url)(\"node:fs/promises\") and overriding rename",
         );
         console.log("PROBE RESULT: YES");
       } else {
         // (b) Interception unavailable — negative result is a valid outcome.
         console.log(
-          "seam not available: mock.module(\"node:fs/promises\") did not intercept atomic-write's rename through createHashlineEditTool",
+          "seam not available: vi.doMock(\"node:fs/promises\") did not intercept atomic-write's rename through createHashlineEditTool",
         );
         console.log("PROBE RESULT: NO");
       }
     },
   );
 });
+
+resetBeforeEach(() => vi.resetModules());

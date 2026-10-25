@@ -15,7 +15,7 @@
  * a temp dir.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -201,7 +201,6 @@ function artifactRootWithReport(dir: string): string {
   return root;
 }
 
-/** A bun one-liner that appends a line to `file` and exits with `code`. */
 function script(file: string, code: number): string {
   return (
     "require('node:fs').appendFileSync(" +
@@ -212,7 +211,6 @@ function script(file: string, code: number): string {
   );
 }
 
-/** A bun one-liner that writes its own working directory to `file`. */
 function writeCwdScript(file: string): string {
   return (
     "require('node:fs').writeFileSync(" +
@@ -221,7 +219,6 @@ function writeCwdScript(file: string): string {
   );
 }
 
-/** A bun one-liner that does not finish before a short timeout. */
 const SLEEP_SCRIPT = "setTimeout(function () {}, 5000);";
 
 /** One trusted command binding, with overridable fields. */

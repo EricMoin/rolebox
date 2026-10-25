@@ -11,7 +11,7 @@
  * first-execution/restart behaviour.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   existsSync,
   mkdirSync,

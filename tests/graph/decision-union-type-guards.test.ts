@@ -1,42 +1,5 @@
-/**
- * THE DECISION ARMS ARE A DISCRIMINATED UNION (F-12), AND EVERY REMAINING
- * "VALUE OR REFUSAL" READ IS A DECLARED READING (F-25 remainder).
- *
- * WHAT THIS FILE PINS.
- *
- * 1. F-12 — `AcceptanceDecision` was ONE interface with `kind: "accepted" |
- *    "rejected"` as an ordinary field, so the compiler could not relate `kind`
- *    to the other fields: a REJECTED decision was type-valid where the advance
- *    contract ("the accepted decision") required an accepted one, and the only
- *    live guard sat in the acceptance core (`acceptance.ts:793`). The type is
- *    now two arms, `AcceptedDecision` / `RejectedDecision`; the advance input
- *    and the acceptance join require the ACCEPTED arm; and the replay path
- *    builds its arm explicitly instead of spreading a computed `kind`. The
- *    `expectTypeOf` pins below are the authority for that shape (`bun run
- *    typecheck:tests`); the runtime cases beside them pin the BEHAVIOUR, which
- *    is unchanged: an accepted submission still advances the plan, and a
- *    rejected one is still refused by the acceptance core's own runtime guard.
- *
- * 2. F-25 remainder — five sites in `runtime.ts` told a refusal union apart from
- *    a value by probing the VALUE for a field only the refusal declares
- *    (`"code" in unsettled/effects/stopped`). Every site now narrows an
- *    `OutcomeReading<T>` on `.kind`; the recovery owner's `records | refusal`
- *    answer is adapted ONCE through a declared predicate. `OutcomeRuntimeRefusal`
- *    itself is untouched, so every refusal keeps its own code and message — the
- *    runtime cases assert the exact value against the owning reader's refusal.
- *
- * COMPATIBILITY. A refused arm is reached by making ONE ledger read fail (a
- * test double over the real store); every other operation on those paths is the
- * real one. The newly refused value at COMPILE time is a `RejectedDecision`
- * passed where an `AcceptedDecision` is required, and no legitimate caller
- * passes one: the only production caller of the advance is the acceptance join,
- * which runs only for an accepted decision (`acceptance.ts:793`), and the only
- * other caller in the tree builds a literal `"accepted"` decision.
- *
- * @module
- */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

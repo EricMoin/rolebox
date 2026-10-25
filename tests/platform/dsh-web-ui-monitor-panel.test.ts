@@ -1,46 +1,7 @@
-/// <reference types="bun-types" />
+import { beforeEach as resetBeforeEach } from "vitest";
 
-/**
- * RoleboxMonitorPanel behavior tests — the browser-half rolebox RUN CONSOLE
- * (`src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx`), a dsh
- * right-Sidebar page tab (`sidebar.right.pane.tab`, keyed by the
- * `rolebox-monitor` tab type).
- *
- * Verifies the panel's contract at three levels:
- *
- *   1. WIRE — the panel reads the shape the backend actually composes
- *      (`loops: { count, states }`, `sessions: { count, mostRecentId,
- *      activeRoles }`) and still tolerates the two legacy shapes. The
- *      previous revision read `loops` as a bare array and
- *      `sessions.recentIds`, so against the real server the Loops section
- *      never mounted and the roster degraded to a count; both regressions are
- *      pinned here.
- *   2. READINGS — every developer-facing field the wire carries is rendered:
- *      per-node ledgers with agent/status/duration/retries, the node strip,
- *      frontier and budget, loop rounds/mode/elapsed/worker session and the
- *      loop's own error reason, session ids with their active roles, and the
- *      metric labels plus histogram avg/p50/p95/n.
- *   3. POSTURE — verdict before evidence, labelled facts instead of
- *      dot-joined metadata, no polling, live-region status seat, and a
- *      stylesheet that is namespaced, `--dsw-*`-only, single-column and free
- *      of decorative stripes.
- *
- * ── Harness ────────────────────────────────────────────────────────────────
- * React is NOT a devDependency of this repo (the temporary
- * `react.stub.d.ts` covers the type surface), so — like the sibling
- * `dsh-web-ui-client.test.ts` — `react` and the JSX runtime are mocked
- * BEFORE the panel module is imported. As in `dsh-web-ui-dock.test.ts`, the
- * double here is STATEFUL: a ~100-line mini-React (hook slots per component
- * instance, synchronous re-render on `setState`, effect flush with
- * dependency comparison and cleanup) plus a virtual-DOM tree with query
- * helpers — enough to exercise the component's full state machine
- * in-process, with `fetch` double-routed through a per-test config and
- * assertions on the rendered vnode tree (no DOM, no jsdom — bun-native).
- *
- * @module
- */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // TYPE-ONLY: the mocked dynamic import below is what loads the module at run
 // time; this erases completely and only names the DTO the fixture stands in
@@ -49,7 +10,6 @@ import type { MonitorEngineGraphDto } from "../../src/platform/adapters/dsh/web-
 
 // ── Stateful react double + tree harness ───────────────────────────────────
 
-/** One rendered JSX element (bun's automatic runtime passes children via props). */
 interface VNode {
   type: unknown;
   props: Record<string, unknown>;
@@ -236,9 +196,9 @@ function useRef<T>(initial: T): { current: T } {
   return rs.states[slot] as { current: T };
 }
 
-mock.module("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 
 // ── Module under test (dynamic import: mocks must precede the graph) ───────
 
@@ -247,13 +207,6 @@ const css = await import("../../src/platform/adapters/dsh/web-ui/rolebox-monitor
 
 // ── EventSource double ─────────────────────────────────────────────────────
 
-/**
- * Controllable `EventSource` double.
- *
- * The runtime DOES define a global `EventSource` (Bun ships one), so a test
- * that leaves it alone would open a real connection; installing this double is
- * what makes the change channel observable and deterministic.
- */
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
   static reset(): void {
@@ -2051,3 +2004,5 @@ describe("RoleboxMonitorPanel", () => {
     });
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

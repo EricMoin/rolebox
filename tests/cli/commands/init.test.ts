@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
@@ -547,7 +548,7 @@ describe("init CLI (mocked interactive mode)", () => {
     let selectCount = 0;
     let textCount = 0;
 
-    mock.module("@clack/prompts", () => ({
+    vi.doMock("@clack/prompts", () => ({
       intro: () => {},
       outro: () => {},
       note: () => {},
@@ -596,3 +597,5 @@ describe("init CLI (mocked interactive mode)", () => {
     expect(yaml.model).toBe("gpt-4o");
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

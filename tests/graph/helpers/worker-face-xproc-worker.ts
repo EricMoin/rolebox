@@ -1,38 +1,4 @@
-/**
- * Cross-process fixture for the P2 part 2 WORKER TOOL FACE (A21 / plan §3.3).
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * WHY THIS FILE EXISTS. The boundary's durable half is a reading of the
- * workspace's one store: which child session the host created an attempt's
- * execution for. A second host object in one process shares the module-level
- * connection map and this process's memory, so the honest strength for "a
- * RESTARTED host still refuses the worker" is a REAL process boundary. The
- * parent (`tests/graph/worker-tool-face-cross-process.test.ts`) therefore
- * spawns THIS file with `Bun.spawn(process.execPath, …)`, exactly as
- * `helpers/host-restart-xproc-worker.ts` does for restart recovery: every mode
- * opens its OWN connection to the store file and has never seen the other
- * process's memory.
- *
- *     bun tests/graph/helpers/worker-face-xproc-worker.ts --mode <mode> ...
- *
- *   --mode dispatch  the dispatching process: start the declared graph, confirm
- *                    the platform's execution for each attempt, let the WORKER
- *                    of `alpha#1` settle its own attempt through the bound face,
- *                    write the barrier marker, and exit. The credential VALUE
- *                    never leaves this process and is never printed.
- *   --mode face      a FRESH process that never dispatched or confirmed
- *                    anything: judge the same session ids through the bound
- *                    face and report only the machine-readable outcome.
- *
- * Every mode prints exactly ONE JSON line on stdout — `{"pid":n,"ok":true,…}` on
- * success, `{"pid":n,"ok":false,…}` plus a non-zero exit on failure.
- *
- * PRIVACY. The store root lives under the OS temp directory; the report carries
- * attempt ids, a stable refusal code, counts and booleans only. It never prints
- * a credential VALUE, a real home-directory path or a session transcript.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";

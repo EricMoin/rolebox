@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { join } from "node:path";
 import os from "node:os";
 import { SKILL_MD } from "../../src/constants.ts";
@@ -19,13 +19,13 @@ import {
 const FAKE_HOME = "/Users/fakeuser";
 const ORIGINAL_PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 
-let homedirSpy: ReturnType<typeof spyOn>;
+let homedirSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   // platformAgentsDir("pi") prefers PI_CODING_AGENT_DIR over homedir(), so an
   // ambient override would decide the expectation instead of the mock below.
   delete process.env.PI_CODING_AGENT_DIR;
-  homedirSpy = spyOn(os, "homedir").mockReturnValue(FAKE_HOME);
+  homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(FAKE_HOME);
 });
 
 afterEach(() => {

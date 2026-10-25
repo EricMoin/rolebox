@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Assembling a node's declared inputs, or refusing the dispatch (§3.5).
@@ -11,7 +10,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   assembleDownstreamInput,
   readInputRefusals,

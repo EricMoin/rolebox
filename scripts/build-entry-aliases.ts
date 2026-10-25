@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync } from "node:fs"
+import { existsSync, unlinkSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 // Builds the legacy published entry aliases (dist/index.js, dist/pi-extension.js,
@@ -10,7 +10,7 @@ import { resolve } from "node:path"
 // declarations beside the stubs. They are removed, never rewritten.
 
 // Project root = scripts/.. (this script lives in scripts/)
-const projectRoot = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd()
+const projectRoot = import.meta.dirname ? resolve(import.meta.dirname, "..") : process.cwd()
 
 // The legacy published entry paths and the canonical modules they re-export.
 const legacyAliases = [
@@ -62,7 +62,7 @@ for (const { alias, entry } of legacyAliases) {
     `export { default } from "./entries/${entry}.js"`,
     ``,
   ].join("\n")
-  await Bun.write(resolve(projectRoot, "dist", `${alias}.js`), stub)
+  writeFileSync(resolve(projectRoot, "dist", `${alias}.js`), stub)
 }
 
 if (purged.length > 0) {

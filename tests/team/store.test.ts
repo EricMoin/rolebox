@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { spawnProcess, sleepSync } from "../../scripts/node-process.ts";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -101,18 +103,20 @@ describe("team store", () => {
     store.create(state());
     const source = `
       import { TeamStore } from ${JSON.stringify(new URL("../../src/team/store.ts", import.meta.url).href)};
+      import { sleepSync } from ${JSON.stringify(new URL("../../scripts/node-process.ts", import.meta.url).href)};
+      import { setTimeout as sleep } from "node:timers/promises";
       const store = new TeamStore(${JSON.stringify(directory)});
       try {
         for (let i = 0; i < 30; i++) {
           store.update("team-one", state => {
             const previous = state.turns;
-            Bun.sleepSync(2);
+            sleepSync(2);
             state.turns = previous + 1;
           });
         }
       } finally { store.close(); }
     `;
-    const children = [0, 1].map(() => Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" }));
+    const children = [0, 1].map(() => spawnProcess([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" }));
     try {
       const results = await Promise.all(children.map(async child => ({
         code: await child.exited,
@@ -159,11 +163,13 @@ describe("team store", () => {
     const children = ["delivery-one", "delivery-two"].map(deliveryId => {
       const source = `
         import { TeamStore } from ${JSON.stringify(new URL("../../src/team/store.ts", import.meta.url).href)};
+      import { sleepSync } from ${JSON.stringify(new URL("../../scripts/node-process.ts", import.meta.url).href)};
+      import { setTimeout as sleep } from "node:timers/promises";
         const store = new TeamStore(${JSON.stringify(directory)});
         try { process.stdout.write(String(store.acquireSession("shared-session", ${JSON.stringify(deliveryId)}))); }
         finally { store.close(); }
       `;
-      return Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
+      return spawnProcess([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
     });
     try {
       const results = await Promise.all(children.map(async child => ({
@@ -223,22 +229,24 @@ describe("team store", () => {
     const { directory, store } = await fixture();
     const source = `
       import { TeamStore } from ${JSON.stringify(new URL("../../src/team/store.ts", import.meta.url).href)};
+      import { sleepSync } from ${JSON.stringify(new URL("../../scripts/node-process.ts", import.meta.url).href)};
+      import { setTimeout as sleep } from "node:timers/promises";
       const store = new TeamStore(${JSON.stringify(directory)});
       const template = ${JSON.stringify(state())};
       try {
         for (let i = 0; i < 30; i++) {
           store.create({ ...template, id: "created-" + i });
-          await Bun.sleep(1);
+          await sleep(1);
         }
       } finally { store.close(); }
     `;
-    const child = Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
+    const child = spawnProcess([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
     let done = false;
     const completed = child.exited.then(code => { done = true; return code; });
     try {
       while (!done) {
         for (const team of store.list()) expect(team.name).toBe("Design and engineering");
-        await Bun.sleep(1);
+        await sleep(1);
       }
       expect(await completed).toBe(0);
       expect(await new Response(child.stderr).text()).toBe("");

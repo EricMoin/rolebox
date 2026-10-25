@@ -44,7 +44,7 @@ card.ts exports renderCard({id,title,status,progress}): string. It must render e
 show the status text as well as color, and use role="status". It must render a progressbar
 with aria-valuemin="0", aria-valuemax="100", and aria-valuenow clamped to 0..100.
 Use design.json as the source of design choices. Do not modify card.test.ts.
-Run bun test card.test.ts before declaring implementation complete.
+Run node --test card.test.ts before declaring implementation complete.
 Work only in the current workspace; no dependency installation or external publishing.
 The designer owns task 'design' and writes the design artifact, then reviews final preview.
 The TypeScript engineer owns task 'implementation' and may use its own internal graph workflow.
@@ -56,27 +56,24 @@ On restart, inspect team_status, existing tasks and files before continuing. Ret
 task IDs and ownership, avoid duplicate teams, and do not reply to passive acknowledgments.
 Each role ends its turn while waiting for the other specialty. Do not delete the team.`;
 
-const fixtureTests = `import { expect, test } from "bun:test";
+const fixtureTests = `import { test } from "node:test";
+import assert from "node:assert/strict";
 import { renderCard } from "./card.ts";
 import { readFileSync } from "node:fs";
 test("escapes content and includes accessible status", () => {
   const html = renderCard({ id: "one", title: '<script>alert("x")</script>', status: "active", progress: 42 });
-  expect(html).not.toContain("<script>"); expect(html).toContain("&lt;script&gt;");
-  expect(html).toMatch(/role=["']status["']/); expect(html).toMatch(/role=["']progressbar["']/);
-  expect(html).toMatch(/aria-valuenow=["']42["']/); expect(html).toMatch(/aria-valuemin=["']0["']/);
-  expect(html).toMatch(/aria-valuemax=["']100["']/);
+  assert.ok(!html.includes("<script>")); assert.ok(html.includes("&lt;script&gt;"));
+  for (const marker of ['role="status"', 'role="progressbar"', 'aria-valuenow="42"', 'aria-valuemin="0"', 'aria-valuemax="100"']) assert.ok(html.includes(marker));
 });
 test("clamps progress and renders every state", () => {
   for (const [progress, expected] of [[-5, 0], [120, 100]]) {
-    expect(renderCard({ id:"test", title:"Card", status:"paused", progress })).toMatch(new RegExp('aria-valuenow=["\\\']' + expected + '["\\\']'));
+    assert.ok(renderCard({ id:"test", title:"Card", status:"paused", progress }).includes('aria-valuenow="' + expected + '"'));
   }
-  for (const status of ["active", "paused", "blocked"] as const) {
-    expect(renderCard({ id:"test", title:"Card", status, progress:0 }).length).toBeGreaterThan(80);
-  }
+  for (const status of ["active", "paused", "blocked"] as const) assert.ok(renderCard({ id:"test", title:"Card", status, progress:0 }).length > 80);
 });
 test("design and preview artifacts are available", () => {
-  expect(Object.keys(JSON.parse(readFileSync("design.json", "utf8"))).length).toBeGreaterThan(2);
-  expect(readFileSync("preview.html", "utf8")).toMatch(/<!doctype html|<html/i);
+  assert.ok(Object.keys(JSON.parse(readFileSync("design.json", "utf8"))).length > 2);
+  assert.match(readFileSync("preview.html", "utf8"), /<!doctype html|<html/i);
 });
 `;
 
@@ -297,7 +294,7 @@ async function parent() {
   const checkInterrupted = () => { if (interrupted) throw new Error("Live verification controller was interrupted"); };
   const run = (command: string[], timeoutMs: number, logFile = "host-private.log", cwd?: string): ControlledChild => {
     checkInterrupted();
-    const child = spawn(process.execPath, command, { cwd, detached: grouped, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), ...command], { cwd, detached: grouped, stdio: ["ignore", "pipe", "pipe"] });
     let complete!: (result: Exit) => void;
     const controlled: ControlledChild = { child, completion: new Promise(resolve => { complete = resolve; }),
       deadline: Date.now() + timeoutMs, stopped: false };
@@ -336,7 +333,7 @@ async function parent() {
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
   try {
-    const first = run([import.meta.path, "--root", root, "--worker", "first"], 12 * 60_000);
+    const first = run([import.meta.filename, "--root", root, "--worker", "first"], 12 * 60_000);
     while (!existsSync(join(root, "checkpoint.json"))) {
       checkInterrupted();
       if (first.result || first.child.exitCode !== null || first.child.signalCode !== null) throw new Error("Initial host exited before the durable claim checkpoint");
@@ -353,7 +350,7 @@ async function parent() {
     const exit = await wait(first, "Initial host shutdown");
     assert.equal(exit.signal, "SIGKILL");
     console.log(JSON.stringify({ stage: "claim-persisted-process-killed", probes: "passed" }));
-    const second = run([import.meta.path, "--root", root, "--worker", "resume"], 28 * 60_000);
+    const second = run([import.meta.filename, "--root", root, "--worker", "resume"], 28 * 60_000);
     const resumedExit = await wait(second, "Resumed host");
     assert.equal(resumedExit.code, 0, "Resumed host did not complete");
     assert.equal(resumedExit.signal, null, "Resumed host did not exit normally");
@@ -386,7 +383,7 @@ async function parent() {
     assert.ok(trace.some(event => event.event === "tool" && event.tool === "graph_submit_outcome" && !event.error &&
       event.sessionId !== creator.sessionId && event.sessionId !== designer.sessionId), "Own-role graph workers did not complete their work");
     assertFixture();
-    const test = run(["test", "card.test.ts"], 30_000, "artifact-tests.log", workspace);
+    const test = run(["--test", "card.test.ts"], 30_000, "artifact-tests.log", workspace);
     const testExit = await wait(test, "Artifact acceptance tests");
     assertFixture();
     assert.equal(testExit.code, 0, "Generated card failed acceptance tests");

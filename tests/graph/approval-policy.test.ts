@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { expect, it } from "vitest";
 import { createApprovalPolicy, APPROVAL_POLICY_ENV } from "../../src/graph/policy/approval-policy.ts";
 import { assembleHostCapabilities } from "../../src/graph/policy/acceptance-primitives.ts";
 import { compileGraph } from "../../src/graph/compiler/compile.ts";

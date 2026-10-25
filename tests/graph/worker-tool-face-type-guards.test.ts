@@ -11,7 +11,7 @@
  * 1. THE TYPE-LEVEL CONTRACT. `HOST_FACE`, `DSH_FACE` and `CHANNEL_FACE` below
  *    are typed `readonly GraphToolName[]`, and `OUT_OF_VOCABULARY_IS_REJECTED`
  *    stops compiling the day a name outside the shipped vocabulary type-checks
- *    as one. The authority is `bun run typecheck:tests`; a bare-string face
+ *    as one. The authority is `npm run typecheck:tests`; a bare-string face
  *    cannot come back without failing it.
  * 2. THE MEMBERSHIP DECISION, asserted per face. The in-process boundary and
  *    the remote channel grant exactly the delivery channel — ONE UNIFIED FACE —
@@ -37,7 +37,7 @@
  * store root lives under the OS temp directory and is removed.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,7 +73,7 @@ import { createMemorySink, type MemorySink } from "../../src/log/sinks/memory.ts
 import { beginLogTest, endLogTest } from "../helpers/log.ts";
 import { naturalDeclaration, POLICY_BODY, POLICY_ID } from "./helpers/host-graph-fixture.ts";
 
-// ── The type-level pins (authority: `bun run typecheck:tests`) ───────────────
+// ── The type-level pins (authority: `npm run typecheck:tests`) ───────────────
 //
 // Each face must be a `readonly GraphToolName[]`: the day one of them goes back
 // to `readonly string[]`, these annotations stop compiling. They are read by the

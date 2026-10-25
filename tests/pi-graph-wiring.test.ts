@@ -14,7 +14,7 @@
  *      holding when both files run together.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { PiLightweightServiceStack } from "../src/platform/adapters/pi/service-stack.ts";
 import type { ResolvedRole } from "../src/types.ts";
 import type { DispatchManager } from "../src/dispatch/core/manager.ts";

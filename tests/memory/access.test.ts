@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,7 +80,7 @@ describe("memory access and provenance", () => {
   });
 
   it("keeps distinct conclusions with identical titles written in the same millisecond", () => {
-    const now = spyOn(Date, "now").mockReturnValue(123456789);
+    const now = vi.spyOn(Date, "now").mockReturnValue(123456789);
     try {
       const first = store.write(entry({ content: "Use a short cache lifetime" }));
       const second = store.write(entry({ content: "Use a long cache lifetime" }));

@@ -1,3 +1,4 @@
+import type { JSX } from "solid-js";
 /**
  * TUI notification state panel.
  *
@@ -29,15 +30,15 @@ export function renderNotificationState(props: { c: ThemeColors; snap: MonitorSn
 
   if (!notif) return null;
 
-  const parts: unknown[] = [];
+  const parts: JSX.Element[] = [];
 
   // Enabled / disabled
   const enabledGlyph = notif.enabled ? G_ENABLED : G_DISABLED;
   const enabledColor = notif.enabled ? c.success : c.error;
   parts.push(
     <text>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  enabled"}</span>
-      <span fg={rgbaToCSS(enabledColor)}>{" " + enabledGlyph}</span>
+      <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  enabled"}</span>
+      <span style={{ fg: rgbaToCSS(enabledColor) }}>{" " + enabledGlyph}</span>
     </text>,
   );
 
@@ -45,8 +46,8 @@ export function renderNotificationState(props: { c: ThemeColors; snap: MonitorSn
   if (notif.quietHoursActive) {
     parts.push(
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  quiet hours"}</span>
-        <span fg={rgbaToCSS(c.warning)}> active</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  quiet hours"}</span>
+        <span style={{ fg: rgbaToCSS(c.warning) }}> active</span>
       </text>,
     );
   }
@@ -55,8 +56,8 @@ export function renderNotificationState(props: { c: ThemeColors; snap: MonitorSn
   if (notif.throttleStats) {
     parts.push(
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  throttle"}</span>
-        <span fg={rgbaToCSS(c.text)}>{" " + notif.throttleStats.recentCount + "/" + notif.throttleStats.windowMs + "ms"}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  throttle"}</span>
+        <span style={{ fg: rgbaToCSS(c.text) }}>{" " + notif.throttleStats.recentCount + "/" + notif.throttleStats.windowMs + "ms"}</span>
       </text>,
     );
   }
@@ -69,8 +70,8 @@ export function renderNotificationState(props: { c: ThemeColors; snap: MonitorSn
       const ts = evt.ts.length > 19 ? evt.ts.slice(0, 19) : evt.ts;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"    " + ts}</span>
-          <span fg={rgbaToCSS(c.text)}>{" " + evt.type}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"    " + ts}</span>
+          <span style={{ fg: rgbaToCSS(c.text) }}>{" " + evt.type}</span>
         </text>,
       );
     }

@@ -564,7 +564,7 @@ examples/benchmarks/
 
 P1–P2 是面向 dsh 用户“改 role 后可可靠评测”的首个完整产品闭环。P3 扩展任务种类并接入 dsh 内嵌交互，P4 再扩展宿主。每阶段可验收后独立发布，不把全部工作推迟到一个大版本。
 
-验证策略：新增 `tests/benchmark/` 模块切片；具体 dsh seam 改动再选择对应测试，例如 `tests/dsh-plugin.test.ts`、`tests/dsh-dispatch.test.ts`、`tests/platform/dsh-role-switcher.test.ts`、`tests/platform/dsh-system-prompt.test.ts`、`tests/platform/dsh-graph-observation.test.ts`。按仓库政策执行 scoped tests 和 `bun run typecheck`，不在开发阶段跑完整套件。
+验证策略：新增 `tests/benchmark/` 模块切片；具体 dsh seam 改动再选择对应测试，例如 `tests/dsh-plugin.test.ts`、`tests/dsh-dispatch.test.ts`、`tests/platform/dsh-role-switcher.test.ts`、`tests/platform/dsh-system-prompt.test.ts`、`tests/platform/dsh-graph-observation.test.ts`。按仓库政策执行 scoped tests 和 `npm run typecheck`，不在开发阶段跑完整套件。
 
 需要的关键测试是：已知好坏产物的 grader 自测；缺失 usage 不变成 0；agent 无法读取 oracle；用户真实目录零写入；memory/case 顺序无污染；重复/乱序事件不重复结算；崩溃恢复与取消不遗留 worker；snapshot 在热编辑期间不漂移；基线不兼容时拒绝 gate；一组已知统计分布上的聚合/区间/分母测试。模型在线 smoke 独立显式运行，不纳入默认离线测试，也不依赖“模型这次刚好回答对”。
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { LspClientManager } from "../../src/lsp/client-manager.ts";
 import { isServerAvailable } from "../../src/lsp/servers.ts";
@@ -13,21 +13,21 @@ import type { Diagnostic } from "../../src/lsp/types.ts";
  * Returns the fake process and a helper to simulate server responses.
  */
 function createFakeProcess() {
-  const stdin = new EventEmitter() as EventEmitter & { write: ReturnType<typeof mock> };
-  stdin.write = mock(() => {});
+  const stdin = new EventEmitter() as EventEmitter & { write: ReturnType<typeof vi.fn<(...args: any[]) => any>> };
+  stdin.write = vi.fn(() => {});
   const stdout = new EventEmitter() as EventEmitter;
   const stderr = new EventEmitter() as EventEmitter;
   const process = new EventEmitter() as EventEmitter & {
     pid: number;
     killed: boolean;
-    kill: ReturnType<typeof mock>;
+    kill: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
     stdin: typeof stdin;
     stdout: typeof stdout;
     stderr: typeof stderr;
   };
   process.pid = 12345;
   process.killed = false;
-  process.kill = mock(() => {
+  process.kill = vi.fn(() => {
     process.killed = true;
   });
   process.stdin = stdin;
@@ -290,8 +290,8 @@ describe("shutdown", () => {
 
   it("cancels pending requests on shutdown", async () => {
     const timeout = setTimeout(() => {}, 10000);
-    const reject = mock<(error: Error) => void>(() => {});
-    const resolve = mock(() => {});
+    const reject = vi.fn<(error: Error) => void>(() => {});
+    const resolve = vi.fn(() => {});
     mgr.servers.set("typescript", {
       languageId: "typescript",
       process: null,

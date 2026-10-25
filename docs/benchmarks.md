@@ -8,7 +8,7 @@ Each trial gets a separate process, workspace, home, and runtime state. The role
 
 ## First run
 
-Use Bun on a system with POSIX process groups. Windows execution is currently unsupported. You also need a compatible, complete dsh installation and a trusted dsh plugin that registers the provider you intend to evaluate. The benchmark does not automatically load your normal dsh profile or credentials.
+Use Node.js 26.4 or newer on a system with POSIX process groups. Windows execution is currently unsupported. You also need a compatible, complete dsh installation and a trusted dsh plugin that registers the provider you intend to evaluate. The benchmark does not automatically load your normal dsh profile or credentials.
 
 ```bash
 rolebox bench init output-quality
@@ -42,7 +42,7 @@ rolebox bench report benchmark-results/RUN_ID --format json
 
 The default report files are `report.html` and `report.json` inside the run directory. Pass `--output report.html` or another destination to choose a file. HTML reports are standalone and work offline. Without `run --output`, results go under the rolebox data directory's `benchmarks/` subdirectory.
 
-From a source checkout, the equivalent entry point is `bun src/cli/main.ts bench <subcommand>`.
+From a source checkout, the equivalent entry point is `node --import tsx src/cli/main.ts bench <subcommand>`.
 
 ## A code repair benchmark
 
@@ -50,7 +50,7 @@ From a source checkout, the equivalent entry point is `bun src/cli/main.ts bench
 rolebox bench init code-quality --template code-fix
 ```
 
-The `response` template remains the default. `code-fix` creates a small JavaScript module with a real bug: `sum([])` throws instead of returning zero. It includes a role instructed to edit the actual working file, a case, and dependency-free checks using Bun and Node's built-in assertions:
+The `response` template remains the default. `code-fix` creates a small JavaScript module with a real bug: `sum([])` throws instead of returning zero. It includes a role instructed to edit the actual working file, a case, and dependency-free checks using Node.js and its built-in assertions:
 
 ```text
 code-quality/
@@ -68,7 +68,7 @@ Before spending model tokens, verify the checks locally:
 
 ```bash
 cd code-quality
-bun checks/sum/check.mjs fixtures/sum
+node checks/sum/check.mjs fixtures/sum
 ```
 
 This must fail on the starter's empty-array bug. Copy the fixture to a temporary directory, add `0` as the initial value to `reduce`, and point the same check at that copy; it should pass. Keep the original fixture defective for actual benchmark runs. The generated README includes this check; there is no general `test-graders` command yet.
@@ -213,7 +213,7 @@ The scenario is one user prompt submitted to the primary session. Roles execute 
 Add a `workspace` object to a case to populate its working directory before the model starts:
 
 ```jsonl
-{"id":"sum-empty","prompt":"Fix src/sum.mjs so sum([]) returns 0 without changing the other numeric behavior. Edit the file itself.","workspace":{"fixture":"./fixtures/sum","checks":"./checks/sum"},"assertions":[{"kind":"file_exists","path":"src/sum.mjs"},{"kind":"command","argv":["bun","{checks}/check.mjs","{workspace}"],"timeoutMs":10000,"expectedExitCode":0}]}
+{"id":"sum-empty","prompt":"Fix src/sum.mjs so sum([]) returns 0 without changing the other numeric behavior. Edit the file itself.","workspace":{"fixture":"./fixtures/sum","checks":"./checks/sum"},"assertions":[{"kind":"file_exists","path":"src/sum.mjs"},{"kind":"command","argv":["node","{checks}/check.mjs","{workspace}"],"timeoutMs":10000,"expectedExitCode":0}]}
 ```
 
 `fixture` is required when `workspace` is present. `checks` is optional; both name directories inside the suite directory, relative to `suite.yaml`. Each snapshot supports at most 1,000 regular files, 1 MiB per file, and 16 MiB total. A suite allows 64 MiB and 50,000 files across all case references, counting repeated references separately. Symlinks, special files, paths outside the suite, and excessive nesting are rejected. File contents and executable bits are frozen at load time and included in the suite digest. Changing inputs on disk does not change an existing run; watch detects the change for the next run. Keep generated results outside role, fixture, and checks directories.

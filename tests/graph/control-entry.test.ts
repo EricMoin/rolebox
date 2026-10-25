@@ -1,3 +1,4 @@
+import { spawnProcessSync, spawnProcess } from "../../scripts/node-process.ts";
 /**
  * P3 item 1 — THE ONE EXPLICIT CONTROL ENTRY (`graph_control`).
  *
@@ -17,12 +18,12 @@
  * also reads the AUTHORITATIVE record back with a fresh connection.
  *
  * STRENGTH: adapter + real store, process-level, and CROSS-PROCESS for the
- * inverse race and for the failure/timeout restart (real `Bun.spawnSync` OS
+ * inverse race and for the failure/timeout restart (real `spawnProcessSync` OS
  * processes with their own store connections). No real dsh/Pi SDK runs in this
  * environment, so nothing here is real-host evidence.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -70,16 +71,7 @@ const CONTROL_XPROC_WORKER = fileURLToPath(
 /** One child process's deadline; a worker that overruns is killed by the harness. */
 const CONTROL_CHILD_DEADLINE_MS = 30_000;
 
-/**
- * THE HARNESS BUDGET MUST EXCEED THIS FILE'S OWN CHILD DEADLINE (the same rule
- * `cancel-delivery.test.ts` and `graph-store-cross-process.test.ts` carry). Bun's
- * default is 5000ms per test, so a child that was merely SLOW — spawn latency
- * under load, a `busy_timeout` wait on the shared store file — would have the
- * CASE killed and its own diagnosis never written. The budget below lets the
- * child deadline fire first, so what this file reports is always the control
- * behavior, never a harness timeout.
- */
-setDefaultTimeout(CONTROL_CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CONTROL_CHILD_DEADLINE_MS + 15_000 });
 
 /** The one fixed instant the inverse-race worker stamps its decision with. */
 const RACE_AT = 1_700_000_000_000;
@@ -1336,23 +1328,6 @@ interface InverseRaceReport {
   readonly error?: string;
 }
 
-/**
- * Apply ONE control command through a REAL second OS process, SYNCHRONOUSLY.
- *
- * WHY SYNCHRONOUS. The acceptance gate runs outside the acceptance
- * transaction, so the only place a test can commit a command INSIDE that
- * window is a validator — and validation is synchronous by contract.
- * Bun.spawnSync starts a second bun process that opens the SAME store with
- * its OWN connection and commits the command before this submission's
- * transaction opens: exactly the interleaving the run path's pre-transaction
- * check cannot see.
- *
- * The command is applied through the STORE, not through the graph_control
- * tool: the child holds no host and no platform context, and this case is
- * about the RACE, not the permission check (that boundary has its own cases
- * above). The run identity is still the run path's own — the worker adopts
- * the id the store already holds.
- */
 function applyControlFromAnotherProcess(options: {
   readonly storeRoot: string;
   readonly graphId: string;
@@ -1360,11 +1335,7 @@ function applyControlFromAnotherProcess(options: {
   readonly attemptId: string;
   readonly reason: string;
 }): InverseRaceReport {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const result = Bun.spawnSync(
+  const result = spawnProcessSync(
     [
       process.execPath,
       XPROC_WORKER,
@@ -1611,7 +1582,7 @@ function recordControlFromAnotherProcess(options: {
   readonly graphId: string;
   readonly command: "failure" | "timeout";
 }): ControlRestartReport {
-  const result = Bun.spawnSync(
+  const result = spawnProcessSync(
     [
       process.execPath,
       CONTROL_XPROC_WORKER,

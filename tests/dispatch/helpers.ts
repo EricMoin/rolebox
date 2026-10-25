@@ -1,4 +1,4 @@
-import { mock } from "bun:test";
+import { vi } from "vitest";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import type { Message, MessageInfo, SessionInfo, SessionStatus } from "../../src/session/types.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
@@ -121,10 +121,10 @@ export function createMockClient(overrides?: {
   sessionFork?: () => unknown;
 }): ISessionClient {
   return {
-    create: mock(
+    create: vi.fn(
       overrides?.sessionCreate ?? (() => Promise.resolve(makeSessionInfo())),
     ),
-    prompt: mock(
+    prompt: vi.fn(
       overrides?.sessionPromptAsync
         ? (id: string, opts: any) => {
             // Convert ISessionClient prompt(id, opts) to the SDK format
@@ -140,47 +140,47 @@ export function createMockClient(overrides?: {
             return Promise.resolve({ id: "prompt-1" });
           }),
     ),
-    promptSync: mock(
+    promptSync: vi.fn(
       overrides?.sessionPromptSync ?? overrides?.sessionPrompt ??
         (() =>
           Promise.resolve({
             parts: [{ type: "text" as const, text: "Hello from subagent" }],
           })),
     ),
-    messages: mock(
+    messages: vi.fn(
       overrides?.sessionMessages ??
         (() => Promise.resolve([])),
     ),
-    status: mock(
+    status: vi.fn(
       overrides?.sessionStatus ??
         (() => Promise.resolve(null)),
     ),
-    abort: mock(
+    abort: vi.fn(
       overrides?.sessionAbort ??
         (() => Promise.resolve(true)),
     ),
-    get: mock(
+    get: vi.fn(
       overrides?.sessionGet
         ? (id: string) => overrides!.sessionGet!(id)
         : ((_id: string) => Promise.resolve(makeSessionInfo())),
     ),
-    list: mock(
+    list: vi.fn(
       overrides?.sessionList ??
         (() => Promise.resolve([])),
     ),
-    children: mock(
+    children: vi.fn(
       overrides?.sessionChildren ??
         (() => Promise.resolve([])),
     ),
-    todo: mock(
+    todo: vi.fn(
       overrides?.sessionTodo ??
         (() => Promise.resolve([])),
     ),
-    diff: mock(
+    diff: vi.fn(
       overrides?.sessionDiff ??
         (() => Promise.resolve([])),
     ),
-    fork: mock(
+    fork: vi.fn(
       overrides?.sessionFork ??
         (() => Promise.resolve(null)),
     ),

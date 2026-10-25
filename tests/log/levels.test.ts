@@ -12,7 +12,7 @@
  * case pins (a record dropped by the level must not consume a throttle window).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   channelLevelEnvKey,

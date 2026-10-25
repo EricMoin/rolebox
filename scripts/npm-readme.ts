@@ -22,8 +22,8 @@
  * state from `prepack`.
  *
  * Usage:
- *   bun run scripts/npm-readme.ts absolute
- *   bun run scripts/npm-readme.ts relative
+ *   node --import tsx scripts/npm-readme.ts absolute
+ *   node --import tsx scripts/npm-readme.ts relative
  */
 import { execFileSync } from "node:child_process"
 import { readFileSync, writeFileSync } from "node:fs"
@@ -205,13 +205,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const USAGE = "usage: bun run scripts/npm-readme.ts <absolute|relative>"
+const USAGE = "usage: node --import tsx scripts/npm-readme.ts <absolute|relative>"
 
 /**
  * CLI entry point. Rewrites `<cwd>/README.md` only when the content changes,
  * prints a one-line summary and returns the process exit code.
  */
-export function main(argv: string[], cwd = resolve(import.meta.dir, "..")): number {
+export function main(argv: string[], cwd = resolve(import.meta.dirname, "..")): number {
   const mode = argv[0]
   if (mode !== "absolute" && mode !== "relative") {
     console.error(

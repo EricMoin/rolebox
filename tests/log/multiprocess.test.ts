@@ -1,41 +1,5 @@
-/**
- * THE MULTI-PROCESS CLAIM, AS A TEST RATHER THAN A PROMISE.
- *
- * Three REAL `bun` child processes write one channel into one directory at the
- * same time — through src/logger.ts's compatibility shell, through the kernel
- * API and through the JSON-lines sink itself — while a real `rolebox logs
- * --follow` process reads the live stream. The probe they all run in
- * (scripts/log-multiprocess-probe.ts) then checks, from the bytes on disk:
- *
- *   • every (writer, seq) appears EXACTLY once in the read layer's merged view;
- *   • every physical line is one complete record of this probe — no torn or
- *     interleaved line — and the raw scan agrees with the read layer;
- *   • rotation really happened (the run sets a 2 KB limit) and did not reorder
- *     any writer's own stream, and it happened AT the limit: every rotated copy
- *     is within `rotationBoundBytes` — ROLEBOX_LOG_MAX_BYTES plus one record per
- *     concurrent writer — which is what fails if the gate ever goes back to
- *     counting only the writing process's own bytes (that version produced
- *     copies at 2.26x the limit). The bound is in BYTES rather than a factor of
- *     the limit on purpose: the in-flight allowance is ~0.9x of a 1 KB limit and
- *     ~0.03x of a 32 KB one, so a factor check is not load-independent;
- *   • the merged view is ordered by `time`, ascending and its exact reverse;
- *   • the live follower delivered every one of those records exactly once, with
- *     no malformed line — and how much of the stream arrived out of `time`
- *     order is measured, because a file a rotation renamed past the follower's
- *     walk can be delivered one poll late.
- *
- * The `maxBytes`/`retain` pair is the point of the rotation part: retention is
- * set far above the volume, so the run's window cannot drop a record BY DESIGN —
- * anything missing is a genuine concurrent-rotation loss. That is exactly what
- * this suite caught before the sink coordinated rotation with a per-file lock:
- * the same probe configuration lost 70 of 1200 records then and none now.
- *
- * This case is slower than the rest of tests/log (it starts real processes and
- * waits for a poll), which is the price of testing processes instead of
- * pretending to.
- */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -69,7 +33,7 @@ describe("multi-process log writes", () => {
         maxBytes: 1_024,
         retain: 4_096,
         delayMs: 0,
-        followerPreload: join(import.meta.dir, "fixtures", "follower-slow-start.ts"),
+        followerPreload: join(import.meta.dirname, "fixtures", "follower-slow-start.ts"),
       });
 
       expect(Object.entries(run.checks).filter(([, passed]) => !passed)).toEqual([]);

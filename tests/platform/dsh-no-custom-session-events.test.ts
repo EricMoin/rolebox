@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Guard — rolebox MUST NOT append custom (non-catalog) session event types to
@@ -36,13 +35,13 @@
  * @module
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { KNOWN_SESSION_EVENT_TYPES } from "@deepseek-ai/dsh-session";
 
 /** Repo root, resolved from this test file (`tests/platform/`). */
-const REPO_ROOT = resolve(import.meta.dir, "../..");
+const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 /** Directories scanned recursively for session-event appends. */
 const SCAN_DIRS = [join(REPO_ROOT, "src/platform/adapters/dsh")];

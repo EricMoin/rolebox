@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,7 +80,7 @@ describe("DSH team session ownership", () => {
       process.stdout.write("ready");
       setInterval(() => {}, 1000);
     `;
-    const child = Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
+    const child = spawnProcess([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
     try {
       const reader = child.stdout.getReader();
       try { expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready"); }

@@ -1,21 +1,5 @@
-// ── Copilot Rules: Unit Tests ───────────────────────────────────────
-//
-// Tests src/copilot/rules.ts (evaluateRules + default replies). Pure
-// deterministic module — no session/injection side effects. Uses bun:test.
-//
-// Coverage:
-//   1. Regex match (pattern tested against last assistant text)
-//   2. Case-insensitive substring match (contains)
-//   3. Both-criteria AND semantics (pattern + contains must BOTH match)
-//   4. First-match-wins ordering
-//   5. Per-action default replies (continue/blocked/done/skip)
-//   6. Custom reply override
-//   7. skip-consumes-decision vs no-match distinction
-//   8. Invalid regex warn-and-skip (no throw, next rule still evaluated)
-//   9. Empty rules array → null
-//  10. Defensive: no match criteria / non-string input never throws
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   evaluateRules,
   DEFAULT_RULE_REPLIES,

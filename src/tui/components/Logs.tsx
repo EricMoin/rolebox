@@ -344,9 +344,9 @@ export function renderLogs(props: LogsProps) {
   return (
     <box>
       <text>
-        <span fg={c.primary} attributes={BOLD}>{"Logs"}</span>
-        <span fg={c.textMuted} attributes={DIM}>{INDENT + "level " + props.minLevel}</span>
-        <span fg={c.textMuted} attributes={DIM}>{INDENT + "chan " + channelSegment(props.channels, props.availableChannels.length)}</span>
+        <span style={{ fg: c.primary, attributes: BOLD }}>{"Logs"}</span>
+        <span style={{ fg: c.textMuted, attributes: DIM }}>{INDENT + "level " + props.minLevel}</span>
+        <span style={{ fg: c.textMuted, attributes: DIM }}>{INDENT + "chan " + channelSegment(props.channels, props.availableChannels.length)}</span>
       </text>
 
       {!props.open && (
@@ -391,9 +391,9 @@ export function renderLogs(props: LogsProps) {
             const line = renderLogRecordLine(record, valueBudget(width, INDENT.length + 2));
             return (
               <text>
-                <span fg={c.textMuted} attributes={DIM}>{INDENT}</span>
-                <span fg={c[logsLevelColor(record.level)] ?? c.text} attributes={BOLD}>{levelGlyph(record.level) + " "}</span>
-                <span fg={c.text}>{line}</span>
+                <span style={{ fg: c.textMuted, attributes: DIM }}>{INDENT}</span>
+                <span style={{ fg: c[logsLevelColor(record.level)] ?? c.text, attributes: BOLD }}>{levelGlyph(record.level) + " "}</span>
+                <span style={{ fg: c.text }}>{line}</span>
               </text>
             );
           }}

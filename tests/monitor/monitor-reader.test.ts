@@ -1,6 +1,6 @@
 import { graphStoreRoot } from "../../src/graph/store/schema.ts";
 import { GraphApplication } from "../../src/graph/application/graph-application.ts";
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

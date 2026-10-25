@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { __configureHostPacing } from "../../src/web/http-utils.ts";
 import type { CanonicalToolContext } from "../../src/platform/types.ts";
@@ -9,13 +9,10 @@ import type { CanonicalToolContext } from "../../src/platform/types.ts";
 // disabled state in case a test re-enables pacing.
 __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
 
-// Bun's `fetch` accepts `string | URL | Request` and carries a `preconnect`
-// helper alongside its call signature (bun-types `declare namespace fetch`), so
-// a double installed on `globalThis.fetch` has to match that port shape.
 function fetchDouble(
   impl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
 ): typeof fetch {
-  return Object.assign(mock(impl), { preconnect: (): void => {} });
+  return vi.fn(impl);
 }
 
 /**
@@ -46,6 +43,11 @@ function ctx(): CanonicalToolContext {
 }
 
 const originalFetch = globalThis.fetch;
+
+vi.doMock("../../src/web/browser-detect.ts", async importOriginal => ({
+  ...await importOriginal<typeof import("../../src/web/browser-detect.ts")>(),
+  detectBrowserCapabilities: async () => ({ playwright: false, crawlee: false, checked: true }),
+}));
 
 afterEach(() => {
   globalThis.fetch = originalFetch;

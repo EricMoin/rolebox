@@ -1,5 +1,4 @@
-/// <reference types="bun-types" />
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   createActiveAgentRef,
   type ActiveAgentRef,

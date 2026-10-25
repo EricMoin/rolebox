@@ -1,3 +1,4 @@
+import { spawnProcessSync, spawnProcess, readableToText } from "../../scripts/node-process.ts";
 /**
  * P3 cancel — the durable intent, the platform delivery, and the two facts
  *
@@ -38,7 +39,7 @@
  * real-host evidence.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -102,15 +103,7 @@ const INVERSE_RACE_GATE = "gate.cancel-inverse-race";
 /** One child process's deadline; a worker that overruns is killed. */
 const CANCEL_CHILD_DEADLINE_MS = 30_000;
 
-/**
- * THE HARNESS BUDGET MUST EXCEED THIS FILE'S OWN CHILD DEADLINE (the comment is
- * the same one `graph-store-cross-process.test.ts` carries). Bun's default is
- * 5000ms per test, so a child that was merely SLOW — spawn latency under load, a
- * `busy_timeout` wait on the shared store file — would have the CASE killed and
- * its own diagnosis never written. The budget below lets the child deadline fire
- * first, so what this file reports is always the cancel behaviour.
- */
-setDefaultTimeout(CANCEL_CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CANCEL_CHILD_DEADLINE_MS + 15_000 });
 
 /** work -> review: an accepted outcome for `work` arms the `review` attempt. */
 const CHAIN: GraphDeclarationV3 = {
@@ -620,22 +613,6 @@ interface ApplyCancelReport {
   readonly error?: string;
 }
 
-/**
- * Apply ONE CANCEL through a REAL second OS process, SYNCHRONOUSLY.
- *
- * WHY SYNCHRONOUS. The acceptance gate runs outside the acceptance transaction,
- * so the only place a test can commit a command INSIDE that window is a
- * validator — and validation is synchronous by contract. `Bun.spawnSync` starts
- * a second bun process that opens the SAME store with its OWN connection and
- * commits the cancel before this submission's transaction opens: exactly the
- * interleaving the run path's pre-transaction control check cannot see.
- *
- * The command is applied through the STORE, not through a `graph_control` call:
- * the child holds no host and no platform context, and this case is about the
- * RACE, not the permission check (which has its own cases in the control suite).
- * The run identity is still the run path's own — the worker adopts the id the
- * store already holds.
- */
 function applyCancelFromAnotherProcess(options: {
   readonly storeRoot: string;
   readonly graphId: string;
@@ -643,11 +620,7 @@ function applyCancelFromAnotherProcess(options: {
   readonly attemptId: string;
   readonly reason: string;
 }): ApplyCancelReport {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const result = Bun.spawnSync(
+  const result = spawnProcessSync(
     [
       process.execPath,
       XPROC_WORKER,
@@ -712,7 +685,7 @@ async function runRecordingProcessUntilItDiesAtTheAsk(
   dir: string,
   storeRoot: string,
 ): Promise<CancelAskReadingOfChild> {
-  const proc = Bun.spawn(
+  const proc = spawnProcess(
     [
       process.execPath,
       CANCEL_XPROC_WORKER,
@@ -725,12 +698,12 @@ async function runRecordingProcessUntilItDiesAtTheAsk(
     ],
     { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
   );
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CANCEL_CHILD_DEADLINE_MS);
   const code = await proc.exited;
   clearTimeout(timer);

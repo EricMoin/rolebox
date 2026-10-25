@@ -1,52 +1,10 @@
-/// <reference types="bun-types" />
+import { beforeEach as resetBeforeEach } from "vitest";
 
-/**
- * RoleboxLogsPanel behavior tests — the browser-half rolebox LIVE LOG VIEW
- * (`src/platform/adapters/dsh/web-ui/rolebox-logs-panel.tsx`), a dsh
- * right-Sidebar page tab (`sidebar.right.pane.tab`, keyed by the `rolebox-logs`
- * tab type).
- *
- * Verifies the panel's contract at four levels:
- *
- *   1. WIRE — the panel polls `GET /rolebox/logs`, sends the window size on the
- *      first request, hands the returned cursor back on every later one, and
- *      tolerates a page whose records are partly unreadable.
- *   2. STREAM CONTROL — refreshing happens only while the document is visible
- *      and the pane is unpaused; a hidden tab tears the change channel AND the
- *      fallback interval down, Resume continues from the SAME cursor, a
- *      `changed` frame refreshes immediately whatever reason it carries, and a
- *      trigger that lands during an in-flight fetch is DEFERRED to that fetch's
- *      `finally` rather than dropped. The buffer is bounded with the dropped
- *      count reported.
- *   3. READINGS — time, level chip, channel, code, scope, fields and the
- *      message are all rendered, and the pane prints the SOURCE the server
- *      actually read rather than a guess.
- *   4. POSTURE — explicit empty/error states with a way back, a live-region
- *      status seat, and a stylesheet that is namespaced, `--dsw-*`-only,
- *      single-column and free of decorative stripes.
- *
- * ── Harness ────────────────────────────────────────────────────────────────
- * React is NOT a devDependency of this repo (the temporary `react.stub.d.ts`
- * covers the type surface), so `react` and the JSX runtime are mocked BEFORE
- * the panel module is imported, exactly as the sibling monitor-panel suite
- * does. The double is STATEFUL: a mini-React (hook slots per component
- * instance, synchronous re-render on `setState`, effect flush with dependency
- * comparison and cleanup) plus a virtual-DOM tree with query helpers. On top of
- * it this file installs four deterministic seams the monitor suite does not
- * need: a TIMER double (the panel's own `setInterval` is the thing under test),
- * a `document` double (visibility), a queue-driven `fetch` double (the polling
- * sequence, whose requests can be HELD open so an in-flight fetch is
- * observable), and an `EventSource` double (the change channel — Bun ships a
- * real global, so installing the double is what keeps a test from dialling).
- *
- * @module
- */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // ── Stateful react double + tree harness ───────────────────────────────────
 
-/** One rendered JSX element (bun's automatic runtime passes children via props). */
 interface VNode {
   type: unknown;
   props: Record<string, unknown>;
@@ -219,9 +177,9 @@ function useRef<T>(initial: T): { current: T } {
   return rs.states[slot] as { current: T };
 }
 
-mock.module("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 
 // ── Module under test (dynamic import: mocks must precede the graph) ───────
 
@@ -285,15 +243,6 @@ function installDocument(): FakeDocument {
 
 // ── EventSource double (the change channel) ────────────────────────────────
 
-/**
- * Controllable `EventSource` double.
- *
- * The runtime DOES define a global `EventSource` (Bun ships one), so a test that
- * leaves it alone would dial a real connection; installing this double is what
- * makes the change channel observable and deterministic. The panel opens a
- * channel per mounted-and-live effect, so the suite reads the LAST instance
- * (`eventSource()`) and keeps them all for the teardown assertions.
- */
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
   static reset(): void {
@@ -1224,3 +1173,5 @@ describe("RoleboxLogsPanel", () => {
     });
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

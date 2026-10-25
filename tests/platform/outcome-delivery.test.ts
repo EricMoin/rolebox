@@ -43,7 +43,7 @@
  * is real-host evidence.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 
 import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
 import { PiOutcomeDelivery } from "../../src/platform/adapters/pi/outcome-dispatch.ts";

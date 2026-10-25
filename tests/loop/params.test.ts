@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { parseLoopParams } from "../../src/loop/params.ts";
 import {
   SEED_CHAR_CAP,

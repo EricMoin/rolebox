@@ -6,7 +6,7 @@
  * updateChainState create/merge, delete, flushSync, loadAll.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   existsSync,
   mkdtempSync,

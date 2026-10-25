@@ -1,9 +1,9 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { makeToolContext } from "./helpers.ts";
 
 function makeMockService(overrides: Record<string, any> = {}) {
   return {
-    triggerReload: mock(() => Promise.resolve({
+    triggerReload: vi.fn(() => Promise.resolve({
       success: true,
       discovered: 5,
       resolved: 4,

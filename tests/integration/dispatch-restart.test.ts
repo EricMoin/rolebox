@@ -10,7 +10,7 @@
  * read-only (the old manager leaked its lock file).
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, readdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";

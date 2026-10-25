@@ -14,7 +14,7 @@
  * @module
  */
 
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach } from "vitest";
 import { z } from "zod";
 import { PiToolFactory } from "../src/platform/adapters/pi/tool-factory.ts";
 import { defineTool } from "../src/platform/ports/tool-factory.ts";

@@ -105,7 +105,7 @@ function ownKeysOf(value: unknown): readonly string[] {
 
 /**
  * Index of the LAST `subagent/descriptor` event whose data is this label's
- * `version: 2`, `mode: "one-shot"` descriptor, or -1 when the session carries
+ * supported execution descriptor, or -1 when the session carries
  * no descriptor at all or its last descriptor belongs to something else.
  *
  * The LAST descriptor wins: a later descriptor — matching or not — resets the
@@ -120,17 +120,22 @@ function ownedDescriptorIndex(events: readonly DshSessionEventLike[], label: str
     if (!isRecord(event) || readProperty(event, "type") !== "subagent/descriptor") continue;
     const data = isRecord(readProperty(event, "data")) ? readProperty(event, "data") : undefined;
     owner = index;
-    owned = readProperty(data, "version") === 2 &&
-      readProperty(data, "mode") === "one-shot" &&
+    const version = readProperty(data, "version");
+    const mode = readProperty(data, "mode");
+    // The v3 SDK records local startActivation children as continuable sessions.
+    const supported = (version === 2 && mode === "one-shot") ||
+      (version === 3 && (mode === "one-shot" || mode === "continuable") &&
+        typeof readProperty(data, "provider") === "string");
+    owned = supported &&
       readProperty(data, "label") === label;
   }
   return owned ? owner : -1;
 }
 
 /**
- * The events owned by the one-shot dsh graph execution `label`: everything
+ * The events owned by the dsh graph execution `label`: everything
  * AFTER its last `subagent/descriptor`, or nothing when the session's last
- * descriptor is not this label's one-shot descriptor.
+ * descriptor does not belong to this execution label.
  *
  * Both exported readers derive ownership from this one helper, so the
  * completion observation and the last-turn declaration reading cannot drift.
@@ -140,7 +145,7 @@ function ownedWindow(events: readonly DshSessionEventLike[], label: string): rea
   return owner < 0 ? [] : windowFrom(events, owner + 1);
 }
 
-/** Only a terminal turn after this one-shot child's own descriptor proves an end. */
+/** Only a terminal turn after the child's own descriptor proves an end. */
 export function observeDshExecutionEvents(events: readonly DshSessionEventLike[], label: string): HostExecutionObservation {
   const unknown = { kind: "unknown" as const, reason: "No confirmed terminal turn for this dsh graph execution" };
   let terminal: HostExecutionObservation = unknown;
@@ -171,7 +176,7 @@ export function observeDshExecutionEvents(events: readonly DshSessionEventLike[]
  *
  *   - ownership: the owned window is everything after the LAST
  *     `subagent/descriptor` event (a later descriptor resets the window), and
- *     the window must be this label's `version: 2`, `mode: "one-shot"` one;
+ *     the window must be this label's supported execution descriptor;
  *   - the FINAL turn is the last `turn/start` .. following `turn/end` pair
  *     inside that window, and its `data.reason.kind` must be `"completed"`
  *     (a failed or aborted turn is the completion observation's business, not a
@@ -214,13 +219,13 @@ export type DshTurnDeclarationReading =
 const DECLARATION_KEYS = new Set(["outcome_id", "data", "evidence_refs"]);
 
 /**
- * Read the single outcome declaration from the last turn of the owned one-shot
+ * Read the single outcome declaration from the last turn of the owned execution
  * execution `label`. See {@link DshTurnDeclarationReading} for the exact,
  * byte-deterministic derivation contract.
  */
 export function readDshLastTurnDeclaration(events: readonly DshSessionEventLike[], label: string): DshTurnDeclarationReading {
   const owner = ownedDescriptorIndex(events, label);
-  if (owner < 0) return { kind: "absent", reason: "No one-shot dsh graph execution descriptor owns this session label" };
+  if (owner < 0) return { kind: "absent", reason: "No matching dsh graph execution descriptor owns this session label" };
   const window = ownedWindow(events, label);
   const offset = owner + 1;
 
@@ -237,7 +242,7 @@ export function readDshLastTurnDeclaration(events: readonly DshSessionEventLike[
       opened = -1;
     }
   }
-  if (!final) return { kind: "absent", reason: "No terminal turn after the owning one-shot descriptor" };
+  if (!final) return { kind: "absent", reason: "No terminal turn after the owning execution descriptor" };
   const closing = elementAt(window, final.end);
   const closingData = isRecord(readProperty(closing, "data")) ? readProperty(closing, "data") : undefined;
   const closingReason = isRecord(readProperty(closingData, "reason")) ? readProperty(closingData, "reason") : undefined;

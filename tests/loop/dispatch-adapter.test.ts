@@ -1,16 +1,16 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { DispatchAdapter, type IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 import type { DispatchInput, DispatchTask } from "../../src/dispatch/types.ts";
 
 interface FakeDispatchManager {
-  launch: ReturnType<typeof mock>;
-  getResult: ReturnType<typeof mock>;
-  cancelTask: ReturnType<typeof mock>;
+  launch: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+  getResult: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+  cancelTask: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 }
 
 function createFakeDispatchManager(): FakeDispatchManager {
   return {
-    launch: mock(
+    launch: vi.fn(
       (
         _input: DispatchInput,
         _parentContext: { sessionID: string; agent: string; directory: string },
@@ -29,7 +29,7 @@ function createFakeDispatchManager(): FakeDispatchManager {
           priority: 0,
         }),
     ),
-    getResult: mock(
+    getResult: vi.fn(
       (_taskId: string): Promise<{
         kind: "ok" | "expired" | "not_found" | "fetch_error";
         text: string;
@@ -46,7 +46,7 @@ function createFakeDispatchManager(): FakeDispatchManager {
           totalChars: 18,
         }),
     ),
-    cancelTask: mock(
+    cancelTask: vi.fn(
       (_taskId: string): Promise<boolean> => Promise.resolve(true),
     ),
   };
@@ -60,18 +60,18 @@ function createFakeClient(overrides?: {
 }): import("../../src/platform/ports/session-client.ts").ISessionClient {
   const data = overrides?.messages ?? [];
   return {
-    messages: mock(() => Promise.resolve(data)),
-    prompt: mock(() => Promise.resolve({ id: "prompt-1" })),
-    create: mock(() => Promise.resolve({ id: "test-session-1" })),
-    promptSync: mock(() => Promise.resolve(null)),
-    get: mock(() => Promise.resolve(null)),
-    list: mock(() => Promise.resolve([])),
-    children: mock(() => Promise.resolve([])),
-    todo: mock(() => Promise.resolve([])),
-    diff: mock(() => Promise.resolve([])),
-    fork: mock(() => Promise.resolve(null)),
-    status: mock(() => Promise.resolve(null)),
-    abort: mock(() => Promise.resolve(true)),
+    messages: vi.fn(() => Promise.resolve(data)),
+    prompt: vi.fn(() => Promise.resolve({ id: "prompt-1" })),
+    create: vi.fn(() => Promise.resolve({ id: "test-session-1" })),
+    promptSync: vi.fn(() => Promise.resolve(null)),
+    get: vi.fn(() => Promise.resolve(null)),
+    list: vi.fn(() => Promise.resolve([])),
+    children: vi.fn(() => Promise.resolve([])),
+    todo: vi.fn(() => Promise.resolve([])),
+    diff: vi.fn(() => Promise.resolve([])),
+    fork: vi.fn(() => Promise.resolve(null)),
+    status: vi.fn(() => Promise.resolve(null)),
+    abort: vi.fn(() => Promise.resolve(true)),
   } as unknown as import("../../src/platform/ports/session-client.ts").ISessionClient;
 }
 
@@ -134,7 +134,7 @@ describe("DispatchAdapter", () => {
 
     it("returns hadError=true when kind is not ok", async () => {
       freshAdapter();
-      dispatchManager.getResult = mock(() =>
+      dispatchManager.getResult = vi.fn(() =>
         Promise.resolve({
           kind: "fetch_error" as const,
           text: "",
@@ -284,7 +284,7 @@ describe("DispatchAdapter", () => {
       // Override client to return three messages
       da.client = {
         ...da.client,
-        messages: mock(() =>
+        messages: vi.fn(() =>
           Promise.resolve([
             { info: { role: "assistant", id: "msg-1" }, parts: [{ type: "text", text: "old" }] },
             { info: { role: "assistant", id: "msg-2" }, parts: [{ type: "text", text: "newer" }] },

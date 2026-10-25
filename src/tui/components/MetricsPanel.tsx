@@ -1,3 +1,4 @@
+import type { JSX } from "solid-js";
 /**
  * TUI metrics panel — dispatch gauges / counters / histograms.
  *
@@ -68,14 +69,14 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
 
   if (!metrics) return null;
 
-  const parts: unknown[] = [];
+  const parts: JSX.Element[] = [];
 
   // Dimmed secondary row — one `label: value` fact per row.
   const dimRow = (label: string, value: string) => {
     const budget = valueBudget(SIDEBAR_WIDTH, INDENT.length);
     return (
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + labelValue(label, value, budget)}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT + labelValue(label, value, budget)}</span>
       </text>
     );
   };
@@ -89,9 +90,9 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
       const value = metrics.counters[key].value;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + name}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  " + name}</span>
           {labelTags(labels, c)}
-          <span fg={rgbaToCSS(c.text)}>{" " + String(value)}</span>
+          <span style={{ fg: rgbaToCSS(c.text) }}>{" " + String(value)}</span>
         </text>,
       );
     }
@@ -106,9 +107,9 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
       const value = metrics.gauges[key].value;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + name}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  " + name}</span>
           {labelTags(labels, c)}
-          <span fg={rgbaToCSS(c.text)}>{" " + String(value)}</span>
+          <span style={{ fg: rgbaToCSS(c.text) }}>{" " + String(value)}</span>
         </text>,
       );
     }
@@ -126,7 +127,7 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
       const p95 = histogramPercentile(h.buckets, h.count, 0.95);
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + name}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  " + name}</span>
           {labelTags(labels, c)}
         </text>,
       );
@@ -152,7 +153,7 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
         .join(" ");
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + ts}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"  " + ts}</span>
         </text>,
       );
       if (counterVals) {
@@ -180,5 +181,5 @@ function labelTags(labels: Record<string, string>, c: ThemeColors) {
   const keys = Object.keys(labels);
   if (keys.length === 0) return null;
   const tagStr = " " + keys.map((k) => k + ":" + labels[k]).join(" ");
-  return <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{tagStr}</span>;
+  return <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{tagStr}</span>;
 }

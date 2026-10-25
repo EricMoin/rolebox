@@ -71,6 +71,8 @@ export type DshSystemPromptRegistry = {
 export interface DshSystemPromptAdapterOptions {
   memoryContext?: (ctx: DshSystemPromptContext) => string;
   computerContext?: (ctx: DshSystemPromptContext) => string;
+  /** The browse workflow block for the tools this session actually registered. */
+  browseContext?: (ctx: DshSystemPromptContext) => string;
   /** Graph workers receive their target role through the dispatch prompt. */
   isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry holding all resolved agent definitions (roles + subagents). */
@@ -102,6 +104,7 @@ export class DshSystemPromptAdapter {
   private readonly isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   private readonly memoryContext?: (ctx: DshSystemPromptContext) => string;
   private readonly computerContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly browseContext?: (ctx: DshSystemPromptContext) => string;
   /** Registry disposers returned by `section()`/`context()` — released by `dispose()`. */
   private readonly disposers: Array<() => void> = [];
   private readonly _log;
@@ -117,6 +120,7 @@ export class DshSystemPromptAdapter {
     this.isGraphWorker = options.isGraphWorker;
     this.memoryContext = options.memoryContext;
     this.computerContext = options.computerContext;
+    this.browseContext = options.browseContext;
     this._log = createSubLogger("dsh-system-prompt");
   }
 
@@ -166,6 +170,14 @@ export class DshSystemPromptAdapter {
         order: 20,
         interpolate: false,
         text: this.computerContext,
+      }));
+    }
+    if (this.browseContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:browse",
+        order: 30,
+        interpolate: false,
+        text: this.browseContext,
       }));
     }
   }

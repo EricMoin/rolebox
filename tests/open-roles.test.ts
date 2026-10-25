@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { collectOpenRoles } from "../src/resolver/open-roles.js";
 import { RoleMode } from "../src/constants.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent } from "../src/types.js";

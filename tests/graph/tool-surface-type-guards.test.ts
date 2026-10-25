@@ -15,7 +15,7 @@
  *    against a real `OutcomeHost` and the shipped `withCancelDelivery`.
  * 2. F-26 — the binding keeps each entry's DECLARED argument type instead of
  *    erasing it to `Record<string, unknown>` and casting the record back. The
- *    `expectTypeOf` pins (authority: `bun run typecheck:tests`, not the
+ *    `expectTypeOf` pins (authority: `npm run typecheck:tests`, not the
  *    transpile-only test run) fail the day the erased record returns, and the
  *    runtime case proves a malformed argument record is REFUSED by name instead
  *    of being forwarded, while a legitimate record still reaches the body with
@@ -29,7 +29,7 @@
  * tree is removed.
  */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

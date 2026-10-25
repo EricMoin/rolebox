@@ -1,7 +1,7 @@
 // Source URL mapping: the URL-only kind detection, the exact manifest/archive
 // shapes each kind produces, and the refusal for a URL that identifies no
 // backend. Pure module — no fs, no network, no config.
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   archiveUrlCandidates,
   archiveUrlFor,

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * opencode v2 registration surfaces — agents, skills and the loop-stop command.
@@ -14,7 +13,7 @@
  * working tree stays clean.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   applyOpencode2AgentPatch,
   applyOpencode2Agents,
@@ -164,12 +163,6 @@ type PlainAgentView = Opencode2MutableAgentInfo & {
   };
 };
 
-/**
- * Read a host entry through the plain field view. `DeepMutable` maps the
- * branded string fields (`Agent.Name`, `Model.ID`, …) into object types, and
- * bun's matchers take the received type as the expected type, so a mapped
- * field cannot be compared with a plain string directly.
- */
 function view(agent: Opencode2HostMutableAgentInfo | undefined): PlainAgentView | undefined {
   return agent as unknown as PlainAgentView | undefined;
 }

@@ -165,7 +165,7 @@ export type {
  *     (still not retried).
  *
  * The `isSessionRejected` marker field makes the guard robust even if the class
- * is duplicated across module instances (Bun/deno cache isolation).
+ * is duplicated across module instances (isolated module caches).
  */
 export class SessionCreateRejectedError extends Error {
   readonly isSessionRejected = true as const;

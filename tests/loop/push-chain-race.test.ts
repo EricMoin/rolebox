@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 
@@ -17,7 +17,7 @@ function createRaceSimAdapter(): {
   let taskCounter = 0;
 
   const adapter: IDispatchAdapter = {
-    dispatchRound: mock(
+    dispatchRound: vi.fn(
       async () => {
         taskCounter += 1;
         const taskId = `task-${taskCounter}`;
@@ -29,38 +29,38 @@ function createRaceSimAdapter(): {
       },
     ),
 
-    getRoundResult: mock(
+    getRoundResult: vi.fn(
       async (_taskId: string) => {
         calls.push(`getRoundResult:${_taskId}`);
         return { text: "ok", hadError: false };
       },
     ),
 
-    cancelRound: mock(async () => {
+    cancelRound: vi.fn(async () => {
       calls.push("cancelRound");
     }),
 
-    readOriginSummary: mock(
+    readOriginSummary: vi.fn(
       async () => {
         calls.push("readOriginSummary");
         return "Round summary for tests.";
       },
     ),
 
-    getLastMessageId: mock(
+    getLastMessageId: vi.fn(
       async () => {
         calls.push("getLastMessageId");
         return "msg-boundary";
       },
     ),
 
-    injectNote: mock(
+    injectNote: vi.fn(
       async () => {
         calls.push("injectNote");
       },
     ),
 
-    registerTerminatedListener: mock(
+    registerTerminatedListener: vi.fn(
       (
         _taskId: string,
         callback: (taskId: string, status: string) => void,
@@ -76,13 +76,13 @@ function createRaceSimAdapter(): {
       },
     ),
 
-    removeTerminatedListener: mock(
+    removeTerminatedListener: vi.fn(
       () => {
         calls.push("removeTerminatedListener");
       },
     ),
 
-    getTaskStatus: mock(
+    getTaskStatus: vi.fn(
       async () => {
         return "completed";
       },
@@ -96,7 +96,7 @@ function createRaceSimAdapter(): {
 
 describe("push-chain race condition", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("round-2 completion that arrives during round-1 _advancing section is still processed", async () => {

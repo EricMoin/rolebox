@@ -1,3 +1,4 @@
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 /**
  * CROSS-PROCESS acceptance evidence for the workspace's ONE GraphStore.
  *
@@ -15,7 +16,7 @@
  *
  * WHICH PROCESS DOES WHAT. The test file runs in ONE process (`--isolate`),
  * and it holds its OWN connection to the store file (`makeFixture`). Every
- * worker is a REAL second/third/fourth OS process — `Bun.spawn(process.execPath,
+ * worker is a REAL second/third/fourth OS process — `spawnProcess(process.execPath,
  * <this directory>/helpers/graph-store-xproc-worker.ts, ...)` — and each
  * opens its own SQLite connection to the SAME file:
  *
@@ -75,7 +76,7 @@
  * process that asked.
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -104,19 +105,7 @@ const BARRIER_DEADLINE_MS = 15_000;
 /** How long the lock-holder worker keeps the store's write lock (see its case). */
 const HOLD_MS = 1_000;
 
-/**
- * THE HARNESS BUDGET MUST EXCEED THIS FILE'S OWN DEADLINES. Bun's default is
- * 5000ms per test, while one child here is deliberately given
- * `CHILD_DEADLINE_MS` (30s) and one barrier round `BARRIER_DEADLINE_MS` (15s).
- * A child that is merely SLOW — spawn latency under load, a `busy_timeout` wait
- * on the shared store file — therefore had the CASE killed at 5s, its children
- * reaped as "dangling", and the case's own diagnosis (which child overran,
- * which marker never arrived) never written: a failure that said nothing about
- * the store. The budget below lets the child deadline fire first, so what this
- * file reports is always the store's behaviour. It asserts nothing about the
- * store and weakens no case.
- */
-setDefaultTimeout(CHILD_DEADLINE_MS + 15_000);
+vi.setConfig({ testTimeout: CHILD_DEADLINE_MS + 15_000 });
 
 // ── Worker protocol ─────────────────────────────────────────────────────────
 
@@ -261,24 +250,19 @@ function workerArgs(fx: XprocFixture, args: Readonly<Record<string, string>>): s
   return out;
 }
 
-/** Spawn one REAL bun process running the worker fixture. */
 function spawnWorker(id: string, args: readonly string[]): Child {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn([process.execPath, WORKER, ...args], {
+  const proc = spawnProcess([process.execPath, WORKER, ...args], {
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
 
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
 
   const done = (async (): Promise<WorkerReport & Record<string, unknown>> => {
@@ -325,7 +309,7 @@ function spawnWorker(id: string, args: readonly string[]): Child {
     done,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   NOTIFICATION_CHANNEL_KINDS,
   NOTIFICATION_EVENT_TYPES,

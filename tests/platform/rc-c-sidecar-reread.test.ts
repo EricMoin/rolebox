@@ -21,7 +21,7 @@
  * @module
  */
 
-import { describe, it, expect, afterAll, mock } from "bun:test";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -47,7 +47,7 @@ async function realReadSession(sessionId: string): Promise<unknown[] | null> {
   return events;
 }
 
-mock.module("../../src/platform/adapters/pi/sidecar-persister", () => ({
+vi.doMock("../../src/platform/adapters/pi/sidecar-persister", () => ({
   readSession: async (id: string): Promise<unknown[] | null> => {
     readSessionCalls++;
     return realReadSession(id);

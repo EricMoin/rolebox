@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 import type { LoopState } from "../../src/loop/types.ts";
@@ -28,7 +28,7 @@ function createFakeAdapter(
   let msgIdCounter = 0;
 
   const adapter: IDispatchAdapter = {
-    dispatchRound: mock(
+    dispatchRound: vi.fn(
       async (_input: {
         originSessionId: string;
         agent: string;
@@ -48,7 +48,7 @@ function createFakeAdapter(
       },
     ),
 
-    getRoundResult: mock(
+    getRoundResult: vi.fn(
       async (_workerTaskId: string) => {
         calls.push({
           method: "getRoundResult",
@@ -61,11 +61,11 @@ function createFakeAdapter(
       },
     ),
 
-    cancelRound: mock(async (_workerTaskId: string) => {
+    cancelRound: vi.fn(async (_workerTaskId: string) => {
       calls.push({ method: "cancelRound", args: [_workerTaskId] });
     }),
 
-    readOriginSummary: mock(
+    readOriginSummary: vi.fn(
       async (_originSessionId: string, _sinceMessageId?: string) => {
         calls.push({
           method: "readOriginSummary",
@@ -76,7 +76,7 @@ function createFakeAdapter(
       },
     ),
 
-    getLastMessageId: mock(
+    getLastMessageId: vi.fn(
       async (_originSessionId: string) => {
         calls.push({
           method: "getLastMessageId",
@@ -90,13 +90,13 @@ function createFakeAdapter(
       },
     ),
 
-    injectNote: mock(
+    injectNote: vi.fn(
       async (_sessionId: string, _text: string) => {
         calls.push({ method: "injectNote", args: [_sessionId, _text] });
       },
     ),
 
-    registerTerminatedListener: mock(
+    registerTerminatedListener: vi.fn(
       (
         _taskId: string,
         _callback: (taskId: string, status: string) => void,
@@ -110,7 +110,7 @@ function createFakeAdapter(
       },
     ),
 
-    removeTerminatedListener: mock(
+    removeTerminatedListener: vi.fn(
       (
         _taskId: string,
         _callback: (taskId: string, status: string) => void,
@@ -122,7 +122,7 @@ function createFakeAdapter(
       },
     ),
 
-    getTaskStatus: mock(async (_taskId: string) => {
+    getTaskStatus: vi.fn(async (_taskId: string) => {
       calls.push({ method: "getTaskStatus", args: [_taskId] });
       return "completed";
     }),
@@ -340,7 +340,7 @@ describe("LoopCoordinator", () => {
       await flushMicrotask();
 
       // Make getRoundResult throw to simulate push-chain error
-      const mockGetResult = adapter.getRoundResult as ReturnType<typeof mock>;
+      const mockGetResult = adapter.getRoundResult as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
       mockGetResult.mockImplementation(async () => {
         throw new Error("push-chain boom");
       });
@@ -840,7 +840,7 @@ describe("LoopCoordinator", () => {
 
       // Override readOriginSummary to return incrementing summaries
       const origReadSummary = adapter.readOriginSummary;
-      adapter.readOriginSummary = mock(
+      adapter.readOriginSummary = vi.fn(
         async () => {
           summaryCount += 1;
           return `Summary for round ${summaryCount}.`;
@@ -871,7 +871,7 @@ describe("LoopCoordinator", () => {
       // Verify seed was threaded: dispatch calls for rounds 2 and 3
       // should have included previous summary
       const dispatchCalls = (
-        adapter.dispatchRound as ReturnType<typeof mock>
+        adapter.dispatchRound as ReturnType<typeof vi.fn<(...args: any[]) => any>>
       ).mock.calls;
       expect(dispatchCalls.length).toBe(3);
 
@@ -1080,7 +1080,7 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       // Make dispatchRound throw during the self-start microtask
-      const mockDispatch = adapter.dispatchRound as ReturnType<typeof mock>;
+      const mockDispatch = adapter.dispatchRound as ReturnType<typeof vi.fn<(...args: any[]) => any>>;
       mockDispatch.mockImplementation(async () => {
         throw new Error("self-start boom");
       });

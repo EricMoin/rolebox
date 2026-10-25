@@ -17,7 +17,7 @@
  * as "no origins".
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
 import { HostInvocationOrigins } from "../../src/graph/host/invocation-origins.ts";

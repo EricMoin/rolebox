@@ -19,7 +19,7 @@
  * The record the operator reads is covered by `outcome-projection.test.ts`.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 

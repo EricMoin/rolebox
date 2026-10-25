@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { lexer, marked } from "marked";
 import { buildMemoryBlock } from "../../src/prompt/builder.ts";
 import type { MemorySummary } from "../../src/types.ts";

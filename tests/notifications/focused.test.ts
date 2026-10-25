@@ -1,27 +1,5 @@
-// ── Notification System: Focused Unit Tests ────────────────────────────
-//
-// Covers identified gaps in the existing integration test suite:
-//   manager     – handleToolBefore, no-channels, edge cases
-//   scheduler   – grace period, cancelSession completeness, maxTrackedSessions=0
-//   throttle    – windowMs=0, prune(), invalid config, burst scenarios
-//   quiet-hours – timezone boundary, nextActiveTime (crossover/full-day), multi-range
-//   channel-resolver – cache hit/miss, creation failure, concurrent promise
-//   channels    – createChannel returns null, system-toast mock, custom-command
-//   formatting  – edge cases
-//   config-validate – 5+ illegal config forms
-//   content     – truncation boundary, empty/undefined vars
-//
-// Uses bun:test syntax – describe/it/expect from "bun:test".
-// Imports follow the same conventions as integration.test.ts.
 
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  mock,
-} from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -82,10 +60,10 @@ function tempDir(): string {
 
 function createMockClient() {
   return {
-    get: mock(() =>
+    get: vi.fn(() =>
       Promise.resolve({ title: "Focused Test Session" }),
     ),
-    messages: mock(() =>
+    messages: vi.fn(() =>
       Promise.resolve([
         {
           info: { role: "user" },
@@ -941,7 +919,7 @@ describe("Channels – focused", () => {
   });
 
   it("WebhookChannel sets default Content-Type header", async () => {
-    const fetchMock = mock((_url: string, _init: RequestInit) =>
+    const fetchMock = vi.fn((_url: string, _init: RequestInit) =>
       Promise.resolve({ ok: true, status: 200 }),
     );
     global.fetch = fetchMock as unknown as typeof global.fetch;
@@ -976,7 +954,7 @@ describe("Channels – focused", () => {
   });
 
   it("WebhookChannel includes custom headers", async () => {
-    const fetchMock = mock((_url: string, _init: RequestInit) =>
+    const fetchMock = vi.fn((_url: string, _init: RequestInit) =>
       Promise.resolve({ ok: true, status: 200 }),
     );
     global.fetch = fetchMock as unknown as typeof global.fetch;
@@ -1315,7 +1293,7 @@ describe("Content – focused", () => {
     const client = createMockClient();
 
     // Mock get to return a long title (which becomes the body via {session_title})
-    const getMock = mock(() =>
+    const getMock = vi.fn(() =>
       Promise.resolve({ title: longBody }),
     ) as any;
 
@@ -1378,8 +1356,8 @@ describe("Content – focused", () => {
 
   it("buildNotificationContent does not throw when client returns null", async () => {
     const nullClient = {
-      get: mock(() => Promise.resolve(null)),
-      messages: mock(() => Promise.resolve(null)),
+      get: vi.fn(() => Promise.resolve(null)),
+      messages: vi.fn(() => Promise.resolve(null)),
     } as any;
 
     const msg = await buildNotificationContent({
@@ -1394,8 +1372,8 @@ describe("Content – focused", () => {
 
   it("buildNotificationContent does not throw when messages return empty array", async () => {
     const emptyMsgClient = {
-      get: mock(() => Promise.resolve({ title: "Empty Session" })),
-      messages: mock(() => Promise.resolve([])),
+      get: vi.fn(() => Promise.resolve({ title: "Empty Session" })),
+      messages: vi.fn(() => Promise.resolve([])),
     } as any;
 
     const msg = await buildNotificationContent({

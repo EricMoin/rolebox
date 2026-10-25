@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Per-OS computer-use plan builders.
@@ -8,7 +7,7 @@
  * exercised on whatever machine runs the suite. No plan is executed here.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { darwinComputerUse } from "../../src/computer/drivers/darwin.ts";
 import { linuxComputerUse } from "../../src/computer/drivers/linux.ts";
 import { unsupportedComputerUse } from "../../src/computer/drivers/unsupported.ts";

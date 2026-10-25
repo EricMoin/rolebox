@@ -29,7 +29,7 @@
  * here is real-host evidence (no dsh/Pi SDK runs in this environment).
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

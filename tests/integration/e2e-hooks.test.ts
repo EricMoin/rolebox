@@ -1,29 +1,5 @@
-/**
- * End-to-end hook pipeline tests for rolebox.
- *
- * Validates the full pipeline:
- *   user message event → plugin hook dispatch → role resolution →
- *   prompt construction → agent response → function state transition →
- *   result extraction
- *
- * Uses two complementary approaches:
- *   1. Mock-client tests – verify hook handler orchestration, function
- *      activation, gate evaluation, graph advancement, and system-prompt
- *      augmentation through the production PluginCore/composition.ts path.
- *   2. Real-server tests – verify the complete message→hook→role→session
- *      pipeline against an actual opencode platform instance.
- *
- * Type notes:
- *   - `agent` is not in the Hooks interface for system.transform but the
- *     hook-service handler extracts it via `(input as any).agent` (matching
- *     production opencode platform behavior). Tests pass it via `as any`.
- *   - `callID` is required by the tool.execute.after Hooks interface.
- *   - `bun:test` import type errors are pre-existing across all test files.
- *
- * Additive only — no existing test files are modified.
- */
 
-import { describe, it, expect, mock, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
@@ -102,7 +78,7 @@ describe("E2E hook pipeline (mock client)", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   // ──────────────────────────────────────────────────────────────────────────

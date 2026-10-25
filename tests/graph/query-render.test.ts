@@ -31,7 +31,7 @@
  * host and no child process, so nothing here is real-host evidence either.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { ZERO_BUDGET_USAGE, type BudgetReport } from "../../src/graph/domain/budget.ts";
 import type { ControlDecisionRecord, RunControlRecord } from "../../src/graph/ledger/types.ts";

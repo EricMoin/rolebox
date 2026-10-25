@@ -1,21 +1,11 @@
-/**
- * A4 — Task depth tracking and sync depth guard
- *
- * Verifies:
- * - computeDepth returns correct 0/1/2 for parent-child-grandchild chains
- * - executeSync throws at depth > 0
- * - executeSync allowed at depth 0
- * - Background dispatch allowed at any depth
- * - Depth survives serialize→recover round-trip
- *
- * Run: bun test tests/dispatch/depth.test.ts
- */
-import { describe, it, expect, afterEach } from "bun:test";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import { createMockClient } from "./helpers.ts";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createPathsMockPayload } from "../helpers/paths-mock.ts";
 import { tmpdir } from "node:os";
-import { mock } from "bun:test";
+import { vi } from "vitest";
 import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
@@ -165,7 +155,8 @@ describe("T5: depth survives serialize→recover", () => {
       try { rmSync(dir, { recursive: true, force: true }); } catch {}
     };
 
-    mock.module("../../src/cli/paths", () => createPathsMockPayload({
+    vi.resetModules();
+    vi.doMock("../../src/cli/paths", () => createPathsMockPayload({
       getDataDir: () => dir,
     }));
 
@@ -192,7 +183,8 @@ describe("T5: depth survives serialize→recover", () => {
       try { rmSync(dir, { recursive: true, force: true }); } catch {}
     };
 
-    mock.module("../../src/cli/paths", () => createPathsMockPayload({
+    vi.resetModules();
+    vi.doMock("../../src/cli/paths", () => createPathsMockPayload({
       getDataDir: () => dir,
     }));
 
@@ -222,9 +214,7 @@ describe("T5: depth survives serialize→recover", () => {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function makeDepthManager() {
-  const { createMockClient } = require("./helpers");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { DispatchManager } = require("../../src/dispatch/core/manager");
   const client = createMockClient();
   return new DispatchManager(client, {
     maxConcurrent: 10,

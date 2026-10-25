@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PluginCore } from "../../src/core/plugin-core.ts";
 import type { PluginService, ServiceHealth } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
@@ -15,8 +15,8 @@ function makeService(name: string, deps: string[] = [], healthFn?: () => Service
   return {
     name: fakeServiceName(name),
     dependencies: fakeServiceNames(deps),
-    init: mock(() => Promise.resolve()),
-    dispose: mock(() => Promise.resolve()),
+    init: vi.fn(() => Promise.resolve()),
+    dispose: vi.fn(() => Promise.resolve()),
     ...(healthFn ? { health: healthFn } : {}),
   };
 }
@@ -72,7 +72,7 @@ describe("HealthMonitorService", () => {
         delete process.env[key];
       }
     }
-    mock.restore();
+    vi.restoreAllMocks();
     __resetForTest();
   });
 
@@ -217,8 +217,8 @@ describe("HealthMonitorService", () => {
     await core.init(makeContext(core));
 
     // Clear init call counts from the init phase
-    (unhealthySvc.init as ReturnType<typeof mock>).mockClear();
-    (unhealthySvc.dispose as ReturnType<typeof mock>).mockClear();
+    (unhealthySvc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (unhealthySvc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     // Give the timer a chance to fire and restart the unhealthy service
     await new Promise((r) => setTimeout(r, 250));
@@ -240,8 +240,8 @@ describe("HealthMonitorService", () => {
     await core.init(makeContext(core));
 
     // Clear init call counts
-    (healthySvc.init as ReturnType<typeof mock>).mockClear();
-    (healthySvc.dispose as ReturnType<typeof mock>).mockClear();
+    (healthySvc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (healthySvc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     // Give the timer a chance to fire
     await new Promise((r) => setTimeout(r, 250));
@@ -263,8 +263,8 @@ describe("HealthMonitorService", () => {
     await core.init(makeContext(core));
 
     // Clear init call counts
-    (degradedSvc.init as ReturnType<typeof mock>).mockClear();
-    (degradedSvc.dispose as ReturnType<typeof mock>).mockClear();
+    (degradedSvc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (degradedSvc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     // Give the timer a chance to fire
     await new Promise((r) => setTimeout(r, 250));
@@ -288,8 +288,8 @@ describe("HealthMonitorService", () => {
     await core.init(makeContext(core));
 
     // Clear init call counts
-    (throwingSvc.init as ReturnType<typeof mock>).mockClear();
-    (throwingSvc.dispose as ReturnType<typeof mock>).mockClear();
+    (throwingSvc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (throwingSvc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     // Give the timer a chance to fire - throwing should not crash the monitor
     await new Promise((r) => setTimeout(r, 250));
@@ -315,9 +315,9 @@ describe("HealthMonitorService", () => {
       lastAttemptTime: Date.now() - 5_000,
       backoffUntil: Date.now() + 60_000,
     };
-    const mockTryRestart = mock(() => Promise.resolve());
-    const mockGetStatus = mock((): ServiceRestartState => backoffState);
-    core.getSupervisor = mock(() => {
+    const mockTryRestart = vi.fn(() => Promise.resolve());
+    const mockGetStatus = vi.fn((): ServiceRestartState => backoffState);
+    core.getSupervisor = vi.fn(() => {
       const supervisor = new ServiceSupervisor(core);
       supervisor.tryRestart = mockTryRestart;
       supervisor.getStatus = mockGetStatus;
@@ -331,8 +331,8 @@ describe("HealthMonitorService", () => {
     await core.init(makeContext(core));
 
     // Clear init call counts from init phase
-    (unhealthySvc.init as ReturnType<typeof mock>).mockClear();
-    (unhealthySvc.dispose as ReturnType<typeof mock>).mockClear();
+    (unhealthySvc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (unhealthySvc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     // Give the timer a chance to fire
     await new Promise((r) => setTimeout(r, 250));
@@ -360,12 +360,12 @@ describe("HealthMonitorService", () => {
       lastAttemptTime: 0,
       backoffUntil: 0,
     };
-    const mockTryRestart = mock(async () => {
+    const mockTryRestart = vi.fn(async () => {
       mutableState.status = "permanently_degraded";
       mutableState.attempts = 3;
     });
-    const mockGetStatus = mock((): ServiceRestartState => mutableState);
-    core.getSupervisor = mock(() => {
+    const mockGetStatus = vi.fn((): ServiceRestartState => mutableState);
+    core.getSupervisor = vi.fn(() => {
       const supervisor = new ServiceSupervisor(core);
       supervisor.tryRestart = mockTryRestart;
       supervisor.getStatus = mockGetStatus;
@@ -401,15 +401,15 @@ describe("HealthMonitorService", () => {
     const monitor = new HealthMonitorService();
 
     // Arrange: mock supervisor that throws on tryRestart
-    const mockTryRestart = mock(() => Promise.reject(new Error("supervisor panic")));
-    const mockGetStatus = mock((): ServiceRestartState => ({
+    const mockTryRestart = vi.fn(() => Promise.reject(new Error("supervisor panic")));
+    const mockGetStatus = vi.fn((): ServiceRestartState => ({
       attempts: 0,
       status: "ok",
       firstAttemptTime: 0,
       lastAttemptTime: 0,
       backoffUntil: 0,
     }));
-    core.getSupervisor = mock(() => {
+    core.getSupervisor = vi.fn(() => {
       const supervisor = new ServiceSupervisor(core);
       supervisor.tryRestart = mockTryRestart;
       supervisor.getStatus = mockGetStatus;
@@ -430,8 +430,8 @@ describe("HealthMonitorService", () => {
     await core.init(makeContext(core));
 
     // Clear init call counts
-    (unhealthySvc.init as ReturnType<typeof mock>).mockClear();
-    (unhealthySvc.dispose as ReturnType<typeof mock>).mockClear();
+    (unhealthySvc.init as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
+    (unhealthySvc.dispose as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockClear();
 
     // Give the timer a chance to fire
     await new Promise((r) => setTimeout(r, 250));
@@ -658,7 +658,7 @@ describe("ServiceHealth type", () => {
 
 describe("HealthMonitorService integration", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("initializes in correct order (last after hook-service)", async () => {
@@ -667,28 +667,28 @@ describe("HealthMonitorService integration", () => {
 
     const svcA = makeService("a", []);
     const origInitA = svcA.init;
-    svcA.init = mock(async (ctx: PluginContext) => {
+    svcA.init = vi.fn(async (ctx: PluginContext) => {
       initOrder.push("a");
       return origInitA.call(svcA, ctx);
     });
 
     const svcB = makeService("b", ["a"]);
     const origInitB = svcB.init;
-    svcB.init = mock(async (ctx: PluginContext) => {
+    svcB.init = vi.fn(async (ctx: PluginContext) => {
       initOrder.push("b");
       return origInitB.call(svcB, ctx);
     });
 
     const hookSvc = makeService("hook-service", ["b"]);
     const origInitH = hookSvc.init;
-    hookSvc.init = mock(async (ctx: PluginContext) => {
+    hookSvc.init = vi.fn(async (ctx: PluginContext) => {
       initOrder.push("hook-service");
       return origInitH.call(hookSvc, ctx);
     });
 
     const monitor = new HealthMonitorService();
     const origMonitorInit = monitor.init.bind(monitor);
-    monitor.init = mock(async (ctx: PluginContext) => {
+    monitor.init = vi.fn(async (ctx: PluginContext) => {
       initOrder.push("health-monitor-service");
       return origMonitorInit(ctx);
     });

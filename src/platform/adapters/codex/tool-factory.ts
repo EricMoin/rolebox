@@ -91,7 +91,7 @@ function toMcpResult(result: ToolResult): McpToolCallResult {
     if (!match) continue;
     content.push({ type: "image", data: match[2], mimeType: match[1] });
   }
-  return { content };
+  return { content, ...(result.metadata?.error === true ? { isError: true } : {}) };
 }
 
 /** An `isError` result carrying one text block. */

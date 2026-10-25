@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshRoleSwitchWebRoute tests — the structural adapter registering the dsh
@@ -37,7 +36,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -255,18 +254,6 @@ async function invoke(
   return { status: res.statusCode, headers: res.headers, text: res.body };
 }
 
-/**
- * Parse a JSON response body, or fail loudly if it isn't JSON.
- *
- * Two signatures on purpose. An UNTYPED `json(res)` yields `unknown` — what
- * `JSON.parse` really returns — and that signature must not be generic:
- * bun-test's `Expect` callable declares `(actual?: never, customFailMessage?:
- * string): Matchers<undefined>` as its FIRST signature, so a generic call whose
- * type argument is left to inference is contextually typed from that
- * `never | undefined` parameter, infers `T = undefined`, and every
- * `expect(json(res)).toEqual({...})` is checked against `Matchers<undefined>`.
- * A TYPED `json<Body>(res)` states the shape the caller is about to assert on.
- */
 function json(result: { text: string }): unknown;
 function json<T>(result: { text: string }): T;
 function json<T = unknown>(result: { text: string }): T {

@@ -11,7 +11,7 @@
  *   5. Full plugin config hook integration
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, cpSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
@@ -26,7 +26,7 @@ import { toPosixPath } from "../src/utils/paths.js";
 import RoleboxModule from "../src/entries/opencode.ts";
 const RoleboxPlugin = RoleboxModule.server;
 
-const examplesDir = path.join(import.meta.dir, "..", "examples");
+const examplesDir = path.join(import.meta.dirname, "..", "examples");
 
 // ── helpers ──────────────────────────────────────────────────────
 

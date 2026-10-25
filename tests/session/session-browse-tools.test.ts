@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { createSessionListTool, createSessionSearchTool } from "../../src/session/session-browse-tools.ts";
 import type { SessionClientWrapper } from "../../src/session/client.ts";
 import { createMockClient } from "../dispatch/helpers.ts";

@@ -1,6 +1,6 @@
-/// <reference types="bun-types" />
+import { spawnProcess } from "../../scripts/node-process.ts";
 
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Console } from "node:console";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -10,6 +10,7 @@ import { codexCapabilities } from "../../src/platform/capabilities.ts";
 import { defineTool } from "../../src/platform/ports/tool-factory.ts";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import { COMPUTER_TOOL_NAMES } from "../../src/loader/computer-grants.ts";
+import { BROWSE_TOOL_NAMES } from "../../src/loader/browse-grants.ts";
 import type { CanonicalToolContext, CanonicalToolDef } from "../../src/platform/types.ts";
 import {
   JsonRpcErrorCode,
@@ -189,13 +190,14 @@ const EXPECTED_CODEX_TOOL_NAMES = [
   "web_search",
 ];
 
-function realCodexTools(computerUse = false): Record<string, CanonicalToolDef> {
+function realCodexTools(computerUse = false, browseUse = false): Record<string, CanonicalToolDef> {
   return buildCanonicalTools({
     resolvedRoles: [],
     directory: process.cwd(),
     capabilities: codexCapabilities(),
     extraTools: { load_role_skill: createLoadRoleSkillTool([]) },
     computerUse,
+    browseUse,
   });
 }
 
@@ -349,6 +351,18 @@ describe("CodexMcpToolFactory", () => {
     const result = await factory.call("counted", { count: 3 }, context);
     expect(result).toEqual({ content: [{ type: "text", text: "count=3" }] });
     expect(JSON.stringify(result)).not.toContain("never model-visible");
+  });
+
+  it("call() preserves a canonical failure without exposing its metadata", async () => {
+    const factory = new CodexMcpToolFactory({ failure: defineTool({
+      description: "Return a structured failure.", args: {},
+      async execute() {
+        return { output: "Error: ref is stale.", metadata: { error: true, code: "stale_ref" } };
+      },
+    }) });
+    const result = await factory.call("failure", {}, context);
+    expect(result).toEqual({ content: [{ type: "text", text: "Error: ref is stale." }], isError: true });
+    expect(JSON.stringify(result)).not.toContain("stale_ref");
   });
 
   it("call() returns an isError correction naming the offending field", async () => {
@@ -610,6 +624,23 @@ describe("CodexMcpServer", () => {
         expect(tool.inputSchema.type).toBe("object");
         expect(tool.description.length).toBeGreaterThan(0);
       }
+    }
+  });
+
+  it("lists the complete browse family only when the browse gate is enabled", async () => {
+    for (const enabled of [false, true]) {
+      const harness = createHarness(realCodexTools(false, enabled));
+      await harness.server.handleLine(request(1, "tools/list"));
+      const [message] = await waitForMessages(harness, 1);
+      const listed = (message.result.tools as Array<Record<string, any>>)
+        .filter(tool => tool.name.startsWith("browse_"));
+      expect(listed.map(tool => tool.name).sort()).toEqual(enabled ? [...BROWSE_TOOL_NAMES].sort() : []);
+      for (const tool of listed) {
+        expect(tool.inputSchema.type).toBe("object");
+        expect(tool.description.length).toBeGreaterThan(0);
+      }
+      // The two families are independent: no computer_* name leaks in here.
+      expect(listed.some(tool => tool.name.startsWith("computer_"))).toBe(false);
     }
   });
 
@@ -924,15 +955,6 @@ describe("CodexMcpServer", () => {
 
 // ── Stdout guard ─────────────────────────────────────────────────────────────
 
-// Node's global console.log writes through process.stdout.write; Bun's global
-// console writes to fd 1 natively instead. The distributed entry runs under
-// node (the generated .mcp.json launches `command: node`), and a node:console
-// Console bound to process.stdout is the code path Node's global console takes,
-// so that path is asserted on every runtime here. Diverting a global
-// console.log is only observable where the runtime wires it to stdout.
-const globalConsoleWritesThroughStdout =
-  (globalThis as { Bun?: unknown }).Bun === undefined;
-
 /** Minimal event-emitting writable: counts writes without touching a real fd. */
 class RecordingOutput extends EventEmitter {
   writes = 0;
@@ -957,7 +979,7 @@ describe("installProtocolStdoutGuard", () => {
   function recordStderr(): string[] {
     const chunks: string[] = [];
     spies.push(
-      spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
         chunks.push(String(chunk));
         return true;
       }) as never),
@@ -1101,21 +1123,20 @@ describe("installProtocolStdoutGuard", () => {
     expect(protocol.join("")).not.toContain("library: global console log");
   });
 
-  it.skipIf(!globalConsoleWritesThroughStdout)(
-    "diverts a global console.log to stderr where the runtime wires it to stdout",
-    async () => {
-      const protocol = recordingStdout();
+  it("diverts the real Node global console to stderr in a subprocess", async () => {
+    const guardUrl = new URL("../../src/platform/adapters/codex/stdout-guard.ts", import.meta.url).href;
+    const child = spawnProcess([process.execPath, "--input-type=module", "-e", `
+      import { installProtocolStdoutGuard } from ${JSON.stringify(guardUrl)};
       const guard = installProtocolStdoutGuard();
-      activeGuard = guard;
-      const stderr = recordStderr();
-
-      const server = loggingServer(guard, () => console.log("library: global console log"));
-      await server.handleLine(request(1, "tools/call", { name: "logging" }));
-
-      expect(stderr.join("")).toContain("library: global console log");
-      expect(protocol.join("")).not.toContain("library: global console log");
-    },
-  );
+      console.log("library: global console log");
+      guard.stream.write("protocol-only");
+      guard.restore();
+    `]);
+    const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect(code).toBe(0);
+    expect(stdout).toBe("protocol-only");
+    expect(stderr).toContain("library: global console log");
+  });
 });
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -1124,7 +1145,7 @@ describe("entries/codex", () => {
   it("importing the module is side-effect free", async () => {
     const writes: string[] = [];
     const stdinListenersBefore = process.stdin.listenerCount("data");
-    const spy = spyOn(process.stdout, "write").mockImplementation(((
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation(((
       chunk: unknown,
     ) => {
       writes.push(String(chunk));
@@ -1143,6 +1164,32 @@ describe("entries/codex", () => {
     expect(mod.default).toBeDefined();
     expect(writes).toEqual([]);
     expect(process.stdin.listenerCount("data")).toBe(stdinListenersBefore);
+  });
+});
+
+// ── MCP instructions ─────────────────────────────────────────────────────────
+
+// Registered after the entry-point test above (same reason as the session-id
+// suite): the module's first evaluation is observed there.
+
+describe("buildCodexInstructions", () => {
+  it("carries one workflow block per registered family and nothing for an absent one", async () => {
+    const { buildCodexInstructions } = await import("../../src/entries/codex.ts");
+
+    const neither = buildCodexInstructions(realCodexTools(false, false));
+    expect(neither).not.toContain("Computer use workflow");
+    expect(neither).not.toContain("Browser use workflow");
+
+    const computerOnly = buildCodexInstructions(realCodexTools(true, false));
+    expect(computerOnly).toContain("Computer use workflow");
+    expect(computerOnly).not.toContain("Browser use workflow");
+
+    const both = buildCodexInstructions(realCodexTools(true, true));
+    expect(both).toContain("Computer use workflow");
+    expect(both).toContain("Browser use workflow");
+    expect(both).toContain("browse_snapshot");
+    // The computer block comes first, and the two are separated by one blank line.
+    expect(both.indexOf("Computer use workflow")).toBeLessThan(both.indexOf("Browser use workflow"));
   });
 });
 

@@ -15,7 +15,7 @@
  * forwards `timeoutMs` into `DispatchInput.timeout_ms` when provided.
  */
 
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -104,7 +104,7 @@ function createStatefulDispatchMocks(): StatefulDispatchMocks {
   let childSeq = 0;
 
   const dispatchManager = {
-    launch: mock(async (input: DispatchInput, _parent: unknown): Promise<DispatchTask> => {
+    launch: vi.fn(async (input: DispatchInput, _parent: unknown): Promise<DispatchTask> => {
       taskSeq += 1;
       const id = `task-${taskSeq}`;
       const sessionId = `session-${taskSeq}`;
@@ -125,7 +125,7 @@ function createStatefulDispatchMocks(): StatefulDispatchMocks {
         priority: 0,
       };
     }),
-    getResult: mock(async (taskId: string) => {
+    getResult: vi.fn(async (taskId: string) => {
       const text = `Result for ${taskId}`;
       return {
         kind: "ok" as const,
@@ -135,54 +135,54 @@ function createStatefulDispatchMocks(): StatefulDispatchMocks {
         totalChars: text.length,
       };
     }),
-    cancelTask: mock(async (taskId: string) => {
+    cancelTask: vi.fn(async (taskId: string) => {
       const t = tasks.get(taskId);
       if (t) t.status = "cancelled";
       return true;
     }),
-    onTaskTerminated: mock((taskId: string, cb: (taskId: string, status: string) => void) => {
+    onTaskTerminated: vi.fn((taskId: string, cb: (taskId: string, status: string) => void) => {
       // Store only — never fire at registration (matches DispatchManager).
       terminatedListeners.set(taskId, cb);
       return cb;
     }),
-    removeTaskTerminatedListener: mock((taskId: string, cb: (taskId: string, status: string) => void) => {
+    removeTaskTerminatedListener: vi.fn((taskId: string, cb: (taskId: string, status: string) => void) => {
       if (terminatedListeners.get(taskId) === cb) terminatedListeners.delete(taskId);
     }),
-    getTask: mock((taskId: string) => tasks.get(taskId)),
-    updateDispatchConfigs: mock(() => {}),
+    getTask: vi.fn((taskId: string) => tasks.get(taskId)),
+    updateDispatchConfigs: vi.fn(() => {}),
     // Used during service init (ExtensionService bridges recovery snapshots /
     // concurrency policies into the manager) — no-ops for the mock.
-    setRecoverySnapshotProvider: mock(() => {}),
-    getConfig: mock(() => ({})),
-    dispose: mock(async () => {}),
-    flushPersistSync: mock(() => {}),
-    isOperational: mock(() => true),
+    setRecoverySnapshotProvider: vi.fn(() => {}),
+    getConfig: vi.fn(() => ({})),
+    dispose: vi.fn(async () => {}),
+    flushPersistSync: vi.fn(() => {}),
+    isOperational: vi.fn(() => true),
   };
 
   const client = {
     session: {
-      create: mock((_args: unknown) => {
+      create: vi.fn((_args: unknown) => {
         childSeq += 1;
         const id = `child-${childSeq}`;
         createdSessionIds.push(id);
         return Promise.resolve({ data: { id }, error: undefined });
       }),
-      promptAsync: mock((args: PromptAsyncCall) => {
+      promptAsync: vi.fn((args: PromptAsyncCall) => {
         promptAsyncCalls.push(args);
         // opencode promptAsync returns HTTP 204 (void data) on success.
         return Promise.resolve({ data: undefined, error: undefined });
       }),
-      prompt: mock(() => Promise.resolve({ data: { parts: [] }, error: undefined })),
-      messages: mock(() => Promise.resolve({ data: [], error: undefined })),
-      status: mock(() => Promise.resolve({ data: {}, error: undefined })),
-      abort: mock(() => Promise.resolve({ data: undefined, error: undefined })),
-      get: mock(() => Promise.resolve({ data: { id: "origin" }, error: undefined })),
-      delete: mock(() => Promise.resolve({ data: true, error: undefined })),
-      list: mock(() => Promise.resolve({ data: [], error: undefined })),
-      children: mock(() => Promise.resolve({ data: [], error: undefined })),
-      todo: mock(() => Promise.resolve({ data: [], error: undefined })),
-      diff: mock(() => Promise.resolve({ data: [], error: undefined })),
-      fork: mock(() => Promise.resolve({ data: null, error: undefined })),
+      prompt: vi.fn(() => Promise.resolve({ data: { parts: [] }, error: undefined })),
+      messages: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      status: vi.fn(() => Promise.resolve({ data: {}, error: undefined })),
+      abort: vi.fn(() => Promise.resolve({ data: undefined, error: undefined })),
+      get: vi.fn(() => Promise.resolve({ data: { id: "origin" }, error: undefined })),
+      delete: vi.fn(() => Promise.resolve({ data: true, error: undefined })),
+      list: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      children: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      todo: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      diff: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      fork: vi.fn(() => Promise.resolve({ data: null, error: undefined })),
     },
   } as unknown as OpencodeClient;
 
@@ -206,7 +206,7 @@ describe("Loop service E2E via chat.message hook", () => {
   let mocks: StatefulDispatchMocks;
 
   beforeEach(async () => {
-    mock.restore();
+    vi.restoreAllMocks();
     tmpDir = mkdtempSync(join(tmpdir(), "rolebox-loop-service-exec-"));
     pendingCorrections.clear();
     userMessagedSessions.clear();
@@ -234,7 +234,7 @@ describe("Loop service E2E via chat.message hook", () => {
     userMessagedSessions.clear();
     if (sid) functionSessionState.clear(sid);
     rmSync(tmpDir, { recursive: true, force: true });
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   /** Simulate DispatchManager.onTaskTerminated: invoke the stored fire-once listener. */
@@ -321,7 +321,7 @@ describe("Loop service E2E via chat.message hook", () => {
       expect(mocks.launchInputs[0]!.description).toBe("Loop round 1/2");
       expect(mocks.launchInputs[1]!.description).toBe("Loop round 2/2");
     },
-    { timeout: 15_000 },
+    15_000,
   );
 
   it("client mock create returns distinct session ids (unlike pluginMockClient's constant id)", async () => {
@@ -342,7 +342,7 @@ describe("Loop service E2E via chat.message hook", () => {
 
 describe("DispatchAdapter timeout_ms forwarding", () => {
   it("spreads timeoutMs into DispatchInput.timeout_ms only when provided", async () => {
-    const launch = mock(async (input: DispatchInput): Promise<DispatchTask> => ({
+    const launch = vi.fn(async (input: DispatchInput): Promise<DispatchTask> => ({
       id: "task-x",
       sessionId: "session-x",
       parentSessionId: "origin",
@@ -368,7 +368,7 @@ describe("DispatchAdapter timeout_ms forwarding", () => {
     });
     await adapter.dispatchRound({ originSessionId: "origin", agent: AGENT, prompt: "p" });
 
-    const calls = (launch as ReturnType<typeof mock>).mock.calls as Array<[DispatchInput]>;
+    const calls = (launch as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls as Array<[DispatchInput]>;
     expect(calls.length).toBe(2);
     expect(calls[0]![0].timeout_ms).toBe(42_000);
     expect(calls[1]![0].timeout_ms).toBeUndefined();

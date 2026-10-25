@@ -1,47 +1,10 @@
-/// <reference types="bun-types" />
+import { beforeEach as resetBeforeEach } from "vitest";
 
-/**
- * RoleSwitchDock behavior tests — the browser-half dock component
- * (`src/platform/adapters/dsh/web-ui/role-switch-dock.tsx`).
- *
- * Verifies the dock's interaction contract:
- *   - collapsed by default on mount AND re-collapsed on session change,
- *     with the hydrated active role reported by the header status seat
- *     (plus the header's current-role dot) while the list is hidden;
- *   - one-click expand (`aria-expanded`) with `aria-current` on the active
- *     role row;
- *   - the keystroke filter (name + description, case-insensitive), its
- *     clear affordance, Escape-to-clear, and the explicit no-match row;
- *   - the filter query surviving collapse/expand but resetting on session
- *     change (transient chrome state, never hidden state);
- *   - protected-name layout: the name seat is `flex: none` in the injected
- *     CSS and every row renders the full name (plus `title` recovery on
- *     name and meta) — meta truncates first, identity never does;
- *   - preserved mutation behaviors: successful switch/clear collapse the
- *     dock and move `aria-current`; a failed mutation keeps the list open
- *     with the Retry row; rows are busy-disabled while a mutation is in
- *     flight (the filter stays usable).
- *
- * ── Harness ────────────────────────────────────────────────────────────────
- * React is NOT a devDependency of this repo (the temporary
- * `react.stub.d.ts` covers the type surface), so — like the sibling
- * `dsh-web-ui-client.test.ts` — `react` and the JSX runtime are mocked
- * BEFORE the dock module is imported. Unlike that file, the double here is
- * STATEFUL: a ~100-line mini-React (hook slots per component instance,
- * synchronous re-render on `setState`, effect flush with dependency
- * comparison and cleanup) plus a virtual-DOM tree with query helpers. This
- * is enough to exercise the component's full state machine in-process,
- * with `fetch` double-routed through a per-test config and assertions on
- * the rendered vnode tree (no DOM, no jsdom — bun-native).
- *
- * @module
- */
 
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // ── Stateful react double + tree harness ───────────────────────────────────
 
-/** One rendered JSX element (bun's automatic runtime passes children via props). */
 interface VNode {
   type: unknown;
   props: Record<string, unknown>;
@@ -242,9 +205,9 @@ const jsx = (type: unknown, props: Record<string, unknown>): VNode => {
   return { type, props };
 };
 
-mock.module("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
-mock.module("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 
 // ── Module under test (dynamic import: mocks must precede the graph) ───────
 
@@ -911,3 +874,5 @@ describe("RoleSwitchDock", () => {
     });
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The computer-use facts as the SYSTEM DESCRIPTORS declare them.
@@ -9,7 +8,7 @@
  * than through the builders directly.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   SYSTEM_REGISTRY,
   detectSystem,

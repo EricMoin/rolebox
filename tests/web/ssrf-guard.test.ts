@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "bun:test";
+import { describe, it, expect, beforeAll } from "vitest";
 import type { Result } from "../../src/utils/result.ts";
 
 /** Narrow a rejected verdict to its reason — fails loudly if the URL was accepted. */

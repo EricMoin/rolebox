@@ -1,32 +1,5 @@
-/**
- * Outcome slice — the Wave 0 guards on the closed outcome readers, the
- * persisted-state reader and the closed vocabularies.
- *
- *   F-11 — `readOutcomeProposal`, `readNaturalCompletionDelivery` and
- *   `readHostDerivedCompletionFact` read each field EXACTLY ONCE, so an
- *   accessor-backed record cannot answer one value to the check and another to
- *   the construction.
- *
- *   F-13 — `readUnreachablePendingNodeStop` reads every `blockedNodes` element
- *   like every other scalar, so a number or a nested array cannot be copied
- *   into a `readonly string[]`.
- *
- *   F-02 — the stop-reason and evaluator vocabularies are derived from their
- *   `as const` lists, and the binding-field list is derived from
- *   `keyof ValidationBinding`.
- *
- *   F-20 — the stop-reason vocabulary is part of the body-version layout, so
- *   the version-9 reader refuses `unreachable-pending-node`, which only a
- *   version-10 writer could record.
- *
- * `bun test` is transpile-only, so the authority for the `expectTypeOf` pins
- * below is `bun run typecheck:tests`; the runtime cases beside them pin the
- * behaviour the types describe.
- *
- * @module
- */
 
-import { describe, expect, expectTypeOf, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type { CompiledPlan } from "../../src/graph/compiler/plan.ts";
 import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.ts";

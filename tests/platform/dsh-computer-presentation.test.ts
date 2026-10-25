@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh native presentation for the computer-use tool family.
@@ -20,7 +19,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   DSH_TOOL_PRESENTATION,
   DshToolFactory,

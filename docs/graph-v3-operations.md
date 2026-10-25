@@ -149,7 +149,7 @@ A declaration requests a revision with its root-level `completion_policy` field,
     "graph": "review-flow",
     "node": "work",
     "outcome": "done",
-    "argv": ["bun", "run", "typecheck"],
+    "argv": ["npm", "run", "typecheck"],
     "cwd": "/path/to/project",
     "timeout_ms": 120000,
     "expect_exit_code": 0,
@@ -200,18 +200,20 @@ Two repeatable real-host checks drive actual SDK agent loops, the host's registe
 
 | Check | Command |
 | --- | --- |
-| Pi host | `bun run scripts/graph-smoke/pi` |
-| dsh host | `bun run scripts/graph-smoke/dsh` |
+| Pi host | `npm exec -- tsx scripts/graph-smoke/pi.ts` |
+| dsh host | `npm exec -- tsx scripts/graph-smoke/dsh.ts` |
 
-Bun resolves each of those entry names without its extension; the two entries are the Pi and dsh smoke scripts in that directory. They call no external model provider, and they do not certify every deployment profile.
+The commands use the installed `tsx` loader and host executables through npm.
+`npm run test:hosts:e2e` runs both checks. They call no external model provider,
+and they do not certify every deployment profile.
 
 The engine's own module slice is the repeatable in-process check:
 
 ```sh
-bun test --isolate tests/graph/
+npm test -- tests/graph/
 ```
 
-`bun run typecheck` checks types without running any test. The full test suite is CI's job, not a local step after a documentation or configuration change.
+`npm run typecheck` checks types without running any test. The full test suite is CI's job, not a local step after a documentation or configuration change.
 
 ## See also
 

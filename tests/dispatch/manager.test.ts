@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
@@ -63,7 +63,7 @@ afterEach(() => {
 
 describe("DispatchManager", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   // ── 1. launch() ──────────────────────────────────────────────
@@ -1320,10 +1320,10 @@ describe("DispatchManager", () => {
     mgr.sessionToTask.set("mature-session", task.id);
     watchdog.registerTask(task.id);
 
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
-    client.status = mock(() => Promise.resolve(makeIdleStatus()));
+    client.status = vi.fn(() => Promise.resolve(makeIdleStatus()));
 
     await manager.handleSessionIdle("mature-session");
 
@@ -1616,7 +1616,7 @@ describe("DispatchManager", () => {
       let resolveMessages!: (v: any) => void;
       const deferred = new Promise<any>((r) => { resolveMessages = r; });
 
-      const sessionMessagesMock = mock(() => deferred);
+      const sessionMessagesMock = vi.fn(() => deferred);
       client.messages = sessionMessagesMock;
 
       const manager = makeManager(client, fastConfig);
@@ -1664,10 +1664,10 @@ describe("DispatchManager", () => {
       mgr.sessionToTask.set("idle-session-2", task.id);
       watchdog.registerTask(task.id);
 
-      client.messages = mock(() =>
+      client.messages = vi.fn(() =>
         Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
       );
-      client.status = mock(() => Promise.resolve(makeIdleStatus()));
+      client.status = vi.fn(() => Promise.resolve(makeIdleStatus()));
       await manager.handleSessionIdle("idle-session-2");
       expect(watchdog.isDebouncing(task.id)).toBe(true);
       expect(t.status).toBe("running");
@@ -1785,7 +1785,7 @@ describe("DispatchManager", () => {
 
 describe("reopenForContinuation", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("reopens a completed task: reuses session, no new session.create, re-prompts, poller re-registered", async () => {
@@ -2680,7 +2680,7 @@ describe("recover()", () => {
 
 describe("debounced persistence", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("multiple consecutive persistState calls within debounce window → only 1 actual save", async () => {
@@ -2688,7 +2688,7 @@ describe("debounced persistence", () => {
     const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
-    const saveSpy = mock(() => Promise.resolve());
+    const saveSpy = vi.fn(() => Promise.resolve());
     mgr.store.save = saveSpy;
 
     // Call persistState 5 times directly (no launch overhead, no poller)
@@ -2710,7 +2710,7 @@ describe("debounced persistence", () => {
     const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
-    const saveSpy = mock(() => Promise.resolve());
+    const saveSpy = vi.fn(() => Promise.resolve());
     mgr.store.save = saveSpy;
 
     // Trigger persistState directly
@@ -2735,7 +2735,7 @@ describe("debounced persistence", () => {
     const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
-    const saveSpy = mock(() => Promise.resolve());
+    const saveSpy = vi.fn(() => Promise.resolve());
     mgr.store.save = saveSpy;
 
     mgr.persistState();
@@ -2753,7 +2753,7 @@ describe("debounced persistence", () => {
     const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
-    const saveSpy = mock(() => Promise.resolve());
+    const saveSpy = vi.fn(() => Promise.resolve());
     mgr.store.save = saveSpy;
 
     mgr.persistState();
@@ -2772,7 +2772,7 @@ describe("debounced persistence", () => {
 
 describe("flushPersistSync", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("T5-1: flushPersistSync writes current state and clears _dirty", async () => {
@@ -2847,7 +2847,7 @@ describe("flushPersistSync", () => {
 
 describe("dispose", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("stops the watchdog, releases the state lock, and is idempotent", async () => {
@@ -2986,7 +2986,7 @@ describe("dispose", () => {
 
 describe("Task 17: LRU cleanedUpTasks", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("T17-1: getResult returns expired for LRU entries, not_found for evicted and unknown", async () => {
@@ -3023,7 +3023,7 @@ describe("Task 17: LRU cleanedUpTasks", () => {
 
 describe("Task 17: leaveRunning debounced persist", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("T17-2: leaveRunning does NOT invoke store.saveSync (no sync flush on hot path)", async () => {
@@ -3031,7 +3031,7 @@ describe("Task 17: leaveRunning debounced persist", () => {
     const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
-    const saveSyncSpy = mock(() => {});
+    const saveSyncSpy = vi.fn(() => {});
     mgr.store.saveSync = saveSyncSpy;
 
     const task = await manager.launch(
@@ -3047,7 +3047,7 @@ describe("Task 17: leaveRunning debounced persist", () => {
 
 describe("Task 17: degraded mode", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("T17-3: degraded mode — store.save() is no-op when _readOnly is set", async () => {
@@ -3078,7 +3078,7 @@ describe("Task 17: degraded mode", () => {
     const mgr = manager as any;
 
     const origTryLock = mgr.store.tryLock.bind(mgr.store);
-    mgr.store.tryLock = mock(() => {
+    mgr.store.tryLock = vi.fn(() => {
       mgr.store._readOnly = true;
       return false;
     });
@@ -3094,7 +3094,7 @@ describe("Task 17: degraded mode", () => {
 
 describe("T8: Notification outbox", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     clearSentFinalNotifies();
     clearParentQueues();
   });
@@ -3309,7 +3309,7 @@ describe("T8: Notification outbox", () => {
 
 describe("Task 13: completion stability re-confirmation", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("T13-1: false-positive guard — message count grows between re-confirmations, task stays running", async () => {
@@ -3331,10 +3331,10 @@ describe("Task 13: completion stability re-confirmation", () => {
     watchdog.registerTask(task.id);
 
     // First setup: idle session with 1 assistant message
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
-    client.status = mock(() => Promise.resolve(makeIdleStatus()));
+    client.status = vi.fn(() => Promise.resolve(makeIdleStatus()));
 
     // First debounce elapse → records pendingConfirm, re-arms
     watchdog.startDebounce(task.id);
@@ -3348,7 +3348,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(es.pendingConfirm.messageCount).toBe(1);
 
     // Change mock: model produced more messages (count grew from 1 → 3)
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([
         makeMessage("assistant", "done"),
         makeMessage("assistant", "more"),
@@ -3387,10 +3387,10 @@ describe("Task 13: completion stability re-confirmation", () => {
     watchdog.registerTask(task.id);
 
     // Stable: session idle, 1 assistant message
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
-    client.status = mock(() => Promise.resolve(makeIdleStatus()));
+    client.status = vi.fn(() => Promise.resolve(makeIdleStatus()));
 
     // First debounce elapse → records pendingConfirm, re-arms
     watchdog.startDebounce(task.id);
@@ -3427,14 +3427,14 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.watchdog.registerTask(task.id);
 
     // Client returns no new messages (session still stable)
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([makeMessage("assistant", "hello")]),
     );
     // status() returns null — session gone, not found
-    client.status = mock(() => Promise.resolve(null));
+    client.status = vi.fn(() => Promise.resolve(null));
 
     // Mock verifyExistence → "missing"
-    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("missing" as const));
+    mgr.sessionMonitor.verifyExistence = vi.fn(() => Promise.resolve("missing" as const));
 
     // Trigger via idle-debounce (only evaluateAndComplete examines sessionStatus for gone check)
     mgr.watchdog.startDebounce(task.id);
@@ -3464,13 +3464,13 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.watchdog.registerTask(task.id);
 
     // status() returns data WITHOUT the task's session
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([makeMessage("assistant", "hello")]),
     );
-    client.status = mock(() => Promise.resolve(makeIdleStatus()));
+    client.status = vi.fn(() => Promise.resolve(makeIdleStatus()));
 
     // Mock verifyExistence → "exists"
-    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
+    mgr.sessionMonitor.verifyExistence = vi.fn(() => Promise.resolve("exists" as const));
 
     // Trigger via idle-debounce
     mgr.watchdog.startDebounce(task.id);
@@ -3500,12 +3500,12 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.sessionToTask.set("idle-session", task.id);
     mgr.watchdog.registerTask(task.id);
 
-    client.messages = mock(() =>
+    client.messages = vi.fn(() =>
       Promise.resolve<Message[]>([makeMessage("assistant", "done")]),
     );
     // Finished child is absent from the status map (server omits idle sessions).
-    client.status = mock(() => Promise.resolve(makeIdleStatus()));
-    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
+    client.status = vi.fn(() => Promise.resolve(makeIdleStatus()));
+    mgr.sessionMonitor.verifyExistence = vi.fn(() => Promise.resolve("exists" as const));
 
     await mgr.watchdog.triggerWatchdog(task.id);
     await new Promise((r) => setTimeout(r, 100));
@@ -4070,7 +4070,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         parentContext(),
       );
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
 
       await mgr.handleTaskCompleted(task.id);
@@ -4089,7 +4089,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         parentContext(),
       );
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
 
       await mgr.handleTaskCompleted(task.id);
@@ -4114,7 +4114,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         parentContext(),
       );
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
       manager.removeTaskTerminatedListener(task.id, callback);
 
@@ -4133,7 +4133,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         parentContext(),
       );
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
 
       mgr.handleTaskError(task.id, "something broke");
@@ -4152,7 +4152,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         parentContext(),
       );
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
 
       mgr.handleTaskTimeout(task.id, "timed out");
@@ -4171,7 +4171,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         parentContext(),
       );
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
 
       await manager.cancelTask(task.id);
@@ -4210,7 +4210,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       expect(task.status).toBe("completed");
 
       // Register the terminated listener AFTER the task is already terminal
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
 
       // Callback must NOT have fired synchronously (async delivery)
@@ -4240,7 +4240,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       mgr.handleTaskError(task.id, "something broke");
       expect(task.status).toBe("error");
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
       expect(callback).toHaveBeenCalledTimes(0); // not sync
 
@@ -4265,7 +4265,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       await manager.cancelTask(task.id);
       expect(task.status).toBe("cancelled");
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
       expect(callback).toHaveBeenCalledTimes(0); // not sync
 
@@ -4287,7 +4287,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       mgr.handleTaskTimeout(task.id, "timed out");
       expect(task.status).toBe("timeout");
 
-      const callback = mock((taskId: string, status: string) => {});
+      const callback = vi.fn((taskId: string, status: string) => {});
       manager.onTaskTerminated(task.id, callback);
       expect(callback).toHaveBeenCalledTimes(0); // not sync
 

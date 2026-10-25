@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { ExtensionRegistry } from "../../src/extensions/registry.ts";
 import { clearExtensionModuleCache } from "../../src/extensions/loader.ts";
 

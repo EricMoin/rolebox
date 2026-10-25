@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { existsSync, writeFileSync } from "node:fs";
 import { NO_BUDGET_LIMITS } from "../../../src/graph/domain/budget.ts";
 import { GraphStore } from "../../../src/graph/store/graph-store.ts";
@@ -11,7 +12,7 @@ try {
     const deadline = Date.now() + 5000;
     while (!existsSync(barrier)) {
       if (Date.now() > deadline) throw new Error("barrier timed out");
-      await Bun.sleep(5);
+      await sleep(5);
     }
   }
   const result = store.budget.reserveDispatch({

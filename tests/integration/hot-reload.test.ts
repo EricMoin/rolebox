@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 /**
  * Integration tests for HotReloadService — real file-system reload cascade.
  *
@@ -5,7 +6,7 @@
  * no mocked fs, no mocked core, no mocked watcher.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -65,7 +66,7 @@ describe("HotReloadService cascade", () => {
 
       const result = await triggerReload(ctx.hooks);
       expect(result).toContain("completed");
-      await Bun.sleep(RELOAD_SETTLE_MS);
+      await sleep(RELOAD_SETTLE_MS);
 
       const afterCfg = await buildAgentConfig(ctx.hooks);
       const agent = expectPrimaryAgent(afterCfg, MINIMAL_PRIMARY_ID);
@@ -96,7 +97,7 @@ describe("HotReloadService cascade", () => {
       // Trigger reload via tool
       const result = await triggerReload(ctx.hooks);
       expect(result).toContain("completed");
-      await Bun.sleep(RELOAD_SETTLE_MS);
+      await sleep(RELOAD_SETTLE_MS);
 
       // Verify updated description
       const updatedCfg = await buildAgentConfig(ctx.hooks);

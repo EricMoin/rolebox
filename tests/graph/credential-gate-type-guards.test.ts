@@ -1,37 +1,5 @@
-/**
- * Credential slice — the Wave 1 gate on the credential store's WRITE (F-14).
- *
- * THE DEFECT THIS FILE PINS. `CredentialIsolationStore.remember` used to answer
- * `void` — the one return type that accepts ANY returned value. An `async`
- * implementation therefore satisfied the interface, the runtime dropped the
- * returned promise, and the state recording only the credential's DIGEST could
- * commit before — or without — the credential: exactly the permanently
- * un-deliverable attempt `credential-isolation.ts` documents it prevents.
- * `resolve` never had the problem (`string | undefined` cannot be a promise), so
- * the asymmetry between the two members was the bug; it is fixed on the write
- * side only, and `resolve` is unchanged.
- *
- * THE THREE LAYERS PINNED HERE:
- * - the TYPE: `remember` answers `undefined`, so an `async` or otherwise
- *   value-returning implementation is refused at its own definition site. The
- *   negative pins are assignability probes whose authority is
- *   `bun run typecheck:tests` (`bun test` is transpile-only);
- * - the READER: `readStore` narrows with an ANSWER check as well as `typeof`, so
- *   an `async` (or generator) `remember` — a JavaScript host satisfies no type —
- *   makes the capability unreadable, and the run path reports the named
- *   `credential-isolation-unavailable` refusal instead of adopting it;
- * - the CALL: the mint checks the answer of the call it makes, the only place a
- *   PLAIN function that returns a promise is observable, and fails the mint so
- *   the enclosing transaction writes nothing.
- *
- * COMPATIBILITY. A well-formed synchronous store is unchanged: it is read, it
- * records the credential, and the runtime's mint/resolve round trip still
- * succeeds. The only new behaviour is fail-closed.
- *
- * @module
- */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

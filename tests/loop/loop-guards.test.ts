@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Comprehensive tests for loop guardrail features (subtask 7):
@@ -10,7 +9,7 @@
  *   (f) Cascade cancel — cancel parent → cancel all descendants.
  */
 
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
 import type { LoopState } from "../../src/loop/types.ts";
@@ -45,7 +44,7 @@ function createFakeAdapter(
   let msgIdCounter = 0;
 
   const adapter: IDispatchAdapter = {
-    dispatchRound: mock(
+    dispatchRound: vi.fn(
       async (_input: {
         originSessionId: string;
         agent: string;
@@ -64,7 +63,7 @@ function createFakeAdapter(
       },
     ),
 
-    getRoundResult: mock(async (_workerTaskId: string) => {
+    getRoundResult: vi.fn(async (_workerTaskId: string) => {
       calls.push({ method: "getRoundResult", args: [_workerTaskId] });
       return (
         overrides?.getRoundResultResult ?? {
@@ -74,11 +73,11 @@ function createFakeAdapter(
       );
     }),
 
-    cancelRound: mock(async (_workerTaskId: string) => {
+    cancelRound: vi.fn(async (_workerTaskId: string) => {
       calls.push({ method: "cancelRound", args: [_workerTaskId] });
     }),
 
-    readOriginSummary: mock(
+    readOriginSummary: vi.fn(
       async (_originSessionId: string, _sinceMessageId?: string) => {
         calls.push({
           method: "readOriginSummary",
@@ -91,7 +90,7 @@ function createFakeAdapter(
       },
     ),
 
-    getLastMessageId: mock(async (_originSessionId: string) => {
+    getLastMessageId: vi.fn(async (_originSessionId: string) => {
       calls.push({
         method: "getLastMessageId",
         args: [_originSessionId],
@@ -103,11 +102,11 @@ function createFakeAdapter(
       return `msg-${msgIdCounter}`;
     }),
 
-    injectNote: mock(async (_sessionId: string, _text: string) => {
+    injectNote: vi.fn(async (_sessionId: string, _text: string) => {
       calls.push({ method: "injectNote", args: [_sessionId, _text] });
     }),
 
-    registerTerminatedListener: mock(
+    registerTerminatedListener: vi.fn(
       (_taskId: string, _callback: (taskId: string, status: string) => void) => {
         calls.push({
           method: "registerTerminatedListener",
@@ -117,7 +116,7 @@ function createFakeAdapter(
       },
     ),
 
-    removeTerminatedListener: mock(
+    removeTerminatedListener: vi.fn(
       (_taskId: string, _callback: (taskId: string, status: string) => void) => {
         calls.push({
           method: "removeTerminatedListener",
@@ -126,7 +125,7 @@ function createFakeAdapter(
       },
     ),
 
-    getTaskStatus: mock(async (_taskId: string) => {
+    getTaskStatus: vi.fn(async (_taskId: string) => {
       calls.push({ method: "getTaskStatus", args: [_taskId] });
       return "completed";
     }),
@@ -527,7 +526,7 @@ describe("(c) No-progress fuse", () => {
     expect(c.getLoopState("origin-1")!.consecutiveStaleRounds).toBe(1);
 
     // Now change the summary for R3
-    (adapter.readOriginSummary as ReturnType<typeof mock>).mockImplementation(
+    (adapter.readOriginSummary as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockImplementation(
       async () => {
         return "fresh progress! new findings discovered.";
       },

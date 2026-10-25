@@ -1,46 +1,6 @@
-/**
- * A21 / plan §3.3 — the worker tool face across a REAL PROCESS BOUNDARY.
- *
- * WHY THIS FILE EXISTS. `worker-tool-face.test.ts` proves the boundary against
- * the store in ONE process: a second host object over the same file shares the
- * module-level connection map and that process's memory. The claim under test —
- * a worker's calls are judged by the host's own durable execution row, so a
- * process that never dispatched or confirmed anything still refuses it — is
- * only honestly established by a REAL process boundary. Every case here spawns
- * `bun` children with `Bun.spawn(process.execPath, …)` (the pattern
- * `graph-store-cross-process.test.ts` established), so the judging process has
- * never seen the dispatching process's memory, its connections or its
- * credential values.
- *
- * WHAT IS PINNED:
- *
- * 1. The dispatching child starts the declared graph, confirms the platform's
- *    execution for each attempt, and lets `alpha#1`'s OWN worker settle its
- *    attempt through the bound face (`decision: "accepted"`) — the delivery
- *    works, and the credential value never leaves that process.
- * 2. A SECOND child — a different pid, no memory of anything — refuses the
- *    SETTLED attempt's worker for `graph_status` and `graph_audit`: the effect
- *    is no longer pending, so the only fact that can bind the session is the
- *    durable EXECUTION row the store keeps after settlement (G-A21-restart).
- * 3. The same child refuses the STILL-OPEN attempt's worker too, from the same
- *    durable read.
- * 4. The refused `graph_declare` lands nowhere (`absent`), which is what makes
- *    the refusal a pre-body check and not a post-hoc report.
- * 5. The declaring session in that fresh process still gets the face — the
- *    boundary refuses a bound worker, not a tool — and its `scope: "persisted"`
- *    query PARSES to the graph's durable position (graph id, node ids, live
- *    node statuses), which an error string cannot satisfy.
- *
- * STRENGTH: cross-process (real OS processes, real SQLite store). Still NO
- * real dsh/Pi SDK run and NO OS/account/container boundary — the platform half
- * of A21 stays open and is reported, never claimed here.
- *
- * PRIVACY: store roots live under the OS temp directory; the children report
- * attempt ids, a stable refusal code and booleans only — never a credential
- * value.
- */
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,32 +94,27 @@ function makeFixture(prefix: string): {
   return { dir, storeRoot, workspaceDir: dir, markerDir };
 }
 
-/** Spawn one REAL bun process running the worker fixture and await its report. */
 async function runWorker(
   id: string,
   args: readonly string[],
 ): Promise<FaceReport> {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn([process.execPath, WORKER, ...args], {
+  const proc = spawnProcess([process.execPath, WORKER, ...args], {
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
   children.push({
     pid: proc.pid,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

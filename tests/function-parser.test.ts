@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { parseFunctionActivation } from "../src/function/parser.js";
 import type { FunctionCall } from "../src/function/parser.js";
 

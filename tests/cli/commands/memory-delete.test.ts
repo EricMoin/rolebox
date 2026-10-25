@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -33,8 +33,6 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   process.exit = origExit;
-  // Bun does not clear `process.exitCode` when it is assigned `undefined`, so
-  // the restore must write a number (the captured value, or 0 when unset).
   process.exitCode = origExitCode ?? 0;
   if (origPrompt === undefined) {
     delete (globalThis as { prompt?: PromptFn }).prompt;

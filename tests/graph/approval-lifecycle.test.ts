@@ -31,7 +31,7 @@ import { approvalPolicyFor } from "./helpers/approval-policy.ts";
  * real-host evidence (no dsh/Pi SDK runs in this environment).
  */
 
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";
@@ -55,7 +55,7 @@ import type {
   CanonicalToolDef,
 } from "../../src/platform/types.ts";
 
-setDefaultTimeout(30_000);
+vi.setConfig({ testTimeout: 30_000 });
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 

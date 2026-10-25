@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh-plugin tests — the cordis plugin entry point (`src/entries/dsh.ts`)
@@ -31,7 +30,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { load } from "js-yaml";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { removeTempTree } from "./graph/helpers/temp-dirs.ts";
@@ -707,7 +706,7 @@ describe("dsh plugin shape", () => {
 // additionally requires the bundle envelope id to equal that graph row id.
 
 describe("dsh packaging — dsh-client-modules resolution seam", () => {
-  const pkgRoot = resolve(import.meta.dir, "..");
+  const pkgRoot = resolve(import.meta.dirname, "..");
   const pkg = JSON.parse(
     readFileSync(resolve(pkgRoot, "package.json"), "utf8"),
   ) as {
@@ -1177,6 +1176,10 @@ describe("dsh plugin apply()", () => {
       disposer = await applyTracked(fixture.ctx, {
         roleboxDir: tmpDir,
         computerUse: false,
+        // This case isolates the computer family; pin the browse family off so
+        // a machine WITH the optional Playwright driver and one without boot
+        // the same surface.
+        browseUse: false,
       } as DshPluginConfig);
       const declare = fixture.tools.registeredTools.find(tool => tool.name === "graph_declare")!;
       await declare.execute({ declaration: {
@@ -1206,7 +1209,10 @@ describe("dsh plugin apply()", () => {
       expect(prompt).toContain("- `schema` — ");
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       expect(workerSections).toEqual([""]);
-      expect(workerContexts).toEqual(["", "", ""]);
+      // One entry per registered context contribution: rolebox:context,
+      // rolebox:memory, rolebox:computer and rolebox:browse — every one of
+      // them renders "" for a graph worker, whose prompt is composed elsewhere.
+      expect(workerContexts).toEqual(["", "", "", ""]);
       expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
     } finally {
       disposer?.();
@@ -2333,14 +2339,20 @@ describe("dsh plugin apply()", () => {
         systemPrompt: true,
       });
 
-      const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      // Both families are pinned ON: the computer family is on by default, and
+      // an explicit `browseUse: true` registers the browse family even on a
+      // machine where the optional Playwright driver is absent.
+      const disposer = await applyTracked(ctx, {
+        roleboxDir: tmpDir,
+        browseUse: true,
+      } as DshPluginConfig);
       const stats = disposer.stats;
 
       expect(sections).toHaveLength(1);
       expect(sections[0].name).toBe("rolebox:role");
       expect(sections[0].order).toBe(50);
       expect(typeof sections[0].text).toBe("function");
-      expect(contexts).toHaveLength(3);
+      expect(contexts).toHaveLength(4);
       expect(contexts[1].name).toBe("rolebox:memory");
       expect(contexts[0].name).toBe("rolebox:context");
       expect(contexts[0].order).toBe(0);
@@ -2384,6 +2396,11 @@ describe("dsh plugin apply()", () => {
       expect(contexts[2].name).toBe("rolebox:computer");
       expect(computer).toContain("computer_permissions");
       expect(computer).toContain("computer_screenshot");
+      const browse = contexts[3].text({ agent: { id: sessionId } });
+      expect(contexts[3].name).toBe("rolebox:browse");
+      expect(contexts[3].order).toBe(30);
+      expect(browse).toContain("browse_snapshot");
+      expect(browse).toContain("browse_open");
 
       disposer();
     } finally {
@@ -2488,9 +2505,7 @@ describe("dsh plugin apply()", () => {
     // the spy observes the plugin's own store, not the developer's state.
     const cwd = process.cwd();
     process.chdir(tmpDir);
-    // Spy on the prototype method the disposer must call. Bun's spyOn calls
-    // through by default, so the real synchronous write still lands.
-    const spy = spyOn(ActiveRoleStore.prototype, "saveSync");
+    const spy = vi.spyOn(ActiveRoleStore.prototype, "saveSync");
     try {
       // Pre-seed the workspace sidecar; boot hydrates the holder from it.
       const sidecar = join(
@@ -3147,8 +3162,8 @@ describe("dsh event-bridge — session-log vocabulary", () => {
 // ── Bundle patch files parse as YAML ───────────────────────────────────────
 
 describe("dsh bundle patch files", () => {
-  const BUNDLE_PATCH = resolve(import.meta.dir, "../dsh/cordis.patch.yml");
-  const EXAMPLE_PATCH = resolve(import.meta.dir, "../examples/dsh/cordis.patch.yml");
+  const BUNDLE_PATCH = resolve(import.meta.dirname, "../dsh/cordis.patch.yml");
+  const EXAMPLE_PATCH = resolve(import.meta.dirname, "../examples/dsh/cordis.patch.yml");
 
   it("the shipped bundle patch (dsh/cordis.patch.yml) parses as a YAML entry list", () => {
     const doc = load(readFileSync(BUNDLE_PATCH, "utf-8"));
@@ -3181,7 +3196,7 @@ describe("dsh bundle patch files", () => {
 // ── Import hygiene ─────────────────────────────────────────────────────────
 
 describe("dsh-plugin import hygiene", () => {
-  const FILE = resolve(import.meta.dir, "../src/entries/dsh.ts");
+  const FILE = resolve(import.meta.dirname, "../src/entries/dsh.ts");
 
   function extractImportSpecifiers(source: string): string[] {
     const importRe =

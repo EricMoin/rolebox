@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * DshAgentRegistrar tests — IAgentRegistrar adapter for the dsh subagent
@@ -18,7 +17,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -741,7 +740,7 @@ describe("DshAgentRegistrar onSpawn wiring diagnostic", () => {
 
 describe("DshAgentRegistrar import boundary", () => {
   const FILE = resolve(
-    import.meta.dir,
+    import.meta.dirname,
     "../../src/platform/adapters/dsh/agent-registrar.ts",
   );
 

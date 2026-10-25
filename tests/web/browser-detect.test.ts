@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 
 describe("browser-detect", () => {
   let detectBrowserCapabilities: () => Promise<{

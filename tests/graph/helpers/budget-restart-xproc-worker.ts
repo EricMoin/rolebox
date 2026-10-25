@@ -1,40 +1,4 @@
-/**
- * Cross-process worker for the P3 item 3 DISPATCH BUDGET restart evidence.
- *
- * WHY THIS FILE EXISTS. Plan §4 P3 requires the budget's "使用记录可恢复" and §5
- * A13 requires "预留/对账不重计" across a restart. Reopening a store OBJECT in
- * one process is not a restart, so this worker is spawned with
- * `Bun.spawn(process.execPath, …)` by
- * tests/graph/budget-restart-cross-process.test.ts: the claim is made by the
- * test's own process, the usage is reconciled by a process that has never seen
- * its memory, a THIRD process re-reads the outcome, and TWO further processes
- * race for the last unit of a node's ceiling from a real barrier.
- *
- *     bun tests/graph/helpers/budget-restart-xproc-worker.ts --mode <mode> ...
- *
- * Modes:
- *   - `resume`  opens the workspace's store through the shipped host and RESUMES
- *                the declared graph, then reports the reservation row and the run
- *                budget state: a restart must NOT re-count a claim already made.
- *   - `usage`   records the platform's measured usage for one attempt through
- *                `OutcomeHost.recordBudgetUsage` and reports what it did.
- *   - `late`    records a DELAYED bill for an attempt the store never reserved
- *                and reports the overrun the run's report derives from it.
- *   - `stop`    applies `budget-stop` through the SHIPPED control entry and
- *                reports the run's control fact and the overrun in its answer.
- *   - `race`    races its sibling for one node's last unit of ceiling from a
- *                marker barrier and reports whether THIS process won the claim.
- *   - `read`    reports the durable reservation row and the budget state a later
- *                window sees.
- *
- * Every mode prints exactly ONE JSON line on stdout — `{"pid":n,"ok":true,…}` on
- * success, `{"pid":n,"ok":false,…}` plus a non-zero exit on failure.
- *
- * PRIVACY. This fixture receives a store root under the OS temp directory and
- * the deterministic ids the graph mints. It never prints a credential value, a
- * real home-directory path or a session transcript: reports carry ids, status
- * tokens, counts and booleans only.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";

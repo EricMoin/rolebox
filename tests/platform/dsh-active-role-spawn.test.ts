@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Dsh active-role spawn seam tests — prove that activating a role for a
@@ -32,7 +31,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { RoleMode } from "../../src/constants.ts";
@@ -675,9 +674,9 @@ describe("dsh dispatch threads the session id onto the spawn request", () => {
 
 describe("dsh active-role seam import boundary", () => {
   const FILES = [
-    resolve(import.meta.dir, "../../src/platform/adapters/dsh/agent-registrar.ts"),
-    resolve(import.meta.dir, "../../src/platform/adapters/dsh/dispatch.ts"),
-    resolve(import.meta.dir, "../../src/platform/adapters/dsh/role-switcher.ts"),
+    resolve(import.meta.dirname, "../../src/platform/adapters/dsh/agent-registrar.ts"),
+    resolve(import.meta.dirname, "../../src/platform/adapters/dsh/dispatch.ts"),
+    resolve(import.meta.dirname, "../../src/platform/adapters/dsh/role-switcher.ts"),
   ];
 
   function extractImportSpecifiers(source: string): string[] {

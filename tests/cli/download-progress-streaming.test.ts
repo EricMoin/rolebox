@@ -1,3 +1,4 @@
+import { spawnProcess } from "../../scripts/node-process.ts";
 // Regression tests for the progress wiring inside the real downloadRole:
 //   (a) it emits the downloading / verifying / extracting phase markers via
 //       the injected progress reporter;
@@ -7,7 +8,7 @@
 //
 // Uses the DownloadRoleProcess DI seam for the tar spawn so extraction runs
 // against the real tar binary while progress is observed through a recorder.
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,9 +17,6 @@ import type { DownloadProgress } from "../../src/cli/download-progress.ts";
 import { hasTar } from "../helpers/tar.ts";
 import { downloadRole } from "../../src/cli/registry-client.ts";
 
-// The real downloadRole is imported statically. Under `bun test --isolate` each
-// test file gets its own module registry, so this always resolves to the real
-// registry-client regardless of mocks registered by other test files.
 
 const originalFetch = globalThis.fetch;
 
@@ -53,7 +51,7 @@ async function createArchiveBytes(roleId: string): Promise<{ bytes: Uint8Array; 
   writeFileSync(join(roleDir, "role.yaml"), `name: ${roleId}\ndescription: Test\n`);
 
   const archivePath = join(tmpDir, "archive.tar.gz");
-  const proc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "owner-repo-commithash"]);
+  const proc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "owner-repo-commithash"]);
   expect(await proc.exited).toBe(0);
   return { bytes: readFileSync(archivePath), tmpDir };
 }
@@ -88,7 +86,7 @@ describe("downloadRole progress streaming", () => {
       const headers = new Headers();
       headers.set("content-length", String(bytes.byteLength));
       const resp = new Response(chunkedBody(bytes, multiChunkSize(bytes)), { status: 200, headers });
-      globalThis.fetch = Object.assign(mock(() => Promise.resolve(resp)), { preconnect: () => {} });
+      globalThis.fetch = vi.fn(() => Promise.resolve(resp));
 
       const { progress, updates, phases } = makeRecorder();
       const resultDir = await downloadRole(
@@ -130,7 +128,7 @@ describe("downloadRole progress streaming", () => {
     try {
       // No content-length header on the response.
       const resp = new Response(chunkedBody(bytes, multiChunkSize(bytes)), { status: 200 });
-      globalThis.fetch = Object.assign(mock(() => Promise.resolve(resp)), { preconnect: () => {} });
+      globalThis.fetch = vi.fn(() => Promise.resolve(resp));
 
       const { progress, updates, phases } = makeRecorder();
       const resultDir = await downloadRole(

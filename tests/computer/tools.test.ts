@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The computer-use tool face: dry-run plans, refusals, the screenshot
@@ -10,7 +9,7 @@
  * macOS.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

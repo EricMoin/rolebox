@@ -1,31 +1,3 @@
-/**
- * Cross-process worker for the artifact store's publish-once rule (D4).
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * WHY THIS FILE EXISTS. "A second deposit of the same bytes is the same object"
- * is not proven by two calls in one process: the deposit publishes with an
- * exists-refusing link, and the property that matters is that SEVERAL REAL OS
- * PROCESSES racing that link leave one intact object and no failure. The parent
- * test (`tests/graph/artifact-deposit-cross-process.test.ts`) spawns this file
- * as a real `bun` process per worker, so every worker publishes into the SAME
- * store directory with its own process identity.
- *
- *     bun tests/graph/helpers/artifact-deposit-xproc-worker.ts \
- *       --root <storeRoot> --bytes <bytesFile> --marker-dir <dir> \
- *       --id <workerId> --rounds <n> --deadline-ms <n>
- *
- * COORDINATION IS MARKER FILES ONLY. The worker writes `ready-<id>.marker` and
- * then waits for `go.marker`; the parent writes `go` only after EVERY worker
- * signalled ready, so the deposits start from one controllable barrier rather
- * than from timing. `--rounds` deposits run back to back after the barrier, so
- * the first is contended and the rest exercise verified reuse.
- *
- * It prints exactly ONE JSON line on stdout — `{"pid":<n>,"ok":true,...}` on
- * success, `{"pid":<n>,"ok":false,...}` plus a non-zero exit when ANY deposit
- * was refused or the barrier was not released in time.
- */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

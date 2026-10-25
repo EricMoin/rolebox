@@ -1,41 +1,4 @@
-/**
- * Cross-process worker fixture for the P3 CANCEL restart evidence.
- *
- * Version: 1.0
- * Date: 2026-09-24
- *
- * WHY THIS FILE EXISTS. The plan's §4 P3 cancel clause is "persist the cancel
- * INTENT ... a process that dies mid-cancel resumes with the intent visible",
- * and §5 forbids a temporary probe as the sole acceptance evidence. The tracked
- * single-process case opens a SECOND HOST INSTANCE over the same store root; it
- * proves the ordering but not a process boundary. This worker IS that boundary:
- * the parent test `tests/graph/cancel-delivery.test.ts` spawns THIS file as a
- * REAL separate OS process (`Bun.spawn(process.execPath, ...)`), it records the
- * trusted cancel decision through the SHIPPED assembly, and it then DIES AT THE
- * PLATFORM ASK — inside the cancel port, after the durable intent and after the
- * request transition, before any platform answer.
- *
- *     bun tests/graph/helpers/cancel-xproc-worker.ts --dir <workspace> --store <root> --graph <id>
- *
- * WHAT IT THEREFORE PINS. The child's own marker (written from inside the ask,
- * with a fresh connection) shows the cancel effect already `started` and the
- * run's control fact already `cancel` at the instant the platform was reached;
- * the child then exits with {@link CANCEL_DEATH_EXIT}. The parent reopens the
- * store with a fresh connection, sees the same rows, and relaunches a host whose
- * sweep REPORTS the stop and RE-ASKS the unconfirmed cancel. The crash window is
- * DRIVEN by a real process exit, not closed-and-reopened in one process.
- *
- * THE ASSEMBLY IS THE SHIPPED ONE: a real `OutcomeHost` over the workspace's one
- * SQLite store, the real `createGraphToolSet`, the `graph_control` tool of
- * `createOutcomeGraphTools`, and the very `OutcomeHost.bindTools` +
- * `withCancelDelivery` pair both entries install. The platform field is a cancel
- * port that reads the durable state and then kills this process.
- *
- * PRIVACY: this worker receives only a store root and a workspace directory
- * under the OS temp directory, plus graph/node/attempt ids minted by the test.
- * Its marker carries ids, statuses and its own pid — never a credential value,
- * a real home-directory path or a session transcript.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";

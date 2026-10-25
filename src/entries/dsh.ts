@@ -95,12 +95,19 @@ import { DshHookProvider } from "../platform/adapters/dsh/hook-provider.ts";
 import { DshRoleSwitcher, createActiveRoleRef } from "../platform/adapters/dsh/role-switcher.ts";
 import { ActiveRoleStore } from "../platform/adapters/dsh/active-role-store.ts";
 import {
+  installDshBrowseUsePolicy,
   installDshComputerUsePolicy,
+  isBrowseUseRegistrationAllowed,
   isComputerUseRegistrationAllowed,
 } from "../platform/adapters/dsh/role-tool-policy.ts";
 import { resolveComputerUseGate } from "../loader/computer-use-gate.ts";
+import { resolveBrowseUseGate } from "../loader/browse-use-gate.ts";
 import { COMPUTER_TOOL_NAMES } from "../loader/computer-grants.ts";
+import { BROWSE_TOOL_NAMES } from "../loader/browse-grants.ts";
 import { createDshComputerContext } from "../platform/adapters/dsh/computer-context.ts";
+import { createDshBrowseContext } from "../platform/adapters/dsh/browse-context.ts";
+import { BrowseSessionManager } from "../browse/session.ts";
+import { BROWSE_DEFAULT_VIEWPORT } from "../browse/tool-helpers.ts";
 import { resolveDshSessionContext, type DshContextOptions } from "../platform/adapters/dsh/session-context.ts";
 import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
 import { createDshMemoryContext, DSH_MEMORY_WORKFLOW_TOOLS, type DshMemoryAgent } from "../platform/adapters/dsh/memory-context.ts";
@@ -185,6 +192,11 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
  *   - `defaultRole`       — role id (directory name) promoted to primary
  *   - `computerUse`       — optional opt-out for rolebox's computer_* tools;
  *                           absent enables the family, false disables it.
+ *   - `browseUse`         — optional opt-in/opt-out for rolebox's browse_* tools;
+ *                           absent AUTO-detects the optional Playwright driver,
+ *                           false always disables the family and true always
+ *                           enables it (browse_status then reports a missing
+ *                           driver instead of the tools being absent).
  *   - `enabledNamespaces` — allow-list of tool names / namespace prefixes,
  *                           composable with `!` exclusions (e.g.
  *                           `["*", "!web"]`); `"*"` or absent registers every
@@ -229,6 +241,12 @@ export const Config = z.object({
     .optional()
     .describe(
       "Expose rolebox computer_* tools by default. Set false to disable this family; an explicit false in the global or project config also disables it. Roles may restrict individual tools. OS permissions are requested through computer_permissions when needed.",
+    ),
+  browseUse: z
+    .boolean()
+    .optional()
+    .describe(
+      "Expose rolebox browse_* tools (headless browser navigation, page snapshots, interaction and observation). Omitted means AUTO: the family is registered only when the optional playwright dependency resolves from rolebox, so a machine without it gets no dead tool surface. Set true to register it anyway when the driver is missing (browse_status then reports the gap), or false to disable the family. An explicit false in the global or project config also disables it. Roles may restrict individual browse_* tools.",
     ),
   enabledNamespaces: z
     .array(z.string())
@@ -1377,6 +1395,25 @@ export async function apply(
     reason: computerUseGate.reason,
   });
 
+  // Resolve the browse family's gate. Unlike computer use this one has an AUTO
+  // default: `playwright` is an optional dependency, so an unconfigured machine
+  // that never installed it must not advertise 22 dead tools. An explicit
+  // setting always wins, and only the resolved gate can register the family.
+  const browseUseGate = resolveBrowseUseGate({
+    hostOverride: config.browseUse,
+    workspaceDir: process.cwd(),
+  });
+  log.info("Browse use gate resolved", {
+    setting: "browseUse",
+    enabled: browseUseGate.enabled,
+    host: browseUseGate.host,
+    globalConfig: browseUseGate.globalConfig,
+    projectConfig: browseUseGate.projectConfig,
+    driverAvailable: browseUseGate.driver.available,
+    driverPath: browseUseGate.driver.resolvedPath,
+    reason: browseUseGate.reason,
+  });
+
   // 2. Discover + resolve roles; sync agents into ctx.subagents.
   //
   // The per-session active-role holder is created FIRST and shared by BOTH
@@ -1422,6 +1459,7 @@ export async function apply(
   };
   const memoryContext = createDshMemoryContext(contextOptions);
   const computerContext = createDshComputerContext(contextOptions);
+  const browseContext = createDshBrowseContext(contextOptions);
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -1433,7 +1471,8 @@ export async function apply(
     const activeId = agentId ?? activeRole.get(sessionId);
     if (!activeId) return undefined;
     const functions = roleFunctionsMap.get(activeId);
-    const blocks = [buildAvailableFunctionsBlock(functions ?? []), memoryContext.render({ id: sessionId }, activeId), computerContext({ id: sessionId }, activeId)].filter(Boolean);
+    const blocks = [buildAvailableFunctionsBlock(functions ?? []), memoryContext.render({ id: sessionId }, activeId),
+      computerContext({ id: sessionId }, activeId), browseContext({ id: sessionId }, activeId)].filter(Boolean);
     return blocks.length ? blocks.map(text => ({ type: "text" as const, text })) : undefined;
   };
   // Provider-route safety path: probe the mounted dsh llm service and hand the
@@ -1562,6 +1601,31 @@ export async function apply(
     registrationAllowed: computerUseEnabled,
   });
 
+  // The browse family gets the same fail-closed guard: registered only when the
+  // gate is on AND the host can enforce per-role restrictions.
+  const browseUsePolicy = installDshBrowseUsePolicy({
+    tools: ctx.tools,
+    enabled: browseUseGate.enabled,
+    activeRoleOf: (sessionId) => activeRole.get(sessionId),
+    roleOfExecution: execution => resolveDshSessionContext(contextOptions, execution.agent ?? {}).requestedRoleId ?? null,
+    canonicalToolNameOf: name => canonicalToolNames.get(name) ?? name,
+    roles: () => resolvedRoles,
+  });
+  const browseUseEnabled = browseUseGate.enabled && browseUsePolicy.allowRegistration;
+  log.info("Browse use policy", {
+    gateEnabled: browseUseGate.enabled,
+    guardInstalled: browseUsePolicy.guardInstalled,
+    registrationAllowed: browseUseEnabled,
+  });
+
+  // ONE browser session manager per plugin boot, bound to this workspace. The
+  // family is lazy (constructing it launches nothing), and passing it in lets
+  // the fiber disposer close the browser the model opened instead of leaking it
+  // past the plugin's lifetime.
+  const browseManager = browseUseEnabled
+    ? new BrowseSessionManager({ worktree: process.cwd(), viewport: BROWSE_DEFAULT_VIEWPORT })
+    : undefined;
+
   // Optional host webServer seam — probe ONCE here. The composed `/rolebox`
   // prefix route (role-switch surface + monitor surface) is registered below,
   // after the loop wiring that the monitor surface depends on (its live-loop
@@ -1618,6 +1682,11 @@ export async function apply(
         computerContext: context => {
           const agent = context.agent ?? context.scope;
           return computerContext(agent && typeof agent === "object" ? agent as DshMemoryAgent
+            : { id: context.sessionID ?? context.sessionId });
+        },
+        browseContext: context => {
+          const agent = context.agent ?? context.scope;
+          return browseContext(agent && typeof agent === "object" ? agent as DshMemoryAgent
             : { id: context.sessionID ?? context.sessionId });
         },
         memoryContext: context => {
@@ -1930,7 +1999,11 @@ export async function apply(
           request.declaredTools, request.toolPresentation);
         const memory = systemPromptRegistry ? "" : memoryContext.render({ session: { header: { cwd: workspace } } }, request.agent, request);
         const computer = systemPromptRegistry ? "" : computerContext({ session: { header: { cwd: workspace } } }, request.agent, request);
-        return [prompt, memory, computer].filter(Boolean).join("\n\n");
+        // The fallback path carries the browse workflow block too: a headless
+        // profile has no system-prompt registry, and a worker that may browse
+        // must still read the snapshot/act/verify rules.
+        const browse = systemPromptRegistry ? "" : browseContext({ session: { header: { cwd: workspace } } }, request.agent, request);
+        return [prompt, memory, computer, browse].filter(Boolean).join("\n\n");
       },
       composeRequest: (agent, request, workerPrompt) =>
         registrar.composeSpawnRequest(agent, request, workerPrompt),
@@ -2302,13 +2375,18 @@ export async function apply(
     });
     let registered = 0;
     for (const [key, def] of Object.entries(compiled)) {
-      // Order: the computer-use gate FIRST, then the namespace filter
-      // (CANONICAL names), then the collision probe. The gate is checked
-      // independently of — and before — `enabledNamespaces`, because a profile
-      // that declares `["*"]` matches the `computer_` namespace prefix like any
-      // other and must never turn screen control on. Only the resolved gate can,
-      // and a refused name is reported exactly like a namespace-filter drop.
+      // Order: the family gates FIRST (computer use, then browse use), then the
+      // namespace filter (CANONICAL names), then the collision probe. Each gate
+      // is checked independently of — and before — `enabledNamespaces`, because
+      // a profile that declares `["*"]` matches those namespace prefixes like
+      // any other and must never turn screen control or browsing on. Only the
+      // resolved gates can, and a refused name is reported exactly like a
+      // namespace-filter drop.
       if (!isComputerUseRegistrationAllowed(key, computerUseEnabled)) {
+        filteredTools.add(key);
+        continue;
+      }
+      if (!isBrowseUseRegistrationAllowed(key, browseUseEnabled)) {
         filteredTools.add(key);
         continue;
       }
@@ -2457,6 +2535,11 @@ export async function apply(
       // the computer-use family; TRUE registers it, and the guard installed
       // above still enforces explicit role restrictions.
       computerUse: computerUseEnabled,
+      // Same contract for the browse family: the resolved gate admits it (see
+      // `resolveBrowseUseGate` for the AUTO default) and the browse guard above
+      // still enforces explicit role restrictions.
+      browseUse: browseUseEnabled,
+      ...(browseManager ? { browseManager } : {}),
     }),
     ...loopTools,
   };
@@ -2465,6 +2548,17 @@ export async function apply(
   const toolDisposers: Array<() => void> = [
     () => workerBoundary.dispose(),
     () => computerUsePolicy.dispose(),
+    () => browseUsePolicy.dispose(),
+    // Close the browser this boot opened. The manager's dispose is async (it
+    // closes every page and the driver), and the fiber disposer is sync, so the
+    // close is started here and its failure is logged instead of thrown.
+    () => {
+      void browseManager?.dispose().catch(err => {
+        log.debug("browse session manager dispose failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    },
   ];
   let registeredTools = 0;
   for (const [key, def] of Object.entries(compiled)) {
@@ -2477,6 +2571,14 @@ export async function apply(
     // path above, and for the same reason: `enabledNamespaces: ["*"]` must not
     // be able to enable the computer_ namespace.
     if (!isComputerUseRegistrationAllowed(key, computerUseEnabled)) {
+      filteredTools.add(key);
+      continue;
+    }
+    // Order: the browse gate sits beside the computer gate and BEFORE the
+    // namespace filter — `enabledNamespaces: ["*"]` must never be able to
+    // enable the browse_ namespace either. A name the gate refused is reported
+    // exactly like a namespace-filter drop.
+    if (!isBrowseUseRegistrationAllowed(key, browseUseEnabled)) {
       filteredTools.add(key);
       continue;
     }
@@ -2498,7 +2600,7 @@ export async function apply(
     if (plan.action === "skip") continue;
     const dispose = ctx.tools.register(plan.definition);
     canonicalToolNames.set(plan.definition.name, key);
-    if ([...DSH_MEMORY_WORKFLOW_TOOLS, ...COMPUTER_TOOL_NAMES].some(name => name === key)) contextToolNames.set(key, plan.definition.name);
+    if ([...DSH_MEMORY_WORKFLOW_TOOLS, ...COMPUTER_TOOL_NAMES, ...BROWSE_TOOL_NAMES].some(name => name === key)) contextToolNames.set(key, plan.definition.name);
     toolDisposers.push(dispose);
     registeredTools++;
   }
@@ -2542,6 +2644,7 @@ export async function apply(
     registeredTools,
     registeredAgents,
     computerUse: computerUseEnabled,
+    browseUse: browseUseEnabled,
     filteredTools: [...filteredTools].sort(),
   });
   if (discovered === 0) {

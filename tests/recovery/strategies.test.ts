@@ -8,7 +8,7 @@
  * registration.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { StrategyRegistry } from "../../src/recovery/strategies/registry.ts";
 import { retryStrategy } from "../../src/recovery/strategies/retry-strategy.ts";
 import { abortStrategy } from "../../src/recovery/strategies/abort-strategy.ts";
@@ -57,7 +57,7 @@ function makeError(overrides?: Partial<RecoveryError>): RecoveryError {
 
 describe("StrategyRegistry", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("starts empty", () => {
@@ -175,7 +175,7 @@ describe("compactStrategy", () => {
   });
 
   it("returns success when compact succeeds", async () => {
-    const compact = mock(() => Promise.resolve(true));
+    const compact = vi.fn(() => Promise.resolve(true));
     const ctx = makeCtx({
       sessionClient: { compact } as any,
     });
@@ -185,7 +185,7 @@ describe("compactStrategy", () => {
   });
 
   it("returns next_strategy when compact returns false", async () => {
-    const compact = mock(() => Promise.resolve(false));
+    const compact = vi.fn(() => Promise.resolve(false));
     const ctx = makeCtx({
       sessionClient: { compact } as any,
     });
@@ -195,7 +195,7 @@ describe("compactStrategy", () => {
   });
 
   it("returns next_strategy when compact throws", async () => {
-    const compact = mock(() => Promise.reject(new Error("compact failed")));
+    const compact = vi.fn(() => Promise.reject(new Error("compact failed")));
     const ctx = makeCtx({
       sessionClient: { compact } as any,
     });
@@ -215,7 +215,7 @@ describe("summarizeStrategy", () => {
   });
 
   it("returns success when prompt succeeds", async () => {
-    const prompt = mock(() => Promise.resolve({ id: "msg-1" }));
+    const prompt = vi.fn(() => Promise.resolve({ id: "msg-1" }));
     const ctx = makeCtx({
       sessionClient: { prompt } as any,
       error: makeError({ message: "too many tokens" }),
@@ -225,7 +225,7 @@ describe("summarizeStrategy", () => {
   });
 
   it("falls back to inject when prompt throws", async () => {
-    const prompt = mock(() => Promise.reject(new Error("api down")));
+    const prompt = vi.fn(() => Promise.reject(new Error("api down")));
     const injected: string[] = [];
     const ctx = makeCtx({
       sessionClient: { prompt } as any,
@@ -273,7 +273,7 @@ describe("fallbackModelStrategy", () => {
   });
 
   it("returns success when prompt succeeds", async () => {
-    const prompt = mock(() => Promise.resolve({ id: "msg-1" }));
+    const prompt = vi.fn(() => Promise.resolve({ id: "msg-1" }));
     const ctx = makeCtx({
       stepConfig: { model: "claude-3-haiku" },
       sessionClient: { prompt } as any,
@@ -284,7 +284,7 @@ describe("fallbackModelStrategy", () => {
   });
 
   it("returns next_strategy when prompt throws", async () => {
-    const prompt = mock(() => Promise.reject(new Error("no fallback available")));
+    const prompt = vi.fn(() => Promise.reject(new Error("no fallback available")));
     const ctx = makeCtx({
       stepConfig: { model: "gpt-3.5" },
       sessionClient: { prompt } as any,

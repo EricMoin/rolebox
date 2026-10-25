@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import {
   BUILTIN_REGISTRY,
   BUILTIN_REGISTRY_NAME,
@@ -177,7 +177,7 @@ describe("resolveRoleSource", () => {
       { name: "custom", url: "https://github.com/acme/custom", default: true },
     ]);
     const customManifest = manifest("custom", ["shared-role"]);
-    const fetchManifest = mock<FetchManifest>(async (registry) =>
+    const fetchManifest = vi.fn<FetchManifest>(async (registry) =>
       registry.name === "custom"
         ? customManifest
         : manifest(BUILTIN_REGISTRY_NAME, ["shared-role"]),
@@ -203,7 +203,7 @@ describe("resolveRoleSource", () => {
     const cfg = config([
       { name: "broken", url: "https://github.com/acme/broken", default: true },
     ]);
-    const fetchManifest = mock(async (registry: RegistryEntry) => {
+    const fetchManifest = vi.fn(async (registry: RegistryEntry) => {
       if (registry.name === "broken") throw new Error("network error");
       return manifest(registry.name, ["wanted"]);
     });
@@ -245,7 +245,7 @@ describe("resolveRoleSource", () => {
   it("passes the entry's ref, falling back to the default branch", async () => {
     // The source under test claims the default, so it is consulted first and
     // matches: one fetch per lookup.
-    const fetchManifest = mock<FetchManifest>(async (registry) => manifest(registry.name, ["r"]));
+    const fetchManifest = vi.fn<FetchManifest>(async (registry) => manifest(registry.name, ["r"]));
 
     await resolveRoleSource("r", config([{ name: "pinned", url: "u", ref: "v2", default: true }]), {
       fetchManifest,
@@ -260,7 +260,7 @@ describe("resolveRoleSource", () => {
   });
 
   it("finds nothing when no source is configured", async () => {
-    const fetchManifest = mock(async () => manifest("any"));
+    const fetchManifest = vi.fn(async () => manifest("any"));
 
     const result = await resolveRoleSource("r", config([]), { fetchManifest });
 

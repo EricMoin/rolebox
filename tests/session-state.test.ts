@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { FunctionSessionState } from "../src/function/session-state.js";
 
 describe("FunctionSessionState", () => {

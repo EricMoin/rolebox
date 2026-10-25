@@ -181,7 +181,7 @@ resolve the same `.rolebox/logs` — and an uncoordinated rename LOSES records:
 `rename(path, path.1)` *replaces* an existing `.1`, so a process that decided to
 rotate a moment before another one finished overwrites the copy the first just
 made. Measured with three real processes writing one channel
-(`bun scripts/log-multiprocess-probe.ts`, 3 × 400 records, a 4 KB limit and a
+(`node --import tsx scripts/log-multiprocess-probe.ts`, 3 × 400 records, a 4 KB limit and a
 retention far above the volume so that retention could not be the cause): the
 uncoordinated sink lost **70 of 1200** records, and a replay lost 143 — always
 the first ~24 records of every writer, i.e. exactly what the first rotation had
@@ -295,8 +295,8 @@ are pinned by `tests/log/throttle-policy.test.ts`.
 Re-measure the evidence on any log directory:
 
 ```bash
-bun scripts/log-event-density.ts                # the resolved source (.rolebox/logs here)
-bun scripts/log-event-density.ts --dir /path/to/project/.rolebox/logs
+node --import tsx scripts/log-event-density.ts                # the resolved source (.rolebox/logs here)
+node --import tsx scripts/log-event-density.ts --dir /path/to/project/.rolebox/logs
 # records, the largest 60 s/10 s/1 s burst, repeated fields, and — for a code that
 # already has a window — how many records the window would let through.
 ```
@@ -552,14 +552,10 @@ unchanged, because a delegate receives the same `(req, res)` with the full URL.)
 ### Why the panel speaks JSON and never touches the kernel
 
 The panel ships inside the browser bundle (`scripts/build-dsh-web-client.ts`,
-Bun `target: "browser"`), where a node builtin is **not** a build error: Bun
-substitutes an empty module and the bundle dies at evaluation time. Stage 2
-measured exactly that — `src/log/context.ts` imports `node:async_hooks`, whose
-browser stub is `{}`, so `new AsyncLocalStorage` throws
-`TypeError: undefined is not a constructor` before a single slot registers. A
-memory sink subscribed in the host process would not help anyway: the browser is
-a different process, and the records it must show were written by whichever
-process logged them.
+esbuild `platform: "browser"`). It cannot import the platform kernel because
+`src/log/context.ts` requires the Node-only `node:async_hooks` module. A memory
+sink subscribed in the host process would not help: the browser is a different
+process, and the records may come from several host processes.
 
 So the panel reads `GET /rolebox/logs` and holds one string between requests —
 the cursor. `tests/platform/dsh-web-ui-logs-bundle.test.ts` is the guard: it

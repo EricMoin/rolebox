@@ -1,4 +1,7 @@
-import { describe, it, expect } from "bun:test";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import {
   LANGUAGE_SERVER_REGISTRY,
   getLanguageIdFromExtension,
@@ -6,6 +9,37 @@ import {
   getServerConfig,
   autoDetectServers,
 } from "../../src/lsp/servers.ts";
+
+describe("Node PATH lookup", () => {
+  let directory: string;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), "rolebox-lsp-path-"));
+    vi.stubEnv("PATH", directory);
+    vi.stubEnv("PATHEXT", ".CMD");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("finds language-server executables through PATH and PATHEXT", () => {
+    const command = LANGUAGE_SERVER_REGISTRY.typescript![0]!.command;
+    const filename = join(directory, command + (process.platform === "win32" ? ".CMD" : ""));
+    writeFileSync(filename, "", { mode: 0o755 });
+    expect(isServerAvailable("typescript")).toBe(true);
+    expect(getServerConfig("typescript")?.command).toBe(filename);
+  });
+
+  it("ignores empty PATH entries before the configured directory", () => {
+    const command = LANGUAGE_SERVER_REGISTRY.typescript![0]!.command;
+    const filename = join(directory, command + (process.platform === "win32" ? ".CMD" : ""));
+    writeFileSync(filename, "", { mode: 0o755 });
+    vi.stubEnv("PATH", delimiter + directory);
+    expect(getServerConfig("typescript")?.command).toBe(filename);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // LANGUAGE_SERVER_REGISTRY (structural assertions)

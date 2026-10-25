@@ -872,7 +872,7 @@ spec) and touches none of `request`
 (`src/platform/adapters/dsh/agent-registrar.ts`); the erased
 compile-time guard `_DshContinuableFreshStartGuard`
 (`src/platform/adapters/dsh/agent-registrar.ts`) fails
-`bun run typecheck` if `seed` ever becomes required — which would make the
+`npm run typecheck` if `seed` ever becomes required — which would make the
 fresh-start choice inexpressible. The contract is pinned by
 `tests/dsh-dispatch.test.ts` (continuable provider handling) and
 `tests/platform/agent-registrar.test.ts`.
@@ -1032,7 +1032,7 @@ The factory-form CJS model: executing the bundle only **registers** the factory;
 module body side effects run at materialization (`factory(require)` → exports,
 memoized in `loadCache`) — so require cycles throw and load order needs no
 external sequencing (`source:packages/client/modules/README.md`). rolebox's build
-(`scripts/build-dsh-web-client.ts`) bundles `web-ui/client.ts` with Bun
+(`scripts/build-dsh-web-client.ts`) bundles `web-ui/client.ts` with esbuild running on Node.js
 (`format: "cjs"`, `react` / `react/jsx-runtime` / `@deepseek-ai/*` external) and
 wraps the output in this exact envelope with `id: "rolebox"`.
 
@@ -2091,7 +2091,7 @@ It asserts, per seam:
 vendors or clones dsh:
 
 ```sh
-DSH_SOURCE_DIR=/path/to/harness-source bun run scripts/verify-dsh-contract.ts
+DSH_SOURCE_DIR=/path/to/harness-source node --import tsx scripts/verify-dsh-contract.ts
 ```
 
 - When `DSH_SOURCE_DIR` is **unset** it prints a notice and **exits 0**, so CI

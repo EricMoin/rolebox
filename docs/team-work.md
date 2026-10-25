@@ -102,7 +102,7 @@ The focused test slices cover transaction rollback, two-process contention, atom
 Run the separate live acceptance scenario with:
 
 ```sh
-bun scripts/team-smoke/dsh.ts
+node --import tsx scripts/team-smoke/dsh.ts
 ```
 
 The runner requires an installed DSH CLI, a configured default model using a supported API-key or pi-ai adapter, and installed `typescript-engineer` and `ai-designer` roles. It mounts the real DSH agent loop, model adapter, JSONL persistence, and workspace sandbox from the same host installation. It copies both role trees into a fresh local directory and changes only those copies' model routes to the configured host model. Installed role configuration is untouched.
@@ -114,7 +114,7 @@ The runner prints the final `report.json` location. Session transcripts, role co
 After a successful run has exited, optionally reopen its persisted sessions for an isolation audit without model calls:
 
 ```sh
-bun scripts/team-smoke/audit.ts --root /path/to/completed-run
+node --import tsx scripts/team-smoke/audit.ts --root /path/to/completed-run
 ```
 
 The audit restores both roles and invokes the registered graph and session tools. Positive controls require each member to read its own transcript and the creator to inspect its private graph; peer queries must conceal that graph and refuse foreign session reads, searches, inspection, diffs, and forks. It also checks that the shared team stream contains no private child role IDs and that probes leave team state and transcripts unchanged. Any attempted model request fails the audit. The shareable `isolation-report.json` contains only check names, counts, and pass/fail status; raw tool results stay in the local `audit-private.log`.

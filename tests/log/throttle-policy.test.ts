@@ -1,35 +1,5 @@
-/**
- * WHICH ENTRIES MAY BE THROTTLED, AND WHICH MAY NEVER BE.
- *
- * `throttleMs` is the one field in the registry that DELETES diagnostics, so the
- * set that carries it is pinned here twice over:
- *
- * 1. AS A SET. Every throttled code and its window is listed explicitly, so
- *    adding a window to an entry is a deliberate edit to this file — not a
- *    one-word change somewhere in a 1300-line table. The evidence behind each
- *    window (records, burst sizes, repeated fields, how many records the window
- *    lets through) is in the entry's own comment and is reproducible with
- *    `bun scripts/log-event-density.ts`.
- * 2. AS A RULE. The entries whose whole value is "this just broke" are named and
- *    asserted to carry NO window: a first failure must stay visible, and because
- *    the gate is keyed by (channel, code) rather than by graph or attempt, a
- *    suppression can hide a DIFFERENT subject's first report.
- * 3. AS A SUBJECT. A window that a first report about ANOTHER subject could fall
- *    into is only allowed when the entry names the thing that must stay
- *    separable — `throttleBy`, a FIELD its callers actually pass, whose string
- *    value becomes the third part of the window key. Entries whose records all
- *    describe one subject keep the plain (channel, code) window. The name is
- *    read back out of the sources the records are built in (the registry's
- *    `Fields:` line and the call sites' own object literals), so a misspelling
- *    cannot silently drop the subject back to the empty string and re-create the
- *    very cross-subject suppression this file exists to prevent.
- *
- * The last cases drive the real pipeline with an injected clock, so the claim
- * "a burst collapses and the loss is counted" is shown on the same code path
- * production uses.
- */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -42,11 +12,11 @@ import { beginLogTest, endLogTest } from "../helpers/log.ts";
 import { __setLogClockForTest } from "../../src/log/index.ts";
 
 /** The registry's own source: the declared `Fields:` keys live in its comments. */
-const REGISTRY_PATH = join(import.meta.dir, "..", "..", "src", "log", "registry.ts");
+const REGISTRY_PATH = join(import.meta.dirname, "..", "..", "src", "log", "registry.ts");
 /** The runtime's own source: the unknown-code report is built there, inline. */
-const RUNTIME_PATH = join(import.meta.dir, "..", "..", "src", "log", "runtime.ts");
+const RUNTIME_PATH = join(import.meta.dirname, "..", "..", "src", "log", "runtime.ts");
 /** The `src/` tree: the call sites that actually PASS a subject field live there. */
-const SRC_DIR = join(import.meta.dir, "..", "..", "src");
+const SRC_DIR = join(import.meta.dirname, "..", "..", "src");
 
 /**
  * Every entry that declares a window, with the window it declares, IN TABLE

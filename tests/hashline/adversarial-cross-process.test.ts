@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, writeFile, readFile, rm, mkdir, access } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -17,7 +18,7 @@ import { makeToolContext } from "./fixtures/tool-context.ts";
 // (docs/limitations.md:30), and cross-process conflicts rely solely on the
 // best-effort pre-write recheck (docs/limitations.md:33, a strict CAS it is
 // not). This suite exercises REAL separate OS processes via
-// `Bun.spawn([process.execPath, fixture, ...])` and a marker-file barrier
+// `spawnProcess([process.execPath, fixture, ...])` and a marker-file barrier
 // protocol (no wall-clock sleeps — the worker's `beforeWrite` seam is the
 // deterministic hold point, src/hashline/hashline-edit.ts:363-387).
 //
@@ -86,13 +87,13 @@ async function writeMarker(markerPath: string): Promise<void> {
  * (primary) or stdout (fallback).
  */
 async function runWorker(args: string[], markerId: string, markerDir: string): Promise<{ ok: boolean; result: string }> {
-  const proc = Bun.spawn([process.execPath, FIXTURE, ...args], {
+  const proc = spawnProcess([process.execPath, FIXTURE, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
   const [out, errOut] = await Promise.all([
-    Bun.readableStreamToText(proc.stdout),
-    Bun.readableStreamToText(proc.stderr),
+    readableToText(proc.stdout),
+    readableToText(proc.stderr),
   ]);
   const code = await proc.exited;
 

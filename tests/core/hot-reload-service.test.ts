@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { HotReloadService } from "../../src/core/services/hot-reload-service.ts";
 import { clearExtensionModuleCache } from "../../src/extensions/loader.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
@@ -18,10 +18,10 @@ import { tmpdir } from "node:os";
 // PluginCoreLike (src/core/service.ts:37-43).
 function makeMockCore(): PluginCoreLike {
   return {
-    getService: mock(() => undefined),
-    getServices: mock(() => new Map()),
-    restartService: mock(() => Promise.resolve()),
-    isDegraded: mock(() => false),
+    getService: vi.fn(() => undefined),
+    getServices: vi.fn(() => new Map()),
+    restartService: vi.fn(() => Promise.resolve()),
+    isDegraded: vi.fn(() => false),
   };
 }
 
@@ -70,7 +70,7 @@ describe("HotReloadService", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
     try {
       rmSync(tempDir, { recursive: true, force: true });
     } catch {
@@ -130,8 +130,6 @@ describe("HotReloadService", () => {
     const core = makeMockCore();
     await svc.init(makeCtx(tempDir, core));
 
-    // triggerReload is the entry point that initiates performReload
-    // (fs.watch is not reliable on Bun/macOS, so we test via triggerReload directly)
     const result = await svc.triggerReload();
 
     // restartService should have been called with "dispatch-service"
@@ -323,19 +321,19 @@ describe("HotReloadService", () => {
     const hookTempDir = mkdtempSync(join(tmpdir(), "hook-service-test-"));
     try {
       // Build comprehensive service mocks for HookService.init()
-      const mockDispatchService = { getDispatchManager: mock(() => ({})) };
-      const mockLoopService = { getLoopManager: mock(() => ({})) };
+      const mockDispatchService = { getDispatchManager: vi.fn(() => ({})) };
+      const mockLoopService = { getLoopManager: vi.fn(() => ({})) };
       const mockRecoveryService = {
-        getRecoveryEngine: mock(() => ({})),
-        getBuiltInHookRegistry: mock(() => ({})),
-        getBuiltinConfig: mock(() => ({})),
+        getRecoveryEngine: vi.fn(() => ({})),
+        getBuiltInHookRegistry: vi.fn(() => ({})),
+        getBuiltinConfig: vi.fn(() => ({})),
       };
-      const mockExtensionService = { getExtensionRegistry: mock(() => ({})) };
-      const mockNotificationService = { getNotificationManager: mock(() => ({})) };
-      const mockToolService = { getTools: mock(() => ({})), getGraphToolSet: mock(() => undefined) };
+      const mockExtensionService = { getExtensionRegistry: vi.fn(() => ({})) };
+      const mockNotificationService = { getNotificationManager: vi.fn(() => ({})) };
+      const mockToolService = { getTools: vi.fn(() => ({})), getGraphToolSet: vi.fn(() => undefined) };
 
       const core = {
-        getService: mock((name: string) => {
+        getService: vi.fn((name: string) => {
           const map: Record<string, any> = {
             "dispatch-service": mockDispatchService,
             "loop-service": mockLoopService,
@@ -346,9 +344,9 @@ describe("HotReloadService", () => {
           };
           return map[name];
         }),
-        getServices: mock(() => new Map()),
-        restartService: mock(() => Promise.resolve()),
-        isDegraded: mock(() => false),
+        getServices: vi.fn(() => new Map()),
+        restartService: vi.fn(() => Promise.resolve()),
+        isDegraded: vi.fn(() => false),
       };
 
       const ctx = makeCtx(hookTempDir, core);

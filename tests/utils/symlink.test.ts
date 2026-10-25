@@ -1,5 +1,5 @@
-import { describe, it, expect, spyOn, afterEach } from "bun:test";
-import * as fs from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import fs from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,6 +9,11 @@ import {
   isSymlink,
 } from "../../src/utils/symlink.ts";
 import { setPlatformForTest } from "../../src/cli/paths.ts";
+
+vi.mock("node:fs", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, symlinkSync: (...args: Parameters<typeof actual.symlinkSync>) => fs.symlinkSync(...args) };
+});
 
 afterEach(() => {
   setPlatformForTest(undefined);
@@ -46,7 +51,7 @@ describe("win32 branch passes the correct type argument", () => {
   it("createDirSymlink passes 'junction' as the third argument", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
-    const spy = spyOn(fs, "symlinkSync");
+    const spy = vi.spyOn(fs, "symlinkSync");
     spy.mockImplementation(
       (
         target: fs.PathLike,
@@ -68,7 +73,7 @@ describe("win32 branch passes the correct type argument", () => {
   it("createFileSymlink passes 'file' as the third argument", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
-    const spy = spyOn(fs, "symlinkSync");
+    const spy = vi.spyOn(fs, "symlinkSync");
     spy.mockImplementation(
       (
         target: fs.PathLike,
@@ -90,7 +95,7 @@ describe("win32 branch passes the correct type argument", () => {
   it("createDirSymlink normalizes POSIX forward slashes to native separators", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
-    const spy = spyOn(fs, "symlinkSync");
+    const spy = vi.spyOn(fs, "symlinkSync");
     spy.mockImplementation(
       (
         target: fs.PathLike,
@@ -112,7 +117,7 @@ describe("win32 branch passes the correct type argument", () => {
   it("createFileSymlink normalizes POSIX forward slashes to native separators", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
-    const spy = spyOn(fs, "symlinkSync");
+    const spy = vi.spyOn(fs, "symlinkSync");
     spy.mockImplementation(
       (
         target: fs.PathLike,

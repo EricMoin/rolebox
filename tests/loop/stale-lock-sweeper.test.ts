@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, spyOn, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import { ADVANCING_LOCK_TIMEOUT_MS } from "../../src/loop/constants.ts";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";
@@ -15,7 +15,7 @@ function createFakeAdapter(): { adapter: IDispatchAdapter } {
   let taskCounter = 0;
 
   const adapter: IDispatchAdapter = {
-    dispatchRound: mock(
+    dispatchRound: vi.fn(
       async () => {
         taskCounter += 1;
         return {
@@ -25,29 +25,29 @@ function createFakeAdapter(): { adapter: IDispatchAdapter } {
       },
     ),
 
-    getRoundResult: mock(
+    getRoundResult: vi.fn(
       async () => ({ text: "worker output", hadError: false }),
     ),
 
-    cancelRound: mock(async () => {}),
+    cancelRound: vi.fn(async () => {}),
 
-    readOriginSummary: mock(
+    readOriginSummary: vi.fn(
       async () => "Round summary for sweeper test.",
     ),
 
-    getLastMessageId: mock(
+    getLastMessageId: vi.fn(
       async () => "msg-boundary",
     ),
 
-    injectNote: mock(async () => {}),
+    injectNote: vi.fn(async () => {}),
 
-    registerTerminatedListener: mock(
+    registerTerminatedListener: vi.fn(
       (_taskId: string, callback: (taskId: string, status: string) => void) => callback,
     ),
 
-    removeTerminatedListener: mock(() => {}),
+    removeTerminatedListener: vi.fn(() => {}),
 
-    getTaskStatus: mock(async () => "completed"),
+    getTaskStatus: vi.fn(async () => "completed"),
   };
 
   return { adapter };
@@ -57,7 +57,7 @@ function createFakeAdapter(): { adapter: IDispatchAdapter } {
 
 describe("_advancing stale lock sweeper", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("sweeps a stale lock older than ADVANCING_LOCK_TIMEOUT_MS", () => {
@@ -112,7 +112,7 @@ describe("_advancing stale lock sweeper", () => {
     // Freeze the clock: _sweepStaleLocks reads Date.now() a second time, so any
     // tick between the injection below and the sweep would make the age
     // TIMEOUT + 1 and sweep a lock that is exactly at the boundary.
-    const nowSpy = spyOn(Date, "now").mockReturnValue(BASE_TIME);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(BASE_TIME);
     try {
       // Inject a lock acquired just at the boundary (max non-stale age)
       coord._advancing.set("boundary-session", BASE_TIME - ADVANCING_LOCK_TIMEOUT_MS);

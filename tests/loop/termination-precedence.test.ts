@@ -24,7 +24,7 @@
  *  6. (f) A failed round (failTask → hadError) terminates the loop as
  *     "error" with exactly one dispatchRound — no further rounds launch.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { LoopCoordinator } from "../../src/loop/coordinator.ts";
 import { STOP_LOOP_SIGNAL } from "../../src/loop/constants.ts";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter.ts";

@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, vi } from "vitest";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import type { CanonicalToolDef } from "../../src/platform/types.ts";
@@ -20,7 +20,7 @@ function roles(): ResolvedRole[] {
 }
 
 function fixture(result = "host-result", getEffectiveAgent?: (sessionID?: string) => string | undefined) {
-  const execute = mock(async () => result);
+  const execute = vi.fn(async () => result);
   const graph: CanonicalToolDef = { description: "Host-bound graph tool", args: {}, execute };
   const tools = buildCanonicalTools({
     resolvedRoles: roles(), directory: "/tmp/rolebox-visibility", capabilities: opencodeCapabilities(),

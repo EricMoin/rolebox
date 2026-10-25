@@ -17,7 +17,7 @@
  * real PluginCore with real directory/file operations.
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";

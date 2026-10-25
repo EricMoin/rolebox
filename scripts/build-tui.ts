@@ -1,74 +1,29 @@
-import { copyFileSync, existsSync } from "node:fs"
-import { resolve } from "node:path"
-import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { build } from "esbuild";
+import { solidBuildPlugin } from "./solid-transform.ts";
 
-// Project root = scripts/.. (this script lives in scripts/)
-const projectRoot = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd()
+const projectRoot = resolve(import.meta.dirname, "..");
+await build({
+  absWorkingDir: projectRoot,
+  entryPoints: ["src/tui/index.tsx"], outfile: "dist/tui.js", bundle: true,
+  platform: "node", target: "node26", format: "esm", packages: "external",
+  plugins: [solidBuildPlugin()],
+});
 
-// Step 1: Bundle with Bun (JSX → JS)
-const result = await Bun.build({
-  entrypoints: ["src/tui/index.tsx"],
-  outdir: "dist",
-  naming: "tui.js",
-  target: "bun",
-  format: "esm",
-  plugins: [createSolidTransformPlugin({ moduleName: "@opentui/solid" })],
-  external: [
-    "@opencode-ai/sdk",
-    "@opencode-ai/plugin",
-    "@opentui/core",
-    "@opentui/solid",
-    "solid-js",
-  ],
-})
-
-if (!result.success) {
-  for (const log of result.logs) {
-    console.error(log)
-  }
-  process.exit(1)
-}
-console.log("build:tui — bundle success")
-
-// Step 2: Generate type declarations (.d.ts) via tsc
-//
-// Known false-positive tsc diagnostics:
-//   TS2322 ("fg" on SpanProps) — Solid plugin handles at runtime
-//   TS7006 (implicit any) — strict-mode callback inference
-// tsc exits 2 when files are emitted with errors; exit 2 is accepted here.
-const tsc = Bun.spawnSync(["bunx", "tsc", "-p", "tsconfig.tui.json", "--declaration", "--emitDeclarationOnly", "--outDir", "dist"], {
-  cwd: projectRoot,
-})
-if (tsc.exitCode === 0) {
-  console.log("build:tui — declarations success")
-} else if (tsc.exitCode === 2) {
-  const stderr = new TextDecoder().decode(tsc.stderr)
-  const count = (stderr.match(/error TS/g) || []).length
-  console.log(`build:tui — declarations emitted with ${count} known-false-positive diagnostics`)
-} else {
-  console.error("build:tui — declaration emit failed (exit code " + tsc.exitCode + ")")
-  console.error(new TextDecoder().decode(tsc.stderr))
-  process.exit(1)
+const tsc = spawnSync(process.execPath, ["node_modules/typescript/bin/tsc", "-p", "tsconfig.tui.json"], {
+  cwd: projectRoot, encoding: "utf8",
+});
+if (tsc.error) throw tsc.error;
+if (tsc.status !== 0) {
+  process.stderr.write(tsc.stderr + tsc.stdout);
+  process.exit(tsc.status ?? 1);
 }
 
-// Step 3: Copy dist/tui/index.d.ts → dist/tui.d.ts so the package.json exports
-// map ("./tui": { "types": "./dist/tui.d.ts" }) resolves correctly.
-const entryDts = resolve(projectRoot, "dist/tui/index.d.ts")
-const entryDtsMap = resolve(projectRoot, "dist/tui/index.d.ts.map")
-const targetDts = resolve(projectRoot, "dist/tui.d.ts")
-const targetDtsMap = resolve(projectRoot, "dist/tui.d.ts.map")
-
-if (existsSync(entryDts)) {
-  // Read, fix sourceMappingURL to match new filename, write
-  const content = Bun.file(entryDts).text()
-    .then((text) => text.replace("index.d.ts.map", "tui.d.ts.map"))
-  const fixed = await content
-  Bun.write(targetDts, fixed)
-  console.log("build:tui — copied dist/tui/index.d.ts → dist/tui.d.ts")
-}
-if (existsSync(entryDtsMap)) {
-  copyFileSync(entryDtsMap, targetDtsMap)
-  console.log("build:tui — copied dist/tui/index.d.ts.map → dist/tui.d.ts.map")
-}
-
-process.exit(0)
+const entry = resolve(projectRoot, "dist/tui/index.d.ts");
+if (!existsSync(entry)) throw new Error("TUI declaration output is missing");
+writeFileSync(resolve(projectRoot, "dist/tui.d.ts"), readFileSync(entry, "utf8").replace("index.d.ts.map", "tui.d.ts.map"));
+const map = `${entry}.map`;
+if (existsSync(map)) copyFileSync(map, resolve(projectRoot, "dist/tui.d.ts.map"));
+console.log("build:tui — bundle and declarations emitted");

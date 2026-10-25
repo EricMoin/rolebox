@@ -2,7 +2,7 @@
 
 **Status:** Pure audit — no source files modified. One new doc only.
 **Scope:** Goal B — confirm the "frozen" download root cause, inventory reusable primitives, map the missing flag/env surface, and sketch the fix.
-**Baseline:** `bun run typecheck` exits **0**.
+**Baseline:** `npm run typecheck` exits **0**.
 
 ---
 
@@ -163,7 +163,7 @@ Confirmed in `package.json` (`"@clack/prompts": "^0.9.0"`) and used in:
 
 **Expected answer holds: NO new dependency.** The plan is:
 
-1. Stream the response body with `response.body.getReader()` (Web `ReadableStream`, available in Bun and Node 18+ — no polyfill needed).
+1. Stream the response body with `response.body.getReader()` (Web `ReadableStream`, available in Node.js — no polyfill needed).
 2. Accumulate bytes and render with `format.ts` `bar()`/ANSI helpers and `display-helpers.ts` `formatDuration()`/`barSegments()`/`statusGlyph()`.
 
 If a team member still prefers a progress library (e.g. `cli-progress`), that would be a **new** runtime dependency and must be justified + Windows-terminal-verified. Not recommended — the existing primitives cover the surface.
@@ -334,6 +334,6 @@ When a phase fails, render a line naming the failed asset, the reason, and (when
 - [x] Primitive-reuse recommendation stated (NO new dependency; `ReadableStream` + `format.ts` suffices).
 - [x] Missing flag/env surface mapped.
 - [x] Concrete design sketch provided (phase lines, determinate/indeterminate, degraded mode, failure rendering).
-- [x] `bun run typecheck` exits **0** (verified: `tsc --noEmit`, `EXIT_STATUS=0`).
+- [x] `npm run typecheck` exits **0** (verified: `tsc --noEmit`, `EXIT_STATUS=0`).
 
 No source files were modified.

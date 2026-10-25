@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -21,7 +21,6 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   process.exit = origExit;
-  // Bun keeps the previous exit code when assigned undefined.
   process.exitCode = 0;
   rmSync(tmpDir, { recursive: true, force: true });
 });

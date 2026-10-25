@@ -36,7 +36,7 @@
  * @module
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,7 +58,7 @@ import type { CanonicalToolDef } from "../../src/platform/types.ts";
 const CHANNEL_REFUSAL = { error: "This worker channel does not expose that tool" };
 
 // The type-level pins: the day either face goes back to a bare-string list,
-// these annotations stop compiling (`bun run typecheck:tests` is the authority).
+// these annotations stop compiling (`npm run typecheck:tests` is the authority).
 const CHANNEL_FACE: readonly GraphToolName[] = WORKER_CHANNEL_GRAPH_TOOLS;
 const HOST_FACE: readonly GraphToolName[] = WORKER_GRANTED_GRAPH_TOOLS;
 

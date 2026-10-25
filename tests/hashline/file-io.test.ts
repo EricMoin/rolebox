@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { computeFileVersion } from "../../src/hashline/hash.ts";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, writeFile, readFile, chmod } from "node:fs/promises";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -190,7 +191,7 @@ describe("formatReadOutput", () => {
 
   it("returns correct SHA-256 version", () => {
     const output = formatReadOutput("hello\n", "/fake/path");
-    const { computeFileVersion } = require("../../src/hashline/hash.ts");
+
     const expectedVersion = computeFileVersion("hello\n");
     const versionLine = output.split("\n")[0];
     expect(versionLine).toBe(`version: ${expectedVersion}`);

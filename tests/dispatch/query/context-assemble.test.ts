@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,7 +68,7 @@ describe("context_assemble memory visibility", () => {
 
   it("never falls back to the configured or process workspace when the call has no absolute workspace", async () => {
     const assemble = tool();
-    const open = spyOn(MemoryStore, "create");
+    const open = vi.spyOn(MemoryStore, "create");
     try {
       for (const workspace of ["", "relative-workspace"]) {
         const result = await assemble.execute(z.object(assemble.args).parse({ topic: "cache", sources: ["memory"] }), context("role-a", workspace));

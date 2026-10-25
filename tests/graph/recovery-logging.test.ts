@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -104,7 +104,7 @@ it("lets I/O callbacks run between graphs in a recovery sweep", async () => {
   const startGraph = host.startDeclaredGraph.bind(host);
   let visits = 0;
   let callbacks = 0;
-  const starts = spyOn(host, "startDeclaredGraph").mockImplementation((...args) => {
+  const starts = vi.spyOn(host, "startDeclaredGraph").mockImplementation((...args) => {
     expect(callbacks).toBe(visits);
     visits++;
     setImmediate(() => { callbacks++; });

@@ -17,7 +17,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -160,8 +160,8 @@ describe("runPiSystemTransform — memory injection", () => {
       scope: "role",
       role_id: "agent-a",
       category: "fact",
-      title: "Pi runs on Bun",
-      content: "Pi prefers the Bun runtime",
+      title: "Pi runs on Node.js",
+      content: "Pi uses the Node.js runtime",
       relevance: "high",
       tags: [],
       session_id: null,
@@ -193,7 +193,7 @@ describe("runPiSystemTransform — memory injection", () => {
     );
 
     expect(result).toContain("## Available memory");
-    expect(result).toContain("Pi runs on Bun");
+    expect(result).toContain("Pi runs on Node.js");
   });
 
   it("teaches memory use without injecting summaries when the store is empty", async () => {

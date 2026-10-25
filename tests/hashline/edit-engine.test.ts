@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   computeLineHash,
   computeFileVersion,
@@ -978,12 +978,9 @@ describe("empty file edge cases", () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════════════
-// 27. No Bun-specific APIs
-// ════════════════════════════════════════════════════════════════════
 
-describe("no Bun-specific APIs", () => {
-  it("uses node:crypto (not Bun)", () => {
+describe("Node filesystem and hashing APIs", () => {
+  it("uses node:crypto", () => {
     // Verify by checking crypto module is available
     const crypto = require("crypto");
     expect(crypto.createHash).toBeDefined();

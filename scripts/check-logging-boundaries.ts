@@ -42,8 +42,8 @@
 // platform pipeline.
 //
 // USAGE
-//   bun run scripts/check-logging-boundaries.ts               # the workspace
-//   bun run scripts/check-logging-boundaries.ts --root <dir>  # a fixture tree
+//   node --import tsx scripts/check-logging-boundaries.ts               # the workspace
+//   node --import tsx scripts/check-logging-boundaries.ts --root <dir>  # a fixture tree
 
 import ts from "typescript";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -77,7 +77,7 @@ export const CONSOLE_WHITELIST: readonly ConsoleWhitelistEntry[] = [
   {
     path: "src/platform/adapters/dsh/web-ui/client.ts",
     reason:
-      "Browser code: this file is the dsh web client bundle (scripts/build-dsh-web-client.ts, target 'browser'), and the platform kernel cannot load there — src/log/context.ts pulls node:async_hooks, which Bun's browser target stubs to an empty module, so `new AsyncLocalStorage` throws while the bundle is evaluated (measured: \"TypeError: undefined is not a constructor (evaluating 'new import_node_async_hooks.AsyncLocalStorage')\"). console.warn is the only channel a failed slot registration has in the browser; the guard must not pretend otherwise.",
+      "Browser code: the dsh web client cannot import the platform kernel because src/log/context.ts requires node:async_hooks. console.warn reports failed slot registration without pulling Node-only modules into the browser bundle.",
   },
 ];
 

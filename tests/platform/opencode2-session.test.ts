@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Opencode2SessionAdapter — the ISessionClient adapter over the opencode v2
@@ -14,7 +13,7 @@
  * No test touches the filesystem, so the working tree stays clean.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   Opencode2SessionAdapter,
 } from "../../src/platform/adapters/opencode2/session.ts";

@@ -185,8 +185,7 @@ export function createInteractiveTerminalTool() {
       shell: z.boolean().optional().describe("Run `command` through the system shell (open)."),
       backend: z.enum(["auto", "pty", "pipe"]).optional().describe(
         "Backend preference (open). 'auto' (default) prefers a real PTY (full TUI support), " +
-        "falling back to pipes. 'pipe' forces line-oriented mode (use under the Bun runtime, " +
-        "where node-pty is unreliable).",
+        "falling back to pipes. 'pipe' forces line-oriented mode.",
       ),
       cwd: z.string().optional().describe("Working directory (open)."),
       env: z.record(z.string(), z.string()).optional().describe("Extra env vars (open)."),

@@ -187,7 +187,9 @@ export async function runBenchmarkWorker(request: BenchmarkWorkerRequest,
     if (!cancelled) {
       const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
       const workerPath = options.workerPath ?? fileURLToPath(new URL(`./hosts/dsh-worker.${extension}`, import.meta.url));
-      child = spawn(process.execPath, [workerPath, requestPath, resultPath], {
+      const runtimeArgs = workerPath.endsWith(".ts") ? ["--import", import.meta.resolve("tsx")] : [];
+      if (runtimeArgs.length) env.TSX_DISABLE_CACHE = "1";
+      child = spawn(process.execPath, [...runtimeArgs, workerPath, requestPath, resultPath], {
         cwd: request.workspace, env, detached: true, stdio: "ignore", shell: false,
       });
       exit = new Promise(resolve => {

@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Pi tool-result image transport.
@@ -17,7 +16,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { PiToolFactory } from "../../src/platform/adapters/pi/tool-factory.ts";
 import { defineTool } from "../../src/platform/ports/tool-factory.ts";
 import type { ToolResult } from "../../src/platform/types.ts";

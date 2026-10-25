@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,6 +153,7 @@ describe("benchmark baseline snapshots", () => {
         db.run("UPDATE records SET body = ? WHERE digest = ?", body, saved.recordDigest);
         expect(() => store.get("quality")).toThrow("corrupt");
       }
+      db.exec("PRAGMA foreign_keys = OFF");
       db.run("DELETE FROM records WHERE digest = ?", saved.recordDigest);
       expect(() => store.get("quality")).toThrow("corrupt");
       expect(() => store.list()).toThrow("corrupt");

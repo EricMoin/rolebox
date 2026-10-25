@@ -20,7 +20,7 @@
  * @module
  */
 
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -40,14 +40,14 @@ import type { ResolvedFunction, ResolvedRole } from "../src/types.ts";
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 interface DepsFixture {
-  runHooks: ReturnType<typeof mock>;
+  runHooks: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 }
 
 /** Minimal HookDeps with an observable customHooks.runHooks spy. */
 function makeDeps(dir: string): HookDeps & { __fixture: DepsFixture } {
-  const runHooks = mock(() => Promise.resolve());
+  const runHooks = vi.fn(() => Promise.resolve());
   const deps = {
-    session: { messages: mock(() => Promise.resolve([])) } as never,
+    session: { messages: vi.fn(() => Promise.resolve([])) } as never,
     roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
     roleGraphMap: new Map(),
     roleMap: new Map<string, ResolvedRole>(),
@@ -152,7 +152,7 @@ describe("wirePiChatActivation — enabled opt-out", () => {
   it("does not subscribe message_start when enabled:false", () => {
     const handlers: Record<string, unknown> = {};
     const pi = {
-      on: mock((name: string, handler: unknown) => {
+      on: vi.fn((name: string, handler: unknown) => {
         handlers[name] = handler;
       }),
     };
@@ -173,7 +173,7 @@ describe("wirePiChatActivation — enabled opt-out", () => {
     const deps = makeDeps(tmpDir);
 
     wirePiChatActivation({
-      pi: { on: mock(() => {}) },
+      pi: { on: vi.fn(() => {}) },
       state: new HookState(),
       deps,
       enabled: false,
@@ -187,7 +187,7 @@ describe("wirePiChatActivation — enabled opt-out", () => {
   it("still wires message_start by default (enabled omitted → true)", () => {
     const handlers: Record<string, unknown> = {};
     const pi = {
-      on: mock((name: string, handler: unknown) => {
+      on: vi.fn((name: string, handler: unknown) => {
         handlers[name] = handler;
       }),
     };

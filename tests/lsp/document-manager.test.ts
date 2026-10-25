@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,16 +16,16 @@ function createMockClient(): LspClientManager {
     detectedLanguages: [],
     messageIdCounter: 0,
     buffers: new Map(),
-    notify: mock(() => {}),
-    request: mock(() => Promise.resolve({})),
-    startServer: mock(() => Promise.resolve()),
-    restartServer: mock(() => Promise.resolve()),
-    shutdown: mock(() => Promise.resolve()),
-    shutdownAll: mock(() => Promise.resolve()),
-    getDiagnostics: mock(() => []),
-    getAllDiagnostics: mock(() => new Map()),
-    getRunningServers: mock(() => []),
-    getServerCapabilities: mock(() => null),
+    notify: vi.fn(() => {}),
+    request: vi.fn(() => Promise.resolve({})),
+    startServer: vi.fn(() => Promise.resolve()),
+    restartServer: vi.fn(() => Promise.resolve()),
+    shutdown: vi.fn(() => Promise.resolve()),
+    shutdownAll: vi.fn(() => Promise.resolve()),
+    getDiagnostics: vi.fn(() => []),
+    getAllDiagnostics: vi.fn(() => new Map()),
+    getRunningServers: vi.fn(() => []),
+    getServerCapabilities: vi.fn(() => null),
   } as unknown as LspClientManager;
 }
 
@@ -127,7 +127,7 @@ describe("sync", () => {
 
     const uri = mgr.getUri(filePath);
     expect(client.notify).toHaveBeenCalledTimes(1);
-    const notifyCall = (client.notify as ReturnType<typeof mock>).mock.calls[0]!;
+    const notifyCall = (client.notify as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0]!;
     expect(notifyCall[0]).toBe("textDocument/didOpen");
     expect(notifyCall[1].textDocument.uri).toBe(uri);
     expect(notifyCall[1].textDocument.languageId).toBe("typescript");
@@ -149,14 +149,14 @@ describe("sync", () => {
     writeFileSync(filePath, "v2", "utf-8");
 
     // Reset notify mock to track only the second call
-    (client.notify as ReturnType<typeof mock>).mockReset();
+    (client.notify as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockReset();
 
     // Second sync should send didChange
     await mgr.sync(filePath, client, "typescript");
 
     const uri = mgr.getUri(filePath);
     expect(client.notify).toHaveBeenCalledTimes(1);
-    const notifyCall = (client.notify as ReturnType<typeof mock>).mock.calls[0]!;
+    const notifyCall = (client.notify as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0]!;
     expect(notifyCall[0]).toBe("textDocument/didChange");
     expect(notifyCall[1].textDocument.uri).toBe(uri);
     expect(notifyCall[1].textDocument.version).toBe(2);
@@ -173,7 +173,7 @@ describe("sync", () => {
     await mgr.sync(filePath, client, "typescript");
     expect(client.notify).toHaveBeenCalledTimes(1);
 
-    (client.notify as ReturnType<typeof mock>).mockReset();
+    (client.notify as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mockReset();
 
     // Second sync with same content
     await mgr.sync(filePath, client, "typescript");

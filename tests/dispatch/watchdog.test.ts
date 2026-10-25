@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog.ts";
 import {
   WATCHDOG_INTERVAL_MS,
@@ -9,16 +9,16 @@ import {
 function noop(): void {}
 
 interface DepMocks {
-  onReconcile: ReturnType<typeof mock>;
-  onSweep: ReturnType<typeof mock>;
-  onDebounceElapsed: ReturnType<typeof mock>;
+  onReconcile: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+  onSweep: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
+  onDebounceElapsed: ReturnType<typeof vi.fn<(...args: any[]) => any>>;
 }
 
 function createMocks(): DepMocks {
   return {
-    onReconcile: mock(noop),
-    onSweep: mock(noop),
-    onDebounceElapsed: mock(noop),
+    onReconcile: vi.fn(noop),
+    onSweep: vi.fn(noop),
+    onDebounceElapsed: vi.fn(noop),
   };
 }
 

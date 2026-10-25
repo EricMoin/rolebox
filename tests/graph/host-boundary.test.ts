@@ -1,3 +1,4 @@
+import { spawnProcess } from "../../scripts/node-process.ts";
 /**
  * THE HOST BOUNDARY, pinned against the three defects that were reproduced
  * against the previous shape.
@@ -30,7 +31,7 @@
  * block; nothing here writes outside a temp dir.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { openTrackedCredentialVault, openTrackedExecutionIndex } from "./helpers/temp-dirs.ts";
 import { removeTempTrees } from "./helpers/temp-dirs.ts";
@@ -320,7 +321,7 @@ describe("host boundary — the reproduced defects stay closed", () => {
 //
 // The REAL process boundary for this scenario is in
 // `tests/graph/host-restart-cross-process.test.ts`, which drives the same two
-// windows with `Bun.spawn` workers.
+// windows with `spawnProcess` workers.
 
 const RESTART_GRAPH_ID = "graph.host-boundary.restart";
 const RESTART_POLICY_ID = "policy.host-boundary.restart";

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import { requestVerdict } from "../src/copilot/llm.ts";
 
@@ -26,19 +26,19 @@ interface FakeClientOverrides {
 
 function makeClient(overrides: FakeClientOverrides = {}) {
   const client = {
-    create: mock(
+    create: vi.fn(
       overrides.create ??
         (() => Promise.resolve({ id: "child-sess-1" })),
     ),
-    promptSync: mock(
+    promptSync: vi.fn(
       overrides.promptSync ??
         (() =>
           Promise.resolve({
             parts: [{ type: "text", text: '{"advance":true,"replyText":"go"}' }],
           })),
     ),
-    prompt: mock(() => Promise.resolve({ id: "async-prompt" })),
-    abort: mock(overrides.abort ?? (() => Promise.resolve(true))),
+    prompt: vi.fn(() => Promise.resolve({ id: "async-prompt" })),
+    abort: vi.fn(overrides.abort ?? (() => Promise.resolve(true))),
   } as unknown as ISessionClient;
   return client;
 }
@@ -73,10 +73,10 @@ describe("requestVerdict", () => {
     expect(verdict).toEqual({ advance: true, replyText: "keep going" });
     // The origin session must never be prompted — only the child.
     expect(client.promptSync).toHaveBeenCalledTimes(1);
-    expect((client.promptSync as ReturnType<typeof mock>).mock.calls[0][0]).toBe(
+    expect((client.promptSync as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][0]).toBe(
       "child-sess-1",
     );
-    expect((client.promptSync as ReturnType<typeof mock>).mock.calls[0][0]).not.toBe(SID);
+    expect((client.promptSync as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0][0]).not.toBe(SID);
   });
 
   it("parses a JSON verdict wrapped in a fenced block", async () => {
@@ -262,7 +262,7 @@ describe("requestVerdict", () => {
 
     await requestVerdict(deps(client), opts());
 
-    const call = (client.promptSync as ReturnType<typeof mock>).mock.calls[0];
+    const call = (client.promptSync as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls[0];
     expect(call[0]).toBe("child-sess-1");
     expect(call[1]).toMatchObject({
       parts: [{ type: "text", text: PROMPT }],
@@ -289,14 +289,14 @@ describe("requestVerdict", () => {
 
   it("never calls the async prompt() on the origin session", async () => {
     const raw = {
-      create: mock(() => Promise.resolve({ id: "child-sess-1" })),
-      promptSync: mock(() =>
+      create: vi.fn(() => Promise.resolve({ id: "child-sess-1" })),
+      promptSync: vi.fn(() =>
         Promise.resolve({
           parts: [{ type: "text", text: '{"advance":true,"replyText":"go"}' }],
         }),
       ),
-      prompt: mock(() => Promise.resolve({ id: "async-prompt" })),
-      abort: mock(() => Promise.resolve(true)),
+      prompt: vi.fn(() => Promise.resolve({ id: "async-prompt" })),
+      abort: vi.fn(() => Promise.resolve(true)),
     };
     const client = raw as unknown as ISessionClient;
 

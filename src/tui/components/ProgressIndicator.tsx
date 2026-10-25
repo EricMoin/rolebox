@@ -47,15 +47,15 @@ export function renderProgressIndicator(props: {
     // Show: [████░░░░░░] 45% | stage: compiling | 12 events
     return (
       <text>
-        <span fg={rgbaToCSS(c.info)}>{G_BAR_ON.repeat(filled)}</span>
-        <span fg={rgbaToCSS(c.borderSubtle)}>{G_BAR_OFF.repeat(empty)}</span>
-        <span fg={rgbaToCSS(c.text)} attributes={BOLD}>{" " + percentage + "%"}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" | stage: " + stage}</span>
+        <span style={{ fg: rgbaToCSS(c.info) }}>{G_BAR_ON.repeat(filled)}</span>
+        <span style={{ fg: rgbaToCSS(c.borderSubtle) }}>{G_BAR_OFF.repeat(empty)}</span>
+        <span style={{ fg: rgbaToCSS(c.text), attributes: BOLD }}>{" " + percentage + "%"}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" | stage: " + stage}</span>
         {eventCount > 0 && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" | " + eventCount + " events"}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" | " + eventCount + " events"}</span>
         )}
         {message && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" \u00b7 " + message}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" \u00b7 " + message}</span>
         )}
       </text>
     );
@@ -64,13 +64,13 @@ export function renderProgressIndicator(props: {
   // No percentage — just show stage
   return (
     <text>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{G_SUB + " "}</span>
-      <span fg={rgbaToCSS(c.info)} attributes={BOLD}>{"stage: " + stage}</span>
+      <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{G_SUB + " "}</span>
+      <span style={{ fg: rgbaToCSS(c.info), attributes: BOLD }}>{"stage: " + stage}</span>
       {eventCount > 0 && (
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" | " + eventCount + " events"}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" | " + eventCount + " events"}</span>
       )}
       {message && (
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" \u00b7 " + message}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" \u00b7 " + message}</span>
       )}
     </text>
   );

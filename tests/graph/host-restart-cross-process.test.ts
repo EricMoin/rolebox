@@ -1,51 +1,6 @@
-/**
- * P2 item 6 — RESTART RECOVERY DRIVEN BY A REAL PROCESS BOUNDARY.
- *
- * Plan §4: "真实宿主重启测试不能仅关闭再打开同一个内存对象；至少用子进程退出与重新启动
- * 驱动边界". Closing and reopening an object in one process is NOT a restart: an
- * in-process "second host" still shares the module-level connection map, the
- * warm caches and the process's memory. Every case here spawns REAL
- * `bun` processes with `Bun.spawn(process.execPath, …)` — the pattern
- * `tests/graph/graph-store-cross-process.test.ts` established — so the process
- * that recovers has never seen the dispatching process's memory, its open
- * connections, or its credential values.
- *
- * WHAT IS PINNED (acceptance A07 and the §3.3 restart authorization):
- *
- * 1. The dispatching child starts the graph, hands the platform one execution
- *    and CONFIRMS the platform's real execution id, then EXITS. The vault's
- *    durable store keeps no credential value (the shipped default), so the
- *    recovering process cannot resolve one.
- * 2. A second child runs the boot sweep with the platform observation port. The
- *    binding is rebuilt from the host's durable record — the execution row plus
- *    the dispatch effect that names the node — and, because the platform reports
- *    the execution TERMINAL, the completion is applied IDEMPOTENTLY through the
- *    same acceptance core an announced completion uses. ONE accepted event.
- * 3. A third child repeats the sweep: nothing is completed twice, nothing is
- *    re-dispatched, and the host's execution row is unchanged.
- * 4. A fourth child settles the SAME completion directly (`host.complete`) with
- *    no observation port: the durable binding is enough, the settlement REPLAYS
- *    the persisted receipt, and the worker's bearer value — which this process
- *    never held — appears in no report.
- * 5. A child with NO observation port must not silently strand the attempt: the
- *    sweep reports an explicit per-effect refusal (`completion-unsettled`) and
- *    leaves the one accepted event count untouched.
- * 6. A confirmed execution the platform reports STILL RUNNING is not settled and
- *    not dropped: the sweep names it (with the platform's own execution id) in
- *    `awaitingCompletion` — the inventory a restarted host adapter re-subscribes
- *    to or keeps re-querying — and a LATER sweep that reads the same execution
- *    terminal settles the same attempt exactly once.
- *
- * The same windows are covered in-process by `host-boundary.test.ts` (binding)
- * and `host-restart-authorization.test.ts` (authorization policy); THIS file is
- * the process-boundary evidence the plan requires.
- *
- * PRIVACY: every store root lives under the OS temp directory, every child
- * reports ids, counts, booleans and status tokens, and no case prints or asserts
- * a credential VALUE.
- */
+import { spawnProcess, readableToText } from "../../scripts/node-process.ts";
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,32 +118,27 @@ function makeFixture(prefix: string): {
   return { dir, storeRoot, workspaceDir: dir, markerDir };
 }
 
-/** Spawn one REAL bun process running the worker fixture and await its report. */
 async function runWorker(
   id: string,
   args: readonly string[],
 ): Promise<WorkerReport> {
-  // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-  // the start-time OS environ, not this process's `process.env` — the
-  // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-  // so the child would resolve and append to the workspace's `.rolebox/logs`.
-  const proc = Bun.spawn([process.execPath, WORKER, ...args], {
+  const proc = spawnProcess([process.execPath, WORKER, ...args], {
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = Bun.readableStreamToText(proc.stdout);
-  const stderr = Bun.readableStreamToText(proc.stderr);
+  const stdout = readableToText(proc.stdout);
+  const stderr = readableToText(proc.stderr);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill(9);
+    proc.kill("SIGKILL");
   }, CHILD_DEADLINE_MS);
   children.push({
     pid: proc.pid,
     kill: () => {
       try {
-        proc.kill(9);
+        proc.kill("SIGKILL");
       } catch {
         // already exited
       }

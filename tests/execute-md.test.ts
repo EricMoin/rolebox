@@ -1,8 +1,9 @@
-import { describe, it, expect } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { describe, it, expect } from "vitest";
 
 describe("execute.md kernel function", () => {
   it("resolves with kernel frontmatter fields", async () => {
-    const content = await Bun.file("functions/execute.md").text();
+    const content = await readFile("functions/execute.md", "utf8");
     const { parseFrontmatter } = await import("../src/resolver/frontmatter.js");
     const { metadata, body } = parseFrontmatter(content);
 

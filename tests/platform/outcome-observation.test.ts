@@ -33,7 +33,7 @@
  * transcript appears in this file.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
 import {

@@ -1,37 +1,7 @@
-/// <reference types="bun-types" />
+import { beforeEach as resetBeforeEach } from "vitest";
 
-/**
- * Regression test — an `'error'` event on the log watcher must not crash the host.
- *
- * WHY THIS DEFECT IS INVISIBLE ON A DEVELOPER MACHINE. `fs.watch`'s FSWatcher is
- * an EventEmitter, and an `'error'` event with no listener is THROWN rather than
- * returned to the caller: `fs.watch` reports the ordinary life of a watched
- * directory that way — the directory removed or rotated away while it is being
- * watched, a permission error, an exhausted watch budget — and the throw lands
- * in whichever process holds the watcher. On the Windows CI lane that is what
- * `bun test` exited 1 for while reporting 0 failures, because the throw landed
- * BETWEEN tests and Bun's rule is that an unhandled error fails the run even
- * when no test failed. On macOS and Linux the same watcher tends to go quiet
- * instead, which is why only a source-level guard makes the difference visible
- * on every platform.
- *
- * THE ROUTE. The claim is about the watcher the MODULE creates and what happens
- * when THAT object emits `'error'`, so the test hands the module a watcher it
- * can drive: `node:fs` is mocked BEFORE `src/log/watch.ts` is imported — the
- * mock-then-dynamic-import seam tests/cli/config-path-partition.test.ts:34-47
- * uses — with the real module spread in and only `watch` replaced by a factory
- * returning a real EventEmitter that also carries `close()`. A static import at
- * the top of tests/log/watch.test.ts would bind the real `node:fs` first, which
- * is why this lives in its own file. The module is then driven through its
- * public `watchLogSource` entry point against a REAL temporary directory, so its
- * own `existsSync` guard still decides to arm, and `'error'` is emitted on the
- * object the module was handed. Every assertion is on runtime behaviour; no
- * source text is inspected.
- *
- * @module
- */
 
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,7 +27,7 @@ const createdWatchers: FakeWatcher[] = [];
 /** Every target the module asked to watch. */
 const watchedTargets: string[] = [];
 
-mock.module("node:fs", () => ({
+vi.doMock("node:fs", () => ({
   ...realFs,
   // The real fs.watch registers its observer as the watcher's own `change`
   // listener; mirroring that is what lets a case drive the module's debounce by
@@ -156,3 +126,5 @@ describe("watchLogSource — a watcher 'error' event is absorbed", () => {
     }
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

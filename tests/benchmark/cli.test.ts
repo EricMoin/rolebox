@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createDatabaseSync, type DatabaseDriver } from "../../src/memory/db-driver.ts";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -41,7 +42,7 @@ beforeEach(async () => {
 afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
 async function cli(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn([process.execPath, entry, "bench", ...args], {
+  const child = spawnProcess([process.execPath, entry, "bench", ...args], {
     cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
   let timedOut = false;
@@ -199,7 +200,7 @@ describe.skipIf(!available || process.platform === "win32")("benchmark CLI with 
       run: { repetitions: 2, concurrency: 1, timeoutMs: 5_000 } });
     expect(plan.cases[0].assertions).toEqual([{ kind: "equals", value: "fixture complete" }]);
     expect((await stat(directory)).mode & 0o777).toBe(0o700);
-    const db = new Database(join(directory, "benchmark.sqlite"), { readonly: true });
+    const db = createDatabaseSync(join(directory, "benchmark.sqlite"), { readonly: true });
     try {
       expect(db.query("SELECT COUNT(*) AS count FROM trials").get()).toEqual({ count: 2 });
       expect(db.query("SELECT COUNT(*) AS count FROM runs").get()).toEqual({ count: 1 });
@@ -267,7 +268,7 @@ describe.skipIf(!available || process.platform === "win32")("benchmark CLI with 
     const outputDirectory = join(root, "watch-results");
     const rolePath = join(suiteDirectory, "role", "role.yaml");
     const firstSource = await readFile(rolePath, "utf8");
-    const child = Bun.spawn([process.execPath, entry, "bench", "watch", suiteDirectory, "--output", outputDirectory, "--baseline", "main"], {
+    const child = spawnProcess([process.execPath, entry, "bench", "watch", suiteDirectory, "--output", outputDirectory, "--baseline", "main"], {
       cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     });
     let stdout = "";

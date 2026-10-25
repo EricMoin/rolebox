@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,8 +20,8 @@ function createFakePrompts() {
   // model clack's cancel symbol. The parameter is declared (prompt options are
   // what the pickers pass, per pick.ts `PromptApi`) so `mockImplementation` and
   // `mock.calls` are typed against the real call shape.
-  const select = mock(async (_opts: SelectOptionsAny): Promise<string | symbol> => "software-architect");
-  const confirm = mock(async () => true);
+  const select = vi.fn(async (_opts: SelectOptionsAny): Promise<string | symbol> => "software-architect");
+  const confirm = vi.fn(async () => true);
   const prompts: PromptApi = {
     intro: () => {},
     outro: () => {},
@@ -45,10 +46,10 @@ function createFakePrompts() {
 }
 
 // ── registry-client mock (install path — same pattern as install.test.ts) ──
-const mockFetchManifest = mock();
-const mockDownloadRole = mock();
-const mockResolveVersion = mock();
-const mockComputeIntegrity = mock();
+const mockFetchManifest = vi.fn();
+const mockDownloadRole = vi.fn();
+const mockResolveVersion = vi.fn();
+const mockComputeIntegrity = vi.fn();
 
 import * as realRegistryClient from "../../../src/cli/registry-client.ts";
 
@@ -96,7 +97,7 @@ beforeEach(() => {
   // Simulate a TTY so the interactive flows pass the stdin guard.
   Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
-  mock.module("../../../src/cli/registry-client", () => ({
+  vi.doMock("../../../src/cli/registry-client", () => ({
     ...realRegistryClient,
     fetchRegistryManifest: mockFetchManifest,
     downloadRole: mockDownloadRole,
@@ -450,3 +451,5 @@ describe("rolebox config (interactive)", () => {
     expect(await configInteractive(prompts, "hint")).toBeUndefined();
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

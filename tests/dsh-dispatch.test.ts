@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh dispatch path tests — the {@link DshDispatchAdapter} (`src/platform/
@@ -21,7 +20,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync, readdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -1160,7 +1159,7 @@ describe("terminating-signal parity on dsh completion settlement", () => {
 describe("dsh dispatch code import hygiene", () => {
   it("contains no @opencode-ai or @deepseek-ai imports", () => {
     const source = readFileSync(
-      join(import.meta.dir, "../src/platform/adapters/dsh/dispatch.ts"),
+      join(import.meta.dirname, "../src/platform/adapters/dsh/dispatch.ts"),
       "utf-8",
     );
     expect(source.includes("@opencode-ai")).toBe(false);

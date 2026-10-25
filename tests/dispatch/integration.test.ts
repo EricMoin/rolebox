@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -731,7 +731,7 @@ describe("integration: outbox resend", () => {
       expect(sent).toBe(true);
       expect(hasFinalNotifyBeenSent(task.id)).toBe(true);
     },
-    { timeout: 15000 },
+    15000,
   );
 });
 
@@ -800,7 +800,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
       expect(sentText).toContain("[BACKGROUND TASK COMPLETED]");
       expect(sentText).not.toContain("[ALL BACKGROUND TASKS COMPLETE]");
     },
-    { timeout: 15000 },
+    15000,
   );
 
   it(
@@ -861,6 +861,6 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
       expect(promptAsyncCallCount).toBe(beforeCalls + 1);
       expect(mgr.notifyOutbox.has(task.id)).toBe(false);
     },
-    { timeout: 15000 },
+    15000,
   );
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { stripAnsi } from "../../src/cli/format.ts";
 import type {
   MonitorSnapshot,

@@ -12,7 +12,7 @@
  *   - When the session verifies `missing`, the genuine-failure path is
  *     preserved and the task transitions to `error`.
  */
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { createMockClient, parentContext } from "./helpers.ts";
 
@@ -23,7 +23,7 @@ describe("completion-evaluator liveness guard", () => {
   };
 
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   /** Launch a background task and pin it to a controlled session in running state. */
@@ -60,7 +60,7 @@ describe("completion-evaluator liveness guard", () => {
     const { manager, mgr, task } = await launchPinnedRunningTask(client, sessionId);
 
     // Mock verifyExistence → "exists" (session still alive).
-    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
+    mgr.sessionMonitor.verifyExistence = vi.fn(() => Promise.resolve("exists" as const));
 
     // Emit a session.error event for the pinned session.
     await manager.handleSessionError(sessionId, new Error("transient provider hiccup"));
@@ -86,7 +86,7 @@ describe("completion-evaluator liveness guard", () => {
     const { manager, mgr, task } = await launchPinnedRunningTask(client, sessionId);
 
     // Session is genuinely gone — verifyExistence → "missing".
-    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("missing" as const));
+    mgr.sessionMonitor.verifyExistence = vi.fn(() => Promise.resolve("missing" as const));
 
     await manager.handleSessionError(sessionId, new Error("fatal"));
 
@@ -113,7 +113,7 @@ describe("completion-evaluator liveness guard", () => {
 
     const { manager, mgr, task } = await launchPinnedRunningTask(client, sessionId);
 
-    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
+    mgr.sessionMonitor.verifyExistence = vi.fn(() => Promise.resolve("exists" as const));
 
     await manager.handleSessionDeleted(sessionId);
 

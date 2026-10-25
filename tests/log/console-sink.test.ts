@@ -10,7 +10,7 @@
  * the promise that an invalid value falls back to "warn" rather than throwing.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetLoggingForTest, configureLogging, createLogger, logEvent, withLogScope } from "../../src/log/index.ts";
 import {

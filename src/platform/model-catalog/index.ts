@@ -3,7 +3,7 @@
  *
  * {@link MODEL_SOURCES} is the one place that knows where each harness
  * declares its models. The table is exhaustive by type, so adding a
- * {@link SyncTarget} fails `bun run typecheck` until its entry exists —
+ * {@link SyncTarget} fails `npm run typecheck` until its entry exists —
  * "adding a new harness is a single-entry change" (src/platform/registry.ts:1-20).
  *
  * @module

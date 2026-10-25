@@ -1,37 +1,4 @@
-/**
- * Cross-process worker fixture for the P2 restart-recovery evidence.
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * WHY THIS FILE EXISTS. Plan §4: "真实宿主重启测试不能仅关闭再打开同一个内存对象；
- * 至少用子进程退出与重新启动驱动边界" — a restart test must be driven by a REAL
- * process boundary, not by closing and reopening an object in one process. The
- * parent (`tests/graph/host-restart-cross-process.test.ts`) therefore spawns
- * THIS file with `Bun.spawn(process.execPath, …)`, exactly as
- * `tests/graph/helpers/graph-store-xproc-worker.ts` does for the store races:
- * every mode opens its OWN connection to the workspace's ONE store file, and a
- * "restart" is a genuinely different OS process that has never seen the
- * dispatching process's memory.
- *
- *     bun tests/graph/helpers/host-restart-xproc-worker.ts --mode <mode> ...
- *
- * Every mode prints exactly ONE JSON line on stdout — `{"pid":n,"ok":true,...}`
- * on success, `{"pid":n,"ok":false,...}` plus a non-zero exit on failure — and
- * the parent enforces its own deadline and kills a worker that overruns.
- *
- * COORDINATION IS A MARKER FILE. `--mode dispatch` writes
- * `dispatched-<attempt>.marker` AFTER the platform execution was confirmed, and
- * the parent writes nothing: it only waits for that file, so the recovery
- * process cannot start before the dispatch process finished. No sleeps decide
- * an outcome.
- *
- * PRIVACY. This fixture receives store roots under the OS temp directory,
- * graph/attempt ids minted by the test, and one platform execution id. It never
- * prints a credential VALUE, a real home-directory path or a session
- * transcript: the report carries attempt ids, counts, booleans and status
- * tokens only — never a value the vault holds.
- */
+import { spawnProcess } from "../../../scripts/node-process.ts";
 
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

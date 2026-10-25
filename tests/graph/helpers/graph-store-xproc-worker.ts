@@ -1,102 +1,4 @@
-/**
- * Cross-process worker fixture for the GraphStore acceptance evidence.
- *
- * Version: 1.0
- * Date: 2026-09-23
- *
- * WHY THIS FILE EXISTS. P1 acceptance bullet 3 (`two independent connections,
- * two ACTUAL processes: unique keys and conditional updates take effect`) and
- * bullet 4 (`a committed receipt replays identically`) were proven only by
- * inline probes that were never saved (gap G11, `docs/graph-v3-execution-plan.md`
- * §8.2), and §5 forbids a probe as the sole acceptance evidence. The parent
- * test `tests/graph/graph-store-cross-process.test.ts` spawns THIS file as a
- * REAL separate OS process — one `bun` process per worker — so every worker
- * opens its OWN SQLite connection to the SAME store file. Two `GraphStore`
- * objects inside one process would share the process's connection
- * (`graph-store.ts`, ONE CONNECTION PER FILE PER PROCESS), which is exactly
- * the single-process evidence the plan refuses to count.
- *
- *     bun tests/graph/helpers/graph-store-xproc-worker.ts --mode <mode> ...
- *
- * Every mode opens `GraphStore.openFile(root)`, does its work, and prints
- * exactly ONE JSON line on stdout — `{"pid":<n>,"ok":true,...}` on success,
- * `{"pid":<n>,"ok":false,...}` plus a non-zero exit on failure. The parent
- * enforces its own deadline and kills a worker that overruns, so a hung child
- * fails the test with a readable message instead of hanging the suite.
- *
- * COORDINATION IS MARKER FILES ONLY (`--mode claim-race`). A worker writes
- * `ready-<id>-<round>.marker` and then busy-waits (bounded by
- * `--deadline-ms`) for `go-<round>.marker`; the parent writes `go-<round>`
- * only after EVERY worker signalled ready for that round, so all racing claims
- * for one effect key start from the same barrier. The parent passes the SAME
- * fixed `--now` to every worker, so the lease arithmetic is identical in all
- * of them: the store's primary key and its conditional `UPDATE ... WHERE`
- * decide the winner, never a wall-clock sleep.
- *
- * MODES
- *
- *   --mode claim-race
- *     --id <workerId> --owner <ownerId> --graph <graphId>
- *     --effect-prefix <p> --rounds <n> --lease-ms <n> --now <epochMs>
- *     --marker-dir <dir> [--confirm on|off] [--deadline-ms <n>]
- *     For each round, waits for the round barrier, then calls
- *     `claimExecution` on `<p>-<round>` / `<p>-attempt-<round>` with this
- *     worker's own owner id. A winner with `--confirm on` then records the
- *     host fact from a REAL second connection: `markExecutionCreating` and
- *     `confirmExecution({executionId: "exec-<id>-<round>"})`. Reports every
- *     claim (kind, the owner the store reported, the observed state).
- *
- *   --mode confirm-shape
- *     --graph --effect --attempt --owner --now --lease-ms
- *     Claim, mark creating, then prove the SHAPE of the transition: an empty
- *     execution id is refused with `GraphStoreWriteError`/`invalid-record`
- *     and leaves the row `creating`; a non-empty id moves it to `created`;
- *     and a `created` row refuses `markExecutionCreating`, `releaseExecution`
- *     and a second `claimExecution`.
- *
- *   --mode confirm-stale
- *     --graph --effect --attempt --owner --generation --execution-id --now
- *     A process presents a claim it believes is current — one it never held
- *     (generation 0), or one the row has moved past. The store's conditional
- *     update names `(owner_id, owner_generation)`, so the confirmation is
- *     REFUSED (`fenced`), the row is untouched, and the attempt is recorded on
- *     it as a `stale-confirmation` refusal. This is the case that replaced the
- *     pre-P2 pin, which asserted a NON-claimant SUCCEEDING at binding the
- *     execution id (G1).
- *
- *   --mode apply-control
- *     --graph --node --attempt --command --reason --at [--run <candidate>]
- *     [--session <id>]
- *     Applies ONE control command to an EXISTING run from this process: adopts
- *     the run identity the store already holds (`mintRun` is idempotent) and
- *     records the decision plus the run's control fact in one transaction.
- *     Used with `Bun.spawnSync` from inside a declared acceptance gate, so the
- *     parent's submission is between its pre-transaction control check and its
- *     acceptance transaction when the command commits.
- *
- *   --mode hold-write-lock
- *     --graph --now --lease-ms --marker-dir --hold-ms
- *     Holds the store's WRITE LOCK for `--hold-ms` inside ONE transaction, and
- *     says so from inside it (`lock-held.marker`). A transaction that reads
- *     first and writes afterwards must PROMOTE its shared lock, and SQLite
- *     refuses that promotion immediately while another connection holds the
- *     write lock; the parent uses this mode to prove that a confirmation
- *     arriving in that window WAITS instead of failing.
- *
- *   --mode receipt
- *     --graph --attempt --submission --effect --plan-revision --outcome
- *     --digest --tag --now --accepted-at --effect-at --result-at
- *     Commits ONE acceptance batch (receipt + accepted event + pending effect
- *     + accepted result) and, only when the verdict is `committed`, writes the
- *     run state in the SAME transaction. Prints the verdict and the persisted
- *     receipt, so the parent can compare a replay/conflict from another
- *     process against what this one committed.
- *
- * PRIVACY: this fixture receives only store roots under the OS temp directory,
- * graph/effect/attempt ids minted by the test, and epoch milliseconds. It never
- * reads or prints a credential value, a real home-directory path or a session
- * transcript — the store's credential table is not touched here at all.
- */
+import { spawnProcessSync } from "../../../scripts/node-process.ts";
 
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -689,7 +591,7 @@ async function controlRace(store: GraphStore): Promise<void> {
  * acceptance gate is evaluated OUTSIDE the acceptance transaction, so a control
  * command that commits in that window is invisible to the run path's
  * pre-transaction check. The parent's gate spawns this worker SYNCHRONOUSLY
- * (`Bun.spawnSync`), so a REAL second OS process with its OWN connection
+ * (`spawnProcessSync`), so a REAL second OS process with its OWN connection
  * commits the command while the parent's submission has not opened its
  * transaction yet.
  *

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { detectCompletion, extractAssistantError } from "../../src/dispatch/completion/completion-detector.ts";
 import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types.ts";
 

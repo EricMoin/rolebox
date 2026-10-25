@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { renderIssues } from "../../src/asset/issue-renderer.ts";
 import type { ValidationIssue } from "../../src/asset/issue-renderer.ts";
 

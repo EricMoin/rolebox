@@ -37,7 +37,7 @@
  * values, no private paths.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { join } from "node:path";
 
 import { OutcomeHost } from "../../src/graph/host/outcome-host.ts";

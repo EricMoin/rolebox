@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { join } from "node:path";
 import { captureFilePath } from "../../src/computer/capture.ts";
 import { PiToolFactory } from "../../src/platform/adapters/pi/tool-factory.ts";

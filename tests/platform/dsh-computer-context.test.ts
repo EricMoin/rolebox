@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { createDshComputerContext } from "../../src/platform/adapters/dsh/computer-context.ts";
 import { resolveDshSessionContext, type DshContextOptions } from "../../src/platform/adapters/dsh/session-context.ts";
 import { installDshComputerUsePolicy } from "../../src/platform/adapters/dsh/role-tool-policy.ts";

@@ -142,10 +142,6 @@ export function moveDir(src: string, dest: string): void {
     // after the check above must not be silently merged into by cpSync.
     assertDestinationAbsent(src, dest);
     try {
-      // verbatimSymlinks keeps relative symlink targets relative. Node's default
-      // (false) rewrites them to absolute paths inside the source tree, which is
-      // then deleted, leaving broken links in the moved tree. Bun preserves them
-      // either way, so this is a no-op on the shipped runtime.
       cpSync(src, dest, { recursive: true, verbatimSymlinks: true });
     } catch (copyErr) {
       // The destination did not exist before this call, so everything under it

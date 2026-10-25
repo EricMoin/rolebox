@@ -1,41 +1,13 @@
-import { describe, it, expect, mock, beforeAll, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { createRequire } from "node:module";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+
 import { makeToolContext } from "./fixtures/tool-context.ts";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SUBTASK 3 — Recheck→rename window suite (DEPENDS ON SUBTASK 1's probe).
-//
-// Subtask 1 outcome (tests/hashline/adversarial-fs-seam-probe.test.ts):
-//   PROBE RESULT: YES — mock.module("node:fs/promises", ...) with a factory
-//   spreading createRequire(import.meta.url)("node:fs/promises") and overriding
-//   `rename` deterministically intercepts the rename performed by a REAL
-//   createHashlineEditTool().execute() call (verified on bun 1.3.14, darwin).
-//
-// Gap under test: the documented limitation at docs/limitations.md:33 and
-// atomic-write.ts:129-134 — "a file changed between this check and the
-// subsequent rename is not detected... NOT a strict cross-process CAS". The
-// tool's only revalidation is the best-effort pre-write recheck
-// (verifyFileUnchanged, atomic-write.ts:136-157) invoked from hashline-edit.ts
-// :395-410. The existing test-only seam `beforeWrite` (hashline-edit.ts:28-33,
-// invoked at :387) fires BEFORE that recheck, while path locks are held — it
-// does NOT cover the recheck→rename window (hashline-edit.ts:395-410 → :412-420
-// → atomic-write.ts:60 `rename`).
-//
-// The rename hook below fires strictly AFTER verifyFileUnchanged returned, so
-// any external mutation it performs lands inside the uncovered window and is
-// invisible to the CAS.
-//
-// Classification: DOCUMENTED-LIMITATION test — it asserts the DOCUMENTED
-// behavior (silent clobber) and must PASS; the silently-lost content is logged
-// as evidence. A separate assertion pins the internal-consistency invariant
-// (returned version == fresh hashline_read of the final on-disk content) which
-// must hold even when the tool's own write won the race.
-// ─────────────────────────────────────────────────────────────────────────────
 
 interface WindowState {
   renameIntercepted: boolean;
@@ -52,15 +24,9 @@ const windowState: WindowState = {
   injectedContent: "",
 };
 
-// Hoisted by bun above the static imports of this file (same mechanism as the
-// subtask-1 probe): the consumer chain src/hashline/index.ts → hashline-edit.ts
-// → atomic-write.ts binds its node:fs/promises named imports to this mock.
 const require = createRequire(import.meta.url);
 
-mock.module("node:fs/promises", () => {
-  // CJS require bypasses bun's ESM mock registry (verified empirically in
-  // subtask 1), so `real` is the GENUINE node:fs/promises — real passthroughs
-  // for every export we do not touch, with `rename` overridden below.
+vi.doMock("node:fs/promises", () => {
   const real = require("node:fs/promises") as typeof import("node:fs/promises");
   const realRename = real.rename;
   const realWriteFile = real.writeFile;
@@ -86,6 +52,7 @@ mock.module("node:fs/promises", () => {
     },
   };
 });
+const { createHashlineReadTool, createHashlineEditTool } = await import("../../src/hashline/index.ts");
 
 let tmpDir: string;
 
@@ -171,3 +138,5 @@ describe("adversarial recheck→rename window (subtask 3)", () => {
     },
   );
 });
+
+resetBeforeEach(() => vi.resetModules());

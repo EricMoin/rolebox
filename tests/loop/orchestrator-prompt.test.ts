@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -9,7 +9,7 @@ function readLoopPrompt(): {
   frontmatter: string;
   body: string;
 } {
-  const filePath = join(import.meta.dir, "../../functions/loop.md");
+  const filePath = join(import.meta.dirname, "../../functions/loop.md");
   const content = readFileSync(filePath, "utf-8");
 
   // Normalize Windows CRLF line endings to LF. git's `core.autocrlf` on

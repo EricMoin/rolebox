@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ const summary: MemoryListSummary = {
 
 describe("buildMemoryContext", () => {
   it("returns no context or data when no memory capability is authorized", () => {
-    const list = mock(() => [summary]);
+    const list = vi.fn(() => [summary]);
     for (const tools of [[], ["web_search"], ["memory_*"], ["memory_unknown"], ["session_list", "session_read"]]) {
       expect(buildMemoryContext({ roleId: "reviewer", tools, store: { list } })).toBe("");
     }
@@ -54,7 +54,7 @@ describe("buildMemoryContext", () => {
   });
 
   it("does not retrieve or reveal summaries to a write-only worker", () => {
-    const list = mock(() => [summary]);
+    const list = vi.fn(() => [summary]);
     const context = buildMemoryContext({ roleId: "writer", tools: ["memory_write"], store: { list } });
     expect(list).not.toHaveBeenCalled();
     expect(context).toContain("memory_write");
@@ -120,7 +120,7 @@ describe("buildMemoryContext", () => {
   });
 
   it("passes the current role and default injection filters to the store", () => {
-    const list = mock(() => [summary]);
+    const list = vi.fn(() => [summary]);
     const context = buildMemoryContext({ roleId: "reviewer", tools: ["memory_read"], store: { list } });
     expect(list).toHaveBeenCalledWith({ roleId: "reviewer", scope: "both", limit: 10, minRelevance: "medium" });
     expect(context).toContain("## Available memory");
@@ -129,7 +129,7 @@ describe("buildMemoryContext", () => {
   });
 
   it("honors configured scope, limit, and relevance without changing workflow", () => {
-    const list = mock(() => [summary]);
+    const list = vi.fn(() => [summary]);
     buildMemoryContext({
       roleId: "author",
       tools: ["memory_recall"],
@@ -142,7 +142,7 @@ describe("buildMemoryContext", () => {
   it("turns off only automatic summaries for inject=false or max_inject=0", () => {
     const configs: MemoryConfig[] = [{ inject: false }, { max_inject: 0 }];
     for (const config of configs) {
-      const list = mock(() => [summary]);
+      const list = vi.fn(() => [summary]);
       const context = buildMemoryContext({ roleId: "reviewer", tools: allTools, config, store: { list } });
       expect(list).not.toHaveBeenCalled();
       expect(context).toContain("Before planning");

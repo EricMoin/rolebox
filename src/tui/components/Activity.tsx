@@ -45,15 +45,15 @@ export function renderFunctionLine(props: { c: ThemeColors; fn: ActiveFunction }
       <text>
         {agent !== null ? (
           <>
-            <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{agent}</span>
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" "}</span>
+            <span style={{ fg: rgbaToCSS(c.primary), attributes: BOLD }}>{agent}</span>
+            <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{" "}</span>
           </>
         ) : null}
-        <span fg={rgbaToCSS(isGated ? c.warning : c.info)}>{name}</span>
+        <span style={{ fg: rgbaToCSS(isGated ? c.warning : c.info) }}>{name}</span>
       </text>
       {fn.continuationCount > 0 && (
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>
             {INDENT + labelValue("cont", String(fn.continuationCount), VALUE_BUDGET)}
           </span>
         </text>
@@ -77,7 +77,7 @@ function dimRow(c: ThemeColors, opts: {
   const color = fg ?? c.textMuted;
   return (
     <text>
-      <span fg={rgbaToCSS(color)} attributes={attr}>{INDENT + text}</span>
+      <span style={{ fg: rgbaToCSS(color), attributes: attr }}>{INDENT + text}</span>
     </text>
   );
 }
@@ -104,8 +104,8 @@ export function renderDispatchRow(props: {
   const primaryAttr = isRunning ? BOLD : 0;
   const primaryRow = (
     <text>
-      <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={primaryAttr}>{sv.glyph}</span>
-      <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={primaryAttr}>{" " + agent}</span>
+      <span style={{ fg: rgbaToCSS(sel ? c.info : sv.color), attributes: primaryAttr }}>{sv.glyph}</span>
+      <span style={{ fg: rgbaToCSS(sel ? c.info : c.text), attributes: primaryAttr }}>{" " + agent}</span>
     </text>
   );
 
@@ -209,8 +209,8 @@ export function renderGraphActivity(props: {
   return (
     <>
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"graph · "}</span>
-        <span fg={rgbaToCSS(c.text)}>{orch}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"graph · "}</span>
+        <span style={{ fg: rgbaToCSS(c.text) }}>{orch}</span>
       </text>
       {graph.iterationCount > 0 && dimRow(c, { label: "iter", value: String(graph.iterationCount) })}
       {graph.terminationReason && graph.status !== "active" && dimRow(c, { label: "term", value: graph.terminationReason })}
@@ -223,9 +223,9 @@ export function renderGraphActivity(props: {
           const color = isDone ? c.success : isRunning ? c.info : c.warning;
           return (
             <text>
-              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}</span>
-              <span fg={rgbaToCSS(color)}>{glyph + " "}</span>
-              <span fg={rgbaToCSS(isDone ? c.textMuted : c.text)} attributes={isDone ? DIM : 0}>{truncate(nodeLeaf, VALUE_BUDGET)}</span>
+              <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT}</span>
+              <span style={{ fg: rgbaToCSS(color) }}>{glyph + " "}</span>
+              <span style={{ fg: rgbaToCSS(isDone ? c.textMuted : c.text), attributes: isDone ? DIM : 0 }}>{truncate(nodeLeaf, VALUE_BUDGET)}</span>
             </text>
           );
         }}</For>
@@ -301,10 +301,10 @@ export function renderEngineGraphActivity(props: {
   return (
     <>
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"engine · "}</span>
-        <span fg={rgbaToCSS(phase.color)}>{phase.glyph + " "}</span>
-        <span fg={rgbaToCSS(c.text)}>{gid + " "}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{effectivePhase}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"engine · "}</span>
+        <span style={{ fg: rgbaToCSS(phase.color) }}>{phase.glyph + " "}</span>
+        <span style={{ fg: rgbaToCSS(c.text) }}>{gid + " "}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{effectivePhase}</span>
       </text>
       {liveSignal && liveSignal !== "" && dimRow(c, { label: "sig", value: liveSignal, fg: c.secondary })}
       {graph.graph?.current?.control && dimRow(c, { label: "stopped", value: graph.graph.current.control.reason })}
@@ -327,16 +327,16 @@ export function renderEngineGraphActivity(props: {
               : "";
             return (
               <text>
-                <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}</span>
-                <span fg={rgbaToCSS(color)}>{glyph + " "}</span>
-                <span fg={rgbaToCSS(done ? c.textMuted : c.text)} attributes={done ? DIM : 0}>
+                <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT}</span>
+                <span style={{ fg: rgbaToCSS(color) }}>{glyph + " "}</span>
+                <span style={{ fg: rgbaToCSS(done ? c.textMuted : c.text), attributes: done ? DIM : 0 }}>
                   {truncate(agentLeaf(node.agent), VALUE_BUDGET)}
                 </span>
                 {node.signalType && !done && (
-                  <span fg={rgbaToCSS(c.secondary)}>{":" + node.signalType}</span>
+                  <span style={{ fg: rgbaToCSS(c.secondary) }}>{":" + node.signalType}</span>
                 )}
                 {liveness !== "" && (
-                  <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{liveness}</span>
+                  <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{liveness}</span>
                 )}
               </text>
             );
@@ -359,12 +359,12 @@ export function renderLoopActivity(props: { c: ThemeColors; loop: LoopSnapshot }
     return (
       <>
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"loop · "}</span>
-          <span fg={rgbaToCSS(c.text)}>{agent}</span>
-          <span fg={rgbaToCSS(c.error)}>{" " + G_ERROR}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"loop · "}</span>
+          <span style={{ fg: rgbaToCSS(c.text) }}>{agent}</span>
+          <span style={{ fg: rgbaToCSS(c.error) }}>{" " + G_ERROR}</span>
         </text>
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}{reason}</span>
+          <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT}{reason}</span>
         </text>
       </>
     );
@@ -378,15 +378,15 @@ export function renderLoopActivity(props: { c: ThemeColors; loop: LoopSnapshot }
   return (
     <>
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"loop · "}</span>
-        <span fg={rgbaToCSS(glyphColor)}>{glyph + " "}</span>
-        <span fg={rgbaToCSS(c.text)}>{agent}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{"loop · "}</span>
+        <span style={{ fg: rgbaToCSS(glyphColor) }}>{glyph + " "}</span>
+        <span style={{ fg: rgbaToCSS(c.text) }}>{agent}</span>
       </text>
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}</span>
-        <span fg={rgbaToCSS(c.text)}>{loop.current + "/" + loop.total + " "}</span>
-        <span fg={rgbaToCSS(c.info)}>{G_BAR_ON.repeat(filled)}</span>
-        <span fg={rgbaToCSS(c.borderSubtle)}>{G_BAR_OFF.repeat(empty)}</span>
+        <span style={{ fg: rgbaToCSS(c.textMuted), attributes: DIM }}>{INDENT}</span>
+        <span style={{ fg: rgbaToCSS(c.text) }}>{loop.current + "/" + loop.total + " "}</span>
+        <span style={{ fg: rgbaToCSS(c.info) }}>{G_BAR_ON.repeat(filled)}</span>
+        <span style={{ fg: rgbaToCSS(c.borderSubtle) }}>{G_BAR_OFF.repeat(empty)}</span>
       </text>
     </>
   );

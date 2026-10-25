@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * Rolebox state-directory watcher tests.
@@ -12,7 +11,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

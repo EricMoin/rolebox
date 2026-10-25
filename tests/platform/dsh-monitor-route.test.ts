@@ -1,4 +1,4 @@
-/// <reference types="bun-types" />
+import { setTimeout as sleep } from "node:timers/promises";
 
 /**
  * DshRoleboxMonitorWebRoute tests — the structural adapter exposing the
@@ -26,7 +26,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -448,7 +448,7 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/events", () => {
     fixture.route.notifyChanged("loop");
     expect(frames(res).filter((frame) => frame.type === "changed")).toHaveLength(1);
 
-    await Bun.sleep(EVENT_COALESCE_MS + 80);
+    await sleep(EVENT_COALESCE_MS + 80);
     const changed = frames(res).filter((frame) => frame.type === "changed");
     expect(changed).toHaveLength(2);
     // The trailing frame carries the pending reason.

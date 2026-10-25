@@ -11,7 +11,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { PiNotificationSessionClient } from "../src/platform/adapters/pi/notification-session.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { ILogObj, Logger } from "../src/logger.ts";
@@ -26,34 +26,34 @@ function createMockInner(processIds: string[] = []): ISessionClient & { processe
 
   return {
     processes,
-    list: mock(async (_dir?: string) => []),
-    get: mock(async (_id: string, _dir?: string) => null),
-    messages: mock(async (_id: string, _opts?: { directory?: string; limit?: number }) => []),
-    children: mock(async (_id: string, _dir?: string) => []),
-    todo: mock(async (_id: string, _dir?: string) => []),
-    diff: mock(async (_id: string, _opts?: { directory?: string; messageID?: string }) => []),
-    fork: mock(async (_id: string, _opts?: { directory?: string; messageID?: string }) => null),
-    status: mock(async (_id: string, _dir?: string) => null),
-    prompt: mock(async (_id: string, _opts: any) => ({ id: _id })),
-    promptSync: mock(async (_id: string, _opts: any) => ({ parts: [{ type: "text", text: "response" }] })),
-    create: mock(async (_opts: { directory: string; agent?: string; parentID?: string }) => null),
-    abort: mock(async (_id: string) => true),
+    list: vi.fn(async (_dir?: string) => []),
+    get: vi.fn(async (_id: string, _dir?: string) => null),
+    messages: vi.fn(async (_id: string, _opts?: { directory?: string; limit?: number }) => []),
+    children: vi.fn(async (_id: string, _dir?: string) => []),
+    todo: vi.fn(async (_id: string, _dir?: string) => []),
+    diff: vi.fn(async (_id: string, _opts?: { directory?: string; messageID?: string }) => []),
+    fork: vi.fn(async (_id: string, _opts?: { directory?: string; messageID?: string }) => null),
+    status: vi.fn(async (_id: string, _dir?: string) => null),
+    prompt: vi.fn(async (_id: string, _opts: any) => ({ id: _id })),
+    promptSync: vi.fn(async (_id: string, _opts: any) => ({ parts: [{ type: "text", text: "response" }] })),
+    create: vi.fn(async (_opts: { directory: string; agent?: string; parentID?: string }) => null),
+    abort: vi.fn(async (_id: string) => true),
   };
 }
 
-function createMockPi(): { sendMessage: ReturnType<typeof mock>; sendUserMessage: ReturnType<typeof mock> } {
+function createMockPi(): { sendMessage: ReturnType<typeof vi.fn<(...args: any[]) => any>>; sendUserMessage: ReturnType<typeof vi.fn<(...args: any[]) => any>> } {
   return {
-    sendMessage: mock((_message: any, _opts?: any) => {}),
-    sendUserMessage: mock((_text: string) => {}),
+    sendMessage: vi.fn((_message: any, _opts?: any) => {}),
+    sendUserMessage: vi.fn((_text: string) => {}),
   };
 }
 
 function createMockLogger(): Logger<ILogObj> {
   return {
-    debug: mock(() => {}),
-    info: mock(() => {}),
-    warn: mock(() => {}),
-    error: mock(() => {}),
+    debug: vi.fn(() => {}),
+    info: vi.fn(() => {}),
+    warn: vi.fn(() => {}),
+    error: vi.fn(() => {}),
   } as unknown as Logger<ILogObj>;
 }
 
@@ -191,7 +191,7 @@ describe("PiNotificationSessionClient", () => {
 
   it("falls back to sendUserMessage when sendMessage is unavailable (legacy Pi)", async () => {
     const legacyPi = {
-      sendUserMessage: mock((_text: string) => {}),
+      sendUserMessage: vi.fn((_text: string) => {}),
     } as any;
     const legacyClient = new PiNotificationSessionClient(
       inner as any,

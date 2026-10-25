@@ -6,21 +6,22 @@ Guidance for coding agents working in this repository.
 
 **rolebox** is a plugin that defines custom AI agent roles — each role gets its own prompts, models, skills, and permissions. It adds persistent memory, multi-agent dispatch, LSP integration, and engineering-team workflows, plus a TUI built on `@opentui`.
 
-- **Language / runtime**: TypeScript (ESM, `"type": "module"`), run with **Bun**.
+- **Language / runtime**: TypeScript (ESM, `"type": "module"`), run with **Node.js 26.4+**.
+- **Package manager**: npm; install with `npm ci` using `package-lock.json`.
 - **Build outputs**: `dist/` (library, TUI, dsh web client).
 
 Key scripts (`package.json`):
 
 | Script | Command |
 | --- | --- |
-| `build` | `tsc && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client` |
-| `build:entry-aliases` | `bun run scripts/build-entry-aliases.ts` |
-| `build:tui` | `bun run scripts/build-tui.ts` |
-| `build:dsh-web-client` | `NODE_ENV=production bun run scripts/build-dsh-web-client.ts` |
-| `typecheck` | `tsc --noEmit` |
-| `test` | `bun run test:core && bun run test:tui` |
-| `test:core` | `bun test --isolate --path-ignore-patterns=tests/tui` |
-| `test:tui` | `bun test tests/tui/` |
+| `build` | `node --import tsx scripts/build-all.ts` |
+| `build:entry-aliases` | `node --import tsx scripts/build-entry-aliases.ts` |
+| `build:tui` | `node --import tsx scripts/build-tui.ts` |
+| `build:dsh-web-client` | `node --import tsx scripts/build-dsh-web-client.ts` |
+| `typecheck` | `tsc --noEmit && tsc -p tsconfig.scripts.json && tsc -p tsconfig.tui-tests.json` |
+| `test` | `node --experimental-ffi --import tsx scripts/test.ts` |
+| `test:core` | `npm test -- --exclude=tests/tui/**` |
+| `test:tui` | `npm test -- tests/tui/` |
 
 ---
 
@@ -40,42 +41,21 @@ Rules:
 - Never print, echo, log, or commit secret values. If a value may have been exposed, flag it for rotation.
 - When in doubt, leave it out.
 
-## ⚠️ Testing policy — READ FIRST
+## Testing policy
 
-> **DO NOT run the full test suite.**
-> **Never run `bun test` (the full 411-file suite) during development.**
-
-The repository has **411 `*.test.ts` files**. Running them all is slow, floods your context with unrelated output, and is **CI's job** — not a local development step. Running the whole suite locally wastes time and can mask the module you actually changed.
-
-**Rule:** run **only the module-scoped slice(s)** for the code you touched. Design tests so they are partitioned by module; a change under `src/graph/**` should be verified with `tests/graph/`, not with the whole tree.
-
-The full suite is reserved for:
-
-- **CI** — `.github/workflows/ci.yml` runs the complete isolated core suite plus the non-isolated TUI suite, order-independence guards, and asserts a clean working tree after tests.
-- **Explicit pre-release validation** requested by a maintainer.
-
-### Run the right slice
+Do not run the full test suite during local development. Run only the module slices affected by the change. The complete suite and randomized order guards belong to CI or explicit pre-release validation.
 
 ```sh
-# Module slice (replace <module> with a directory under tests/)
-bun test --isolate tests/<module>/
-
-# Single file (fastest inner loop)
-bun test --isolate tests/<module>/<file>.test.ts
-
-# TUI tests — NO --isolate (see reason below)
-bun test tests/tui/
-
-# Types only — no test run at all
-bun run typecheck
-
-# Full suite — CI / pre-release ONLY. Avoid locally.
-bun test
+npm test -- tests/<module>/
+npm test -- tests/<module>/<subject>.test.ts
+npm run test:tui
+npm run typecheck
+npm run typecheck:tests
+npm run test:browse:e2e
+npm run test:package
 ```
 
-**Why the TUI slice omits `--isolate`:** `@opentui/core` performs a top-level `await` that fails under `--isolate`. Core tests **must** use `--isolate`; TUI tests must **not**.
-
----
+Vitest runs on Node with isolated fork workers. TUI tests use the same isolation and require the Node FFI flag supplied by the test command. Do not disable isolation to work around module mocks.
 
 ## Module → test path mapping
 
@@ -100,7 +80,7 @@ New tests mirror the `src/` module path under `tests/`. Root-level `tests/*.test
 | `src/recovery/**` | `tests/recovery/` |
 | `src/session/**` | `tests/session/` |
 | `src/signal/**` | `tests/signal/` |
-| `src/tui/**` | `tests/tui/` (no `--isolate`) |
+| `src/tui/**` | `tests/tui/` |
 | `src/utils/**` | `tests/utils/` |
 | `src/web/**` | `tests/web/` |
 
@@ -125,7 +105,7 @@ Support directories (helpers, not modules): `tests/helpers/`, `tests/integration
 
 - **Mirror the `src/` path** in `tests/` (e.g. a test for `src/graph/foo.ts` goes in `tests/graph/foo.test.ts`).
 - **Name files** `<subject>.test.ts`.
-- **Core tests need `--isolate`** when you run them (see policy above).
+- **Preserve Vitest process isolation** when running tests.
 - **Keep the working tree clean** after tests — CI asserts a clean tree, so tests must not leave stray files behind.
 - **Guard Unix-only tests** with `it.skipIf(!hasTar())` from `tests/helpers/tar.ts`.
 
@@ -136,17 +116,17 @@ Support directories (helpers, not modules): `tests/helpers/`, `tests/integration
 - Keep changes **focused** — one concern per change.
 - **No unrelated refactors**; do not rename, reformat, or "clean up" code outside your task.
 - **Match existing style** in the file and module you are editing.
-- Run `bun run typecheck` before declaring work done.
+- Run `npm run typecheck` before declaring work done.
 
 ---
 
 ## Host package versions
 
-Host packages — `@opencode-ai/*`, `@deepseek-ai/*`, `@earendil-works/*` — are devDependencies that track their published channel at `latest`; the `@deepseek-ai/dsh-*` packages track `next`. The policy table lives in `scripts/host-versions.ts`; `bun run check:hosts` compares each resolved version against its channel and exits 1 when one is behind. The `host-versions.yml` workflow runs that daily and fails on drift, so a host release never blocks an unrelated PR.
+Host packages — `@opencode-ai/*`, `@deepseek-ai/*`, `@earendil-works/*` — are devDependencies that track their published channel at `latest`; the `@deepseek-ai/dsh-*` packages track `next`. The policy table lives in `scripts/host-versions.ts`; `npm run check:hosts` compares each resolved version against its channel and exits 1 when one is behind. The `host-versions.yml` workflow runs that daily and fails on drift, so a host release never blocks an unrelated PR.
 
 ```sh
-bun run update:hosts            # bump pins, reinstall, typecheck, vocabulary guards
-bun run update:hosts --dry-run  # print the edits, touch nothing
+npm run update:hosts            # bump pins, reinstall, typecheck, vocabulary guards
+npm run update:hosts --dry-run  # print the edits, touch nothing
 ```
 
 Releases are manual — there is no tag-triggered publish workflow.

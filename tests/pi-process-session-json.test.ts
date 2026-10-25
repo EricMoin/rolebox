@@ -30,7 +30,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach } from "vitest";
 import { PiProcessSessionAdapter, buildSpawnArgs } from "../src/platform/adapters/pi/process-session.ts";
 import { detectCompletion } from "../src/dispatch/completion/completion-detector.ts";
 import { PI_SUBAGENT_TOOLS } from "../src/entries/pi.ts";
@@ -962,7 +962,7 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
 describe("buildSpawnArgs — deterministic spawn arguments", () => {
   // The test file itself is guaranteed to exist, so the
   // --append-system-prompt ordering branch is exercised hermetically.
-  const sysPromptPath = import.meta.path;
+  const sysPromptPath = import.meta.filename;
 
   it("--tools carries the full PI_SUBAGENT_TOOLS allowlist, comma-joined", () => {
     const args = buildSpawnArgs(

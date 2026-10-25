@@ -1,14 +1,4 @@
-/**
- * Graceful degradation tests — verify that services handle errors without crashing.
- *
- * IMPORTANT: These tests do NOT use mock.module() because bun's mock.module
- * is process-wide and pollutes other test files when all tests run together.
- * Instead, we test via alternative approaches:
- *   - Health/critical flag assertions for clean starts
- *   - Real StartupChecker with controlled temp directories
- *   - Direct service behavior validation
- */
-import { describe, it, expect, afterAll } from "bun:test";
+import { describe, it, expect, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

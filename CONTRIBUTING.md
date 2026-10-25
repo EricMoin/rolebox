@@ -13,11 +13,16 @@ Thanks for your interest in rolebox! This document covers the basics.
 1. Fork the repo and create a branch from `main`.
 2. Make your changes. Keep them focused — one feature or fix per PR.
 3. Add or update tests where applicable.
-4. Run the test suite:
+4. Use Node.js 26.4 or newer, install dependencies with `npm ci`, and run the
+   typechecks plus the test slice for the module you changed:
 
    ```bash
-   bun test
+   npm run typecheck
+   npm run typecheck:tests
+   npm test -- tests/<module>/
    ```
+
+   See [AGENTS.md](AGENTS.md) for module mappings. Complete suites run in CI.
 
 5. Open a PR against `main`. Describe what it does and why.
 

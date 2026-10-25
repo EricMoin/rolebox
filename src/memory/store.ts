@@ -39,8 +39,7 @@ export class MemoryStore {
   }
 
   /**
-   * Async factory: resolve the runtime driver (Bun or Node), open the
-   * database, and run schema migration.
+   * Opens the Node SQLite database and runs schema migration.
    */
   static async create(workspaceDir: string): Promise<MemoryStore> {
     const path = memoryDbPath(workspaceDir);

@@ -22,7 +22,7 @@
  * actual decision order rather than a mocked short-circuit.
  */
 
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runTurnEndPipeline } from "../src/copilot/pipeline.ts";
 import type {
   TurnEndPipelineContext,
@@ -61,12 +61,12 @@ interface FakeClientOptions {
 /** Minimal ISessionClient fake — records prompt/create/promptSync calls. */
 function makeClient(opts: FakeClientOptions = {}) {
   const client = {
-    messages: mock(() => Promise.resolve(opts.messages ?? [])),
-    prompt: mock(() => Promise.resolve({ id: "prompted" })),
-    create: mock(() =>
+    messages: vi.fn(() => Promise.resolve(opts.messages ?? [])),
+    prompt: vi.fn(() => Promise.resolve({ id: "prompted" })),
+    create: vi.fn(() =>
       Promise.resolve(opts.createResult ?? { id: "child-sess-1" }),
     ),
-    promptSync: mock(() =>
+    promptSync: vi.fn(() =>
       Promise.resolve({
         parts: [
           {
@@ -78,7 +78,7 @@ function makeClient(opts: FakeClientOptions = {}) {
         ],
       }),
     ),
-    abort: mock(() => Promise.resolve(true)),
+    abort: vi.fn(() => Promise.resolve(true)),
   } as unknown as ISessionClient;
   return client;
 }
@@ -140,7 +140,7 @@ function makeCtx(
 
 /** Track every session.prompt call as { sid, text, agent }. */
 function promptCalls(client: ISessionClient) {
-  const calls = (client.prompt as ReturnType<typeof mock>).mock.calls;
+  const calls = (client.prompt as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock.calls;
   return calls.map((call: unknown[]) => ({
     sid: call[0] as string,
     text: (call[1] as { parts: Array<{ type: string; text?: string }> }).parts[0]
@@ -173,7 +173,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  mock.restore();
+  vi.restoreAllMocks();
   functionSessionState.clear(SID);
   functionRuntime.clearSession(SID);
   functionRuntime.resetAll();

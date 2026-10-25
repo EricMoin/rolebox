@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, mock } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { createRequire } from "node:module";
 import {
   mkdtemp, writeFile, readFile, rm, mkdir, link, readdir, stat,
@@ -6,53 +7,9 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createHashlineReadTool, createHashlineEditTool } from "../../src/hashline/index.ts";
+
 import { makeToolContext } from "./fixtures/tool-context.ts";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SUBTASK 4 — Batch partial-write & hardlink-ordering adversarial suite.
-//
-// Focus: what lands on disk when atomicWriteBatch fails, specifically around
-// HARDLINKED files (nlink > 1). resolveWriteTarget (src/hashline/atomic-write.ts:
-// 25-36) marks hardlinked files `inPlace`, and atomicWriteBatch writes them IN
-// PLACE at :99-103 — during the TEMP-write phase, BEFORE later files' temp
-// writes are validated. Hardlink aliases are NOT deduplicated: normalizeLockKey
-// (src/hashline/path-lock.ts:32-42) uses realpathSync + case-folding, but
-// hardlinks are peer directory entries — realpath does not fold them.
-//
-// Classification conventions:
-//  - Documented behavior / control → assert the DOCUMENTED contract, PASS.
-//  - Regression guard → assert the CORRECT (now-fixed) contract, log on-disk
-//    evidence via console.log, PASS (guards against reintroduction of the defect).
-//  - Every scenario logs a [CLASSIFY:] line for the triage report.
-//
-// Scenarios already asserted elsewhere (NOT re-tested here):
-//  - Regular-file batch temp-write failure (zero writes, "Write failed"/ENOENT
-//    message, temp cleanup): tests/hashline/adversarial-batch-concurrency.test.ts
-//    (e). NOTE: that test even comments (:191-192) that "Write failed:" lacks
-//    the "Error:" prefix but never asserts it — subtask 4 (d) is the assertion.
-//  - Single hardlink edit write-through (in-place, both names observe the edit):
-//    tests/hashline/adversarial-path-alias.test.ts (c). Subtask 4 (a)/(b) are
-//    the BATCH variants (hardlink as first batch entry + later failure; hardlink
-//    alias PAIR in one batch) — not covered there.
-//  - Symlink-alias duplicate rejection: tests/hashline/adversarial-path-alias.
-//    test.ts (a). Subtask 4 (b) is the HARDLINK variant — realpath folds symlink
-//    chains but not hardlink aliases, so the outcome differs.
-//  - Mid-flight fs-state via the beforeWrite seam (dir swap / chmod / symlink
-//    swap / truncation): tests/hashline/adversarial-midflight-fsstate.test.ts.
-//    Subtask 4 (e) uses the rename-interception seam (probe YES from subtask 1,
-//    tests/hashline/adversarial-fs-seam-probe.test.ts) for the RENAME-phase
-//    failure — a different window, not covered there.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Rename-interception seam (subtask 1 probe technique, PROBE RESULT: YES) ──
-// mock.module is hoisted by bun above the static imports of this file, so when
-// atomic-write.ts evaluates its `import { ... } from "node:fs/promises"` the
-// bindings resolve to this mock. The factory spreads the GENUINE module via
-// createRequire(import.meta.url)("node:fs/promises") — which bypasses the ESM
-// mock registry (verified empirically on bun 1.3.14) — and overrides only
-// `rename`. `intercept` defaults off, so scenarios (a)-(d) pass through the
-// real rename; scenario (e) arms it to throw on the 2nd rename call.
 const require = createRequire(import.meta.url);
 
 const renameState = {
@@ -62,7 +19,7 @@ const renameState = {
   targets: [] as string[],
 };
 
-mock.module("node:fs/promises", () => {
+vi.doMock("node:fs/promises", () => {
   const real = require("node:fs/promises") as typeof import("node:fs/promises");
   const realRename = real.rename;
   return {
@@ -78,6 +35,7 @@ mock.module("node:fs/promises", () => {
     },
   };
 });
+const { createHashlineReadTool, createHashlineEditTool } = await import("../../src/hashline/index.ts");
 
 let tmpDir: string;
 
@@ -308,3 +266,5 @@ describe("hashline adversarial batch partial-write & hardlink ordering", () => {
     },
   );
 });
+
+resetBeforeEach(() => vi.resetModules());

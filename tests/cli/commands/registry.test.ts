@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -12,7 +13,7 @@ process.env.XDG_DATA_HOME = regDataDir;
 
 import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
-mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
     getSyncTarget: (target: string) => {
       if (target === "opencode") {
@@ -30,7 +31,7 @@ afterAll(() => {
   rmSync(regDataDir, { recursive: true, force: true });
 });
 
-const mockFetchManifest = mock();
+const mockFetchManifest = vi.fn();
 
 let tmpConfigDir: string;
 
@@ -38,7 +39,7 @@ beforeEach(() => {
   tmpConfigDir = mkdtempSync(join(tmpdir(), "rolebox-registry-config-"));
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
 
-  mock.module("../../../src/cli/registry-client", () => ({
+  vi.doMock("../../../src/cli/registry-client", () => ({
     fetchRegistryManifest: mockFetchManifest,
     // The real helpers the command prints through; the stub mirrors them so the
     // assertions see the same output the shipped code produces.
@@ -718,3 +719,5 @@ describe("registry remove (built-in and leftover roles)", () => {
     expect(defaultRegistry({ registries: parsed.registries })).toBeUndefined();
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

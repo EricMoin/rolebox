@@ -11,7 +11,7 @@
  * spawn path (`PI_BIN_PATH`), so it pins what the child actually receives: the
  * worker delivery grant, and no rolebox profile.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

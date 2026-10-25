@@ -499,10 +499,6 @@ export const rolesClass = {
   toolEmpty: "rolebox-roles-tool-empty",
 } as const;
 
-// ── Module-load CSS injection (the exact dsh pattern) ───────────────────────
-// Mirrors `role-switch-dock.css.ts`: probe for an already-injected style by its
-// data-plugin-css marker, then append the style tag once. `typeof document`
-// guards the non-DOM case (tests run in bun without a document global).
 if (
   typeof document !== "undefined" &&
   document.querySelector(

@@ -5,7 +5,7 @@
  * coordinator crash recovery — additive, no modifications
  * to existing tests.
  */
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { shouldCancelLoop, TERMINAL_PHASES, ORIGIN_OWNED_PHASES } from "../../src/loop/cancellation.ts";
 import {
   DEFAULT_ITERATIONS,
@@ -25,25 +25,25 @@ import type { LoopState, LoopPhase } from "../../src/loop/types.ts";
 function createFakeAdapter(): { adapter: IDispatchAdapter } {
   let taskCounter = 0;
   const adapter: IDispatchAdapter = {
-    dispatchRound: mock(async () => {
+    dispatchRound: vi.fn(async () => {
       taskCounter += 1;
       return {
         workerTaskId: `task-${taskCounter}`,
         workerSessionId: `session-${taskCounter}`,
       };
     }),
-    getRoundResult: mock(async () => ({ text: "ok", hadError: false })),
-    cancelRound: mock(async () => {}),
-    readOriginSummary: mock(async () => "summary"),
-    getLastMessageId: mock(async () => "msg-1"),
-    injectNote: mock(async () => {}),
-    registerTerminatedListener: mock(
+    getRoundResult: vi.fn(async () => ({ text: "ok", hadError: false })),
+    cancelRound: vi.fn(async () => {}),
+    readOriginSummary: vi.fn(async () => "summary"),
+    getLastMessageId: vi.fn(async () => "msg-1"),
+    injectNote: vi.fn(async () => {}),
+    registerTerminatedListener: vi.fn(
       (_taskId: string, callback: (taskId: string, status: string) => void) => {
         return callback;
       },
     ),
-    removeTerminatedListener: mock(async () => {}),
-    getTaskStatus: mock(async () => "completed"),
+    removeTerminatedListener: vi.fn(async () => {}),
+    getTaskStatus: vi.fn(async () => "completed"),
   };
   return { adapter };
 }

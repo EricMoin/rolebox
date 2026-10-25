@@ -1,13 +1,7 @@
-import { describe, it, expect, mock, afterAll } from "bun:test";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { Message, Part, ToolPart } from "../src/session/types.ts";
 
-// ── Timeout override ────────────────────────────────────────────────────────
-// DEFAULT_TIMEOUT_MS is computed once at module load from
-// ROLEBOX_CLIENT_TIMEOUT_MS. Setting it before the first (dynamic) import of
-// the transcript module makes the real-timeout test fast instead of 30s.
-// bun test runs each file in an isolated process (--isolate), so this does
-// not leak into other test files.
 const prevTimeout = process.env.ROLEBOX_CLIENT_TIMEOUT_MS;
 process.env.ROLEBOX_CLIENT_TIMEOUT_MS = "80";
 
@@ -51,7 +45,7 @@ function toolPart(tool: string, state: ToolPart["state"]): Part {
 }
 
 function clientWith(handler: (sid: string, opts?: { limit?: number }) => Promise<Message[] | null>) {
-  return { messages: mock(handler) } as unknown as ISessionClient;
+  return { messages: vi.fn(handler) } as unknown as ISessionClient;
 }
 
 const opts = (overrides: Partial<{ window_size: number; max_chars: number; include_tools: boolean }> = {}) => ({

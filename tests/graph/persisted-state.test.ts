@@ -10,7 +10,7 @@
  * the store: a definition row plus a run-state row.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { removeTempTree } from "./helpers/temp-dirs.ts";
 import { tmpdir } from "node:os";

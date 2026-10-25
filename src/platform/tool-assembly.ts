@@ -33,6 +33,8 @@ import { createAssetInspectTool } from "../asset/asset-inspect.ts";
 import { createAssetValidateTool } from "../asset/asset-validate.ts";
 import { createReferenceSearchTool } from "../utils/reference-search.ts";
 import { createComputerTools } from "../computer/tools.ts";
+import { createBrowseTools } from "../browse/tools.ts";
+import type { BrowseSessionManager } from "../browse/session.ts";
 import {
   createSessionListTool,
   createSessionSearchTool,
@@ -87,6 +89,23 @@ export interface BuildToolsOptions {
    * keeps the family out of hosts that do not implement it, including OpenCode.
    */
   computerUse?: boolean;
+  /**
+   * Whether this host wants rolebox's own browser family (`browse_*`).
+   *
+   * Host entries pass their resolved availability policy: `true` for an
+   * explicit opt-in, or for AUTO mode on a machine where the optional
+   * `playwright` dependency resolves. Omitted or false keeps the family out,
+   * including OpenCode, which registers neither family.
+   */
+  browseUse?: boolean;
+  /**
+   * The browser session manager the family binds to.
+   *
+   * Omitted → `createBrowseTools()` creates one manager per worktree on first
+   * use, exactly as before. A host that owns a disposer passes its own manager
+   * so closing that disposer also closes the browser the model opened.
+   */
+  browseManager?: BrowseSessionManager;
 }
 
 /**
@@ -153,6 +172,14 @@ export function buildCanonicalTools(
   // cannot override one; extraTools/loopToolsOverride still win over it.
   if (opts.computerUse === true) {
     Object.assign(tools, createComputerTools());
+  }
+
+  // 1c. The browse family — registered when the host enables it (an explicit
+  // `browseUse: true`, or AUTO mode with the optional Playwright driver
+  // present). The browse_* keys share no namespace with any other tool, so this
+  // merge cannot override one; extraTools/loopToolsOverride still win over it.
+  if (opts.browseUse === true) {
+    Object.assign(tools, createBrowseTools(opts.browseManager ? { manager: opts.browseManager } : {}));
   }
 
   // 2. Session tools (if sessionClient provided)

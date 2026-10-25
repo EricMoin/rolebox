@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { createWorkerToolSession, type WorkerToolRegistry } from "../../../src/platform/worker-tools/index.ts";
 
 const registry = (

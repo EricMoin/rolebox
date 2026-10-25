@@ -6,146 +6,64 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    # Cross-platform matrix (audit F5.1): run the full typecheck + TUI build +
-    # test suite on all three supported platforms. The install/update path
-    # (paths.ts win32 branches, tar extraction, symlink handling) is
-    # platform-sensitive and must be exercised on every OS.
-    #
-    # Note on Unix-only tests: several tests build a real tarball fixture and
-    # run it through the real `tar` extraction (tests/cli/registry-client.test.ts,
-    # tests/cli/download-progress-streaming.test.ts,
-    # tests/cli/commands/install-realtime.test.ts). They are guarded by
-    # `it.skipIf(!hasTar())` via tests/helpers/tar.ts, so on a host without a
-    # usable `tar` (a minimal Windows image, for example) they SKIP GRACEFULLY
-    # instead of failing the build. Windows runners ship bsdtar as `tar.exe`,
-    # so these tests typically run; if a tar variant diverges, the test reports
-    # it rather than masking it.
     strategy:
-      # Each platform reports its own result independently: without this, GitHub's
-      # default fail-fast cancels the other two OS jobs as soon as one fails.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
-      # A process-fatal event must NAME ITSELF in the CI log.
-      # src/core/composition.ts installs the ProcessFatalReporter once per test
-      # process, and merely HAVING its `uncaughtException` listener suppresses
-      # the runtime's own crash report, while its one structured record goes to
-      # the rolebox log sink — under the test preload (bunfig.toml `[test]
-      # preload` → tests/helpers/log-dir-preload.ts) a per-pid temp directory no
-      # CI reader opens. ROLEBOX_FATAL_STDERR is the reporter's own designed
-      # switch for exactly this: one line on stderr, which IS the CI log.
-      # Without it a crash outside any test surfaces as a complete, all-green
-      # summary followed by a bare `exit code 1` (windows-latest, run 37891045140).
       ROLEBOX_FATAL_STDERR: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
         with:
-          bun-version: latest
-
-      - name: Install dependencies
-        # --frozen-lockfile makes install deterministic in CI: it never rewrites
-        # bun.lock (so it cannot dirty the working tree) and fails loudly if the
-        # committed lockfile is ever out of sync with package.json.
-        run: bun install --frozen-lockfile
-
-      - name: Type check (full project)
-        run: bun run typecheck
-
-      - name: Type check tests (non-TUI)
-        # Production typechecking excludes tests. This gate checks all non-TUI
-        # test modules against their production and dependency contracts.
-        # TUI is checked separately by its build — see tsconfig.tests.json.
-        run: bun run typecheck:tests
-
-      - name: Build package library (tsc emit)
-        # `dist/` is gitignored, so the dsh-client-modules seam tests
-        # (tests/dsh-plugin.test.ts:494-525) fail on a fresh runner unless the
-        # library is emitted here: they assert dist/entries/dsh.js exists (the
-        # canonical entry; dist/dsh-plugin.js is only a generated re-export stub
-        # written by build:entry-aliases, never by this emit), and
-        # build:dsh-web-client below copies the ./client entry declarations this
-        # emit produces. Run before the build/test steps.
-        run: bunx tsc
-
-      - name: Build TUI module (bundle + declarations)
-        run: bun run build:tui
-
-      - name: Build dsh web client bundle (browser bundle + envelope)
-        # `dist/` is gitignored, so the dsh-client-modules seam tests
-        # (tests/dsh-plugin.test.ts:356-391) fail on a fresh runner unless the
-        # bundle is built here: they assert dist/dsh-web-client.js exists and
-        # that its envelope id is "rolebox". Run before the test steps.
-        run: bun run build:dsh-web-client
-
-      - name: Run tests (isolated core suite)
-        # Each test file runs in its own module registry under `--isolate`,
-        # which is what makes cross-file mock.module leakage structurally
-        # impossible. The tests/tui/ leg is carved out into its own step below:
-        # @opentui/core performs a top-level await during import that fails
-        # under `--isolate` (a third-party limitation we cannot fix by editing
-        # our tests). A separate invocation is a separate process, so it gets
-        # isolation via the process boundary anyway. Do NOT re-merge the legs.
-        run: bun test --isolate --path-ignore-patterns=tests/tui
-
-      - name: Run TUI tests (non-isolated)
-        # @opentui/core's top-level await fails under `--isolate`; this leg runs
-        # without it. Keep this separate from the isolated step above.
-        run: bun test tests/tui/
-
-      - name: Order-independence regression guard (forward)
-        # REGRESSION GUARD — do NOT delete or merge as redundant. This pair is a
-        # mocker/real-consumer pair for one module: install.test.ts registers an
-        # unimplemented `src/cli/registry-client` mock via `mock.module`, while
-        # registry-client.test.ts imports that module for real and exercises
-        # fetch/download/integrity against temp-dir fixtures. In a shared module
-        # registry a mock registered by one file shadows the real module for a
-        # later file — the leakage class tests/cli/commands/install-realtime.test.ts
-        # documents (it defends itself with `?real` specifiers). Under `--isolate`
-        # each test file gets its own module registry, so the pair must pass in
-        # either order. Running it both ways is the structural proof the leakage
-        # is gone and guards against reintroducing shared-registry pollution.
-        run: bun test --isolate tests/cli/commands/install.test.ts tests/cli/registry-client.test.ts
-
-      - name: Order-independence regression guard (reverse)
-        # Same pair with arguments reversed — both directions must pass. Keep
-        # this step next to the forward step above.
-        run: bun test --isolate tests/cli/registry-client.test.ts tests/cli/commands/install.test.ts
-
-      - name: Randomized-order core suite (full-suite order-independence fuzz)
-        # Run the ENTIRE core suite under a random test order to catch any order-
-        # dependent failure beyond the known pair. Runs only on ubuntu-latest:
-        # the order-dependence defect class (bun module-registry / singleton
-        # ordering) is platform-independent, and the deterministic suite already
-        # exercises platform-specific paths/tar on all three OSes. Running this
-        # ~160s leg on all three OSes would triple its compute cost for no extra
-        # coverage of the defect class.
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run typecheck:tests
+      - run: npm run build
+      - run: npm run test:package
+      - name: Isolated core tests
+        run: npm run test:core
+      - name: Isolated TUI tests
+        run: npm run test:tui
+      - name: Module mock order guard (forward)
+        run: npm test -- tests/cli/commands/install.test.ts tests/cli/registry-client.test.ts --file-order
+      - name: Module mock order guard (reverse)
+        run: npm test -- tests/cli/registry-client.test.ts tests/cli/commands/install.test.ts --file-order
+      - name: Randomized core tests
         if: matrix.os == 'ubuntu-latest'
-        run: bun test --isolate --randomize --path-ignore-patterns=tests/tui
-
-      - name: Randomized-order TUI suite (order-independence fuzz)
-        # Non-isolated tui leg under random order. Same platform rationale as the
-        # randomized core step above (ubuntu-latest only).
+        run: npm run test:core -- --sequence.shuffle
+      - name: Randomized TUI tests
         if: matrix.os == 'ubuntu-latest'
-        run: bun test tests/tui/ --randomize
-
-      - name: Assert clean working tree (no stray artifacts)
-        # Fail CI if any test step left the working tree dirty. Catches stray
-        # artifact writes — notably the relative `cache/` tree the historical bug
-        # produced in the repo root. Placed LAST so it covers every test step
-        # above (main suite, order-independence proofs, randomized leg).
-        # `shell: bash` keeps a single implementation across all three matrix
-        # OSes (Windows runners ship Git Bash).
+        run: npm run test:tui -- --sequence.shuffle
+      - name: Real SDK host acceptance
+        if: matrix.os == 'macos-latest'
+        run: npm run test:hosts:e2e
+      - name: Check for test artifacts
         shell: bash
         run: |
           dirty=$(git status --porcelain --untracked-files=all)
           if [ -n "$dirty" ]; then
-            echo "::error::Working tree dirty after test run — stray artifact writes:"
+            echo "::error::Working tree dirty after tests"
             printf '%s\n' "$dirty"
             exit 1
           fi
-          echo "Clean working tree after test run."
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium firefox webkit
+      - run: npm run test:browse:e2e

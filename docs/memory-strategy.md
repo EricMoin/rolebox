@@ -24,7 +24,7 @@ All decisions are finalized:
 | Decision | Conclusion |
 |---|---|
 | Scope | Role-private + workspace-shared layer |
-| Storage | SQLite via `bun:sqlite`, WAL mode |
+| Storage | SQLite via `node:sqlite`, WAL mode |
 | Built-in vs Optional | Approach C: tools built-in for all roles, injection configurable in `role.yaml` |
 | Instant write | Working roles proactively call `memory_write` tool |
 | Consolidation write | `\|memory\|` function activated by user, current agent executes |
@@ -53,7 +53,7 @@ Markdown files work well for static references and skills — they are human-rea
 
 `.rolebox/` is runtime state — already gitignored — not source code. SQLite is the right tool for transactional, queryable runtime state.
 
-Bun ships `bun:sqlite` natively — zero additional dependencies.
+Node.js includes `node:sqlite`; rolebox accesses it through `src/memory/db-driver.ts` without an additional SQLite package.
 
 ### 3.2 File Location
 
@@ -151,7 +151,7 @@ END;
 New file: `src/memory/store.ts`
 
 ```typescript
-import { Database } from "bun:sqlite";
+import { createDatabaseSync, type DatabaseDriver } from "./db-driver.ts";
 import { join } from "node:path";
 import { memoryDbPath, shortHash } from "../state-paths.ts";
 import { createSubLogger } from "../logger.ts";
@@ -174,11 +174,11 @@ export interface MemorySearchOptions {
 }
 
 export class MemoryStore {
-  private db: Database;
+  private db: DatabaseDriver;
 
   constructor(private workspaceDir: string) {
     const path = memoryDbPath(workspaceDir);
-    this.db = new Database(path);
+    this.db = createDatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.ensureSchema();
   }
@@ -195,9 +195,9 @@ export class MemoryStore {
     this.db.run(
       `INSERT INTO memories (id, scope, role_id, category, title, content, tags, relevance, created_at, updated_at, session_id, source_sessions)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, entry.scope, entry.role_id, entry.category, entry.title, entry.content,
+      id, entry.scope, entry.role_id, entry.category, entry.title, entry.content,
        JSON.stringify(entry.tags ?? []), entry.relevance, now, now, entry.session_id,
-       JSON.stringify(entry.source_sessions ?? [])],
+       JSON.stringify(entry.source_sessions ?? []),
     );
     return id;
   }
@@ -217,7 +217,7 @@ export class MemoryStore {
 **Key implementation notes:**
 
 - Only 1 `MemoryStore` instance per session (stored in `HookDeps` or created on demand)
-- The `db` field is the single `bun:sqlite` `Database` instance — no pool needed since memory writes are low-frequency
+- The `db` field is a single `DatabaseDriver` backed by `node:sqlite` — no pool needed since memory writes are low-frequency
 - WAL mode allows concurrent reads from CLI while agent writes
 - All write operations are wrapped in `db.transaction()` for atomicity
 - FTS5 queries use `SELECT ... FROM memories WHERE rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?)`
@@ -781,14 +781,14 @@ The eviction mechanism keeps the database bounded and relevant:
 **Subtask 13** — Injection test and regression test:
 - Verify the `## Available memory` block format via `buildMemoryBlock()`
 - Verify `handleSystemTransform` injection with mocked store
-- Ensure existing tests (`bun test`) pass with zero regressions
+- Run `npm test -- tests/memory/` and the affected CLI memory tests with zero regressions
 
 ### Phase 7: Verification
 
 **Subtask 14** — Full verification pass:
-- `bun test tests/memory/` passes all suites
+- `npm test -- tests/memory/` passes all suites
 - `tsc --noEmit` passes with zero errors
-- `bun test` (full test suite) passes with no regressions
+- Module-scoped memory and CLI tests pass locally; CI runs the complete suite
 - Manual validation: memory written via tool is persisted, retrieved, searchable
 
 ---
@@ -832,7 +832,7 @@ The eviction mechanism keeps the database bounded and relevant:
 | SQLite WAL contention with high-concurrency dispatch | Medium | WAL mode handles concurrent reads without blocking; writes are serialized but memory writes are low-frequency (one per meaningful event, not per tool call) |
 | Memory injection bloating system prompt | Medium | Only inject summaries (id + title + category + relevance), not full content; configurable `max_inject` (default 10) and `min_relevance` (default `medium`) limits injection size |
 | Memory DB file not in `.gitignore` | Low | `.rolebox/` is already gitignored (verify in existing `.gitignore`); document this explicitly in README |
-| FTS5 availability in bun:sqlite | Low | Bun bundles SQLite with FTS5 enabled by default; verify in tests with a smoke test (`CREATE VIRTUAL TABLE test_fts USING fts5(content)`) |
+| FTS5 availability in node:sqlite | Low | Verify the bundled SQLite build in tests with a smoke test (`CREATE VIRTUAL TABLE test_fts USING fts5(content)`) |
 | Memory write by untrusted subagent | Low | All writes go through the tool layer with Zod schema validation; `scope` field prevents cross-role pollution (role-private cannot be read by another role) |
 | `\|memory\|` function reading large number of sessions | Medium | Incremental mode by default (skip sessions already in `source_sessions` of existing memories); `session_read` has pagination via the `limit` parameter |
 | Memory tool name collision with other plugins | Low | Namespaced names (`memory_write`, `memory_recall`, etc.); rolebox runs as a single plugin so internal collision is the only risk, and these names are unique within rolebox |
@@ -855,11 +855,11 @@ The eviction mechanism keeps the database bounded and relevant:
 2. **`\|memory\|` function file** exists at `functions/memory.md` with correct frontmatter and consolidation instructions
 3. **`## Available memory` block** injected at session start when `memory.inject !== false`, using `buildMemoryBlock()` in `src/prompt-builder.ts`
 4. **`tsc --noEmit`** passes with zero errors
-5. **`bun test tests/memory/`** passes (store.test.ts + tools.test.ts, minimum 20+ test cases)
+5. **`npm test -- tests/memory/`** passes (store.test.ts + tools.test.ts, minimum 20+ test cases)
 6. **SQLite DB** created at `.rolebox/memory.db` with correct schema (WAL mode, FTS5, indexes, triggers)
 7. **FTS5 search** returns ranked results ordered by relevance
 8. **`rolebox memory`** CLI subcommands work: list, show, search, delete, export, clean, stats
 9. **Memory config** parsed from `role.yaml` with correct defaults (`inject: true`, `max_inject: 10`, `min_relevance: medium`, `scope: both`)
-10. **No regression** in existing tests: `bun test tests/dispatch/`, `bun test tests/session/`, `bun test tests/plugin-hooks.test.ts` all pass
+10. **No regression** in existing tests: `npm test -- tests/dispatch/`, `npm test -- tests/session/`, `npm test -- tests/plugin-hooks.test.ts` all pass
 11. **MemoryStore** uses the same logging pattern: `import { createSubLogger } from "../logger.ts"; const log = createSubLogger("memory:store");`
 12. **`memoryDbPath(dir)`** function added to `src/state-paths.ts` for single-source-of-truth path derivation

@@ -22,7 +22,7 @@
  * @module
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { PiProcessSessionAdapter } from "../src/platform/adapters/pi/process-session.ts";
 import { PiEventBridge } from "../src/platform/adapters/pi/event-bridge.ts";
 import { wirePiSessionStatusEvents } from "../src/entries/pi.ts";

@@ -9,7 +9,7 @@
  * canonical tool assembly.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { buildCanonicalTools } from "../../src/platform/tool-assembly.ts";
 import type { BuildToolsOptions } from "../../src/platform/tool-assembly.ts";

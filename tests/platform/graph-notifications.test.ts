@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { expect, it } from "vitest";
 import { createGraphNotificationSender } from "../../src/platform/graph-notifications.ts";
 import type { GraphNotification } from "../../src/graph/application/graph-notifications.ts";
 

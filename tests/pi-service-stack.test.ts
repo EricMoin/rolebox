@@ -7,7 +7,7 @@
  *   3. Each tool in the required list is registered with the correct name
  */
 
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi } from "vitest";
 import { PiLightweightServiceStack } from "../src/platform/adapters/pi/service-stack.ts";
 import type { ResolvedRole } from "../src/types.ts";
 

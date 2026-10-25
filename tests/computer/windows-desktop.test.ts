@@ -1,6 +1,5 @@
-/// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { win32ComputerUse } from "../../src/computer/drivers/win32.ts";
 import type { ComputerInputRequest, ComputerPlan, ComputerPlanOrRefusal } from "../../src/platform/system/types.ts";
 

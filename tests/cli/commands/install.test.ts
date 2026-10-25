@@ -1,19 +1,16 @@
-import { describe, it, expect, mock, beforeEach, afterEach, beforeAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump, load } from "js-yaml";
 import type { RegistryManifest } from "../../../src/cli/types.ts";
 
-const mockFetchManifest = mock();
-const mockDownloadRole = mock();
-const mockResolveVersion = mock();
-const mockComputeIntegrity = mock();
+const mockFetchManifest = vi.fn();
+const mockDownloadRole = vi.fn();
+const mockResolveVersion = vi.fn();
+const mockComputeIntegrity = vi.fn();
 
-// The real registry-client is needed so the beforeEach stub can spread its full
-// export surface while overriding only the install-path functions with the mocks
-// below. Under `bun test --isolate` the module registry is per-file, so a static
-// import resolves to the real on-disk module — no cache-busting required.
 import * as realRegistryClient from "../../../src/cli/registry-client.ts";
 
 const sampleManifest: RegistryManifest = {
@@ -46,7 +43,7 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
   process.env.XDG_DATA_HOME = tmpDataDir;
 
-  mock.module("../../../src/cli/registry-client", () => ({
+  vi.doMock("../../../src/cli/registry-client", () => ({
     ...realRegistryClient,
     fetchRegistryManifest: mockFetchManifest,
     downloadRole: mockDownloadRole,
@@ -514,3 +511,5 @@ describe("install across sources", () => {
     expect(parsed.roles.map((r: any) => r.registry).sort()).toEqual(["custom", "oh-my-role"]);
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

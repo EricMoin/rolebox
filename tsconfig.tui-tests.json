@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.tui.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "emitDeclarationOnly": false
+  },
+  "include": [
+    "src/tui/**/*.ts",
+    "src/tui/**/*.tsx",
+    "src/tui/**/*.d.ts",
+    "tests/tui/**/*.ts"
+  ],
+  "exclude": []
+}

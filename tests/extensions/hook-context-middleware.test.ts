@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import type { HookContext, PromptBlock, DispatchSnapshot } from "../../src/hooks/custom/types.ts";
 
 describe("HookContext Middleware Interface", () => {

@@ -63,7 +63,7 @@ export interface ProcessFatalReporterOptions {
  * Observation-first process-fatal reporter that preserves the host's crash
  * semantics instead of overriding them.
  *
- * Measured on Node v26.4.0 and Bun 1.3.14: a thrown error with no
+ * Measured on Node v26.4.0: a thrown error with no
  * `uncaughtException` listener prints the stack and exits 1; with any listener
  * the process stays alive and later exits 0. A listener that only logs
  * therefore turns a crash into a surviving corrupted process.

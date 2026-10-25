@@ -1,3 +1,4 @@
+import { beforeEach as resetBeforeEach } from "vitest";
 /**
  * Regression test — Windows separator mismatch in `partitionRoleEntries`.
  *
@@ -14,7 +15,7 @@
  * match, while `samePath` can. This file feeds hand-constructed Windows-shaped
  * literals to exercise exactly that mismatch.
  */
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { RoleModelEntry } from "../../src/cli/role-models.ts";
 
 /** A win32-style role dir, as `path.join` would build it on Windows. */
@@ -35,7 +36,7 @@ const WINDOWS_ENTRIES: RoleModelEntry[] = [
 // `runNonInteractive` can be driven with the same Windows-shaped entries a
 // win32 `scanRoleModels` would produce. Mirrors the seam at
 // tests/cli/commands/sync.test.ts:53. `--isolate` keeps this process-local.
-mock.module("../../src/cli/role-models", () => ({
+vi.doMock("../../src/cli/role-models", () => ({
   scanRoleModels: (roleDir: string) =>
     roleDir === WIN_ROLE_DIR ? WINDOWS_ENTRIES : [],
 }));
@@ -93,7 +94,6 @@ describe("runNonInteractive --primary-only — Windows-shaped entries", () => {
   afterEach(() => {
     console.log = origLog;
     console.error = origError;
-    // Bun keeps the prior exit code when assigned undefined.
     process.exitCode = origExitCode ?? 0;
   });
 
@@ -109,3 +109,5 @@ describe("runNonInteractive --primary-only — Windows-shaped entries", () => {
     ).toBe(true);
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

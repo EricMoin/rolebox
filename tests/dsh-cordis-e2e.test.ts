@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * dsh cordis e2e tests — boot the rolebox plugin on a REAL
@@ -34,7 +33,7 @@
  * @module
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Context, Service } from "@deepseek-ai/cordis";
 import SystemPrompt, { renderPrompt } from "@deepseek-ai/dsh-system-prompt";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -614,9 +613,6 @@ describe("rolebox plugin on a real cordis Context", () => {
     new FakeSubagentsService(ctx);
     new FakeSessionsService(ctx);
 
-    // Note: cordis's plugin() returns a custom thenable (the fiber wrapper);
-    // bun's expect().rejects resolves it as a plain value, so assert via
-    // try/catch around an await — same rejection path, no bun quirk.
     let err: unknown;
     try {
       await ctx.plugin(roleboxPlugin as never, { roleboxDir: 42 } as never);

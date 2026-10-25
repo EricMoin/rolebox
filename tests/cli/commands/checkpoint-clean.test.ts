@@ -6,7 +6,7 @@
  * empty-directory edge case.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -36,7 +36,6 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   Date.now = origDateNow;
-  // The --all test sets exitCode 1; process-global, so it must not leak into the run's exit status (Bun ignores "= undefined").
   process.exitCode = 0;
   rmSync(tmpDir, { recursive: true, force: true });
   Object.defineProperty(process.stdin, "isTTY", {
@@ -74,11 +73,6 @@ async function createCheckpointFile(
   );
 }
 
-/**
- * Capture clack stdout and console.error stderr.
- * clack writes via process.stdout.write; Bun's console.error does NOT
- * go through process.stderr.write, so we intercept console.error directly.
- */
 function captureOutput(
   fn: () => Promise<void>,
 ): { stdout: string[]; stderr: string[]; run: () => Promise<void> } {
@@ -92,7 +86,7 @@ function captureOutput(
     stdout.push(String(chunk));
     return true;
   };
-  // @ts-ignore - console.error in Bun bypasses process.stderr.write
+  // @ts-ignore
   console.error = (...args: any[]) => {
     stderr.push(args.join(" "));
   };

@@ -5,7 +5,7 @@
  * All tests use temporary directories (mkdtempSync) so there is zero
  * dependency on real dispatch files.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect } from "vitest";
 import { mkdtempSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

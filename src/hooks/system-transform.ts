@@ -7,7 +7,9 @@ import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
 import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock } from "../prompt/builder.ts";
 import { buildMemoryContext } from "../memory/context.ts";
 import { buildComputerContext } from "../computer/context.ts";
+import { buildBrowseContext } from "../browse/context.ts";
 import { COMPUTER_TOOL_NAMES, decideComputerToolGrant } from "../loader/computer-grants.ts";
+import { BROWSE_TOOL_NAMES, decideBrowseToolGrant } from "../loader/browse-grants.ts";
 import { MEMORY_TOOL_NAMES, memoryToolEnabled } from "../memory/tool-policy.ts";
 import { buildReminder } from "../prompt/reminder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
@@ -89,11 +91,20 @@ export async function handleSystemTransform(
   }
 
   const available = new Set(deps.availableTools?.(sid) ?? []);
-  const computerRoles = [...deps.roleMap.values()];
+  const familyRoles = [...deps.roleMap.values()];
   const computerTools = COMPUTER_TOOL_NAMES.filter(name => available.has(name) &&
-    decideComputerToolGrant({ toolName: name, roleId: agentId, roles: computerRoles }).granted);
+    decideComputerToolGrant({ toolName: name, roleId: agentId, roles: familyRoles }).granted);
   const computerBlock = buildComputerContext({ tools: computerTools });
   if (computerBlock) output.system.push(computerBlock);
+
+  // The browse workflow block, from the same two restrictions: the tool must be
+  // registered on this host (the gate let it through) and the acting role's
+  // tools: map must grant it. With no browse tool registered the block is "",
+  // so a host that does not offer the family injects nothing.
+  const browseTools = BROWSE_TOOL_NAMES.filter(name => available.has(name) &&
+    decideBrowseToolGrant({ toolName: name, roleId: agentId, roles: familyRoles }).granted);
+  const browseBlock = buildBrowseContext({ tools: browseTools });
+  if (browseBlock) output.system.push(browseBlock);
 
   if (agentId) {
     const role = findGraphWorkerRole([...deps.roleMap.values()], agentId);

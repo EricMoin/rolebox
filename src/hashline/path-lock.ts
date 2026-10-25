@@ -4,8 +4,8 @@ import { resolve } from "node:path";
 /**
  * Per-path FIFO async mutex.
  *
- * Serializes same-file critical sections within a single process (Bun/Node
- * share one event loop, but async code interleaves at every await point).
+ * Serializes same-file critical sections within a single Node.js process,
+ * where async code interleaves at every await point.
  * This is intentionally an in-process lock only — it provides NO mutual
  * exclusion across processes. Cross-process races are handled by best-effort
  * pre-write version revalidation in the hashline_edit write path, not here.

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { SERVICE_NAMES, type ServiceName } from "../../src/core/service-names.ts";
 
 describe("SERVICE_NAMES", () => {

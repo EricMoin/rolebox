@@ -27,7 +27,7 @@ export async function executeWorkerCode(session: WorkerToolSession, source: stri
   if (Buffer.byteLength(source) > MAX_SOURCE_BYTES) throw new WorkerCodeError("budget", "Code source exceeds 65536 bytes");
   if (options.signal?.aborted) throw new WorkerCodeError("cancelled", "Code execution was cancelled");
   const controller = new AbortController();
-  const runtimeFlags = process.versions.bun ? [] : ["--experimental-vm-modules", "--max-old-space-size=64"];
+  const runtimeFlags = ["--experimental-vm-modules", "--max-old-space-size=64"];
   const worker = spawn(process.execPath, [...runtimeFlags, "--eval", WORKER_CODE_BOOTSTRAP], {
     env: {},
     stdio: ["ignore", "pipe", "pipe", "ipc"],

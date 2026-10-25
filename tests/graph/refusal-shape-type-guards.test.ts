@@ -14,7 +14,7 @@
  *    `{ kind: "refused"; refusal }` — so the arms are proved exhaustive by the
  *    compiler and no value a reader answers can move itself into the refusal
  *    arm. The `expectTypeOf`/`Extract` pins below are the authority for the
- *    union's shape (`bun run typecheck:tests`); the runtime cases beside them
+ *    union's shape (`npm run typecheck:tests`); the runtime cases beside them
  *    pin the BEHAVIOUR, which is unchanged: the legitimate path still answers
  *    the plan state, and the refused path still answers the owning reader's own
  *    refusal — the same code and the same message bytes.
@@ -40,7 +40,7 @@
  * @module
  */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";

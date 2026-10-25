@@ -49,7 +49,7 @@
  *  I10. bootstrapRoles({ platformId }) threads the id to the harness catalog
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 import {
   mkdtempSync,

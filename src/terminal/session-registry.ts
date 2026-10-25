@@ -106,8 +106,6 @@ export interface OpenOptions {
   /**
    * Backend preference. Default "auto" (prefer node-pty, fall back to pipes).
    * Env `ROLEBOX_TERMINAL_BACKEND` overrides the default when this is unset.
-   * NOTE: node-pty is unreliable under the Bun runtime (input written after a
-   * short delay can be dropped) — force "pipe" there for line-oriented programs.
    */
   backend?: TerminalBackendPref;
 }

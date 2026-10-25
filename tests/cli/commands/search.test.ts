@@ -1,11 +1,12 @@
-import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump } from "js-yaml";
 import type { RegistryManifest } from "../../../src/cli/types.ts";
 
-const mockFetchManifest = mock();
+const mockFetchManifest = vi.fn();
 
 const sampleManifest: RegistryManifest = {
   name: "oh-my-role",
@@ -35,7 +36,7 @@ process.env.XDG_CONFIG_HOME = searchConfigDir;
 
 import { createPathsMockPayload } from "../../helpers/paths-mock.ts";
 
-mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+vi.doMock("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
     getSyncTarget: (target: string) => {
       if (target === "opencode") {
@@ -71,7 +72,7 @@ beforeEach(() => {
     "utf-8",
   );
 
-  mock.module("../../../src/cli/registry-client", () => ({
+  vi.doMock("../../../src/cli/registry-client", () => ({
     fetchRegistryManifest: mockFetchManifest,
     // The real helper the command prints through; the stub mirrors it so the
     // assertions see the same output the shipped code produces.
@@ -87,7 +88,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.XDG_CONFIG_HOME;
   rmSync(tmpConfigDir, { recursive: true, force: true });
-  mock.restore();
+  vi.restoreAllMocks();
 });
 
 async function importSearch() {
@@ -373,3 +374,5 @@ describe("search source selection", () => {
     expect(warnings.some((w) => w.includes("result is unknown"))).toBe(false);
   });
 });
+
+resetBeforeEach(() => vi.resetModules());

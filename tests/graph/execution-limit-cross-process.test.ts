@@ -1,4 +1,6 @@
-import { expect, it } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,18 +38,14 @@ it("serializes different nodes at the run ceiling and replays the winner after p
   // drive), so the child runtime could not find the script at all. Every other
   // cross-process worker in this directory is named this way.
   const worker = fileURLToPath(new URL("./helpers/execution-limit-worker.ts", import.meta.url));
-  const children: ReturnType<typeof Bun.spawn>[] = [];
+  const children: ReturnType<typeof spawnProcess>[] = [];
   try {
     const store = GraphStore.openFile(directory);
     store.runs.mintRun({ graphId: "bounded", runId: "run", planRevision: "plan", startedAt: 0 });
     store.close();
     const barrier = join(directory, "go");
     const spawn = (attempt: string, wait?: string) => {
-      // `env` is explicit: a bare `Bun.spawn` under `bun test --isolate` gets
-      // the start-time OS environ, not this process's `process.env` — the
-      // preload's ROLEBOX_LOG_DIR (tests/helpers/log-dir-preload.ts) included,
-      // so the child would resolve and append to the workspace's `.rolebox/logs`.
-      const child = Bun.spawn([process.execPath, worker, directory, attempt, ...(wait ? [wait] : [])], { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
+      const child = spawnProcess([process.execPath, worker, directory, attempt, ...(wait ? [wait] : [])], { env: { ...process.env }, stdout: "pipe", stderr: "pipe" });
       children.push(child);
       return child;
     };
@@ -67,7 +65,7 @@ it("serializes different nodes at the run ceiling and replays the winner after p
       if (Date.now() > deadline) {
         throw new Error(`workers did not reach barrier within ${BARRIER_BUDGET_MS}ms`);
       }
-      await Bun.sleep(5);
+      await sleep(5);
     }
     writeFileSync(barrier, "go");
     const reports = await Promise.all([first, second].map(async (child) => {

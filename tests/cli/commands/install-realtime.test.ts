@@ -1,56 +1,11 @@
-// End-to-end test exercising the REAL download + extraction + atomic-swap
-// pipeline with a real tarball fixture.
-//
-// Unlike tests/cli/commands/install.test.ts (which mock.module's the entire
-// registry-client with stubbed downloadRole/computeIntegrity and tests the
-// install() stub wiring), this file mocks only `globalThis.fetch` — the
-// network boundary.
-//
-// ═══════════════════════════════════════════════════════════════════════
-// Scope note
-// ═══════════════════════════════════════════════════════════════════════
-//
-// This file drives downloadRole / computeIntegrity / atomic-swap directly
-// against real artifacts; it does NOT drive the install() command function
-// end-to-end. Under `bun test --isolate` each test file has its own module
-// registry, so the real registry-client / paths / fs-utils modules imported
-// below resolve to the on-disk source regardless of mocks registered by other
-// test files (e.g. install.test.ts).
-//
-// To ALSO stay correct in a shared-process run (plain `bun test` WITHOUT
-// `--isolate`), the real modules are loaded via cache-busted query-string
-// specifiers (`?real`). A prior test file's `mock.module("...registry-client", ...)`
-// (e.g. install.test.ts registers an unimplemented `downloadRole`) would
-// otherwise shadow a bare static import and make `downloadRole` throw. The
-// distinct specifiers are never covered by mocks keyed to the bare paths
-// (same technique as tests/cli/e2e.test.ts).
-//
-// Covered end-to-end:
-//   • downloadRole() → tar xzf with a real tarball (tests 1 & 2)
-//   • computeIntegrity() on a real extracted tree
-//   • Atomic swap + rollback with a real extracted artifact
-//     (test 3 — manually exercises the same moveDir / getRolePath /
-//     ensureWritableDir calls that install() uses)
-//
-// Not covered end-to-end:
-//   • The install() → downloadRole composition; install() itself is driven
-//     only via install.test.ts's stub wiring. The atomic-swap logic IS tested
-//     below with real artifacts, and the install() stub wiring IS tested in
-//     install.test.ts.
-//
-// Unix-centric: depends on a real `tar` on PATH (used both to build the
-// fixture via `tar czf` and to extract via `tar xzf`). SKIPS GRACEFULLY on
-// hosts without `tar` (see tests/helpers/tar.ts).
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { beforeEach as resetBeforeEach } from "vitest";
+import { spawnProcess } from "../../../scripts/node-process.ts";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { hasTar } from "../../helpers/tar.ts";
 
-// Load the REAL modules via cache-busted query-string specifiers so a prior
-// test file's `mock.module(...)` (keyed to the bare path) cannot shadow them in
-// a shared-process `bun test` run. Each distinct `?real` specifier resolves to
-// the on-disk module even when a mock for the bare specifier is registered.
 const _REAL_REGISTRY_CLIENT_SPECIFIER = "../../../src/cli/registry-client.ts?real";
 const _REAL_PATHS_SPECIFIER = "../../../src/cli/paths.ts?real";
 const _REAL_FS_UTILS_SPECIFIER = "../../../src/cli/fs-utils.ts?real";
@@ -90,7 +45,7 @@ async function buildFixtureArchive(roleId: string): Promise<Uint8Array<ArrayBuff
   writeFileSync(join(roleDir, "role.yaml"), `name: ${roleId}\ndescription: Real extraction\n`, "utf-8");
 
   const archivePath = join(tmpFixtureDir, "archive.tar.gz");
-  const proc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+  const proc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
   expect(await proc.exited).toBe(0);
   // Copy into a fresh ArrayBuffer-backed view: `new Response(body)` requires
   // BufferSource (`ArrayBufferView<ArrayBuffer>`), while readFileSync() returns a
@@ -129,13 +84,13 @@ describe("install with the real download/extraction path", () => {
     async () => {
       const archiveBytes = await buildFixtureArchive("software-architect");
 
-      globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
         const url = input instanceof Request ? input.url : String(input);
         if (url.includes("/tarball/")) {
           return Promise.resolve(new Response(archiveBytes, { status: 200 }));
         }
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-      }), { preconnect: () => {} });
+      });
 
       // Call downloadRole directly from the real module.
       const { spawn, spawnSync } = await import("node:child_process");
@@ -166,17 +121,17 @@ describe("install with the real download/extraction path", () => {
     mkdirSync(join(topDir, "docs"), { recursive: true });
     writeFileSync(join(topDir, "docs", "readme.md"), "no role here", "utf-8");
     const archivePath = join(tmpFixtureDir, "archive.tar.gz");
-    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+    const tarProc = spawnProcess(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
     expect(await tarProc.exited).toBe(0);
     const missingRoleArchive = readFileSync(archivePath);
 
-    globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+    globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes("/tarball/")) {
         return Promise.resolve(new Response(missingRoleArchive, { status: 200 }));
       }
       return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-    }), { preconnect: () => {} });
+    });
 
     const { spawn, spawnSync } = await import("node:child_process");
     await expect(
@@ -207,13 +162,13 @@ describe("install with the real download/extraction path", () => {
 
       // Phase 1: Download and extract a real tarball → extractedDir.
       const archiveBytes = await buildFixtureArchive("software-architect");
-      globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
         const url = input instanceof Request ? input.url : String(input);
         if (url.includes("/tarball/")) {
           return Promise.resolve(new Response(archiveBytes, { status: 200 }));
         }
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-      }), { preconnect: () => {} });
+      });
       const extractedDir = await realRegistryClient.downloadRole(
         { name: "oh-my-role", url: "https://github.com/example/myrepo" },
         "software-architect",
@@ -271,13 +226,13 @@ describe("install with the real download/extraction path", () => {
       // attempt the atomic swap, but simulate failure BEFORE the final move.
       // The previous version must survive intact.
       const archiveV2 = await buildFixtureArchive("software-architect");
-      globalThis.fetch = Object.assign(mock((input: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
         const url = input instanceof Request ? input.url : String(input);
         if (url.includes("/tarball/")) {
           return Promise.resolve(new Response(archiveV2, { status: 200 }));
         }
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
-      }), { preconnect: () => {} });
+      });
       const extractedV2 = await realRegistryClient.downloadRole(
         { name: "oh-my-role", url: "https://github.com/example/myrepo" },
         "software-architect",
@@ -310,3 +265,5 @@ describe("install with the real download/extraction path", () => {
     },
   );
 });
+
+resetBeforeEach(() => vi.resetModules());

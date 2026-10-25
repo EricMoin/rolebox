@@ -16,7 +16,7 @@
  * real graph start and the fake subagent runtime).
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import { resolveDshWorkerToolAllowList } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
 import { DSH_GRAPH_WORKER_TOOLS } from "../../src/platform/adapters/dsh/graph-worker.ts";

@@ -1,39 +1,5 @@
-/**
- * F-17 (second leg) — THE CONTROL REQUEST, THE STOP PROJECTION AND THE DECLARE
- * START ARE DISCRIMINATED UNIONS.
- *
- * WHAT THIS FILE PINS.
- *
- * 1. `GraphControlRequest` (`control/contracts.ts`) was one flat record:
- *    `command: ControlCommandName` with `nodeId`/`attemptId`/`retry`/`approval`
- *    all optional, so the three shapes the handlers refuse were type-legal — a
- *    run-wide `cancel`/`budget-stop` naming a node (`stop-command.ts`), an
- *    `approval-request` with no specification (`approval-command.ts`) and a
- *    NODE-SCOPED `retry` with no credential-isolation capability
- *    (`retry-command.ts`). Each command now has its own arm carrying exactly
- *    what that handler requires, the fields it refuses are `never`, and
- *    `Extract<…, {command: …}>` yields that command's arm(s).
- *
- * 2. `SubmitOutcomeStop` (`tools/submit-outcome.ts`) was a flat envelope with
- *    `reason: string` and twelve optional payload fields. It now mirrors the
- *    PERSISTED `OutcomeStop` union (`outcome/state-model.ts`) arm for arm, in
- *    the tool's snake_case: each reason requires the fields it defines and
- *    refuses the ones it does not.
- *
- * 3. `GraphDeclareResult.start` (`tools/declare-graph.ts`) was `{kind: …}` with
- *    five independent optionals, so `{kind: "refused"}` with no `refusals`
- *    compiled. It is now a union whose arms carry what each `kind` means.
- *
- * `bun test` is transpile-only, so the authority for every `expectTypeOf` pin
- * below is `bun run typecheck:tests`. The runtime cases beside them drive the
- * SHIPPED assembly (`GraphApplication` + `createTools`) and assert that a real
- * `graph_declare`, a real `graph_control` call and a real submission that
- * STOPPED a run behave exactly as before.
- *
- * @module
- */
 
-import { afterEach, describe, expect, expectTypeOf, it } from "bun:test";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

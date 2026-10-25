@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 
 /**
  * The immutable artifact store, and the property it exists for (P4 item 5 / A17).
@@ -14,7 +13,7 @@
  * @module
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import {
   mkdirSync,
   mkdtempSync,

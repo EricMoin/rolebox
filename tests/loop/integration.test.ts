@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,31 +20,31 @@ import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/ses
 function pluginMockClient(): OpencodeClient {
   return {
     session: {
-      create: mock(() =>
+      create: vi.fn(() =>
         Promise.resolve({ data: { id: "test-child" }, error: undefined }),
       ),
-      prompt: mock(() =>
+      prompt: vi.fn(() =>
         Promise.resolve({
           data: { parts: [{ type: "text", text: "ok" }] },
           error: undefined,
         }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      messages: mock(() =>
+      messages: vi.fn(() =>
         Promise.resolve({ data: [], error: undefined }),
       ),
-      status: mock(() =>
+      status: vi.fn(() =>
         Promise.resolve({ data: {}, error: undefined }),
       ),
-      abort: mock(() =>
+      abort: vi.fn(() =>
         Promise.resolve({ data: undefined, error: undefined }),
       ),
-      get: mock(() =>
+      get: vi.fn(() =>
         Promise.resolve({ data: { id: "test" }, error: undefined }),
       ),
-      delete: mock(() =>
+      delete: vi.fn(() =>
         Promise.resolve({ data: true, error: undefined }),
       ),
     },
@@ -55,7 +55,7 @@ const AGENT = "test-agent";
 
 describe("LoopManager integration", () => {
   beforeEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   describe("Same-origin loop exclusivity", () => {
@@ -74,7 +74,7 @@ describe("LoopManager integration", () => {
       loopManagerMap.clear();
       managerMap.clear();
       rmSync(tmpDir, { recursive: true, force: true });
-      mock.restore();
+      vi.restoreAllMocks();
     });
 
     it("rejects |loop| on a session that already has an active loop (same-origin exclusivity)", async () => {
@@ -134,7 +134,7 @@ describe("LoopManager integration", () => {
       loopManagerMap.clear();
       managerMap.clear();
       rmSync(tmpDir, { recursive: true, force: true });
-      mock.restore();
+      vi.restoreAllMocks();
     });
 
     it("shouldCancelOnUserMessage marks cancelRequested on genuine user message", async () => {
@@ -191,45 +191,45 @@ function createDisposeInitMocks(tmpDir: string) {
 
   // ── DispatchManager mock ──────────────────────────────────────────────
   const dispatchManager = {
-    getTask: mock((taskId: string) => tasks.get(taskId)),
-    launch: mock(async (_input: unknown, _opts: unknown) => {
+    getTask: vi.fn((taskId: string) => tasks.get(taskId)),
+    launch: vi.fn(async (_input: unknown, _opts: unknown) => {
       taskCounter++;
       const id = `task-${taskCounter}`;
       const sessionId = `session-${taskCounter}`;
       tasks.set(id, { id, status: "running", sessionId });
       return { id, sessionId };
     }),
-    getResult: mock(async (_taskId: string) => ({
+    getResult: vi.fn(async (_taskId: string) => ({
       kind: "ok" as const,
       text: "worker output",
       error: undefined,
     })),
-    cancelTask: mock(async () => {}),
-    onTaskTerminated: mock((_taskId: string, cb: (taskId: string, status: string) => void) => cb),
-    removeTaskTerminatedListener: mock(() => {}),
+    cancelTask: vi.fn(async () => {}),
+    onTaskTerminated: vi.fn((_taskId: string, cb: (taskId: string, status: string) => void) => cb),
+    removeTaskTerminatedListener: vi.fn(() => {}),
   };
 
   // ── DispatchService mock ──────────────────────────────────────────────
   const dispatchService = {
-    health: mock(() => ({ status: "healthy" })),
-    getDispatchManager: mock(() => dispatchManager),
+    health: vi.fn(() => ({ status: "healthy" })),
+    getDispatchManager: vi.fn(() => dispatchManager),
   };
 
   // ── PluginCore mock ───────────────────────────────────────────────────
   const core = {
-    getService: mock((name: string) =>
+    getService: vi.fn((name: string) =>
       name === "dispatch-service" ? dispatchService : undefined,
     ),
-    getServices: mock(() => new Map()),
-    restartService: mock(() => Promise.resolve()),
-    isDegraded: mock(() => false),
+    getServices: vi.fn(() => new Map()),
+    restartService: vi.fn(() => Promise.resolve()),
+    isDegraded: vi.fn(() => false),
   };
 
   // ── OpencodeClient mock ───────────────────────────────────────────────
   // OpencodeSessionAdapter wraps this client; we must match its call shapes.
   const client = {
     session: {
-      messages: mock((_opts: unknown) =>
+      messages: vi.fn((_opts: unknown) =>
         Promise.resolve({
           data: [
             {
@@ -253,22 +253,22 @@ function createDisposeInitMocks(tmpDir: string) {
           error: undefined,
         }),
       ),
-      promptAsync: mock(() =>
+      promptAsync: vi.fn(() =>
         Promise.resolve({ data: { id: "note-1" }, error: undefined }),
       ),
       // Stubs — not called by the tested paths but required by
       // OpencodeSessionAdapter constructor signature
-      create: mock(() => Promise.resolve({ data: null, error: undefined })),
-      prompt: mock(() => Promise.resolve({ data: { parts: [] }, error: undefined })),
-      status: mock(() => Promise.resolve({ data: {}, error: undefined })),
-      abort: mock(() => Promise.resolve({ data: true, error: undefined })),
-      get: mock(() => Promise.resolve({ data: null, error: undefined })),
-      delete: mock(() => Promise.resolve({ data: true, error: undefined })),
-      list: mock(() => Promise.resolve({ data: [], error: undefined })),
-      children: mock(() => Promise.resolve({ data: [], error: undefined })),
-      todo: mock(() => Promise.resolve({ data: [], error: undefined })),
-      diff: mock(() => Promise.resolve({ data: [], error: undefined })),
-      fork: mock(() => Promise.resolve({ data: null, error: undefined })),
+      create: vi.fn(() => Promise.resolve({ data: null, error: undefined })),
+      prompt: vi.fn(() => Promise.resolve({ data: { parts: [] }, error: undefined })),
+      status: vi.fn(() => Promise.resolve({ data: {}, error: undefined })),
+      abort: vi.fn(() => Promise.resolve({ data: true, error: undefined })),
+      get: vi.fn(() => Promise.resolve({ data: null, error: undefined })),
+      delete: vi.fn(() => Promise.resolve({ data: true, error: undefined })),
+      list: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      children: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      todo: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      diff: vi.fn(() => Promise.resolve({ data: [], error: undefined })),
+      fork: vi.fn(() => Promise.resolve({ data: null, error: undefined })),
     },
   } as unknown as OpencodeClient;
 
@@ -282,7 +282,7 @@ function createDisposeInitMocks(tmpDir: string) {
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
-    bus: { on: mock(() => {}), emit: mock(() => {}), off: mock(() => {}) },
+    bus: { on: vi.fn(() => {}), emit: vi.fn(() => {}), off: vi.fn(() => {}) },
   } as any;
 
   return { ctx, dispatchManager, tasks, client };
@@ -312,7 +312,7 @@ describe("LoopService dispose+init round advancement", () => {
     hookState.loopStoreMap.clear();
     hookState.activeLoopManager = undefined;
     rmSync(tmpDir, { recursive: true, force: true });
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("survives dispose+init and advances from round 1 to round 2", async () => {
@@ -385,13 +385,13 @@ describe("LoopService dispose+init round advancement", () => {
     expect(state.rounds![1]!.round).toBe(2);
 
     // Verify dispatch was called for both rounds
-    const launchCalls = (dispatchManager.launch as ReturnType<typeof mock>).mock
+    const launchCalls = (dispatchManager.launch as ReturnType<typeof vi.fn<(...args: any[]) => any>>).mock
       .calls;
     expect(launchCalls.length).toBe(2);
 
     // [loop-progress] note was injected once (only on round 1)
     const injectCalls = (
-      mocks.client.session.promptAsync as ReturnType<typeof mock>
+      mocks.client.session.promptAsync as ReturnType<typeof vi.fn<(...args: any[]) => any>>
     ).mock.calls;
     const progressNotes = injectCalls.filter(
       ([args]: any[]) =>
@@ -434,7 +434,7 @@ describe("LoopService dispose+init round advancement", () => {
     expect(state2.activeWorkerTaskId).toBe("task-1");
     // Verify that onTaskTerminated was called to re-subscribe
     const regCalls = (
-      mocks.dispatchManager.onTaskTerminated as ReturnType<typeof mock>
+      mocks.dispatchManager.onTaskTerminated as ReturnType<typeof vi.fn<(...args: any[]) => any>>
     ).mock.calls;
     expect(regCalls.length).toBe(2); // first init + re-subscribe
     expect(regCalls[1]![0]).toBe("task-1");

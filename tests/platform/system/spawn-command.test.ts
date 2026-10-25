@@ -9,7 +9,7 @@
  * `tests/platform/pi-worker-sandbox.test.ts`, which executes on the platform
  * that has cmd.exe.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   escapeBatchArgument,
   escapeBatchCommand,

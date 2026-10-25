@@ -10,7 +10,7 @@
  *   (c) a missing or failing service REFUSES the command instead of spawning it
  *       unconfined.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

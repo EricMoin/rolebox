@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { spawnProcess } from "../../scripts/node-process.ts";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -38,7 +39,7 @@ afterEach(async () => {
 });
 
 async function cli(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn([process.execPath, entry, "bench", ...args], { cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const child = spawnProcess([process.execPath, entry, "bench", ...args], { cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
   const deadline = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 20_000);
   try {

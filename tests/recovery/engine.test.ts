@@ -7,7 +7,7 @@
  * requirement: retry exhaustion produces expected escalation signal.
  * ─────────────────────────────────────────────────────────────────────
  */
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { RecoveryEngine, type RecoveryEngineDeps } from "../../src/recovery/engine.ts";
 import { RecoveryStateStore } from "../../src/recovery/state.ts";
 import { StrategyRegistry } from "../../src/recovery/strategies/registry.ts";
@@ -56,7 +56,7 @@ function makeStateStore(tmpDir: string): RecoveryStateStore {
 
 describe("RecoveryEngine", () => {
   afterEach(() => {
-    mock.restore();
+    vi.restoreAllMocks();
   });
 
   it("initializes with default patterns and strategies", () => {
