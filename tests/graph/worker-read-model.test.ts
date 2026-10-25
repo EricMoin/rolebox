@@ -78,12 +78,14 @@ it("indexes all worker identities once per committed revision and caches both gr
     const graphId = "historical-" + String(i).padStart(2, "0");
     persistDeclaredGraph(buildDeclaredOutcomeGraph({ declaration: declaration(graphId) }), fx.root);
     mutate(fx.root, store => {
-      for (let attempt = 0; attempt < 10; attempt++) {
-        store.run(`INSERT INTO ${tables.executions}
-          (graph_id, effect_id, attempt_id, state, owner_id, owner_generation, execution_id, claimed_at, updated_at)
-          VALUES (?, ?, ?, 'created', 'owner', 1, ?, 1, 1)`, graphId, "dispatch:" + attempt, String(attempt), "historical:" + i + ":" + attempt);
-        store.run(`INSERT INTO ${tables.acceptedEvents} VALUES (?, ?, 'submission', 'revision', 'done', 1)`, graphId, String(attempt));
-      }
+      store.transaction(() => {
+        for (let attempt = 0; attempt < 10; attempt++) {
+          store.run(`INSERT INTO ${tables.executions}
+            (graph_id, effect_id, attempt_id, state, owner_id, owner_generation, execution_id, claimed_at, updated_at)
+            VALUES (?, ?, ?, 'created', 'owner', 1, ?, 1, 1)`, graphId, "dispatch:" + attempt, String(attempt), "historical:" + i + ":" + attempt);
+          store.run(`INSERT INTO ${tables.acceptedEvents} VALUES (?, ?, 'submission', 'revision', 'done', 1)`, graphId, String(attempt));
+        }
+      });
     });
   }
   const bulk = vi.spyOn(GraphStore.prototype, "readWorkerExecutions");
