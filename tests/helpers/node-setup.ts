@@ -1,5 +1,6 @@
 import { afterAll, afterEach, expect } from "vitest";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import "./log-dir-preload.ts";
@@ -7,12 +8,12 @@ import "./log-dir-preload.ts";
 const temporaryEnvironment = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
 const temporaryDirectory = mkdtempSync(join(realpathSync.native(process.env.RUNNER_TEMP || tmpdir()), "rolebox-test-worker-"));
 process.env.TMPDIR = process.env.TMP = process.env.TEMP = temporaryDirectory;
-afterAll(() => {
+afterAll(async () => {
   for (const [key, value] of Object.entries(temporaryEnvironment)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
-  rmSync(temporaryDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await rm(temporaryDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 expect.extend({

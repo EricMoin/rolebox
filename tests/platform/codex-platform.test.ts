@@ -99,7 +99,7 @@ describe("codex registry descriptor", () => {
     expect(integration?.registered).toBe(false);
     expect(integration?.detail).toBe("not found in codex config");
     expect(integration?.hint).toContain("rolebox sync codex");
-    expect(integration?.hint).toContain(join(codexHome, "config.toml"));
+    expect(integration?.hint?.replace("~", homedir())).toContain(join(codexHome, "config.toml"));
   });
 
   it("reports not registered for an unrelated config.toml", () => {

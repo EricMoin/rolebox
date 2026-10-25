@@ -65,6 +65,7 @@ import { detectPlatform, findCommand, commandExists, preWarmCommandCache } from 
 
 // Manager
 import { NotificationManager } from "../../src/notifications/manager.ts";
+import { waitForNotificationLog } from "./helpers.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -1043,7 +1044,7 @@ describe("NotificationManager", () => {
     });
 
     // Should have written to first file
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     await mgr.dispose();
     await mgr2.dispose();
   });
@@ -1062,7 +1063,7 @@ describe("NotificationManager", () => {
     });
 
     // Should have written to file
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const content = readFileSync(logFile, "utf-8").trim();
     const parsed = JSON.parse(content);
     expect(parsed.eventType).toBe("dispatch_complete");
@@ -1140,7 +1141,7 @@ describe("NotificationManager", () => {
 
     // Give async notify a moment to complete
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const content = readFileSync(logFile, "utf-8").trim();
     const parsed = JSON.parse(content);
     expect(parsed.eventType).toBe("error");
@@ -1157,7 +1158,7 @@ describe("NotificationManager", () => {
     mgr.handleDispatchComplete("ses_dc");
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const content = readFileSync(logFile, "utf-8").trim();
     const parsed = JSON.parse(content);
     expect(parsed.eventType).toBe("dispatch_complete");
@@ -1174,7 +1175,7 @@ describe("NotificationManager", () => {
     mgr.handleLoopComplete("ses_lc");
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const content = readFileSync(logFile, "utf-8").trim();
     const parsed = JSON.parse(content);
     expect(parsed.eventType).toBe("loop_complete");
@@ -1191,7 +1192,7 @@ describe("NotificationManager", () => {
     mgr.handleApprovalPending("ses_ap", "graph_1", "node_a");
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const lines = readFileSync(logFile, "utf-8").trim().split("\n");
     expect(lines.length).toBe(1);
     const parsed = JSON.parse(lines[0]);
@@ -1209,7 +1210,7 @@ describe("NotificationManager", () => {
     mgr.handleApprovalPending("ses_ap2", "graph_2", "node_b");
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const parsed = JSON.parse(readFileSync(logFile, "utf-8").trim());
     // Default event config title template: "Approval gate waiting: {graph_id}/{node_id}".
     expect(parsed.title).toBe("Approval gate waiting: graph_2/node_b");
@@ -1234,7 +1235,7 @@ describe("NotificationManager", () => {
     mgr.handleApprovalPending("ses_ap_throttle", "graph_3", "node_c"); // throttled
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const lines = readFileSync(logFile, "utf-8").trim().split("\n");
     expect(lines.length).toBe(1);
 
@@ -1263,7 +1264,7 @@ describe("NotificationManager", () => {
     mgr.scheduleIdle("ses_idle", "helper");
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const content = readFileSync(logFile, "utf-8").trim();
     const parsed = JSON.parse(content);
     expect(parsed.eventType).toBe("idle");

@@ -51,6 +51,7 @@ import { resolveChannels } from "../../src/notifications/channel-resolver.ts";
 
 // ── Manager ───────────────────────────────────────────────────────
 import { NotificationManager } from "../../src/notifications/manager.ts";
+import { waitForNotificationLog } from "./helpers.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -132,7 +133,7 @@ describe("NotificationManager – focused", () => {
     mgr.handleToolBefore("ses_q", "askUser", { questions: [{ question: "What color?" }] }, "helper");
 
     await new Promise((r) => setTimeout(r, 200));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const parsed = JSON.parse(readFileSync(logFile, "utf-8").trim());
     expect(parsed.eventType).toBe("question");
     expect(parsed.body).toContain("What color?");
@@ -204,7 +205,7 @@ describe("NotificationManager – focused", () => {
     });
 
     await new Promise((r) => setTimeout(r, 100));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const parsed = JSON.parse(readFileSync(logFile, "utf-8").trim());
     expect(parsed.body).toContain("Proceed?");
     expect(parsed.eventType).toBe("question");
@@ -229,7 +230,7 @@ describe("NotificationManager – focused", () => {
     mgr.scheduleIdle("ses_idle_c", "customAgent");
 
     await new Promise((r) => setTimeout(r, 150));
-    expect(existsSync(logFile)).toBe(true);
+    await waitForNotificationLog(logFile);
     const parsed = JSON.parse(readFileSync(logFile, "utf-8").trim());
     expect(parsed.eventType).toBe("idle");
     expect(parsed.sessionId).toBe("ses_idle_c");

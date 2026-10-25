@@ -12,7 +12,8 @@
  * worker delivery grant, and no rolebox profile.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiProcessSessionAdapter } from "../../src/platform/adapters/pi/process-session.ts";
@@ -24,7 +25,15 @@ import type { MemoryConfig } from "../../src/memory/types.ts";
 import type { PiWorkerToolConfig } from "../../src/platform/adapters/pi/worker-tools.ts";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  for (const root of roots.splice(0)) {
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      throw new Error(`Pi fixture cleanup failed; cwd=${process.cwd()}; remaining=${JSON.stringify(readdirSync(root, { recursive: true }))}`, { cause: error });
+    }
+  }
+});
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "graph-worker-pi-"));
