@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { readLogRecords } from "../src/log/index.ts";
 import { logChannelFileName } from "../src/log/sinks/file.ts";
@@ -366,7 +367,7 @@ export async function runOnce(options: ProbeOptions): Promise<ProbeRun> {
   const follower = spawnProcess(
     [
       process.execPath,
-      ...(options.followerPreload === undefined ? [] : ["--import", options.followerPreload]),
+      ...(options.followerPreload === undefined ? [] : ["--import", pathToFileURL(options.followerPreload).href]),
       join(import.meta.dirname, "..", "src", "cli", "main.ts"),
       "logs", "--log-dir", dir, "--json", "--follow",
     ],

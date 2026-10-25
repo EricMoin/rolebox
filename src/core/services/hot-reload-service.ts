@@ -3,7 +3,7 @@ import { SERVICE_NAMES, type ServiceName } from "../service-names.ts";
 import type { PluginContext } from "../context.ts";
 import { createSubLogger } from "../../logger.ts";
 import { clearExtensionModuleCache } from "../../extensions/loader.ts";
-import { watch, type FSWatcher } from "node:fs";
+import { realpathSync, watch, type FSWatcher } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { readTextFile } from "../../utils/fs.ts";
@@ -122,7 +122,9 @@ export class HotReloadService implements PluginService {
 
     for (const dir of dirsToWatch) {
       try {
-        const watcher = watch(dir, { recursive: true }, (eventType, filename) => {
+        // Windows notifications resolve 8.3 aliases, so the watcher must use their canonical path.
+        const watchDirectory = process.platform === "win32" ? realpathSync(dir) : dir;
+        const watcher = watch(watchDirectory, { recursive: true }, (eventType, filename) => {
           if (!filename) return;
           const ext = filename.slice(filename.lastIndexOf("."));
           if (!WATCH_EXTENSIONS.has(ext)) return;
