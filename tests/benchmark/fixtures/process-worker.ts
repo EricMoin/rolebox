@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BenchmarkWorkerRequest, BenchmarkWorkerResult } from "../../../src/benchmark/types.ts";
@@ -14,6 +14,11 @@ const result: BenchmarkWorkerResult = {
   usage: { inputTokens: 2, outputTokens: 3, costUsd: null, source: "host" },
 };
 const write = (value: unknown) => writeFile(resultPath, JSON.stringify(value));
+async function writeEvidence(name: string, value: unknown): Promise<void> {
+  const path = join(request.workspace, name);
+  await writeFile(`${path}.tmp`, JSON.stringify(value));
+  await rename(`${path}.tmp`, path);
+}
 
 switch (request.prompt) {
   case "normal":
@@ -58,19 +63,19 @@ switch (request.prompt) {
   case "hang":
   case "cancel": {
     process.on("SIGTERM", () => {});
-    await writeFile(join(request.workspace, "started.json"), JSON.stringify({ pid: process.pid, root: dirname(requestPath) }));
+    await writeEvidence("started.json", { pid: process.pid, root: dirname(requestPath) });
     setInterval(() => {}, 1_000);
     break;
   }
   case "descendant": {
     const child = spawn(process.execPath, [fileURLToPath(new URL("./process-descendant.ts", import.meta.url))], { stdio: "ignore" });
-    await writeFile(join(request.workspace, "descendant.json"), JSON.stringify({ pid: child.pid }));
+    await writeEvidence("descendant.json", { pid: child.pid });
     await write(result);
     process.exit(0);
   }
   case "draining-descendant": {
     const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { stdio: "ignore" });
-    await writeFile(join(request.workspace, "descendant.json"), JSON.stringify({ pid: child.pid }));
+    await writeEvidence("descendant.json", { pid: child.pid });
     await write(result);
     process.exit(0);
   }
