@@ -1,52 +1,68 @@
 /**
- * RoleSwitchDock — the rolebox contribution to the dsh
- * `'conversation.input.dock'` slot (browser half).
+ * RoleSwitchDock — the rolebox role-switch chip in the dsh composer tool row
+ * (browser half).
  *
- * The dock is a list/session-scoped full-width row above the composer card
- * (declared by `@deepseek-ai/dsh-client-ui-conversation` as
- * `{ kind: 'list', scope: 'session', owner: InputZone }`). This component is
- * registered into that slot by the client plugin entry (`client.ts`).
+ * The component contributes to the `'conversation.input.right'` slot, the
+ * list/session-scoped seat between the composer's left controls and the model
+ * selector (declared by `@deepseek-ai/dsh-client-ui-conversation` as
+ * `{ kind: 'list', scope: 'session' }` with no owner share, rendered with `{}`
+ * by the default composer body immediately before `conversation.input.model`).
+ * It is a 28px chip — lead glyph, the FULL active role display name, an `Active`
+ * marker only while a role is active, and a chevron — whose role list opens
+ * UPWARD in a popover anchored to the chip. Nothing renders above the composer
+ * card any more.
  *
- * The dock answers a STATUS question — "which role is running?" — so the
- * redesign makes the VALUE the title. The shipped static label ("Role") is
- * gone; the header renders the active role's display NAME. A label the user
- * already knows (the strip is 8px above a composer, glyph-marked, and the only
- * such strip) is replaced by the one fact the user does not have.
+ * The chip answers a STATUS question — "which role is running?" — so the VALUE
+ * is the title. The shipped static label ("Role") is gone; the trigger renders
+ * the active role's display NAME (never its id, which the list does not show).
  *
- *   - a 40px toggle header — lead glyph, the active role NAME, an
- *     `Active`/`Base` chip, a chevron — plus a sibling status seat outside
- *     the button. The dock starts COLLAPSED on mount and on every session
- *     change so it never blocks the composer;
+ *   - the popover is the existing `.rolebox-dock-disclosure`
+ *     ({@link DOCK_DISCLOSURE_ID}) and is ABSOLUTELY positioned above the chip
+ *     (`bottom: calc(100% + 8px)`, right-aligned to the seat). An upward
+ *     popover anchored in the bottom tool row necessarily overlays part of
+ *     the editor area — that is expected — so it must not be clipped by any
+ *     ancestor, and the host menu material blurs the content behind it.
+ *     While open the root carries `data-trigger-menu`, which the host uses to
+ *     raise the sticky composer seat above the transcript
+ *     (`:has([data-trigger-menu])` in ConversationRoot.module.css);
  *   - the active role is carried by FIVE redundant channels and never by a
- *     coloured side border (a banned anti-slop tell): the spelled-out chip in
- *     the header (which survives total loss of hue perception), a reserved
- *     20px trailing mark seat on every row holding a check glyph, an inherited
- *     font-weight step (400 -> 500) on the active row, the host active-nav
- *     fill, and `aria-current`. The shipped 6px dot is gone;
- *   - the status seat is a SIBLING of the toggle button, not a descendant:
- *     a live region nested inside an interactive control rewrites the
- *     control's accessible name on every status change. It is rendered
- *     UNCONDITIONALLY so the region stays mounted (mounting a live region
- *     together with its text is unreliable across screen readers), and it is
- *     empty and silent at rest — the value seat and the chip carry the steady
- *     state. A successful mutation writes a confirmation into it visually
- *     hidden, so a collapse is still announced;
+ *     coloured side border (a banned anti-slop tell): the spelled-out `Active`
+ *     chip in the trigger (which survives total loss of hue perception), a
+ *     reserved 20px trailing mark seat on every row holding a check glyph, an
+ *     inherited font-weight step (400 -> 500) on the active row, the host
+ *     active-nav fill, and `aria-current`. The shipped 6px dot is gone;
+ *   - the status seat is a SIBLING of the trigger, not a descendant: a live
+ *     region nested inside an interactive control rewrites the control's
+ *     accessible name on every status change. It is rendered UNCONDITIONALLY so
+ *     the region stays mounted (mounting a live region together with its text is
+ *     unreliable across screen readers), it is visually hidden — the chip and
+ *     the list carry the visual state — and it is empty and silent at rest. A
+ *     successful mutation writes a confirmation into it, so closing the popover
+ *     is still announced. A failed mutation's message is ALSO rendered inside
+ *     the popover as visible text marked `aria-hidden="true"`: it is already in
+ *     the live region, and announcing it twice is worse than not repeating it
+ *     visually;
  *   - the disclosure is ALWAYS MOUNTED and animated via
  *     `grid-template-rows: 0fr -> 1fr` plus `visibility`, so closing can
  *     animate and closed content is neither focusable nor exposed to the
- *     accessibility tree. The button carries `aria-expanded` and
+ *     accessibility tree. The trigger carries `aria-expanded` and
  *     `aria-controls`;
+ *   - Escape on the trigger (or anywhere in the root, bubbling up from the
+ *     filter) closes the popover and returns focus to the trigger; the filter's
+ *     own Escape first clears a non-empty query. A pointerdown outside the root
+ *     closes the popover (that listener exists only while open);
  *   - a filter row (shown while roles exist) narrows the list client-side by
  *     name and description as the user types, with a clear affordance, a live
  *     `n of N` count, and an explicit no-match row. The query survives
- *     collapse/expand and resets on session change;
+ *     open/close and resets on session change;
  *   - on mount (and on every `sessionId` change) the session's persisted
  *     active role is hydrated from `GET /rolebox/roles/active?session=…`. A
- *     tri-state (`loading` | `ready` | `unknown`) prevents the dock from
+ *     tri-state (`loading` | `ready` | `unknown`) prevents the chip from
  *     claiming "Base agent" before the probe has answered;
- *   - a successful switch or clear collapses the dock — the collapse IS the
+ *   - a successful switch or clear closes the popover — the close IS the
  *     confirmation (no toast, no checkmark flash, no colour pulse) — and a
- *     FAILED mutation keeps the list open so the Retry row stays reachable;
+ *     FAILED mutation keeps the list open so the error and the Retry row stay
+ *     reachable;
  *   - a clear-to-base row (visible only while a role is active) issues
  *     `DELETE /rolebox/roles/active?session=…`;
  *   - a failed LOAD is recoverable: the empty state offers a Reload action
@@ -64,12 +80,13 @@
  * those five may be used.
  *
  * This module is BROWSER code: it must not import node builtins, and it uses
- * the browser `fetch` global with relative (same-origin) paths. It touches
- * the DOM in exactly ONE place, by design: a single `useRef` on the header
- * toggle, used to restore focus after a successful switch/clear. Collapsing
- * the disclosure hides the row the user just activated, so without that call
- * focus falls to `<body>` and the keyboard user's next keystroke goes nowhere.
- * No scroll listeners, no measurement, no other DOM reads.
+ * the browser `fetch` global with relative (same-origin) paths. It touches the
+ * DOM in exactly TWO places, by design: the trigger `useRef` restores focus
+ * after a successful switch/clear (closing the popover hides the row the user
+ * just activated, so without that call focus falls to `<body>` and the keyboard
+ * user's next keystroke goes nowhere), and the root `useRef` backs the
+ * outside-pointerdown listener that is installed only while the popover is
+ * open. No scroll listeners, no measurement, no other DOM reads.
  *
  * @module
  */
@@ -118,8 +135,8 @@ export interface RoleSwitchErrorBody {
 }
 
 /**
- * Composed props of the dock entry — a duck-type of the slot framework's
- * `PropsRuntime<'conversation.input.dock'> & InjectFace<...> & PropsLocale<'conversation'>`
+ * Composed props of the role chip entry — a duck-type of the slot framework's
+ * `PropsRuntime<'conversation.input.right'> & InjectFace<...> & PropsLocale<'conversation'>`
  * intersection, restricted to the two seats this component consumes:
  *
  *   - `sessionId` — the framework-resolved session id, delivered through the
@@ -127,7 +144,7 @@ export interface RoleSwitchErrorBody {
  *     ({ sessionId })`, per the InjectParams of a `scope: 'session'` slot).
  *   - `t` — the locale seat promised by declaring `locale: 'conversation'`.
  *     Declared (optional) so the component satisfies the four-share
- *     composition, but the dock renders hardcoded English text: the
+ *     composition, but the chip renders hardcoded English text: the
  *     'conversation' dictionary keys are not known at this layer, and unknown
  *     keys must not be routed through `t`.
  */
@@ -159,7 +176,7 @@ export const DOCK_DISCLOSURE_ID = "rolebox-dock-disclosure";
 
 /**
  * `ROLE_DATALIST_ID` (`"rolebox-role-list"`) — retained as an exported
- * contract constant. The pre-restyle dock fed a `<datalist>` with this id
+ * contract constant. The pre-restyle picker fed a `<datalist>` with this id
  * into the role-id input; the picker restyle dropped the input/datalist
  * pair from the render tree, but the export stays (value unchanged) for
  * consumers that wire the old surface.
@@ -171,21 +188,25 @@ interface DockStatus {
   text: string;
   error: boolean;
   /**
-   * Render the seat visually hidden. A successful switch confirms itself
-   * visually by collapsing and by re-mounting the value seat — but a screen
-   * reader gets nothing from a collapse, so the confirmation is announced
-   * through the seat instead (WCAG 2.1 AA SC 4.1.3). No visible banner.
+   * Mark the success confirmation. The seat itself is visually hidden at all
+   * times (the chip carries the steady state, and an error is additionally
+   * repeated inside the popover); this flag is retained because it is the
+   * success path's own marker and the tests pin its modifier class. A screen
+   * reader gets nothing from a collapse or a chip flip, so the confirmation is
+   * announced through the live region instead (WCAG 2.1 AA SC 4.1.3). No
+   * visible banner.
    */
   srOnly?: boolean;
 }
 
 /**
- * Hydration state of the dock's data.
+ * Hydration state of the chip's data.
  *
  *   - `loading` — the roles/active probes are in flight; the value seat reads
- *     "Loading…" and no chip is shown, so the dock never claims "Base agent"
+ *     "Loading…" and no chip is shown, so the trigger never claims "Base agent"
  *     before the active-role probe has answered.
- *   - `ready` — both probes settled; the value seat and the chip are truthful.
+ *   - `ready` — both probes settled; the value seat and the `Active` marker
+ *     are truthful.
  *   - `unknown` — the roles probe failed; the empty state offers Reload.
  */
 type DockRoleState = "loading" | "ready" | "unknown";
@@ -244,8 +265,8 @@ async function readMutation(res: Response): Promise<RoleboxMutation> {
 
 /**
  * Lead glyph — a 14x14 "role" mark (person silhouette) stroked with
- * `currentColor`, following the shipped glyph convention of the dsh dock
- * strips (14x14 artboard, `fill: none`, `aria-hidden`). Inline local SVG:
+ * `currentColor`, following the shipped composer-row glyph convention
+ * (14x14 artboard, `fill: none`, `aria-hidden`). Inline local SVG:
  * the dsh primitives icon set is deliberately not imported.
  */
 function RoleGlyph() {
@@ -394,28 +415,30 @@ function AlertGlyph() {
 }
 
 /**
- * The dock component: a dsh-styled picker (header + animated disclosure).
+ * The role-switch chip: a 28px trigger + an upward popover.
  *
  * Behavior:
- *   - starts collapsed (and re-collapses on every `sessionId` change, and
- *     after a successful switch/clear). The header's VALUE seat reports the
- *     active role's display name while the list is hidden, and one header
- *     click expands it;
+ *   - starts closed (and re-closes on every `sessionId` change, and after a
+ *     successful switch/clear). The trigger's VALUE seat reports the active
+ *     role's display name while the list is hidden, and one click opens the
+ *     popover above the chip;
+ *   - Escape closes the open popover and returns focus to the trigger; a
+ *     pointerdown outside the root closes it too;
  *   - on mount (and on every `sessionId` change), fetches the switchable
  *     roles from `GET /rolebox/roles` and the session's persisted active
  *     role from `GET /rolebox/roles/active?session=…` — the active probe is
  *     best-effort (a failure just leaves the seat showing the base agent);
- *   - the expanded list is preceded by a filter row: a keystroke filter
+ *   - the opened popover is preceded by a filter row: a keystroke filter
  *     narrows the rows by name and description (case-insensitive substring),
  *     the clear button (visible only while a query is typed) restores the
  *     full list, and an explicit no-match row reports an empty result set;
  *   - a row click posts `{ role, session: sessionId }` to
- *     `POST /rolebox/roles/switch`, then collapses on success (the collapse
- *     is the confirmation). On failure the previous active role is preserved,
- *     the list stays open, the server error is shown, and a Retry row re-runs
- *     the failed switch;
+ *     `POST /rolebox/roles/switch`, then closes the popover on success (the
+ *     close is the confirmation: the chip re-mounts with the new name). On
+ *     failure the previous active role is preserved, the list stays open, the
+ *     server error is shown, and a Retry row re-runs the failed switch;
  *   - the clear-to-base row (visible only while a role is active) issues
- *     `DELETE /rolebox/roles/active?session=…`, collapsing on success; a
+ *     `DELETE /rolebox/roles/active?session=…`, closing on success; a
  *     failed clear keeps the previous active role and shows the error with a
  *     Retry row;
  *   - rows and the clear/retry controls are disabled while a mutation is
@@ -427,14 +450,14 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
   const [roles, setRoles] = useState<RoleSwitchRoleDto[]>([]);
   const [busy, setBusy] = useState(false);
   /**
-   * Collapsed by default: the dock is a quiet tool strip above the
-   * composer, not a view. Every session change re-collapses it and a
-   * successful switch/clear collapses it again.
+   * Closed by default: the chip is a compact composer control, not a view.
+   * Every session change re-closes it and a successful switch/clear closes it
+   * again.
    */
   const [collapsed, setCollapsed] = useState(true);
   /**
    * The keystroke filter over the role list (name + description,
-   * case-insensitive). Transient chrome state: it survives collapse/expand
+   * case-insensitive). Transient chrome state: it survives open/close
    * (the field stays visible and self-explanatory — no hidden state) and is
    * preserved across a Reload, but is reset by a session change.
    */
@@ -460,10 +483,19 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
   /** Hydration tri-state; see {@link DockRoleState}. */
   const [roleState, setRoleState] = useState<DockRoleState>("loading");
   /**
-   * The header toggle. Used only to restore focus after a successful
-   * switch/clear collapses the disclosure out from under the activated row.
+   * The trigger. Used only to restore focus after a successful switch/clear
+   * closes the popover out from under the activated row, and by the Escape
+   * handler.
    */
   const headerRef = useRef<{ focus?: () => void } | null>(null);
+  /**
+   * The root element. Backs the outside-pointerdown close: a click anywhere
+   * else dismisses the popover, like every other menu in the composer.
+   */
+  const rootRef = useRef<HTMLElement | null>(null);
+
+  /** Popover openness — derived from `collapsed` and read by both handlers. */
+  const open = !collapsed;
 
   // Session-scoped reset. Deliberately does NOT depend on `loadToken`: a
   // session switch must never render stale state, but a Reload must not throw
@@ -513,8 +545,8 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       setRoles(list);
       setActiveRole(active);
       setRoleState("ready");
-      // The value seat and the chip carry the steady state; the seat stays
-      // empty until there is something to report (progress or a failure).
+      // The value seat and the Active marker carry the steady state; the seat
+      // stays empty until there is something to report (progress or failure).
       setStatus({ text: "", error: false });
     }
 
@@ -531,6 +563,25 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       cancelled = true;
     };
   }, [sessionId, loadToken]);
+
+  // Dismiss the open popover on a pointerdown outside the root. The listener
+  // exists only while the popover is open, and only when there is a document
+  // at all (the unit-test harness renders this tree without a DOM).
+  useEffect(() => {
+    if (!open) return;
+    if (typeof document === "undefined") return;
+    const onPointerDown = (event: PointerEvent): void => {
+      const root = rootRef.current;
+      if (root === null) return;
+      const target = event.target;
+      if (target instanceof Node && root.contains(target)) return;
+      setCollapsed(true);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [open]);
 
   /** Re-fetch the role list and the active role without losing the filter. */
   function reload(): void {
@@ -566,11 +617,12 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       }
       setFailedAction(null);
       setActiveRole(result.role);
-      // The picker closes on success and the collapse IS the visible
-      // confirmation: the value seat re-mounts with the new name, the chip
-      // flips to Active, and the dock returns to its rest posture instead of
-      // blocking the composer. No toast, no checkmark flash, no colour pulse —
-      // but the seat still announces the change for assistive technology.
+      // The popover closes on success and that close IS the visible
+      // confirmation: the value seat re-mounts with the new name, the Active
+      // chip appears, and the chip returns to its 28px rest posture instead of
+      // covering the composer. No toast, no checkmark flash, no colour pulse —
+      // but the live region still announces the change for assistive
+      // technology.
       setStatus({
         text: switchedName + " is now the active role",
         error: false,
@@ -688,10 +740,18 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       ? String(roles.length)
       : visibleRoles.length + " of " + roles.length;
 
-  const open = !collapsed;
-
   return (
-    <div className="rolebox-dock" data-rolebox-dock>
+    <div
+      ref={rootRef}
+      className="rolebox-dock"
+      data-rolebox-dock
+      data-trigger-menu={open ? "true" : undefined}
+      onKeyDown={(event: { key: string }) => {
+        if (event.key !== "Escape" || !open) return;
+        setCollapsed(true);
+        headerRef.current?.focus?.();
+      }}
+    >
       <div className={dockClass.panel}>
         <div className={dockClass.headerRow}>
           <button
@@ -713,16 +773,12 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
             >
               {valueLabel}
             </span>
-            {chipKind !== null && (
+            {chipKind === "active" && (
               <span
-                className={
-                  chipKind === "active"
-                    ? dockClass.chip + " " + dockClass.chipActive
-                    : dockClass.chip + " " + dockClass.chipBase
-                }
+                className={dockClass.chip + " " + dockClass.chipActive}
                 aria-hidden="true"
               >
-                {chipKind === "active" ? "Active" : "Base"}
+                Active
               </span>
             )}
             <span
@@ -733,21 +789,16 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
               <ChevronGlyph />
             </span>
           </button>
+          {/* The ONE live region. A SIBLING of the trigger (never inside it),
+              always mounted and visually hidden: the chip and the list carry
+              the visual state, and a collapse/flip is inaudible without it. */}
           <span
             role="status"
-            title={status.text}
             className={
-              (status.error
-                ? dockClass.status + " " + dockClass.statusError
-                : dockClass.status) +
+              dockClass.status +
               (status.srOnly === true ? " " + dockClass.statusSr : "")
             }
           >
-            {status.error && (
-              <span className={dockClass.statusGlyph} aria-hidden="true">
-                <AlertGlyph />
-              </span>
-            )}
             {status.text}
           </span>
         </div>
@@ -757,6 +808,17 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
           data-open={String(open)}
         >
           <div className={dockClass.disclosureInner}>
+            {status.error && (
+              // The visible copy of the error. aria-hidden: the live region
+              // above already announced it, and a second announcement is worse
+              // than not repeating the text visually inside the popover.
+              <div className={dockClass.statusError} aria-hidden="true">
+                <span className={dockClass.statusGlyph}>
+                  <AlertGlyph />
+                </span>
+                <span className={dockClass.errorText}>{status.text}</span>
+              </div>
+            )}
             {roles.length > 0 && (
               <div className={dockClass.filter}>
                 <span className={dockClass.filterLead} aria-hidden="true">
@@ -773,8 +835,16 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                   onChange={(event: { target: { value: string } }) =>
                     setQuery(event.target.value)
                   }
-                  onKeyDown={(event: { key: string }) => {
-                    if (event.key === "Escape" && query !== "") setQuery("");
+                  onKeyDown={(event: {
+                    key: string;
+                    stopPropagation?: () => void;
+                  }) => {
+                    if (event.key !== "Escape" || query === "") return;
+                    setQuery("");
+                    // The filter's Escape clears the query; the root's
+                    // Escape closes the popover. Stop here so one keypress
+                    // never does both.
+                    event.stopPropagation?.();
                   }}
                 />
                 <span className={dockClass.count} role="status">

@@ -18,7 +18,7 @@
  *   - `SessionEvent` envelope keys,
  *   - the cordis `Plugin.Base.Config` type,
  *   - the `dsh.bundle.patch` row shape,
- *   - the four client slot keys (`conversation.input.dock`, `settings.section`,
+ *   - the four client slot keys (`conversation.input.right`, `settings.section`,
  *     `sidebar.right.pane.tab`, `tool.call.toolview`), the tab-type
  *     registration behind the third (the `ctx.sidebarRightTabs` definition
  *     mirror), the owner share of the keyed tool view, and the locale

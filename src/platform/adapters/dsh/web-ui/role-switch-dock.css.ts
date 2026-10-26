@@ -3,10 +3,13 @@
 export const dockCss = `
 .rolebox-dock {
   box-sizing: border-box;
-  width: calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));
-  max-width: calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));
-  margin: 0 auto calc(0px - var(--dsh-composer-stack-gap) - 3px);
-  padding: 0 var(--dsh-composer-dock-inset);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
   flex: none;
 
   --rolebox-surface: var(--dsw-specific-tip, rgb(245, 246, 247));
@@ -33,7 +36,6 @@ export const dockCss = `
   --rolebox-radius-chip: 6px;
   --rolebox-radius-control: 8px;
   --rolebox-radius-card: 12px;
-  --rolebox-radius-panel: 12px 12px 0 0;
 
   --rolebox-row-height: 40px;
   --rolebox-mark-seat: 20px;
@@ -53,52 +55,53 @@ export const dockCss = `
 }
 
 .rolebox-dock-panel {
-  background: var(--rolebox-surface, var(--dsw-specific-tip, rgb(245, 246, 247)));
-  border-radius: var(--rolebox-radius-panel, 12px 12px 0 0);
-  width: 100%;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  max-width: 100%;
   padding: 0;
   position: relative;
-  overflow: hidden;
-}
-
-.rolebox-dock-panel::after {
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: inherit;
-  content: "";
-  pointer-events: none;
-  border-bottom: none;
-  position: absolute;
-  inset: 0;
 }
 
 .rolebox-dock-header-row {
   box-sizing: border-box;
-  width: 100%;
-  height: var(--rolebox-row-height, 40px);
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: var(--rolebox-space-2, 8px);
-  display: flex;
-  border-radius: var(--rolebox-radius-panel, 12px 12px 0 0);
-  overflow: hidden;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  gap: 0;
 }
 
 .rolebox-dock-header {
   box-sizing: border-box;
-  flex: 1 1 auto;
-  min-width: 0;
-  height: var(--rolebox-row-height, 40px);
-  margin-left: var(--rolebox-space-1, 4px);
-  color: var(--dsw-alias-label-primary);
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rolebox-space-1, 4px);
+  height: 28px;
+  max-width: min(240px, 45cqw);
+  margin: 0;
+  padding: 0 var(--rolebox-space-1, 4px) 0 var(--rolebox-space-2, 8px);
+  color: var(--dsw-alias-label-secondary);
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
   background: transparent;
   border: none;
-  border-radius: var(--rolebox-radius-control, 8px);
-  align-items: center;
-  gap: var(--rolebox-space-2, 8px);
-  padding: 0 var(--rolebox-space-3, 12px);
-  display: flex;
+  border-radius: var(--dsw-radius-sm);
   font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  transition: background-color var(--rolebox-dur-fast, 130ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.rolebox-dock-header:hover,
+.rolebox-dock-header[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .rolebox-dock-header:focus-visible {
@@ -115,14 +118,14 @@ export const dockCss = `
 
 .rolebox-dock-value {
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--rolebox-ink, rgb(15, 17, 21));
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 22px;
+  line-height: 20px;
 }
 
 .rolebox-dock-chip {
@@ -164,34 +167,43 @@ export const dockCss = `
 }
 
 .rolebox-dock-status {
-  box-sizing: border-box;
-  min-width: 0;
-  flex: 0 1 auto;
-  max-width: 55%;
-  margin-right: var(--rolebox-space-1, 4px);
-  align-items: center;
-  gap: var(--rolebox-space-1, 4px);
-  display: inline-flex;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--rolebox-ink-muted, rgb(97, 102, 107));
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 20px;
+  clip-path: inset(50%);
 }
 
+/* The visible copy of a failure, rendered INSIDE the popover: a menu surface
+   cannot grow a message row in the 28px chip, and the live region above is
+   already the announcement channel. */
 .rolebox-dock-status-error {
-  height: 24px;
-  padding: 0 var(--rolebox-space-2, 8px);
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--rolebox-space-1, 4px);
+  margin-bottom: var(--rolebox-space-1, 4px);
+  padding: var(--rolebox-space-2, 8px);
   border: 1px solid var(--rolebox-border-danger, rgb(236, 19, 19));
-  border-radius: var(--rolebox-radius-chip, 6px);
+  border-radius: var(--rolebox-radius-control, 8px);
   background: var(--rolebox-surface-danger, rgba(236, 19, 19, 0.05));
   color: var(--rolebox-ink, rgb(15, 17, 21));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.rolebox-dock-error-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .rolebox-dock-status-glyph {
   flex: none;
+  margin-top: 2px;
   color: var(--rolebox-ink-danger, rgb(236, 19, 19));
   place-items: center;
   display: grid;
@@ -209,8 +221,28 @@ export const dockCss = `
 }
 
 .rolebox-dock-disclosure {
+  box-sizing: border-box;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
   display: grid;
   grid-template-rows: 1fr;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 160px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: var(--rolebox-space-1, 4px);
+  background: var(--dsw-specific-menu, rgb(255, 255, 255));
+  /* The host's menu material: this fill is translucent, so without the
+     paired blur the page content behind the popover reads through
+     crisply. */
+  backdrop-filter: var(--dsw-menu-backdrop-filter, blur(40px) saturate(150%));
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--rolebox-radius-card, 12px);
+  box-shadow: var(--dsw-elevation-prominent);
   opacity: 1;
   visibility: visible;
   transition:
@@ -240,7 +272,7 @@ export const dockCss = `
 .rolebox-dock-disclosure-inner {
   min-height: 0;
   overflow: hidden;
-  padding: 0 var(--rolebox-space-1, 4px) var(--rolebox-space-1, 4px);
+  padding: 0;
   transform: translateY(0);
   transform-origin: top center;
   transition: transform var(--rolebox-dur-base, 200ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1));
@@ -523,6 +555,7 @@ export const dockCss = `
     transition: none;
     transform: none;
   }
+  .rolebox-dock-header,
   .rolebox-dock-chevron,
   .rolebox-dock-row,
   .rolebox-dock-chip,
@@ -552,6 +585,7 @@ export const dockClass = {
   statusError: "rolebox-dock-status-error",
   statusGlyph: "rolebox-dock-status-glyph",
   statusSr: "rolebox-dock-status-sr",
+  errorText: "rolebox-dock-error-text",
   disclosure: "rolebox-dock-disclosure",
   disclosureInner: "rolebox-dock-disclosure-inner",
   filter: "rolebox-dock-filter",

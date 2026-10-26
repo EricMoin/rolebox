@@ -328,6 +328,20 @@ function headerButton(): VNode {
   return byClass("rolebox-dock-header")[0]!;
 }
 
+/** The composer chip's root wrapper (its own popover is anchored to it). */
+function root(): VNode {
+  return byClass("rolebox-dock")[0]!;
+}
+
+/** True when `node` is `ancestor` itself or one of its descendants. */
+function within(ancestor: VNode, node: VNode): boolean {
+  let found = false;
+  walk(ancestor, (candidate) => {
+    if (candidate === node) found = true;
+  });
+  return found;
+}
+
 function expand(): void {
   click(headerButton());
 }
@@ -386,9 +400,14 @@ describe("RoleSwitchDock", () => {
       // The header VALUE seat names the role: a display name, never the id the
       // picker does not show.
       expect(textOf(valueSeat())).toBe("Engineer");
+      // The FULL display name stays recoverable from both recovery channels
+      // even though the 28px chip ellipsizes the visible copy.
       expect(valueSeat().props.title).toBe("Engineer");
-      // The chip spells the state out, so it survives total loss of hue.
+      expect(String(headerButton().props["aria-label"])).toContain("Engineer");
+      // The state chip spells the state out, so it survives total loss of hue.
       expect(textOf(chipSeat()!)).toBe("Active");
+      // The chip seat carries the chevron that states the open direction.
+      expect(byClass("rolebox-dock-chevron")).toHaveLength(1);
       // Reserved mark seat: the non-colour row channel carrying the check glyph.
       expect(byClass("rolebox-dock-mark-active")).toHaveLength(1);
       // The shipped 6px dot is gone entirely.
@@ -403,7 +422,9 @@ describe("RoleSwitchDock", () => {
       mountDock();
       await settle();
       expect(textOf(valueSeat())).toBe("Base agent");
-      expect(textOf(chipSeat()!)).toBe("Base");
+      // No state chip for the base agent: the name IS the state.
+      expect(chipSeat()).toBeUndefined();
+      expect(textOf(headerButton())).not.toContain("Active");
       expect(byClass("rolebox-dock-mark-active")).toHaveLength(0);
       expect(byClass("rolebox-dock-current")).toHaveLength(0);
       expect(textOf(statusSeat())).toBe("");
@@ -630,7 +651,7 @@ describe("RoleSwitchDock", () => {
 
       expect(disclosureOpen()).toBe(false);
       expect(textOf(valueSeat())).toBe("Base agent");
-      expect(textOf(chipSeat()!)).toBe("Base");
+      expect(chipSeat()).toBeUndefined();
       expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
 
       expand();
@@ -687,6 +708,14 @@ describe("RoleSwitchDock", () => {
       // token namespace. Definitions are plain declarations and are not scanned.
       const bareRoleboxVars = [...cssText.matchAll(/var\((--rolebox-[a-z0-9-]+)\)/g)].map((m) => m[1]!);
       expect(bareRoleboxVars).toEqual([]);
+
+      // The popover must carry the host's menu MATERIAL, not just its fill:
+      // the fill is translucent, so without the paired blur the page content
+      // behind the popover reads through crisply (found in live browser
+      // verification, which the unit tests did not cover).
+      const disclosure =
+        /\.rolebox-dock-disclosure\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(disclosure).toContain("backdrop-filter: var(--dsw-menu-backdrop-filter");
       expect(cssText).not.toContain(".rolebox-dock-current");
     });
   });
@@ -722,6 +751,175 @@ describe("RoleSwitchDock", () => {
       // status message can never rewrite the control's accessible name.
       expect(textOf(statusSeat())).toContain("Switch failed");
       expect(textOf(headerButton())).not.toContain("Switch failed");
+    });
+  });
+
+  describe("composer chip posture", () => {
+    it("names the role in the trigger and shows the state chip only while active", async () => {
+      cfg.active = "engineer";
+      mountDock();
+      await settle();
+
+      // The trigger IS the chip: display name + state marker + chevron.
+      expect(textOf(headerButton())).toContain("Engineer");
+      expect(textOf(headerButton())).toContain("Active");
+      expect(byClass("rolebox-dock-chevron")).toHaveLength(1);
+      // No strip above the composer: the contribution renders inside the
+      // composer tool row, not a full-width dock.
+      expect(root().props["data-rolebox-dock"]).toBe(true);
+
+      cfg.active = null;
+      rerender({ sessionId: "sess-2" });
+      await settle();
+
+      expect(textOf(headerButton())).toContain("Base agent");
+      expect(textOf(headerButton())).not.toContain("Active");
+      expect(chipSeat()).toBeUndefined();
+    });
+
+    it("styles the trigger as a 28px chip whose name ellipsizes", () => {
+      const cssText = css.dockCss;
+      const headerBlock = /\.rolebox-dock-header\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(headerBlock).toContain("height: 28px");
+      expect(headerBlock).toContain("border-radius: var(--dsw-radius-sm)");
+      expect(headerBlock).toContain("font-size: 13px");
+      expect(headerBlock).toContain("max-width: min(240px, 45cqw)");
+      expect(headerBlock).toContain("font-weight: 500");
+      expect(headerBlock).toContain("cursor: pointer");
+
+      // The visible name ellipsizes, but the full value survives in `title`
+      // and in the trigger's aria-label (asserted above).
+      const valueBlock = /\.rolebox-dock-value\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(valueBlock).toContain("min-width: 0");
+      expect(valueBlock).toContain("overflow: hidden");
+      expect(valueBlock).toContain("text-overflow: ellipsis");
+      expect(valueBlock).toContain("white-space: nowrap");
+
+      // The 40px list row height is untouched; the chip has its own rule.
+      expect(cssText).toContain("--rolebox-row-height: 40px");
+    });
+
+    it("anchors the popover above the chip with no clip on its ancestors", () => {
+      const cssText = css.dockCss;
+      const disclosure = /\.rolebox-dock-disclosure\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(disclosure).toContain("position: absolute");
+      expect(disclosure).toContain("bottom: calc(100% + 8px)");
+      expect(disclosure).toContain("right: 0");
+      expect(disclosure).toContain("width: min(340px, calc(100vw - 32px))");
+      expect(disclosure).toContain("max-height: min(420px, calc(100vh - 160px))");
+      expect(disclosure).toContain("overflow-y: auto");
+      expect(disclosure).toContain("background: var(--dsw-specific-menu");
+      expect(disclosure).toContain("box-shadow: var(--dsw-elevation-prominent)");
+      expect(disclosure).toContain("border-radius: var(--rolebox-radius-card");
+      expect(disclosure).toContain("z-index: 20");
+
+      // The closed popover is not focusable and not in the a11y tree.
+      const closed =
+        /\.rolebox-dock-disclosure\[data-open="false"\]\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(closed).toContain("visibility: hidden");
+      expect(closed).toContain("grid-template-rows: 0fr");
+
+      // The panel and the header row must not clip the absolutely positioned
+      // popover (the old strip had both `overflow: hidden`).
+      const panel = /\.rolebox-dock-panel\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(panel).not.toContain("overflow");
+      expect(panel).not.toContain("background");
+      expect(cssText).not.toContain(".rolebox-dock-panel::after");
+      const headerRow = /\.rolebox-dock-header-row\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(headerRow).not.toContain("overflow");
+      expect(headerRow).not.toContain("40px");
+    });
+
+    it("marks the root while open so the host raises the sticky composer seat", async () => {
+      mountDock();
+      await settle();
+      expect(root().props["data-trigger-menu"]).toBeUndefined();
+      expand();
+      expect(root().props["data-trigger-menu"]).toBe("true");
+      click(headerButton());
+      expect(root().props["data-trigger-menu"]).toBeUndefined();
+    });
+  });
+
+  describe("popover dismissal", () => {
+    it("closes on Escape and returns focus to the trigger", async () => {
+      mountDock();
+      await settle();
+      expand();
+      expect(disclosureOpen()).toBe(true);
+      focusCalls.length = 0;
+
+      keyDown(root(), "Escape");
+
+      expect(disclosureOpen()).toBe(false);
+      expect(headerButton().props["aria-expanded"]).toBe(false);
+      // The popover is gone, so focus must land back on the chip.
+      expect(focusCalls.length).toBe(1);
+    });
+
+    it("lets the filter's Escape clear the query first and keeps the popover open", async () => {
+      mountDock();
+      await settle();
+      expand();
+      changeInput(filterInput(), "eng");
+      expect(rows()).toHaveLength(1);
+
+      keyDown(filterInput(), "Escape");
+
+      expect(filterInput().props.value).toBe("");
+      expect(rows()).toHaveLength(ROLES.length);
+      expect(disclosureOpen()).toBe(true);
+    });
+
+    it("does nothing on Escape while already closed", async () => {
+      mountDock();
+      await settle();
+      focusCalls.length = 0;
+
+      keyDown(root(), "Escape");
+      keyDown(root(), "Enter");
+
+      expect(disclosureOpen()).toBe(false);
+      expect(focusCalls).toHaveLength(0);
+    });
+  });
+
+  describe("live region", () => {
+    it("keeps the single role=status seat outside the trigger", async () => {
+      mountDock();
+      await settle();
+      expand();
+
+      const seat = statusSeat();
+      expect(within(headerButton(), seat)).toBe(false);
+      expect(headerButton().props.role).toBeUndefined();
+
+      // EVERY live region in the dock lives outside the trigger, so a status
+      // change can never rewrite the control's accessible name.
+      const statusNodes = allNodes().filter((node) => node.props.role === "status");
+      expect(statusNodes.length).toBeGreaterThanOrEqual(1);
+      for (const node of statusNodes) {
+        expect(within(headerButton(), node)).toBe(false);
+      }
+    });
+
+    it("repeats a failure inside the popover without announcing it twice", async () => {
+      cfg.switchOk = false;
+      mountDock();
+      await settle();
+      expand();
+      click(rows().find((row) => textOf(row).includes("Engineer"))!);
+      await settle();
+
+      // The live region is the announcement channel…
+      expect(textOf(statusSeat())).toContain("Switch failed");
+      // …and the popover carries a VISIBLE copy that is hidden from the a11y
+      // tree, so the message is never announced twice.
+      const visible = byClass("rolebox-dock-status-error");
+      expect(visible).toHaveLength(1);
+      expect(textOf(visible[0]!)).toContain("Switch failed");
+      expect(visible[0]!.props["aria-hidden"]).toBe("true");
+      expect(within(visible[0]!, statusSeat())).toBe(false);
     });
   });
 

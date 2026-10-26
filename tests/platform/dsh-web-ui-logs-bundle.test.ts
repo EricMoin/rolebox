@@ -194,7 +194,7 @@ describe("dsh web client bundle probe (target: browser)", () => {
       "rolebox-logs",
     ]);
     expect((seatBodies[1]!.component as { name?: string }).name).toBe("RoleboxLogsPanel");
-    expect(registered.some((entry) => entry.options.name === "conversation.input.dock")).toBe(true);
+    expect(registered.some((entry) => entry.options.name === "conversation.input.right")).toBe(true);
     expect(registered.some((entry) => entry.options.name === "settings.section")).toBe(true);
 
     // Both page types, each with its own guide entry.

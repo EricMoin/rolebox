@@ -9,8 +9,9 @@
  *   - the plugin entry metadata: `name === 'rolebox'`,
  *     `inject === ['slots', 'sidebarRightTabs', 'sidebarRight', 'locale']`,
  *     `apply` is a function (and the default object export carries them)
- *   - the UNCHANGED dock contribution: `ctx.slots.inject` is called with
- *     `'conversation.input.dock'`, and the injected callback registers
+ *   - the role-chip contribution: `ctx.slots.inject` is called with
+ *     `'conversation.input.right'` (the composer tool-row seat left of the
+ *     model selector), and the injected callback registers
  *     `{ name, id: 'rolebox', order: 40, locale: 'conversation' }` with the
  *     session-scoped inject factory resolving `{ sessionId }`
  *   - the settings contribution: `'settings.section'` is injected, and its
@@ -204,7 +205,7 @@ describe("dsh web-UI client plugin entry", () => {
     expect(typeof client.default.apply).toBe("function");
   });
 
-  it("keeps the canonical input-dock registration unchanged", () => {
+  it("registers the role chip in the composer tool row", () => {
     const { slots, injected, registered } = createFakeSlots();
     const tabs = createFakeSidebarRightTabs();
     const right = createFakeSidebarRight();
@@ -216,16 +217,19 @@ describe("dsh web-UI client plugin entry", () => {
       locale: locale.locale,
     });
 
-    // apply waits on every seat declaration; pick the dock one by key.
-    const dockInject = injected.find((i) => i.key === "conversation.input.dock");
-    expect(dockInject).toBeDefined();
+    // apply waits on every seat declaration; pick the role-chip one by key.
+    // The seat is the composer tool row immediately LEFT of the model
+    // selector — never the full-width strip above the composer.
+    const chipInject = injected.find((i) => i.key === "conversation.input.right");
+    expect(chipInject).toBeDefined();
+    expect(client.DOCK_SLOT_NAME).toBe("conversation.input.right");
 
     // the injected callback performs the registration.
-    dockInject!.callback();
+    chipInject!.callback();
     expect(registered).toHaveLength(1);
 
     const call = registered[0]!;
-    expect(call.options.name).toBe("conversation.input.dock");
+    expect(call.options.name).toBe("conversation.input.right");
     expect(call.options.id).toBe("rolebox");
     expect(call.options.order).toBe(40);
     expect(call.options.locale).toBe("conversation");
@@ -535,7 +539,7 @@ describe("dsh web-UI client plugin entry", () => {
 
       // Every declaration-waited contribution is still installed.
       for (const key of [
-        "conversation.input.dock",
+        "conversation.input.right",
         "settings.section",
         "sidebar.right.pane.tab",
       ]) {

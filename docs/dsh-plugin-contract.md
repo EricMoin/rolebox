@@ -918,8 +918,8 @@ fresh-start choice inexpressible. The contract is pinned by
 
 The role-switch UI ships as two halves: a **host route** on dsh's own web server
 (the `/rolebox` REST API) and a **browser slot plugin** (`dsh.client` bundle that
-mounts the dock into the web app). Both surfaces are verified against the
-`0.1.5-rc.1` source checkout. The monitoring surface ships through the same two
+mounts the role-switch chip into the web app). Both surfaces are verified
+against the `0.1.5-rc.1` source checkout. The monitoring surface ships through the same two
 halves: two read-only endpoints added to the `/rolebox` host API (§4.4.6) and a
 **right-Sidebar page tab** contributed by the same client bundle (§4.4.7), whose
 settings-panel counterpart is the "Rolebox" page listing the loaded roles.
@@ -1048,9 +1048,20 @@ The conversation UI declares the input-zone region seats
 The broader roster also declares `conversation.session.header` /
 `conversation.session.header.actions` / `conversation.session.header.utilities`
 (`source:packages/client/ui-conversation/src/client/contract/slots.ts`).
-rolebox mounts into `conversation.input.dock` (`client.ts`); the
-`scope: 'session'` slot makes the inject factory resolve the definite session id
-(`(sessionId) => ({ sessionId })`, `client.ts`).
+rolebox mounts into `conversation.input.right` (`client.ts`) — the composer tool
+row, rendered by the default composer body with `{}` immediately LEFT of the
+model seat (`renderSlot("conversation.input.right", {})` runs immediately before
+`renderSlot("conversation.input.model", …)`,
+`source:packages/client/ui-conversation/src/client/skeleton/InputBar.tsx:495-496`),
+so nothing renders above the composer card. The `scope: 'session'` slot makes
+the inject factory resolve the definite session id
+(`(sessionId) => ({ sessionId })`, `client.ts`) even though the seat passes no
+owner props. The contribution is a 28px chip naming the active role (glyph,
+full display name, an `Active` marker only while a role is set, and a chevron)
+whose role list opens UPWARD in a popover anchored to the chip
+(`position: absolute; bottom: calc(100% + 8px)`), and the root carries
+`data-trigger-menu` while open so the host raises the sticky composer seat
+(`:has([data-trigger-menu])` in ConversationRoot.module.css).
 
 #### 4.4.5 Client bundle format
 
@@ -1225,21 +1236,21 @@ drives the mounted handler (`GET` = `200` view JSON, `POST` = `405`);
 
 #### 4.4.7 Client entries: the `settings.section` "Rolebox" page and the right-Sidebar tabs
 
-The client bundle now contributes **five** surfaces — the dock
-(`conversation.input.dock`, §4.4.4, unchanged), the "Rolebox" settings page, the
+The client bundle now contributes **five** surfaces — the role-switch chip
+(`conversation.input.right`, §4.4.4), the "Rolebox" settings page, the
 monitoring tab, the log view tab, and one keyed transcript row per rolebox tool
 name (`tool.call.toolview`, §4.4.7(d)) — and `apply()` returns one disposer that
-tears every one of them down: the dock declaration wait, the settings declaration
-wait, the two tab-type registrations (`ctx.sidebarRightTabs.register`), the two
-tab-body declaration waits (both keyed into the SAME
-`sidebar.right.pane.tab` seat under their own type ids), the tool-row
-dictionaries and the tool-row declaration waits,
+tears every one of them down: the role-chip declaration wait, the settings
+declaration wait, the two tab-type registrations
+(`ctx.sidebarRightTabs.register`), the two tab-body declaration waits (both
+keyed into the SAME `sidebar.right.pane.tab` seat under their own type ids),
+the tool-row dictionaries and the tool-row declaration waits,
 `src/platform/adapters/dsh/web-ui/client.ts`.
 
 **(a) The `settings.section` page — "Rolebox" (what roles are loaded)**
 
-`src/platform/adapters/dsh/web-ui/client.ts` adds, alongside the dock, the
-canonical QueueDock registrant posture (§4.4.3):
+`src/platform/adapters/dsh/web-ui/client.ts` adds, alongside the role chip,
+the canonical QueueDock registrant posture (§4.4.3):
 
 ```ts
 ctx.slots.inject("settings.section", () =>
@@ -1275,7 +1286,7 @@ shell owns the open state.
 - **Entry metadata** — slot key `settings.section`; list-kind entry `id`
   `rolebox`; `order` `90` (after the stock sections); `label` `Rolebox`. The
   `scope: 'root'` slot means the inject factory receives **no definite session
-  id** — unlike the session-scoped `conversation.input.dock` (§4.4.4, whose
+  id** — unlike the session-scoped `conversation.input.right` (§4.4.4, whose
   inject factory resolves `(sessionId) => ({ sessionId })`).
 - **Inject face** — the entry passes the zero-argument face
   `() => ({ openMonitor })`, the shape the shipped registrants use
@@ -1307,7 +1318,7 @@ shell owns the open state.
   across independent activation and reload. If the `settings.section`
   declaration is absent (a profile without the settings feature), the inject
   effect never fires, the page does not mount, and the plugin stays healthy —
-  the dock and the monitoring tab are unaffected.
+  the role chip and the monitoring tab are unaffected.
 
 **(b) The right-Sidebar monitoring tab (live session evidence)**
 
@@ -1497,12 +1508,15 @@ without costing the other (both bodies install before their types).
   ledgers at `NODE_ROW_LIMIT` and the session roster at `SESSION_ROW_LIMIT`,
   and the first load shows a content-shaped skeleton in place of the former bare
   text line while a refresh keeps the existing data on screen.
-- **Dock focus restoration** — a successful switch or clear collapses the
-  disclosure out from under the row the user just activated, which would drop
-  keyboard focus to `<body>`. The dock therefore holds exactly one ref, on the
-  header toggle, and returns focus to it after a successful mutation. That is
-  the module's only DOM interaction, and it is deliberate: every other rule
-  (no measurement, no scroll listeners, no other DOM reads) still holds.
+- **Chip focus restoration and popover dismissal** — a successful switch or
+  clear closes the popover out from under the row the user just activated, which
+  would drop keyboard focus to `<body>`. The chip therefore holds a ref on the
+  trigger and returns focus to it after a successful mutation; Escape (on the
+  root, after the filter's own Escape has had its chance to clear a query) and a
+  pointerdown outside the root close the popover the same way. Those are the
+  module's only DOM interactions — two refs plus one `pointerdown` listener that
+  exists only while the popover is open — and they are deliberate: no
+  measurement and no scroll listeners still hold.
 
 ### 4.5 Session-level system-prompt registration (`rolebox:role` / `rolebox:context`)
 
@@ -2033,8 +2047,8 @@ The migration to the `0.1.5-rc.1` line is **complete**. rolebox's `package.json`
   in the repo. Its successor surfaces are `@deepseek-ai/dsh-client-ui-slots`
   (the slot registry, §4.4.3) and `@deepseek-ai/dsh-client-ui-settings` (the
   `settings.section` seat, §4.4.7); `@deepseek-ai/dsh-client-ui-conversation`
-  remains the source of the dock seat (§4.4.4) and `@deepseek-ai/dsh-client-locale`
-  the i18n surface.
+  remains the source of the composer tool-row seat (§4.4.4) and
+  `@deepseek-ai/dsh-client-locale` the i18n surface.
 - The old `0.1.0-rc.6` published-npm-tarball installability verdict — including
   its "restricted `latest` dist-tag" analysis — is **superseded** and has been
   removed from this contract. The source checkout is the reference of record.
@@ -2164,7 +2178,7 @@ It asserts, per seam:
 - the `dsh.bundle.patch` row shape (every row key must be a loader
   `EntryOptions` member);
 - the three client slot keys rolebox contributes into
-  (`conversation.input.dock`, `settings.section`,
+  (`conversation.input.right`, `settings.section`,
   `sidebar.right.pane.tab`) — the third keyed by the monitoring tab type's
   `id` — plus the tab-type registration behind it: the client's
   `ctx.sidebarRightTabs.register(...)` call must exist, dsh must still declare

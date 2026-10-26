@@ -4,8 +4,10 @@
  * This module is the client entry of the rolebox web-UI integration: a dsh
  * client plugin that contributes the rolebox surfaces to the dsh web app:
  *
- *   - {@link RoleSwitchDock} → the `'conversation.input.dock'` slot (the
- *     list/session-scoped full-width row above the composer card);
+ *   - {@link RoleSwitchDock} → the `'conversation.input.right'` slot (the
+ *     list/session-scoped composer tool-row seat immediately LEFT of the model
+ *     selector: a 28px chip naming the active role, whose role-list popover
+ *     opens upward);
  *   - {@link RoleboxRolesPanel} → the `'settings.section'` slot (the
  *     list/root-scoped settings page entitled "Rolebox" listing every loaded
  *     role and its tool policy / max steps);
@@ -37,26 +39,31 @@
  * The export mirrors the canonical registrant-plugin posture of
  * `@deepseek-ai/dsh-client-ui-conversation`'s QueueDock entry
  * (packages/client/ui-conversation/src/client/queue/QueueDock.tsx in the
- * 0.1.5-rc.1 source checkout):
+ * 0.1.5-rc.1 source checkout) — `ctx.slots.inject(key, () =>
+ * ctx.slots.register(...))`:
  *
- *     ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({
- *       name: "conversation.input.dock",
- *       id: "todo",
- *       order: 0,
- *       locale: NS,
- *     }, TodoDock));
+ *     ctx.slots.inject("conversation.input.right", () => ctx.slots.register({
+ *       name: "conversation.input.right",
+ *       id: "rolebox",
+ *       order: 40,
+ *       locale: "conversation",
+ *     }, RoleSwitchDock));
  *
- * i.e. `{ name, inject, apply(ctx) }` where `apply` waits on the input-dock
- * declaration (`ctx.slots.inject`) and registers the component inside the
- * injection callback (`ctx.slots.register`), so the entry follows the slot
- * declaration across independent activation and reload. The `'conversation.input.dock'`
- * slot is declared by `@deepseek-ai/dsh-client-ui-conversation` as
- * `{ kind: 'list', scope: 'session', owner: InputZone }`
- * (lib/types/client/contract/slots.d.ts:190-194). The inject factory
- * signature derives from `InjectParams` for a `scope: 'session'` slot —
- * `(sessionId) => ({ sessionId })` (dsh-client-ui-slots
- * lib/types/index.d.ts:367) — delivering the framework-resolved session id
- * to the component for the switch request.
+ * i.e. `{ name, inject, apply(ctx) }` where `apply` waits on the
+ * `conversation.input.right` declaration (`ctx.slots.inject`) and registers the
+ * component inside the injection callback (`ctx.slots.register`), so the entry
+ * follows the slot declaration across independent activation and reload. The
+ * `'conversation.input.right'` slot is declared by
+ * `@deepseek-ai/dsh-client-ui-conversation` as `{ kind: 'list', scope:
+ * 'session' }` with NO owner share (lib/types/client/contract/slots.d.ts), and
+ * the default composer body renders it with `{}` between the left tools and the
+ * model seat (`conversation.input.model`) — `renderSlot("conversation.input.right",
+ * {})` immediately before the model selector (packages/client/ui-conversation/
+ * src/client/skeleton/InputBar.tsx:495-496 in the 0.1.5-rc.1 source checkout).
+ * The inject factory signature derives from `InjectParams` for a
+ * `scope: 'session'` slot — `(sessionId) => ({ sessionId })`
+ * (dsh-client-ui-slots lib/types/index.d.ts:367) — delivering the
+ * framework-resolved session id to the component for the switch request.
  *
  * ── The `settings.section` contribution (the "Rolebox" page) ─────────────
  * {@link RoleboxRolesPanel} is contributed to the `'settings.section'` slot —
@@ -205,13 +212,13 @@ export const inject: string[] = ["slots", "sidebarRightTabs", "sidebarRight", "l
 /** The keyed per-tool transcript-view seat (declared by dsh-client-ui-tool). */
 export const TOOL_VIEW_SLOT = "tool.call.toolview";
 
-/** The slot this plugin contributes into (the input dock above the composer). */
-export const DOCK_SLOT_NAME = "conversation.input.dock";
+/** The slot this plugin contributes into (composer tool row, left of the model selector). */
+export const DOCK_SLOT_NAME = "conversation.input.right";
 
-/** List-entry id within the dock slot (list-kind slots key entries by `id`). */
+/** List-entry id within that seat (list-kind slots key entries by `id`). */
 export const DOCK_SLOT_ID = "rolebox";
 
-/** List position — after the goal/queue strips (TodoDock=0, QueueDock=20). */
+/** List position within the seat — rolebox is its only occupant today. */
 export const DOCK_SLOT_ORDER = 40;
 
 /** Locale namespace declared by the entry (dsh-client-ui-conversation). */
@@ -462,11 +469,12 @@ function toMessage(err: unknown): string {
  * then register inside the injected callback so the contribution tracks the
  * declaration across independent activation and reload.
  *
- *   - the {@link RoleSwitchDock} into `'conversation.input.dock'`. The inject
+ *   - the {@link RoleSwitchDock} into `'conversation.input.right'`. The inject
  *     factory resolves the session-scoped session id (the framework calls it
  *     with the definite session id per `InjectParams<'session'>`) and
- *     returns the business face `{ sessionId }` the dock consumes for the
- *     `POST /rolebox/roles/switch` body.
+ *     returns the business face `{ sessionId }` the role chip consumes for the
+ *     `POST /rolebox/roles/switch` body. The seat is the composer tool row, so
+ *     the chip renders immediately left of the model selector.
  *   - the {@link RoleboxRolesPanel} into `'settings.section'`. The slot is
  *     `scope: 'root'`, so the inject factory receives no session id; it
  *     returns the business face `{ openMonitor }` — the page's "Open monitor"
@@ -487,8 +495,8 @@ function toMessage(err: unknown): string {
  *     reason the monitor's does.
  *
  * The returned disposer tears down EVERY registration created here (the four
- * injection effects — dock, settings page, monitor body, logs body — and both
- * tab-type registrations), so an absent declaration or an unloading fiber
+ * injection effects — role chip, settings page, monitor body, logs body — and
+ * both tab-type registrations), so an absent declaration or an unloading fiber
  * degrades gracefully — see the module docstring.
  *
  * @param ctx - the client cordis context (structural; the injected services).
@@ -553,7 +561,7 @@ export function apply(ctx: DshClientContext): (() => void) | void {
     }
   };
 
-  contribute("input dock", () =>
+  contribute("role switch chip", () =>
     ctx.slots.inject(DOCK_SLOT_NAME, () =>
       ctx.slots.register(
         {
@@ -700,6 +708,6 @@ export default {
   apply,
 };
 
-// Type-only re-exports: the dock's and the roles page's composed props for
+// Type-only re-exports: the role chip's and the roles page's composed props for
 // consumers wiring the entry (e.g. the slot-contract mirror in tests).
 export type { RoleSwitchDockProps, RoleboxRolesPanelProps };
