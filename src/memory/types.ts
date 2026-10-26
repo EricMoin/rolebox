@@ -16,6 +16,22 @@ export interface MemoryConfig {
   min_relevance?: "high" | "medium" | "low";
   /** Which scope to inject: "role" | "workspace" | "both" (default: "both") */
   scope?: "role" | "workspace" | "both";
+  /** Keep and inject a session-focus memory entry across dsh compaction (DSH only; default: true) */
+  session_focus?: boolean;
+  /**
+   * Inject a per-turn block of memories retrieved from the current DSH user
+   * prompt (DSH only; default: true).
+   */
+  recall?: boolean;
+  /**
+   * How turn recall builds its queries (DSH only; default: "auto").
+   *
+   * `auto` searches with the prompt first and runs the one-shot LLM query
+   * scout only when workspace memory is large (at least 20 entries by default)
+   * and the deterministic search is weak (fewer than two hits). `always` runs
+   * the scout on every new human prompt; `deterministic` never runs it.
+   */
+  recall_mode?: "auto" | "always" | "deterministic";
 }
 
 /**

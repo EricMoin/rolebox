@@ -7,7 +7,12 @@ export interface DshContextAgent {
   id?: string;
   session?: DshEventSource & {
     id?: string;
-    header?: { cwd?: string };
+    /**
+     * Durable session creation metadata. Only `cwd` is read for the workspace;
+     * `origin`/`parentSession` let the turn-recall scout recognize a subagent
+     * session without importing the dsh session format.
+     */
+    header?: { cwd?: string; origin?: string; parentSession?: string };
     inheritedEventCount?: number;
   };
 }

@@ -45,6 +45,32 @@ describe("role memory configuration", () => {
     expect(logs).toEqual([]);
   });
 
+  it("retains the session-focus opt-out", async () => {
+    writeRole("role-default", { memory: {} });
+    writeRole("role-optout", { memory: { session_focus: false } });
+    const roles = await discoverRoles(root);
+    expect(roles.get("role-optout")?.memory).toEqual({ session_focus: false });
+    expect(roles.get("role-default")?.memory).toEqual({});
+  });
+
+  it("retains the turn-recall opt-out", async () => {
+    writeRole("role-default", { memory: {} });
+    writeRole("role-optout", { memory: { recall: false } });
+    const roles = await discoverRoles(root);
+    expect(roles.get("role-optout")?.memory).toEqual({ recall: false });
+    expect(roles.get("role-default")?.memory).toEqual({});
+  });
+
+  it("retains every turn-recall mode", async () => {
+    for (const recallMode of ["auto", "always", "deterministic"]) {
+      writeRole(`role-${recallMode}`, { memory: { recall_mode: recallMode } });
+    }
+    const roles = await discoverRoles(root);
+    for (const recallMode of ["auto", "always", "deterministic"]) {
+      expect(roles.get(`role-${recallMode}`)?.memory).toEqual({ recall_mode: recallMode });
+    }
+  });
+
   const invalid: Array<[string, unknown, string]> = [
     ["boolean block", false, "memory must be an object"],
     ["null block", null, "memory must be an object"],
@@ -58,6 +84,11 @@ describe("role memory configuration", () => {
     ["null limit", { max_inject: null }, "memory.max_inject"],
     ["invalid relevance", { min_relevance: "urgent" }, "memory.min_relevance"],
     ["invalid scope", { scope: "all" }, "memory.scope"],
+    ["string session_focus", { session_focus: "yes" }, "memory.session_focus"],
+    ["string recall", { recall: "yes" }, "memory.recall"],
+    ["invalid recall mode", { recall_mode: "sometimes" }, "memory.recall_mode"],
+    ["numeric recall mode", { recall_mode: 1 }, "memory.recall_mode"],
+    ["removed checkpoint field", { checkpoint: true }, "memory.checkpoint"],
     ["unknown field", { injection: false }, "memory.injection"],
   ];
 

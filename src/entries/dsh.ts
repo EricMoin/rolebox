@@ -112,6 +112,9 @@ import { BROWSE_DEFAULT_VIEWPORT } from "../browse/tool-helpers.ts";
 import { resolveDshSessionContext, type DshContextOptions } from "../platform/adapters/dsh/session-context.ts";
 import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
 import { createDshMemoryContext, DSH_MEMORY_WORKFLOW_TOOLS, type DshMemoryAgent } from "../platform/adapters/dsh/memory-context.ts";
+import { createDshSessionFocus } from "../platform/adapters/dsh/session-focus.ts";
+import { createDshMemoryRecall } from "../platform/adapters/dsh/memory-recall.ts";
+import { installDshMemoryScout, type DshMemoryScoutLlm } from "../platform/adapters/dsh/memory-scout.ts";
 import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/system-prompt.ts";
 import {
   createDshSkillProviderFactory,
@@ -599,6 +602,34 @@ interface DshLlmRuntimeLike {
    * `index.d.ts:234`). Only `id` is read.
    */
   listProviders(): ReadonlyArray<{ id: string }>;
+  /**
+   * One-shot streaming call (`LlmRuntime.stream(GenerateOptions)`). Probed
+   * separately: it is the seam the memory query scout consumes, and a host
+   * without it keeps deterministic-only turn recall. Left `unknown` here
+   * because the scout's request type is its own structural subset — see
+   * {@link DshMemoryScoutLlm}.
+   */
+  stream?: unknown;
+}
+
+/**
+ * The probed llm service plus the `stream` seam the memory scout needs. The
+ * runtime probe only requires `listProviders`, so the scout narrows on the
+ * function before installing; the cast is a checked downcast of that probe.
+ */
+interface DshScoutLlmService extends DshMemoryScoutLlm {
+  listProviders(): ReadonlyArray<{ id: string }>;
+}
+
+/**
+ * Narrow the probed llm runtime to the scout's one-shot stream seam.
+ *
+ * @param llm - The probed llm service (or `undefined` when absent).
+ * @returns The service when it exposes `stream`, else `undefined`.
+ */
+function scoutLlmOf(llm: DshLlmRuntimeLike | undefined): DshScoutLlmService | undefined {
+  if (llm === undefined || typeof llm.stream !== "function") return undefined;
+  return llm as DshScoutLlmService;
 }
 
 /**
@@ -1461,6 +1492,24 @@ export async function apply(
   const memoryContext = createDshMemoryContext(contextOptions);
   const computerContext = createDshComputerContext(contextOptions);
   const browseContext = createDshBrowseContext(contextOptions);
+  // Session focus: dsh compacts a long session by replacing older surface
+  // history with one model-written summary (`compaction/summary`, the same
+  // engine behind `/compact`). The summary stays in the session log — rolebox
+  // never stores or re-injects it. Instead the provider renders a bounded
+  // `## Session focus` block around the ONE memory entry the agent curates for
+  // the session, and asks for a refresh when a compaction is newer than that
+  // entry. It subscribes to nothing and writes nothing, so there is no
+  // teardown.
+  const sessionFocus = createDshSessionFocus({ context: contextOptions });
+  // Turn recall: the session-start `## Available memory` table goes stale as a
+  // session grows. This provider searches the memory store with the prompt the
+  // current step is working on and renders a bounded `## Relevant memory`
+  // block (ids, content, citation instruction) once per message. The pre-step
+  // listener installed below notes that message (the log does not hold it
+  // yet); it falls back to the session log's newest user-authored message. It
+  // writes nothing and caches per prompt key, so there is no teardown here —
+  // the handoff listener's disposer goes into `promptDisposers`.
+  const memoryRecall = createDshMemoryRecall({ context: contextOptions });
   // Spawn-time context injection: rolebox's `system-transform` hook (which
   // injects the role's dynamic context — available functions, memory — into
   // the agent prompt) has no dsh extension point and is a documented no-op
@@ -1670,6 +1719,23 @@ export async function apply(
   // webServer seam above. The adapter's registry disposers are collected
   // into the fiber disposer below via `promptDisposers`.
   const promptDisposers: Array<() => void> = [];
+  // Turn recall's prompt handoff, plus its optional one-shot query scout. The
+  // agent loop claims a step's user message out of the inbox BEFORE it appends
+  // it to the session log, so the `agent/pre-step` payload is the only place
+  // the step's own prompt exists at context-refresh time — including the FIRST
+  // turn's. The listener is therefore ALWAYS installed with the recall
+  // adapter: it notes that message for the same step's `## Relevant memory`
+  // render, and, when the probed llm service exposes `stream`, also runs one
+  // bounded query extraction on the step's route before admission. The scout
+  // is fail-open (timeout/abort/parse failure yields no offer and the step
+  // proceeds unchanged) and writes no memory. The disposer releases the
+  // listener with the fiber.
+  const scoutLlm = scoutLlmOf(llm);
+  promptDisposers.push(installDshMemoryScout(ctx, {
+    context: contextOptions,
+    recall: memoryRecall,
+    ...(scoutLlm === undefined ? {} : { llm: scoutLlm }),
+  }));
   let rolePromptWired = false;
   const systemPromptRegistry = probeSystemPrompt(ctx);
   if (systemPromptRegistry) {
@@ -1695,6 +1761,8 @@ export async function apply(
           return memoryContext.render(agent && typeof agent === "object" ? agent as DshMemoryAgent
             : { id: context.sessionID ?? context.sessionId });
         },
+        recallContext: context => memoryRecall.render(context),
+        focusContext: context => sessionFocus.render(context),
       });
       promptAdapter.register(systemPromptRegistry);
       promptDisposers.push(() => promptAdapter.dispose());

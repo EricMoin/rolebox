@@ -1,7 +1,14 @@
 /**
- * Registers active-role instructions, available functions and live memory context
- * with the DSH prompt service. Memory uses the caller's session workspace and
- * role identity; its provider opens and closes a synchronous store per refresh.
+ * Registers active-role instructions, available functions, live memory context,
+ * turn-scoped relevant-memory recall and the agent-curated session-focus block
+ * with the DSH prompt service.
+ * Memory uses the caller's session workspace and role identity; its provider
+ * opens and closes a synchronous store per refresh. Contributions: the
+ * `rolebox:role` section (order 50), `rolebox:context` (order 0),
+ * `rolebox:recall` (order 5), `rolebox:memory` (order 10),
+ * `rolebox:focus` (order 15), `rolebox:computer` (order 20) and
+ * `rolebox:browse` (order 30) — each registered only when its provider is
+ * supplied.
  */
 
 import { buildAvailableFunctionsBlock } from "../../../prompt/builder.ts";
@@ -73,6 +80,10 @@ export interface DshSystemPromptAdapterOptions {
   computerContext?: (ctx: DshSystemPromptContext) => string;
   /** The browse workflow block for the tools this session actually registered. */
   browseContext?: (ctx: DshSystemPromptContext) => string;
+  /** Memories retrieved from the session's latest user prompt, per turn. */
+  recallContext?: (ctx: DshSystemPromptContext) => string;
+  /** The agent-curated session-focus block for a compacted session. */
+  focusContext?: (ctx: DshSystemPromptContext) => string;
   /** Graph workers receive their target role through the dispatch prompt. */
   isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry holding all resolved agent definitions (roles + subagents). */
@@ -103,8 +114,10 @@ export class DshSystemPromptAdapter {
   private readonly directory: string;
   private readonly isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   private readonly memoryContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly recallContext?: (ctx: DshSystemPromptContext) => string;
   private readonly computerContext?: (ctx: DshSystemPromptContext) => string;
   private readonly browseContext?: (ctx: DshSystemPromptContext) => string;
+  private readonly focusContext?: (ctx: DshSystemPromptContext) => string;
   /** Registry disposers returned by `section()`/`context()` — released by `dispose()`. */
   private readonly disposers: Array<() => void> = [];
   private readonly _log;
@@ -119,8 +132,10 @@ export class DshSystemPromptAdapter {
     this.directory = options.directory;
     this.isGraphWorker = options.isGraphWorker;
     this.memoryContext = options.memoryContext;
+    this.recallContext = options.recallContext;
     this.computerContext = options.computerContext;
     this.browseContext = options.browseContext;
+    this.focusContext = options.focusContext;
     this._log = createSubLogger("dsh-system-prompt");
   }
 
@@ -156,12 +171,28 @@ export class DshSystemPromptAdapter {
         text: (ctx) => this.isGraphWorker?.(ctx) ? "" : buildContextBlock(ctx, this.activeRole, this.roleFunctionsMap),
       }),
     );
+    if (this.recallContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:recall",
+        order: 5,
+        interpolate: false,
+        text: this.recallContext,
+      }));
+    }
     if (this.memoryContext) {
       this.disposers.push(registry.context({
         name: "rolebox:memory",
         order: 10,
         interpolate: false,
         text: this.memoryContext,
+      }));
+    }
+    if (this.focusContext) {
+      this.disposers.push(registry.context({
+        name: "rolebox:focus",
+        order: 15,
+        interpolate: false,
+        text: this.focusContext,
       }));
     }
     if (this.computerContext) {

@@ -75,7 +75,7 @@ export function createMemoryRecallTool() {
   return defineTool({
     description:
       "Search workspace and current-role memories before repeating research, choosing an approach, or writing a memory. " +
-      "Use concrete keywords in the full-text query. Markdown returns ranked previews. Read full content before relying on a result: " +
+      "Use concrete keywords in the full-text query; Chinese (Han) runs are matched as overlapping 2-character bigrams, so a short term finds it inside a longer phrase. Markdown returns ranked previews. Read full content before relying on a result: " +
       "use format=json, or memory_read(id) when available and authorized. An empty result is not proof that no relevant memory exists.",
     args: {
       query: z.string().min(1).describe("Keywords or an FTS query; invalid FTS syntax falls back to literal terms that must all match"),

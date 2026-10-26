@@ -7,6 +7,7 @@ import { createSubLogger } from "../logger.ts";
 import { logEvent } from "../log/index.ts";
 import type { MemoryEntry, MemorySummary } from "../types.ts";
 import { ensureMemorySchema } from "./schema.ts";
+import { memorySearchText } from "./normalize.ts";
 import { searchMemories, type MemorySearchOptions } from "./search.ts";
 import { memoryVisibility } from "./visibility.ts";
 
@@ -88,8 +89,8 @@ export class MemoryStore {
 
     const doWrite = this.db.transaction((): string => {
       this.db.run(
-        `INSERT INTO memories (id, scope, role_id, category, title, content, tags, relevance, created_at, updated_at, session_id, source_sessions)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO memories (id, scope, role_id, category, title, content, tags, relevance, created_at, updated_at, session_id, source_sessions, search_text)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         entry.scope,
         entry.role_id,
@@ -102,6 +103,7 @@ export class MemoryStore {
         now,
         entry.session_id,
         JSON.stringify(entry.source_sessions ?? []),
+        memorySearchText({ title: entry.title, content: entry.content, tags: entry.tags }),
       );
       return id;
     });
@@ -123,7 +125,7 @@ export class MemoryStore {
       if (!row) return null;
 
       return {
-        ...row,
+        ...withoutSearchText(row),
         tags: parseJsonArray(row.tags),
         source_sessions: parseJsonArray(row.source_sessions),
         access_count: Number(row.access_count),
@@ -175,6 +177,15 @@ export class MemoryStore {
       if (fields.source_sessions !== undefined) {
         sets.push("source_sessions = ?");
         params.push(JSON.stringify([...new Set([...existing.source_sessions, ...fields.source_sessions])]));
+      }
+
+      if (fields.title !== undefined || fields.content !== undefined || fields.tags !== undefined) {
+        sets.push("search_text = ?");
+        params.push(memorySearchText({
+          title: fields.title ?? existing.title,
+          content: fields.content ?? existing.content,
+          tags: fields.tags ?? existing.tags,
+        }));
       }
 
       sets.push("updated_at = ?");
@@ -334,6 +345,16 @@ export class MemoryStore {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Copy a raw row without the derived `search_text` index column, so the
+ * internal index text never leaks onto a MemoryEntry.
+ */
+function withoutSearchText(row: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...row };
+  delete copy.search_text;
+  return copy;
+}
 
 /**
  * Parse a value from SQLite as a JSON array.

@@ -1,6 +1,7 @@
 import type { DatabaseDriver } from "./db-driver.ts";
 import type { MemoryEntry } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
+import { memorySearchQuery } from "./normalize.ts";
 import { memoryVisibility } from "./visibility.ts";
 
 const log = createSubLogger("memory:search");
@@ -18,12 +19,18 @@ export interface MemorySearchOptions {
  * Full-text search across memories using FTS5 MATCH.
  * Returns full MemoryEntry[] ranked by relevance.
  * Supports optional scope and category filtering.
+ *
+ * A Han-containing query is rewritten to CJK bigram `OR` terms
+ * ({@link memorySearchQuery}) so a short term matches inside a longer run;
+ * other queries keep their explicit FTS syntax unchanged.
  */
 export function searchMemories(db: DatabaseDriver, options: MemorySearchOptions): MemoryEntry[] {
+  const matchQuery = memorySearchQuery(options.query);
+  if (matchQuery === "") return [];
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  params.push(options.query);
+  params.push(matchQuery);
 
   // Use a JOIN with the FTS table to access the `rank` column for ordering
   conditions.push("memories_fts MATCH ?");
@@ -65,7 +72,7 @@ export function searchMemories(db: DatabaseDriver, options: MemorySearchOptions)
       rows = statement.all(...params) as Record<string, unknown>[];
     }
     return rows.map((row) => ({
-      ...row,
+      ...withoutSearchText(row),
       tags: parseJsonArray(row.tags),
       source_sessions: parseJsonArray(row.source_sessions),
       access_count: Number(row.access_count),
@@ -74,6 +81,16 @@ export function searchMemories(db: DatabaseDriver, options: MemorySearchOptions)
     log.warn("memory search query failed", { query: options.query, error: String(err) });
     return [];
   }
+}
+
+/**
+ * Copy a raw row without the derived `search_text` index column, so the
+ * internal index text never leaks onto a MemoryEntry.
+ */
+function withoutSearchText(row: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...row };
+  delete copy.search_text;
+  return copy;
 }
 
 /**

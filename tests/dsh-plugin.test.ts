@@ -44,6 +44,7 @@ import { getRootLogger } from "../src/logger.ts";
 import { realpathSync } from "node:fs";
 import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
+import { MemoryStore } from "../src/memory/store.ts";
 import { DshEventBridge, mapDshEventType } from "../src/platform/adapters/dsh/event-bridge.ts";
 import {
   apply,
@@ -218,8 +219,14 @@ function createFakeCtx(
     systemPrompt?: boolean;
     /** Optional live-agent registry double (graph-notify injector seam). */
     agents?: FakeAgentRegistry;
-    /** Optional dsh llm runtime double (`ctx.llm` provider-route probe seam). */
-    llm?: { listProviders(): ReadonlyArray<{ id: string }> };
+    /**
+     * Optional dsh llm runtime double (`ctx.llm` provider-route probe seam).
+     * `stream` is the optional one-shot seam the memory query scout probes.
+     */
+    llm?: {
+      listProviders(): ReadonlyArray<{ id: string }>;
+      stream?(...args: unknown[]): unknown;
+    };
     /** Optional dsh skill-registry double (lazy skill-provider seam). */
     skills?: boolean;
     /**
@@ -612,6 +619,75 @@ async function applyTracked(
   );
   pendingDisposers.add(tracked);
   return tracked;
+}
+
+/** Seed one workspace-scoped memory entry into `<workspace>/.rolebox/memory.db`. */
+function seedWorkspaceMemory(
+  workspace: string,
+  entry: { title: string; content: string },
+): void {
+  const store = MemoryStore.open(workspace);
+  try {
+    store.write({
+      scope: "workspace",
+      role_id: "shared",
+      category: "fact",
+      title: entry.title,
+      content: entry.content,
+      tags: [],
+      relevance: "high",
+      session_id: "seed-session",
+      source_sessions: ["seed-session"],
+    });
+  } finally {
+    store.close();
+  }
+}
+
+/** The model-visible user message an `agent/pre-step` payload carries. */
+function preStepMessage(id: string, text: string): Record<string, unknown> {
+  return {
+    id,
+    role: "user",
+    source: { kind: "user" },
+    content: [{ type: "text", text }],
+  };
+}
+
+/** Async text-delta chunks for the plugin's fake `llm.stream`. */
+async function* textDeltaStream(text: string): AsyncIterable<unknown> {
+  yield { type: "text-delta", index: 0, text };
+}
+
+/**
+ * Drive every registered `agent/pre-step` listener with one claimed user
+ * message and the waterfall's `next` decision, awaiting each listener's
+ * (possibly async) result. The recorded listener type is `void`-returning even
+ * though the installed listeners are `async`, so the promise is adopted at
+ * runtime and checked as an unknown value.
+ */
+async function drivePreStep(
+  listeners: ReadonlyArray<(...args: unknown[]) => void>,
+  agent: unknown,
+  messageId: string,
+  text: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  for (const listener of listeners) {
+    const pending: void = listener(
+      {
+        agent,
+        messages: [preStepMessage(messageId, text)],
+        turn: 1,
+        step: 1,
+        signal: new AbortController().signal,
+        ...extra,
+      },
+      async () => ({ kind: "enter", messages: [] }),
+    );
+    const decision: unknown = await Promise.resolve(pending);
+    expect(decision).toEqual({ kind: "enter", messages: [] });
+  }
 }
 
 let tmpDataDir: string;
@@ -1210,9 +1286,11 @@ describe("dsh plugin apply()", () => {
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       expect(workerSections).toEqual([""]);
       // One entry per registered context contribution: rolebox:context,
-      // rolebox:memory, rolebox:computer and rolebox:browse — every one of
-      // them renders "" for a graph worker, whose prompt is composed elsewhere.
-      expect(workerContexts).toEqual(["", "", "", ""]);
+      // rolebox:recall, rolebox:memory, rolebox:focus, rolebox:computer and
+      // rolebox:browse — every one of them renders "" for a graph worker, whose
+      // prompt is composed elsewhere (the recall and focus providers skip graph
+      // workers outright).
+      expect(workerContexts).toEqual(["", "", "", "", "", ""]);
       expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
     } finally {
       disposer?.();
@@ -1945,6 +2023,101 @@ describe("dsh plugin apply()", () => {
     disposer();
   });
 
+  // ── turn recall prompt handoff and query scout (agent/pre-step) ────────────
+  // The agent loop claims a step's user message out of the inbox BEFORE it
+  // appends it to the session log, so the `agent/pre-step` payload is the only
+  // place the step's prompt exists at context-refresh time. The listener is
+  // installed even without an llm: it notes that message for the recall
+  // render, and only the optional scout call needs a stream.
+
+  it("hands the current turn's prompt to recall without an llm and disposes the listener", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const workspace = join(tmpDir, "workspace-handoff");
+    mkdirSync(workspace, { recursive: true });
+    seedWorkspaceMemory(workspace, {
+      title: "Deployment migration",
+      content: "Run the migration before restarting.",
+    });
+
+    const { ctx, listeners, contexts } = createFakeCtx({ systemPrompt: true });
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const preStep = [...(listeners.get("agent/pre-step") ?? [])];
+    expect(preStep.length).toBeGreaterThan(0);
+
+    const sessionId = "session-handoff";
+    const agent = {
+      id: sessionId,
+      session: { id: sessionId, header: { cwd: workspace }, events: [], inheritedEventCount: 0 },
+    };
+    const recall = contexts.find((entry) => entry.name === "rolebox:recall");
+    expect(recall).toBeDefined();
+    // The first turn's message is not in the session log yet.
+    expect(recall?.text({ agent })).toBe("");
+
+    await drivePreStep(preStep, agent, "message-1", "deployment migration");
+
+    // The handoff made the SAME step's render see the admitted message.
+    expect(recall?.text({ agent })).toContain("Run the migration before restarting.");
+
+    disposer();
+    expect(listeners.get("agent/pre-step") ?? []).toHaveLength(0);
+  });
+
+  it("scouts with a stream-capable llm and merges its queries into the same step's recall", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const workspace = join(tmpDir, "workspace-scout");
+    mkdirSync(workspace, { recursive: true });
+    seedWorkspaceMemory(workspace, {
+      title: "Deployment migration",
+      content: "Run the migration before restarting.",
+    });
+    seedWorkspaceMemory(workspace, {
+      title: "Release rollout",
+      content: "Release rollout checklist.",
+    });
+    // `auto` scouts only when the store is large AND the deterministic search
+    // is weak; pad it with unrelated entries and match one weak prompt.
+    for (let index = 0; index < 20; index += 1) {
+      seedWorkspaceMemory(workspace, {
+        title: `Misc note ${index}`,
+        content: `Unrelated workspace content number ${index}.`,
+      });
+    }
+
+    const requests: Array<{ provider: unknown; model: unknown }> = [];
+    const { ctx, listeners, contexts } = createFakeCtx({
+      systemPrompt: true,
+      llm: {
+        listProviders: () => [],
+        stream: (options: unknown) => {
+          const request = options as { provider?: unknown; model?: unknown };
+          requests.push({ provider: request.provider, model: request.model });
+          return textDeltaStream('{"queries": ["release rollout"]}');
+        },
+      },
+    });
+    const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+
+    const sessionId = "session-scout";
+    const agent = {
+      id: sessionId,
+      session: { id: sessionId, header: { cwd: workspace }, events: [], inheritedEventCount: 0 },
+    };
+    const recall = contexts.find((entry) => entry.name === "rolebox:recall");
+    expect(recall).toBeDefined();
+
+    await drivePreStep(listeners.get("agent/pre-step") ?? [], agent, "message-1", "deployment migration", {
+      modelSelection: { provider: "example-provider", model: "example-model" },
+    });
+
+    expect(requests).toEqual([{ provider: "example-provider", model: "example-model" }]);
+    const rendered = recall?.text({ agent }) ?? "";
+    expect(rendered).toContain("Run the migration before restarting.");
+    expect(rendered).toContain("Release rollout checklist.");
+
+    disposer();
+  });
+
   it("disposer cleans up tool registrations and hook listeners", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools, listeners } = createFakeCtx();
@@ -2352,9 +2525,16 @@ describe("dsh plugin apply()", () => {
       expect(sections[0].name).toBe("rolebox:role");
       expect(sections[0].order).toBe(50);
       expect(typeof sections[0].text).toBe("function");
-      expect(contexts).toHaveLength(4);
-      expect(contexts[1].name).toBe("rolebox:memory");
+      expect(contexts).toHaveLength(6);
       expect(contexts[0].name).toBe("rolebox:context");
+      expect(contexts[1].name).toBe("rolebox:recall");
+      expect(contexts[1].order).toBe(5);
+      expect(contexts[1].interpolate).toBe(false);
+      expect(contexts[2].name).toBe("rolebox:memory");
+      expect(contexts[2].order).toBe(10);
+      expect(contexts[3].name).toBe("rolebox:focus");
+      expect(contexts[3].order).toBe(15);
+      expect(contexts[3].interpolate).toBe(false);
       expect(contexts[0].order).toBe(0);
       expect(typeof contexts[0].text).toBe("function");
 
@@ -2386,19 +2566,22 @@ describe("dsh plugin apply()", () => {
       expect(
         sections[0].text({ agent: { id: sessionId }, sessionID: sessionId }),
       ).toBe("## Role instructions\n\nYou are a test role.");
-      const memory = contexts[1].text({ agent: { id: sessionId } });
+      const memory = contexts[2].text({ agent: { id: sessionId } });
       expect(memory).toContain("## Memory workflow");
       expect(memory).toContain("memory_read");
       expect(memory).toContain("explicitly requests session consolidation");
       expect(memory).toContain("session_list");
       expect(memory).toContain("session_read");
-      const computer = contexts[2].text({ agent: { id: sessionId } });
-      expect(contexts[2].name).toBe("rolebox:computer");
+      // The fake session store resolves no session for this id, so the focus
+      // contribution is registered but renders nothing without a workspace.
+      expect(contexts[3].text({ agent: { id: sessionId } })).toBe("");
+      const computer = contexts[4].text({ agent: { id: sessionId } });
+      expect(contexts[4].name).toBe("rolebox:computer");
       expect(computer).toContain("computer_permissions");
       expect(computer).toContain("computer_screenshot");
-      const browse = contexts[3].text({ agent: { id: sessionId } });
-      expect(contexts[3].name).toBe("rolebox:browse");
-      expect(contexts[3].order).toBe(30);
+      const browse = contexts[5].text({ agent: { id: sessionId } });
+      expect(contexts[5].name).toBe("rolebox:browse");
+      expect(contexts[5].order).toBe(30);
       expect(browse).toContain("browse_snapshot");
       expect(browse).toContain("browse_open");
 

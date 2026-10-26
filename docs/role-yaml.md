@@ -35,12 +35,15 @@ functions:                    # Additional functions beyond built-in defaults (m
 disable_functions:            # Remove specific built-in functions
   - execute
 
-# Memory summaries (see Persistent memory)
+# Memory summaries, DSH turn recall and DSH session focus (see Persistent memory)
 memory:
   inject: true
   max_inject: 10
   min_relevance: medium
   scope: both
+  session_focus: true         # DSH only; default: true
+  recall: true                # DSH only; default: true
+  recall_mode: auto           # DSH only; auto | always | deterministic
 
 # References (explicit declarations — auto-discovery needs no config)
 references:
@@ -97,6 +100,8 @@ tools:
 ## Persistent memory
 
 `memory` controls the summaries included in the system prompt. All fields are optional: `inject` defaults to `true`, `max_inject` to `10` (allowed range `0`–`100`), `min_relevance` to `medium` (`low`, `medium`, or `high`), and `scope` to `both` (`role`, `workspace`, or `both`). Inline subagents inherit the parent block unless they declare their own.
+
+`recall` controls the DSH per-turn `## Relevant memory` block built from the latest user prompt; `session_focus` controls the DSH session-focus block. Both default to `true`. `recall_mode` selects the turn-recall query tier: `auto` (default) adds the one-shot LLM query scout only when workspace memory has at least 20 entries and the deterministic search finds fewer than two, `always` scouts every new human prompt, and `deterministic` never does.
 
 Setting `inject: false` or `max_inject: 0` turns off automatic summaries while keeping tool-aware memory workflow guidance. Tool permissions still apply; DSH graph workers need an explicit memory tool grant. In ordinary OpenCode and Pi sessions, `functions: [memory]` makes the optional consolidation function available. In DSH, request consolidation directly; its function listing does not activate `|memory|` instructions. See [Persistent memory](memory.md) for tool usage, role visibility, and DSH behavior.
 
