@@ -1,32 +1,4 @@
-/**
- * node-tool-grants — the v3 node field `tools?: string[]` (plan §3.3 / A21).
- *
- * THE CLAIM THIS FILE PROVES. A declared graph node may be granted HOST tools
- * beyond the two-tool worker baseline, declared in the v3 graph declaration; an
- * undeclared node keeps exactly today's restriction (default deny). The grant is
- * resolved from the HOST's own binding of the executing node and is added to the
- * baseline only for that node's worker, so a declarer or an unrelated session is
- * unaffected.
- *
- * WHAT IS COVERED, AND HOW:
- *   (a) the FRONT-END: `tools: ["computer_*"]` is accepted (trimmed, unique,
- *       sorted) and the closed grammar refuses an unknown key, a blank entry, a
- *       non-string entry, more than 32 entries, an empty array and a non-array;
- *   (b) the DEFAULT: a node that declares nothing is refused a computer tool,
- *       asserted THROUGH the shipped face (`OutcomeHost.bindTools`);
- *   (c) the GRANT: a node that declares `computer_*` may call a `computer_`
- *       tool while every other name stays refused; an exact declared name
- *       admits exactly that name;
- *   (d) the NON-WORKER: the declaring session and an unrelated session are
- *       unaffected by the boundary;
- *   (e) the PLAN: the compiled and PERSISTED plan carries the field for the
- *       nodes that declared it and carries nothing for the others.
- *
- * The behaviour cases drive the shipped assembly over a real store — the same
- * `createGraphToolSet` + `OutcomeHost` + `bindTools` the dsh and Pi entries
- * call — and the two synthetic host tools stand in for the computer-use tools
- * another module owns (they are FIXTURES here, never imports of that module).
- */
+/** Node restrictions select inherited host tools without widening graph control access. */
 
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync } from "node:fs";
@@ -150,7 +122,7 @@ describe("the v3 node `tools` grammar", () => {
     ]);
   });
 
-  it("keeps an absent field ABSENT, which is what the baseline default rests on", () => {
+  it("preserves an absent field so workers inherit parent task tools", () => {
     const parsed = parseGraphDeclarationV3(declarationWith({}));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -167,9 +139,8 @@ describe("the v3 node `tools` grammar", () => {
     expect(tooMany.errors[0].path).toBe("$.nodes[0].tools");
   });
 
-  it("refuses an empty array, a blank entry, a non-string entry and a non-array", () => {
+  it("refuses a blank entry, a non-string entry and a non-array", () => {
     const cases: Array<{ readonly extra: Record<string, unknown>; readonly code: DeclarationV3ErrorCode; readonly path: string }> = [
-      { extra: { tools: [] }, code: "invalid-value", path: "$.nodes[0].tools" },
       { extra: { tools: ["   "] }, code: "invalid-value", path: "$.nodes[0].tools[0]" },
       { extra: { tools: ["computer_*", 7] }, code: "wrong-type", path: "$.nodes[0].tools[1]" },
       { extra: { tools: "computer_*" }, code: "wrong-type", path: "$.nodes[0].tools" },
@@ -228,9 +199,9 @@ describe("the compiled plan carries the declared grant", () => {
     const reread: unknown = JSON.parse(JSON.stringify(record));
     expect(declaredNodeTools(reread, "alpha")).toEqual(["computer_*"]);
     expect(declaredNodeTools(reread, "beta")).toBeUndefined();
-    expect(declaredNodeTools(reread, "missing")).toBeUndefined();
-    expect(declaredNodeTools(null, "alpha")).toBeUndefined();
-    expect(declaredNodeTools({ nodes: [{ id: "alpha", tools: [1] }] }, "alpha")).toBeUndefined();
+    expect(declaredNodeTools(reread, "missing")).toEqual([]);
+    expect(declaredNodeTools(null, "alpha")).toEqual([]);
+    expect(declaredNodeTools({ nodes: [{ id: "alpha", tools: [1] }] }, "alpha")).toEqual([]);
   });
 });
 
@@ -247,8 +218,8 @@ describe("the declared-grant matcher", () => {
     expect(declaredToolAllows("*", "computer_click")).toBe(false);
   });
 
-  it("is fail-closed for an absent or empty grant", () => {
-    expect(declaredToolsAllow("computer_click", undefined)).toBe(false);
+  it("inherits task tools by default and honors an explicit empty restriction", () => {
+    expect(declaredToolsAllow("computer_click", undefined)).toBe(true);
     expect(declaredToolsAllow("computer_click", [])).toBe(false);
     expect(declaredToolsAllow("computer_click", ["computer_*"])).toBe(true);
   });
@@ -258,7 +229,7 @@ describe("the declared-grant matcher", () => {
 
 /**
  * Three entry nodes in one graph: `alpha` declares the prefix `computer_*`,
- * `beta` declares nothing (the baseline default), and `gamma` declares the
+ * `beta` inherits task tools, and `gamma` declares the
  * exact name `computer_screenshot`. One start dispatches all three, so one host
  * holds three bound workers — the population a widened grant could leak across.
  */
@@ -381,7 +352,7 @@ interface WorkerToolRefusal {
 }
 
 describe("a dispatched worker's granted host tools", () => {
-  it("(c) allows a declared prefix or exact name, and (b) refuses an undeclared node", async () => {
+  it("narrows inherited tools by prefix or exact name and inherits them when omitted", async () => {
     const fixture = await openGrantFixture();
     try {
       expect(fixture.dispatched.map((request) => request.attemptId)).toEqual([
@@ -404,14 +375,10 @@ describe("a dispatched worker's granted host tools", () => {
       expect(refused.tool).toBe("browser_open");
       expect(refused.granted_tools).toEqual([...WORKER_GRANTED_GRAPH_TOOLS, "computer_*"]);
 
-      // (b) beta declares NOTHING: the baseline default stands, and the refusal
-      // carries exactly the baseline grant.
-      const baseline = JSON.parse(
-        await fixture.call("computer_screenshot", childSessionOf("beta#2"), "agent.beta"),
-      ) as WorkerToolRefusal;
-      expect(baseline.refused).toBe(true);
-      expect(baseline.code).toBe(WORKER_TOOL_FORBIDDEN_CODE);
-      expect(baseline.granted_tools).toEqual([...WORKER_GRANTED_GRAPH_TOOLS]);
+      expect(await fixture.call("computer_screenshot", childSessionOf("beta#2"), "agent.beta"))
+        .toBe("computer_screenshot ran");
+      expect(await fixture.call("browser_open", childSessionOf("beta#2"), "agent.beta"))
+        .toBe("browser_open ran");
 
       // gamma declares the EXACT name: it admits that name and no sibling.
       expect(await fixture.call("computer_screenshot", childSessionOf("gamma#3"), "agent.gamma"))
@@ -475,10 +442,8 @@ describe("a dispatched worker's granted host tools", () => {
         await second.call("browser_open", childSessionOf("alpha#1"), "agent.alpha"),
       ) as WorkerToolRefusal;
       expect(refused.refused).toBe(true);
-      const baseline = JSON.parse(
-        await second.call("computer_screenshot", childSessionOf("beta#2"), "agent.beta"),
-      ) as WorkerToolRefusal;
-      expect(baseline.refused).toBe(true);
+      expect(await second.call("computer_screenshot", childSessionOf("beta#2"), "agent.beta"))
+        .toBe("computer_screenshot ran");
     } finally {
       second.host.close();
     }
@@ -618,10 +583,10 @@ describe("the worker prompt states the node's grant", () => {
     expect(block).toContain("graph_worker_exec");
   });
 
-  it("states the baseline restriction when the field is absent or empty", () => {
+  it("distinguishes inherited tools from an explicit empty restriction", () => {
     for (const declared of [undefined, [] as string[]]) {
       const block = buildGraphWorkerToolGrantBlock(declared);
-      expect(block).toContain("declares no extra host tools");
+      expect(block).toContain(declared === undefined ? "inherits the parent's authorized task tools" : "restricts additional task tools to an empty set");
       expect(block).toContain("worker baseline");
       expect(block).not.toContain("computer_*");
     }
@@ -642,9 +607,9 @@ describe("the worker prompt states the node's grant", () => {
       boundary,
       ["computer_*"],
     );
-    expect(declared).toContain("this node declares the host tools computer_*");
+    expect(declared).toContain("this node restricts inherited host tools to computer_*");
     expect(declared).toContain(
-      "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares.",
+      "worker baseline entry points are graph_submit_outcome, graph_worker_exec",
     );
     const baseline = prepareDshGraphWorkerPrompt(
       [WORKER_ROLE],
@@ -653,8 +618,9 @@ describe("the worker prompt states the node's grant", () => {
       workspace,
       boundary,
     );
-    expect(baseline).toContain("this node declares no extra host tools");
-    expect(baseline).toContain("Your tools are graph_worker_exec and graph_submit_outcome.");
+    expect(baseline).toContain("this node inherits the parent's authorized task tools");
+    expect(baseline).toContain("worker baseline entry points are graph_submit_outcome, graph_worker_exec");
+    expect(baseline).not.toContain("only tools you may call");
   });
 });
 

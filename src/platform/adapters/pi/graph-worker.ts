@@ -60,7 +60,8 @@ export function registerPiGraphWorker(pi: PiWorkerApi): boolean {
       });
     }
     const runtime = createWorkerToolSession({
-      presentation: config.presentation ?? { mode: "native" }, allowedTools: [...config.baseline, ...config.grants],
+      presentation: config.presentation ?? { mode: "native" },
+      allowedTools: () => pi.getAllTools!().filter(tool => piWorkerToolAllowed(tool.name, config)).map(tool => tool.name),
       registry: {
         list: () => pi.getAllTools!().map(tool => ({ name: tool.name, description: tool.description,
           inputSchema: tool.parameters, source: proxies.has(tool.name) ? "rolebox" : "pi" })),

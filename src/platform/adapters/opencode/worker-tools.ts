@@ -1,13 +1,12 @@
 import type { OutcomeHost } from "../../../graph/host/outcome-host.ts";
 import type { OutcomeDispatchRequest } from "../../../graph/outcome/dispatch-effects.ts";
-import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
+import { declaredToolsAllow, workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import { workerPresentationTools } from "../../../graph/domain/worker-tools.ts";
 import type { CanonicalToolDef } from "../../types.ts";
 import { createWorkerCapabilityTools, createWorkerToolSession, type WorkerToolDescriptor } from "../../worker-tools/index.ts";
 
 const BASELINE = ["bash", "graph_submit_outcome"];
-const forbidden = (name: string) => (name.startsWith("graph_") && name !== "graph_submit_outcome") ||
-  name.startsWith("dispatch_") || name.startsWith("loop_") || name.startsWith("team_") || name === "task_retry";
+type WorkerRequest = Pick<OutcomeDispatchRequest, "declaredTools" | "inheritedTools" | "toolPresentation">;
 
 export interface OpencodeWorkerToolOptions {
   host(): OutcomeHost | undefined;
@@ -21,25 +20,27 @@ export interface OpencodeWorkerToolOptions {
 
 export class OpencodeWorkerTools {
   readonly #options: OpencodeWorkerToolOptions;
-  readonly #bound = new Map<string, Pick<OutcomeDispatchRequest, "declaredTools" | "toolPresentation">>();
+  readonly #bound = new Map<string, WorkerRequest>();
   readonly #active = new Map<string, Set<string>>();
   readonly #catalogs = new Map<string, readonly WorkerToolDescriptor[]>();
+  readonly inheritedTools?: (sessionID: string) => readonly string[] | undefined;
 
-  constructor(options: OpencodeWorkerToolOptions) { this.#options = options; }
+  constructor(options: OpencodeWorkerToolOptions) {
+    this.#options = options;
+    if (options.supportsPresentation !== false) this.inheritedTools = sessionID => this.#catalogs.get(sessionID)
+      ?.map(tool => tool.name).filter(name => declaredToolsAllow(name, undefined));
+  }
 
 
   bind(sessionID: string, request: OutcomeDispatchRequest): void {
-    this.#bound.set(sessionID, { declaredTools: request.declaredTools, toolPresentation: request.toolPresentation });
+    this.#bound.set(sessionID, { declaredTools: request.declaredTools, inheritedTools: request.inheritedTools, toolPresentation: request.toolPresentation });
     this.#active.set(sessionID, new Set(request.toolPresentation?.preload ?? []));
   }
 
   #request(sessionID: string) {
-    const bound = this.#bound.get(sessionID);
-    if (bound) return bound;
     const host = this.#options.host();
     const principal = host?.workerPrincipalOf(sessionID);
-    return principal ? { declaredTools: host?.workerDeclaredToolsOf(principal),
-      toolPresentation: host?.workerToolPresentationOf(principal) } : undefined;
+    return principal ? host?.workerToolGrantOf(principal) : this.#bound.get(sessionID);
   }
 
   async #catalog(): Promise<readonly WorkerToolDescriptor[]> {
@@ -58,20 +59,20 @@ export class OpencodeWorkerTools {
     this.#validateCatalog(request, await this.#catalog());
   }
 
-  #validateCatalog(request: Pick<OutcomeDispatchRequest, "declaredTools" | "toolPresentation">, catalog: readonly WorkerToolDescriptor[]): void {
+  #validateCatalog(request: WorkerRequest, catalog: readonly WorkerToolDescriptor[]): void {
     for (const grant of request.declaredTools ?? []) {
-      if (!catalog.some(tool => !forbidden(tool.name) && declaredToolsAllow(tool.name, [grant]))) {
+      if (!catalog.some(tool => workerTaskToolAllowed(tool.name, [grant], request.inheritedTools))) {
         throw new Error(`OpenCode worker grant ${JSON.stringify(grant)} matches no registered tool`);
       }
     }
     const presentation = request.toolPresentation;
     for (const name of presentation?.preload ?? []) {
-      if (!catalog.some(tool => tool.name === name) || !declaredToolsAllow(name, request.declaredTools)) {
+      if (!catalog.some(tool => tool.name === name) || !workerTaskToolAllowed(name, request.declaredTools, request.inheritedTools)) {
         throw new Error(`OpenCode worker preload ${JSON.stringify(name)} is unavailable or unauthorized`);
       }
     }
     if (presentation?.mode === "discover" && !this.#options.nativeActivation) {
-      const unsupported = catalog.filter(tool => declaredToolsAllow(tool.name, request.declaredTools) &&
+      const unsupported = catalog.filter(tool => workerTaskToolAllowed(tool.name, request.declaredTools, request.inheritedTools) &&
         !BASELINE.includes(tool.name) && !presentation.preload?.includes(tool.name));
       if (unsupported.length) throw new Error(`OpenCode cannot broker these tools while preserving host permissions: ${unsupported.map(tool => tool.name).join(", ")}. Use native presentation${this.#options.nativeActivation ? " or discover to activate native calls" : ", or preload external tools in discover mode"}.`);
     }
@@ -81,16 +82,16 @@ export class OpencodeWorkerTools {
     const request = this.#request(sessionID);
     if (!request) return;
     if (workerPresentationTools(request.toolPresentation).includes(name as never)) return;
-    if (forbidden(name) || (request.toolPresentation !== undefined && !BASELINE.includes(name) && !declaredToolsAllow(name, request.declaredTools))) {
+    if (!BASELINE.includes(name) && !workerTaskToolAllowed(name, request.declaredTools, request.inheritedTools)) {
       throw new Error(`Tool ${name} is not granted to this graph worker`);
     }
   }
 
   filterContext(sessionID: string, tools: Record<string, { description: string; input: unknown }>): void {
     const request = this.#request(sessionID);
-    if (!request) return;
     const available = Object.entries(tools).map(([name, tool]) => ({ name, description: tool.description, inputSchema: tool.input, source: "opencode" }));
     this.#catalogs.set(sessionID, available);
+    if (!request) return;
     if (this.#options.contextCatalogOnly && request.toolPresentation !== undefined) {
       try { this.#validateCatalog(request, available); } catch (error) {
         for (const name of Object.keys(tools)) delete tools[name];
@@ -112,7 +113,7 @@ export class OpencodeWorkerTools {
       const request = this.#request(context.sessionID);
       if (!request?.toolPresentation) return undefined;
       return createWorkerToolSession({ presentation: request.toolPresentation,
-        allowedTools: request.declaredTools ?? [],
+        allowedTools: request.inheritedTools?.filter(name => declaredToolsAllow(name, request.declaredTools)) ?? request.declaredTools,
         registry: {
           list: async () => {
             const contextCatalog = this.#catalogs.get(context.sessionID);

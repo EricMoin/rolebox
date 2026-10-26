@@ -319,6 +319,8 @@ function createFakeCtx(
   const workerGuards: Array<Parameters<NonNullable<DshPluginContext["tools"]["guard"]>>[0]> = [];
   const tools = {
     registeredTools,
+    schemas: () => registeredTools.map(({ name, description, parameters }) => ({ name, description, parameters })),
+    execute: async () => ({ content: [] }),
     guard: (callback: Parameters<NonNullable<DshPluginContext["tools"]["guard"]>>[0]) => {
       workerGuards.push(callback);
       return () => { workerGuards.splice(workerGuards.indexOf(callback), 1); };
@@ -1084,7 +1086,7 @@ describe("dsh plugin apply()", () => {
       const worker = {
         id,
         session: { id, events: [] },
-        ctx: { tools: { presentAs: () => () => {} } },
+        ctx: { tools: { presentAs: () => () => {}, register: (_definition: DshToolDefinition) => () => {} } },
       };
       workers.push(worker);
       fixture.ctx.emit("agent/created", { agent: worker });
@@ -1159,7 +1161,8 @@ describe("dsh plugin apply()", () => {
         check({ name: "graph_control", agent: workers[shooterIndex] })?.includes("Graph workers may only"))!;
       expect(guard).toBeDefined();
       expect(guard({ name: "computer_screenshot", agent: workers[shooterIndex] })).toBeUndefined();
-      expect(guard({ name: "computer_screenshot", agent: workers[plainIndex] })).toContain("Graph workers may only");
+      expect(guard({ name: "computer_screenshot", agent: workers[plainIndex] })).toBeUndefined();
+      expect(guard({ name: "web_search", agent: workers[shooterIndex] })).toContain("Graph workers may only");
       expect(guard({ name: "graph_control", agent: workers[shooterIndex] })).toContain("Graph workers may only");
 
       const requestOf = (node: string): DshSubagentStartRequest =>
@@ -1182,16 +1185,16 @@ describe("dsh plugin apply()", () => {
       // (a) THE DELIVERED PROMPT states the grant: the declared node is told
       // about its host tools, the undeclared node is told the baseline.
       expect(promptText(shooter)).toContain(
-        "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares.",
+        "worker baseline entry points are graph_submit_outcome, graph_worker_exec",
       );
-      expect(promptText(shooter)).toContain("this node declares the host tools computer_*");
-      expect(promptText(shooter)).not.toContain("declares no extra host tools");
+      expect(promptText(shooter)).toContain("this node restricts inherited host tools to computer_*");
+      expect(promptText(shooter)).not.toContain("inherits the parent's authorized task tools");
       // The composed worker prompt reaches the child ahead of the plan prompt
       // and the attempt handoff.
       expect(promptText(shooter)).toContain("shoot");
-      expect(promptText(plain)).toContain("declares no extra host tools");
+      expect(promptText(plain)).toContain("inherits the parent's authorized task tools");
       expect(promptText(plain)).toContain(
-        "Your tools are graph_worker_exec and graph_submit_outcome.",
+        "worker baseline entry points are graph_submit_outcome, graph_worker_exec",
       );
       // ONE start, TWO nodes: the stated grant is per attempt, which a static
       // option could not express.
@@ -1243,7 +1246,9 @@ describe("dsh plugin apply()", () => {
       // the worker's start scope.
       runtime.startActivation = async (spec) => {
         requests.push({ ...spec.request, label: spec.label, signal: spec.signal });
-        const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: { presentAs: () => () => {} } } };
+        const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: {
+          presentAs: () => () => {}, register: (_definition: DshToolDefinition) => () => {},
+        } } };
         fixture.ctx.emit("agent/created", { agent: worker });
         workerSections.push(...fixture.sections.map(section => section.text({ agent: { id: "worker" } })));
         workerContexts.push(...fixture.contexts.map(context => context.text({ agent: { id: "worker" } })));

@@ -1,6 +1,6 @@
 import { buildComputerContext } from "../../../computer/context.ts";
 import { COMPUTER_TOOL_NAMES, decideComputerToolGrant } from "../../../loader/computer-grants.ts";
-import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import { resolveDshSessionContext, type DshContextAgent, type DshContextOptions } from "./session-context.ts";
 import type { DshWorkerStartupTools } from "./graph-worker.ts";
 
@@ -12,7 +12,7 @@ export function createDshComputerContext(options: DshContextOptions) {
     const actual = (name: string) => names?.get(name) ?? name;
     const tools = COMPUTER_TOOL_NAMES.filter(name => registered.has(actual(name)) &&
       decideComputerToolGrant({ toolName: name, roleId: requestedRoleId, roles: options.roles() }).granted &&
-      (worker === undefined || declaredToolsAllow(actual(name), worker.declaredTools)));
+      (worker === undefined || workerTaskToolAllowed(actual(name), worker.declaredTools, worker.inheritedTools)));
     return buildComputerContext({ tools, presentation: worker?.toolPresentation?.mode, discoverInvocation: "call" })
       .replace(/\bcomputer_[a-z_]+\b/g, actual);
   };

@@ -151,21 +151,7 @@ export interface NodeDeclarationV3 {
    * never reads "the latest result of some type" at run time.
    */
   inputs?: InputDeclarationV3[];
-  /**
-   * EXTRA HOST TOOLS this node's worker may use beyond the worker baseline.
-   *
-   * The grammar is: `tools?: string[]` — extra host tool names or
-   * trailing-star prefixes (for example `computer_*`) this node may use beyond
-   * the worker baseline `graph_submit_outcome` and `graph_worker_exec`;
-   * absent means baseline only. Entries are trimmed, unique and sorted by the
-   * front-end, so two spellings of one grant compare equal.
-   *
-   * A DECLARED GRANT IS A NARROWING OF WHAT THE NODE MAY DO, never a widening of
-   * the graph face: these are HOST tools (a browser, a device, a network
-   * client), while the graph face a dispatched worker holds — and the refusal
-   * every other graph tool receives — is unchanged. An undeclared node keeps
-   * exactly the baseline restriction.
-   */
+  /** Optional restriction on inherited task tools. Absence inherits; an empty list keeps worker entry points only. */
   tools?: string[];
   /** How authorized host tools are presented to this worker. */
   toolPresentation?: WorkerToolPresentation;

@@ -263,27 +263,7 @@ class ControlStoppedError extends Error {
   }
 }
 
-/**
- * CARRY THE EXECUTING NODE'S DECLARED HOST-TOOL GRANT ON EVERY DISPATCH REQUEST.
- *
- * THE DEFECT THIS CLOSES. The v3 node field `tools?: string[]` is plan
- * provenance: the node the request names declares it, and the plan that decides
- * the request is THIS runtime's plan. Resolving it here — at the ONE seam every
- * request leaves the runtime through — is what makes the grant reach the
- * delivery on EVERY path, without a second resolution that could disagree: the
- * entry dispatch ({@link OutcomeGraphRuntime.start}), a successor armed by an
- * acceptance, a re-execution, and the RESTART RECONCILIATION the recovery
- * collaborator performs are all `create` calls through this adapter, so none of
- * them can deliver an attempt with the grant silently dropped.
- *
- * FAIL CLOSED, AND TOTAL. The grant is read with
- * {@link declaredNodeTools}, which answers `undefined` for a node that declares
- * nothing AND for every malformed or unreadable value; an `undefined` answer
- * leaves the request EXACTLY as it was, so a dispatch that cannot substantiate a
- * grant delivers today's baseline restriction. Nothing here widens a grant: the
- * only source is the executing plan, and the only value attached is the plan's
- * own normalized declaration.
- */
+/** Resolve the node restriction on every dispatch path, including recovery, from the executing plan. */
 function withDeclaredNodeTools(
   dispatch: NormalizedOutcomeDispatch | undefined,
   plan: CompiledPlan,

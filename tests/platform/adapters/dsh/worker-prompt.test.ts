@@ -80,12 +80,19 @@ function filesUnder(root: string): string[] {
 }
 
 describe("DSH graph worker prompt", () => {
-  it("names the enabled capability entry points even without extra host grants", () => {
+  it.each(["discover", "code"] as const)("explains %s tools without restricting all work to the command tool", mode => {
     const f = fixture();
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED,
-      undefined, { mode: "code" });
-    expect(prompt).toContain("Your tool entry points are graph_worker_exec, graph_submit_outcome, graph_worker_tools, graph_worker_code");
-    expect(prompt).not.toContain("Your tools are graph_worker_exec and graph_submit_outcome.");
+    for (const declaredTools of [undefined, ["docs_*"]]) {
+      const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED,
+        declaredTools, { mode });
+      expect(prompt).toContain("worker baseline entry points are graph_submit_outcome, graph_worker_exec, graph_worker_tools");
+      expect(prompt).toContain("list/search authorized host tools");
+      expect(prompt).toContain("Use authorized host tools when they fit the task");
+      expect(prompt).not.toContain("Your tools are");
+      expect(prompt).not.toContain("only tools you may call");
+      expect(prompt).not.toContain("for all file reads");
+      if (mode === "code") expect(prompt).toContain("graph_worker_code to call them from JavaScript");
+    }
   });
 
   it("omits inactive function instructions that the worker cannot activate", () => {

@@ -1,20 +1,4 @@
-/**
- * The dsh worker allow-list — the start request's `toolFilter.allow` for ONE
- * attempt (item 1b).
- *
- * THE CLAIM THIS FILE PROVES. The list is the baseline PLUS the executing
- * node's declared entries INTERSECTED with the tools the host actually
- * registered, so a declared name nobody registered can never be named to
- * `tools.restrict()` (which THROWS on an unknown name and would abort the
- * start), and no input can produce a name the node did not declare. Every
- * uncertainty answers the narrower side: an absent declaration, an empty
- * candidate set and a throwing predicate all leave the baseline alone.
- *
- * STRENGTH: pure-function level. The resolver is the shipped one; the "host"
- * here is a set membership test, and the delivery that calls it is covered
- * end-to-end in `tests/dsh-plugin.test.ts` (which drives the real entry, the
- * real graph start and the fake subagent runtime).
- */
+/** Worker allow-lists intersect the inherited catalog, explicit node restriction and registered host tools. */
 
 import { describe, expect, it } from "vitest";
 
@@ -31,7 +15,14 @@ function registry(names: readonly string[]): (name: string) => boolean {
 }
 
 describe("the per-request worker allow-list", () => {
-  it("answers exactly the REGISTERED baseline for an absent declaration", () => {
+  it("cannot expand inherited permissions with an explicit name or prefix", () => {
+    expect(resolveDshWorkerToolAllowList({ baseline: BASELINE, declared: ["computer_*", "web_search"],
+      inherited: ["computer_screenshot"], candidates: ["computer_screenshot", "computer_click", "web_search", "dispatch"],
+      isRegistered: registry([...BASELINE, "computer_screenshot", "computer_click", "web_search", "dispatch"]),
+    })).toEqual([...BASELINE, "computer_screenshot"]);
+  });
+
+  it("inherits registered task candidates for an absent restriction", () => {
     const allow = resolveDshWorkerToolAllowList({
       baseline: BASELINE,
       candidates: ["computer_screenshot"],
@@ -39,7 +30,7 @@ describe("the per-request worker allow-list", () => {
     });
     // graph_worker_exec is not registered here, so it is NOT named: a name the
     // host does not resolve would make restrict() throw and abort the start.
-    expect(allow).toEqual(["graph_submit_outcome"]);
+    expect(allow).toEqual(["graph_submit_outcome", "computer_screenshot"]);
   });
 
   it("adds a declared prefix's REGISTERED names, in candidate order", () => {

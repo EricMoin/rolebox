@@ -19,36 +19,26 @@ export function buildGraphWorkerFunctionBlock(role: WorkerRole): string {
   return buildFunctionBlock(role.functions.filter(fn => active.has(fn.name)));
 }
 
-/**
- * STATE THE NODE'S TOOL GRANT IN THE WORKER'S OWN PROMPT.
- *
- * The grant is the v3 node field `tools?: string[]` — extra HOST tool names or
- * trailing-star prefixes (for example `computer_*`) beyond the worker baseline
- * `graph_submit_outcome` and `graph_worker_exec`. The boundary enforces exactly
- * this grant; the prompt states it so a worker does not spend a call learning it.
- *
- * ABSENT AND EMPTY ARE THE BASELINE, and the wording says so rather than
- * promising a list the host did not resolve: a worker told it has more tools
- * than it does is worse than one told the truth.
- */
+/** Tool visibility is separate from inherited authorization; a node may only narrow task tools. */
 export function buildGraphWorkerToolGrantBlock(
   declaredTools: readonly string[] | undefined,
   presentation?: WorkerToolPresentation,
   baseline: readonly string[] = ["graph_submit_outcome", "graph_worker_exec"],
 ): string {
-  const entries = [...baseline, ...workerPresentationTools(presentation)].join(" and ");
+  const entries = [...baseline, ...workerPresentationTools(presentation)].join(", ");
   const guidance = presentation?.mode === "discover"
-    ? " Use graph_worker_tools to list/search authorized capabilities and describe a tool to load its schema before calling it. Discovery cannot grant additional permissions."
+    ? " Use graph_worker_tools to list/search authorized host tools and describe a tool to load its schema before calling its exposed native entry point. Discovery cannot grant additional permissions."
     : presentation?.mode === "code"
-      ? " Use graph_worker_tools to inspect authorized tool schemas, then graph_worker_code to call them from JavaScript. Submit the outcome separately using graph_submit_outcome."
+      ? " Use graph_worker_tools to list/search authorized host tools and inspect their schemas, then graph_worker_code to call them from JavaScript. Discovery cannot grant additional permissions. Submit the outcome separately using graph_submit_outcome."
       : "";
-  if (declaredTools === undefined || declaredTools.length === 0) {
-    return "Tool grant: this node declares no extra host tools, so the worker baseline stands — " +
-      entries + " are the only tools you may call, and a call to any other tool is refused." + guidance;
-  }
-  return "Tool grant: beyond the worker baseline " + entries + ", this node declares the host tools " +
-    declaredTools.join(", ") +
-    ". A name ending in * grants every host tool whose name starts with that prefix; a call to any tool this node does not declare is refused. Graph control tools remain unavailable." + guidance;
+  const grant = declaredTools === undefined
+    ? "this node inherits the parent's authorized task tools."
+    : declaredTools.length === 0
+      ? "this node explicitly restricts additional task tools to an empty set."
+      : "this node restricts inherited host tools to " + declaredTools.join(", ") +
+        ". A name ending in * selects inherited host tools whose names start with that prefix.";
+  return "Tool grant: worker baseline entry points are " + entries + "; " + grant +
+    " Use authorized host tools when they fit the task. Node tools can only narrow inherited permissions. Graph control tools and recursive agent dispatch remain unavailable." + guidance;
 }
 
 export function buildGraphWorkerRolePrompt(

@@ -16,14 +16,15 @@ export class WorkerToolSession {
   constructor(options: WorkerToolSessionOptions) {
     this.#options = {
       ...options,
-      allowedTools: typeof options.allowedTools === "function" ? options.allowedTools : [...options.allowedTools],
+      allowedTools: typeof options.allowedTools === "function" || options.allowedTools === undefined
+        ? options.allowedTools : [...options.allowedTools],
     };
     this.presentation = Object.freeze({ ...options.presentation,
       ...(options.presentation.preload ? { preload: Object.freeze([...options.presentation.preload]) } : {}),
     });
   }
 
-  async #grants(): Promise<readonly string[]> {
+  async #grants(): Promise<readonly string[] | undefined> {
     return typeof this.#options.allowedTools === "function" ? this.#options.allowedTools() : this.#options.allowedTools;
   }
 

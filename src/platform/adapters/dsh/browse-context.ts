@@ -1,6 +1,6 @@
 import { buildBrowseContext } from "../../../browse/context.ts";
 import { BROWSE_TOOL_NAMES, decideBrowseToolGrant } from "../../../loader/browse-grants.ts";
-import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import { resolveDshSessionContext, type DshContextAgent, type DshContextOptions } from "./session-context.ts";
 import type { DshWorkerStartupTools } from "./graph-worker.ts";
 
@@ -22,7 +22,7 @@ export function createDshBrowseContext(options: DshContextOptions) {
     const actual = (name: string) => names?.get(name) ?? name;
     const tools = BROWSE_TOOL_NAMES.filter(name => registered.has(actual(name)) &&
       decideBrowseToolGrant({ toolName: name, roleId: requestedRoleId, roles: options.roles() }).granted &&
-      (worker === undefined || declaredToolsAllow(actual(name), worker.declaredTools)));
+      (worker === undefined || workerTaskToolAllowed(actual(name), worker.declaredTools, worker.inheritedTools)));
     return buildBrowseContext({ tools, presentation: worker?.toolPresentation?.mode, discoverInvocation: "call" })
       .replace(/\bbrowse_[a-z_]+\b/g, actual);
   };

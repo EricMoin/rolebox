@@ -6,7 +6,7 @@ const keys = ["ROLEBOX_GRAPH_WORKER_ENDPOINT", "ROLEBOX_GRAPH_WORKER_TOKEN", "RO
 const original = new Map(keys.map(key => [key, process.env[key]]));
 afterEach(() => { for (const [key, value] of original) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
 
-function setup(mode: "native" | "discover" | "code") {
+function setup(mode: "native" | "discover" | "code", options: { grants?: readonly string[]; inheritedTools?: readonly string[] } = { grants: ["mcp_*"] }) {
   const tools = new Map<string, any>(["bash", "mcp_lookup", "unrelated", "graph_status"].map(name => [name, { name, description: name, parameters: { type: "object" } }]));
   const hooks = new Map<string, (...args: any[]) => any>();
   let active: string[] = [];
@@ -14,7 +14,7 @@ function setup(mode: "native" | "discover" | "code") {
   process.env.ROLEBOX_GRAPH_WORKER_ENDPOINT = "http://127.0.0.1:9/invoke";
   process.env.ROLEBOX_GRAPH_WORKER_TOKEN = "fixture-token";
   delete process.env.ROLEBOX_GRAPH_WORKER_ROUTE;
-  process.env.ROLEBOX_GRAPH_WORKER_TOOLS = JSON.stringify({ ...piWorkerToolConfig(["bash", "unrelated"], ["mcp_*"], { mode: "native" }, {}), presentation: { mode } });
+  process.env.ROLEBOX_GRAPH_WORKER_TOOLS = JSON.stringify({ ...piWorkerToolConfig(["bash", "unrelated"], options.grants, { mode: "native" }, {}, options.inheritedTools), presentation: { mode } });
   registerPiGraphWorker({
     registerTool(tool: any) { tools.set(tool.name, tool); },
     getAllTools: () => [...tools.values()],
@@ -26,6 +26,26 @@ function setup(mode: "native" | "discover" | "code") {
 }
 
 describe("Pi graph tool presentation", () => {
+  it("discovers inherited task tools without loading their schemas until described", async () => {
+    const fixture = setup("discover", { inheritedTools: ["mcp_lookup", "unrelated"] });
+    fixture.start();
+    expect(fixture.active()).not.toContain("mcp_lookup");
+    const result = await fixture.tools.get("graph_worker_tools").execute("describe", { action: "describe", name: "mcp_lookup" },
+      new AbortController().signal, () => {}, { sessionID: "worker" });
+    expect(JSON.stringify(result)).toContain("mcp_lookup");
+    expect(fixture.active()).toContain("mcp_lookup");
+    expect(fixture.hooks.get("tool_call")!({ toolName: "unrelated" })).toBeUndefined();
+    for (const toolName of ["graph_control", "dispatch", "rb_dispatch", "team_create", "task", "task_retry"]) {
+      expect(fixture.hooks.get("tool_call")!({ toolName })).toMatchObject({ block: true });
+    }
+  });
+
+  it("keeps explicit tools within parent authorization", () => {
+    const fixture = setup("native", { grants: ["mcp_*"], inheritedTools: ["unrelated"] });
+    expect(fixture.start).toThrow("matches no loaded tool");
+    expect(fixture.active()).toEqual([]);
+  });
+
   it("uses the child's loaded custom/MCP catalog and limits native calls to the node grant", () => {
     const fixture = setup("native");
     fixture.start();

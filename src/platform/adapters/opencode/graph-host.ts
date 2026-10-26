@@ -86,6 +86,7 @@
  */
 
 import { GraphApplication } from "../../../graph/application/graph-application.ts";
+import type { WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
 import {
   buildAttemptDeliveryPrompt,
   type DeliveredInputView,
@@ -135,7 +136,7 @@ export interface OpencodeGraphSessionReading {
 
 export interface OpencodeGraphSessionPort {
   /** Start one session for a worker. `null` means the platform created none. */
-  create(input: { directory: string; agent?: string }): Promise<{ id: string } | null>;
+  create(input: { directory: string; agent?: string; parentID?: string }): Promise<{ id: string } | null>;
   /** true = the prompt was handed to the session. */
   prompt(input: { sessionID: string; text: string; agent?: string }): Promise<boolean>;
   /** Resolves when the session's current turn finishes. Absent on a host with no such call. */
@@ -218,8 +219,8 @@ export function opencodeGraphSessionPort(
     create: async (input) => {
       const created = await client.create(
         input.agent === undefined || input.agent === ""
-          ? { directory: input.directory }
-          : { directory: input.directory, agent: input.agent },
+          ? { directory: input.directory, ...(input.parentID === undefined ? {} : { parentID: input.parentID }) }
+          : { directory: input.directory, agent: input.agent, ...(input.parentID === undefined ? {} : { parentID: input.parentID }) },
       );
       return created === null ? null : { id: created.id };
     },
@@ -258,6 +259,7 @@ export interface OpencodeGraphHostOptions {
   readonly workerTools?: {
     prepare(request: OutcomeDispatchRequest): Promise<void>;
     bind(sessionID: string, request: OutcomeDispatchRequest): void;
+    inheritedTools?(sessionID: string): readonly string[] | undefined;
   };
   /** The workspace whose artifacts an attempt produces and whose agent it runs as. */
   readonly workspaceDir: string;
@@ -284,6 +286,7 @@ export interface OpencodeGraphHostOptions {
   readonly sessionEndFeed?: boolean;
   /** Resolves the acting agent for a session, as the entries' own resolver does. */
   readonly getEffectiveAgent?: (sessionID?: string) => string;
+  readonly defaultWorkerToolPresentation?: WorkerToolPresentation;
 }
 
 /** One session end this host recorded, and the platform's own reason for it. */
@@ -365,10 +368,10 @@ export class OpencodeGraphHost {
   private readonly deliver: HostDispatchDelivery = (
     request,
     effect,
-    _invocation,
+    invocation,
     inputView,
   ) => {
-    void this.start(request, effect, inputView);
+    void this.start(request, effect, inputView, invocation?.sessionId);
   };
 
   /**
@@ -421,6 +424,11 @@ export class OpencodeGraphHost {
       storeRoot: options.storeRoot,
       env: options.env ?? process.env,
       deliver: this.deliver,
+      ...(options.workerTools?.inheritedTools === undefined ? {} : {
+        workerTaskToolsOf: (invocation: { sessionId?: string }) => invocation.sessionId === undefined
+          ? [] : options.workerTools!.inheritedTools!(invocation.sessionId),
+      }),
+      defaultWorkerToolPresentation: options.defaultWorkerToolPresentation,
       // D9 IS NOT DECLARED, for the reason dsh and Pi give
       // (src/entries/pi.ts:860-875): a dispatched worker is a SEPARATE session,
       // so its submission arrives from its own session and the declaring
@@ -540,6 +548,7 @@ export class OpencodeGraphHost {
     request: OutcomeDispatchRequest,
     effect: OutcomeDispatchEffectKey,
     inputView?: DeliveredInputView,
+    parentID?: string,
   ): Promise<void> {
     try { await this.options.workerTools?.prepare(request); }
     catch (error) { this.failDelivery(request, effect, "worker tool configuration refused before session creation", error); return; }
@@ -552,8 +561,8 @@ export class OpencodeGraphHost {
     try {
       session = await this.session.create(
         request.agent === undefined || request.agent === ""
-          ? { directory: this.options.workspaceDir }
-          : { directory: this.options.workspaceDir, agent: request.agent },
+          ? { directory: this.options.workspaceDir, ...(parentID === undefined ? {} : { parentID }) }
+          : { directory: this.options.workspaceDir, agent: request.agent, ...(parentID === undefined ? {} : { parentID }) },
       );
     } catch (error) {
       this.failDelivery(request, effect, "session create failed", error);

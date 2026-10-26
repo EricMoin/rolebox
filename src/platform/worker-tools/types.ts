@@ -19,7 +19,7 @@ export interface WorkerToolRegistry {
 
 export interface WorkerToolSessionOptions {
   registry: WorkerToolRegistry;
-  allowedTools: readonly string[] | (() => Awaitable<readonly string[]>);
+  allowedTools: readonly string[] | undefined | (() => Awaitable<readonly string[] | undefined>);
   presentation: WorkerToolPresentation;
   signal?: AbortSignal;
   activate?: (descriptors: readonly WorkerToolDescriptor[]) => Awaitable<void>;

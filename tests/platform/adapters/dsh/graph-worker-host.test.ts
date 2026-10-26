@@ -41,7 +41,7 @@ describe("DSH worker grant routing", () => {
     expect(host.workerPrincipalOf("worker")).toBe(principal);
     expect(host.workerToolGrantOf!(principal)).toEqual({ declaredTools: ["docs_*"] });
     hosts.length = 0;
-    expect(host.workerToolGrantOf!(principal)).toEqual({});
+    expect(host.workerToolGrantOf!(principal)).toEqual({ declaredTools: [] });
   });
 
   it("checks every identity field when routing a principal it did not resolve", () => {
@@ -49,7 +49,7 @@ describe("DSH worker grant routing", () => {
       workerPrincipalOf: () => principal,
       workerToolGrantOf: () => ({ declaredTools: ["docs_*"] }),
     }]);
-    expect(host.workerToolGrantOf!({ ...principal, executionId: "different" })).toEqual({});
+    expect(host.workerToolGrantOf!({ ...principal, executionId: "different" })).toEqual({ declaredTools: [] });
     expect(host.workerToolGrantOf!({ ...principal })).toEqual({ declaredTools: ["docs_*"] });
   });
 });

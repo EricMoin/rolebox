@@ -447,24 +447,7 @@ function readNode(
  */
 const MAX_NODE_TOOLS = 32;
 
-/**
- * Read the OPTIONAL node `tools` list — the grammar's `tools?: string[]`: extra
- * host tool names, or trailing-star prefixes such as `computer_*`, this node's
- * worker may use beyond the worker baseline `graph_submit_outcome` and
- * `graph_worker_exec`.
- *
- * ABSENT IS THE BASELINE, and the reader preserves that absence as absence
- * rather than inventing an empty grant, so every declaration written before
- * this field existed keeps exactly the baseline restriction. An EMPTY array is
- * refused instead of read as "no tools": a field that says nothing is a
- * misspelling of the absence, not a grant.
- *
- * The retained value is the grant as the boundary matches on it: each entry is
- * TRIMMED to the name it names, then de-duplicated and sorted in code-unit
- * order, so two spellings of one node compare equal. The refusals are the
- * grammar's own — a non-array, a non-string entry, a blank entry, more than
- * {@link MAX_NODE_TOOLS} entries, and the empty array above.
- */
+/** Keep absence distinct from an explicit empty restriction; normalize names before computing the plan revision. */
 function readNodeTools(
   value: unknown,
   path: string,
@@ -476,16 +459,6 @@ function readNodeTools(
       issue(
         "wrong-type",
         `${path} must be an array of host tool names, received ${describeValue(value)}`,
-        path,
-      ),
-    );
-    return undefined;
-  }
-  if (value.length === 0) {
-    log.issues.push(
-      issue(
-        "invalid-value",
-        `${path} must name at least one tool when present — omit the field to keep the worker baseline`,
         path,
       ),
     );

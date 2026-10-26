@@ -12,6 +12,27 @@ const context: CanonicalToolContext = {
 };
 
 describe("OpenCode graph tool presentation", () => {
+  it("inherits the parent's context catalog and activates schemas only after discovery", async () => {
+    const controller = new OpencodeWorkerTools({ host: () => undefined, nativeActivation: true, contextCatalogOnly: true,
+      catalog: async () => [] });
+    controller.filterContext("parent", { mcp_lookup: { description: "MCP lookup", input: {} },
+      dispatch: { description: "Dispatch", input: {} } });
+    const { declaredTools: _restriction, ...inherited } = request("discover");
+    controller.bind("worker", { ...inherited, inheritedTools: controller.inheritedTools!("parent") });
+    const fresh = () => Object.fromEntries(["bash", "graph_worker_tools", "mcp_lookup", "private_lookup", "dispatch", "rb_graph_control"]
+      .map(name => [name, { description: name, input: {} }]));
+    const first = fresh(); controller.filterContext("worker", first);
+    expect(Object.keys(first)).toEqual(["bash", "graph_worker_tools"]);
+    const described = await controller.createTools().graph_worker_tools!.execute({ action: "describe", name: "mcp_lookup" }, context);
+    expect(JSON.stringify(described)).toContain("mcp_lookup");
+    const next = fresh(); controller.filterContext("worker", next);
+    expect(next.mcp_lookup).toBeDefined();
+    expect(next.private_lookup).toBeUndefined();
+    for (const name of ["private_lookup", "dispatch", "rb_graph_control"]) {
+      expect(() => controller.assertAllowed("worker", name)).toThrow("not granted");
+    }
+  });
+
   it("withholds independent team execution from graph workers even with wildcard grants", () => {
     const controller = new OpencodeWorkerTools({ host: () => undefined, nativeActivation: true, catalog: async () => [] });
     const { toolPresentation: _presentation, ...legacy } = request("native", ["*"]);

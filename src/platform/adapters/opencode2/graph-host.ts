@@ -116,6 +116,7 @@ export function openOpencode2GraphHost(options: {
   workerTools?: OpencodeGraphHostOptions["workerTools"];
 }): OpencodeGraphHost {
   const hostOptions: OpencodeGraphHostOptions = {
+    defaultWorkerToolPresentation: { mode: "discover" },
     workspaceDir: options.directory,
     ...(options.workerTools === undefined ? {} : { workerTools: options.workerTools }),
     storeRoot: graphStoreRoot(getDataDir(), options.directory),

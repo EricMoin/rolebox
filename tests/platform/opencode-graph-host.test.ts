@@ -549,7 +549,7 @@ describe("opencode graph host — the declared-graph tool face", () => {
     expect(delivery.text).toContain("solo");
     // The delivery asked the port to create the worker in THIS workspace, and
     // the session the platform named is the one the host confirmed.
-    expect(session.createCalls).toEqual([{ directory: workspace, agent: "agent.worker" }]);
+    expect(session.createCalls).toEqual([{ directory: workspace, agent: "agent.worker", parentID: "session-parent" }]);
     expect(host.observeExecution({ executionId: delivery.workerSession }).kind).toBe("running");
 
     // The worker session submits its own attempt's outcome, carrying back the

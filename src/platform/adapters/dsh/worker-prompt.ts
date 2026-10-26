@@ -7,7 +7,7 @@ import {
   findGraphWorkerRole,
 } from "../../../prompt/graph-worker.ts";
 import type { ResolvedRole } from "../../../types.ts";
-import { workerPresentationTools, type WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
+import type { WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
 import type { DshWorkerCommandBoundary } from "./graph-worker.ts";
 import { disposableEnvironmentHint, getSystem } from "../../system/index.ts";
 
@@ -95,10 +95,8 @@ function workspaceBlock(workspace: string): string {
  * validated here — a blank or relative path is a caller defect, never a reason to
  * fall back to this process's own working directory.
  *
- * `declaredTools` is the EXECUTING NODE's own grant (the v3 `tools?: string[]`
- * beyond the baseline), which the caller resolves for THIS attempt. Omitting it
- * — or passing the empty list — states the baseline restriction, which is what
- * an undeclared node keeps.
+ * `declaredTools` restricts inherited task tools for this node. Absence inherits
+ * the parent's authorization; an empty list retains worker entry points only.
  */
 export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, workspace: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[], presentation?: WorkerToolPresentation): string {
   if (typeof workspace !== "string" || workspace.trim().length === 0 || !isAbsolute(workspace)) {
@@ -133,18 +131,9 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
       ...ref,
       filePath: deliver(ref.filePath, referenceRoot(ref.filePath)),
     }));
-    // The sentence names the tools the boundary will actually grant: the two
-    // baseline entries alone when the node declares none, and the node's
-    // declared host tools as well when it does.
-    const capabilityTools = workerPresentationTools(presentation);
-    const toolsSentence = capabilityTools.length
-      ? `Your tool entry points are graph_worker_exec, graph_submit_outcome, ${capabilityTools.join(", ")}, and any host tools currently exposed by this presentation. `
-      : declaredTools === undefined || declaredTools.length === 0
-        ? "Your tools are graph_worker_exec and graph_submit_outcome. "
-        : "Your tools are graph_worker_exec, graph_submit_outcome and the host tools this node declares. ";
     return [
       "You are a graph worker assigned to the role below. Complete only the dispatched task. " +
-        toolsSentence + "Use graph_worker_exec for all file reads, commands and permitted edits. " +
+        "Use graph_worker_exec to run commands, read files and make permitted edits. " +
         "You cannot dispatch agents or inspect/control graph state. Resource paths below are private copies for this attempt. " +
         "Submit only a declared outcome using the host handoff; an accepted submission settles your attempt. A prose answer does not settle it. " +
         "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +

@@ -25,6 +25,15 @@ function declaration(extra: Record<string, unknown> = {}): unknown {
 }
 
 describe("worker tool presentation declaration", () => {
+  it("allows preloading inherited task tools and rejects orchestration entries", () => {
+    expect(parseGraphDeclarationV3(declaration({ tools: undefined,
+      toolPresentation: { mode: "discover", preload: ["docs_read"] } })).ok).toBe(true);
+    for (const name of ["graph_control", "rb_graph_control", "dispatch", "rb_dispatch", "task", "team_create"]) {
+      expect(parseGraphDeclarationV3(declaration({ tools: undefined,
+        toolPresentation: { mode: "discover", preload: [name] } })).ok).toBe(false);
+    }
+  });
+
   it("normalizes and persists presentation without changing the tool grant", () => {
     const parsed = parseGraphDeclarationV3(declaration({ toolPresentation: { mode: "discover", preload: [" docs_read ", "docs_read"] } }));
     expect(parsed.ok).toBe(true);
@@ -58,7 +67,7 @@ describe("worker tool presentation declaration", () => {
 
   it("fails closed when reading malformed stored presentation", () => {
     expect(declaredNodeToolPresentation({ nodes: [{ id: "worker", toolPresentation: { mode: "unknown" } }] }, "worker")).toBeUndefined();
-    expect(declaredNodeToolPresentation({ nodes: [{ id: "worker", toolPresentation: { mode: "code", preload: ["docs_read"] } }] }, "worker")).toBeUndefined();
+    expect(declaredNodeToolPresentation({ nodes: [{ id: "worker", tools: [], toolPresentation: { mode: "code", preload: ["docs_read"] } }] }, "worker")).toBeUndefined();
   });
 });
 

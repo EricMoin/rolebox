@@ -107,10 +107,11 @@ describe("DSH browse workflow", () => {
     expect(result).not.toContain("browse_click");
     if (mode === "discover") expect(result).toContain('action="call"');
     if (mode === "code") expect(result).toContain("graph_worker_code");
-    // A worker with no declared grant browses nothing.
     f.options.worker = () => ({ agent: "parent--child" });
-    expect(f.render({ id: "worker" })).toBe("");
+    expect(f.render({ id: "worker" })).toContain("browse_open");
     f.options.worker = () => ({ agent: "parent--child", declaredTools: [] });
+    expect(f.render({ id: "worker" })).toBe("");
+    f.options.worker = () => ({ agent: "parent--child", inheritedTools: [] });
     expect(f.render({ id: "worker" })).toBe("");
   });
 

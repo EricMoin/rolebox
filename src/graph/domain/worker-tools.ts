@@ -3,6 +3,25 @@ export interface WorkerToolPresentation {
   readonly preload?: readonly string[];
 }
 
+export function isWorkerTaskTool(name: string): boolean {
+  const canonical = name.startsWith("rb_") ? name.slice(3) : name;
+  return !canonical.startsWith("graph_") && !canonical.startsWith("team_") &&
+    !canonical.startsWith("dispatch_") && !canonical.startsWith("loop_") &&
+    !["dispatch", "task", "task_retry", "session_fork"].includes(canonical);
+}
+
+export function inheritedWorkerTaskTools(names: readonly string[], policy?: Readonly<Record<string, boolean>>): readonly string[] {
+  return names.filter(name => {
+    if (!isWorkerTaskTool(name)) return false;
+    const canonical = name.startsWith("rb_") ? name.slice(3) : name;
+    const exact = policy?.[canonical];
+    if (exact !== undefined) return exact;
+    const pattern = Object.keys(policy ?? {}).filter(key => key.endsWith("*") && canonical.startsWith(key.slice(0, -1)))
+      .sort((a, b) => b.length - a.length)[0];
+    return pattern === undefined || policy?.[pattern] !== false;
+  });
+}
+
 /** Presentation changes visibility, never the node's tool grant. */
 export function normalizeWorkerToolPresentation(value: unknown): WorkerToolPresentation | undefined {
   if (value === undefined) return undefined;
@@ -39,8 +58,8 @@ export function workerPresentationTools(presentation: WorkerToolPresentation | u
 
 export function validateWorkerToolPreload(presentation: WorkerToolPresentation | undefined, tools: readonly string[] | undefined): void {
   for (const name of presentation?.preload ?? []) {
-    const granted = tools?.some(entry => entry === name ||
-      (entry.endsWith("*") && entry.length > 1 && name.startsWith(entry.slice(0, -1))));
+    const granted = isWorkerTaskTool(name) && (tools === undefined || tools.some(entry => entry === name ||
+      (entry.endsWith("*") && entry.length > 1 && name.startsWith(entry.slice(0, -1)))));
     if (!granted) throw new TypeError(`Preloaded tool ${JSON.stringify(name)} is not in the node's tools grant`);
   }
 }

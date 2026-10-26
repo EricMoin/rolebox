@@ -16,6 +16,8 @@ the available API:
 - Worker discovery and code subcalls use the host invocation pipeline, keeping
   the original agent, parent token, cancellation and step tool admission.
   Executor modules resolve through the host plugin loader.
+  The Loader is accessed inside a `ctx.inject(["loader"], ...)` child so
+  Cordis permits the loader's own service reads during plugin activation.
 - Local `startActivation` children are `continuable`. Recovery correlates both
   `one-shot` and `continuable` catalog rows by the stable dispatch label;
   duplicate matches remain ambiguous.

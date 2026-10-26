@@ -1,10 +1,11 @@
 import { createDshGraphWorkerGrantHost } from "../platform/adapters/dsh/graph-worker-host.ts";
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
-import { loadDshWorkerExecutorFactory } from "../platform/adapters/dsh/worker-executor.ts";
+import { loadDshWorkerExecutorFactory, type DshWorkerExecutorContext } from "../platform/adapters/dsh/worker-executor.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, resolveDshWorkerCommandBoundary, type DshGraphWorkerRegistry, type DshSandboxPolicyService, type DshSandboxService, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
 import { prepareDshGraphWorkerPrompt } from "../platform/adapters/dsh/worker-prompt.ts";
 import { INPUT_DELIVERY_DIR, inputConsumerDirectory } from "../graph/host/input-view.ts";
+import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
  *
@@ -409,6 +410,7 @@ export interface DshPluginContext {
    * gracefully when it is absent — headless profiles have no web server.
    */
   get(name: string): unknown;
+  inject?: DshWorkerExecutorContext["inject"];
   /** Subscribe to a cordis/dsh event (contract §2.5). */
   on(event: string, listener: (...args: unknown[]) => void): (() => void) | void;
   /** Emit a cordis/dsh event. */
@@ -2059,7 +2061,7 @@ export async function apply(
         // (`OutcomeDispatchRequest.declaredTools`). It reaches the prompt HERE —
         // the same value the derived worker face is built from below — so the
         // sentence a worker reads and the face it holds state one grant. An
-        // absent declaration stays absent and the prompt states the baseline.
+        // absent restriction stays absent and the prompt states inherited authorization.
         //
         // The attempt's materialized input view reaches the worker through the
         // attempt-delivery prompt the adapter appends after this block, so this
@@ -2093,6 +2095,7 @@ export async function apply(
           resolveDshWorkerToolAllowList({
             baseline: DSH_GRAPH_WORKER_TOOLS,
             declared: request.declaredTools,
+            inherited: request.inheritedTools,
             candidates: ctx.tools.schemas?.().map(tool => tool.name) ?? [],
             isRegistered: (name: string) => {
               try {
@@ -2197,6 +2200,13 @@ export async function apply(
       workspaceDir: workspace,
       storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
+      defaultWorkerToolPresentation: { mode: "discover" },
+      workerTaskToolsOf: invocation => {
+        const parent = invocation.sessionId ? agentRegistry?.get(invocation.sessionId) : undefined;
+        if (!parent || !ctx.tools.schemas) return [];
+        const role = resolveDshSessionContext(contextOptions, parent).role;
+        return inheritedWorkerTaskTools(ctx.tools.schemas(parent).map(tool => tool.name), role?.config.tools);
+      },
       // The registry and the credential RECORDS are durable; no credential VALUE
       // is (the vault default), because this host cannot substantiate the
       // platform boundary a durable value would need.

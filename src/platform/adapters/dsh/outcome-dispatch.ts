@@ -131,7 +131,7 @@ import type {
   HostExecutionObservationPort,
 } from "../../../graph/host/outcome-host.ts";
 import { buildAttemptDeliveryPrompt } from "../../../graph/host/delivery.ts";
-import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import type { DeliveredInputView } from "../../../graph/host/input-view.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { errorText } from "../../../utils/error-text.ts";
@@ -203,14 +203,14 @@ export interface DshOutcomeDeliveryOptions {
   readonly workerTools?: readonly string[];
   /**
    * THE ALLOW-LIST FOR ONE REQUEST, resolved by the entry that owns the host
-   * tool registry: the baseline PLUS the executing node's declared host tools,
+   * tool registry: the baseline plus inherited task tools within the node restriction,
    * each intersected with the tools the host actually registered
    * ({@link resolveDshWorkerToolAllowList}).
    *
    * WHY PER REQUEST. The node's declared grant rides ON the request
    * ({@link OutcomeDispatchRequest.declaredTools}), so the allow-list is a
    * property of the attempt, not of the adapter: one delivery may start a
-   * worker with `computer_*` and the next the baseline alone.
+   * worker limited to `computer_*` and the next inheriting all parent task tools.
    *
    * FAIL CLOSED ON EVERY UNCERTAINTY. An answer of `undefined`, a resolver the
    * entry did not install, and a resolver that THROWS all fall back to
@@ -285,46 +285,11 @@ export interface DshOutcomeDeliveryOptions {
   readonly loggerName?: string;
 }
 
-/**
- * THE ALLOW-LIST ONE ATTEMPT'S WORKER FACE IS DERIVED FROM.
- *
- * On dsh 0.1.x the list became `toolFilter.allow`, the child's only VISIBLE and
- * EXECUTABLE tool set. dsh 0.2.x removed the start-request tool restriction, so
- * the list no longer reaches the start call: it now feeds rolebox's own worker
- * boundary — the execution guard installed by `installDshGraphWorkerBoundary`
- * and the tool sentence in the worker prompt. It therefore has to name tools the
- * host actually resolves, and it must never name one the node did not declare.
- *
- * THREE INPUTS, ONE FAIL-CLOSED RULE:
- *
- *   - the BASELINE — the worker's delivery channel, granted unconditionally
- *     (still filtered by `isRegistered` so an unresolved name is not reported
- *     as granted);
- *   - the node's DECLARED entries, matched with the ONE matcher the worker
- *     boundary itself uses ({@link declaredToolsAllow}), so the derived face and
- *     the per-call refusal cannot disagree; that matcher never admits a name in
- *     the graph face's own reserved namespace, so a declaration cannot re-open
- *     the face through this door either;
- *   - the CANDIDATE names this host composed, each verified by `isRegistered`.
- *
- * THE INTERSECTION IS THE POINT. A declared name the host did not register is
- * not granted: it could not be called. An undeclared node, an absent declaration,
- * and a declaration whose every entry fails the intersection all produce the
- * registered baseline alone — exactly the surface this delivery had before the
- * field existed.
- *
- * AN EXACT ENTRY IS ALSO PROBED BY NAME, so a HOST-owned tool this build did not
- * compose remains grantable; a prefix entry is expanded over the candidates,
- * which is the only enumeration available without asking the registry to list
- * itself.
- *
- * TOTAL AND NARROWING: the inputs are a list and a predicate, a predicate that
- * throws answers "not registered", and no input can add a name the intersection
- * did not produce.
- */
+/** Select registered task candidates within the node restriction, retaining the worker entry points. */
 export function resolveDshWorkerToolAllowList(options: {
   readonly baseline: readonly string[];
   readonly declared?: readonly string[] | undefined;
+  readonly inherited?: readonly string[];
   readonly candidates: readonly string[];
   readonly isRegistered: (name: string) => boolean;
 }): readonly string[] {
@@ -340,15 +305,15 @@ export function resolveDshWorkerToolAllowList(options: {
     if (registered(name)) allow.add(name);
   }
   const declared = options.declared;
-  if (declared === undefined || declared.length === 0) return Object.freeze([...allow]);
+  if (declared?.length === 0) return Object.freeze([...allow]);
   for (const name of options.candidates) {
     if (allow.has(name)) continue;
-    if (declaredToolsAllow(name, declared) && registered(name)) allow.add(name);
+    if (workerTaskToolAllowed(name, declared, options.inherited) && registered(name)) allow.add(name);
   }
-  for (const entry of declared) {
+  for (const entry of declared ?? []) {
     if (typeof entry !== "string" || entry.length === 0 || entry.endsWith("*")) continue;
     if (allow.has(entry)) continue;
-    if (declaredToolsAllow(entry, declared) && registered(entry)) allow.add(entry);
+    if (workerTaskToolAllowed(entry, declared, options.inherited) && registered(entry)) allow.add(entry);
   }
   return Object.freeze([...allow]);
 }
@@ -883,8 +848,7 @@ export class DshOutcomeDelivery {
     }
 
     const controller = new AbortController();
-    // THE PER-REQUEST ALLOW-LIST (the node's declared grant, intersected with
-    // the tools this host actually registered). A resolver that THROWS or
+    // Intersect the inherited catalog, node restriction and registered tools. A resolver that THROWS or
     // answers nothing has not granted anything: the delivery falls back to the
     // static baseline rather than starting a worker under a list nobody
     // resolved. Never wider, only narrower.
@@ -904,7 +868,7 @@ export class DshOutcomeDelivery {
     // the worker's own copies, verified before this call.
     const workerPrompt = this.opts.workerPrompt?.(request, inputView);
     const deliveryText = buildAttemptDeliveryPrompt(request, inputView)
-      + (workerTools ? "\nUse graph_worker_exec for all workspace commands, file reads, edits and tests." : "");
+      + (workerTools ? "\nUse authorized task tools as needed; graph_worker_exec can run workspace commands and tests." : "");
     const baseRequest: DshSubagentStartRequest = {
       label: dispatchIdempotencyKeyOf(effect),
       prompt: [{ type: "text", text: deliveryText }],

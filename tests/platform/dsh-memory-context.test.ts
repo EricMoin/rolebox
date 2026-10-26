@@ -250,12 +250,12 @@ describe("DSH memory prompt and execution integration", () => {
     expect(f.memory.render(agent)).toContain("Worker memory");
   });
 
-  it("does not expose memory workflow or summaries when the worker has no grants", async () => {
+  it("does not expose memory workflow or summaries with an explicit empty restriction", async () => {
     const f = fixture();
     const agent = f.agent();
     f.active.set(agent.id, "role-a");
     await f.call("memory_write", { title: "Project memory", content: "Project fact", scope: "workspace" }, agent);
-    await f.start(agent, { agent: "parent--worker" });
+    await f.start(agent, { agent: "parent--worker", declaredTools: [] });
     expect(f.memory.render(agent)).toBe("");
   });
 

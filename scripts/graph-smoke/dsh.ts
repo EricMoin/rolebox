@@ -1,7 +1,8 @@
 import { approvalPolicy, controlScenarios, eventually, assertRestored, verifyHostProcessRestart } from "./scenarios.ts";
-import { existsSync, globSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, globSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { strict as assert } from "node:assert";
 import { createRequire } from "node:module";
@@ -13,10 +14,11 @@ if (process.env.DSH_SOURCE_DIR) {
     sourcePackages.set(JSON.parse(readFileSync(path, "utf8")).name, path);
   }
 }
-const hostImport = (specifier: string) => {
+const hostModulePath = (specifier: string) => {
   const source = sourcePackages.get(specifier.split("/").slice(0, 2).join("/"));
-  return import((source ? createRequire(source) : hostRequire).resolve(specifier));
+  return (source ? createRequire(source) : hostRequire).resolve(specifier);
 };
+const hostImport = (specifier: string) => import(hostModulePath(specifier));
 const hostModule = (name: string) => hostImport("@deepseek-ai/" + name);
 const { Context } = await hostModule("cordis");
 const { default: SessionStore, SessionId } = await hostModule("dsh-session");
@@ -32,10 +34,17 @@ const { default: AgentLoop } = await hostModule("dsh-agent-loop");
 const { default: SystemPrompt } = await hostModule("dsh-system-prompt");
 const { default: ToolRegistry } = await hostModule("dsh-tools");
 const nativeExecutor = ToolRegistry.prototype.setExecutor ? await hostModule("dsh-tool-executor-native") : undefined;
+const profile = nativeExecutor ? {
+  Loader: (await hostModule("cordis-plugin-loader")).default,
+  Registry: (await hostModule("dsh-agent-preset-registry")).default,
+  Preset: (await hostModule("dsh-agent-preset")).default,
+} : undefined;
 const { default: LlmService, LlmAdapter } = await hostModule("dsh-llm");
 const { default: SubagentService } = await hostModule("dsh-subagent");
 const spawn = nativeExecutor ? undefined : await hostModule("dsh-subagent-spawn-in-process");
-import * as rolebox from "../../src/entries/dsh.ts";
+import type * as DshPlugin from "../../src/entries/dsh.ts";
+const rolebox: typeof DshPlugin = await import(new URL(process.env.ROLEBOX_SMOKE_BUILT === "1"
+  ? "../../dist/entries/dsh.js" : "../../src/entries/dsh.ts", import.meta.url).href);
 import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import { graphStoreRoot } from "../../src/graph/store/schema.ts";
 import { DshOutcomeDelivery } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
@@ -141,7 +150,7 @@ try {
   process.chdir(launcher);
   writeFileSync(protectedFile, "host-state", { mode: 0o600 });
   mkdirSync(join(root, "rolebox", "smoke"), { recursive: true });
-  writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n");
+  writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n    subagents:\n      - name: Private\n        description: Private nested worker\n        prompt: Complete internal work.\n        model: example-provider/deterministic\n");
   fibers.push(ctx.plugin(SessionPersistence, { root: join(root, "sessions"), compression: "none" }));
   for (const plugin of [SessionStore, SessionProjections, FileSystem, AgentRegistry, LlmService, SystemPrompt, SubagentService]) fibers.push(ctx.plugin(plugin));
   fibers.push(ctx.plugin(SessionQuery, { path: join(root, "session-query.sqlite"), openAt: "never" }));
@@ -150,15 +159,30 @@ try {
   fibers.push(ctx.plugin(SandboxPolicy, { mode: "workspace-write", workspaceRoot: root }));
   fibers.push(ctx.plugin(ToolRegistry, nativeExecutor ? {} : { mode: "ptc" }));
   if (nativeExecutor) {
-    ctx.provide("loader", { import: hostImport });
-    fibers.push(ctx.plugin(nativeExecutor));
+    const resolution = join(root, "profile");
+    mkdirSync(join(resolution, "node_modules", "@deepseek-ai"), { recursive: true });
+    writeFileSync(join(resolution, "package.json"), '{"private":true,"type":"module"}');
+    for (const name of ["dsh-tool-executor-native", "dsh-tools"]) {
+      const target = join(resolution, "node_modules", "@deepseek-ai", name);
+      if (!existsSync(target)) symlinkSync(dirname(hostModulePath("@deepseek-ai/" + name + "/package.json")), target, process.platform === "win32" ? "junction" : "dir");
+    }
+    ctx.baseUrl = pathToFileURL(resolution).href + "/";
+    fibers.push(ctx.plugin(profile!.Loader));
   }
   fibers.push(ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 }));
   if (spawn) fibers.push(ctx.plugin(spawn, { providerName: "spawn" }));
+  if (profile) {
+    fibers.push(ctx.plugin(profile.Registry, { default: "smoke" }));
+    fibers.push(ctx.plugin(profile.Preset, { id: "smoke", plugins: [{ id: "native", name: "@deepseek-ai/dsh-tool-executor-native" }] }));
+  }
 
   let mountTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([Promise.all(fibers.map(fiber => fiber.await())), new Promise((_, reject) => {
+    await Promise.race([(async () => {
+      await Promise.all(fibers.map(fiber => fiber.await()));
+      await eventually(() => ["tools", "sessions", "subagents", ...(profile ? ["agentPresets"] : [])]
+        .every(name => ctx.get(name) !== undefined), ready => ready, "Required host services did not activate");
+    })(), new Promise((_, reject) => {
       mountTimer = setTimeout(() => reject(new Error("Host services failed to mount")), 3000);
     })]);
   } finally { clearTimeout(mountTimer); }
@@ -171,14 +195,26 @@ try {
   ctx.tools.register({ name: "custom_probe", description: "An explicitly granted worker fixture", parameters: { type: "object", properties: {} },
     output: { schema: {}, render: () => [{ type: "text", text: "capability-output" }] }, execute: async () => { capabilityProbes++; return "capability-output"; } },
   { when: () => true });
-  let dispose = await rolebox.apply(ctx as unknown as rolebox.DshPluginContext, rolebox.Config.parse({ roleboxDir: join(root, "rolebox") }));
+  const mountRolebox = async () => {
+    let installed: DshPlugin.DshPluginDisposer | undefined;
+    const fiber = ctx.plugin({ ...rolebox.default, async apply(owner: DshPlugin.DshPluginContext, config: DshPlugin.DshPluginConfig) {
+      installed = await rolebox.apply(owner, config);
+      return installed;
+    } }, { roleboxDir: join(root, "rolebox") });
+    await fiber.await();
+    assert.ok(installed, "Rolebox plugin did not activate through Cordis: " + JSON.stringify({ state: fiber.state,
+      services: Object.fromEntries(["tools", "sessions", "subagents"].map(name => [name, ctx.get(name) !== undefined])) }));
+    return Object.assign(async () => { await fiber.dispose(); }, installed);
+  };
+  let dispose = await mountRolebox();
   const parentOptions = {
-    setup: (scope: any) => { scope.tools.presentAs?.("native"); },
+    setup: async (scope: any) => { if (profile) await ctx.agentPresets.mount(scope, "smoke"); else scope.tools.presentAs("native"); },
     agentOptions: { provider: "example-provider", model: "deterministic" },
   };
   const handle = restoreRoot
     ? await ctx.agents.resume({ resumeSessionId: SessionId("dsh-parent"), ...parentOptions })
     : await ctx.agents.create({ sessionId: SessionId("dsh-parent"), meta: { cwd: root }, ...parentOptions });
+  assert.equal((await dispose.activateRole("smoke", handle.agent.id)).ok, true);
   if (restoreRoot) {
     parentAction = { tool: "graph_status", args: { scope: "all", format: "json" } };
     handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Read restored graphs." }] });
@@ -193,6 +229,13 @@ try {
   const graph = queryGraphs(graphStoreRoot(data, root)).graphs[0];
   assert.equal(graph?.graphId, "dsh.smoke", JSON.stringify(hostErrors));
   assert.equal(graph.phase, "ready");
+  parentAction = { tool: "graph_declare", args: { declaration: { version: 3, name: "dsh.private-child",
+    nodes: [{ id: "work", agent: "smoke--worker--private", prompt: "Must be refused.", outcomes: [{ id: "done" }] }], edges: [] } } };
+  handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Verify nested role boundaries." }] });
+  await handle.agent.whenIdle();
+  assert.match(String(results.get(handle.agent.id + ":graph_declare")), /not a top-level role or a direct child/);
+  assert.equal(queryGraphs(graphStoreRoot(data, root)).graphs.some(graph => graph.graphId === "dsh.private-child"), false);
+  parentAction = undefined;
   parentDeclaration = { version: 3, name: "dsh.explicit", nodes: [
     { id: "work", agent: "smoke--worker", prompt: "Produce.", outcomes: [{ id: "done" }] },
     { id: "review", agent: "smoke--worker", prompt: "Consume.", inputs: [{ from: "work", outcome: "done" }], outcomes: [{ id: "done" }] },
@@ -264,7 +307,8 @@ try {
     await handle.agent.whenIdle();
   }
   assert.equal(capabilityProbes, 2, "Native discovery and program subcalls must each execute the granted host tool");
-  const other = await ctx.agents.create({ sessionId: SessionId("dsh-other"), meta: { cwd: root }, setup: (scope: any) => { scope.tools.presentAs?.("native"); }, agentOptions: { provider: "example-provider", model: "deterministic" } });
+  const other = await ctx.agents.create({ sessionId: SessionId("dsh-other"), meta: { cwd: root }, ...parentOptions });
+  assert.equal((await dispose.activateRole("smoke", other.agent.id)).ok, true);
   const controls = await controlScenarios({ host: "dsh", workspace: root, approver: "dsh-other",
     read: id => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === id),
     async call(tool, args, actor = "owner") {
@@ -290,7 +334,7 @@ try {
   }
   await dispose();
   delete process.env.ROLEBOX_ENGINE_RECOVERY;
-  dispose = await rolebox.apply(ctx as unknown as rolebox.DshPluginContext, rolebox.Config.parse({ roleboxDir: join(root, "rolebox") }));
+  dispose = await mountRolebox();
   for (const name of ["dsh.restart", "dsh.restart-natural"]) {
     writeFileSync(join(root, name + ".release"), "ready");
     const restarted = await eventually(() => queryGraphs(graphStoreRoot(data, root)).graphs.find(graph => graph.graphId === name), graph => graph?.phase === "complete", name + " failed to finish after host reload");
@@ -299,7 +343,7 @@ try {
   await handle.dispose();
   await dispose();
   await verifyHostProcessRestart(import.meta.filename, root, queryGraphs(graphStoreRoot(data, root)).graphs);
-  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", unconfirmedExecutionRecovery: "verified", workerDiscovery: "verified", workerCode: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
+  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", entry: process.env.ROLEBOX_SMOKE_BUILT === "1" ? "built" : "source", cordisActivation: "verified", profileLoader: profile ? "real" : "not-required", inheritedPreset: Boolean(profile), activeRole: "verified", nestedChild: "refused", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", unconfirmedExecutionRecovery: "verified", workerDiscovery: "verified", workerCode: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
   }
 } catch (error) { console.error(error); throw error; } finally {
   for (const fiber of fibers.reverse()) await fiber.dispose();

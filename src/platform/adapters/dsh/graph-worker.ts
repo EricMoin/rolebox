@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { OutcomeHost } from "../../../graph/host/outcome-host.ts";
 import {
   declaredToolsAllow,
+  workerTaskToolAllowed,
   isGraphToolName,
   type GraphToolName,
   type OutcomeWorkerPrincipal,
@@ -277,6 +278,7 @@ export type DshGraphWorkerGrantHost = Pick<OutcomeHost, "workerPrincipalOf"> &
 export interface DshWorkerStartupTools {
   readonly agent?: string;
   readonly declaredTools?: readonly string[];
+  readonly inheritedTools?: readonly string[];
   readonly toolPresentation?: WorkerToolPresentation;
 }
 
@@ -320,27 +322,30 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     return descriptorStartup(agent) !== undefined;
   };
   const grantOf = (agent?: DshWorkerAgent): DshWorkerStartupTools => {
-    if (!agent) return {};
+    if (!agent) return { declaredTools: [] };
     const principal: OutcomeWorkerPrincipal | undefined = host.workerPrincipalOf(agent.session?.id ?? agent.id ?? "");
-    if (!principal) return prepared.get(agent)?.startup ?? {};
+    if (!principal) return prepared.get(agent)?.startup ?? { declaredTools: [] };
     try {
       if (host.workerToolGrantOf) return host.workerToolGrantOf(principal);
-      const declared = host.workerDeclaredToolsOf?.(principal);
+      if (!host.workerDeclaredToolsOf) return { declaredTools: [] };
+      const declared = host.workerDeclaredToolsOf(principal);
       return {
-        declaredTools: Array.isArray(declared) ? declared : undefined,
+        declaredTools: declared === undefined ? undefined : Array.isArray(declared) &&
+          declared.every(name => typeof name === "string" && name.length > 0) ? declared : [],
         toolPresentation: host.workerToolPresentationOf?.(principal),
       };
-    } catch { return {}; }
+    } catch { return { declaredTools: [] }; }
   };
   const grantedBy = (name: string, grant: DshWorkerStartupTools): boolean =>
     (isGraphToolName(name) && DSH_GRAPH_WORKER_GRANT.includes(name)) ||
-    workerPresentationTools(grant.toolPresentation).some(tool => tool === name) || declaredToolsAllow(name, grant.declaredTools);
+    workerPresentationTools(grant.toolPresentation).some(tool => tool === name) ||
+    workerTaskToolAllowed(name, grant.declaredTools, grant.inheritedTools);
   const grantedToWorker = (name: string, agent?: DshWorkerAgent): boolean => {
     if (isGraphToolName(name) && DSH_GRAPH_WORKER_GRANT.includes(name)) return true;
     return grantedBy(name, grantOf(agent));
   };
   const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution.name, execution.agent)
-    ? "Graph workers may only use their node's granted tools: the baseline graph_submit_outcome and graph_worker_exec, plus any host tools the node declares" : undefined);
+    ? "Graph workers may only use inherited authorized task tools within the node's tools restriction, plus their worker entry points" : undefined);
   if (guard) disposers.push(guard);
   const catalogOf = (agent: DshWorkerAgent): readonly DshWorkerToolSchema[] | undefined => {
     if (!tools.schemas) return undefined;
@@ -354,6 +359,9 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     const exact = [...(grant.declaredTools ?? []).filter(name => !name.endsWith("*")), ...(grant.toolPresentation?.preload ?? [])];
     const missing = [...new Set(exact.filter(name => !names.has(name)))];
     if (missing.length) throw new Error(`Worker tool grant names unavailable host tools: ${missing.join(", ")}`);
+    const deniedPreloads = (grant.toolPresentation?.preload ?? []).filter(name =>
+      !workerTaskToolAllowed(name, grant.declaredTools, grant.inheritedTools));
+    if (deniedPreloads.length) throw new Error(`Worker preload is outside inherited authorization: ${deniedPreloads.join(", ")}`);
     return (grant.declaredTools ?? []).filter(pattern => pattern.endsWith("*") &&
       !catalog.some(tool => declaredToolsAllow(tool.name, [pattern])));
   };
@@ -362,7 +370,7 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     if (!grantedBy(name, grant)) return false;
     const presentation = grant.toolPresentation;
     return !presentation || presentation.mode === "native" || isGraphToolName(name) ||
-      declaredToolsAllow(name, presentation.preload) || (presentation.mode === "discover" && activated?.has(name) === true);
+      declaredToolsAllow(name, presentation.preload ?? []) || (presentation.mode === "discover" && activated?.has(name) === true);
   };
   const prepare = (agent?: DshWorkerAgent, admitted = false, startup: DshWorkerStartupTools = {}) => {
     if (!agent || (!admitted && !isWorker(agent)) || prepared.has(agent)) return;
@@ -403,7 +411,11 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
       }
       const sessionFor = (outer: DshToolRunContext & { token?: unknown }) => createWorkerToolSession({
         presentation,
-        allowedTools: () => grantOf(agent).declaredTools ?? [],
+        allowedTools: () => {
+          const current = grantOf(agent);
+          return (catalogOf(agent) ?? []).filter(tool => workerTaskToolAllowed(tool.name, current.declaredTools, current.inheritedTools))
+            .map(tool => tool.name);
+        },
         registry: {
           list: () => catalogOf(agent)!.map(schema => {
             const definition = tools.get?.(schema.name, agent) as { output?: { schema?: unknown } } | undefined;
@@ -495,7 +507,8 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     roleOf: (agent?: DshWorkerAgent) => agent ? prepared.get(agent)?.startup.agent : undefined,
     async start<T>(label: string, create: () => Promise<T>, startup: DshWorkerStartupTools = {}): Promise<T> {
       if (!guard) throw new Error("This dsh host cannot enforce the graph worker execution guard");
-      const grant = { agent: startup.agent, declaredTools: startup.declaredTools, toolPresentation: startup.toolPresentation };
+      const grant = { agent: startup.agent, declaredTools: startup.declaredTools, inheritedTools: startup.inheritedTools,
+        toolPresentation: startup.toolPresentation };
       labels.set(label, grant);
       const scope = { active: true, tools: grant };
       try { return await starting.run(scope, create); }

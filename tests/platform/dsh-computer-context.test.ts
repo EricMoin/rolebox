@@ -69,6 +69,10 @@ describe("DSH computer workflow", () => {
     if (mode === "discover") expect(result).toContain('action="call"');
     if (mode === "code") expect(result).toContain("graph_worker_code");
     f.options.worker = () => ({ agent: "parent--child" });
+    expect(f.render({ id: "worker" })).toContain("computer_screenshot");
+    f.options.worker = () => ({ agent: "parent--child", declaredTools: [] });
+    expect(f.render({ id: "worker" })).toBe("");
+    f.options.worker = () => ({ agent: "parent--child", inheritedTools: [] });
     expect(f.render({ id: "worker" })).toBe("");
   });
 

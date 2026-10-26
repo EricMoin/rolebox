@@ -1,5 +1,5 @@
 import { registerPiGraphWorker } from "../platform/adapters/pi/graph-worker.ts";
-import { buildGraphWorkerRolePrompt } from "../prompt/graph-worker.ts";
+import { buildGraphWorkerRolePrompt, findGraphWorkerRole } from "../prompt/graph-worker.ts";
 import { buildPublicAgentsBlock } from "../prompt/builder.ts";
 import { renderInjectBlock } from "../prompt/blocks.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
@@ -7,6 +7,7 @@ import { openGraphWorkerChannel } from "../graph/application/worker-channel.ts";
 import { piWorkerToolConfig, piWorkerToolAllowed, type PiWorkerToolConfig } from "../platform/adapters/pi/worker-tools.ts";
 import type { CanonicalToolDef } from "../platform/types.ts";
 import { interceptToolBefore } from "../platform/adapters/pi/tool-interceptor.ts";
+import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
 /**
  * Pi Extension Entry Point — `src/pi-extension.ts`
  *
@@ -929,6 +930,9 @@ export default async function(pi: any): Promise<void> {
       workspaceDir: process.cwd(),
       storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
+      defaultWorkerToolPresentation: { mode: "discover" },
+      workerTaskToolsOf: invocation => inheritedWorkerTaskTools(pi.getAllTools().map((tool: { name: string }) => tool.name),
+        findGraphWorkerRole(resolvedRoles, invocation.agent ?? activeAgent.get() ?? "")?.config.tools),
       // THE SHIPPED ACCEPTANCE PRIMITIVES (P4 items 2 and 4): schema, artifact,
       // command exit and human approval are installed here, each with a real
       // implementation, and the SAME registry is handed to the toolset below so
@@ -971,13 +975,16 @@ export default async function(pi: any): Promise<void> {
     const graphWorkerChannel = await openGraphWorkerChannel(graphApplication.createTools(), process.cwd(), graphStoreRoot(getDataDir(), process.cwd()), {
       resolveTool(name, context) {
         const principal = outcomeHost?.workerPrincipalOf(context.sessionID);
+        const grant = principal === undefined ? undefined : outcomeHost?.workerToolGrantOf(principal);
         const config = workerToolConfigs.get(context.sessionID) ?? (principal === undefined ? undefined :
-          piWorkerToolConfig(PI_SUBAGENT_TOOLS, outcomeHost?.workerDeclaredToolsOf(principal), outcomeHost?.workerToolPresentationOf(principal), workerToolDefinitions));
+          piWorkerToolConfig(PI_SUBAGENT_TOOLS, outcomeHost?.workerDeclaredToolsOf(principal), outcomeHost?.workerToolPresentationOf(principal), workerToolDefinitions,
+            outcomeHost?.workerToolGrantOf(principal).inheritedTools));
         if (config === undefined || !piWorkerToolAllowed(name, config)) return undefined;
+        if (grant?.inheritedTools !== undefined && !grant.inheritedTools.includes(name)) return undefined;
         return workerToolDefinitions[name];
       },
     });
-    sessionAdapter.setGraphWorkerToolConfig((request, baseline) => piWorkerToolConfig(baseline, request?.declaredTools, request?.toolPresentation, workerToolDefinitions));
+    sessionAdapter.setGraphWorkerToolConfig((request, baseline) => piWorkerToolConfig(baseline, request?.declaredTools, request?.toolPresentation, workerToolDefinitions, request?.inheritedTools));
     sessionAdapter.setGraphWorkerChannel((sessionId, agent, config) => {
       if (config) workerToolConfigs.set(sessionId, config);
       return graphWorkerChannel.issue(sessionId, agent);

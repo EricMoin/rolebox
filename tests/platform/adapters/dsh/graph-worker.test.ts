@@ -42,7 +42,7 @@ describe("DSH graph worker presentation", () => {
       await listeners.get("agent/created")!({ agent: worker });
       expect(worker.modes).toEqual(["native"]);
       expect(boundary.isWorker({ id: "worker" })).toBe(true);
-      expect(guard!({ name: "run_code", agent: worker })).toContain("Graph workers may only");
+      expect(guard!({ name: "run_code", agent: worker })).toBeUndefined();
       expect(guard!({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
       expect(guard!({ name: "graph_submit_outcome", agent: worker })).toBeUndefined();
       await listeners.get("agent/pre-step")!({ agent: worker }, async () => ({ kind: "enter" }));
@@ -77,7 +77,7 @@ describe("DSH graph worker presentation", () => {
     const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: {} } };
     await boundary.start("attempt-label", async () => {
       await listeners.get("agent/created")!({ agent: worker });
-      expect(guard!({ name: "run_code", agent: worker })).toContain("Graph workers may only");
+      expect(guard!({ name: "run_code", agent: worker })).toBeUndefined();
       expect(guard!({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
     });
     expect(boundary.isWorker({ id: "worker" })).toBe(true);

@@ -136,7 +136,7 @@ interface WorkerReadSnapshot {
   readonly grants: Map<string, OutcomeWorkerToolGrant>;
 }
 
-const BASELINE_WORKER_GRANT: OutcomeWorkerToolGrant = Object.freeze({});
+const BASELINE_WORKER_GRANT: OutcomeWorkerToolGrant = Object.freeze({ declaredTools: Object.freeze([]) });
 
 /**
  * The host's own log channel.
@@ -207,6 +207,9 @@ export interface OutcomeHostOptions {
   readonly storeRoot: string;
   /** How the platform starts one attempt. See `dispatch-host.ts`. */
   readonly deliver: HostDispatchDelivery;
+  /** Resolve the parent's authorized task catalog; a failed installed resolver yields no inherited tools. */
+  readonly workerTaskToolsOf?: (invocation: HostDispatchInvocation) => readonly string[] | undefined;
+  readonly defaultWorkerToolPresentation?: WorkerToolPresentation;
   /** The validator capabilities this host installs (defaults to none). */
   readonly validators?: ValidatorRegistry;
   /** The completion policies this host authorized (defaults to none). */
@@ -974,6 +977,8 @@ export class OutcomeHost {
     | ((execution: HostExecutionIdentity) => string | undefined)
     | undefined;
   private readonly dispatchAdapter: HostOutcomeDispatch;
+  private readonly workerTaskToolsOf: OutcomeHostOptions["workerTaskToolsOf"];
+  private readonly defaultWorkerToolPresentation: WorkerToolPresentation | undefined;
   /** The platform port the boot sweep observes a confirmed execution through. */
   private readonly observeExecution: HostExecutionObservationPort | undefined;
   /**
@@ -1063,6 +1068,8 @@ export class OutcomeHost {
           : undefined,
     });
     this.workerSessionOf = options.workerSessionOf;
+    this.workerTaskToolsOf = options.workerTaskToolsOf;
+    this.defaultWorkerToolPresentation = options.defaultWorkerToolPresentation;
     this.observeExecution = options.observeExecution;
     this.derivedOutcomeOf = options.derivedOutcomeOf;
     this.query = options.query;
@@ -1083,7 +1090,14 @@ export class OutcomeHost {
     this.declareInvocationIdentity = options.declareInvocationIdentity ?? true;
     this.dispatchAdapter = new HostOutcomeDispatch({
       executions: this.executions,
-      deliver: options.deliver,
+      deliver: (request, effect, invocation, inputView) => {
+        const inheritedTools = this.inheritedTaskTools(invocation);
+        const toolPresentation = request.toolPresentation ?? this.defaultWorkerToolPresentation;
+        options.deliver({ ...request,
+          ...(inheritedTools === undefined ? {} : { inheritedTools }),
+          ...(toolPresentation === undefined ? {} : { toolPresentation }),
+        }, effect, invocation, inputView);
+      },
       invocation: () => this.holder.current(),
       // The graph's own declaring invocation, not the ambient one: this is what
       // lets a successor armed out of band (and a boot sweep) name the same
@@ -2809,13 +2823,10 @@ export class OutcomeHost {
       workerBoundary: {
         granted: WORKER_GRANTED_GRAPH_TOOLS,
         principalOf: (sessionId: string) => this.workerPrincipalOf(sessionId),
-        // THE NODE'S OWN GRANT, PER PRINCIPAL: the baseline above is the graph
-        // face; the host tools the executing node declared are resolved from
-        // the principal this host bound, and an unresolved grant leaves the
-        // worker with the baseline alone.
         declaredToolsOf: (principal: OutcomeWorkerPrincipal) =>
           this.workerDeclaredToolsOf(principal),
         presentationOf: (principal: OutcomeWorkerPrincipal) => this.workerToolPresentationOf(principal),
+        inheritedToolsOf: (principal: OutcomeWorkerPrincipal) => this.workerToolGrantOf(principal).inheritedTools,
       },
       ...(getEffectiveAgent === undefined ? {} : { getEffectiveAgent }),
     });
@@ -3091,9 +3102,28 @@ export class OutcomeHost {
 
   /**
    * Resolve both authorization inputs from one verified committed store revision.
-   * Missing or unreadable bindings and definitions leave only the worker baseline.
+   * Missing or unreadable bindings and definitions retain an empty task-tool restriction.
    */
   workerToolGrantOf(principal: OutcomeWorkerPrincipal): OutcomeWorkerToolGrant {
+    const grant = this.nodeToolGrantOf(principal);
+    if (!this.workerTaskToolsOf) return grant;
+    try {
+      const inheritedTools = this.inheritedTaskTools(this.originOf(principal.graphId));
+      return Object.freeze({ ...grant, inheritedTools });
+    } catch { return Object.freeze({ ...grant, inheritedTools: Object.freeze([]) }); }
+  }
+
+  private inheritedTaskTools(invocation: HostDispatchInvocation | undefined): readonly string[] | undefined {
+    if (!this.workerTaskToolsOf) return undefined;
+    if (!invocation) return Object.freeze([]);
+    try {
+      const tools = this.workerTaskToolsOf(invocation);
+      return Object.freeze(Array.isArray(tools) && tools.every(name => typeof name === "string" && name.length > 0)
+        ? [...new Set(tools)] : []);
+    } catch { return Object.freeze([]); }
+  }
+
+  private nodeToolGrantOf(principal: OutcomeWorkerPrincipal): OutcomeWorkerToolGrant {
     if (this.closed) return BASELINE_WORKER_GRANT;
     if (this.sharedStore !== undefined) {
       // Memory bindings have no independently observable commit revision.
@@ -3147,7 +3177,7 @@ export class OutcomeHost {
 
   private toolGrantOf(declared: StoredDeclaredGraph, nodeId: string): OutcomeWorkerToolGrant {
     const declaredTools = declaredNodeTools(declared.plan, nodeId);
-    const toolPresentation = declaredNodeToolPresentation(declared.plan, nodeId);
+    const toolPresentation = declaredNodeToolPresentation(declared.plan, nodeId) ?? this.defaultWorkerToolPresentation;
     return Object.freeze({
       ...(declaredTools === undefined ? {} : { declaredTools }),
       ...(toolPresentation === undefined ? {} : { toolPresentation }),

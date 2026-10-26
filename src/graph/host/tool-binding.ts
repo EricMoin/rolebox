@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { workerPresentationTools, type WorkerToolPresentation } from "../domain/worker-tools.ts";
+import { isWorkerTaskTool, workerPresentationTools, type WorkerToolPresentation } from "../domain/worker-tools.ts";
 
 import type { CanonicalToolDef, CanonicalToolContext } from "../../platform/types.ts";
 import { readAppliedControl } from "../control/contracts.ts";
@@ -28,25 +28,7 @@ import type { OutcomeHost, OutcomeHostOptions, OutcomeCancelDeliveryReport } fro
  */
 export const WORKER_TOOL_FORBIDDEN_CODE = "worker-tool-forbidden" as const;
 
-/**
- * The ONLY graph-tool names a dispatched worker's face grants.
- *
- * DELIBERATELY AN ALLOW-LIST, NOT A DENY-LIST: a tool this build has not
- * shipped yet (an approval or cancel entry) is refused to a worker without
- * anyone remembering to add it here. A worker that needs more than the
- * delivery channel is a principal the run path does not have.
- *
- * THIS LIST IS THE GRAPH FACE, AND IT STAYS STATIC. A node that declares extra
- * `tools` grants its own worker HOST tools beside this baseline
- * ({@link OutcomeWorkerToolBoundary.declaredToolsOf}); those names are not graph
- * tools and are never merged into this constant, so every graph tool outside it
- * refuses a worker exactly as before.
- *
- * THE NAMESPACE IS ALSO RESERVED: the graph face owns every tool name beginning
- * {@link GRAPH_TOOL_NAME_PREFIX}, and a declared grant can never admit one
- * ({@link declaredToolsAllow}) — a grant is a narrowing of what HOST tools the
- * node may use, never a second route to the face this boundary withholds.
- */
+/** Task tools are inherited separately; declarations cannot widen this graph control boundary. */
 export const WORKER_GRANTED_GRAPH_TOOLS: readonly GraphToolName[] = Object.freeze([
   "graph_submit_outcome",
 ]);
@@ -69,6 +51,7 @@ export interface OutcomeWorkerPrincipal {
 
 export interface OutcomeWorkerToolGrant {
   readonly declaredTools?: readonly string[];
+  readonly inheritedTools?: readonly string[];
   readonly toolPresentation?: WorkerToolPresentation;
 }
 
@@ -82,40 +65,16 @@ export interface OutcomeWorkerToolGrant {
  * a boolean capability.
  */
 export interface OutcomeWorkerToolBoundary {
-  /**
-   * The BASELINE granted tool names — the graph face; every other name in the
-   * face refuses a worker unless the node that worker executes declares it
-   * through {@link OutcomeWorkerToolBoundary.declaredToolsOf}.
-   */
+  /** Graph entry points granted independently of inherited task tools. */
   readonly granted: readonly GraphToolName[];
   /** The attempt one session is the confirmed worker of, or `undefined`. */
   readonly principalOf: (sessionId: string) => OutcomeWorkerPrincipal | undefined;
-  /**
-   * THE NODE'S DECLARED HOST-TOOL GRANT, resolved per worker principal.
-   *
-   * A v3 node may declare `tools?: string[]` — extra HOST tool names, or
-   * trailing-star prefixes such as `computer_*`, its worker may use beyond the
-   * baseline. Those names are HOST tools, never graph tools, so they are added
-   * to the baseline only for the worker of the node that declared them, and
-   * only for the call being judged.
-   *
-   * THE GRAPH FACE IS OUT OF REACH OF THE DECLARATION: a declared entry is
-   * matched against HOST tools only, so no spelling (`graph_*`, `graph_status`,
-   * an exact graph name) can admit a call to a name in the reserved graph
-   * namespace ({@link isGraphFaceToolName}), however the declaration was
-   * written. The enforcement lives HERE rather than in the declaration reader
-   * because a persisted plan is read structurally at dispatch: a plan written
-   * before any reader rule existed must still refuse a worker its graph face.
-   *
-   * FAIL CLOSED. Omitted, answering `undefined`, throwing, or answering
-   * anything that is not an array of non-empty strings all leave the worker
-   * with the BASELINE alone: a grant this host cannot resolve is never read as
-   * "allow". An undeclared node keeps exactly the baseline restriction.
-   */
+  /** Resolve the node restriction from its verified principal. Absence inherits; unreadable restrictions return []. */
   readonly declaredToolsOf?: (
     principal: OutcomeWorkerPrincipal,
   ) => readonly string[] | undefined;
   readonly presentationOf?: (principal: OutcomeWorkerPrincipal) => WorkerToolPresentation | undefined;
+  readonly inheritedToolsOf?: (principal: OutcomeWorkerPrincipal) => readonly string[] | undefined;
 }
 
 /**
@@ -206,30 +165,25 @@ export function isGraphToolName(toolName: string): toolName is GraphToolName {
   return GRAPH_TOOL_NAMES.some((name) => name === toolName);
 }
 
-/**
- * Whether ONE DECLARED GRANT admits one tool name. TOTAL and fail-closed: an
- * absent or empty grant, and any entry that is not a usable string, admits
- * nothing.
- *
- * THE DECLARED GRANT NAMES HOST TOOLS, SO THE GRAPH FACE IS NEVER ADMITTED. A
- * name in the reserved graph namespace is refused BEFORE the entries are even
- * consulted, so `tools: ["graph_*"]`, `tools: ["graph_status"]` and every other
- * spelling of a graph-tool grant admit nothing: the graph face a dispatched
- * worker holds is {@link WORKER_GRANTED_GRAPH_TOOLS} plus dsh's
- * `graph_worker_exec`, and it stays that whatever a node declares. The baseline
- * check runs first in every caller, so the names a worker legitimately holds are
- * unaffected by this rule.
- */
+/** Node restrictions select task tools only. Absence inherits; [] refuses additional task tools. */
 export function declaredToolsAllow(
   toolName: string,
   declared: readonly string[] | undefined,
 ): boolean {
-  if (isGraphFaceToolName(toolName)) return false;
-  if (toolName.startsWith("team_") || toolName.startsWith("rb_team_")) return false;
-  if (declared === undefined) return false;
+  if (!isWorkerTaskTool(toolName)) return false;
+  if (declared === undefined) return true;
   return declared.some(
     (entry) => typeof entry === "string" && declaredToolAllows(entry, toolName),
   );
+}
+
+export function workerTaskToolAllowed(
+  toolName: string,
+  declared: readonly string[] | undefined,
+  inherited?: readonly string[],
+): boolean {
+  return declaredToolsAllow(toolName, declared) &&
+    (inherited === undefined || inherited.includes(toolName));
 }
 
 /**
@@ -249,19 +203,11 @@ function declaredEntryNamesGraphFace(entry: string): boolean {
   return isGraphFaceToolName(stem);
 }
 
-/**
- * The declared grant of one worker's node, as the boundary will use it.
- *
- * A lookup that THROWS has not answered — the answer is the baseline, never a
- * grant — and a malformed entry is dropped rather than trusted, so the only way
- * a name is admitted is a non-empty string the host actually resolved. The
- * refusal this fallback produces names the baseline it judged, so a host whose
- * lookup is broken refuses; it never allows on an uncertainty.
- */
+/** An unavailable or malformed lookup must not be confused with a verified absent restriction. */
 function declaredToolsForPrincipal(
   boundary: OutcomeWorkerToolBoundary,
   principal: OutcomeWorkerPrincipal,
-): readonly string[] {
+): readonly string[] | undefined {
   const lookup = boundary.declaredToolsOf;
   if (lookup === undefined) return [];
   let declared: readonly string[] | undefined;
@@ -270,10 +216,9 @@ function declaredToolsForPrincipal(
   } catch {
     return [];
   }
-  if (!Array.isArray(declared)) return [];
-  return declared.filter(
-    (entry): entry is string => typeof entry === "string" && entry.length > 0,
-  );
+  if (declared === undefined) return undefined;
+  if (!Array.isArray(declared) || declared.some(entry => typeof entry !== "string" || entry.length === 0)) return [];
+  return declared;
 }
 
 /**
@@ -302,11 +247,11 @@ function workerToolRefusal(
     // An unreadable presentation never grants a capability entry point.
   }
   if (presentationTools.includes(toolName)) return undefined;
-  // THE DECLARED GRANT IS THE NODE'S OWN: it is resolved from the principal the
-  // HOST bound this session as — never from the caller, the tool name or a
-  // process-wide setting — and it only ever ADDS names for that one worker.
   const declared = declaredToolsForPrincipal(boundary, principal);
-  if (declaredToolsAllow(toolName, declared)) return undefined;
+  let inherited: readonly string[] | undefined;
+  try { inherited = boundary.inheritedToolsOf?.(principal); }
+  catch { inherited = []; }
+  if (workerTaskToolAllowed(toolName, declared, inherited)) return undefined;
   return renderWorkerToolRefusal(
     toolName,
     [
@@ -314,7 +259,8 @@ function workerToolRefusal(
       ...presentationTools,
       // A declared graph-namespace entry is NOT reported as granted: it admits
       // no host tool, and this refusal is read as "what the face grants".
-      ...declared.filter((entry) => !declaredEntryNamesGraphFace(entry)),
+      ...(inherited === undefined ? declared ?? [] : inherited.filter(name => declaredToolsAllow(name, declared)))
+        .filter((entry) => !declaredEntryNamesGraphFace(entry)),
     ],
     principal,
   );
@@ -342,11 +288,10 @@ function renderWorkerToolRefusal(
         JSON.stringify(principal.attemptId) +
         " of graph " +
         JSON.stringify(principal.graphId) +
-        ". A dispatched worker's face grants exactly " +
+        ". Its worker entry points and resolved task-tool permissions are " +
         granted.join(", ") +
-        " (the graph baseline plus the host tools its own node declares; a declared " +
-        "grant names HOST tools only and never admits a name in the graph face's own " +
-        "graph_ namespace) — " +
+        ". Task tools must be inherited from the parent and satisfy the node's tools restriction; " +
+        "recursive dispatch remains unavailable. " +
         "declaring or mutating a graph definition, reading the authoritative store " +
         "and controlling another attempt are the declaring/operating principal's " +
         "capabilities, not the worker's. Settle your own attempt's outcome with " +

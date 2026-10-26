@@ -517,8 +517,8 @@ function readConsumerNodeIssue(plan: unknown): string | undefined {
     }
     const tools = raw.tools;
     if (tools !== undefined) {
-      if (!Array.isArray(tools) || tools.length === 0) {
-        return `compiled plan node ${JSON.stringify(id)} tools is not a non-empty array of host tool names`;
+      if (!Array.isArray(tools)) {
+        return `compiled plan node ${JSON.stringify(id)} tools is not an array of host tool names`;
       }
       const toolNames: readonly unknown[] = tools;
       for (const tool of toolNames) {

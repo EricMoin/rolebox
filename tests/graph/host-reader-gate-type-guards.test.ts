@@ -429,7 +429,7 @@ describe("F-03 — the recorded run state is read by the versioned state codec",
 
     const restarted = openGateHost(fixture.dir, fixture.storeRoot, []);
     try {
-      expect(restarted.workerDeclaredToolsOf(principalOf(attemptId))).toBeUndefined();
+      expect(restarted.workerDeclaredToolsOf(principalOf(attemptId))).toEqual([]);
     } finally {
       restarted.close();
     }
@@ -453,7 +453,7 @@ describe("F-03 — the recorded run state is read by the versioned state codec",
 
     const restarted = openGateHost(fixture.dir, fixture.storeRoot, []);
     try {
-      expect(restarted.workerDeclaredToolsOf(principalOf(attemptId))).toBeUndefined();
+      expect(restarted.workerDeclaredToolsOf(principalOf(attemptId))).toEqual([]);
     } finally {
       restarted.close();
     }

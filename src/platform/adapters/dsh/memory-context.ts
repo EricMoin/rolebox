@@ -3,7 +3,7 @@ import { isAbsolute } from "node:path";
 import { buildMemoryContext } from "../../../memory/context.ts";
 import { MemoryStore } from "../../../memory/store.ts";
 import { MEMORY_TOOL_NAMES, memoryToolEnabled } from "../../../memory/tool-policy.ts";
-import { declaredToolsAllow } from "../../../graph/host/tool-binding.ts";
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import type { DshWorkerStartupTools } from "./graph-worker.ts";
 import { createSubLogger } from "../../../logger.ts";
 
@@ -29,7 +29,7 @@ export function createDshMemoryContext(options: DshMemoryOptions) {
       const names = options.names?.();
       const actual = (name: string) => names?.get(name) ?? name;
       const tools = DSH_MEMORY_WORKFLOW_TOOLS.filter(name => registered.has(actual(name)) && memoryToolEnabled(name, role?.config.tools) &&
-        (worker === undefined || declaredToolsAllow(actual(name), worker.declaredTools)));
+        (worker === undefined || workerTaskToolAllowed(actual(name), worker.declaredTools, worker.inheritedTools)));
       const context = { roleId, config: role?.config.memory, tools, presentation: worker?.toolPresentation?.mode,
         discoverInvocation: "call" as const };
       const render = (store?: MemoryStore) => {

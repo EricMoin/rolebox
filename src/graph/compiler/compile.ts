@@ -777,11 +777,11 @@ function readDeclaredTools(
   log: IssueLog,
 ): readonly string[] | undefined {
   if (raw === undefined) return undefined;
-  if (!Array.isArray(raw) || raw.length === 0) {
+  if (!Array.isArray(raw)) {
     log.errors.push(
       issue(
         "malformed-declaration",
-        `tools at ${path} is not a non-empty array of host tool names`,
+        `tools at ${path} is not an array of host tool names`,
         path,
       ),
     );

@@ -97,6 +97,26 @@ function createFixture(startup: DshWorkerStartupTools, executorMode: boolean) {
 
 describe.each(["presentation switch", "scoped executor"])("dsh worker capability integration with %s", mode => {
   const fixture = (startup: DshWorkerStartupTools) => createFixture(startup, mode === "scoped executor");
+  it.each(["discover", "code"] as const)("inherits parent capabilities through %s without expanding schemas", async presentation => {
+    const f = fixture({ inheritedTools: ["custom_search", "mcp_docs_lookup"], toolPresentation: { mode: presentation } });
+    try {
+      await f.start();
+      expect(await f.visible()).not.toContain("custom_search");
+      const list = await f.call("graph_worker_tools", { action: "list" });
+      expect(JSON.stringify(list)).toContain("custom_search");
+      expect(JSON.stringify(list)).not.toContain("private_lookup");
+      if (presentation === "discover") {
+        await f.call("graph_worker_tools", { action: "describe", name: "custom_search" });
+        expect(await f.visible()).toContain("custom_search");
+      } else {
+        expect(JSON.stringify(await f.call("graph_worker_code", { source: 'return await tools.call("custom_search", {})' })))
+          .toContain("Two matches");
+        expect(await f.visible()).not.toContain("custom_search");
+      }
+      expect(f.guard("private_lookup")).toContain("Graph workers may only");
+      expect(f.guard("dispatch")).toContain("Graph workers may only");
+    } finally { f.boundary.dispose(); }
+  });
   it("recovers startup grants from the descriptor when publication leaves the async start scope", async () => {
     const f = fixture({ agent: "worker-role", declaredTools: ["custom_*"], toolPresentation: { mode: "discover" } });
     try {

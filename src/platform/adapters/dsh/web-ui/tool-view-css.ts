@@ -45,8 +45,10 @@ export const toolViewCss = `
   width: 100%;
   min-width: 0;
   color: var(--rolebox-tool-ink);
-  font-size: 13px;
-  line-height: 20px;
+  font-family: var(--dsw-font-family, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  font-weight: 400;
+  line-height: calc(24px + var(--dsh-content-font-delta, 0px));
 }
 
 .rolebox-tool-head {
@@ -54,20 +56,24 @@ export const toolViewCss = `
   align-items: center;
   gap: 6px;
   width: 100%;
+  height: calc(24px + var(--dsh-content-font-delta, 0px));
   min-width: 0;
   margin: 0;
-  padding: 2px 6px 2px 2px;
+  padding: 0;
   border: 0;
   border-radius: var(--rolebox-tool-radius);
   background: transparent;
-  color: inherit;
+  color: var(--dsw-alias-label-tertiary, #81858c);
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: color 100ms ease;
 }
 
-.rolebox-tool-head:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+@media (hover: hover) {
+  .rolebox-tool-head:hover {
+    color: var(--rolebox-tool-ink-muted);
+  }
 }
 
 .rolebox-tool-head:focus-visible {
@@ -80,18 +86,20 @@ export const toolViewCss = `
 }
 
 .rolebox-tool-icon {
+  box-sizing: border-box;
   flex: none;
-  width: 14px;
-  height: 14px;
-  color: var(--rolebox-tool-ink-glyph);
+  width: calc(16px + var(--dsh-content-font-delta, 0px));
+  height: calc(16px + var(--dsh-content-font-delta, 0px));
+  padding: 1px;
+  color: inherit;
 }
 
 .rolebox-tool-title {
   flex: none;
   max-width: 60%;
   overflow: hidden;
-  color: var(--rolebox-tool-ink);
-  font-weight: 500;
+  color: inherit;
+  font-weight: 400;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -99,9 +107,8 @@ export const toolViewCss = `
 .rolebox-tool-summary {
   min-width: 0;
   overflow: hidden;
-  color: var(--rolebox-tool-ink-muted);
-  font-family: var(--rolebox-tool-mono);
-  font-size: 12px;
+  color: inherit;
+  font: inherit;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -109,7 +116,7 @@ export const toolViewCss = `
 .rolebox-tool-summary::before {
   content: "·";
   margin-right: 6px;
-  color: var(--rolebox-tool-ink-glyph);
+  color: var(--dsw-alias-label-caption, var(--rolebox-tool-ink-glyph));
   font-family: inherit;
 }
 
@@ -118,7 +125,7 @@ export const toolViewCss = `
   flex: none;
   align-items: center;
   margin-left: auto;
-  color: var(--rolebox-tool-ink-glyph);
+  color: inherit;
 }
 
 .rolebox-tool[data-state="error"] .rolebox-tool-title,
@@ -144,7 +151,7 @@ export const toolViewCss = `
 }
 
 .rolebox-tool-details {
-  margin: 4px 0 6px 22px;
+  margin: 4px 0 6px calc(22px + var(--dsh-content-font-delta, 0px));
   padding: 8px 10px;
   border: 1px solid var(--rolebox-tool-border);
   border-radius: var(--rolebox-tool-radius);
@@ -177,7 +184,7 @@ export const toolViewCss = `
 }
 
 .rolebox-tool-error {
-  margin: 0 0 0 22px;
+  margin: 0 0 0 calc(22px + var(--dsh-content-font-delta, 0px));
   overflow: hidden;
   color: var(--rolebox-tool-ink-danger);
   font-family: var(--rolebox-tool-mono);
@@ -191,6 +198,7 @@ export const toolViewCss = `
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .rolebox-tool-head { transition: none; }
   .rolebox-tool-spinner { animation: none; opacity: 0.6; }
   .rolebox-tool-chevron { transition: none; }
 }

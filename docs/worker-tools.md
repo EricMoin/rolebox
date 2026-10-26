@@ -1,10 +1,11 @@
 # Worker tools
 
-Graph workers separate the host's tool catalog, the node's grant, and the tools
-shown to the model. A small initial tool set can therefore use custom tools and
-MCP integrations without loading every schema into its context.
+Graph workers inherit the parent's authorized task tools. A node's `tools` list
+can narrow that inherited catalog, and `toolPresentation` controls which schemas
+are shown to the model. Discovery keeps the initial context small while making
+custom tools and MCP integrations available when needed.
 
-## Declare capability and presentation
+## Restrict tools and choose presentation
 
 ```json
 {
@@ -15,7 +16,6 @@ MCP integrations without loading every schema into its context.
     "agent": "researcher",
     "prompt": "Find the project documentation and report the relevant evidence.",
     "outcomes": [{ "id": "done" }],
-    "tools": ["docs_*"],
     "toolPresentation": {
       "mode": "discover",
       "preload": ["docs_search"]
@@ -26,14 +26,27 @@ MCP integrations without loading every schema into its context.
 ```
 
 Use the actual registered tool names from your host. MCP naming conventions
-vary between hosts; `docs_*` above is an example. Connect the MCP server or load
-the custom tool through the host first. A grant does not register a tool, install
-an integration, or supply credentials.
+vary between hosts; the `docs_search` name above is an example. Connect the MCP server or load
+the custom tool through the host first. Inheritance does not register a tool,
+install an integration, or supply credentials.
+
+Omit `tools` to inherit authorized parent task tools. Set `tools: ["docs_*"]` to
+restrict this node to inherited document tools, or `tools: []` to withhold all
+additional task tools while retaining the worker's execution and outcome entry
+points. A list cannot authorize a tool the parent lacks.
 
 `tools` accepts exact names and trailing-star prefixes with a nonempty stem.
 Names are trimmed, deduplicated and sorted; a declaration may contain at most 32
-entries. A prefix can select a larger catalog. A bare `*` does not grant all
-tools. The `graph_` namespace cannot be authorized through this list.
+entries. A bare `*` matches nothing. Graph control, team orchestration, recursive
+dispatch, task retry and session-fork tools remain unavailable, including rolebox
+collision aliases. The worker submits its own outcome through its dedicated
+`graph_submit_outcome` entry point.
+
+Inherited catalogs come from the parent host scope and role restrictions. Calls
+retain the host's normal permission, approval and execution checks. An installed
+parent-catalog resolver that cannot read authorization yields no inherited task
+tools. Missing or malformed persisted node restrictions also withhold task tools;
+they are distinct from a verified omitted `tools` field.
 
 `toolPresentation` accepts the following modes:
 
@@ -43,19 +56,24 @@ tools. The `graph_` namespace cannot be authorized through this list.
 | `discover` | The baseline, preloaded tools and `graph_worker_tools` | Search/list the authorized catalog; describe a tool to load its schema |
 | `code` | The baseline, preloaded tools, `graph_worker_tools` and `graph_worker_code` | Inspect schemas and compose authorized calls in JavaScript |
 
-`preload` contains at most 32 exact host names, each already covered by `tools`.
-It changes visibility only. Unknown configuration fields, invalid modes,
-wildcard preloads and preloads outside the grant are rejected during compilation.
+`preload` contains at most 32 exact task-tool names. With an explicit `tools`
+restriction, each preload must match it. The host also checks availability and
+inherited authorization before use. Preloads change visibility only. Unknown
+configuration fields, invalid modes, wildcard preloads and preloads outside an
+explicit restriction are rejected during compilation.
 
-Omitting the presentation preserves the host's existing native behavior. Omitting
-both fields preserves the existing worker baseline: dsh uses
-`graph_worker_exec` and `graph_submit_outcome`; other hosts retain their native
-worker tools. The configuration is part of the compiled plan revision and is
-restored from that plan after a restart.
+dsh, Pi and OpenCode 2 default to `discover` when presentation is omitted.
+Choose `native` explicitly to expose authorized native schemas immediately, or
+`code` on a host that supports broker invocation. OpenCode 1.x retains native
+presentation because it lacks an independent schema-visibility hook.
+
+Explicit restrictions and presentation settings are part of the compiled plan
+revision and are restored after a restart. Parent authorization is checked again;
+an unreadable parent catalog does not become an unrestricted catalog.
 
 With an explicit presentation, Pi and OpenCode 2 use `bash` and
-`graph_submit_outcome` as their baseline, then add the declared tools and the
-selected discovery entry. dsh retains its two baseline entries in every mode.
+`graph_submit_outcome` as their baseline, then expose inherited tools within
+the node restriction and the selected discovery entry. dsh retains its two baseline entries in every mode.
 
 ## Discovery and invocation
 
@@ -66,8 +84,8 @@ The broker's call operation is available only when the host exposes invocation
 through its complete execution pipeline. Otherwise, describe the tool and call
 its native entry.
 
-Only registered tools within the node's grant appear in the catalog. Listing by
-source or paging through the catalog provides a fallback when a text search has
+Only registered, inherited task tools within the node's restriction appear in
+the catalog. Listing by source or paging through the catalog provides a fallback when a text search has
 no matches. Calls recheck registration and authorization; discovery never changes
 the grant. Ambiguous duplicate names are omitted rather than routed arbitrarily.
 Source filtering is available when the adapter has source metadata. dsh does
@@ -91,7 +109,7 @@ call operations. Native calls continue through the host's normal tool pipeline.
 OpenCode 1.x also lacks an independent tool-presentation hook: its prompt-level
 tool switches change permission rules, and its exposed registry does not include
 the complete MCP catalog. It therefore rejects any explicit `toolPresentation`
-configuration and preserves existing default behavior and host permissions.
+configuration and preserves native presentation and host permissions.
 OpenCode 2 reads its catalog from the tools assembled for the worker's model
 request, so custom and MCP tools are checked before the first model call and
 the discovery catalog updates with subsequent turns.
@@ -144,4 +162,4 @@ tool-selection errors and argument retries for each model and workload.
 
 Regression coverage lives under `tests/graph/worker-tool-presentation.test.ts`,
 `tests/platform/worker-tools/`, and the host adapters' scoped test files. Run
-those slices with `npm test -- --isolate`, followed by `npm run typecheck`.
+those slices with `npm test -- tests/graph/worker-tool-inheritance.test.ts tests/graph/worker-tool-presentation.test.ts tests/platform/worker-tools/`, followed by `npm run typecheck`.
