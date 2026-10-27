@@ -1,5 +1,5 @@
 /**
- * The `browse_*` tool family: one browser, 22 actions.
+ * The `browse_*` tool family: one browser, 23 actions.
  *
  * The family is split by intent — navigation (`tools-navigation.ts`),
  * observation (`tools-observe.ts`) and interaction (`tools-interact.ts`) — and
@@ -28,6 +28,7 @@ import {
   createBrowseClickTool,
   createBrowseCookiesTool,
   createBrowseDialogTool,
+  createBrowseDragTool,
   createBrowseHoverTool,
   createBrowsePressTool,
   createBrowseScrollTool,
@@ -53,13 +54,14 @@ import {
   createBrowseStatusTool,
 } from "./tools-observe.ts";
 
-/** The 22 tool names this module registers, in the order they are documented. */
+/** The 23 tool names this module registers, in the order they are documented. */
 export const BROWSE_TOOL_NAMES = [
   "browse_status",
   "browse_open",
   "browse_snapshot",
   "browse_read",
   "browse_click",
+  "browse_drag",
   "browse_type",
   "browse_press",
   "browse_select",
@@ -96,6 +98,7 @@ export function createBrowseTools(options: BrowseToolsOptions = {}): Record<stri
     browse_snapshot: createBrowseSnapshotTool(runtime),
     browse_read: createBrowseReadTool(runtime),
     browse_click: createBrowseClickTool(runtime),
+    browse_drag: createBrowseDragTool(runtime),
     browse_type: createBrowseTypeTool(runtime),
     browse_press: createBrowsePressTool(runtime),
     browse_select: createBrowseSelectTool(runtime),

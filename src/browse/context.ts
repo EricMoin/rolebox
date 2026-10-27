@@ -33,7 +33,7 @@ const PRESENTATION_CODE =
 /**
  * Render the browse workflow block for the tools a host registered.
  *
- * Returns `""` when none of the 22 names is present, so a host that did not
+ * Returns `""` when none of the 23 names is present, so a host that did not
  * grant browsing injects no browser instructions at all.
  */
 export function buildBrowseContext(options: BrowseContextOptions): string {

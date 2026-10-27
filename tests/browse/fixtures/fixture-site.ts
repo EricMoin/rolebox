@@ -46,7 +46,15 @@ export const FIXTURE_CLOSED_URL = "http://127.0.0.1:45999/closed";
 
 const HOME_HTML = `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Fixture home</title></head>
+<head>
+<meta charset="utf-8"><title>Fixture home</title>
+<style>
+  #pad { position: relative; width: 300px; height: 120px; background: #ddd; user-select: none; }
+  #hover-menu { display: none; }
+  #hover-zone:hover #hover-menu { display: inline-block; }
+  #scroller { width: 220px; height: 80px; overflow: auto; }
+</style>
+</head>
 <body>
   <h1>Fixture home</h1>
   <p id="intro">A local page for the browse live suite.</p>
@@ -64,12 +72,61 @@ const HOME_HTML = `<!doctype html>
   </select>
   <p><button id="clicker" onclick="document.getElementById('out').textContent='clicked'">Click me</button></p>
   <p><button id="confirm" onclick="window.confirm('Proceed?')">Confirm</button></p>
+  <p><button id="gesture">Gesture</button></p>
+  <div id="pad" aria-label="Drag pad"></div>
+  <p id="gesture-out">idle</p>
+  <div id="hover-zone">Hover zone <button id="hover-menu">Hover menu</button></div>
+  <div id="scroller"><div style="height: 1200px">scrolled content</div></div>
+  <p><span id="drag-source" draggable="true">drag source</span> <span id="drop-zone">drop here</span></p>
+  <div style="height: 2400px" aria-hidden="true"></div>
   <p><a id="download" href="${FIXTURE_DOWNLOAD_PATH}" download="fixture.txt">Download</a></p>
   <p><input id="upload" type="file" aria-label="Attachment"></p>
   <p><a id="popup" href="${FIXTURE_SECOND_PATH}" target="_blank">Open the second page in a new window</a></p>
   <div id="fetch-status">fetch-pending</div>
   <div id="closed-status">closed-pending</div>
   <script>
+    window.gesture = { clicks: 0, detail: [], dblclicks: 0, contextmenus: 0, down: null, up: null, upAt: 0, clickPoint: null };
+    (function () {
+      const pad = document.getElementById('pad');
+      const out = document.getElementById('gesture-out');
+      function point(event) { return [Math.round(event.offsetX), Math.round(event.offsetY)]; }
+      pad.addEventListener('mousedown', function (event) {
+        window.gesture.down = point(event);
+        window.gesture.downAt = Date.now();
+      });
+      pad.addEventListener('mouseup', function (event) {
+        window.gesture.up = point(event);
+        window.gesture.upAt = Date.now();
+      });
+      pad.addEventListener('click', function (event) {
+        window.gesture.clicks += 1;
+        window.gesture.detail.push(event.detail);
+        window.gesture.clickPoint = point(event);
+        out.textContent = 'click:' + point(event).join(',');
+      });
+      pad.addEventListener('dblclick', function () { window.gesture.dblclicks += 1; });
+      pad.addEventListener('contextmenu', function (event) {
+        event.preventDefault();
+        window.gesture.contextmenus += 1;
+        out.textContent = 'contextmenu:' + event.button;
+      });
+      document.getElementById('gesture').addEventListener('contextmenu', function (event) {
+        event.preventDefault();
+        window.gesture.contextmenus += 1;
+      });
+    }());
+    (function () {
+      const source = document.getElementById('drag-source');
+      const zone = document.getElementById('drop-zone');
+      source.addEventListener('dragstart', function (event) {
+        event.dataTransfer.setData('text/plain', 'dragged');
+      });
+      zone.addEventListener('dragover', function (event) { event.preventDefault(); });
+      zone.addEventListener('drop', function (event) {
+        event.preventDefault();
+        window.gesture.dropped = event.dataTransfer.getData('text/plain');
+      });
+    }());
     console.log('fixture-log');
     console.error('fixture-error');
     fetch('${FIXTURE_MISSING_PATH}')

@@ -4,7 +4,7 @@
  * This module is the surface the `browse_*` tool family is built on: the driver
  * port and shared vocabulary, availability, target parsing, the snapshot walker,
  * the session manager, the one Playwright driver, capture helpers, the shared
- * tool-result helpers, the 22 `browse_*` tool definitions
+ * tool-result helpers, the 23 `browse_*` tool definitions
  * (`createBrowseTools`) and the browser workflow prompt block
  * (`buildBrowseContext`). Importing this module registers nothing and launches
  * nothing.

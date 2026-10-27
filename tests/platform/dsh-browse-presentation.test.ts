@@ -7,7 +7,7 @@
  * the canonical tool set only when the host's browse gate resolved on, so this
  * pins:
  *
- * - every one of the 22 real tool names has a declared decision (drift guard);
+ * - every one of the 23 real tool names has a declared decision (drift guard);
  * - `browse_open` renders the URL it will load and `browse_screenshot` the file
  *   or element it will capture;
  * - ONLY the read-only `browse_status` probe may join a parallel group — every
@@ -48,7 +48,7 @@ describe("dsh browse_* native presentation", () => {
     // Drift guard: the real tool record (src/browse/tools.ts) supplies the
     // names; every one of them must have a declared presentation decision.
     expect(Object.keys(createBrowseTools()).sort()).toEqual([...BROWSE_TOOL_NAMES].sort());
-    expect(BROWSE_TOOL_NAMES).toHaveLength(22);
+    expect(BROWSE_TOOL_NAMES).toHaveLength(23);
     for (const name of BROWSE_TOOL_NAMES) {
       expect(DSH_TOOL_PRESENTATION[name], name).toBeDefined();
     }

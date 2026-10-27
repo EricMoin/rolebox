@@ -1106,6 +1106,7 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   browse_snapshot: {},
   browse_read: {},
   browse_click: {},
+  browse_drag: {},
   browse_type: {},
   browse_press: {},
   browse_select: {},

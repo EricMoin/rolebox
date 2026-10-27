@@ -116,7 +116,7 @@ The parity matrix below is the tool surface shared with the 1.x entry; the diffe
 | function_graph / skill_compose / context_assemble | ✓ | ✓ | — (not over MCP) |
 | asset_hot_reload | ✓ | — (opencode-only) | — (opencode-only) |
 | [computer_* (12 tools)](computer-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (default on) | ✓ (default on) |
-| [browse_* (22 tools)](browser-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (when the browseUse gate is on) | ✓ (when the browseUse gate is on) |
+| [browse_* (23 tools)](browser-use.md#tools-and-arguments) | — (not registered; the gate only emits deny rules) | ✓ (when the browseUse gate is on) | ✓ (when the browseUse gate is on) |
 | dispatch_* / loop_* | — (withheld) | — (withheld) | — (not over MCP) |
 | task_retry | — (withheld) | — (withheld) | — (withheld) |
 
@@ -146,7 +146,7 @@ Remaining platform-inherent gaps (hot reload, extensions, recovery engine, TUI) 
 
 Rolebox's browser family — `browse_status`, `browse_open`, `browse_snapshot`,
 `browse_read`, `browse_click`, `browse_type`, `browse_press`, `browse_select`,
-`browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`,
+`browse_drag`, `browse_hover`, `browse_scroll`, `browse_wait`, `browse_eval`,
 `browse_screenshot`, `browse_upload`, `browse_downloads`, `browse_dialog`,
 `browse_tabs`, `browse_history`, `browse_console`, `browse_network`,
 `browse_cookies` and `browse_close` — is the DOM-level counterpart to computer

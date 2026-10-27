@@ -1,6 +1,6 @@
 # Browser use
 
-Rolebox's `browse_*` family provides 22 tools for semantic browser automation:
+Rolebox's `browse_*` family provides 23 tools for semantic browser automation:
 a local Playwright browser whose pages are read as an ARIA-shaped tree and
 operated through element refs instead of screen coordinates. It is the DOM-level
 alternative to the coordinate-driven `computer_*` family when the target is a
@@ -63,7 +63,7 @@ failure — the gate decided before the tool surface was built.
 
 | Host | Behavior |
 | --- | --- |
-| DSH | Registers the 22 tools when the gate is on and the host exposes its tool-guard seam, the surface that refuses a call for a role that never granted it. Without the seam, registration is refused rather than exposed unprotected. The gate is applied before `enabledNamespaces`, so a namespace list matching `browse_*` cannot turn the family on. One session manager per plugin boot is closed when the plugin disposes, and the browser workflow block is injected as the `rolebox:browse` prompt context for the tools a role or worker actually has. |
+| DSH | Registers the 23 tools when the gate is on and the host exposes its tool-guard seam, the surface that refuses a call for a role that never granted it. Without the seam, registration is refused rather than exposed unprotected. The gate is applied before `enabledNamespaces`, so a namespace list matching `browse_*` cannot turn the family on. One session manager per plugin boot is closed when the plugin disposes, and the browser workflow block is injected as the `rolebox:browse` prompt context for the tools a role or worker actually has. |
 | Pi | Adds the family to its extra tools only when the gate is on, and a browse interceptor seam refuses a per-role call and returns the correction, so a role's `tools:` map is enforced per call. The workflow block is appended to the system transform and to a worker's prompt. |
 | Codex | Takes the `browseUse` host option, resolves the same gate, builds the same family, and appends the workflow block to the MCP initialization instructions. |
 | OpenCode (v1 and v2) | Registers neither family. With the gate on, role configuration materializes an explicit `false` for every `browse_*` tool the role's `tools:` map does not grant, so the policy is recorded even though no tool is added. |
@@ -120,7 +120,7 @@ or turn a gate that is off on.
    has launched — close the session first to change them.
 3. Call `browse_snapshot` to read the page and obtain element refs. Refs come
    only from a snapshot.
-4. Act on those refs with `browse_click`, `browse_type`, `browse_press`,
+4. Act on those refs with `browse_click`, `browse_drag`, `browse_type`, `browse_press`,
    `browse_select`, `browse_hover`, `browse_scroll` or `browse_upload`, and use
    `browse_wait` when the next step depends on text, an element or a URL
    appearing.
@@ -151,12 +151,13 @@ on the code. Every result also carries `driver`, `action`, `session`, `page`,
 | `browse_open` | `url?`, `page?`, `browser?`, `headless?`, `cdp_url?`, `viewport?`, `wait_until?`, `timeout_ms?` | Launch or attach to a browser and create or reuse a named page, optionally navigating |
 | `browse_snapshot` | `page?`, `selector?`, `full?`, `max_chars?` | Walk the page into an ARIA-shaped text tree and assign fresh element refs; the only source of refs |
 | `browse_read` | `page?`, `format?`, `selector?`, `max_chars?` | Read the page as markdown, text, HTML, a link list or markdown tables |
-| `browse_click` | `target`, `page?`, `button?`, `click_count?`, `modifiers?`, `force?`, `timeout_ms?` | Click one element; refs are validated and a target matching several elements is refused |
+| `browse_click` | `target`, `page?`, `button?`, `click_count?`, `modifiers?`, `position?`, `delay_ms?`, `repeat?`, `interval_ms?`, `force?`, `timeout_ms?` | Click one element once or repeatedly; refs are validated and a target matching several elements is refused |
+| `browse_drag` | `from`, `to`, `page?`, `from_position?`, `to_position?`, `steps?`, `force?`, `timeout_ms?` | Press on one element, move, and release on another; positions inside either element make canvases and sliders usable |
 | `browse_type` | `target`, `text`, `page?`, `clear?`, `submit?`, `timeout_ms?` | Type into an input, textarea or contenteditable element; the text is never echoed in the result |
 | `browse_press` | `key`, `target?`, `page?`, `timeout_ms?` | Press one key or chord on the target, or on the focused element when no target is given |
 | `browse_select` | `target`, `values`, `page?`, `timeout_ms?` | Select one or more option values (or labels) in a `<select>` element |
-| `browse_hover` | `target`, `page?`, `timeout_ms?` | Move the pointer over an element to reveal hover menus and tooltips |
-| `browse_scroll` | `target?` or `delta_x?`/`delta_y?`, `page?`, `timeout_ms?` | Scroll an element into view, or wheel the page by a pixel delta |
+| `browse_hover` | `target`, `page?`, `position?`, `modifiers?`, `hold_ms?`, `force?`, `timeout_ms?` | Move the pointer over an element to reveal hover menus and tooltips |
+| `browse_scroll` | `target?`, `to?`, `at?`/`at_position?`, `delta_x?`/`delta_y?`, `modifiers?`, `page?`, `timeout_ms?` | Scroll an element into view, jump to an edge, or wheel at a chosen point |
 | `browse_wait` | exactly one of `text?`, `selector?`, `url?`, plus `state?`, `page?`, `timeout_ms?` | Wait until text, a visible element or a URL fragment appears |
 | `browse_eval` | `expression`, `page?`, `max_chars?`, `timeout_ms?` | Evaluate a JavaScript expression in the page and return its value |
 | `browse_screenshot` | `page?`, `selector?`, `full_page?`, `path?`, `format?`, `quality?`, `timeout_ms?` | Capture a PNG or JPEG, save it under `.rolebox/browse` and return it as an image attachment |
@@ -171,8 +172,10 @@ on the code. Every result also carries `driver`, `action`, `session`, `page`,
 | `browse_close` | `page?`, `all?` | Close one page, or the whole browser session |
 
 Defaults: `browse_open` uses Chromium, headless, `domcontentloaded` and a
-1440x900 viewport. `browse_click` clicks the left button once unless `button` or
-`click_count` says otherwise; `browse_type` replaces the field content unless
+1440x900 viewport. `browse_click` clicks the left button once unless `button`,
+`click_count` or `repeat` says otherwise. `browse_drag` interpolates ten pointer
+moves unless `steps` says otherwise. `browse_hover` targets the element centre
+unless `position` says otherwise. `browse_type` replaces the field content unless
 `clear: false`; `browse_scroll` wheels 600 CSS pixels vertically unless a delta
 is given; `browse_console` and `browse_network` return at most 100 recent entries
 each (maximum 1,000). `browse_snapshot` caps its text at 20,000 characters
@@ -212,6 +215,30 @@ elements — a text, role, label or CSS target, for example — is
 `ambiguous_target` rather than a silent first match: take a ref from a snapshot
 and act on that. A ref is checked against the page's current
 snapshot before any driver call, and a ref that is not in it is `stale_ref`.
+
+## Gestures
+
+A click is one pointer gesture: `button` chooses left, right or middle,
+`click_count` is 1, 2 or 3, `modifiers` holds Alt/Control/Meta/Shift, and
+`position` picks a point inside the element instead of its centre. `delay_ms`
+holds the button down before releasing it (long press), while `repeat` performs
+separate clicks with `interval_ms` between them. A double-click is therefore
+`click_count: 2` in one call, not two calls: two calls deliver two independent
+`click` events with `detail: 1`.
+
+`browse_drag` presses on `from`, moves in `steps` interpolated moves and releases
+on `to`. `from_position` and `to_position` are points inside each element, so a
+canvas can be dragged from one pixel to another and a slider can be moved to a
+value. `browse_hover` accepts the same `position` and `modifiers`, plus `hold_ms`
+to keep the pointer there for a delayed hover effect. `browse_scroll` can wheel
+at `at`/`at_position` instead of wherever the pointer was left, hold `modifiers`
+(for example Control to zoom) and jump to `to: "top"` or `to: "bottom"`.
+
+Clicks, hovers, drags and wheels go through the browser's real input pipeline
+rather than synthetic DOM events, so pointer capture, CSS `:hover` and native
+drag-and-drop work the way they do for a person at the machine. The trade-off is
+that a gesture cannot span tool calls: there is no mouse-down in one call and
+mouse-up in another, and a drag is always one source and one destination.
 
 ## Snapshots and refs
 
@@ -336,9 +363,9 @@ The full-surface live suite is gated the same way:
 ROLEBOX_BROWSE_LIVE=1 npm test -- tests/browse/live-e2e.test.ts
 ```
 
-It starts a fixture site on an ephemeral loopback port and drives all 22 tools
+It starts a fixture site on an ephemeral loopback port and drives all 23 tools
 through the real Playwright driver and a headless browser — snapshot refs, click,
-type, press, select, hover, scroll, read, screenshot, console, network, tabs,
+drag, type, press, select, hover, scroll, read, screenshot, console, network, tabs,
 history, cookies, a dialog, a download and an upload — and disposes each session
 in a `finally` path. It is opt-in for the same reason as the smoke test, and it
 states its gaps rather than asserting them: the fixture's `target="_blank"` link
@@ -358,7 +385,7 @@ npm run test:browse:e2e
 ```
 
 The runner builds once, runs module and host regression checks, then executes
-each live suite in its own process, including the 22-tool acceptance suite on
+each live suite in its own process, including the 23-tool acceptance suite on
 all three engines. It also checks production and test types. Keeping native
 browser transports separate from module mocks avoids interference between
 these suites; a failed suite remains a nonzero result and does not stop the

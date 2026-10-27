@@ -1,5 +1,5 @@
 /**
- * Interaction tools: `browse_click`, `browse_type`, `browse_press`,
+ * Interaction tools: `browse_click`, `browse_drag`, `browse_type`, `browse_press`,
  * `browse_select`, `browse_hover`, `browse_scroll`, `browse_upload`,
  * `browse_dialog` and `browse_cookies`.
  *
@@ -10,10 +10,12 @@
  * matching elements are `ambiguous_target` rather than a silent first match.
  *
  * The tool layer adds argument-level guarantees the driver leaves open: a mouse
- * button, click count and modifier set on a click; a clear-or-append choice on
- * typing; an explicit exclusive choice between scrolling to an element and
- * wheeling; worktree-relative upload paths checked before the browser sees them;
- * one pending dialog at a time; and cookies scoped by url or by domain+path.
+ * button, click count, point, hold time and modifier set on a click; the same
+ * point/modifier controls on a hover; explicit source and destination positions
+ * on a drag; an exclusive choice between scrolling to an element, jumping to an
+ * edge, and wheeling; a clear-or-append choice on typing; worktree-relative
+ * upload paths checked before the browser sees them; one pending dialog at a
+ * time; and cookies scoped by url or by domain+path.
  */
 
 import { statSync } from "node:fs";
@@ -27,6 +29,7 @@ import { browseError } from "./types.ts";
 import {
   BROWSE_ACTION_TIMEOUT_MS,
   BROWSE_PAGE_ARG,
+  BROWSE_POSITION_ARG,
   BROWSE_SCROLL_STEP,
   BROWSE_TARGET_ARG,
   browseCall,
@@ -45,12 +48,12 @@ import {
 /** The mouse buttons a click may use. */
 const CLICK_BUTTONS = ["left", "right", "middle"] as const;
 
-/** The modifier keys a click may hold down. */
+/** The modifier keys a click, hover or wheel may hold down. */
 const MODIFIERS = ["Alt", "Control", "Meta", "Shift"] as const;
 
 /** The one-line gesture a click result reports. */
 function describeClick(button: string, clickCount: number, modifiers: readonly string[]): string {
-  const gesture = clickCount === 2 ? "double-click" : "click";
+  const gesture = clickCount === 1 ? "click" : clickCount === 2 ? "double-click" : "triple-click";
   const held = modifiers.length === 0 ? "" : ` holding ${modifiers.join("+")}`;
   return `${button} ${gesture}${held}`;
 }
@@ -64,21 +67,45 @@ export function createBrowseClickTool(runtime: BrowseRuntime): CanonicalToolDef 
       "Refs are validated against the current snapshot and a stale ref is refused; a text or role target that matches several " +
       "elements is ambiguous_target, so snapshot and use a ref instead. " +
       "button defaults to left, click_count to 1, and modifiers is a subset of Alt, Control, Meta and Shift. " +
+      "position clicks a point inside the element; delay_ms holds the button down; repeat performs separate clicks with interval_ms between them. " +
       "A successful click does not prove the page changed: call browse_snapshot afterwards when the next step depends on it.",
     args: {
       target: BROWSE_TARGET_ARG,
       page: BROWSE_PAGE_ARG,
       button: z.enum(CLICK_BUTTONS).optional().default("left").describe("Mouse button (default left)"),
       click_count: z
-        .union([z.literal(1), z.literal(2)])
+        .union([z.literal(1), z.literal(2), z.literal(3)])
         .optional()
         .default(1)
-        .describe("Click count: 1 for a click, 2 for a double-click (default 1)"),
+        .describe("Click count: 1 click, 2 double-click, 3 triple-click (default 1)"),
       modifiers: z
         .array(z.enum(MODIFIERS))
         .max(4)
         .optional()
         .describe("Modifier keys held during the click, a subset of Alt, Control, Meta and Shift"),
+      position: BROWSE_POSITION_ARG.optional().describe("Point inside the element to click (default: its centre)"),
+      delay_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(5_000)
+        .optional()
+        .describe("Hold the mouse button down this long between down and up, in milliseconds (default 0)"),
+      repeat: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .default(1)
+        .describe("How many separate clicks to perform, each of click_count presses (default 1)"),
+      interval_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(5_000)
+        .optional()
+        .describe("Pause between repeated clicks, in milliseconds (requires repeat > 1)"),
       timeout_ms: timeoutArg(BROWSE_ACTION_TIMEOUT_MS),
       force: z.boolean().optional().describe("Skip actionability checks and click even if another element covers the target"),
     },
@@ -86,6 +113,10 @@ export function createBrowseClickTool(runtime: BrowseRuntime): CanonicalToolDef 
       const timeoutMs = resolveTimeout(args.timeout_ms, BROWSE_ACTION_TIMEOUT_MS);
       const plan = parseTarget(args.target);
       const modifiers = args.modifiers ?? [];
+      const repeat = args.repeat;
+      if (args.interval_ms !== undefined && repeat <= 1) {
+        throw invalidArgumentsError("browse_click", "interval_ms only applies when repeat is greater than 1");
+      }
       const call = browseCall({ runtime, action: "browse_click", context, page: args.page });
       return runOnPage(call, context, async (page, resultContext) => {
         const result = await page.click(plan, {
@@ -94,11 +125,20 @@ export function createBrowseClickTool(runtime: BrowseRuntime): CanonicalToolDef 
           button: args.button,
           clickCount: args.click_count,
           modifiers,
+          ...(args.position === undefined ? {} : { position: args.position }),
+          ...(args.delay_ms === undefined ? {} : { delayMs: args.delay_ms }),
+          repeat,
+          ...(args.interval_ms === undefined ? {} : { intervalMs: args.interval_ms }),
         });
         const where = result.url === "" ? "" : `; the page is at ${result.url}`;
+        const point = args.position === undefined ? "" : ` at (${args.position.x}, ${args.position.y})`;
+        const hold = args.delay_ms === undefined || args.delay_ms === 0 ? "" : ` holding the button ${args.delay_ms} ms`;
+        const repeated = repeat <= 1
+          ? ""
+          : `, repeated ${repeat} times${args.interval_ms === undefined ? "" : ` every ${args.interval_ms} ms`}`;
         return browseResult({
           title: `Clicked ${describeTarget(plan)}`,
-          output: `Clicked ${describeTarget(plan)} with a ${describeClick(args.button, args.click_count, modifiers)}${where}. Call browse_snapshot if the click changed the page.`,
+          output: `Clicked ${describeTarget(plan)} with a ${describeClick(args.button, args.click_count, modifiers)}${point}${hold}${repeated}${where}. Call browse_snapshot if the click changed the page.`,
           context: resultContext({ url: result.url, title: result.title }),
           metadata: {
             target: result.target,
@@ -106,6 +146,69 @@ export function createBrowseClickTool(runtime: BrowseRuntime): CanonicalToolDef 
             button: args.button,
             click_count: args.click_count,
             modifiers,
+            position: args.position ?? null,
+            delay_ms: args.delay_ms ?? 0,
+            repeat,
+            interval_ms: args.interval_ms ?? 0,
+            force: args.force === true,
+            timeout_ms: timeoutMs,
+          },
+        });
+      });
+    },
+  });
+}
+
+/** `browse_drag` — press on one element, move, and release on another. */
+export function createBrowseDragTool(runtime: BrowseRuntime): CanonicalToolDef {
+  return defineBrowseTool("browse_drag", {
+    description:
+      "Drag from one element onto another. from is pressed, the pointer moves in steps, and it is released on to. " +
+      "from_position and to_position pick points inside each element instead of their centres, which is what makes a canvas, " +
+      "slider or list reorder draggable. Both targets use the same ref/css/text/role grammar as browse_click; refs are validated " +
+      "against the current snapshot. A successful drag does not prove the page changed: re-snapshot when the next step depends on it.",
+    args: {
+      from: BROWSE_TARGET_ARG.describe("Element to press at the start of the drag"),
+      to: BROWSE_TARGET_ARG.describe("Element to release on at the end of the drag"),
+      page: BROWSE_PAGE_ARG,
+      from_position: BROWSE_POSITION_ARG.optional().describe("Point inside from to press (default: its centre)"),
+      to_position: BROWSE_POSITION_ARG.optional().describe("Point inside to to release (default: its centre)"),
+      steps: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .optional()
+        .default(10)
+        .describe("Interpolated pointer moves between press and release (default 10)"),
+      timeout_ms: timeoutArg(BROWSE_ACTION_TIMEOUT_MS),
+      force: z.boolean().optional().describe("Skip actionability checks on both endpoints"),
+    },
+    async execute(args, context) {
+      const timeoutMs = resolveTimeout(args.timeout_ms, BROWSE_ACTION_TIMEOUT_MS);
+      const source = parseTarget(args.from);
+      const target = parseTarget(args.to);
+      const call = browseCall({ runtime, action: "browse_drag", context, page: args.page });
+      return runOnPage(call, context, async (page, resultContext) => {
+        const result = await page.drag(source, target, {
+          timeoutMs,
+          force: args.force === true,
+          steps: args.steps,
+          ...(args.from_position === undefined ? {} : { sourcePosition: args.from_position }),
+          ...(args.to_position === undefined ? {} : { targetPosition: args.to_position }),
+        });
+        const fromPoint = args.from_position === undefined ? "" : ` at (${args.from_position.x}, ${args.from_position.y})`;
+        const toPoint = args.to_position === undefined ? "" : ` at (${args.to_position.x}, ${args.to_position.y})`;
+        return browseResult({
+          title: `Dragged ${describeTarget(source)} to ${describeTarget(target)}`,
+          output: `Dragged ${describeTarget(source)}${fromPoint} to ${describeTarget(target)}${toPoint} in ${args.steps} step(s); the page is at ${result.url}. Call browse_snapshot if the drag changed the page.`,
+          context: resultContext({ url: result.url, title: result.title }),
+          metadata: {
+            source: describeTarget(source),
+            target: describeTarget(target),
+            from_position: args.from_position ?? null,
+            to_position: args.to_position ?? null,
+            steps: args.steps,
             force: args.force === true,
             timeout_ms: timeoutMs,
           },
@@ -240,54 +343,109 @@ export function createBrowseHoverTool(runtime: BrowseRuntime): CanonicalToolDef 
   return defineBrowseTool("browse_hover", {
     description:
       "Move the pointer over an element, which reveals hover menus and tooltips. " +
+      "position moves to a point inside the element rather than its centre, modifiers holds keys during the move, " +
+      "force skips actionability checks and hold_ms keeps the pointer there before returning. " +
       "Take the target from the latest browse_snapshot; a hover that opened a menu usually needs a second snapshot to see its items.",
     args: {
       target: BROWSE_TARGET_ARG,
       page: BROWSE_PAGE_ARG,
+      position: BROWSE_POSITION_ARG.optional().describe("Point inside the element to hover (default: its centre)"),
+      modifiers: z
+        .array(z.enum(MODIFIERS))
+        .max(4)
+        .optional()
+        .describe("Modifier keys held during the move, a subset of Alt, Control, Meta and Shift"),
+      hold_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(10_000)
+        .optional()
+        .describe("Keep the pointer over the element this long after moving there, in milliseconds (default 0)"),
       timeout_ms: timeoutArg(BROWSE_ACTION_TIMEOUT_MS),
+      force: z.boolean().optional().describe("Skip actionability checks and hover even if another element covers the target"),
     },
     async execute(args, context) {
       const timeoutMs = resolveTimeout(args.timeout_ms, BROWSE_ACTION_TIMEOUT_MS);
       const plan = parseTarget(args.target);
+      const modifiers = args.modifiers ?? [];
+      const holdMs = args.hold_ms ?? 0;
       const call = browseCall({ runtime, action: "browse_hover", context, page: args.page });
       return runOnPage(call, context, async (page, resultContext) => {
-        const result = await page.hover(plan, { timeoutMs });
+        const result = await page.hover(plan, {
+          timeoutMs,
+          force: args.force === true,
+          modifiers,
+          ...(args.position === undefined ? {} : { position: args.position }),
+          holdMs,
+        });
+        const point = args.position === undefined ? "" : ` at (${args.position.x}, ${args.position.y})`;
+        const held = holdMs === 0 ? "" : ` and kept it there ${holdMs} ms`;
         return browseResult({
           title: `Hovered ${describeTarget(plan)}`,
-          output: `Hovered ${describeTarget(plan)}; the page is at ${result.url}. Call browse_snapshot if the hover revealed new elements.`,
+          output: `Hovered ${describeTarget(plan)}${point}${held}; the page is at ${result.url}. Call browse_snapshot if the hover revealed new elements.`,
           context: resultContext({ url: result.url, title: result.title }),
-          metadata: { target: result.target, timeout_ms: timeoutMs },
+          metadata: {
+            target: result.target,
+            position: args.position ?? null,
+            modifiers,
+            hold_ms: holdMs,
+            force: args.force === true,
+            timeout_ms: timeoutMs,
+          },
         });
       });
     },
   });
 }
 
-/** `browse_scroll` — scroll an element into view or wheel the page. */
+/** `browse_scroll` — put an element in view, jump to an edge, or wheel. */
 export function createBrowseScrollTool(runtime: BrowseRuntime): CanonicalToolDef {
   return defineBrowseTool("browse_scroll", {
     description:
-      "Scroll either to an element or by a wheel delta, never both. " +
-      "With target, the element is scrolled into view. Without a target, the page is wheeled by delta_x (default 0) and delta_y (default 600); " +
-      "use a negative delta to scroll up. Pass exactly one of target or a non-zero delta pair, and re-snapshot after scrolling if new content appeared.",
+      "Move the viewport in exactly one of three ways. With target, scroll that element into view. With to=top|bottom, jump the document to its edge. " +
+      "With no target and no to, wheel by delta_x (default 0) and delta_y (default 600); at puts the pointer over an element first, " +
+      "so an inner scroller receives the wheel instead of whatever was under the pointer, and modifiers holds keys such as Control during the wheel. " +
+      "Use a negative delta to scroll up. Re-snapshot after scrolling if new content appeared.",
     args: {
       page: BROWSE_PAGE_ARG,
-      target: BROWSE_TARGET_ARG.optional().describe("Element to scroll into view; excludes delta_x and delta_y"),
+      target: BROWSE_TARGET_ARG.optional().describe("Element to scroll into view; excludes deltas, to, at and modifiers"),
+      to: z.enum(["top", "bottom"]).optional().describe("Jump the document to its top or bottom; excludes target, deltas and at"),
+      at: BROWSE_TARGET_ARG.optional().describe("Move the pointer over this element before wheeling; excludes target and to"),
+      at_position: BROWSE_POSITION_ARG.optional().describe("Point inside at for the pointer (requires at)"),
       delta_x: z.number().int().min(-100_000).max(100_000).optional().describe("Horizontal wheel delta in CSS pixels (default 0)"),
       delta_y: z.number().int().min(-100_000).max(100_000).optional().describe(`Vertical wheel delta in CSS pixels (default ${BROWSE_SCROLL_STEP})`),
+      modifiers: z
+        .array(z.enum(MODIFIERS))
+        .max(4)
+        .optional()
+        .describe("Modifier keys held during the wheel, for example Control for browser zoom"),
       timeout_ms: timeoutArg(BROWSE_ACTION_TIMEOUT_MS),
     },
     async execute(args, context) {
       const timeoutMs = resolveTimeout(args.timeout_ms, BROWSE_ACTION_TIMEOUT_MS);
       const plan = args.target === undefined ? undefined : parseTarget(args.target);
-      if (plan !== undefined && (args.delta_x !== undefined || args.delta_y !== undefined)) {
-        throw invalidArgumentsError("browse_scroll", "delta_x and delta_y apply only when no target is given");
+      const at = args.at === undefined ? undefined : parseTarget(args.at);
+      const modifiers = args.modifiers ?? [];
+      const hasDelta = args.delta_x !== undefined || args.delta_y !== undefined;
+      const hasWheelExtras = at !== undefined || hasDelta || args.at_position !== undefined || modifiers.length > 0;
+
+      if (plan !== undefined && (args.to !== undefined || hasWheelExtras)) {
+        throw invalidArgumentsError("browse_scroll", "target excludes to, at, at_position, delta_x, delta_y and modifiers");
       }
-      const deltaX = plan === undefined ? args.delta_x ?? 0 : 0;
-      const deltaY = plan === undefined ? args.delta_y ?? BROWSE_SCROLL_STEP : 0;
-      if (plan === undefined && deltaX === 0 && deltaY === 0) {
+      if (args.to !== undefined && hasWheelExtras) {
+        throw invalidArgumentsError("browse_scroll", "to excludes target, at, at_position, delta_x, delta_y and modifiers");
+      }
+      if (args.at_position !== undefined && at === undefined) {
+        throw invalidArgumentsError("browse_scroll", "at_position requires at");
+      }
+
+      const deltaX = plan === undefined && args.to === undefined ? args.delta_x ?? 0 : 0;
+      const deltaY = plan === undefined && args.to === undefined ? args.delta_y ?? BROWSE_SCROLL_STEP : 0;
+      if (plan === undefined && args.to === undefined && deltaX === 0 && deltaY === 0) {
         throw invalidArgumentsError("browse_scroll", "delta_x and delta_y are both 0, so nothing would scroll");
       }
+
       const call = browseCall({ runtime, action: "browse_scroll", context, page: args.page });
       return runOnPage(call, context, async (page, resultContext) => {
         if (plan !== undefined) {
@@ -296,15 +454,59 @@ export function createBrowseScrollTool(runtime: BrowseRuntime): CanonicalToolDef
             title: `Scrolled to ${describeTarget(plan)}`,
             output: `Scrolled ${describeTarget(plan)} into view; the page is at ${page.url}.`,
             context: resultContext({ url: page.url }),
-            metadata: { target: describeTarget(plan), delta_x: 0, delta_y: 0, timeout_ms: timeoutMs },
+            metadata: {
+              target: describeTarget(plan),
+              to: null,
+              at: null,
+              at_position: null,
+              delta_x: 0,
+              delta_y: 0,
+              modifiers: [],
+              timeout_ms: timeoutMs,
+            },
           });
         }
-        await page.scroll({ deltaX, deltaY, timeoutMs });
+        if (args.to !== undefined) {
+          await page.scroll({ to: args.to, timeoutMs });
+          return browseResult({
+            title: `Scrolled to the ${args.to}`,
+            output: `Scrolled the document to the ${args.to}; it is now at ${page.url}.`,
+            context: resultContext({ url: page.url }),
+            metadata: {
+              target: null,
+              to: args.to,
+              at: null,
+              at_position: null,
+              delta_x: 0,
+              delta_y: 0,
+              modifiers: [],
+              timeout_ms: timeoutMs,
+            },
+          });
+        }
+        await page.scroll({
+          deltaX,
+          deltaY,
+          ...(at === undefined ? {} : { at }),
+          ...(args.at_position === undefined ? {} : { atPosition: args.at_position }),
+          ...(modifiers.length === 0 ? {} : { modifiers }),
+          timeoutMs,
+        });
+        const where = at === undefined ? "at the current pointer" : `over ${describeTarget(at)}`;
         return browseResult({
-          title: "Scrolled the page",
-          output: `Scrolled the page by dx=${deltaX}, dy=${deltaY}; it is now at ${page.url}.`,
+          title: "Wheeled the page",
+          output: `Wheeled ${where} by dx=${deltaX}, dy=${deltaY}; it is now at ${page.url}.`,
           context: resultContext({ url: page.url }),
-          metadata: { target: null, delta_x: deltaX, delta_y: deltaY, timeout_ms: timeoutMs },
+          metadata: {
+            target: null,
+            to: null,
+            at: at === undefined ? null : describeTarget(at),
+            at_position: args.at_position ?? null,
+            delta_x: deltaX,
+            delta_y: deltaY,
+            modifiers,
+            timeout_ms: timeoutMs,
+          },
         });
       });
     },

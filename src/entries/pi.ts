@@ -1269,7 +1269,7 @@ export default async function(pi: any): Promise<void> {
       ...createAllLspTools(lspClientManager, lspDocManager),
       // Computer use — the canonical family, present ONLY when the gate is on.
       ...(computerUseGate.enabled ? createComputerTools() : {}),
-      // Browse — the 22-tool browser family, likewise present ONLY when its own
+      // Browse — the 23-tool browser family, likewise present ONLY when its own
       // gate is on (an explicit opt-in, or AUTO with the driver installed).
       ...(browseUseGate.enabled ? createBrowseTools() : {}),
     };

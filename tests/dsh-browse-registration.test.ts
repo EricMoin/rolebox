@@ -2,7 +2,7 @@
 /**
  * dsh browse-use gate — registration.
  *
- * The plugin registers the 22-tool browse family only when the resolved gate is
+ * The plugin registers the 23-tool browse family only when the resolved gate is
  * on AND the host can enforce per-role restrictions (`ctx.tools.guard`). The
  * gate is checked BEFORE `enabledNamespaces`, so a wildcard profile — the
  * common `["*"]` shape — can never turn the family on by itself.
@@ -180,7 +180,7 @@ function browseKeys(registered: DshToolDefinition[]): string[] {
 // ── Registration ────────────────────────────────────────────────────────────
 
 describe("dsh browse-use gate — registration", () => {
-  it('registers all 22 browse tools under enabledNamespaces ["*"] when the gate is on', async () => {
+  it('registers all 23 browse tools under enabledNamespaces ["*"] when the gate is on', async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, registeredTools } = createFakeCtx();
 

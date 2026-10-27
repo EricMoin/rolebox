@@ -38,7 +38,7 @@ log destinations, and subprocess fixtures use Node. Mock factories that depend
 on local state use `vi.doMock` before dynamically importing their consumers.
 
 The browser acceptance runner builds the package, checks the affected modules,
-and drives all 22 browser tools on Chromium, Firefox, and WebKit. It also tests
+and drives all 23 browser tools on Chromium, Firefox, and WebKit. It also tests
 the built Node MCP server, host adapters, cancellation, CDP ownership, and clean
 shutdown. Install browser binaries first:
 

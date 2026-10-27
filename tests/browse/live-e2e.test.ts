@@ -244,6 +244,109 @@ describe.skipIf(!live)("browse_* live end to end", () => {
     });
   }, 90_000);
 
+  it("drives click points, repeats, triple clicks, drags, hover and wheel placement", async () => {
+    await withBrowse(async turn => {
+      await openHome(turn);
+      const gesture = async () => JSON.parse(await pageText(turn, "JSON.stringify(window.gesture)"));
+      const reset = async () => {
+        await pageText(turn, "Object.assign(window.gesture, { clicks: 0, detail: [], dblclicks: 0, contextmenus: 0, down: null, up: null, downAt: 0, upAt: 0, clickPoint: null }); 'reset'");
+      };
+
+      // A point inside the element, a held button and three separate clicks.
+      ok(await turn.call("browse_click", {
+        target: "css=#pad",
+        position: { x: 40, y: 50 },
+        delay_ms: 60,
+        repeat: 3,
+        interval_ms: 10,
+      }), "browse_click repeated");
+      let state = await gesture();
+      expect(state.clicks).toBe(3);
+      expect(state.detail).toEqual([1, 1, 1]);
+      // Engine subpixel hit-testing can round the point by a pixel.
+      expect(state.clickPoint[0]).toBe(40);
+      expect(state.clickPoint[1]).toBeGreaterThanOrEqual(48);
+      expect(state.clickPoint[1]).toBeLessThanOrEqual(51);
+      expect(state.upAt - state.downAt).toBeGreaterThanOrEqual(45);
+
+      // One native triple-click sequence, not three calls.
+      await reset();
+      ok(await turn.call("browse_click", {
+        target: "css=#pad",
+        position: { x: 10, y: 20 },
+        click_count: 3,
+      }), "browse_click triple");
+      state = await gesture();
+      expect(state.clicks).toBe(3);
+      expect(state.detail).toEqual([1, 2, 3]);
+      expect(state.dblclicks).toBe(1);
+      expect(state.clickPoint[0]).toBe(10);
+      expect(state.clickPoint[1]).toBeGreaterThanOrEqual(18);
+      expect(state.clickPoint[1]).toBeLessThanOrEqual(21);
+
+      // Right-click reaches the page's contextmenu handler.
+      await reset();
+      ok(await turn.call("browse_click", { target: "css=#gesture", button: "right" }), "browse_click right");
+      expect((await gesture()).contextmenus).toBe(1);
+
+      // Drag between two points of the same element.
+      await reset();
+      ok(await turn.call("browse_drag", {
+        from: "css=#pad",
+        to: "css=#pad",
+        from_position: { x: 20, y: 20 },
+        to_position: { x: 200, y: 80 },
+        steps: 10,
+      }), "browse_drag");
+      state = await gesture();
+      for (const [actual, expected] of [[state.down, [20, 20]], [state.up, [200, 80]]] as const) {
+        expect(actual[0]).toBeGreaterThanOrEqual(expected[0] - 2);
+        expect(actual[0]).toBeLessThanOrEqual(expected[0] + 2);
+        expect(actual[1]).toBeGreaterThanOrEqual(expected[1] - 2);
+        expect(actual[1]).toBeLessThanOrEqual(expected[1] + 2);
+      }
+
+      // Native HTML5 drag-and-drop uses dragstart/dragover/drop, not only pointer moves.
+      await pageText(turn, "Object.assign(window.gesture, { dropped: null }); 'reset'");
+      ok(await turn.call("browse_drag", { from: "css=#drag-source", to: "css=#drop-zone" }), "browse_drag html5");
+      expect(await pageText(turn, "String(window.gesture.dropped)")).toBe("dragged");
+
+      // Hover reveals a menu that only CSS :hover shows.
+      ok(await turn.call("browse_hover", { target: "css=#hover-zone", hold_ms: 30 }), "browse_hover");
+      expect(await pageText(turn, "getComputedStyle(document.getElementById('hover-menu')).display")).toBe("inline-block");
+
+      // Wheel over an inner scroller instead of wherever the pointer was left.
+      ok(await turn.call("browse_hover", { target: "css=#scroller" }), "browse_hover scroller");
+      const pageBefore = Number(await pageText(turn, "window.scrollY"));
+      ok(await turn.call("browse_scroll", {
+        at: "css=#scroller",
+        at_position: { x: 10, y: 10 },
+        delta_y: 300,
+      }), "browse_scroll at");
+      // The compositor applies a wheel asynchronously; read the result after it settles.
+      await sleep(150);
+      expect(Number(await pageText(turn, "document.getElementById('scroller').scrollTop"))).toBeGreaterThan(0);
+      expect(Number(await pageText(turn, "window.scrollY"))).toBe(pageBefore);
+
+      // Modifiers reach the wheel event, e.g. Control for browser zoom.
+      await pageText(turn, "window.__lastWheel = null; window.addEventListener('wheel', function (event) { window.__lastWheel = { ctrl: event.ctrlKey, dy: event.deltaY }; }); 'ok'");
+      ok(await turn.call("browse_scroll", {
+        at: "css=#scroller",
+        at_position: { x: 10, y: 10 },
+        delta_y: 60,
+        modifiers: ["Control"],
+      }), "browse_scroll modifiers");
+      await sleep(100);
+      expect(JSON.parse(await pageText(turn, "JSON.stringify(window.__lastWheel)"))).toMatchObject({ ctrl: true, dy: 60 });
+
+      // Edge jumps use the document, not the pointer position.
+      ok(await turn.call("browse_scroll", { to: "bottom" }), "browse_scroll bottom");
+      expect(Number(await pageText(turn, "window.scrollY"))).toBeGreaterThan(1_000);
+      ok(await turn.call("browse_scroll", { to: "top" }), "browse_scroll top");
+      expect(Number(await pageText(turn, "window.scrollY"))).toBe(0);
+    });
+  }, 90_000);
+
   it("captures a PNG attachment whose reported path is a real file", async () => {
     await withBrowse(async turn => {
       await openHome(turn);

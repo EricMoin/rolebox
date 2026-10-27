@@ -382,6 +382,10 @@ export const TOOL_DESCRIPTORS: Readonly<Record<string, ToolDescriptor>> = {
     icon: "browse", verb: "click", noun: "page",
     summarize: args => line(args, "target"),
   },
+  browse_drag: {
+    icon: "browse", verb: "drag", noun: "page",
+    summarize: args => join([line(args, "from"), line(args, "to")]),
+  },
   // The typed text may be a credential; never echo it.
   browse_type: {
     icon: "browse", verb: "type", noun: "page",

@@ -435,8 +435,14 @@ export interface NavigationResult {
   status: number | null;
 }
 
-/** A modifier key a click or hover may hold down. */
+/** A modifier key a click, hover or wheel may hold down. */
 export type BrowseModifier = "Alt" | "Control" | "Meta" | "Shift";
+
+/** A point relative to an element's padding-box top-left, in CSS pixels. */
+export interface BrowsePoint {
+  x: number;
+  y: number;
+}
 
 /** Per-action options shared by clicking, typing and the other gestures. */
 export interface ActionOptions {
@@ -445,10 +451,40 @@ export interface ActionOptions {
   force?: boolean;
   /** Mouse button for a click; ignored by the other gestures. */
   button?: "left" | "right" | "middle";
-  /** 1 for a single click, 2 for a double click. */
-  clickCount?: 1 | 2;
+  /** 1 for a single click, 2 for a double click, 3 for a triple click. */
+  clickCount?: 1 | 2 | 3;
   /** Modifier keys held down during the action. */
   modifiers?: readonly BrowseModifier[];
+  /** Where inside the element to act; the centre is used when omitted. */
+  position?: BrowsePoint;
+  /** Hold the mouse button down this long between down and up, in milliseconds. */
+  delayMs?: number;
+  /** How many separate clicks to perform, each with `clickCount` presses. */
+  repeat?: number;
+  /** Pause between repeated clicks, in milliseconds. */
+  intervalMs?: number;
+}
+
+/** Options for moving the pointer over an element. */
+export interface HoverOptions {
+  timeoutMs?: number;
+  force?: boolean;
+  position?: BrowsePoint;
+  modifiers?: readonly BrowseModifier[];
+  /** Keep the pointer over the element this long after moving there. */
+  holdMs?: number;
+}
+
+/** Options for dragging one element onto another. */
+export interface DragOptions {
+  timeoutMs?: number;
+  force?: boolean;
+  /** Where inside the source to press, relative to its padding box. */
+  sourcePosition?: BrowsePoint;
+  /** Where inside the destination to release, relative to its padding box. */
+  targetPosition?: BrowsePoint;
+  /** Interpolated pointer moves between press and release (default 1). */
+  steps?: number;
 }
 
 /** What an element action did, and where the page stood afterwards. */
@@ -469,7 +505,14 @@ export interface ScrollOptions {
   target?: TargetPlan;
   deltaX?: number;
   deltaY?: number;
+  /** Jump the document to its top or bottom instead of wheeling. */
   to?: "top" | "bottom";
+  /** Move the pointer over this element before wheeling. */
+  at?: TargetPlan;
+  /** Where inside `at` to put the pointer. */
+  atPosition?: BrowsePoint;
+  /** Modifiers held while wheeling, e.g. Control for browser zoom. */
+  modifiers?: readonly BrowseModifier[];
   timeoutMs?: number;
 }
 
@@ -546,7 +589,9 @@ export interface BrowsePageDriver {
   /** Press one key, optionally on a target instead of the focused element. */
   press(key: string, target?: TargetPlan, options?: ActionOptions): Promise<ActionResult>;
   select(target: TargetPlan, values: readonly string[], options?: ActionOptions): Promise<ActionResult>;
-  hover(target: TargetPlan, options?: ActionOptions): Promise<ActionResult>;
+  hover(target: TargetPlan, options?: HoverOptions): Promise<ActionResult>;
+  /** Press on a source element, move, and release on a destination element. */
+  drag(source: TargetPlan, target: TargetPlan, options?: DragOptions): Promise<ActionResult>;
   scroll(options?: ScrollOptions): Promise<ScrollResult>;
   wait(options?: WaitOptions): Promise<void>;
   /** Evaluate a JavaScript expression in the page and return its serializable value. */

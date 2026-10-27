@@ -212,7 +212,7 @@ describe("browse-use grants — allow by default with explicit role restrictions
     // the received side, which the const annotation widens.
     const declared: string[] = [...BROWSE_TOOL_NAMES];
     expect(declared.sort()).toEqual(Object.keys(createBrowseTools()).sort());
-    expect(BROWSE_TOOL_NAMES).toHaveLength(22);
+    expect(BROWSE_TOOL_NAMES).toHaveLength(23);
     expect(isBrowseToolName("browse_open")).toBe(true);
     expect(isBrowseToolName("browse_future_tool")).toBe(true);
     expect(isBrowseToolName("hashline_read")).toBe(false);

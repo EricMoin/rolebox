@@ -9,7 +9,7 @@
  * adapters). This file deliberately tests the SEAMS, because that is where the
  * upstream layers can disagree while every unit suite stays green:
  *
- * - the hub's 22 names, the host wire's 22 names and the assembled
+ * - the hub's 23 names, the host wire's 23 names and the assembled
  *   `buildCanonicalTools({ browseUse: true })` surface are one set, and the
  *   family is absent unless the host opts in;
  * - one canonical record drives a real open → snapshot → click → type → read →
@@ -96,12 +96,12 @@ function expectOk(result: StructuredToolResult, action: string): Record<string, 
 // ── The surface the host registers ───────────────────────────────────────────
 
 describe("browse tool surface — hub, host wire and assembly", () => {
-  it("joins the hub names, the host wire and the assembled surface into one 22-name set", () => {
+  it("joins the hub names, the host wire and the assembled surface into one 23-name set", () => {
     const hub = createBrowseTools();
     expect(Object.keys(hub).sort()).toEqual([...HUB_TOOL_NAMES].sort());
-    expect(HUB_TOOL_NAMES).toHaveLength(22);
+    expect(HUB_TOOL_NAMES).toHaveLength(23);
     // The host's own copy of the registry (kept independent of the driver
-    // stack) must name the same 22 tools, or a host would register a name the
+    // stack) must name the same 23 tools, or a host would register a name the
     // tools module never builds — or grant one it does.
     expect([...WIRE_TOOL_NAMES]).toEqual([...HUB_TOOL_NAMES]);
 

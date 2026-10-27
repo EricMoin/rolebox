@@ -64,7 +64,7 @@ describe("buildCanonicalTools — browse family", () => {
     }
   });
 
-  it("registers exactly the 22 declared names when the gate is on", () => {
+  it("registers exactly the 23 declared names when the gate is on", () => {
     const tools = buildCanonicalTools({ ...baseOptions(), browseUse: true });
     expect(browseKeys(tools)).toEqual([...BROWSE_TOOL_NAMES].sort());
     for (const name of BROWSE_TOOL_NAMES) {

@@ -136,7 +136,7 @@ when its `browseUse` gate is on (see
 
 - **Playwright is optional, so the family can be absent.** With no explicit
   setting the gate is on only when `playwright` resolves from the rolebox
-  install. An explicit `browseUse: true` registers the 22 tools even without the
+  install. An explicit `browseUse: true` registers the 23 tools even without the
   driver so `browse_status` can report the gap, but every action fails until the
   driver (`npm install playwright`) and a browser build
   (`npx playwright install chromium`) are installed. The gate is read at boot;

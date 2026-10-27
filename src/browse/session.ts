@@ -52,7 +52,9 @@ import {
   type CookieRecord,
   type DialogState,
   type DownloadEntry,
+  type DragOptions,
   type EvaluateOptions,
+  type HoverOptions,
   type NavigateOptions,
   type NavigationResult,
   type NetworkEntry,
@@ -259,19 +261,37 @@ export class BrowseSessionPage {
     return this.targetAction(target, "select", plan => this.page.driver.select(plan, values, options));
   }
 
-  async hover(target: TargetPlan, options?: ActionOptions): Promise<ActionResult> {
+  async hover(target: TargetPlan, options?: HoverOptions): Promise<ActionResult> {
     return this.targetAction(target, "hover", plan => this.page.driver.hover(plan, options));
   }
 
+  async drag(source: TargetPlan, target: TargetPlan, options?: DragOptions): Promise<ActionResult> {
+    this.assertNotCancelled();
+    const from = this.resolveTarget(source);
+    const to = this.resolveTarget(target);
+    try {
+      return await this.perform("drag", () => this.page.driver.drag(from, to, options));
+    } catch (error) {
+      throw this.translateDragFailure(from, to, error);
+    }
+  }
+
   async scroll(options?: ScrollOptions): Promise<ScrollResult> {
-    if (options?.target === undefined) {
+    if (options?.target === undefined && options?.at === undefined) {
       return this.perform("scroll", () => this.page.driver.scroll(options));
     }
-    const target = this.resolveTarget(options.target);
+    const target = options.target === undefined ? undefined : this.resolveTarget(options.target);
+    const at = options.at === undefined ? undefined : this.resolveTarget(options.at);
     try {
-      return await this.perform("scroll", () => this.page.driver.scroll({ ...options, target }));
+      return await this.perform("scroll", () => this.page.driver.scroll({
+        ...options,
+        ...(target === undefined ? {} : { target }),
+        ...(at === undefined ? {} : { at }),
+      }));
     } catch (error) {
-      throw this.translateTargetFailure(target, error, "scroll");
+      const failed = target ?? at;
+      if (failed === undefined) throw asBrowseError(error, "scroll");
+      throw this.translateTargetFailure(failed, error, "scroll");
     }
   }
 
@@ -446,6 +466,32 @@ export class BrowseSessionPage {
       );
     }
     return browse;
+  }
+
+  /**
+   * Translate a drag endpoint that vanished into `stale_ref`.
+   *
+   * Playwright reports which selector failed, but not which endpoint of the
+   * drag it was; when neither endpoint is named, both refs are dropped so the
+   * next model turn starts from a fresh snapshot instead of guessing.
+   */
+  private translateDragFailure(source: TargetPlan, target: TargetPlan, error: unknown): BrowseError {
+    const browse = asBrowseError(error, "drag");
+    if (browse.code !== "element_not_found" && browse.code !== "stale_ref") return browse;
+    const refs = [source, target].filter(
+      (endpoint): endpoint is { kind: "ref"; ref: string } => endpoint.kind === "ref",
+    );
+    if (refs.length === 0) return browse;
+    const named = refs.filter(ref => browse.message.includes(`data-rolebox-ref="${ref.ref}"`));
+    const stale = named.length === 0 ? refs : named;
+    for (const ref of stale) this.page.refs.delete(ref.ref);
+    const labels = stale.map(ref => `ref ${ref.ref}`).join(" and ");
+    return browseError(
+      "stale_ref",
+      `${labels} ${stale.length === 1 ? "is" : "are"} stale on page "${this.page.name}"`,
+      "Call browse_snapshot again to get current refs, then retry the drag.",
+      browse,
+    );
   }
 
   /** Replace the ref map from a snapshot, with a text fallback for driver stand-ins. */

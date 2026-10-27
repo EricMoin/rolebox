@@ -25,7 +25,9 @@ import {
   type CookieRecord,
   type DialogState,
   type DownloadEntry,
+  type DragOptions,
   type DriverStatus,
+  type HoverOptions,
   type LoadState,
   type NavigateOptions,
   type NavigationResult,
@@ -60,6 +62,10 @@ export class FakePageDriver implements BrowsePageDriver {
   readonly buffers: BrowsePageBuffers;
   readonly calls: string[] = [];
   readonly clickTargets: TargetPlan[] = [];
+  readonly clickOptions: Array<ActionOptions | undefined> = [];
+  readonly hoverOptions: Array<HoverOptions | undefined> = [];
+  readonly scrollOptions: Array<ScrollOptions | undefined> = [];
+  readonly dragCalls: Array<{ source: TargetPlan; target: TargetPlan; options?: DragOptions }> = [];
   readonly acceptedDialogs: Array<string | undefined> = [];
   readonly writtenCookies: Array<readonly CookieInput[]> = [];
   readonly uploadedFiles: string[] = [];
@@ -70,6 +76,7 @@ export class FakePageDriver implements BrowsePageDriver {
   snapshotText = "";
   snapshotRefs: SnapshotRef[] = [];
   clickError: unknown = null;
+  dragError: unknown = null;
   dialogState: DialogState | null = null;
   cookiesValue: CookieRecord[] = [];
   screenshotResult: ScreenshotResult = { bytes: FAKE_PNG_BYTES, mime: "image/png" };
@@ -170,8 +177,9 @@ export class FakePageDriver implements BrowsePageDriver {
     });
   }
 
-  async click(target: TargetPlan, _options?: ActionOptions): Promise<ActionResult> {
+  async click(target: TargetPlan, options?: ActionOptions): Promise<ActionResult> {
     this.clickTargets.push(target);
+    this.clickOptions.push(options);
     return this.operation("click", async () => {
       if (this.clickError !== null) throw this.clickError;
       return this.action("click", target);
@@ -199,11 +207,21 @@ export class FakePageDriver implements BrowsePageDriver {
     return this.operation("select", async () => ({ ...(await this.action("select", target)), values: [...values] }));
   }
 
-  async hover(target: TargetPlan, _options?: ActionOptions): Promise<ActionResult> {
+  async hover(target: TargetPlan, options?: HoverOptions): Promise<ActionResult> {
+    this.hoverOptions.push(options);
     return this.operation("hover", () => this.action("hover", target));
   }
 
-  async scroll(_options?: ScrollOptions): Promise<ScrollResult> {
+  async drag(source: TargetPlan, target: TargetPlan, options?: DragOptions): Promise<ActionResult> {
+    this.dragCalls.push({ source, target, ...(options === undefined ? {} : { options }) });
+    return this.operation("drag", async () => {
+      if (this.dragError !== null) throw this.dragError;
+      return this.action("drag", source);
+    });
+  }
+
+  async scroll(options?: ScrollOptions): Promise<ScrollResult> {
+    this.scrollOptions.push(options);
     return this.operation("scroll", () => ({ url: this.currentUrl, title: this.titleText }));
   }
 

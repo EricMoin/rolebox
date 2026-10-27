@@ -41,10 +41,10 @@ function expectFailure(result: StructuredToolResult, code: string): void {
 }
 
 describe("browse tool surface", () => {
-  it("exposes exactly the 22 declared names", () => {
+  it("exposes exactly the 23 declared names", () => {
     const harness = makeHarness();
     expect(Object.keys(harness.tools).sort()).toEqual([...BROWSE_TOOL_NAMES].sort());
-    expect(BROWSE_TOOL_NAMES.length).toBe(22);
+    expect(BROWSE_TOOL_NAMES.length).toBe(23);
   });
 
   it("keeps the barrel export naming the same tools", () => {
@@ -186,7 +186,7 @@ describe("invalid arguments and the shared failure contract", () => {
     expect(snapshot.metadata?.ref_count).toBe(3);
   });
 
-  it("runs every one of the 22 tools successfully and names itself in metadata.action", async () => {
+  it("runs every one of the 23 tools successfully and names itself in metadata.action", async () => {
     const harness = makeHarness();
     writeFileSync(join(harness.worktree, "upload.txt"), "payload");
     const dialog: DialogState = { type: "alert", message: "Heads up", defaultValue: "", open: true };
@@ -201,6 +201,7 @@ describe("invalid arguments and the shared failure contract", () => {
       ["browse_snapshot", () => harness.call("browse_snapshot")],
       ["browse_read", () => harness.call("browse_read")],
       ["browse_click", () => harness.call("browse_click", { target: "e1" })],
+      ["browse_drag", () => harness.call("browse_drag", { from: "e1", to: "e2" })],
       ["browse_type", () => harness.call("browse_type", { target: "e2", text: "hello" })],
       ["browse_press", () => harness.call("browse_press", { key: "Enter" })],
       ["browse_select", () => harness.call("browse_select", { target: "e3", values: ["pro"] })],

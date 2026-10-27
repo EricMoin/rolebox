@@ -4,7 +4,7 @@
  * Every tool in the family is written against the same four helpers:
  *
  * - the argument vocabulary (`page`, `timeout`, target, URL) so the schemas and
- *   their descriptions stay identical across 22 tools;
+ *   their descriptions stay identical across 23 tools;
  * - {@link defineBrowseTool}, the one wrapper that parses arguments and turns
  *   any thrown value into the canonical `Error:` tool result — a browse tool
  *   never rejects;
@@ -83,6 +83,14 @@ export const BROWSE_TARGET_ARG = z
     "Element target: a ref from the latest browse_snapshot (e12 or @e12), css=<selector>, text=<text>, "
       + 'role=<role>[name="<name>"], label=<text>, placeholder=<text>, alt=<text>, title=<text> or testid=<id>',
   );
+
+/** A point inside an element, in CSS pixels from its padding-box top-left. */
+export const BROWSE_POSITION_ARG = z
+  .object({
+    x: z.number().finite().min(0).max(100_000),
+    y: z.number().finite().min(0).max(100_000),
+  })
+  .describe("Point inside the element, in CSS pixels from its padding-box top-left");
 
 /** A per-tool `timeout_ms` argument carrying this tool's default in its description. */
 export function timeoutArg(defaultMs: number, maximumMs: number = BROWSE_MAX_TIMEOUT_MS) {

@@ -84,12 +84,42 @@ describe("browse_click", () => {
     expect(result.output).toContain("right double-click holding Control+Shift");
   });
 
-  it("rejects an invalid button, click count, modifier or empty target", async () => {
+  it("passes a position, triple count, hold delay and repeat through", async () => {
+    const harness = makeHarness();
+    await openAndSnapshot(harness);
+    const result = await harness.call("browse_click", {
+      target: "e1",
+      position: { x: 12, y: 34 },
+      click_count: 3,
+      delay_ms: 40,
+      repeat: 3,
+      interval_ms: 25,
+    });
+    expect(harness.page().clickOptions[0]).toMatchObject({
+      clickCount: 3,
+      position: { x: 12, y: 34 },
+      delayMs: 40,
+      repeat: 3,
+      intervalMs: 25,
+    });
+    expect(result.metadata?.position).toEqual({ x: 12, y: 34 });
+    expect(result.metadata?.delay_ms).toBe(40);
+    expect(result.metadata?.repeat).toBe(3);
+    expect(result.metadata?.interval_ms).toBe(25);
+    expect(result.output).toContain("left triple-click at (12, 34)");
+    expect(result.output).toContain("holding the button 40 ms");
+    expect(result.output).toContain("repeated 3 times every 25 ms");
+  });
+
+  it("rejects an invalid button, click count, modifier, position or empty target", async () => {
     const harness = makeHarness();
     for (const args of [
       { target: "e1", button: "sideways" },
-      { target: "e1", click_count: 3 },
+      { target: "e1", click_count: 4 },
       { target: "e1", modifiers: ["Hyper"] },
+      { target: "e1", position: { x: -1, y: 0 } },
+      { target: "e1", delay_ms: 5_001 },
+      { target: "e1", interval_ms: 10 },
       { target: "" },
       { target: "unknownprefix=x" },
     ]) {
@@ -240,6 +270,29 @@ describe("browse_hover", () => {
     expect(harness.page().calls).toContain("hover");
     expect(result.metadata?.target).toBe("ref=e1");
     expect(result.output).toContain("Hovered ref=e1");
+    expect(result.metadata?.hold_ms).toBe(0);
+  });
+
+  it("passes a point, modifiers, force and hold time through", async () => {
+    const harness = makeHarness();
+    await openAndSnapshot(harness);
+    const result = await harness.call("browse_hover", {
+      target: "e1",
+      position: { x: 7, y: 8 },
+      modifiers: ["Shift"],
+      force: true,
+      hold_ms: 30,
+    });
+    expect(harness.page().hoverOptions[0]).toMatchObject({
+      position: { x: 7, y: 8 },
+      modifiers: ["Shift"],
+      force: true,
+      holdMs: 30,
+    });
+    expect(result.metadata?.position).toEqual({ x: 7, y: 8 });
+    expect(result.metadata?.modifiers).toEqual(["Shift"]);
+    expect(result.metadata?.hold_ms).toBe(30);
+    expect(result.output).toContain("Hovered ref=e1 at (7, 8) and kept it there 30 ms");
   });
 });
 
@@ -270,13 +323,112 @@ describe("browse_scroll", () => {
     expect(result.output).toContain("Scrolled ref=e1 into view");
   });
 
-  it("rejects a target combined with deltas, and a zero wheel", async () => {
+  it("wheels over a chosen element with modifiers", async () => {
     const harness = makeHarness();
-    const both = await harness.call("browse_scroll", { target: "e1", delta_y: 10 });
-    expectFailure(both, "invalid_arguments");
-    const zero = await harness.call("browse_scroll", { delta_x: 0, delta_y: 0 });
-    expectFailure(zero, "invalid_arguments");
+    await openAndSnapshot(harness);
+    const result = await harness.call("browse_scroll", {
+      at: "e1",
+      at_position: { x: 5, y: 6 },
+      delta_y: 120,
+      modifiers: ["Control"],
+    });
+    expect(harness.page().scrollOptions[0]).toMatchObject({
+      at: { kind: "ref", ref: "e1" },
+      atPosition: { x: 5, y: 6 },
+      deltaX: 0,
+      deltaY: 120,
+      modifiers: ["Control"],
+    });
+    expect(result.metadata?.at).toBe("ref=e1");
+    expect(result.metadata?.modifiers).toEqual(["Control"]);
+    expect(result.output).toContain("Wheeled over ref=e1 by dx=0, dy=120");
+  });
+
+  it("jumps the document to an edge", async () => {
+    const harness = makeHarness();
+    await harness.call("browse_open");
+    const result = await harness.call("browse_scroll", { to: "bottom" });
+    expect(harness.page().scrollOptions[0]).toMatchObject({ to: "bottom" });
+    expect(result.metadata?.to).toBe("bottom");
+    expect(result.output).toContain("Scrolled the document to the bottom");
+  });
+
+  it("rejects conflicting scroll modes and a zero wheel", async () => {
+    const harness = makeHarness();
+    for (const args of [
+      { target: "e1", delta_y: 10 },
+      { target: "e1", to: "top" },
+      { to: "top", delta_y: 10 },
+      { to: "top", at: "e1" },
+      { at_position: { x: 1, y: 2 } },
+      { delta_x: 0, delta_y: 0 },
+    ]) {
+      const result = await harness.call("browse_scroll", args);
+      expectFailure(result, "invalid_arguments");
+    }
     expect(harness.factory.launchCount).toBe(0);
+  });
+});
+
+describe("browse_drag", () => {
+  it("drags between two refs with positions and steps", async () => {
+    const harness = makeHarness();
+    await openAndSnapshot(harness);
+    const result = await harness.call("browse_drag", {
+      from: "e1",
+      to: "e2",
+      from_position: { x: 3, y: 4 },
+      to_position: { x: 5, y: 6 },
+      steps: 25,
+    });
+    expect(harness.page().dragCalls).toEqual([{
+      source: { kind: "ref", ref: "e1" },
+      target: { kind: "ref", ref: "e2" },
+      options: {
+        timeoutMs: 15_000,
+        force: false,
+        steps: 25,
+        sourcePosition: { x: 3, y: 4 },
+        targetPosition: { x: 5, y: 6 },
+      },
+    }]);
+    expect(result.metadata?.source).toBe("ref=e1");
+    expect(result.metadata?.target).toBe("ref=e2");
+    expect(result.metadata?.from_position).toEqual({ x: 3, y: 4 });
+    expect(result.metadata?.to_position).toEqual({ x: 5, y: 6 });
+    expect(result.metadata?.steps).toBe(25);
+    expect(result.output).toContain("Dragged ref=e1 at (3, 4) to ref=e2 at (5, 6) in 25 step(s)");
+  });
+
+  it("defaults to ten interpolated steps", async () => {
+    const harness = makeHarness();
+    await openAndSnapshot(harness);
+    const result = await harness.call("browse_drag", { from: "e1", to: "e2" });
+    expect(result.metadata?.steps).toBe(10);
+    expect(harness.page().dragCalls[0]?.options?.steps).toBe(10);
+  });
+
+  it("turns a vanished drag endpoint into stale_ref and forgets the refs", async () => {
+    const harness = makeHarness();
+    await openAndSnapshot(harness);
+    harness.page().dragError = browseError("element_not_found", "element is not attached to the DOM", "Retry.");
+    const vanished = await harness.call("browse_drag", { from: "e1", to: "e2" });
+    expectFailure(vanished, "stale_ref");
+    expect(vanished.output).toContain("ref e1 and ref e2 are stale");
+    expect(vanished.output).toContain("browse_snapshot");
+
+    // Both endpoints were dropped, so the next action asks for a new snapshot.
+    harness.page().dragError = null;
+    expectFailure(await harness.call("browse_click", { target: "e1" }), "stale_ref");
+  });
+
+  it("rejects an out-of-range step count or a stale endpoint before the browser", async () => {
+    const harness = makeHarness();
+    await openAndSnapshot(harness);
+    expectFailure(await harness.call("browse_drag", { from: "e1", to: "e2", steps: 0 }), "invalid_arguments");
+    const stale = await harness.call("browse_drag", { from: "e1", to: "e99" });
+    expectFailure(stale, "stale_ref");
+    expect(harness.page().dragCalls).toEqual([]);
   });
 });
 

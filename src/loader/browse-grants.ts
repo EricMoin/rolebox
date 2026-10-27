@@ -17,6 +17,7 @@ export const BROWSE_TOOL_NAMES = [
   "browse_snapshot",
   "browse_read",
   "browse_click",
+  "browse_drag",
   "browse_type",
   "browse_press",
   "browse_select",

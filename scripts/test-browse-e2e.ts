@@ -26,7 +26,7 @@ async function run(name: string, args: string[], overrides: Record<string, strin
 if (await run("build", ["--import", "tsx", "scripts/build-all.ts"]) !== 0) process.exit(1);
 await run("module and host regression", ["--import", "tsx", "scripts/test.ts", ...unitFiles]);
 for (const engine of ["chromium", "firefox", "webkit"]) {
-  await run(`${engine}: 22-tool acceptance`, ["--import", "tsx", "scripts/test.ts", "tests/browse/live-e2e.test.ts"], {
+  await run(`${engine}: 23-tool acceptance`, ["--import", "tsx", "scripts/test.ts", "tests/browse/live-e2e.test.ts"], {
     ROLEBOX_BROWSE_LIVE: "1", ROLEBOX_BROWSE_ENGINE: engine,
   });
 }

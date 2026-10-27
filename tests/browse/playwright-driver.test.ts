@@ -54,7 +54,8 @@ function fakeLocator(selector: string, before?: (method: string) => Promise<void
     fill: async (value: string) => run("fill", value),
     pressSequentially: async (text: string) => run("pressSequentially", text),
     press: async (key: string) => run("press", key),
-    hover: async () => run("hover"),
+    hover: async (options?: AnyRecord) => run("hover", options),
+    dragTo: async (target: unknown, options?: AnyRecord) => run("dragTo", { target, options }),
     selectOption: async (values: string[]) => {
       await run("selectOption", values);
       return [...values];
@@ -76,6 +77,8 @@ function fakePage(): AnyRecord {
     roleCalls: [] as AnyRecord[],
     goto: [] as Array<{ url: string; options?: AnyRecord }>,
     screenshotOptions: [] as AnyRecord[],
+    keyCalls: [] as Array<{ kind: string; key: string }>,
+    wheelCalls: [] as Array<{ deltaX: number; deltaY: number }>,
     beforeLocatorAction: undefined as ((method: string) => Promise<void> | void) | undefined,
   };
   const locator = (selector: string) => fakeLocator(selector, state.beforeLocatorAction);
@@ -122,8 +125,22 @@ function fakePage(): AnyRecord {
       state.screenshotOptions.push(options ?? {});
       return new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
     },
-    keyboard: { press: async () => undefined },
-    mouse: { wheel: async () => undefined },
+    keyboard: {
+      press: async (key: string) => {
+        state.keyCalls.push({ kind: "press", key });
+      },
+      down: async (key: string) => {
+        state.keyCalls.push({ kind: "down", key });
+      },
+      up: async (key: string) => {
+        state.keyCalls.push({ kind: "up", key });
+      },
+    },
+    mouse: {
+      wheel: async (deltaX: number, deltaY: number) => {
+        state.wheelCalls.push({ deltaX, deltaY });
+      },
+    },
     isClosed: () => state.closed,
     close: async () => {
       state.closed = true;
@@ -600,6 +617,95 @@ describe("PlaywrightPageDriver", () => {
     // use Playwright's dedicated engines, which the fake page tracks separately.
     expect(harness.page.state.selectorLocators).toEqual(["#save"]);
     expect(harness.page.state.roleCalls[0]).toEqual({ role: "button", options: { name: "Save", exact: false } });
+    await driver.close();
+  });
+
+  it("passes a click point, hold delay, triple count and repeats to the locator", async () => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+
+    await pageDriver.click({ kind: "ref", ref: "e1" }, {
+      position: { x: 11, y: 22 },
+      delayMs: 35,
+      clickCount: 3,
+      repeat: 2,
+      intervalMs: 5,
+      modifiers: ["Control"],
+    });
+
+    const clicks = locatorCalls.filter(call => call.method === "click");
+    expect(clicks).toHaveLength(2);
+    expect(clicks[0]!.value).toMatchObject({
+      position: { x: 11, y: 22 },
+      delay: 35,
+      clickCount: 3,
+      modifiers: ["Control"],
+    });
+    await driver.close();
+  });
+
+  it("drags with source and target positions and steps", async () => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+
+    await pageDriver.drag({ kind: "css", selector: "#source" }, { kind: "css", selector: "#target" }, {
+      sourcePosition: { x: 3, y: 4 },
+      targetPosition: { x: 8, y: 9 },
+      steps: 4,
+      force: true,
+    });
+
+    const drag = locatorCalls.find(call => call.method === "dragTo");
+    expect(drag?.value).toMatchObject({
+      options: {
+        sourcePosition: { x: 3, y: 4 },
+        targetPosition: { x: 8, y: 9 },
+        steps: 4,
+        force: true,
+      },
+    });
+    await driver.close();
+  });
+
+  it("hovers a point with modifiers and holds there", async () => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+
+    await pageDriver.hover({ kind: "ref", ref: "e1" }, {
+      position: { x: 7, y: 8 },
+      modifiers: ["Shift"],
+      force: true,
+      holdMs: 1,
+    });
+
+    expect(locatorCalls.find(call => call.method === "hover")?.value).toMatchObject({
+      position: { x: 7, y: 8 },
+      modifiers: ["Shift"],
+      force: true,
+    });
+    await driver.close();
+  });
+
+  it("wheels over a chosen point with modifiers held", async () => {
+    const harness = fakeBrowser();
+    const { driver, pageDriver } = await openPage(harness);
+
+    await pageDriver.scroll({
+      at: { kind: "ref", ref: "e1" },
+      atPosition: { x: 5, y: 6 },
+      deltaX: 10,
+      deltaY: -20,
+      modifiers: ["Control"],
+    });
+
+    expect(locatorCalls.find(call => call.method === "hover")?.value).toMatchObject({
+      position: { x: 5, y: 6 },
+    });
+    expect(harness.page.state.keyCalls).toEqual([
+      { kind: "down", key: "Control" },
+      { kind: "up", key: "Control" },
+    ]);
+    expect(harness.page.state.wheelCalls).toEqual([{ deltaX: 10, deltaY: -20 }]);
     await driver.close();
   });
 

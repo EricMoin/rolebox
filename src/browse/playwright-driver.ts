@@ -54,13 +54,16 @@ import {
   type BrowseLaunchOptions,
   type BrowsePageBuffers,
   type BrowsePageDriver,
+  type BrowsePoint,
   type BrowseSnapshot,
   type BrowseViewport,
   type CookieInput,
   type CookieRecord,
   type DialogState,
+  type DragOptions,
   type DriverStatus,
   type EvaluateOptions,
+  type HoverOptions,
   type LoadState,
   type NavigateOptions,
   type NavigationResult,
@@ -114,11 +117,25 @@ interface PlaywrightLocatorLike {
     button?: "left" | "right" | "middle";
     clickCount?: number;
     modifiers?: readonly string[];
+    position?: BrowsePoint;
+    delay?: number;
   }): Promise<void>;
   fill(value: string, options?: { timeout?: number }): Promise<void>;
   pressSequentially(text: string, options?: { timeout?: number; delay?: number }): Promise<void>;
   press(key: string, options?: { timeout?: number }): Promise<void>;
-  hover(options?: { timeout?: number; force?: boolean }): Promise<void>;
+  hover(options?: {
+    timeout?: number;
+    force?: boolean;
+    modifiers?: readonly string[];
+    position?: BrowsePoint;
+  }): Promise<void>;
+  dragTo(target: PlaywrightLocatorLike, options?: {
+    timeout?: number;
+    force?: boolean;
+    sourcePosition?: BrowsePoint;
+    targetPosition?: BrowsePoint;
+    steps?: number;
+  }): Promise<void>;
   selectOption(values: readonly string[], options?: { timeout?: number }): Promise<string[]>;
   setInputFiles(files: readonly string[], options?: { timeout?: number }): Promise<void>;
   scrollIntoViewIfNeeded(options?: { timeout?: number }): Promise<void>;
@@ -210,7 +227,11 @@ interface PlaywrightPageLike {
     url: string | RegExp | ((url: URL) => boolean),
     options?: { timeout?: number },
   ): Promise<void>;
-  keyboard: { press(key: string): Promise<void> };
+  keyboard: {
+    press(key: string): Promise<void>;
+    down(key: string): Promise<void>;
+    up(key: string): Promise<void>;
+  };
   mouse: { wheel(deltaX: number, deltaY: number): Promise<void> };
   on(event: "console", handler: (message: PlaywrightConsoleMessageLike) => void): void;
   on(event: "pageerror", handler: (error: Error) => void): void;
@@ -1135,13 +1156,22 @@ class PlaywrightPageDriver implements BrowsePageDriver {
   async click(target: TargetPlan, options?: ActionOptions): Promise<ActionResult> {
     this.assertReady("click");
     const locator = this.locatorFor(target);
-    await this.run(`click ${describeTarget(target)}`, () => locator.click({
-      timeout: options?.timeoutMs ?? this.timeoutMs,
-      force: options?.force === true,
-      ...(options?.button === undefined ? {} : { button: options.button }),
-      ...(options?.clickCount === undefined ? {} : { clickCount: options.clickCount }),
-      ...(options?.modifiers === undefined ? {} : { modifiers: [...options.modifiers] }),
-    }));
+    const repeat = Math.max(1, options?.repeat ?? 1);
+    const intervalMs = Math.max(0, options?.intervalMs ?? 0);
+    for (let index = 0; index < repeat; index += 1) {
+      await this.run(`click ${describeTarget(target)}`, () => locator.click({
+        timeout: options?.timeoutMs ?? this.timeoutMs,
+        force: options?.force === true,
+        ...(options?.button === undefined ? {} : { button: options.button }),
+        ...(options?.clickCount === undefined ? {} : { clickCount: options.clickCount }),
+        ...(options?.modifiers === undefined ? {} : { modifiers: [...options.modifiers] }),
+        ...(options?.position === undefined ? {} : { position: options.position }),
+        ...(options?.delayMs === undefined ? {} : { delay: options.delayMs }),
+      }));
+      if (index + 1 < repeat && intervalMs > 0) {
+        await this.run("wait between clicks", () => this.page.waitForTimeout(intervalMs));
+      }
+    }
     return this.actionResult("click", target);
   }
 
@@ -1197,14 +1227,40 @@ class PlaywrightPageDriver implements BrowsePageDriver {
     return this.actionResult("select", target, { values: selected });
   }
 
-  async hover(target: TargetPlan, options?: ActionOptions): Promise<ActionResult> {
+  async hover(target: TargetPlan, options?: HoverOptions): Promise<ActionResult> {
     this.assertReady("hover");
     const locator = this.locatorFor(target);
     await this.run(`hover ${describeTarget(target)}`, () => locator.hover({
       timeout: options?.timeoutMs ?? this.timeoutMs,
       force: options?.force === true,
+      ...(options?.modifiers === undefined ? {} : { modifiers: [...options.modifiers] }),
+      ...(options?.position === undefined ? {} : { position: options.position }),
     }));
+    const holdMs = Math.max(0, options?.holdMs ?? 0);
+    if (holdMs > 0) await this.run("hold the pointer", () => this.page.waitForTimeout(holdMs));
     return this.actionResult("hover", target);
+  }
+
+  async drag(source: TargetPlan, target: TargetPlan, options?: DragOptions): Promise<ActionResult> {
+    this.assertReady("drag");
+    const sourceLocator = this.locatorFor(source);
+    const targetLocator = this.locatorFor(target);
+    await this.run(
+      `drag ${describeTarget(source)} to ${describeTarget(target)}`,
+      () => sourceLocator.dragTo(targetLocator, {
+        timeout: options?.timeoutMs ?? this.timeoutMs,
+        force: options?.force === true,
+        ...(options?.sourcePosition === undefined ? {} : { sourcePosition: options.sourcePosition }),
+        ...(options?.targetPosition === undefined ? {} : { targetPosition: options.targetPosition }),
+        ...(options?.steps === undefined ? {} : { steps: options.steps }),
+      }),
+    );
+    return {
+      action: "drag",
+      target: `${describeTarget(source)} -> ${describeTarget(target)}`,
+      url: this.safeUrl(),
+      title: await this.safeTitle(),
+    };
   }
 
   async scroll(options?: ScrollOptions): Promise<ScrollResult> {
@@ -1213,13 +1269,41 @@ class PlaywrightPageDriver implements BrowsePageDriver {
     if (options?.target !== undefined) {
       const locator = this.locatorFor(options.target);
       await this.run(`scroll to ${describeTarget(options.target)}`, () => locator.scrollIntoViewIfNeeded({ timeout }));
-    } else if (options?.to === "top" || options?.to === "bottom") {
-      await this.run("scroll the page", () => this.page.evaluate((where: string) => {
+      return { url: this.safeUrl(), title: await this.safeTitle() };
+    }
+    if (options?.to === "top" || options?.to === "bottom") {
+      await this.run(`scroll to the ${options.to}`, () => this.page.evaluate((where: string) => {
         window.scrollTo(0, where === "bottom" ? document.body.scrollHeight : 0);
       }, options.to));
-    } else {
-      await this.run("scroll the page", () => this.page.mouse.wheel(options?.deltaX ?? 0, options?.deltaY ?? 0));
+      return { url: this.safeUrl(), title: await this.safeTitle() };
     }
+    const deltaX = options?.deltaX ?? 0;
+    const deltaY = options?.deltaY ?? 0;
+    if (options?.at !== undefined) {
+      const at = this.locatorFor(options.at);
+      await this.run(`move the pointer to ${describeTarget(options.at)}`, () => at.hover({
+        timeout,
+        ...(options.atPosition === undefined ? {} : { position: options.atPosition }),
+      }));
+    }
+    await this.run("wheel the page", async () => {
+      const pressed: string[] = [];
+      try {
+        for (const modifier of options?.modifiers ?? []) {
+          await this.page.keyboard.down(modifier);
+          pressed.push(modifier);
+        }
+        await this.page.mouse.wheel(deltaX, deltaY);
+      } finally {
+        for (const modifier of [...pressed].reverse()) {
+          try {
+            await this.page.keyboard.up(modifier);
+          } catch {
+            // The page may have closed while the wheel was in flight.
+          }
+        }
+      }
+    });
     return { url: this.safeUrl(), title: await this.safeTitle() };
   }
 
