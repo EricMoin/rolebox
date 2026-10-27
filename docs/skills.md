@@ -16,6 +16,27 @@ When reviewing code, check:
 - ...
 ```
 
+## Built-in configuration guide
+
+The package ships [`rolebox-config`](../skills/rolebox-config/SKILL.md), a global
+skill covering role configuration, harness paths, models, assets, functions,
+subagents, memory, orchestration and runtime features. Its references are
+included in the package, so agents can read the installed guide without a source
+checkout.
+
+The install lifecycle links it into each existing harness home's `skills/`
+directory, respecting `XDG_CONFIG_HOME`, `PI_CODING_AGENT_DIR`, `DSH_HOME` and
+`CODEX_HOME`. It does not create homes for absent harnesses or register plugins.
+Host startup and `rolebox sync <target>` also sync the guide, including when
+installation scripts were disabled. Restart/reload the host for native skill
+discovery. Regular files/directories at the destination are preserved and
+reported; existing links are refreshed after upgrades.
+
+The guide is independent of role declarations and uses `rolebox-config`, outside
+the `rolebox--` namespace cleaned by role skill synchronization. To explicitly
+include it in a role's resource catalog, add
+`opencode_skills: [rolebox-config]`.
+
 ## Resolution order
 
 1. `{roleDir}/skills/{name}/SKILL.md` (role-local, directory)

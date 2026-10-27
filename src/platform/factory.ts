@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { resolvePlatformPaths } from "./registry.ts";
 import { bootstrapRoles, type BootstrapRolesResult } from "../resolver/bootstrap.ts";
 import { syncAllAgents } from "../sync/agent-files.ts";
+import { syncBuiltinSkills } from "../sync/builtin-skills.ts";
 import type { IAgentRegistrar } from "./ports/agent-registrar.ts";
 import type { ResolvedFunction } from "../types.ts";
 
@@ -129,6 +130,7 @@ export async function initializeRoleboxRuntime(
   opts: InitializeRuntimeOptions,
 ): Promise<BootstrapRolesResult> {
   const { directories: dirs, roleFunctionsMap, registrar } = opts;
+  syncBuiltinSkills(dirs.globalSkillsDir);
 
   const result = await bootstrapRoles({
     roleboxDir: dirs.roleboxDir,

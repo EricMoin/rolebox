@@ -13,6 +13,10 @@ const environment: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: "", CI: "
 environment.ROLEBOX_CONFIG_DIR = join(scratch, "config");
 environment.ROLEBOX_DATA_DIR = join(scratch, "data");
 environment.ROLEBOX_LOG_DIR = join(scratch, "logs");
+environment.XDG_CONFIG_HOME = join(scratch, "harnesses");
+environment.PI_CODING_AGENT_DIR = join(scratch, "pi");
+environment.DSH_HOME = join(scratch, "dsh");
+environment.CODEX_HOME = join(scratch, "codex");
 
 // Nested npm reads the original allow-scripts policy from its configuration file.
 for (const key of Object.keys(environment)) if (/^npm_config_allow_scripts$/i.test(key)) delete environment[key];
@@ -34,7 +38,8 @@ try {
   const consumer = join(scratch, "consumer");
   await mkdir(packedProject);
   await mkdir(consumer);
-  for (const path of ["package.json", "README.md", "LICENSE", "dist", "dsh", "examples", "functions", "scripts/npm-readme.ts"]) {
+  await mkdir(join(environment.XDG_CONFIG_HOME!, "opencode"), { recursive: true });
+  for (const path of ["package.json", "README.md", "LICENSE", "dist", "dsh", "examples", "functions", "skills", "scripts/npm-readme.ts"]) {
     await cp(join(repository, path), join(packedProject, path), { recursive: true });
   }
   await symlink(join(repository, "node_modules"), join(packedProject, "node_modules"), process.platform === "win32" ? "junction" : "dir");
@@ -44,6 +49,8 @@ try {
   const manifest = JSON.parse(packed.slice(packed.indexOf("[\n"), packed.lastIndexOf("]") + 1)) as Array<{ filename: string; files: Array<{ path: string }> }>;
   const archive = join(scratch, manifest[0]!.filename);
   assert(manifest[0]!.files.some(file => file.path === "dist/cli/main.js"));
+  assert(manifest[0]!.files.some(file => file.path === "skills/rolebox-config/SKILL.md"));
+  assert(manifest[0]!.files.some(file => file.path === "skills/rolebox-config/references/roles.md"));
   assert(!manifest[0]!.files.some(file => /(?:bun\.lock|bunfig|patch-opentui)/.test(file.path)));
   const bin = await readFile(join(packedProject, "dist/cli/main.js"), "utf8");
   assert(bin.startsWith("#!/usr/bin/env node\n"));
@@ -51,6 +58,12 @@ try {
   const development = JSON.parse(await readFile(join(repository, "package.json"), "utf8")).devDependencies as Record<string, string>;
   const peers = ["@opencode-ai/plugin", "@opencode/plugin", "@opentui/core", "@opentui/solid", "solid-js", "@earendil-works/pi-coding-agent"].map(name => `${name}@${development[name]}`);
   command(process.execPath, [npmCli, "install", "--omit=optional", "--no-audit", "--no-fund", "--prefer-offline", "--foreground-scripts", "--loglevel=verbose", archive, ...peers], consumer, 300_000);
+  const installedSkill = join(environment.XDG_CONFIG_HOME!, "opencode", "skills", "rolebox-config");
+  assert.equal(
+    await readFile(join(installedSkill, "SKILL.md"), "utf8"),
+    await readFile(join(consumer, "node_modules/rolebox/skills/rolebox-config/SKILL.md"), "utf8"),
+  );
+  assert((await readFile(join(installedSkill, "references/roles.md"), "utf8")).length > 0);
   const probe = join(consumer, "probe.mjs");
   await writeFile(probe, `
     import assert from "node:assert/strict";

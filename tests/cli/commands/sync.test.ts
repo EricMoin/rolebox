@@ -124,6 +124,17 @@ async function importSync() {
 }
 
 describe("sync", () => {
+  it("deploys the built-in guide even when no registry roles are installed", async () => {
+    setupLock([]);
+    const { sync } = await importSync();
+    await sync("opencode");
+    const skill = join(configTmp, "opencode", "skills", "rolebox-config");
+    expect(lstatSync(skill).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(skill, "SKILL.md"))).toBe(true);
+    expect(existsSync(join(skill, "references/roles.md"))).toBe(true);
+    expect(logs.some(line => line.includes("Synced 0 roles"))).toBe(true);
+  });
+
   it("creates symlinks for installed roles", async () => {
     setupLock([
       {

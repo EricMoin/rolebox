@@ -70,9 +70,9 @@ the sync: the bundle is still written and registered, and a warning names the mi
 | `{codexHome}/skills` | Created if missing; this is the directory exposed to the plugin as its `skills/` |
 | `{codexHome}/config.toml` | Exactly one managed registration block (below) |
 
-The skill symlinks inside `{codexHome}/skills` are not written by `sync`: the MCP server
-writes the `rolebox--<skill>` entries when it boots and resolves the installed roles
-(`syncSkillSymlinks`).
+`sync` also writes the built-in `rolebox-config` skill link inside
+`{codexHome}/skills`. The MCP server writes the role-specific `rolebox--<skill>`
+entries when it boots and resolves the installed roles (`syncSkillSymlinks`).
 
 The managed block written to `config.toml` is:
 

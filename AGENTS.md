@@ -120,6 +120,45 @@ Support directories (helpers, not modules): `tests/helpers/`, `tests/integration
 
 ---
 
+## Built-in configuration skill maintenance
+
+[`skills/rolebox-config/SKILL.md`](skills/rolebox-config/SKILL.md) and its
+`references/` are the configuration guide shipped to agents with the package.
+Keep them current **in the same change** whenever a feature is added, changed,
+deprecated or removed and affects how an agent configures or uses rolebox.
+Updating README or `docs/` alone does not satisfy this requirement.
+
+Before editing a user-facing feature, read the relevant skill reference. Before
+declaring the change complete, compare its final behavior with the guide and
+update the affected instructions, examples and limitations:
+
+| Changed surface | Skill reference |
+| --- | --- |
+| Harness integration, installation/sync, config paths, environment variables, model aliases, project defaults or automatic role activation | `references/configuration.md` |
+| Role fields, model selection, permissions, inheritance, subagents or memory | `references/roles.md` |
+| Skills, references, functions, activation or function state machines | `references/assets.md` |
+| Dispatch, graphs, budgets, worker tools or role teams | `references/orchestration.md` |
+| Hooks, recovery, Copilot, notifications, extensions, browser/desktop gates or LSP | `references/runtime.md` |
+
+- Document effective runtime behavior: supported fields, values, defaults,
+  precedence, scope, activation/reload steps and differences between harnesses.
+  Parser acceptance or a declared type alone does not establish feature support.
+- When implementing a previously unsupported capability, replace the skill's
+  obsolete limitation; when changing or removing behavior, revise old examples
+  and describe the supported replacement where one exists.
+- Keep the guide self-contained inside `skills/rolebox-config/`. Link additional
+  packaged references from `SKILL.md` when adding a configuration topic; agents
+  must not need a source checkout or files omitted from the npm package.
+- Edit the repository skill source, not copies installed in a harness home.
+  Validate changed YAML/JSON examples and local reference links. Changes to skill
+  packaging or synchronization also require the affected sync tests and
+  `npm run build && npm run test:package`.
+- In the completion report, identify the skill documentation updated, or explain
+  why the change has no effect on agent-facing configuration or usage. Do not
+  leave known contradictions for a later documentation pass.
+
+---
+
 ## Host package versions
 
 Host packages — `@opencode-ai/*`, `@deepseek-ai/*`, `@earendil-works/*` — are devDependencies that track their published channel at `latest`; the `@deepseek-ai/dsh-*` packages track `next`. The policy table lives in `scripts/host-versions.ts`; `npm run check:hosts` compares each resolved version against its channel and exits 1 when one is behind. The `host-versions.yml` workflow runs that daily and fails on drift, so a host release never blocks an unrelated PR.

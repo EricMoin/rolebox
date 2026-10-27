@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
 import { loadLock } from "../config.ts";
-import { getSyncTarget, getTargetConfigDir, getRolePath } from "../paths.ts";
+import { getSyncTarget, getTargetConfigDir, getTargetSkillsDir, getRolePath } from "../paths.ts";
+import { syncBuiltinSkills } from "../../sync/builtin-skills.ts";
 import { SyncTarget } from "../../constants.ts";
 import {
   writeCodexPluginBundle,
@@ -84,6 +85,7 @@ export async function sync(target: string, relink = false): Promise<void> {
   const syncTarget = getSyncTarget(target);
 
   mkdirSync(syncTarget, { recursive: true });
+  syncBuiltinSkills(getTargetSkillsDir(target));
 
   const lock = loadLock();
 

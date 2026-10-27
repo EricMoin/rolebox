@@ -52,7 +52,8 @@
     "dist",
     "dsh",
     "examples",
-    "functions"
+    "functions",
+    "skills"
   ],
   "scripts": {
     "build": "node --import tsx scripts/build-all.ts",

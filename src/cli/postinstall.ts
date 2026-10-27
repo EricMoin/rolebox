@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PLATFORM_REGISTRY } from "../platform/registry.ts";
+import { syncBuiltinSkills } from "../sync/builtin-skills.ts";
 
 // ── 24-bit ANSI helpers (self-contained, no imports from format.ts) ──
 
@@ -90,5 +92,17 @@ export function showWelcome(): void {
   }
 }
 
-// Allow running directly: node dist/cli/postinstall.js
+/** Sync only existing harness homes, including non-interactive installs. */
+export function syncInstalledHarnessSkills(): void {
+  for (const platform of PLATFORM_REGISTRY) {
+    try {
+      const paths = platform.paths();
+      if (existsSync(paths.configDir)) syncBuiltinSkills(paths.skillsDir);
+    } catch {
+      // A host's unavailable home must not prevent installing for other hosts.
+    }
+  }
+}
+
+syncInstalledHarnessSkills();
 showWelcome();

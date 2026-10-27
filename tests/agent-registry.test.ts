@@ -11,8 +11,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, readFileSync, existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { OpencodeAgentRegistrar } from "../src/platform/adapters/opencode/agent-registrar.ts";
 import { syncAllAgents } from "../src/sync/agent-files.ts";
@@ -20,6 +20,91 @@ import { RoleMode, ROLEBOX_AGENT_MARKER } from "../src/constants.ts";
 import type { AgentDefinition } from "../src/platform/types.ts";
 import type { IAgentRegistrar } from "../src/platform/ports/agent-registrar.ts";
 import type { ResolvedRole } from "../src/types.ts";
+import { syncBuiltinSkills } from "../src/sync/builtin-skills.ts";
+import { syncSkillSymlinks } from "../src/sync/skill-symlinks.ts";
+import { initializeRoleboxRuntime } from "../src/platform/factory.ts";
+import { createDirSymlink } from "./helpers/symlink.ts";
+
+describe("built-in skill synchronization", () => {
+  let tempDir: string;
+  const source = resolve(import.meta.dirname, "../skills/rolebox-config");
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "rolebox-builtin-skills-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("exposes the full skill directory and references without installed roles", () => {
+    syncBuiltinSkills(tempDir);
+    const entry = join(tempDir, "rolebox-config");
+    expect(lstatSync(entry).isSymbolicLink()).toBe(true);
+    expect(realpathSync(entry)).toBe(realpathSync(source));
+    expect(readFileSync(join(entry, "references/roles.md"), "utf8"))
+      .toBe(readFileSync(join(source, "references/roles.md"), "utf8"));
+  });
+
+  it("keeps an unchanged link and survives role-skill cleanup", () => {
+    syncBuiltinSkills(tempDir);
+    const entry = join(tempDir, "rolebox-config");
+    const inode = lstatSync(entry).ino;
+    syncBuiltinSkills(tempDir);
+    syncSkillSymlinks([], tempDir);
+    expect(lstatSync(entry).ino).toBe(inode);
+    expect(realpathSync(entry)).toBe(realpathSync(source));
+  });
+
+  it.each([false, true])("refreshes an old package link (broken: %s)", (broken) => {
+    const oldSource = join(tempDir, "old-package", "skills", "rolebox-config");
+    mkdirSync(oldSource, { recursive: true });
+    const entry = join(tempDir, "rolebox-config");
+    createDirSymlink(oldSource, entry);
+    if (broken) rmSync(join(tempDir, "old-package"), { recursive: true });
+    syncBuiltinSkills(tempDir);
+    expect(realpathSync(entry)).toBe(realpathSync(source));
+  });
+
+  it.each(["file", "directory"])("preserves a user-owned %s at the destination", (kind) => {
+    const entry = join(tempDir, "rolebox-config");
+    if (kind === "directory") mkdirSync(entry);
+    const file = kind === "directory" ? join(entry, "SKILL.md") : entry;
+    writeFileSync(file, "User content");
+    syncBuiltinSkills(tempDir);
+    expect(readFileSync(file, "utf8")).toBe("User content");
+    expect(lstatSync(entry).isSymbolicLink()).toBe(false);
+  });
+
+  it("does not block startup when the skills path is not writable as a directory", () => {
+    const file = join(tempDir, "skills-file");
+    writeFileSync(file, "Keep this file");
+    expect(() => syncBuiltinSkills(file)).not.toThrow();
+    expect(readFileSync(file, "utf8")).toBe("Keep this file");
+  });
+
+  it("syncs at host bootstrap before resolving explicitly declared global skills", async () => {
+    const roleDir = join(tempDir, "rolebox", "example");
+    mkdirSync(roleDir, { recursive: true });
+    writeFileSync(join(roleDir, "role.yaml"), [
+      "name: Example", "description: Example role", "prompt: Configure this project.",
+      "opencode_skills: [rolebox-config]",
+    ].join("\n"));
+    const result = await initializeRoleboxRuntime({
+      directories: {
+        roleboxDir: join(tempDir, "rolebox"),
+        globalSkillsDir: join(tempDir, "skills"),
+        configDir: tempDir,
+        platformId: "opencode",
+        builtinDir: resolve(import.meta.dirname, "../functions"),
+      },
+      roleFunctionsMap: new Map(),
+    });
+    expect(result.resolved).toBe(1);
+    expect(result.resolvedRoles[0].skills.map(skill => skill.name)).toContain("rolebox-config");
+    expect(result.resolvedRoles[0].skills[0].references.length).toBeGreaterThan(0);
+  });
+});
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
