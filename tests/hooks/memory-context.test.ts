@@ -93,7 +93,13 @@ describe("ordinary session memory context", () => {
 
   it("keeps graph workers and unknown roles outside the ordinary memory path", async () => {
     await seed();
-    expect(await transform("parent--child", true)).toBe("");
+    // The worker hook carries the worker's role, never the ordinary memory
+    // path: no workflow hint and no summary from any scope reaches it.
+    const worker = await transform("parent--child", true);
+    expect(worker).toContain("## Role instructions");
+    expect(worker).not.toContain("## Memory workflow");
+    expect(worker).not.toContain("Child decision");
+    expect(worker).not.toContain("Workspace decision");
     expect(await transform("unknown")).toBe("");
   });
 });
