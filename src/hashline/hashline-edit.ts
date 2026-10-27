@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText, splitLines } from "./hash.ts";
-import { normalizeEdits, applyEditsWithReport } from "./edit-primitives.ts";
+import { canonicalizeFileContent, canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText, splitLines } from "./hash.ts";
+import { normalizeEdits, applyEditsToLinesWithReport } from "./edit-primitives.ts";
 import { validateVersion } from "./validation.ts";
-import { reanchorChangedLines, generateUnifiedDiff, countLineDiffs } from "./diff.ts";
+import { generateDiffReport } from "./diff.ts";
 import { detectUniformOffset, suggestCorrectAnchor, AmbiguousAnchorError } from "./fuzzy.ts";
 import { atomicWriteFile, atomicWriteBatch, verifyFileUnchanged, BatchWriteError } from "./atomic-write.ts";
 import { normalizeLockKey, withPathLocks } from "./path-lock.ts";
@@ -48,6 +48,7 @@ export interface ProcessedFileResult {
   correctionsApplied?: Array<{old: string; new: string}>;
   noopEdits?: number;
   deduplicatedEdits?: number;
+  verifiedSnapshot?: { raw: string; version: string };
 }
 
 function remapEditAnchors(edits: EditOp[], corrections: Map<string, string>): EditOp[] {
@@ -132,9 +133,9 @@ async function processSingleFile(
 
   const envelope = canonicalizeFileText(raw);
   const canonicalContent = envelope.content;
+  const actualVersion = computeFileVersion(canonicalContent);
 
   if (fileExisted) {
-    const actualVersion = computeFileVersion(canonicalContent);
     try {
       validateVersion(expectedVersion, actualVersion);
     } catch {
@@ -150,13 +151,14 @@ async function processSingleFile(
   // SMALL_FILE_THRESHOLD lines that ends in "\n" would report 1001 lines here
   // (split("\n").length) vs 1000 in read — escalating hashWidth and making the
   // read-returned anchors permanently unvalidatable.
-  const lineCount = splitLines(canonicalContent).length;
+  const oldLines = splitLines(canonicalContent);
+  const lineCount = oldLines.length;
   const hashWidth = hashWidthForLineCount(lineCount);
 
   // Validate per-file hashWidth if provided
   if (providedHashWidth !== undefined && providedHashWidth !== hashWidth) {
     return {
-      filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+      filePath, existed: fileExisted, version: actualVersion, diff: "", additions: 0, deletions: 0, reanchored: "",
       error: `hashWidth mismatch for ${filePath}: expected ${providedHashWidth} from read output, computed ${hashWidth} from file`,
     };
   }
@@ -169,7 +171,7 @@ async function processSingleFile(
   let dedupEditCount = 0;
 
   try {
-    const editResult = applyEditsWithReport(canonicalContent, normalizedEdits, hashWidth);
+    const editResult = applyEditsToLinesWithReport(oldLines, normalizedEdits, hashWidth);
     resultContent = editResult.content;
     noopEditCount = editResult.noopEdits;
     dedupEditCount = editResult.deduplicatedEdits;
@@ -186,7 +188,7 @@ async function processSingleFile(
           // message already starts with the ambiguity detail and ends with the
           // hashline_read re-read guidance.
           return {
-            filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+            filePath, existed: fileExisted, version: actualVersion, diff: "", additions: 0, deletions: 0, reanchored: "",
             error: caught.message,
           };
         }
@@ -196,14 +198,14 @@ async function processSingleFile(
         correctionsApplied = Array.from(corrections.entries()).map(([oldRef, newRef]) => ({ old: oldRef, new: newRef }));
         const correctedEdits = remapEditAnchors(normalizedEdits, corrections);
         try {
-          const editResult = applyEditsWithReport(canonicalContent, correctedEdits, hashWidth);
+          const editResult = applyEditsToLinesWithReport(oldLines, correctedEdits, hashWidth);
           resultContent = editResult.content;
           noopEditCount = editResult.noopEdits;
           dedupEditCount = editResult.deduplicatedEdits;
         } catch (retryErr: unknown) {
           if (isHashMismatchError(retryErr)) {
             return {
-              filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+              filePath, existed: fileExisted, version: actualVersion, diff: "", additions: 0, deletions: 0, reanchored: "",
               error: buildHashMismatchErrorDetail(retryErr.mismatches, retryErr.fileLines, hashWidth),
             };
           }
@@ -211,7 +213,7 @@ async function processSingleFile(
         }
       } else {
         return {
-          filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+          filePath, existed: fileExisted, version: actualVersion, diff: "", additions: 0, deletions: 0, reanchored: "",
           error: buildHashMismatchErrorDetail(err.mismatches, err.fileLines, hashWidth),
         };
       }
@@ -233,7 +235,7 @@ async function processSingleFile(
 
   if (finalContent === canonicalContent) {
     return {
-      filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+      filePath, existed: fileExisted, version: actualVersion, diff: "", additions: 0, deletions: 0, reanchored: "",
       correctionsApplied, noopEdits: noopEditCount, deduplicatedEdits: dedupEditCount,
       error: `No changes were made to ${filePath}. The resulting content is identical to the original. Re-read the file and provide different edit content.`,
     };
@@ -247,8 +249,7 @@ async function processSingleFile(
   // (the line-join WITHOUT trailing newlines) skewed the version for any file
   // ending in "\n". Canonicalizing the restored final content makes the edit
   // contract match the read contract exactly.
-  const newVersion = computeFileVersion(canonicalizeFileText(finalContent).content);
-  const oldLines = splitLines(canonicalContent);
+  const newVersion = computeFileVersion(canonicalizeFileContent(finalContent));
   const newLines = splitLines(resultContent);
   // D6c fix: reanchored anchors must be computed with the POST-EDIT width.
   // A fresh hashline_read of the written file derives its hashWidth from the
@@ -259,9 +260,8 @@ async function processSingleFile(
   // fresh reads exactly. splitLines is the shared line model (hashline-read
   // uses it too), so newLines.length is exactly the post-edit line count.
   const postHashWidth = hashWidthForLineCount(newLines.length);
-  const diff = generateUnifiedDiff(canonicalContent, resultContent, filePath);
-  const { additions, deletions } = countLineDiffs(canonicalContent, resultContent);
-  const reanchoredLines = reanchorChangedLines(oldLines, newLines, postHashWidth);
+  const { diff, additions, deletions, reanchored: reanchoredLines } =
+    generateDiffReport(oldLines, newLines, filePath, postHashWidth);
 
   const reanchoredStr = reanchoredLines
     .map((r) => {
@@ -274,6 +274,7 @@ async function processSingleFile(
   return {
     filePath, existed: fileExisted, version: newVersion, diff, additions, deletions, reanchored: reanchoredStr, content: finalContent,
     correctionsApplied, noopEdits: noopEditCount, deduplicatedEdits: dedupEditCount,
+    verifiedSnapshot: fileExisted ? { raw, version: actualVersion } : undefined,
   };
 }
 
@@ -424,7 +425,7 @@ export function createHashlineEditTool(hooks: HashlineEditToolHooks = {}) {
             const conflicts: string[] = [];
             for (let i = 0; i < files.length; i++) {
               const baseline = results[i].existed ? files[i].version : null;
-              const conflict = await verifyFileUnchanged(files[i].filePath, baseline);
+              const conflict = await verifyFileUnchanged(files[i].filePath, baseline, results[i].verifiedSnapshot);
               if (conflict !== null) conflicts.push(conflict);
             }
             if (conflicts.length > 0) {

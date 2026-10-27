@@ -1,7 +1,7 @@
 import { writeFile, rename, unlink, readFile, realpath, stat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
-import { canonicalizeFileText, computeFileVersion } from "./hash.ts";
+import { canonicalizeFileContent, computeFileVersion } from "./hash.ts";
 import { normalizeLockKey } from "./path-lock.ts";
 
 /**
@@ -188,7 +188,11 @@ async function cleanupTemps(temps: string[]): Promise<void> {
  * so a file changed between this check and the subsequent rename is not
  * detected. It is NOT a strict cross-process CAS.
  */
-export async function verifyFileUnchanged(filePath: string, expectedVersion: string | null): Promise<string | null> {
+export async function verifyFileUnchanged(
+  filePath: string,
+  expectedVersion: string | null,
+  verifiedSnapshot?: { raw: string; version: string },
+): Promise<string | null> {
   let raw: string;
   try {
     raw = await readFile(filePath, "utf-8");
@@ -205,7 +209,11 @@ export async function verifyFileUnchanged(filePath: string, expectedVersion: str
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Pre-write re-check failed for ${filePath}: ${msg}. Re-read the file with hashline_read and retry.`);
   }
-  const actualVersion = computeFileVersion(canonicalizeFileText(raw).content);
+  // Reuse only a version already validated against this exact text; still read from disk.
+  if (expectedVersion !== null && verifiedSnapshot?.version === expectedVersion && raw === verifiedSnapshot.raw) {
+    return null;
+  }
+  const actualVersion = computeFileVersion(canonicalizeFileContent(raw));
   if (expectedVersion === null) {
     return `File ${filePath} now exists but was expected to be created (found version ${actualVersion}). Re-read the file with hashline_read and retry.`;
   }

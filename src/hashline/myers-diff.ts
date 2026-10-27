@@ -13,24 +13,32 @@ export function buildDiffFromTrace(
   M: number,
   offset: number,
 ): DiffEntry[] {
+  return buildDiff(oldLines, newLines, endD, N, M, (distance, diagonal) => trace[distance][diagonal + offset]);
+}
+
+function buildDiff(
+  oldLines: string[],
+  newLines: string[],
+  endD: number,
+  N: number,
+  M: number,
+  frontier: (distance: number, diagonal: number) => number,
+): DiffEntry[] {
   const edits: DiffEntry[] = [];
   let x = N;
   let y = M;
 
   for (let D = endD; D > 0; D--) {
-    const V = trace[D];
     const k = x - y;
-    const idx = k + offset;
 
     let prevK: number;
-    if (k === -D || (k !== D && V[idx - 1] < V[idx + 1])) {
+    if (k === -D || (k !== D && frontier(D, k - 1) < frontier(D, k + 1))) {
       prevK = k + 1;
     } else {
       prevK = k - 1;
     }
 
-    const prevIdx = prevK + offset;
-    const prevX = V[prevIdx];
+    const prevX = frontier(D, prevK);
     const prevY = prevX - prevK;
 
     while (x > prevX && y > prevY) {
@@ -115,24 +123,22 @@ export function myersDiff(oldLines: string[], newLines: string[]): DiffEntry[] {
   }
 
   const max = N + M;
-  const offset = max;
-  const V: number[] = new Array(2 * max + 1);
-  V.fill(-1);
-  V[1 + offset] = 0;
-
   const trace: number[][] = [];
+  let previous = [0];
 
   for (let D = 0; D <= max; D++) {
-    trace.push([...V]);
+    // Distance D visits only D + 1 diagonals, k = 2 * i - D.
+    const current: number[] = new Array(D + 1);
+    trace.push(current);
 
-    for (let k = -D; k <= D; k += 2) {
-      const idx = k + offset;
+    for (let i = 0; i <= D; i++) {
+      const k = 2 * i - D;
       let x: number;
 
-      if (k === -D || (k !== D && V[idx - 1] < V[idx + 1])) {
-        x = V[idx + 1];
+      if (i === 0 || (i !== D && previous[i - 1] < previous[i])) {
+        x = previous[i];
       } else {
-        x = V[idx - 1] + 1;
+        x = previous[i - 1] + 1;
       }
 
       let y = x - k;
@@ -142,12 +148,14 @@ export function myersDiff(oldLines: string[], newLines: string[]): DiffEntry[] {
         y++;
       }
 
-      V[idx] = x;
+      current[i] = x;
 
       if (x >= N && y >= M) {
-        return buildDiffFromTrace(oldLines, newLines, trace, D, N, M, offset);
+        return buildDiff(oldLines, newLines, D, N, M, (distance, diagonal) =>
+          trace[distance - 1][(diagonal + distance - 1) / 2]);
       }
     }
+    previous = current;
   }
 
   return [];

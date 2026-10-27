@@ -24,6 +24,20 @@ export const UNIFIED_DIFF_CONTEXT = 3;
 
 export { myersDiff };
 
+export function generateDiffReport(
+  oldLines: string[],
+  newLines: string[],
+  filePath: string,
+  hashWidth: number,
+): { diff: string; additions: number; deletions: number; reanchored: ReanchoredLine[] } {
+  const entries = myersDiff(oldLines, newLines);
+  return {
+    diff: formatUnifiedDiff(entries, filePath),
+    ...countDiffEntries(entries),
+    reanchored: reanchorDiffEntries(oldLines, entries, hashWidth),
+  };
+}
+
 /**
  * Re-anchor changed lines after an edit.
  */
@@ -33,6 +47,14 @@ export function reanchorChangedLines(
   hashWidth: number,
 ): ReanchoredLine[] {
   const diff = myersDiff(oldLines, newLines);
+  return reanchorDiffEntries(oldLines, diff, hashWidth);
+}
+
+function reanchorDiffEntries(
+  oldLines: string[],
+  diff: readonly DiffEntry[],
+  hashWidth: number,
+): ReanchoredLine[] {
   const result: ReanchoredLine[] = [];
 
   for (const entry of diff) {
@@ -85,7 +107,10 @@ export function generateUnifiedDiff(
   const oldLines = splitLines(oldContent);
   const newLines = splitLines(newContent);
   const diff = myersDiff(oldLines, newLines);
+  return formatUnifiedDiff(diff, filePath);
+}
 
+function formatUnifiedDiff(diff: readonly DiffEntry[], filePath: string): string {
   if (diff.length === 0) return "";
 
   const hasChanges = diff.some((e) => e.op !== "equal");
@@ -224,7 +249,10 @@ export function countLineDiffs(
   const oldLines = splitLines(oldContent);
   const newLines = splitLines(newContent);
   const diff = myersDiff(oldLines, newLines);
+  return countDiffEntries(diff);
+}
 
+function countDiffEntries(diff: readonly DiffEntry[]): { additions: number; deletions: number } {
   let additions = 0;
   let deletions = 0;
   for (const entry of diff) {

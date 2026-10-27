@@ -356,10 +356,16 @@ export function applyEditsWithReport(
   edits: EditOp[],
   hashWidth: number
 ): { content: string; noopEdits: number; deduplicatedEdits: number } {
+  return applyEditsToLinesWithReport(splitLines(content), edits, hashWidth);
+}
+
+export function applyEditsToLinesWithReport(
+  lines: string[],
+  edits: EditOp[],
+  hashWidth: number
+): { content: string; noopEdits: number; deduplicatedEdits: number } {
   // Step 1: Deduplicate
   const { edits: deduped, deduplicatedCount } = deduplicateEdits(edits);
-
-  const lines = splitLines(content);
 
   // Step 2 (D3): after dedup, before sort — attach append/prepend ops whose
   // anchor lies strictly inside a replace range to that range. Attached
@@ -387,12 +393,11 @@ export function applyEditsWithReport(
 
   // Step 6: Apply edits — every op validates/echo-strips against the original
   // `lines` snapshot (D11) while splicing the working `currentLines`.
-  let currentLines = [...lines];
+  let currentLines = lines;
   let noopEdits = 0;
 
   for (const edit of sorted) {
-    const before = [...currentLines];
-    let beforeLen = currentLines.length;
+    const before = currentLines;
 
     switch (edit.op) {
       case "replace": {
@@ -428,10 +433,7 @@ export function applyEditsWithReport(
     }
 
     // Check if the edit was a noop (no change)
-    if (
-      arraysEqual(before, currentLines) ||
-      (currentLines.length === beforeLen && arraysEqual(before, currentLines))
-    ) {
+    if (arraysEqual(before, currentLines)) {
       noopEdits++;
     }
   }
