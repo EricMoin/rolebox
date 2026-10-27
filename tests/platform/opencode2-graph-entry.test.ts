@@ -70,7 +70,7 @@ const GRAPH_TOOLS = [
  * not change how many other tools are registered. A change to the canonical
  * toolset is a change this number must be updated with.
  */
-const NON_GRAPH_TOOL_COUNT = 63;
+const NON_GRAPH_TOOL_COUNT = 64;
 
 // ── The fake Context ────────────────────────────────────────────────────────
 
