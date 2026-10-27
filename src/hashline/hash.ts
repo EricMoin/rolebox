@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, hash } from "node:crypto";
 import {
   BASE64_DICT,
   HASH_WIDTH_SMALL,
@@ -65,20 +65,18 @@ export function computeLineHash(content: string, width: number, lineNumber?: num
   const hasSignificantChar = /[\p{L}\p{N}]/u.test(trimmed);
   const seed = hasSignificantChar ? "" : String(lineNumber ?? 0);
 
-  const hash = createHash("sha256").update(seed + trimmed).digest();
+  const digest = hash("sha256", seed + trimmed, "buffer");
+  const bytesNeeded = Math.min(Math.ceil((width * 6) / 8) + 1, digest.length);
 
-  // Convert hash bytes to a big integer, then base-64 encode to `width` chars
-  let num = 0n;
-  const bytesNeeded = Math.ceil((width * 6) / 8) + 1; // 6 bits per char
-  for (let i = 0; i < bytesNeeded && i < hash.length; i++) {
-    num = (num << 8n) | BigInt(hash[i]);
-  }
-
+  // Keep the low width * 6 bits of the same digest prefix as the original encoding.
   let result = "";
-  for (let i = 0; i < width; i++) {
-    const idx = Number(num % 64n);
-    result = BASE64_DICT[idx] + result;
-    num /= 64n;
+  for (let i = width - 1; i >= 0; i--) {
+    const bitOffset = i * 6;
+    const byteIndex = bytesNeeded - 1 - (bitOffset >> 3);
+    const shift = bitOffset & 7;
+    let value = digest[byteIndex] >>> shift;
+    if (shift > 2) value |= digest[byteIndex - 1] << (8 - shift);
+    result += BASE64_DICT[value & 63];
   }
   return result;
 }
@@ -130,6 +128,19 @@ function buildLineEols(raw: string): Array<"\r\n" | "\n" | ""> {
   return eols;
 }
 
+function normalizeLineEndings(content: string, hasCrlf: boolean, hasCr: boolean): string {
+  if (hasCrlf) return content.replace(/\r\n/g, "\n");
+  if (hasCr) return content.replace(/\r/g, "\n");
+  return content;
+}
+
+/** Canonical file content without allocating metadata for restoring line endings. */
+export function canonicalizeFileContent(rawContent: string): string {
+  const content = rawContent.charCodeAt(0) === 0xfeff ? rawContent.slice(1) : rawContent;
+  const hasCrlf = content.includes("\r\n");
+  return normalizeLineEndings(content, hasCrlf, !hasCrlf && content.includes("\r"));
+}
+
 /**
  * Canonicalize file text: strip BOM, normalize line endings to \n.
  * Returns the canonicalized content and metadata for later restoration.
@@ -155,14 +166,13 @@ export function canonicalizeFileText(rawContent: string): FileTextEnvelope {
   let lineEnding: "\n" | "\r\n";
   if (hasCrlf) {
     lineEnding = "\r\n";
-    content = content.replace(/\r\n/g, "\n");
   } else if (hasCr) {
     // Legacy \r-only line endings — normalize to \n
     lineEnding = "\r\n"; // treat as CRLF for restoration
-    content = content.replace(/\r/g, "\n");
   } else {
     lineEnding = "\n";
   }
+  content = normalizeLineEndings(content, hasCrlf, hasCr);
 
   // Per-line terminators. Legacy CR-only files record "\r\n" everywhere,
   // matching today's restore (which re-expands every line to CRLF). All other
@@ -187,6 +197,12 @@ export function canonicalizeFileText(rawContent: string): FileTextEnvelope {
  */
 export function restoreFileText(content: string, envelope: FileTextEnvelope): string {
   const eols = envelope.lineEols ?? [];
+  if (eols.every((eol) => eol === "" || eol === envelope.lineEnding)) {
+    const restored = envelope.lineEnding === "\n"
+      ? content
+      : content.replace(/\r?\n/g, "\r\n");
+    return envelope.hadBom ? "\uFEFF" + restored : restored;
+  }
   const segments = content.split("\n");
   let result = "";
   for (let i = 0; i < segments.length; i++) {

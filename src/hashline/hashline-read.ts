@@ -1,10 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import { canonicalizeFileText, computeFileVersion, computeLineHash, hashWidthForLineCount, formatHashLine, splitLines } from "./hash.ts";
+import { computeLineHash, hashWidthForLineCount } from "./hash.ts";
 import { resolveHashlinePath } from "./path-resolve.ts";
+import { createReadSnapshot, findReadLineStart, HashlineReadCache, type ReadSnapshot } from "./read-cache.ts";
 
 export function createHashlineReadTool() {
+  const cache = new HashlineReadCache();
   return defineTool({
     description:
       "Read a file and return each line annotated with a content-based hash anchor (LINE#HASH|content).\n" +
@@ -42,9 +44,12 @@ export function createHashlineReadTool() {
     async execute(input, context) {
       const filePath = resolveHashlinePath(input.filePath, context);
       try {
-        const raw = await readFile(filePath, "utf-8");
-        return formatReadOutput(raw, filePath, input.offset, input.limit);
+        const raw = cache.has(filePath)
+          ? await readFile(filePath, "utf-8")
+          : await readFile(filePath);
+        return formatSnapshot(cache.get(filePath, raw), input.offset, input.limit);
       } catch (err: unknown) {
+        cache.delete(filePath);
         if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
           return `Error: File not found: ${filePath}`;
         }
@@ -64,21 +69,13 @@ export function formatReadOutput(
   offset?: number,
   limit?: number,
 ): string {
-  const envelope = canonicalizeFileText(rawContent);
-  const content = envelope.content;
+  return formatSnapshot(createReadSnapshot(rawContent), offset, limit);
+}
 
-  // Compute version from canonical content
-  const version = computeFileVersion(content);
-
-  // Split into lines using the shared line model: a single trailing "\n" is
-  // the terminator of the last line, not an extra empty line. A file whose
-  // content is exactly "\n" is one (empty) line, not zero lines.
-  const allLines = splitLines(content);
-  const totalLines = allLines.length;
-
+function formatSnapshot(snapshot: ReadSnapshot, offset?: number, limit?: number): string {
+  const { content, version, totalLines } = snapshot;
   const hashWidth = hashWidthForLineCount(totalLines);
 
-  const lines: string[] = [];
   const result: string[] = [];
 
   // Header
@@ -106,14 +103,18 @@ export function formatReadOutput(
   // Annotate lines within the window
   // Lines exceeding 2000 chars get display-only truncation to match the documented
   // contract. Hash is computed from the ORIGINAL full content so anchors are stable.
+  let lineStart = findReadLineStart(snapshot, effectiveStart);
   for (let i = effectiveStart; i <= effectiveEnd; i++) {
-    const lineContent = allLines[i - 1] ?? "";
+    let lineEnd = content.indexOf("\n", lineStart);
+    if (lineEnd === -1) lineEnd = content.length;
+    const lineContent = content.slice(lineStart, lineEnd);
     const displayContent =
       lineContent.length > 2000
         ? lineContent.slice(0, 1997) + "..."
         : lineContent;
     const hash = computeLineHash(lineContent, hashWidth, i);
     result.push(`${i}#${hash}|${displayContent}`);
+    lineStart = lineEnd + 1;
   }
 
   return result.join("\n");
