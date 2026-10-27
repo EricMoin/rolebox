@@ -37,6 +37,7 @@ import { removeTempTree } from "./graph/helpers/temp-dirs.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { toPosixPath } from "../src/utils/paths.ts";
 import { graphStoreRoot } from "../src/graph/store/schema.ts";
 import { queryGraphs } from "../src/graph/query/graph-query.ts";
 import { getDataDir } from "../src/cli/paths.ts";
@@ -1326,7 +1327,9 @@ describe("dsh plugin apply()", () => {
       expect(prompt).not.toContain("## Available sub-agents");
       expect(requests[0].agentOptions).toEqual({ provider: "worker-provider", model: "model-name" });
       const referenceDirectory = prompt.match(/^Base directory: `([^`]+)`$/m)![1];
-      expect(referenceDirectory).toBe(join(tmpDir, "coordinator", "references"));
+      // Prompt paths are POSIX-normalized by the reference resolver, so the
+      // expectation must be too: a native join would differ on Windows.
+      expect(referenceDirectory).toBe(toPosixPath(join(tmpDir, "coordinator", "references")));
       expect(prompt).toContain("- `schema` — ");
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       const resourceContext = { signal: new AbortController().signal, callId: "worker-resource", agent: liveAgents.get("worker"),
