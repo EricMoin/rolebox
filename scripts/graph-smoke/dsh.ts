@@ -94,8 +94,7 @@ class ScriptedAdapter extends LlmAdapter {
     const capabilityStep = capabilityMode ? capabilitySteps.get(graphId!) ?? 0 : 0;
     if (!graphId && graphNotice) parentNotices.push(last);
     if (graphId) {
-      const expected = ["graph_submit_outcome", "graph_worker_exec"];
-      if (capabilityMode) expected.push("graph_worker_tools");
+      const expected = ["graph_submit_outcome", "graph_worker_exec", "graph_worker_tools"];
       if (capabilityMode === "code") expected.push("graph_worker_code");
       if (capabilityMode === "discover" && capabilityStep > 0) expected.push("custom_probe");
       assert.deepEqual(options.tools.map((tool: any) => tool.name).sort(), expected.sort(), "Worker requests must expose exactly their granted tool presentation");
@@ -237,8 +236,8 @@ try {
   assert.equal(queryGraphs(graphStoreRoot(data, root)).graphs.some(graph => graph.graphId === "dsh.private-child"), false);
   parentAction = undefined;
   parentDeclaration = { version: 3, name: "dsh.explicit", nodes: [
-    { id: "work", agent: "smoke--worker", prompt: "Produce.", outcomes: [{ id: "done" }] },
-    { id: "review", agent: "smoke--worker", prompt: "Consume.", inputs: [{ from: "work", outcome: "done" }], outcomes: [{ id: "done" }] },
+    { id: "work", agent: "smoke--worker", prompt: "Produce.", tools: [], outcomes: [{ id: "done" }] },
+    { id: "review", agent: "smoke--worker", prompt: "Consume.", inputs: [{ from: "work", outcome: "done" }], tools: [], outcomes: [{ id: "done" }] },
   ], edges: [{ from: "work", to: "review", outcome: "done" }] };
   handle.agent.followup({ role: "user", source: { kind: "user" }, id: randomUUID(), content: [{ type: "text", text: "Execute the graph chain." }] });
   await handle.agent.whenIdle();
