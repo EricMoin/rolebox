@@ -71,7 +71,23 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium firefox webkit
+      - name: Resolve Playwright version
+        id: playwright-version
+        run: |
+          version=$(node -p "require('playwright/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium firefox webkit
       - name: Allow sandboxed Playwright Chromium
         run: |
           cat > "$RUNNER_TEMP/rolebox-playwright.apparmor" <<EOF
