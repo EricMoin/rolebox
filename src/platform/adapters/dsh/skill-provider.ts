@@ -35,7 +35,7 @@
  * workspace} ∪ {the promoted default/primary role}, using only each top-level
  * role's own `skills`, excluding roles with private children: their workflow
  * bodies can name those children, and this global API has no caller identity.
- * Those roles use `load_role_skill`; workers receive private resource copies.
+ * Those roles and graph workers use the role-scoped `load_role_skill` loader.
  * The active set is read through the
  * injected per-session {@link DshActiveRoleSnapshot} (the rolebox dsh
  * `ActiveRoleRef`, `role-switcher.ts:131`, satisfies it structurally). The

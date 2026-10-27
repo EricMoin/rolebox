@@ -43,7 +43,7 @@ describe("DSH graph worker presentation", () => {
       expect(worker.modes).toEqual(["native"]);
       expect(boundary.isWorker({ id: "worker" })).toBe(true);
       expect(guard!({ name: "run_code", agent: worker })).toBeUndefined();
-      expect(guard!({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
+      expect(guard!({ name: "bash", agent: worker })).toBeUndefined();
       expect(guard!({ name: "graph_submit_outcome", agent: worker })).toBeUndefined();
       await listeners.get("agent/pre-step")!({ agent: worker }, async () => ({ kind: "enter" }));
       expect(worker.modes).toEqual(["native"]);
@@ -78,7 +78,7 @@ describe("DSH graph worker presentation", () => {
     await boundary.start("attempt-label", async () => {
       await listeners.get("agent/created")!({ agent: worker });
       expect(guard!({ name: "run_code", agent: worker })).toBeUndefined();
-      expect(guard!({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
+      expect(guard!({ name: "bash", agent: worker })).toBeUndefined();
     });
     expect(boundary.isWorker({ id: "worker" })).toBe(true);
     boundary.dispose();

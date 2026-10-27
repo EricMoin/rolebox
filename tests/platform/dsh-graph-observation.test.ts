@@ -90,7 +90,7 @@ it("reads the one declaration block from the final completed turn of the owned d
 
 it("joins text blocks and messages with one newline and ignores reasoning/tool/unknown blocks", () => {
   const reasoning = { type: "reasoning", text: block('{"outcome_id": "reasoning-must-not-count"}') };
-  const tool = { type: "tool-call", id: "call-1", name: "graph_worker_exec", arguments: "{}" };
+  const tool = { type: "tool-call", id: "call-1", name: "bash", arguments: "{}" };
   const events = [descriptor, began,
     assistant([reasoning, tool, text("The report follows"), text(block('{"outcome_id": "done", "data": null}'))]),
     ended("completed")];

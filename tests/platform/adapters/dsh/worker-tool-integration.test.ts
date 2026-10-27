@@ -97,20 +97,24 @@ function createFixture(startup: DshWorkerStartupTools, executorMode: boolean) {
 
 describe.each(["presentation switch", "scoped executor"])("dsh worker capability integration with %s", mode => {
   const fixture = (startup: DshWorkerStartupTools) => createFixture(startup, mode === "scoped executor");
-  it("exposes hashline schemas and executes file tools without discovery despite legacy empty lists", async () => {
-    const f = fixture({ declaredTools: [], inheritedTools: ["hashline_read", "hashline_edit"] });
-    f.register("hashline_read");
-    f.register("hashline_edit");
+  it("uses native command and rolebox tools without discovery despite legacy empty lists", async () => {
+    const inheritedTools = ["bash", "hashline_read", "hashline_edit", "load_role_skill", "load_reference",
+      "reference_search", "memory_recall", "memory_write", "browse_open", "computer_screenshot"];
+    const f = fixture({ declaredTools: [], inheritedTools });
+    for (const name of inheritedTools) f.register(name);
     try {
       await f.start();
-      expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS, "hashline_read", "hashline_edit"]);
+      expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS, ...inheritedTools]);
       expect(f.local.has("graph_worker_tools")).toBe(false);
-      for (const name of ["hashline_read", "hashline_edit"]) {
+      for (const name of inheritedTools) {
         const result = await f.registry.execute!({ name, arguments: {}, agent: f.agent, callId: name,
           signal: new AbortController().signal });
         expect(result).toBe(f.rich);
       }
-      expect(f.executions.map(execution => execution.name)).toEqual(["hashline_read", "hashline_edit"]);
+      expect(f.executions.map(execution => execution.name)).toEqual(inheritedTools);
+      for (const name of ["graph_declare", "dispatch", "task", "team_create", "loop_start"]) {
+        expect(f.guard(name)).toContain("Graph workers may only");
+      }
       expect(f.guard("graph_control")).toContain("Graph workers may only");
     } finally { f.boundary.dispose(); }
   });

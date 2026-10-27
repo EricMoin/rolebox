@@ -2,8 +2,8 @@
 
 Graph workers inherit the parent's authorized task tools and expose their native
 schemas by default. Choose the available task tools that fit the operation.
-`graph_worker_exec` remains available for shell commands, builds and tests; it
-is not the required path for file operations. Use `load_role_skill` for role
+Use the host's native command and file tools for shell commands, edits, builds
+and tests. Their normal permissions, approval checks and session environment apply. Use `load_role_skill` for role
 skills and `load_reference({ name })` for full reference documents.
 `reference_search` finds relevant passages. Read resource files directly only
 when the corresponding loader is unavailable.
@@ -64,8 +64,9 @@ schema set. Code invocation is available only on hosts that support it.
 
 Explicit presentation settings are part of the compiled plan revision and are
 restored after a restart. Parent authorization is checked again. Pi and OpenCode
-2 retain `bash` and `graph_submit_outcome` as worker entry points; dsh retains
-`graph_worker_exec` and `graph_submit_outcome`.
+2 retain `bash` and `graph_submit_outcome` as worker entry points. Dsh keeps
+`graph_submit_outcome` alongside the parent-authorized native tools, including
+`bash` when the host provides it.
 
 ## Discovery and invocation
 

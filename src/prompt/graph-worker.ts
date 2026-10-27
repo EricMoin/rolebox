@@ -22,7 +22,7 @@ export function buildGraphWorkerFunctionBlock(role: WorkerRole): string {
 export function buildGraphWorkerToolGrantBlock(
   _declaredTools: readonly string[] | undefined,
   presentation?: WorkerToolPresentation,
-  baseline: readonly string[] = ["graph_submit_outcome", "graph_worker_exec"],
+  baseline: readonly string[] = ["graph_submit_outcome"],
 ): string {
   const entries = [...baseline, ...workerPresentationTools(presentation)].join(", ");
   const guidance = presentation?.mode === "discover"

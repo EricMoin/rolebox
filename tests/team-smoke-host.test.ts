@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { createSmokeHost, readSmokeModelConfig, resolveSmokeHostAnchor } from "../scripts/team-smoke/host.ts";
-import { executeDshWorkerCommand, type DshSandboxPolicyService, type DshSandboxService } from "../src/platform/adapters/dsh/graph-worker.ts";
+import type {} from "@deepseek-ai/dsh-tools";
+import type { ToolCallId } from "@deepseek-ai/dsh-llm";
 import type {} from "@deepseek-ai/dsh-fs";
 
 const roots: string[] = [];
@@ -112,20 +113,18 @@ describe("team smoke host with installed DSH services", () => {
     const host = await createSmokeHost({ root, hostAnchor, dshHome: root,
       profileConfigPaths: layers(base.replace("provider: example-provider", "provider: deepseek-official")) });
     try {
-      const sandbox = host.ctx.get("sandbox") as DshSandboxService | undefined;
-      const sandboxPolicy = host.ctx.get("sandboxPolicy") as DshSandboxPolicyService | undefined;
-      expect(sandbox).toBeDefined();
-      expect(sandboxPolicy?.resolve({})).toMatchObject({ mode: "workspace-write", workspaceRoot: workspace });
       expect(await host.ctx.fs.readText(await host.ctx.fs.resolve("fixture.txt"))).toBe("workspace fixture");
-      const result = await executeDshWorkerCommand({ sandbox, sandboxPolicy, workspace,
-        command: "printf success > result.txt", timeoutMs: 10_000 });
-      expect(result.exitCode).toBe(0);
-      expect(result.mode).toBe("workspace-write");
-      expect(result.enforcement).not.toBe("unconfined");
+      const result = await host.ctx.tools.execute({ name: "bash", arguments: {
+        description: "Write the workspace fixture", command: "printf success > result.txt", timeoutMs: 10_000 },
+        callId: "workspace-write" as ToolCallId, signal: new AbortController().signal });
+      expect(result.isError).toBe(false);
+      expect(result.value).toMatchObject({ kind: "foreground", cwd: workspace, exitCode: 0 });
       expect(readFileSync(join(workspace, "result.txt"), "utf8")).toBe("success");
-      const denied = await executeDshWorkerCommand({ sandbox, sandboxPolicy, workspace,
-        command: "printf forbidden > ../roles/protected.txt", timeoutMs: 10_000 });
-      expect(denied.exitCode).not.toBe(0);
+      const denied = await host.ctx.tools.execute({ name: "bash", arguments: {
+        description: "Probe the host sandbox boundary", command: "printf forbidden > ../roles/protected.txt", timeoutMs: 10_000 },
+        callId: "boundary-probe" as ToolCallId, signal: new AbortController().signal });
+      expect(denied.value).toMatchObject({ kind: "foreground", cwd: workspace, exitCode: expect.any(Number) });
+      expect(denied.value).not.toMatchObject({ exitCode: 0 });
       await expect(host.ctx.fs.writeText(await host.ctx.fs.resolve("../roles/protected.txt"), "forbidden")).rejects.toThrow();
       expect(readFileSync(join(root, "roles", "protected.txt"), "utf8")).toBe("original");
     } finally { await host.dispose(); }
@@ -137,8 +136,8 @@ describe("team smoke host with installed DSH services", () => {
     const host = await createSmokeHost({ root, hostAnchor, dshHome: root,
       profileConfigPaths: layers(base.replace("provider: example-provider", "provider: deepseek-official")) });
     try {
-      const sandboxPolicy = host.ctx.get("sandboxPolicy") as DshSandboxPolicyService;
-      expect(sandboxPolicy.resolve({})).toMatchObject({ mode: "workspace-write", workspaceRoot: root });
+      const sandboxPolicy = host.ctx.get("sandboxPolicy") as { resolve(): { mode: string; workspaceRoot: string } };
+      expect(sandboxPolicy.resolve()).toMatchObject({ mode: "workspace-write", workspaceRoot: root });
       const target = await host.ctx.fs.resolve("fixture.txt");
       await host.ctx.fs.writeText(target, "bootstrap fixture");
       expect(readFileSync(join(root, "fixture.txt"), "utf8")).toBe("bootstrap fixture");

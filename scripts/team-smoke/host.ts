@@ -20,7 +20,8 @@ const corePackages = [
   "cordis", "dsh-session-persistence-jsonl", "dsh-session", "dsh-session-projection",
   "dsh-session-query-sqlite", "dsh-agent", "dsh-agent-default-model", "dsh-llm", "dsh-system-prompt",
   "dsh-subagent", "dsh-skill", "dsh-fs-sandbox", "dsh-working-directory",
-  "dsh-sandbox-local", "dsh-sandbox-policy",
+  "dsh-sandbox-local", "dsh-sandbox-policy", "dsh-subprocess-local",
+  "dsh-bash-sandbox", "dsh-shell-env", "dsh-tool-bash",
   "dsh-tools", "dsh-agent-loop", "dsh-subagent-spawn-in-process", "dsh-tool-skill",
   "dsh-fs-observation-policy", "dsh-tool-fs", "dsh-credentials-local", "dsh-launch-environment",
 ] as const;
@@ -217,6 +218,10 @@ export async function createSmokeHost(options: SmokeHostOptions): Promise<SmokeH
     mount("dsh-sandbox-policy", { mode: "workspace-write", workspaceRoot: workspace });
     mount("dsh-fs-sandbox", { cwd: workspace });
     mount("dsh-working-directory", { defaultDirectory: workspace });
+    mount("dsh-subprocess-local");
+    mount("dsh-bash-sandbox", { cwd: workspace });
+    mount("dsh-shell-env", { dshHome });
+    mount("dsh-tool-bash", { enableRunInBackground: false, promoteOnTimeout: false });
     mount("dsh-tools", { mode: "native" });
     mount("dsh-fs-observation-policy");
     mount("dsh-tool-fs");

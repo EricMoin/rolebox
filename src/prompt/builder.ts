@@ -59,7 +59,7 @@ export interface AgentPromptOptions {
   references?: ResolvedReference[];
   canDelegate?: boolean;
   canTeam?: boolean;
-  resourceTool?: "graph_worker_exec" | "files";
+  resourceTool?: "files";
 }
 
 export function buildAgentPrompt(

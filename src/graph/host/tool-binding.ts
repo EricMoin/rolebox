@@ -97,7 +97,7 @@ export function declaredToolAllows(entry: string, toolName: string): boolean {
  *
  * Every graph tool this build ships is spelled `graph_` + name
  * (`graph_declare`, `graph_submit_outcome`, `graph_status`, `graph_audit`,
- * `graph_control`, and dsh's `graph_worker_exec`), and the worker baseline
+ * and `graph_control`), and the worker baseline
  * {@link WORKER_GRANTED_GRAPH_TOOLS} is drawn from the same namespace. Reserving
  * the PREFIX — rather than a list repeated here — is what keeps the rule
  * fail-closed for a graph tool this build has not shipped yet: a declaration
@@ -144,8 +144,6 @@ export const GRAPH_TOOL_NAMES = Object.freeze([
   "graph_status",
   /** The trusted lifecycle control entry. */
   "graph_control",
-  /** dsh's worker command entry, shipped beside the graph face on that host. */
-  "graph_worker_exec",
   "graph_worker_tools",
   "graph_worker_code",
 ] as const);

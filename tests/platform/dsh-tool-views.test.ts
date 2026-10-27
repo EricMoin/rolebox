@@ -173,9 +173,9 @@ describe("rolebox tool-call rows — argument summaries", () => {
       .toBe("input[name=password]");
   });
 
-  it("clips a long command summary to one line", () => {
-    const long = `echo ${"x".repeat(400)}`;
-    const summary = TOOL_DESCRIPTORS.graph_worker_exec!.summarize!({ command: long }, t)!;
+  it("clips a long URL summary to one line", () => {
+    const long = `https://example.com/${"x".repeat(400)}`;
+    const summary = TOOL_DESCRIPTORS.browse_open!.summarize!({ url: long }, t)!;
     expect(summary.length).toBeLessThanOrEqual(120);
     expect(summary.endsWith("…")).toBe(true);
   });

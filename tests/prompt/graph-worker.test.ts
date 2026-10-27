@@ -7,7 +7,7 @@ describe("graph worker tool guidance", () => {
     mode => {
       const presentation = mode === undefined ? undefined : { mode };
       const block = buildGraphWorkerToolGrantBlock(["docs_read", "browse_*"], presentation);
-      expect(block).toContain("Worker entry points are graph_submit_outcome, graph_worker_exec");
+      expect(block).toContain("Worker entry points are graph_submit_outcome");
       expect(block).toContain("inherits the parent's authorized task tools");
       expect(block).not.toContain("hashline_");
       expect(block).not.toContain("docs_read, browse_*");

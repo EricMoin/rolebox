@@ -196,8 +196,7 @@ export type DshOutcomeSettlement =
 export interface DshOutcomeDeliveryOptions {
   /**
    * THE BASELINE ALLOW-LIST, used when no per-request resolver answers: the
-   * worker's own delivery channel (`graph_submit_outcome` and, on dsh,
-   * `graph_worker_exec`). It is deliberately STATIC and unconditional — this is
+   * worker's own delivery channel (`graph_submit_outcome`). It is deliberately STATIC and unconditional — this is
    * the surface every worker keeps, and nothing a caller passes can widen it.
    */
   readonly workerTools?: readonly string[];
@@ -862,7 +861,7 @@ export class DshOutcomeDelivery {
     // the worker's own copies, verified before this call.
     const workerPrompt = this.opts.workerPrompt?.(request, inputView);
     const deliveryText = buildAttemptDeliveryPrompt(request, inputView)
-      + (workerTools ? "\nUse authorized task tools as needed; graph_worker_exec can run workspace commands and tests." : "");
+      + (workerTools ? "\nUse the authorized host and rolebox tools for commands, file operations, builds and tests." : "");
     const baseRequest: DshSubagentStartRequest = {
       label: dispatchIdempotencyKeyOf(effect),
       prompt: [{ type: "text", text: deliveryText }],

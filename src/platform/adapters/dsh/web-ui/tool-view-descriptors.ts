@@ -243,10 +243,6 @@ export const TOOL_DESCRIPTORS: Readonly<Record<string, ToolDescriptor>> = {
     icon: "graph", verb: "submit", noun: "node outcome",
     summarize: args => join([text(args, "node_id"), text(args, "outcome_id")]),
   },
-  graph_worker_exec: {
-    icon: "terminal", verb: "run", noun: "command",
-    summarize: args => line(args, "command"),
-  },
 
   // ── Teams ───────────────────────────────────────────────────────────────
   team_list_roles: { icon: "team", verb: "list", noun: "roles" },

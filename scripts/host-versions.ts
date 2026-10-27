@@ -71,6 +71,10 @@ export const HOST_PACKAGES: readonly HostPackage[] = [
   // dsh packages — `next` is the current line; `latest` is the older 0.0.1-rc.1.
   { name: "@deepseek-ai/dsh-agent", channel: "next" },
   { name: "@deepseek-ai/dsh-agent-loop", channel: "next" },
+  { name: "@deepseek-ai/dsh-bash-local", channel: "next" },
+  { name: "@deepseek-ai/dsh-bash-sandbox", channel: "next" },
+  { name: "@deepseek-ai/dsh-shell-env", channel: "next" },
+  { name: "@deepseek-ai/dsh-tool-bash", channel: "next" },
   { name: "@deepseek-ai/dsh-client-locale", channel: "next" },
   { name: "@deepseek-ai/dsh-client-ui-conversation", channel: "next" },
   { name: "@deepseek-ai/dsh-client-ui-settings", channel: "next" },
@@ -89,6 +93,7 @@ export const HOST_PACKAGES: readonly HostPackage[] = [
   { name: "@deepseek-ai/dsh-session-projection", channel: "next" },
   { name: "@deepseek-ai/dsh-skill", channel: "next" },
   { name: "@deepseek-ai/dsh-subagent", channel: "next" },
+  { name: "@deepseek-ai/dsh-subprocess-local", channel: "next" },
   { name: "@deepseek-ai/dsh-subagent-spawn-in-process", channel: "next" },
   { name: "@deepseek-ai/dsh-system-prompt", channel: "next" },
   { name: "@deepseek-ai/dsh-tool-fs", channel: "next" },

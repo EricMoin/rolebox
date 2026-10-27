@@ -1965,7 +1965,7 @@ carrying the new name, with execute and presentation untouched, because those
 callbacks are keyed by the canonical name at compile time — and one warning
 names both. If the prefixed name is taken too, the tool is skipped with a
 warning instead of failing the boot; a probe that throws counts as "free". The
-two graph-worker tool names (`graph_worker_exec`, `graph_submit_outcome`) are
+graph-worker outcome entry (`graph_submit_outcome`) is
 never renamed: the worker execution guard and the dispatch tool filter match
 them by literal, so an occupied name is warned about and skipped rather than
 silently broken. In the preset-based profile above nothing is prefixed (the read

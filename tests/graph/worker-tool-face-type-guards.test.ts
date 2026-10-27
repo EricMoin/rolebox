@@ -15,7 +15,7 @@
  *    cannot come back without failing it.
  * 2. THE MEMBERSHIP DECISION, asserted per face. The in-process boundary and
  *    the remote channel grant exactly the delivery channel — ONE UNIFIED FACE —
- *    and dsh adds its own command entry. The remote channel serves
+ *    and dsh uses the same delivery channel. The remote channel serves
  *    `graph_submit_outcome` alone: `graph_status` and `graph_audit` read the
  *    authoritative store §3.3 reserves to the declaring principal, and the
  *    worker's input view IS its information boundary, so a forwarded reader
@@ -96,7 +96,7 @@ const VOCABULARY_RESOLVES_THROUGH_THE_GUARD: readonly GraphToolName[] =
 
 describe("the worker graph-tool faces", () => {
   it("answers membership by narrowing into one closed vocabulary", () => {
-    expect(GRAPH_TOOL_NAMES.length).toBe(8);
+    expect(GRAPH_TOOL_NAMES.length).toBe(7);
     expect(isGraphToolName("graph_worker_tools")).toBe(true);
     expect(isGraphToolName("graph_worker_code")).toBe(true);
     expect([...VOCABULARY_RESOLVES_THROUGH_THE_GUARD]).toEqual([...GRAPH_TOOL_NAMES]);
@@ -112,9 +112,9 @@ describe("the worker graph-tool faces", () => {
     // authoritative-store readers belong to the declaring/operating principal.
     expect([...HOST_FACE]).toEqual(["graph_submit_outcome"]);
     expect(HOST_FACE.length).toBe(1);
-    // DSH: the same delivery channel plus this host's own worker command entry.
-    expect([...DSH_FACE]).toEqual(["graph_submit_outcome", "graph_worker_exec"]);
-    expect(DSH_FACE.length).toBe(2);
+    // DSH uses the same outcome delivery channel.
+    expect([...DSH_FACE]).toEqual(["graph_submit_outcome"]);
+    expect(DSH_FACE.length).toBe(1);
     // THE EXPORTED dsh BINDING IS THE TYPED GRANT — one array, widened only for
     // the callers that compare it against a name they know as a `string`.
     expect([...DSH_GRAPH_WORKER_TOOLS]).toEqual([...DSH_GRAPH_WORKER_GRANT]);

@@ -327,7 +327,6 @@ authorized that exact mapping in the requested completion-policy revision.
 | `graph_control` | Apply a trusted lifecycle command to a run or an attempt | Every host |
 | `graph_status` | Read the shared read model | Every host |
 | `graph_audit` | Read-only drain and migration inventory | Every host |
-| `graph_worker_exec` | Run one shell command in the worker's sandbox | Hosts that install it (the dsh platform) |
 
 ### `graph_declare`
 
@@ -947,19 +946,15 @@ What a worker actually gets depends on the host:
 | Host | Worker-facing tools |
 | --- | --- |
 | pi | Native worker tools and `graph_submit_outcome`, with the latter delivered through a loopback channel to its owning host process |
-| dsh | `graph_submit_outcome` and `graph_worker_exec` by default; declared host tools and presentation entries are added per node |
+| dsh | `graph_submit_outcome` and parent-authorized native tools; discovery and code presentation are optional |
 
 Worker grants, discovery and code invocation are described in [Worker tools](worker-tools.md).
 
 A dsh graph worker receives its target role's prompt, functions and model. The
 declaring session's active role is not applied to that child. Worker prompts omit
-dispatch catalogs and direct resource reads through `graph_worker_exec`. The host
-copies the target role's reference bundles and skills, including their supporting
-files, into the attempt's input directory before starting it. The listed paths
-point to these copies; whether a command may write them follows the host's
-session policy like any other path.
-Missing resources or links escaping a resource bundle refuse the start; the host
-does not grant access to the original role directory.
+dispatch catalogs and advertise the target role's skills and references through
+the normal rolebox loaders. Resource paths point to the original role bundles,
+so relative supporting files resolve from the loaded resource's directory.
 
 A dsh graph worker's prompt asks it to end its **final message** with exactly one
 fenced `json` block, so an execution that ends without a submission can still
@@ -994,89 +989,16 @@ of the host that serves it, so a surviving child finds a replacement host after
 the original host process is gone; it is the pi loopback channel that keeps the
 file, and it carries no credential.
 
-A dsh worker's command boundary is the **host session's resolved sandbox policy**,
-not a profile of rolebox's own. For every `graph_worker_exec` call, rolebox asks
-the host's policy resolver (`@deepseek-ai/dsh-sandbox-policy`) for the worker
-session's policy and hands the command to the host's confinement service
-(`@deepseek-ai/dsh-sandbox`); both are consumed structurally, and rolebox neither
-builds an OS profile nor widens or narrows the resolved mode. The policy
-vocabulary carries a mode, a workspace root and an optional session identity:
-
-| Resolved mode | How the worker command runs |
-| --- | --- |
-| `read-only` | Confined by the host, which denies the session's writes. |
-| `workspace-write` | Confined by the host, which confines writes to the session's workspace root. |
-| `danger-full-access` | **Unconfined**, with no OS restriction beyond what the host session already authorizes. |
-
-The resolver's precedence is the host's own: an explicitly approved mode, else the
-session's last `sandbox/mode` event, else the deployment default. A worker
-therefore **cannot be confined more narrowly than its session's mode**: a
-`danger-full-access` session runs a worker unconfined, and rolebox has no
-independent boundary to add. Confinement is **fail closed**: a missing resolver, a
-missing confinement service, a rejected `confine` call or a malformed spawn argv
-refuses the command with an error naming the service rather than falling back to
-an unconfined run. Only `danger-full-access` spawns a command unconfined.
-
-What a command actually got is reported as data rather than inferred: the
-`graph_worker_exec` result carries the effective `mode`, the `enforcement`
-(`full`, `partial` or `unconfined`) and — when enforcement is `partial` — the
-`denialSignatures` the backend produced, so a boundary denial is distinguishable
-from a command failure.
-
-**Known cost.** The host policy vocabulary carries a mode and a workspace root
-only, so rolebox can no longer deny a worker access to rolebox's own state. Under
-`workspace-write` and `danger-full-access` the graph store, the rolebox data
-directory, the workspace's `.rolebox` and `.dsh` directories and agent session
-files are reachable — reads always, and writes under `workspace-write` wherever
-those paths sit inside the workspace root. That protection existed only while
-rolebox applied its own macOS Seatbelt profile; it is gone by design, because a
-second, platform-specific boundary is not the session policy the user authorized.
-A host that needs that isolation must express it in the session policy itself.
-
-Each command still runs with a minimal environment: a path, a locale, disposable
-home/config/cache directories and a temporary directory (removed with the command,
-carrying no credentials and no host caches), browser discovery variables and the
-selected developer toolchain. The variable names are the detected system's,
-declared once in `src/platform/system/`: `HOME`, `XDG_CONFIG_HOME`,
-`XDG_CACHE_HOME` and `TMPDIR` on every platform, plus `CFFIXED_USER_HOME`,
-`MAC_CHROMIUM_TMPDIR` and `xcrun_db` on macOS and `USERPROFILE`, `LOCALAPPDATA`,
-`APPDATA`, `TEMP` and `TMP` on Windows (where `HOME` and the `XDG_*` names stay
-set, so an XDG-isolated run works there too). Work that needs real credentials or
-host state — `git push`, `gh`, `npm publish`, an authenticated API call — cannot
-succeed, and network egress is reachable but unauthenticated by construction. A
-command runs under a 60-second default timeout that the caller may raise to at most
-300 seconds, so a long build is split across commands rather than run as one.
-
-The shell is the detected system's too. macOS and Linux run `/bin/sh -c`: on macOS
-that is bash in POSIX mode, where brace expansion and arrays work and process
-substitution `<(...)` is a syntax error, while on Debian/Ubuntu it is dash, where
-brace expansion, arrays and process substitution are all unavailable — write
-portable POSIX sh. Windows runs `cmd.exe /d /s /c` (the host's `COMSPEC` when it is
-set), where POSIX idioms — single-quoted strings, `$(...)`, `<(...)`, brace
-expansion, arrays, `VAR=x cmd` — are unavailable; use `set VAR=...` and `%VAR%`.
-`perl`, `sed`, `awk`, `grep`, `patch`, `diff`, `ed` and `git` are available, and
-`git` and `node` run inside the workspace with disposable caches. The runner
-applies no OS profile of its own and is platform-neutral: whether and how a host
-confines a command is that host's own adapter decision.
-
-`PLAYWRIGHT_BROWSERS_PATH`, `PUPPETEER_CACHE_DIR` and `PUPPETEER_EXECUTABLE_PATH`
-keep installed browser caches discoverable under the disposable home, with
-relative paths resolved against the session workspace and Playwright's `0` value
-still selecting package-local browsers. The defaults are the detected system's own
-cache locations: Playwright's `~/Library/Caches/ms-playwright` on macOS,
-`~/.cache/ms-playwright` on Linux and `%USERPROFILE%\AppData\Local\ms-playwright`
-on Windows; Puppeteer's `~/.cache/puppeteer` on all three. Whether those paths may
-be read is the host policy's decision, not a grant rolebox makes. Browser profiles,
-caches and Chromium's macOS socket directory use the command scratch directory,
-which is removed when the command finishes; persistent automation output belongs in
-the workspace.
-
-Where a confinement is in effect, macOS does not support initializing Chromium's
-own sandbox inside it. Use Playwright's default `chromiumSandbox: false`, or pass
-`args: ["--no-sandbox"]` to Puppeteer's `launch`.
+Dsh workers execute commands through the host's native command tool, such as
+`bash`, when authorized by the parent and available in the child session. The
+host owns the command environment, working-directory behavior, sandbox policy,
+approvals, timeout and cancellation. Rolebox does not install a separate command
+runner or replace the host environment with disposable credential-free directories.
+Skills, references, memory, browser and computer tools use their normal rolebox
+implementations under the same inherited authorization and role policy.
 
 Worker execution is scoped to the **invoking session's workspace**. Each dsh
-session's graph application, store, artifact root and worker command directory are
+session's graph application, store and artifact root are
 selected from that session's absolute working directory, resolved canonically;
 applications are shared only within the same workspace, and the host process's
 launch directory is not a fallback. A tool call whose workspace is not absolute

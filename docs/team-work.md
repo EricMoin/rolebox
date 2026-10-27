@@ -12,7 +12,7 @@ All successfully resolved top-level roles are discoverable through the system pr
 
 A team accepts only exact top-level role IDs. Another role's private children are absent from the team catalog and cannot join. Role-aware asset discovery and graph target validation also preserve this boundary. A role can still use its own private children through the existing graph workflow.
 
-Role assets are scoped to the caller's owning role tree, including root workflow skills whose bodies may name private children. DSH's global native skill catalog excludes roles with children because that provider API has no caller identity. Their root and child skills remain available through `load_role_skill`; graph workers receive only their own skill bundles and explicit paths to their private copies. Top-level role IDs and descriptions remain available through team discovery.
+Role assets are scoped to the caller's owning role tree, including root workflow skills whose bodies may name private children. DSH's global native skill catalog excludes roles with children because that provider API has no caller identity. Their root and child skills remain available through `load_role_skill`; graph workers use the same role-scoped loader and original resource paths. Top-level role IDs and descriptions remain available through team discovery.
 
 Host calls to `graph_status` and `graph_audit` expose only graphs owned by the calling session, including after that same session is restored. Filtering applies before graph decoding, rendering, and export, so another member's private nodes and unreadable-record diagnostics stay out of the results. Unattributed administrative queries retain the store-wide view.
 

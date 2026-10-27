@@ -1,13 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { FunctionSource, ReferenceScope } from "../../../../src/constants.ts";
 import { prepareDshGraphWorkerPrompt } from "../../../../src/platform/adapters/dsh/worker-prompt.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../../src/types.ts";
-
-/** The host resolves a session policy per attempt; these tests state one explicitly. */
-const CONFINED = { kind: "confined", mode: "workspace-write", workspaceRoot: "/workspace/example" } as const;
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -39,215 +36,81 @@ function fixture() {
     functions: [{ name: "triage", description: "Route", content: "Dispatch more work.", filePath: "triage.md", source: FunctionSource.RoleLocal }],
     subagents: [planner],
   };
-  const inputDirectory = join(directory, "data", "inputs", "attempt");
   const workspace = join(directory, "workspace");
   mkdirSync(workspace);
-  return { directory, inputDirectory, workspace, planner, roles: [parent], refs, skill };
-}
-
-/** How many times a pattern matches — a count, never a truthiness check on `match`. */
-function countMatches(text: string, pattern: RegExp): number {
-  return text.match(pattern)?.length ?? 0;
-}
-
-/** The directory the reference block states once, shared by every entry. */
-function referenceBase(prompt: string): string {
-  expect(countMatches(prompt, /^Base directory: `/gm)).toBe(1);
-  return prompt.match(/^Base directory: `([^`\n]+)`$/m)![1];
-}
-
-/**
- * The readable private copy a reference bullet advertises: the block states the
- * base once and each bullet names its own file below it (the resolver names a
- * reference after its path under `references/` without the extension). The path
- * is derived from the prompt, so this asserts the worker can actually reach the
- * copy — not merely that the prompt mentions a path.
- */
-function referencePath(prompt: string, name: string): string {
-  expect(countMatches(prompt, new RegExp("^- `" + name + "` — ", "gm"))).toBe(1);
-  const copy = join(referenceBase(prompt), `${name}.md`);
-  expect(existsSync(copy)).toBe(true);
-  expect(readFileSync(copy, "utf8").length).toBeGreaterThan(0);
-  return copy;
-}
-
-/** Every regular file under a directory tree — the private copies a worker may read. */
-function filesUnder(root: string): string[] {
-  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(root, entry.name);
-    return entry.isDirectory() ? filesUnder(path) : [path];
-  });
+  return { directory, workspace, planner, roles: [parent], refs, skill };
 }
 
 describe("DSH graph worker prompt", () => {
-  it.each(["discover", "code"] as const)("explains %s tools without restricting all work to the command tool", mode => {
+  it.each(["native", "discover", "code"] as const)("uses host and rolebox capabilities in %s mode", mode => {
     const f = fixture();
-    for (const declaredTools of [undefined, ["docs_*"]]) {
-      const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED,
-        declaredTools, { mode });
-      expect(prompt).toContain("Worker entry points are graph_submit_outcome, graph_worker_exec, graph_worker_tools");
-      expect(prompt).toContain("list/search authorized host tools");
-      expect(prompt).toContain("Use them directly when exposed");
-      expect(prompt).not.toContain("Your tools are");
-      expect(prompt).not.toContain("only tools you may call");
-      expect(prompt).not.toContain("for all file reads");
-      if (mode === "code") expect(prompt).toContain("graph_worker_code to call them from JavaScript");
-    }
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace, [], { mode });
+    expect(prompt).toContain("host's native tools and rolebox capabilities");
+    expect(prompt).toContain("inherits the parent's authorized task tools");
+    expect(prompt).toContain("Worker entry points are graph_submit_outcome");
+    expect(prompt).toContain("Graph control tools and recursive agent dispatch remain unavailable");
+    expect(prompt).toContain("host's native command and file tools");
+    expect(prompt).toContain("permissions and sandbox policy apply");
+    expect(prompt).toContain("```json");
+    expect(prompt).not.toContain("graph_worker_exec");
+    expect(prompt).not.toContain("disposable per-command");
+    expect(prompt).not.toContain("private copies");
+    if (mode !== "native") expect(prompt).toContain("list/search authorized host tools");
+    if (mode === "code") expect(prompt).toContain("graph_worker_code to call them from JavaScript");
   });
 
-  it("omits inactive function instructions that the worker cannot activate", () => {
+  it("includes only the target role and its active functions", () => {
     const f = fixture();
-    f.planner.functions.push({
-      name: "loop", description: "Orchestrate", content: "Inactive orchestration instructions.",
-      filePath: "loop.md", source: FunctionSource.RoleLocal,
-    });
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED);
-    expect(prompt).not.toContain("## Available functions");
-    expect(prompt).not.toContain("Inactive orchestration instructions.");
-    expect(prompt).toContain("Return a Strategy.");
-    expect(prompt).toContain("graph_submit_outcome");
-  });
-
-  it("uses only the target role and functions, with readable copies of its resources", () => {
-    const f = fixture();
-    f.planner.references.push({ ...f.planner.references[0] });
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED);
+    f.planner.functions.push({ name: "unused", description: "Other work", content: "Inactive instructions.",
+      filePath: "unused.md", source: FunctionSource.RoleLocal });
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
     expect(prompt).toContain("## Role instructions\n\nYou are the planner.");
-    expect(prompt).toContain("You are the planner.");
     expect(prompt).toContain("## Active functions");
     expect(prompt).toContain("Return a Strategy.");
-    expect(prompt).toContain("use load_role_skill if available");
-    expect(prompt).toContain("Use load_reference with the listed name");
-    expect(prompt).not.toContain("hashline_");
-    expect(prompt).not.toContain("Use graph_worker_exec to read");
-    for (const forbidden of ["You are the coordinator.", "triage", "Legacy rendered", "graph_declare", "Use the Read tool", "Use the skill tool", "## Available sub-agents"]) {
+    for (const forbidden of ["You are the coordinator.", "triage", "Legacy rendered", "Inactive instructions.",
+      "## Available functions", "## Available sub-agents", "## Available public agents"]) {
       expect(prompt).not.toContain(forbidden);
     }
-    // Two identical references collapse into one rendered entry: one bullet,
-    // no second `` `name`: `path` `` line, and the base stated once.
-    expect(countMatches(prompt, /^- `schema` — /gm)).toBe(1);
-    expect(prompt).not.toMatch(/^ {2}`schema`: /m);
-    // The skill bullet locates its private copy for the command-only worker.
-    expect(prompt).toContain("## Available skills");
-    expect(prompt).toContain("- `research` — Research");
-    const reference = referencePath(prompt, "schema");
-    // Base + the entry's own name land inside the attempt's delivery directory,
-    // and the advertised file is the readable copy of the role's reference.
-    expect(referenceBase(prompt).startsWith(f.inputDirectory)).toBe(true);
-    expect(reference.startsWith(f.inputDirectory)).toBe(true);
-    expect(readFileSync(reference, "utf8")).toContain("Strategy schema");
-    expect(readFileSync(join(dirname(reference), "examples.json"), "utf8")).toBe('{"example":true}');
-    const copies = filesUnder(f.inputDirectory);
-    const skillCopy = copies.find((path) => basename(path) === "SKILL.md")!;
-    expect(skillCopy.startsWith(f.inputDirectory)).toBe(true);
-    expect(prompt).toContain(`  File: \`${skillCopy}\``);
-    expect(readFileSync(skillCopy, "utf8")).toBe("Read scripts/check.sh beside this skill.");
-    expect(readFileSync(join(dirname(skillCopy), "scripts", "check.sh"), "utf8")).toBe("printf checked");
-    writeFileSync(join(f.refs, "schema.md"), "changed after dispatch");
-    expect(readFileSync(reference, "utf8")).toContain("Strategy schema");
   });
 
-  it("locates every delivered reference from the base it states once", () => {
+  it("uses the role's original resource paths and normal loaders without copying bundles", () => {
     const f = fixture();
-    // A realistic bundle: a flat reference beside a nested one, all named below
-    // `references/`. The block states that one directory and each bullet names
-    // its own file below it, so every entry has to resolve to a readable copy.
-    writeFileSync(join(f.refs, "theory", "deep.md"), "Nested theory; read ./examples.json beside it.");
-    writeFileSync(join(f.refs, "theory", "examples.json"), '{"nested":true}');
-    f.planner.references.push({
-      name: "theory/deep", description: "Nested theory",
-      scope: ReferenceScope.Role, relativePath: "references/theory/deep.md",
-      filePath: join(f.refs, "theory", "deep.md"),
-    });
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED);
-
-    // One base line for both entries, one bullet per entry, no path line.
-    expect(countMatches(prompt, /^Base directory: `/gm)).toBe(1);
-    expect(countMatches(prompt, /^- `schema` — /gm)).toBe(1);
-    expect(countMatches(prompt, /^- `theory\/deep` — /gm)).toBe(1);
-    expect(prompt).not.toMatch(/^ {2}`/m);
-    const flat = referencePath(prompt, "schema");
-    const nested = referencePath(prompt, "theory/deep");
-    expect(flat.startsWith(f.inputDirectory)).toBe(true);
-    expect(nested.startsWith(f.inputDirectory)).toBe(true);
-    expect(readFileSync(nested, "utf8")).toContain("Nested theory");
-    expect(readFileSync(join(dirname(nested), "examples.json"), "utf8")).toBe('{"nested":true}');
-    expect(nested).not.toBe(flat);
+    const before = readdirSync(f.directory);
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    expect(prompt).toContain("use load_role_skill if available");
+    expect(prompt).toContain("Use load_reference with the listed name");
+    expect(prompt).toContain(`Base directory: \`${f.refs}\``);
+    expect(prompt).toContain("- `schema` — Schema");
+    expect(prompt).toContain(`File: \`${join(f.skill, "SKILL.md")}\``);
+    expect(readFileSync(join(f.refs, "examples.json"), "utf8")).toBe('{"example":true}');
+    expect(existsSync(join(f.skill, "scripts", "check.sh"))).toBe(true);
+    expect(readdirSync(f.directory)).toEqual(before);
   });
 
-  it("gives separate attempts independent resource copies", () => {
+  it("locates nested references relative to their original resource directory", () => {
     const f = fixture();
-    const first = referencePath(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED), "schema");
-    const secondRoot = join(f.directory, "data", "inputs", "another-attempt");
-    const second = referencePath(prepareDshGraphWorkerPrompt(f.roles, f.planner.id, secondRoot, f.workspace, CONFINED), "schema");
-    expect(first).not.toBe(second);
-    expect(second.startsWith(secondRoot)).toBe(true);
+    writeFileSync(join(f.refs, "theory", "deep.md"), "Nested theory");
+    f.planner.references.push({ name: "theory/deep", description: "Nested theory", scope: ReferenceScope.Role,
+      relativePath: "references/theory/deep.md", filePath: join(f.refs, "theory", "deep.md") });
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    expect(prompt).toContain(`Base directory: \`${f.refs}\``);
+    expect(prompt).toContain("- `theory/deep` — Nested theory");
   });
 
-  it("fails before dispatch for missing agents or resources and removes partial copies", () => {
+  it("states the workspace without promising a custom command runner", () => {
     const f = fixture();
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, "missing", f.inputDirectory, f.workspace, CONFINED)).toThrow("not resolved");
-    expect(existsSync(f.inputDirectory)).toBe(false);
-    rmSync(join(f.refs, "schema.md"));
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED)).toThrow();
-    expect(readdirSync(f.inputDirectory)).toEqual([]);
+    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    expect(prompt).toContain(`Worker workspace: ${f.workspace}.`);
+    expect(prompt.indexOf("Worker workspace:")).toBeLessThan(prompt.indexOf("## Role instructions"));
+    expect(prompt).not.toContain("Worker command boundary:");
   });
 
-  it.skipIf(process.platform === "win32")("refuses resource links outside the declared bundle", () => {
+  it("refuses unknown agents and invalid workspaces", () => {
     const f = fixture();
-    const privateFile = join(f.directory, "private.txt");
-    writeFileSync(privateFile, "unrelated file");
-    symlinkSync(privateFile, join(f.skill, "escape.txt"));
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED)).toThrow("escaping or cyclic");
-    expect(readdirSync(f.inputDirectory)).toEqual([]);
-  });
-
-  it("states the boundary the host resolved for this attempt, not a fixed writable set", () => {
-    const f = fixture();
-    const confined = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace,
-      { kind: "confined", mode: "workspace-write", workspaceRoot: "/workspace/example" });
-    expect(confined).toContain("'workspace-write' mode with workspace root /workspace/example");
-    expect(confined).toContain("cannot confine this attempt more narrowly than the session's mode");
-    const unconfined = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace,
-      { kind: "unconfined", mode: "danger-full-access" });
-    expect(unconfined).toContain("'danger-full-access'");
-    expect(unconfined).toContain("UNCONFINED");
-    const refused = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace,
-      { kind: "refused", reason: "this host exposes no sandbox policy service" });
-    expect(refused).toContain("no host sandbox policy service is available to this attempt");
-    expect(refused).toContain("is refused rather than run without the boundary the session authorized");
-    for (const prompt of [confined, unconfined, refused]) {
-      // The fenced-json fallback, the tool face and the workspace fact survive
-      // every boundary state — including the unconfined one, whose boundary block
-      // names no path at all.
-      expect(prompt).toContain("```json");
-      expect(prompt).toContain("graph_submit_outcome");
-      expect(prompt).not.toContain("boundary.md");
-      expect(prompt).toContain(`every graph_worker_exec command runs with ${f.workspace} as its current directory`);
-    }
-  });
-
-  it("states the workspace every command starts in, so a worker never has to cd into it", () => {
-    const f = fixture();
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED);
-    expect(prompt).toContain(`every graph_worker_exec command runs with ${f.workspace} as its current directory`);
-    expect(prompt).toContain("and a relative path in the command resolves against it.");
-    expect(prompt).toContain("Each call is a fresh shell, so a `cd` is not needed to reach this workspace");
-    expect(prompt).toContain("use one only to run in a different directory.");
-    // The workspace sentence lands after the boundary block and before the role
-    // prompt, so a worker reads the directory before its instructions.
-    expect(prompt.indexOf("Worker working directory:")).toBeGreaterThan(prompt.indexOf("Worker command boundary:"));
-    expect(prompt.indexOf("Worker working directory:")).toBeLessThan(prompt.indexOf("## Role instructions"));
-  });
-
-  it("refuses a blank or relative workspace before it copies anything", () => {
-    const f = fixture();
+    expect(() => prepareDshGraphWorkerPrompt(f.roles, "missing", f.workspace)).toThrow("not resolved");
     for (const workspace of ["", "   ", "relative/workspace"]) {
-      expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, workspace, CONFINED))
+      expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, workspace))
         .toThrow("The 'workspace' argument must be a non-blank absolute path");
     }
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, "relative/workspace", CONFINED))
-      .toThrow('"relative/workspace"');
-    expect(existsSync(f.inputDirectory)).toBe(false);
   });
 });

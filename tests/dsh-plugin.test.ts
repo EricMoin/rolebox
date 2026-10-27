@@ -1189,7 +1189,7 @@ describe("dsh plugin apply()", () => {
       // (a) THE DELIVERED PROMPT states the grant: the declared node is told
       // about its host tools, the undeclared node is told the baseline.
       expect(promptText(shooter)).toContain(
-        "Worker entry points are graph_submit_outcome, graph_worker_exec",
+        "Worker entry points are graph_submit_outcome",
       );
       expect(promptText(shooter)).toContain("inherits the parent's authorized task tools");
       expect(promptText(shooter)).not.toContain("restricts inherited host tools");
@@ -1198,7 +1198,7 @@ describe("dsh plugin apply()", () => {
       expect(promptText(shooter)).toContain("shoot");
       expect(promptText(plain)).toContain("inherits the parent's authorized task tools");
       expect(promptText(plain)).toContain(
-        "Worker entry points are graph_submit_outcome, graph_worker_exec",
+        "Worker entry points are graph_submit_outcome",
       );
       // ONE start, TWO nodes: the stated grant is per attempt, which a static
       // option could not express.
@@ -1210,7 +1210,7 @@ describe("dsh plugin apply()", () => {
     }
   });
 
-  it("delivers only the graph target's role, functions and readable resources through the real registrar", async () => {
+  it("delivers only the graph target's role, functions and role resources through the real registrar", async () => {
     writeRoleYaml("coordinator", [
       "name: Coordinator", "description: Coordinates", "prompt: Coordinator-only prompt",
       "model: parent-provider/model-name", "functions: [triage]", "disable_functions: [plan, execute, loop]",
@@ -1293,10 +1293,8 @@ describe("dsh plugin apply()", () => {
       expect(prompt).not.toContain("Prefer hashline_");
       expect(prompt).not.toContain("## Available sub-agents");
       expect(requests[0].agentOptions).toEqual({ provider: "worker-provider", model: "model-name" });
-      // The block states the delivery directory once; each entry names its own
-      // file below it, so base + name is the readable private copy.
       const referenceDirectory = prompt.match(/^Base directory: `([^`]+)`$/m)![1];
-      expect(referenceDirectory.startsWith(tmpDataDir)).toBe(true);
+      expect(referenceDirectory).toBe(join(tmpDir, "coordinator", "references"));
       expect(prompt).toContain("- `schema` — ");
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
       const resourceContext = { signal: new AbortController().signal, callId: "worker-resource", agent: liveAgents.get("worker"),
@@ -1811,7 +1809,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const entries = captureLogEntries();
     const { ctx, tools } = createFakeCtx({
-      takenTools: new Set(["graph_worker_exec"]),
+      takenTools: new Set(["graph_submit_outcome"]),
     });
 
     const disposer = await applyTracked(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
@@ -1820,9 +1818,9 @@ describe("dsh plugin apply()", () => {
     // The worker guard matches `execution.name` by literal and the dispatch
     // request filters on the same list, so a rename would silently break the
     // worker face — an occupied name is skipped instead.
-    expect(keys).not.toContain("graph_worker_exec");
-    expect(keys).not.toContain("rb_graph_worker_exec");
-    expect(collisionWarnings(entries, "graph_worker_exec")).toHaveLength(1);
+    expect(keys).not.toContain("graph_submit_outcome");
+    expect(keys).not.toContain("rb_graph_submit_outcome");
+    expect(collisionWarnings(entries, "graph_submit_outcome")).toHaveLength(1);
 
     disposer();
   });

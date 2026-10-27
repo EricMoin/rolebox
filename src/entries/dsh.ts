@@ -2,9 +2,8 @@ import { createDshGraphWorkerGrantHost } from "../platform/adapters/dsh/graph-wo
 import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observation.ts";
 import { loadDshWorkerExecutorFactory, type DshWorkerExecutorContext } from "../platform/adapters/dsh/worker-executor.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
-import { createDshGraphWorkerTools, installDshGraphWorkerBoundary, resolveDshWorkerCommandBoundary, type DshGraphWorkerRegistry, type DshSandboxPolicyService, type DshSandboxService, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
+import { installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
 import { prepareDshGraphWorkerPrompt } from "../platform/adapters/dsh/worker-prompt.ts";
-import { INPUT_DELIVERY_DIR, inputConsumerDirectory } from "../graph/host/input-view.ts";
 import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
@@ -368,28 +367,6 @@ export interface DshPluginContext {
    * an optional service must not gate plugin activation.
    */
   skills?: unknown;
-  /**
-   * The host's process-confinement seam (`@deepseek-ai/dsh-sandbox`, structural
-   * subset — see {@link DshSandboxService}). `confine` carries the session
-   * policy PER CALL and answers the argv to spawn together with the enforcement
-   * the host achieved and the denial signatures its backend produces. Present in
-   * full profiles; a host or test double without it makes a confined
-   * `graph_worker_exec` command FAIL CLOSED (the missing service refuses the
-   * command) rather than running it unconfined. Never injected via the `inject`
-   * roster — an optional service must not gate plugin activation.
-   */
-  sandbox?: DshSandboxService;
-  /**
-   * The host's session-policy resolver (`@deepseek-ai/dsh-sandbox-policy`,
-   * structural subset — see {@link DshSandboxPolicyService}). It is synchronous,
-   * because the host answers it from in-memory session state, and resolves
-   * `{mode, workspaceRoot, sessionId?}` with the precedence: an explicitly
-   * approved mode, else the session's last `sandbox/mode` event, else the
-   * deployment default. `danger-full-access` is NOT a confined mode: such a
-   * worker command runs unconfined instead of being narrowed. Never injected via
-   * the `inject` roster — an optional service must not gate plugin activation.
-   */
-  sandboxPolicy?: DshSandboxPolicyService;
   /**
    * The host's durable image-attachment service (`@deepseek-ai/dsh-attachment`
    * `AttachmentStore`, structural subset — see {@link DshAttachmentService}).
@@ -1112,69 +1089,6 @@ function probeSkillRegistry(
 }
 
 /**
- * Structurally probe the cordis ctx for the host's process-confinement seam
- * (`@deepseek-ai/dsh-sandbox`, structural subset — see {@link DshSandboxService}).
- *
- * This service is deliberately NOT in the `inject` roster: rolebox consumes it
- * only to confine `graph_worker_exec` commands, and an optional service must not
- * gate plugin activation. It is therefore resolved structurally — the direct
- * `ctx.sandbox` property read can throw before the dependency is injected
- * ("cannot get property without inject") and a service mounted by a SIBLING
- * plugin fiber throws on the property-resolver walk, so a throw falls through to
- * the named-service resolver `ctx.get("sandbox")`. The value is consumed by duck
- * typing (`confine`), so a missing `get`, a throw, or a non-conforming value all
- * resolve to "absent" — and an absent service refuses a confined command rather
- * than running it unconfined.
- */
-export function probeSandbox(ctx: DshPluginContext): DshSandboxService | undefined {
-  let service: unknown;
-  try {
-    service = ctx.sandbox;
-  } catch {
-    service = undefined;
-  }
-  if (service === undefined && typeof ctx.get === "function") {
-    try {
-      service = ctx.get("sandbox");
-    } catch {
-      return undefined;
-    }
-  }
-  if (service !== undefined && service !== null && typeof (service as { confine?: unknown }).confine === "function") {
-    return service as DshSandboxService;
-  }
-  return undefined;
-}
-
-/**
- * Structurally probe the cordis ctx for the host's session-policy resolver
- * (`@deepseek-ai/dsh-sandbox-policy`, structural subset — see
- * {@link DshSandboxPolicyService}), with the same optional-service discipline as
- * {@link probeSandbox}: not in the `inject` roster, direct property read then
- * named-service fallback, duck typed on `resolve`. An absent resolver refuses a
- * worker command rather than letting it run at an unstated boundary.
- */
-export function probeSandboxPolicy(ctx: DshPluginContext): DshSandboxPolicyService | undefined {
-  let service: unknown;
-  try {
-    service = ctx.sandboxPolicy;
-  } catch {
-    service = undefined;
-  }
-  if (service === undefined && typeof ctx.get === "function") {
-    try {
-      service = ctx.get("sandboxPolicy");
-    } catch {
-      return undefined;
-    }
-  }
-  if (service !== undefined && service !== null && typeof (service as { resolve?: unknown }).resolve === "function") {
-    return service as DshSandboxPolicyService;
-  }
-  return undefined;
-}
-
-/**
  * Structural mirror of the host's image-attachment service.
  *
  * THE OWNING MODULE IS `src/platform/adapters/dsh/attachment.ts` (the
@@ -1184,7 +1098,7 @@ export function probeSandboxPolicy(ctx: DshPluginContext): DshSandboxPolicyServi
  * shape mirrors the agreed contract — `saveImage({ data, mediaType, name? })`
  * resolves to `{ attachmentId, mediaType, bytes, width, height, name? }` — and
  * is consumed STRUCTURALLY (duck typed on `saveImage`), never value-imported,
- * exactly like `ctx.agents` / `ctx.sandbox`.
+ * exactly like `ctx.agents` / `ctx.skills`.
  */
 export interface DshAttachmentService {
   saveImage(input: {
@@ -1204,7 +1118,7 @@ export interface DshAttachmentService {
 /**
  * Structurally probe the cordis ctx for the host's image-attachment service
  * (structural subset — see {@link DshAttachmentService}), with the same
- * optional-service discipline as {@link probeSandbox}: not in the `inject`
+ * optional-service discipline as {@link probeSkillRegistry}: not in the `inject`
  * roster, a direct property read (which can throw before the dependency is
  * injected, and does throw for a service mounted by a SIBLING plugin fiber),
  * then the named-service resolver. Both spellings are probed — `attachments`
@@ -1785,7 +1699,7 @@ export async function apply(
 
   // Optional skills service seam — register rolebox's LAZY skill provider on
   // dsh's global `ctx.skills` registry for top-level role skills. Private
-  // child skills use the scoped loader or the worker's private resource copies.
+  // child skills use the role-scoped loader.
   // The registry's plugin seam is `registerProvider(create)` — a FACTORY — fed
   // the `(control) => SkillProvider` factory built from the resolved roles (the
   // candidate pool, narrowed by the provider to the active ∪ default roles),
@@ -2052,23 +1966,7 @@ export async function apply(
       // never sees its own `start()`, so the worker prompt must be in the start
       // request rather than prepended by a provider.
       workerPrompt: (request) => {
-        const inputDirectory = inputConsumerDirectory(join(outcomeStoreRoot, INPUT_DELIVERY_DIR), request.graphId, request.attemptId);
-        // The worker's own session does not exist at prompt-assembly time, so this
-        // states the mode the host resolves for the request (its deployment default);
-        // each command's own result carries the authoritative mode and enforcement.
-        //
-        // The SIXTH argument is the EXECUTING NODE'S OWN GRANT, resolved from the
-        // plan by the runtime and carried on the request
-        // (`OutcomeDispatchRequest.declaredTools`). It reaches the prompt HERE —
-        // the same value the derived worker face is built from below — so the
-        // sentence a worker reads and the face it holds state one grant. An
-        // absent restriction stays absent and the prompt states inherited authorization.
-        //
-        // The attempt's materialized input view reaches the worker through the
-        // attempt-delivery prompt the adapter appends after this block, so this
-        // hook does not read it.
-        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, inputDirectory, workspace,
-          resolveDshWorkerCommandBoundary(probeSandboxPolicy(ctx), probeSandbox(ctx)),
+        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, workspace,
           request.declaredTools, request.toolPresentation);
         const memory = systemPromptRegistry ? "" : memoryContext.render({ session: { header: { cwd: workspace } } }, request.agent, request);
         const computer = systemPromptRegistry ? "" : computerContext({ session: { header: { cwd: workspace } } }, request.agent, request);
@@ -2081,7 +1979,7 @@ export async function apply(
       composeRequest: (agent, request, workerPrompt) =>
         registrar.composeSpawnRequest(agent, request, workerPrompt),
       startWorker: async (label, start, request) => workerBoundary!.start(label, start, request),
-      // THE BASELINE the delivery falls back to: the static two-tool surface, used
+      // THE BASELINE the delivery falls back to: the outcome submission entry, used
       // when the per-request resolver below is not installed (a host with no tool
       // lookup) or answers nothing. It is never widened from here.
       workerTools: DSH_GRAPH_WORKER_TOOLS,
@@ -2330,9 +2228,7 @@ export async function apply(
       });
 
     return { host: outcomeHost, application: graphApplication, delivery: outcomeDelivery,
-      tools: runtimeTools, workspace, storeRoot: outcomeStoreRoot,
-      sandbox: probeSandbox(ctx), sandboxPolicy: probeSandboxPolicy(ctx),
-      sessionOf: (sessionId: string) => ctx.sessions.get(sessionId) };
+      tools: runtimeTools, workspace, storeRoot: outcomeStoreRoot };
   }
   function graphRuntime(directory: string) {
     if (!isAbsolute(directory)) throw new Error("Graph tools require an absolute session workspace");
@@ -2351,7 +2247,6 @@ export async function apply(
       execute: (args, context) => resolveGraphRuntime(context).tools[name]!.execute(args, context),
     } satisfies CanonicalToolDef]),
   );
-  Object.assign(graphTools, createDshGraphWorkerTools(resolveGraphRuntime));
   const restoreGraphSession = (session: { id: string; header?: { cwd?: string } }) => {
     if (!session.header?.cwd) return;
     try {

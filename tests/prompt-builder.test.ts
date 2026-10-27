@@ -265,10 +265,10 @@ describe("buildAgentPrompt", () => {
     expect(result).toContain("- `` we`ird `` — Has a backtick");
   });
 
-  it("locates the private skill copy in the graph_worker_exec variant", () => {
+  it("locates the skill resource in the file-resource variant", () => {
     const role = makeRole();
     const skills = [makeSkill({ name: "located-skill", filePath: "/attempt/role-resources-x/located/SKILL.md" })];
-    const result = buildAgentPrompt(role, skills, { resourceTool: "graph_worker_exec" });
+    const result = buildAgentPrompt(role, skills, { resourceTool: "files" });
 
     expect(result).toContain(
       "## Available skills\n\n" +
@@ -746,7 +746,7 @@ describe("buildReferenceBlock", () => {
         relativePath: "references/anti-patterns.md",
       }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     // The long prefix is stated ONCE, not once per entry.
     expect(countOccurrences(result, "Base directory: ")).toBe(1);
@@ -772,7 +772,7 @@ describe("buildReferenceBlock", () => {
         description: "Anti-patterns",
       }),
     ];
-    const tokens = lexer(buildReferenceBlock(references, "graph_worker_exec"))
+    const tokens = lexer(buildReferenceBlock(references, "files"))
       .filter((token) => token.type !== "space");
 
     expect(tokens.map((token) => token.type)).toEqual(["heading", "paragraph", "paragraph", "list"]);
@@ -791,7 +791,7 @@ describe("buildReferenceBlock", () => {
   });
 
   it("states the base for a single reference whose name derives from its file", () => {
-    const result = buildReferenceBlock([makeReference()], "graph_worker_exec");
+    const result = buildReferenceBlock([makeReference()], "files");
 
     expect(result).toContain("Base directory: `/refs`");
     expect(result).toContain("- `guide` — The guide");
@@ -817,7 +817,7 @@ describe("buildReferenceBlock", () => {
     const references = [...files].map(([name, filePath]) =>
       makeReference({ name, filePath, relativePath: `references/${name}.md` }));
 
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(countOccurrences(result, "Base directory: ")).toBe(1);
     expect(result).toContain(`Base directory: \`${referencesDirectory}\``);
@@ -842,7 +842,7 @@ describe("buildReferenceBlock", () => {
       makeReference({ name: "guide", filePath: "/refs/guide.md" }),
       makeReference({ name: "policy", filePath: "/elsewhere/policy.md", description: "The policy" }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(countOccurrences(result, "Base directory: ")).toBe(0);
     expect(result).toContain("- `guide` — The guide\n  `guide`: `/refs/guide.md`");
@@ -857,7 +857,7 @@ describe("buildReferenceBlock", () => {
       makeReference({ name: "guide", filePath: "/refs/guide.md" }),
       makeReference({ name: "policy", filePath: "/elsewhere/policy.md", description: "The policy" }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(countOccurrences(result, "Base directory: ")).toBe(0);
     const bullets = result.split("\n").filter((line) => line.startsWith("- "));
@@ -886,7 +886,7 @@ describe("buildReferenceBlock", () => {
       }),
       makeReference({ name: "overview", filePath: "/refs/chapters/one-summary.md" }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(result).not.toContain("Base directory:");
     expect(resolve("/refs", "overview.md")).not.toBe("/refs/chapters/one-summary.md");
@@ -908,7 +908,7 @@ describe("buildReferenceBlock", () => {
         relativePath: "references/theory/psychology.md",
       }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(result).not.toContain("Base directory:");
     expect(result).toContain("- `guide` — The guide\n  `guide`: `/refs/a/guide.md`");
@@ -926,7 +926,7 @@ describe("buildReferenceBlock", () => {
         relativePath: "references/theory/psychology.md",
       }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(countOccurrences(result, "Base directory: ")).toBe(1);
     expect(result).toContain("Base directory: `/roles/r/references`");
@@ -943,7 +943,7 @@ describe("buildReferenceBlock", () => {
       makeReference({ name: "role-x", filePath: "/refs/role-x.md" }),
       makeReference({ name: "role-y", filePath: "/refs/role-y.md" }),
     ];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     expect(result).toContain("Base directory: `/refs`");
     expect(result).not.toContain("`/refs/role`");
@@ -951,7 +951,7 @@ describe("buildReferenceBlock", () => {
 
   it("keeps the per-entry path line when an explicit name does not derive from the file", () => {
     const references = [makeReference({ name: "api-docs", filePath: "/refs/api.md" })];
-    const result = buildReferenceBlock(references, "graph_worker_exec");
+    const result = buildReferenceBlock(references, "files");
 
     // base + name would point at `/refs/api-docs.md`, which does not exist.
     expect(result).not.toContain("Base directory:");

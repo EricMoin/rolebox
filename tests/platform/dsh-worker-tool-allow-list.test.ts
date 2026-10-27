@@ -28,8 +28,6 @@ describe("the per-request worker allow-list", () => {
       candidates: ["computer_screenshot"],
       isRegistered: registry(["computer_screenshot", "graph_submit_outcome"]),
     });
-    // graph_worker_exec is not registered here, so it is NOT named: a name the
-    // host does not resolve would make restrict() throw and abort the start.
     expect(allow).toEqual(["graph_submit_outcome", "computer_screenshot"]);
   });
 
@@ -76,7 +74,6 @@ describe("the per-request worker allow-list", () => {
       "graph_control",
       "graph_audit",
       "graph_submit_outcome",
-      "graph_worker_exec",
     ];
     const allow = resolveDshWorkerToolAllowList({
       baseline: BASELINE,

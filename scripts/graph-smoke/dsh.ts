@@ -29,6 +29,10 @@ const { default: FileSystem } = await hostModule("dsh-fs-local");
 const { default: WorkingDirectory } = await hostModule("dsh-working-directory");
 const { default: Sandbox } = await hostModule("dsh-sandbox-local");
 const { default: SandboxPolicy } = await hostModule("dsh-sandbox-policy");
+const { default: Subprocess } = await hostModule("dsh-subprocess-local");
+const { default: Bash } = await hostModule("dsh-bash-sandbox");
+const ShellEnv = await hostModule("dsh-shell-env");
+const BashTool = await hostModule("dsh-tool-bash");
 const { default: AgentRegistry } = await hostModule("dsh-agent");
 const { default: AgentLoop } = await hostModule("dsh-agent-loop");
 const { default: SystemPrompt } = await hostModule("dsh-system-prompt");
@@ -94,10 +98,20 @@ class ScriptedAdapter extends LlmAdapter {
     const capabilityStep = capabilityMode ? capabilitySteps.get(graphId!) ?? 0 : 0;
     if (!graphId && graphNotice) parentNotices.push(last);
     if (graphId) {
-      const expected = ["graph_submit_outcome", "graph_worker_exec", "graph_worker_tools"];
-      if (capabilityMode === "code") expected.push("graph_worker_code");
-      if (capabilityMode === "discover" && capabilityStep > 0) expected.push("custom_probe");
-      assert.deepEqual(options.tools.map((tool: any) => tool.name).sort(), expected.sort(), "Worker requests must expose exactly their granted tool presentation");
+      const names = options.tools.map((tool: any) => tool.name);
+      assert.ok(names.includes("graph_submit_outcome"));
+      for (const forbidden of ["graph_declare", "graph_control", "graph_status", "graph_audit", "dispatch", "task", "team_create"]) {
+        assert.ok(!names.includes(forbidden), `Worker exposed orchestration tool ${forbidden}`);
+      }
+      if (capabilityMode) {
+        const expected = ["graph_submit_outcome", "graph_worker_tools"];
+        if (capabilityMode === "code") expected.push("graph_worker_code");
+        if (capabilityMode === "discover" && capabilityStep > 0) expected.push("custom_probe");
+        assert.deepEqual(names.sort(), expected.sort(), "Worker requests must expose their selected presentation");
+      } else {
+        assert.ok(names.includes("bash"), "Worker must inherit the host's native command tool");
+        assert.ok(!names.includes("graph_worker_tools"), "Default workers should use native schemas");
+      }
     }
     if (graphId) writeFileSync(join(root, graphId + ".ready"), "ready");
     if (graphId && texts.includes("FAIL_FIXTURE") && !existsSync(join(root, graphId + ".failed"))) {
@@ -123,12 +137,12 @@ class ScriptedAdapter extends LlmAdapter {
         } else if (capabilityMode === "code" && capabilityStep === 0) {
           tool = "graph_worker_code"; args = { source: 'const result = await tools.call("custom_probe", {}); emit(result); return result.value;' };
         }
-      } else if (graphId && !history.includes('"name":"graph_worker_exec"')) {
-        tool = "graph_worker_exec";
+      } else if (graphId && !history.includes('"name":"bash"')) {
+        tool = "bash";
         const manifestPath = nodeId === "review" ? JSON.parse(texts.match(/manifest:\s+([^\n]+)/)?.[1] ?? "null") : undefined;
         const readInput = manifestPath ? "cat '" + manifestPath.replaceAll("'", "'\\''") + "'; " : "";
         const protectedTarget = "'" + protectedFile.replaceAll("'", "'\\''") + "'";
-        args = { command: readInput + "if (echo modified > " + protectedTarget + ") 2>/dev/null; then exit 41; fi; /usr/bin/git --version && echo worker-output > worker-output.txt && echo probe-okay" };
+        args = { description: "Verify worker commands and upstream input", command: readInput + "if (echo modified > " + protectedTarget + ") 2>/dev/null; then exit 41; fi; /usr/bin/git --version && echo worker-output > worker-output.txt && echo probe-okay" };
       } else if (graphId && !history.includes('"name":"unsafe_probe"')) {
         tool = "unsafe_probe"; args = {};
       }
@@ -149,7 +163,7 @@ try {
   process.chdir(launcher);
   writeFileSync(protectedFile, "host-state", { mode: 0o600 });
   mkdirSync(join(root, "rolebox", "smoke"), { recursive: true });
-  writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n    subagents:\n      - name: Private\n        description: Private nested worker\n        prompt: Complete internal work.\n        model: example-provider/deterministic\n");
+  writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\ntools:\n  unsafe_probe: false\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n    subagents:\n      - name: Private\n        description: Private nested worker\n        prompt: Complete internal work.\n        model: example-provider/deterministic\n");
   fibers.push(ctx.plugin(SessionPersistence, { root: join(root, "sessions"), compression: "none" }));
   for (const plugin of [SessionStore, SessionProjections, FileSystem, AgentRegistry, LlmService, SystemPrompt, SubagentService]) fibers.push(ctx.plugin(plugin));
   fibers.push(ctx.plugin(SessionQuery, { path: join(root, "session-query.sqlite"), openAt: "never" }));
@@ -157,6 +171,10 @@ try {
   fibers.push(ctx.plugin(Sandbox));
   fibers.push(ctx.plugin(SandboxPolicy, { mode: "workspace-write", workspaceRoot: root }));
   fibers.push(ctx.plugin(ToolRegistry, nativeExecutor ? {} : { mode: "ptc" }));
+  fibers.push(ctx.plugin(Subprocess));
+  fibers.push(ctx.plugin(Bash, { cwd: root }));
+  fibers.push(ctx.plugin(ShellEnv, { dshHome: root }));
+  fibers.push(ctx.plugin(BashTool, { enableRunInBackground: false, promoteOnTimeout: false }));
   if (nativeExecutor) {
     const resolution = join(root, "profile");
     mkdirSync(join(resolution, "node_modules", "@deepseek-ai"), { recursive: true });
@@ -188,7 +206,7 @@ try {
   ctx.llm.registerAdapter(["example-provider"], new ScriptedAdapter());
   ctx.on("agent/error", (event: any) => { hostErrors.push(String(event.error?.stack ?? event.error)); });
   mkdirSync(data, { recursive: true });
-  ctx.on("tools/result", (execution: any, result: any) => { if (execution.name === "unsafe_probe" && result.isError) deniedProbes++; if (execution.name.startsWith("graph_")) results.set(execution.agent?.id + ":" + execution.name, result.value); });
+  ctx.on("tools/result", (execution: any, result: any) => { if (execution.name === "unsafe_probe" && result.isError) deniedProbes++; if (execution.name.startsWith("graph_") || execution.name === "bash") results.set(execution.agent?.id + ":" + execution.name, result.value); });
   ctx.tools.register({ name: "unsafe_probe", description: "A forbidden worker fixture", parameters: { type: "object", properties: {} },
     output: { schema: {}, render: () => [{ type: "text", text: "unsafe" }] }, execute: async () => { unsafeCalls++; return "unsafe"; } });
   ctx.tools.register({ name: "custom_probe", description: "An explicitly granted worker fixture", parameters: { type: "object", properties: {} },
@@ -252,7 +270,7 @@ try {
   assert.ok(explicit?.current, "Completed graph is missing its current attempt");
   assert.equal(explicit.current.attempts.length, 2);
   assert.ok(existsSync(join(root, "worker-output.txt")), JSON.stringify(
-    [...results.entries()].filter(([key]) => key.endsWith(":graph_worker_exec"))));
+    [...results.entries()].filter(([key]) => key.endsWith(":bash"))));
   assert.equal(readFileSync(protectedFile, "utf8"), "host-state");
   assert.equal(existsSync(join(launcher, "worker-output.txt")), false);
   assert.equal(existsSync(graphStoreRoot(data, launcher)), false);
