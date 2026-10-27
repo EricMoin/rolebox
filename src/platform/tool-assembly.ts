@@ -32,6 +32,7 @@ import { createAssetSearchTool } from "../asset/asset-search.ts";
 import { createAssetInspectTool } from "../asset/asset-inspect.ts";
 import { createAssetValidateTool } from "../asset/asset-validate.ts";
 import { createReferenceSearchTool } from "../utils/reference-search.ts";
+import { createLoadReferenceTool } from "../asset/reference-tool.ts";
 import { createComputerTools } from "../computer/tools.ts";
 import { createBrowseTools } from "../browse/tools.ts";
 import type { BrowseSessionManager } from "../browse/session.ts";
@@ -109,7 +110,7 @@ export interface BuildToolsOptions {
 }
 
 /**
- * The four role-snapshot tool keys — the tools whose behavior is bound to the
+ * The role-snapshot tool keys — the tools whose behavior is bound to the
  * resolved-role snapshot (`resolvedRoles`). Kept as a membership record so
  * the dsh plugin can both skip them in its boot registration loop
  * (`key in ROLE_SNAPSHOT_TOOL_KEYS`) and rebuild them as one disposable
@@ -120,10 +121,11 @@ export const ROLE_SNAPSHOT_TOOL_KEYS = {
   asset_inspect: true,
   asset_validate: true,
   reference_search: true,
+  load_reference: true,
 } as const satisfies Record<string, true>;
 
 /**
- * Build exactly the four role-snapshot tools from a resolved-role snapshot.
+ * Build the role-snapshot tools from a resolved-role snapshot.
  *
  * Separate from {@link buildCanonicalTools} so the dsh plugin's reload seam can
  * rebuild this generation alone (dispose-then-re-register) without recompiling
@@ -139,6 +141,7 @@ export function buildRoleSnapshotTools(
     asset_inspect: createAssetInspectTool(resolvedRoles),
     asset_validate: createAssetValidateTool(resolvedRoles),
     reference_search: createReferenceSearchTool(resolvedRoles),
+    load_reference: createLoadReferenceTool(resolvedRoles),
   }, resolvedRoles, getEffectiveAgent);
 }
 

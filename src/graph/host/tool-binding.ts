@@ -69,7 +69,7 @@ export interface OutcomeWorkerToolBoundary {
   readonly granted: readonly GraphToolName[];
   /** The attempt one session is the confirmed worker of, or `undefined`. */
   readonly principalOf: (sessionId: string) => OutcomeWorkerPrincipal | undefined;
-  /** Resolve the node restriction from its verified principal. Absence inherits; unreadable restrictions return []. */
+  /** @deprecated Node tools lists no longer restrict worker task tools. */
   readonly declaredToolsOf?: (
     principal: OutcomeWorkerPrincipal,
   ) => readonly string[] | undefined;
@@ -165,7 +165,7 @@ export function isGraphToolName(toolName: string): toolName is GraphToolName {
   return GRAPH_TOOL_NAMES.some((name) => name === toolName);
 }
 
-/** Node restrictions select task tools only. Absence inherits; [] refuses additional task tools. */
+/** Match parent authorization or broker allow-lists without exposing orchestration tools. */
 export function declaredToolsAllow(
   toolName: string,
   declared: readonly string[] | undefined,
@@ -179,46 +179,11 @@ export function declaredToolsAllow(
 
 export function workerTaskToolAllowed(
   toolName: string,
-  declared: readonly string[] | undefined,
+  _declared: readonly string[] | undefined,
   inherited?: readonly string[],
 ): boolean {
-  return declaredToolsAllow(toolName, declared) &&
+  return isWorkerTaskTool(toolName) &&
     (inherited === undefined || inherited.includes(toolName));
-}
-
-/**
- * Whether one declared entry can only ever name the reserved graph namespace.
- *
- * A prefix entry is judged by its STEM: `graph_*` admits only names beginning
- * `graph_`, so it is a graph grant and never a host grant. A bare `*` has no
- * stem and is kept (it admits no graph name either — {@link declaredToolsAllow}
- * refuses the namespace first).
- *
- * Used for REPORTING alone: an entry that cannot admit a host tool is not part
- * of the face a refusal may claim was granted. The enforcement is
- * {@link declaredToolsAllow}'s, not this predicate's.
- */
-function declaredEntryNamesGraphFace(entry: string): boolean {
-  const stem = entry.endsWith("*") ? entry.slice(0, -1) : entry;
-  return isGraphFaceToolName(stem);
-}
-
-/** An unavailable or malformed lookup must not be confused with a verified absent restriction. */
-function declaredToolsForPrincipal(
-  boundary: OutcomeWorkerToolBoundary,
-  principal: OutcomeWorkerPrincipal,
-): readonly string[] | undefined {
-  const lookup = boundary.declaredToolsOf;
-  if (lookup === undefined) return [];
-  let declared: readonly string[] | undefined;
-  try {
-    declared = lookup(principal);
-  } catch {
-    return [];
-  }
-  if (declared === undefined) return undefined;
-  if (!Array.isArray(declared) || declared.some(entry => typeof entry !== "string" || entry.length === 0)) return [];
-  return declared;
 }
 
 /**
@@ -247,20 +212,16 @@ function workerToolRefusal(
     // An unreadable presentation never grants a capability entry point.
   }
   if (presentationTools.includes(toolName)) return undefined;
-  const declared = declaredToolsForPrincipal(boundary, principal);
   let inherited: readonly string[] | undefined;
   try { inherited = boundary.inheritedToolsOf?.(principal); }
   catch { inherited = []; }
-  if (workerTaskToolAllowed(toolName, declared, inherited)) return undefined;
+  if (workerTaskToolAllowed(toolName, undefined, inherited)) return undefined;
   return renderWorkerToolRefusal(
     toolName,
     [
       ...boundary.granted,
       ...presentationTools,
-      // A declared graph-namespace entry is NOT reported as granted: it admits
-      // no host tool, and this refusal is read as "what the face grants".
-      ...(inherited === undefined ? declared ?? [] : inherited.filter(name => declaredToolsAllow(name, declared)))
-        .filter((entry) => !declaredEntryNamesGraphFace(entry)),
+      ...(inherited ?? []).filter(isWorkerTaskTool),
     ],
     principal,
   );
@@ -290,7 +251,7 @@ function renderWorkerToolRefusal(
         JSON.stringify(principal.graphId) +
         ". Its worker entry points and resolved task-tool permissions are " +
         granted.join(", ") +
-        ". Task tools must be inherited from the parent and satisfy the node's tools restriction; " +
+        ". Task tools must be authorized by the parent; node tools lists do not restrict them. " +
         "recursive dispatch remains unavailable. " +
         "declaring or mutating a graph definition, reading the authoritative store " +
         "and controlling another attempt are the declaring/operating principal's " +

@@ -21,13 +21,13 @@ async function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "worker-inheritance-"));
   directories.push(directory);
   const dispatched: OutcomeDispatchRequest[] = [];
-  let inherited = ["docs_read", "docs_search"];
+  let inherited = ["docs_read", "docs_search", "hashline_read", "hashline_edit"];
   let unavailable = false;
   let host: OutcomeHost;
   const open = () => OutcomeHost.open({
     workspaceDir: directory, storeRoot: join(directory, "store"), declareInvocationIdentity: false,
     validators: createValidatorRegistry([]), workerSessionOf: execution => execution.executionId,
-    defaultWorkerToolPresentation: { mode: "discover" },
+    defaultWorkerToolPresentation: { mode: "native" },
     workerTaskToolsOf: invocation => {
       expect(invocation.sessionId).toBe("parent");
       if (unavailable) throw new Error("Parent authorization unavailable");
@@ -54,7 +54,7 @@ async function fixture() {
     { id: "attempt-expand", agent: "worker", prompt: "Inspect", outcomes: [{ id: "done" }], tools: ["docs_*", "private_lookup", "rb_*", "dispatch"] },
   ], edges: [] } }, context("parent"));
   expect((await host.startDeclaredGraph("inheritance", { sessionId: "parent", agent: "parent-role" })).kind).toBe("started");
-  const names = ["docs_read", "docs_search", "private_lookup", "graph_control", "rb_graph_control", "dispatch",
+  const names = ["docs_read", "docs_search", "hashline_read", "hashline_edit", "private_lookup", "graph_control", "rb_graph_control", "dispatch",
     "rb_dispatch", "dispatch_output", "loop_start", "team_create", "rb_team_create", "task", "task_retry", "session_fork"];
   const definitions: Record<string, CanonicalToolDef> = Object.fromEntries(names.map(name => [name, {
     description: name, args: {}, execute: async () => `${name} ran`,
@@ -72,19 +72,23 @@ async function fixture() {
 }
 
 describe("inherited worker task tools", () => {
-  it("inherits parent tools, narrows explicit lists and preserves an empty restriction after restart", async () => {
+  it("exposes every inherited task tool despite legacy node lists, including empty lists, after restart", async () => {
     const f = await fixture();
     try {
       expect(f.dispatched).toHaveLength(4);
-      expect(f.dispatched.every(request => request.toolPresentation?.mode === "discover")).toBe(true);
-      expect(f.dispatched.every(request => request.inheritedTools?.join(",") === "docs_read,docs_search")).toBe(true);
+      expect(f.dispatched.every(request => request.toolPresentation?.mode === "native")).toBe(true);
+      expect(f.dispatched.every(request => request.inheritedTools?.join(",") === "docs_read,docs_search,hashline_read,hashline_edit")).toBe(true);
       for (let pass = 0; pass < 2; pass++) {
         expect(await f.call("inherit", "docs_search")).toBe("docs_search ran");
         expect(await f.call("narrow", "docs_read")).toBe("docs_read ran");
-        expect(JSON.parse(String(await f.call("narrow", "docs_search")))).toMatchObject({ refused: true });
-        expect(JSON.parse(String(await f.call("empty", "docs_read")))).toMatchObject({ refused: true });
+        expect(await f.call("narrow", "docs_search")).toBe("docs_search ran");
+        expect(await f.call("empty", "docs_read")).toBe("docs_read ran");
+        for (const node of ["inherit", "narrow", "empty", "attempt-expand"]) {
+          expect(await f.call(node, "hashline_read")).toBe("hashline_read ran");
+          expect(await f.call(node, "hashline_edit")).toBe("hashline_edit ran");
+        }
         expect(JSON.parse(String(await f.call("attempt-expand", "private_lookup")))).toMatchObject({ refused: true });
-        for (const name of f.names.slice(3)) {
+        for (const name of f.names.slice(5)) {
           expect(JSON.parse(String(await f.call("attempt-expand", name)))).toMatchObject({ code: "worker-tool-forbidden" });
         }
         if (pass === 0) f.restart();

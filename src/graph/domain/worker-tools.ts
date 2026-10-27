@@ -56,10 +56,8 @@ export function workerPresentationTools(presentation: WorkerToolPresentation | u
   return [];
 }
 
-export function validateWorkerToolPreload(presentation: WorkerToolPresentation | undefined, tools: readonly string[] | undefined): void {
+export function validateWorkerToolPreload(presentation: WorkerToolPresentation | undefined, _tools: readonly string[] | undefined): void {
   for (const name of presentation?.preload ?? []) {
-    const granted = isWorkerTaskTool(name) && (tools === undefined || tools.some(entry => entry === name ||
-      (entry.endsWith("*") && entry.length > 1 && name.startsWith(entry.slice(0, -1)))));
-    if (!granted) throw new TypeError(`Preloaded tool ${JSON.stringify(name)} is not in the node's tools grant`);
+    if (!isWorkerTaskTool(name)) throw new TypeError(`Preloaded tool ${JSON.stringify(name)} is not a task tool`);
   }
 }

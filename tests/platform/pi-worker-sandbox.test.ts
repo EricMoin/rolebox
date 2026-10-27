@@ -169,7 +169,7 @@ describe("Pi graph worker boundary", () => {
           model: "example/model", tools: [], systemPrompt: "Worker context", memory: item.config,
         });
         adapter.setGraphWorkerToolConfig(() => ({
-          baseline: ["bash", "graph_submit_outcome"], grants: item.tools, presentation: item.presentation,
+          baseline: ["bash", "graph_submit_outcome"], grants: item.tools, inheritedTools: item.tools, presentation: item.presentation,
           proxies: ["memory_recall", "memory_read", "memory_write", "memory_update"].map(name => ({ name, description: name, inputSchema: {} })),
         }));
         const worker = await adapter.create({ directory: root, agent: "memory-worker" });
@@ -214,7 +214,7 @@ describe("Pi graph worker boundary", () => {
           toolPolicy: item.policy ?? { "computer_*": true },
         });
         adapter.setGraphWorkerToolConfig(() => ({
-          baseline: ["bash", "graph_submit_outcome"], grants: item.grants, presentation: item.presentation,
+          baseline: ["bash", "graph_submit_outcome"], grants: item.grants, inheritedTools: item.grants, presentation: item.presentation,
           proxies: item.proxies.map(name => ({ name, description: name, inputSchema: {} })),
         }));
         const worker = await adapter.create({ directory: root, agent: "computer-worker" });

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { declaredToolsAllow, workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import type { WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
 import { normalizeWorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
 import type { CanonicalToolDef } from "../../types.ts";
@@ -45,11 +45,6 @@ export function parsePiWorkerToolConfig(raw: string): PiWorkerToolConfig {
 
 export function validatePiWorkerTools(config: PiWorkerToolConfig, tools: readonly { name: string }[]): void {
   if (config.presentation?.mode === "code") throw new Error("Pi code presentation is unsupported: the extension API cannot invoke tools through the complete host tool_call hooks. Use native or discover presentation.");
-  for (const grant of config.grants ?? []) {
-    if (!tools.some(tool => declaredToolsAllow(tool.name, [grant]) && piWorkerToolAllowed(tool.name, config))) {
-      throw new Error(`Pi worker tool grant ${JSON.stringify(grant)} matches no loaded tool`);
-    }
-  }
   for (const name of config.presentation?.preload ?? []) {
     if (!tools.some(tool => tool.name === name) || !piWorkerToolAllowed(name, config)) {
       throw new Error(`Pi worker preload ${JSON.stringify(name)} is unavailable or unauthorized`);

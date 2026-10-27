@@ -89,6 +89,7 @@ const OPENCODE_SURFACE: readonly string[] = [
   "asset_inspect",
   "asset_validate",
   "reference_search",
+  "load_reference",
   // 2. Session tools (registered when a session client is present — always
   //    on both platforms: opencode via SessionService, Pi via PiSessionAdapter)
   "session_list",

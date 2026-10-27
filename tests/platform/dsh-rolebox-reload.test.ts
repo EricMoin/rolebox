@@ -204,7 +204,7 @@ function makeExec(): DshToolRunContext {
   };
 }
 
-/** Compile the four role-snapshot tools through the dsh tool factory. */
+/** Compile the role-snapshot tools through the dsh tool factory. */
 function compileSnapshot(
   roles: ResolvedRole[],
 ): Record<string, DshToolDefinition> {

@@ -177,6 +177,7 @@ const EXPECTED_CODEX_TOOL_NAMES = [
   "hashline_edit",
   "hashline_read",
   "interactive_terminal",
+  "load_reference",
   "load_role_skill",
   "memory_list",
   "memory_read",

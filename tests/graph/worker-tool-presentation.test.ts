@@ -58,7 +58,7 @@ describe("worker tool presentation declaration", () => {
   it.each([
     null, "code", {}, { mode: "automatic" }, { mode: "native", grant: ["other"] },
     { mode: "discover", preload: "docs_read" }, { mode: "discover", preload: ["docs_*"] },
-    { mode: "code", preload: ["graph_status"] }, { mode: "code", preload: ["billing_read"] },
+    { mode: "code", preload: ["graph_status"] },
     { mode: "discover", preload: [7] },
   ])("refuses invalid configuration %j in both authoring and direct compilation", toolPresentation => {
     expect(parseGraphDeclarationV3(declaration({ toolPresentation })).ok).toBe(false);
@@ -67,7 +67,7 @@ describe("worker tool presentation declaration", () => {
 
   it("fails closed when reading malformed stored presentation", () => {
     expect(declaredNodeToolPresentation({ nodes: [{ id: "worker", toolPresentation: { mode: "unknown" } }] }, "worker")).toBeUndefined();
-    expect(declaredNodeToolPresentation({ nodes: [{ id: "worker", tools: [], toolPresentation: { mode: "code", preload: ["docs_read"] } }] }, "worker")).toBeUndefined();
+    expect(declaredNodeToolPresentation({ nodes: [{ id: "worker", tools: [], toolPresentation: { mode: "code", preload: ["dispatch"] } }] }, "worker")).toBeUndefined();
   });
 });
 
@@ -118,7 +118,7 @@ it("carries mode through dispatch and restart, granting only its capability entr
       const child = context(`child:${request.attemptId}`);
       const principal = host.workerPrincipalOf(child.sessionID)!;
       expect(host.workerToolPresentationOf(principal)).toEqual(request.toolPresentation);
-      const allowed = new Set(["docs_read", ...(request.toolPresentation?.mode === "discover" ? ["graph_worker_tools"] :
+      const allowed = new Set(["docs_read", "billing_read", ...(request.toolPresentation?.mode === "discover" ? ["graph_worker_tools"] :
         request.toolPresentation?.mode === "code" ? ["graph_worker_tools", "graph_worker_code"] : [])]);
       for (const [name, tool] of Object.entries(bound)) {
         const result = String(await tool.execute({}, child));

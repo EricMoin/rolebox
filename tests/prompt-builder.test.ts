@@ -208,7 +208,7 @@ describe("buildAgentPrompt", () => {
     const section = [
       "## Available skills",
       "",
-      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the skill tool. Role workflow skills are scoped to their owning role.",
+      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the host's skill loader. Read the listed file only when no suitable skill loader is available. Resolve relative resources against the loaded skill's directory. Role workflow skills are scoped to their owning role.",
       "",
       "- `alpha` — Alpha description",
     ].join("\n");
@@ -244,7 +244,7 @@ describe("buildAgentPrompt", () => {
     const result = buildAgentPrompt(role, skills);
 
     expect(result).toContain(
-      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the skill tool. Role workflow skills are scoped to their owning role.",
+      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the host's skill loader. Read the listed file only when no suitable skill loader is available. Resolve relative resources against the loaded skill's directory. Role workflow skills are scoped to their owning role.",
     );
   });
 
@@ -272,7 +272,7 @@ describe("buildAgentPrompt", () => {
 
     expect(result).toContain(
       "## Available skills\n\n" +
-      "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory.\n\n" +
+      "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the host's skill loader. Read the listed file only when no suitable skill loader is available. Resolve relative resources against the loaded skill's directory. Role workflow skills are scoped to their owning role.\n\n" +
       "- `located-skill` — A test skill",
     );
     expect(result).toContain("  File: `/attempt/role-resources-x/located/SKILL.md`");
@@ -558,8 +558,11 @@ function makeSubagent(
 // ---------------------------------------------------------------------------
 
 describe("buildSubagentBlock", () => {
-  it("explains task-specific computer grants and recovery dependencies for graph delegation", () => {
+  it("explains inherited tools and computer recovery dependencies for graph delegation", () => {
     const result = buildSubagentBlock([makeSubagent()]);
+    expect(result).toContain("Workers inherit your authorized task tools");
+    expect(result).toContain("native schemas by default");
+    expect(result).not.toContain("node's tools array");
     expect(result).toContain("When a task needs desktop observation or interaction");
     expect(result).toContain("specific available computer_* tools");
     expect(result).toContain("computer_screenshot for observation");
@@ -721,8 +724,7 @@ function countOccurrences(text: string, literal: string): number {
 // buildReferenceBlock tests
 // ---------------------------------------------------------------------------
 
-const RESOURCE_INSTRUCTION = "Reference documents provide deep knowledge. Use graph_worker_exec to read the listed files. " +
-  "Resolve relative references against the document's directory.";
+const RESOURCE_INSTRUCTION = "Reference documents provide deep knowledge. Use load_reference with the listed name to load the full reference. Use reference_search to find relevant passages. Read the listed file only when the reference loader is unavailable. Resolve relative resources against the loaded reference's directory.";
 
 describe("buildReferenceBlock", () => {
   it("returns empty string for empty array", () => {

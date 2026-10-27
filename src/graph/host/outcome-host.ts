@@ -136,7 +136,7 @@ interface WorkerReadSnapshot {
   readonly grants: Map<string, OutcomeWorkerToolGrant>;
 }
 
-const BASELINE_WORKER_GRANT: OutcomeWorkerToolGrant = Object.freeze({ declaredTools: Object.freeze([]) });
+const BASELINE_WORKER_GRANT: OutcomeWorkerToolGrant = Object.freeze({ inheritedTools: Object.freeze([]) });
 
 /**
  * The host's own log channel.
@@ -3101,11 +3101,12 @@ export class OutcomeHost {
   }
 
   /**
-   * Resolve both authorization inputs from one verified committed store revision.
-   * Missing or unreadable bindings and definitions retain an empty task-tool restriction.
+   * Resolve worker presentation and parent authorization from verified bindings.
+   * Missing or unreadable bindings and definitions provide no inherited task tools.
    */
   workerToolGrantOf(principal: OutcomeWorkerPrincipal): OutcomeWorkerToolGrant {
     const grant = this.nodeToolGrantOf(principal);
+    if (grant === BASELINE_WORKER_GRANT) return grant;
     if (!this.workerTaskToolsOf) return grant;
     try {
       const inheritedTools = this.inheritedTaskTools(this.originOf(principal.graphId));

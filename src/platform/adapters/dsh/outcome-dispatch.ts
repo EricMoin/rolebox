@@ -203,14 +203,14 @@ export interface DshOutcomeDeliveryOptions {
   readonly workerTools?: readonly string[];
   /**
    * THE ALLOW-LIST FOR ONE REQUEST, resolved by the entry that owns the host
-   * tool registry: the baseline plus inherited task tools within the node restriction,
+   * tool registry: the baseline plus inherited task tools,
    * each intersected with the tools the host actually registered
    * ({@link resolveDshWorkerToolAllowList}).
    *
    * WHY PER REQUEST. The node's declared grant rides ON the request
    * ({@link OutcomeDispatchRequest.declaredTools}), so the allow-list is a
    * property of the attempt, not of the adapter: one delivery may start a
-   * worker limited to `computer_*` and the next inheriting all parent task tools.
+   * worker inheriting one parent catalog and the next inheriting another.
    *
    * FAIL CLOSED ON EVERY UNCERTAINTY. An answer of `undefined`, a resolver the
    * entry did not install, and a resolver that THROWS all fall back to
@@ -285,7 +285,7 @@ export interface DshOutcomeDeliveryOptions {
   readonly loggerName?: string;
 }
 
-/** Select registered task candidates within the node restriction, retaining the worker entry points. */
+/** Select registered, parent-authorized task candidates, retaining the worker entry points. */
 export function resolveDshWorkerToolAllowList(options: {
   readonly baseline: readonly string[];
   readonly declared?: readonly string[] | undefined;
@@ -305,15 +305,9 @@ export function resolveDshWorkerToolAllowList(options: {
     if (registered(name)) allow.add(name);
   }
   const declared = options.declared;
-  if (declared?.length === 0) return Object.freeze([...allow]);
   for (const name of options.candidates) {
     if (allow.has(name)) continue;
     if (workerTaskToolAllowed(name, declared, options.inherited) && registered(name)) allow.add(name);
-  }
-  for (const entry of declared ?? []) {
-    if (typeof entry !== "string" || entry.length === 0 || entry.endsWith("*")) continue;
-    if (allow.has(entry)) continue;
-    if (workerTaskToolAllowed(entry, declared, options.inherited) && registered(entry)) allow.add(entry);
   }
   return Object.freeze([...allow]);
 }

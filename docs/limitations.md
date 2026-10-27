@@ -27,7 +27,7 @@ Pi runs `PiLightweightServiceStack` instead of the full PluginCore service stack
 
 ## Codex (MCP) parity
 
-The Codex tool surface is pinned by `tests/platform/codex-mcp.test.ts`: the MCP server (`rolebox mcp`) registers the canonical intersection `buildCanonicalTools` assembles for a harness with no session client and no dispatch backend, plus `load_role_skill` — 15 tools. See [compatibility.md](compatibility.md) for the parity matrix and [codex.md](codex.md) for the documented surface.
+The Codex tool surface is pinned by `tests/platform/codex-mcp.test.ts`: the MCP server (`rolebox mcp`) registers the canonical intersection `buildCanonicalTools` assembles for a harness with no session client and no dispatch backend, plus `load_role_skill` — 18 tools. See [compatibility.md](compatibility.md) for the parity matrix and [codex.md](codex.md) for the documented surface.
 
 - `session_*` tools are absent: the stdio MCP transport exposes no rolebox session client.
 - `dispatch_*` / `loop_*` / `task_*` are withheld, and the `graph_*` tools are not registered either — the Codex entry builds the canonical tool set without a dispatch manager, so the graph tools are never constructed. No stubs stand in for any of them.

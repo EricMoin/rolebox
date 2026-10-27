@@ -59,7 +59,7 @@ export interface OutcomeDispatchRequest extends OutcomeDispatchTarget {
    * credential (or copied it); it does not prove the original worker is asking.
    */
   readonly credential: string;
-  /** Restriction resolved from the executing plan. Absence inherits parent task tools; [] keeps worker entry points only. */
+  /** Legacy node tool metadata; worker authorization comes from the parent catalog. */
   readonly declaredTools?: readonly string[];
   /** Parent task catalog resolved by the host, independently of the node's restriction. */
   readonly inheritedTools?: readonly string[];

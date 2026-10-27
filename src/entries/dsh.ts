@@ -509,8 +509,9 @@ export interface DshPluginDisposer {
   /** Await asynchronous team-session shutdown after invoking the disposer. */
   whenDisposed(): Promise<void>;
   /**
-   * In-process role-reload seam: replace the four role-snapshot tools
-   * (`asset_search` / `asset_inspect` / `asset_validate` / `reference_search`)
+   * In-process role-reload seam: replace the role-snapshot tools
+   * (`asset_search` / `asset_inspect` / `asset_validate` / `reference_search` /
+   * `load_reference`) and `load_role_skill`
    * with a fresh generation built from `roles`. Disposes the previously
    * registered generation FIRST — the host registry frees each global tool
    * name synchronously, so re-registering the same names cannot collide —
@@ -2200,7 +2201,7 @@ export async function apply(
       workspaceDir: workspace,
       storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
-      defaultWorkerToolPresentation: { mode: "discover" },
+      defaultWorkerToolPresentation: { mode: "native" },
       workerTaskToolsOf: invocation => {
         const parent = invocation.sessionId ? agentRegistry?.get(invocation.sessionId) : undefined;
         if (!parent || !ctx.tools.schemas) return [];
@@ -2448,7 +2449,11 @@ export async function apply(
         });
       }
     }
-    const getEffectiveAgent = (sessionID?: string) => sessionID ? activeRole.get(sessionID) ?? undefined : undefined;
+    const getEffectiveAgent = (sessionID?: string) => {
+      if (!sessionID) return undefined;
+      const agent = agentRegistry?.get(sessionID) ?? { id: sessionID, session: ctx.sessions.get(sessionID) };
+      return resolveDshSessionContext(contextOptions, agent).requestedRoleId ?? undefined;
+    };
     const compiled = factory.compileAll({
       ...buildRoleSnapshotTools(roles, getEffectiveAgent),
       ...bindRoleVisibility({ load_role_skill: createLoadRoleSkillTool(roles) }, roles, getEffectiveAgent),
@@ -2684,7 +2689,7 @@ export async function apply(
     toolDisposers.push(dispose);
     registeredTools++;
   }
-  // Initial generation: the same four tools, registered through the reload
+  // Initial generation: the same snapshot tools, registered through the reload
   // seam so a later re-registration replaces them cleanly.
   registeredTools += registerRoleSnapshotTools(resolvedRoles);
 

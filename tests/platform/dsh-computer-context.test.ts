@@ -61,7 +61,7 @@ describe("DSH computer workflow", () => {
 
   it.each(["native", "discover", "code"] as const)("follows worker grants and %s presentation", mode => {
     const f = fixture();
-    f.options.worker = () => ({ agent: "parent--child", declaredTools: ["computer_screenshot", "computer_permissions"], toolPresentation: { mode } });
+    f.options.worker = () => ({ agent: "parent--child", inheritedTools: ["computer_screenshot", "computer_permissions"], toolPresentation: { mode } });
     const result = f.render({ id: "worker" });
     expect(result).toContain("computer_permissions");
     expect(result).toContain("computer_screenshot");
@@ -71,7 +71,7 @@ describe("DSH computer workflow", () => {
     f.options.worker = () => ({ agent: "parent--child" });
     expect(f.render({ id: "worker" })).toContain("computer_screenshot");
     f.options.worker = () => ({ agent: "parent--child", declaredTools: [] });
-    expect(f.render({ id: "worker" })).toBe("");
+    expect(f.render({ id: "worker" })).toContain("computer_screenshot");
     f.options.worker = () => ({ agent: "parent--child", inheritedTools: [] });
     expect(f.render({ id: "worker" })).toBe("");
   });

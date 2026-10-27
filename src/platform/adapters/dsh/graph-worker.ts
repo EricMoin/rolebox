@@ -322,19 +322,13 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     return descriptorStartup(agent) !== undefined;
   };
   const grantOf = (agent?: DshWorkerAgent): DshWorkerStartupTools => {
-    if (!agent) return { declaredTools: [] };
+    if (!agent) return { inheritedTools: [] };
     const principal: OutcomeWorkerPrincipal | undefined = host.workerPrincipalOf(agent.session?.id ?? agent.id ?? "");
-    if (!principal) return prepared.get(agent)?.startup ?? { declaredTools: [] };
+    if (!principal) return prepared.get(agent)?.startup ?? { inheritedTools: [] };
     try {
       if (host.workerToolGrantOf) return host.workerToolGrantOf(principal);
-      if (!host.workerDeclaredToolsOf) return { declaredTools: [] };
-      const declared = host.workerDeclaredToolsOf(principal);
-      return {
-        declaredTools: declared === undefined ? undefined : Array.isArray(declared) &&
-          declared.every(name => typeof name === "string" && name.length > 0) ? declared : [],
-        toolPresentation: host.workerToolPresentationOf?.(principal),
-      };
-    } catch { return { declaredTools: [] }; }
+      return { toolPresentation: host.workerToolPresentationOf?.(principal) };
+    } catch { return { inheritedTools: [] }; }
   };
   const grantedBy = (name: string, grant: DshWorkerStartupTools): boolean =>
     (isGraphToolName(name) && DSH_GRAPH_WORKER_GRANT.includes(name)) ||
@@ -345,25 +339,24 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     return grantedBy(name, grantOf(agent));
   };
   const guard = tools.guard?.(execution => isWorker(execution.agent) && !grantedToWorker(execution.name, execution.agent)
-    ? "Graph workers may only use inherited authorized task tools within the node's tools restriction, plus their worker entry points" : undefined);
+    ? "Graph workers may only use parent-authorized task tools and their worker entry points; graph control and recursive dispatch remain unavailable" : undefined);
   if (guard) disposers.push(guard);
   const catalogOf = (agent: DshWorkerAgent): readonly DshWorkerToolSchema[] | undefined => {
     if (!tools.schemas) return undefined;
     try { return tools.schemas(agent); }
     catch (error) { throw new Error(`Worker tool catalog is unavailable: ${message(error)}`); }
   };
-  const checkAvailability = (agent: DshWorkerAgent, grant: DshWorkerStartupTools): string[] => {
+  const checkAvailability = (agent: DshWorkerAgent, grant: DshWorkerStartupTools): void => {
     const catalog = catalogOf(agent);
-    if (!catalog) return [];
+    if (!catalog) return;
     const names = new Set(catalog.map(tool => tool.name));
-    const exact = [...(grant.declaredTools ?? []).filter(name => !name.endsWith("*")), ...(grant.toolPresentation?.preload ?? [])];
+    const exact = grant.toolPresentation?.preload ?? [];
     const missing = [...new Set(exact.filter(name => !names.has(name)))];
-    if (missing.length) throw new Error(`Worker tool grant names unavailable host tools: ${missing.join(", ")}`);
+    if (missing.length) throw new Error(`Worker preload names unavailable host tools: ${missing.join(", ")}`);
     const deniedPreloads = (grant.toolPresentation?.preload ?? []).filter(name =>
       !workerTaskToolAllowed(name, grant.declaredTools, grant.inheritedTools));
     if (deniedPreloads.length) throw new Error(`Worker preload is outside inherited authorization: ${deniedPreloads.join(", ")}`);
-    return (grant.declaredTools ?? []).filter(pattern => pattern.endsWith("*") &&
-      !catalog.some(tool => declaredToolsAllow(tool.name, [pattern])));
+
   };
   let subcall = 0;
   const visibleToWorker = (name: string, grant: DshWorkerStartupTools, activated?: Set<string>): boolean => {
@@ -484,12 +477,8 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     prepare(agent);
     const grant = grantOf(agent);
     const activated = agent && prepared.get(agent)?.activated;
-    const unmatched = agent ? checkAvailability(agent, grant) : [];
+    if (agent) checkAvailability(agent, grant);
     return { ...assembly,
-      ...(unmatched.length ? { contexts: [...(assembly.contexts ?? []), {
-        name: "rolebox:worker-tool-availability",
-        text: `No currently available host tool matches these granted prefixes: ${unmatched.join(", ")}. Search the catalog again if a provider becomes available; these grants do not create tools.`,
-      }] } : {}),
       // Newer hosts keep tool declarations outside the text presentation waterfall.
       ...(assembly.tools === undefined ? {} : { tools: assembly.tools.filter(tool => visibleToWorker(tool.name, grant, activated)) }),
     };

@@ -90,6 +90,7 @@ const CORE_KEYS = [
   "asset_inspect",
   "asset_validate",
   "reference_search",
+  "load_reference",
 ];
 
 const SESSION_KEYS = [

@@ -69,6 +69,7 @@ const REQUIRED_TOOLS = [
   "asset_search",
   "asset_inspect",
   "reference_search",
+  "load_reference",
   "session_list",
   "session_read",
   "session_info",

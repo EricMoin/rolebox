@@ -5,9 +5,9 @@
  * registerRoleSnapshotTools handle on the apply() disposer (src/entries/dsh.ts).
  *
  * Verifies:
- *   - buildRoleSnapshotTools advertises exactly the four role-snapshot keys
+ *   - buildRoleSnapshotTools advertises exactly the five role-snapshot keys
  *   - boot registration is not doubled: apply() over a tools registry that
- *     THROWS on a duplicate name resolves, with each of the four registered
+ *     THROWS on a duplicate name resolves, with each of the five registered
  *     exactly once
  *   - the dispose-then-re-register path serves the NEW roles after a swap: the
  *     previously registered asset_search definition is replaced, so it searches
@@ -39,7 +39,7 @@ import type {
 import type { DshSubagentDispatchRuntime } from "../../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSubagentProvider } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import type { DshSessionStoreLike } from "../../src/platform/adapters/dsh/session.ts";
-import { SkillScope } from "../../src/constants.ts";
+import { ReferenceScope, SkillScope } from "../../src/constants.ts";
 import type { ResolvedRole } from "../../src/types.ts";
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ const EXPECTED_ROLE_SNAPSHOT_KEYS = [
   "asset_inspect",
   "asset_validate",
   "reference_search",
+  "load_reference",
 ];
 
 /** Minimal ResolvedRole fixture for a synthetic (post-swap) snapshot. */
@@ -114,7 +115,7 @@ function writeRoleWithSkills(roleId: string, skillNames: string[]): void {
 //
 // Mirrors the minimal harness in tests/dsh-plugin.test.ts:177-312 with ONE
 // difference: tools.register rejects a duplicate name exactly like the host
-// registry. A boot that registered any of the four role-snapshot tools twice
+// registry. A boot that registered any of the role-snapshot tools twice
 // therefore fails here instead of silently succeeding.
 
 function createFakeCtx() {
@@ -253,7 +254,29 @@ afterEach(() => {
 });
 
 describe("role-snapshot tool registration seam", () => {
-  it("advertises exactly the four role-snapshot tool keys", () => {
+  it("reloads reference loaders with the role snapshot and releases the previous generation", async () => {
+    writeRoleWithSkills("snapshot-role", ["alpha-skill"]);
+    const { ctx, tools } = createFakeCtx();
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    try {
+      await disposer.activateRole("snapshot-role", "owner-session");
+      for (const generation of ["first", "second"]) {
+        const role = makeResolvedRole("snapshot-role", "alpha-skill");
+        const filePath = join(tmpDir, `${generation}.md`);
+        writeFileSync(filePath, `${generation} reference body`);
+        role.references = [{ name: "guide", description: "Guide", scope: ReferenceScope.Role, filePath, relativePath: "references/guide.md" }];
+        disposer.registerRoleSnapshotTools([role]);
+        expect(tools.registeredTools.filter(tool => tool.name === "load_reference")).toHaveLength(1);
+        const loader = currentTool(tools, "load_reference");
+        const result = await loader.execute({ name: "guide" }, { ...makeExec(), agent: { id: "owner-session", session: { id: "owner-session" } } });
+        expect(JSON.stringify(result)).toContain(`${generation} reference body`);
+        const foreign = await loader.execute({ name: "guide" }, { ...makeExec(), agent: { id: "peer-session", session: { id: "peer-session" } } });
+        expect(foreign).toContain("Role assets require an active role");
+      }
+    } finally { await disposer(); }
+  });
+
+  it("advertises exactly the five role-snapshot tool keys", () => {
     const built = buildRoleSnapshotTools([
       makeResolvedRole("snapshot-role", "alpha-skill"),
     ]);
@@ -299,7 +322,7 @@ describe("role-snapshot tool registration seam", () => {
     expect(await runAssetSearch(tools, "alpha")).toContain("alpha-skill");
     expect(await runAssetSearch(tools, "beta")).not.toContain("beta-skill");
 
-    // Swap to a snapshot whose assets differ. Re-registering the same four
+    // Swap to a snapshot whose assets differ. Re-registering the same tool
     // names succeeds only because the previous generation was disposed FIRST —
     // tools.register throws on a duplicate name.
     const registered = disposer.registerRoleSnapshotTools([

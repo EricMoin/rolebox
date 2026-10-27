@@ -59,7 +59,7 @@ export interface AgentPromptOptions {
   references?: ResolvedReference[];
   canDelegate?: boolean;
   canTeam?: boolean;
-  resourceTool?: "graph_worker_exec";
+  resourceTool?: "graph_worker_exec" | "files";
 }
 
 export function buildAgentPrompt(
@@ -112,13 +112,9 @@ export function buildFunctionBlock(functions: ResolvedFunction[]): string {
   });
 }
 
-export function buildSkillBlock(skills: ResolvedSkill[], resourceTool?: "graph_worker_exec"): string {
+export function buildSkillBlock(skills: ResolvedSkill[], resourceTool?: AgentPromptOptions["resourceTool"]): string {
   if (skills.length === 0) return "";
-  const instruction = resourceTool
-    ? "Skills provide specialized instructions. Use graph_worker_exec to read the listed skill file when the task matches. Resolve relative resources against its directory."
-    : "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the skill tool. Role workflow skills are scoped to their owning role.";
-  // Workers read private copies with unpredictable paths, so name-based
-  // loading is insufficient for their command-only tool surface.
+  const instruction = "Skills provide specialized instructions. When a task matches, use load_role_skill if available; otherwise use the host's skill loader. Read the listed file only when no suitable skill loader is available. Resolve relative resources against the loaded skill's directory. Role workflow skills are scoped to their owning role.";
   return renderInjectBlock({
     title: "Available skills",
     instruction,
@@ -177,11 +173,9 @@ function referenceBaseLocatesEvery(base: string, references: ResolvedReference[]
   return true;
 }
 
-export function buildReferenceBlock(references: ResolvedReference[], resourceTool?: "graph_worker_exec"): string {
+export function buildReferenceBlock(references: ResolvedReference[], _resourceTool?: AgentPromptOptions["resourceTool"]): string {
   if (references.length === 0) return "";
-  const instruction = resourceTool
-    ? "Reference documents provide deep knowledge. Use graph_worker_exec to read the listed files. Resolve relative references against the document's directory."
-    : "Reference documents provide deep knowledge. Use the Read tool to load full content when needed.";
+  const instruction = "Reference documents provide deep knowledge. Use load_reference with the listed name to load the full reference. Use reference_search to find relevant passages. Read the listed file only when the reference loader is unavailable. Resolve relative resources against the loaded reference's directory.";
   // One `Base directory:` line for a shared directory; the old per-entry
   // `` `name`: `path` `` line otherwise, so no reference becomes unlocatable.
   const base = sharedReferenceBase(references);
@@ -207,21 +201,21 @@ export function buildMemoryBlock(memories: MemorySummary[]): string {
   });
 }
 
-const MEMORY_GRANT_INSTRUCTIONS = "Declare extra host tools in each node's tools array. When prior decisions or lessons matter, " +
-  "grant memory_recall and memory_read if available. Grant memory_write or memory_update when the " +
-  "worker should persist verified, reusable findings. Do not assume a worker inherits your tool access.";
+const MEMORY_WORKER_INSTRUCTIONS = "Workers inherit your authorized task tools and receive their native schemas by default. " +
+  "When prior decisions or lessons matter, " +
+  "use memory_recall and memory_read if available. Use memory_write or memory_update to persist verified, reusable findings.";
 
-const COMPUTER_GRANT_INSTRUCTIONS = "When a task needs desktop observation or interaction, declare the specific available computer_* tools " +
-  "in that node's tools array: computer_screenshot for observation, computer_windows and computer_focus for targeting, " +
-  "and only the required input tools such as computer_click or computer_type. Include computer_status and computer_permissions " +
-  "when available so the worker can diagnose failures and request missing OS permissions. A declaration cannot enable " +
-  "unregistered tools, override a denied capability, or grant OS permission.";
+const COMPUTER_WORKER_INSTRUCTIONS = "When a task needs desktop observation or interaction, use the specific available computer_* tools: " +
+  "computer_screenshot for observation, computer_windows and computer_focus for targeting, " +
+  "and the required input tools such as computer_click or computer_type. Use computer_status and computer_permissions " +
+  "when available to diagnose failures and request missing OS permissions. Inheritance cannot enable unregistered tools, " +
+  "override a denied capability, or grant OS permission.";
 
-const BROWSE_GRANT_INSTRUCTIONS = "When a task needs a web page instead of the desktop, declare the specific available browse_* tools " +
-  "in that node's tools array: browse_status first when the browser dependency itself is in doubt, then browse_open with " +
-  "browse_snapshot and browse_read for navigation and page text, and only the action tools the step needs such as browse_click, " +
-  "browse_type or browse_wait. Include browse_close so the worker releases the browser when its step ends. A declaration cannot " +
-  "enable unregistered tools, override a denied capability, or grant browsing on a host whose browse gate is off.";
+const BROWSE_WORKER_INSTRUCTIONS = "When a task needs a web page instead of the desktop, use the available browse_* tools: " +
+  "browse_status first when the browser dependency itself is in doubt, then browse_open with browse_snapshot and browse_read " +
+  "for navigation and page text, plus the required actions such as browse_click, browse_type or browse_wait. " +
+  "Use browse_close to release the browser when the step ends. Inheritance cannot enable unregistered tools, " +
+  "override a denied capability, or enable browsing on a host whose browse gate is off.";
 
 const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents through the graph outcome protocol.\n" +
   "Declare the work as a graph with graph_declare: a version-3 declaration naming each\n" +
@@ -237,7 +231,7 @@ const SUBAGENT_INSTRUCTIONS = "You can delegate tasks to these sub-agents throug
   "and a node\u0027s status changes only when a settlement commits. A transition comes\n" +
   "from a declared outcome and edge only: free-form reports are never ranked, merged\n" +
   "or interpreted as progress.\n" +
-  MEMORY_GRANT_INSTRUCTIONS + "\n" + COMPUTER_GRANT_INSTRUCTIONS + "\n" + BROWSE_GRANT_INSTRUCTIONS;
+  MEMORY_WORKER_INSTRUCTIONS + "\n" + COMPUTER_WORKER_INSTRUCTIONS + "\n" + BROWSE_WORKER_INSTRUCTIONS;
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,

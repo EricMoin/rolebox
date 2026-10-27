@@ -1,11 +1,29 @@
 # Worker tools
 
-Graph workers inherit the parent's authorized task tools. A node's `tools` list
-can narrow that inherited catalog, and `toolPresentation` controls which schemas
-are shown to the model. Discovery keeps the initial context small while making
-custom tools and MCP integrations available when needed.
+Graph workers inherit the parent's authorized task tools and expose their native
+schemas by default. Choose the available task tools that fit the operation.
+`graph_worker_exec` remains available for shell commands, builds and tests; it
+is not the required path for file operations. Use `load_role_skill` for role
+skills and `load_reference({ name })` for full reference documents.
+`reference_search` finds relevant passages. Read resource files directly only
+when the corresponding loader is unavailable.
 
-## Restrict tools and choose presentation
+Main agents and workers can load references by exact name within the same role
+visibility as `load_role_skill`. This includes role references, skill references
+and visible nested sub-agent resources. The loader returns full content and its
+resolved path; missing-name responses list only visible resources. Deeper
+sub-agent resources take precedence over their ancestors when names collide.
+
+There is no node-level task-tool restriction. Older declarations may still carry
+`tools` lists, including `tools: []`; those lists are accepted as legacy metadata
+and do not restrict, grant or register tools. Parent permissions, role policy,
+host availability and approval checks still apply.
+
+Graph control, team orchestration, recursive dispatch, task retry and session-fork
+tools remain unavailable, including rolebox collision aliases. The worker submits
+its own outcome through its dedicated `graph_submit_outcome` entry point.
+
+## Optional tool presentation
 
 ```json
 {
@@ -15,38 +33,17 @@ custom tools and MCP integrations available when needed.
     "id": "research",
     "agent": "researcher",
     "prompt": "Find the project documentation and report the relevant evidence.",
-    "outcomes": [{ "id": "done" }],
-    "toolPresentation": {
-      "mode": "discover",
-      "preload": ["docs_search"]
-    }
+    "outcomes": [{ "id": "done" }]
   }],
   "edges": []
 }
 ```
 
-Use the actual registered tool names from your host. MCP naming conventions
-vary between hosts; the `docs_search` name above is an example. Connect the MCP server or load
-the custom tool through the host first. Inheritance does not register a tool,
-install an integration, or supply credentials.
-
-Omit `tools` to inherit authorized parent task tools. Set `tools: ["docs_*"]` to
-restrict this node to inherited document tools, or `tools: []` to withhold all
-additional task tools while retaining the worker's execution and outcome entry
-points. A list cannot authorize a tool the parent lacks.
-
-`tools` accepts exact names and trailing-star prefixes with a nonempty stem.
-Names are trimmed, deduplicated and sorted; a declaration may contain at most 32
-entries. A bare `*` matches nothing. Graph control, team orchestration, recursive
-dispatch, task retry and session-fork tools remain unavailable, including rolebox
-collision aliases. The worker submits its own outcome through its dedicated
-`graph_submit_outcome` entry point.
-
-Inherited catalogs come from the parent host scope and role restrictions. Calls
-retain the host's normal permission, approval and execution checks. An installed
-parent-catalog resolver that cannot read authorization yields no inherited task
-tools. Missing or malformed persisted node restrictions also withhold task tools;
-they are distinct from a verified omitted `tools` field.
+Use the actual registered tool names from your host. Connect any MCP server or
+custom tool through the host first. Inheritance does not install integrations,
+supply credentials or override a denied permission. An installed parent-catalog
+resolver that cannot read authorization yields no inherited task tools. An
+unreadable worker binding likewise provides no inherited task tools.
 
 `toolPresentation` accepts the following modes:
 
@@ -56,24 +53,19 @@ they are distinct from a verified omitted `tools` field.
 | `discover` | The baseline, preloaded tools and `graph_worker_tools` | Search/list the authorized catalog; describe a tool to load its schema |
 | `code` | The baseline, preloaded tools, `graph_worker_tools` and `graph_worker_code` | Inspect schemas and compose authorized calls in JavaScript |
 
-`preload` contains at most 32 exact task-tool names. With an explicit `tools`
-restriction, each preload must match it. The host also checks availability and
-inherited authorization before use. Preloads change visibility only. Unknown
-configuration fields, invalid modes, wildcard preloads and preloads outside an
-explicit restriction are rejected during compilation.
+`preload` contains at most 32 exact task-tool names. The host checks availability
+and inherited authorization before use. It only affects visibility in an
+explicitly selected discovery or code presentation.
 
-dsh, Pi and OpenCode 2 default to `discover` when presentation is omitted.
-Choose `native` explicitly to expose authorized native schemas immediately, or
-`code` on a host that supports broker invocation. OpenCode 1.x retains native
-presentation because it lacks an independent schema-visibility hook.
+Omitting presentation uses `native`, so a worker can immediately call any
+available authorized tool without first discovering or describing it. Select
+`discover` or `code` explicitly for workloads that benefit from a smaller initial
+schema set. Code invocation is available only on hosts that support it.
 
-Explicit restrictions and presentation settings are part of the compiled plan
-revision and are restored after a restart. Parent authorization is checked again;
-an unreadable parent catalog does not become an unrestricted catalog.
-
-With an explicit presentation, Pi and OpenCode 2 use `bash` and
-`graph_submit_outcome` as their baseline, then expose inherited tools within
-the node restriction and the selected discovery entry. dsh retains its two baseline entries in every mode.
+Explicit presentation settings are part of the compiled plan revision and are
+restored after a restart. Parent authorization is checked again. Pi and OpenCode
+2 retain `bash` and `graph_submit_outcome` as worker entry points; dsh retains
+`graph_worker_exec` and `graph_submit_outcome`.
 
 ## Discovery and invocation
 
@@ -84,8 +76,7 @@ The broker's call operation is available only when the host exposes invocation
 through its complete execution pipeline. Otherwise, describe the tool and call
 its native entry.
 
-Only registered, inherited task tools within the node's restriction appear in
-the catalog. Listing by source or paging through the catalog provides a fallback when a text search has
+Only registered, parent-authorized task tools appear in the catalog. Listing by source or paging through the catalog provides a fallback when a text search has
 no matches. Calls recheck registration and authorization; discovery never changes
 the grant. Ambiguous duplicate names are omitted rather than routed arbitrarily.
 Source filtering is available when the adapter has source metadata. dsh does
@@ -157,7 +148,7 @@ Transport-specific failures are surfaced instead of reported as successful calls
 Keep task capability coverage separate from tool-presentation quality. A task
 that needs an external integration cannot fairly compare against a baseline
 that lacks that integration. Compare native, discovery and code modes with the
-same grants and fixtures, then measure task success, total tokens, elapsed time,
+same parent-authorized catalogs and fixtures, then measure task success, total tokens, elapsed time,
 tool-selection errors and argument retries for each model and workload.
 
 Regression coverage lives under `tests/graph/worker-tool-presentation.test.ts`,

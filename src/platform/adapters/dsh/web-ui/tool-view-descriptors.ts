@@ -186,6 +186,10 @@ export const TOOL_DESCRIPTORS: Readonly<Record<string, ToolDescriptor>> = {
     icon: "search", verb: "search", noun: "references",
     summarize: args => line(args, "query"),
   },
+  load_reference: {
+    icon: "page", verb: "load", noun: "reference",
+    summarize: args => text(args, "name"),
+  },
 
   // ── Sessions ────────────────────────────────────────────────────────────
   session_list: {

@@ -48,7 +48,7 @@ describe("the per-request worker allow-list", () => {
     expect(allow).toEqual([...BASELINE, "computer_screenshot", "computer_click"]);
   });
 
-  it("probes an exact declared name by name, so a host-owned tool is grantable", () => {
+  it("does not use legacy node names to expand the parent catalog", () => {
     const allow = resolveDshWorkerToolAllowList({
       baseline: BASELINE,
       declared: ["browser_open"],
@@ -56,19 +56,17 @@ describe("the per-request worker allow-list", () => {
       candidates: ["computer_screenshot"],
       isRegistered: registry([...BASELINE, "browser_open"]),
     });
-    expect(allow).toEqual([...BASELINE, "browser_open"]);
+    expect(allow).toEqual([...BASELINE]);
   });
 
-  it("never names an unregistered declared entry, and never names an undeclared one", () => {
+  it("inherits registered tools regardless of legacy node names", () => {
     const allow = resolveDshWorkerToolAllowList({
       baseline: BASELINE,
       declared: ["browser_open"],
       candidates: ["browser_open", "computer_screenshot"],
       isRegistered: registry([...BASELINE, "computer_screenshot"]),
     });
-    // `browser_open` was declared but is not registered; `computer_screenshot`
-    // is registered but not declared. Neither appears.
-    expect(allow).toEqual([...BASELINE]);
+    expect(allow).toEqual([...BASELINE, "computer_screenshot"]);
   });
 
   it("cannot re-open the graph face, whatever the node declares", () => {

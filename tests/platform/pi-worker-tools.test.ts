@@ -6,7 +6,7 @@ const keys = ["ROLEBOX_GRAPH_WORKER_ENDPOINT", "ROLEBOX_GRAPH_WORKER_TOKEN", "RO
 const original = new Map(keys.map(key => [key, process.env[key]]));
 afterEach(() => { for (const [key, value] of original) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
 
-function setup(mode: "native" | "discover" | "code", options: { grants?: readonly string[]; inheritedTools?: readonly string[] } = { grants: ["mcp_*"] }) {
+function setup(mode: "native" | "discover" | "code", options: { grants?: readonly string[]; inheritedTools?: readonly string[] } = { grants: ["mcp_*"], inheritedTools: ["bash", "mcp_lookup"] }) {
   const tools = new Map<string, any>(["bash", "mcp_lookup", "unrelated", "graph_status"].map(name => [name, { name, description: name, parameters: { type: "object" } }]));
   const hooks = new Map<string, (...args: any[]) => any>();
   let active: string[] = [];
@@ -42,11 +42,12 @@ describe("Pi graph tool presentation", () => {
 
   it("keeps explicit tools within parent authorization", () => {
     const fixture = setup("native", { grants: ["mcp_*"], inheritedTools: ["unrelated"] });
-    expect(fixture.start).toThrow("matches no loaded tool");
-    expect(fixture.active()).toEqual([]);
+    fixture.start();
+    expect(fixture.active()).toContain("unrelated");
+    expect(fixture.active()).not.toContain("mcp_lookup");
   });
 
-  it("uses the child's loaded custom/MCP catalog and limits native calls to the node grant", () => {
+  it("uses the child's loaded custom/MCP catalog and limits native calls to parent authorization", () => {
     const fixture = setup("native");
     fixture.start();
     expect(fixture.active().sort()).toEqual(["bash", "graph_submit_outcome", "mcp_lookup"]);
@@ -73,9 +74,9 @@ describe("Pi graph tool presentation", () => {
     expect(fixture.hooks.get("tool_call")!({ toolName: "bash" })).toMatchObject({ block: true });
   });
 
-  it("rejects grants that exist only in the parent's catalog", () => {
+  it("ignores legacy node grants for tools not loaded by the worker", () => {
     const config = piWorkerToolConfig(["bash"], ["mcp_missing"], { mode: "native" }, {});
-    expect(() => validatePiWorkerTools(config, [{ name: "bash" }])).toThrow("matches no loaded tool");
+    expect(() => validatePiWorkerTools(config, [{ name: "bash" }])).not.toThrow();
   });
 
   it("cannot bypass a native extension denial through the discovery call action", async () => {

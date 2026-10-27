@@ -11,14 +11,15 @@
  * | ---------------------------------------- | --------------------------------------- |
  * | `ctx.resolvedRoles` / `ctx.roleFunctionsMap` | the SAME mutable objects injected here |
  * | `new OpencodeAgentRegistrar()` per reload | the EXISTING {@link DshAgentRegistrar} instance |
- * | `ctx.core.restartService("dispatch-service")` (:372) | `refreshRoleSnapshotTools` (subtask 3 seam: dispose + re-register the four role-snapshot tools) + `refreshSkills` (skill-catalog invalidation) |
+ * | `ctx.core.restartService("dispatch-service")` (:372) | `refreshRoleSnapshotTools` (dispose + re-register role-snapshot tools) + `refreshSkills` (skill-catalog invalidation) |
  *
  * The dsh platform has no dispatch service to restart: graph nodes and loop
  * rounds dispatch through {@link DshDispatchAdapter}, which resolves providers
  * from the registrar at spawn time, so re-syncing the registrar IS the refresh
  * for dispatch. The two consumers that hold a *captured* snapshot of role
  * state are the role-snapshot tools (`asset_search` / `asset_inspect` /
- * `asset_validate` / `reference_search`, built from the roles array) and the
+ * `asset_validate` / `reference_search` / `load_reference` / `load_role_skill`,
+ * built from the roles array) and the
  * lazy dsh skill provider (which reads the same array at `list()` time).
  *
  * ── Why the injected state is mutated IN PLACE ─────────────────────────────
@@ -106,7 +107,8 @@ export interface DshRoleboxReloaderOptions {
   /**
    * Role-snapshot tool refresh seam (subtask 3): disposes the previously
    * registered generation of `asset_search` / `asset_inspect` /
-   * `asset_validate` / `reference_search` and registers a fresh one built
+   * `asset_validate` / `reference_search` / `load_reference` / `load_role_skill`
+   * and registers a fresh one built
    * from the passed roles. This is the dsh-plugin's
    * `registerRoleSnapshotTools` handle.
    */

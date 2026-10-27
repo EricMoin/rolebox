@@ -47,6 +47,7 @@ const REQUIRED_TOOLS = [
   "asset_search",
   "asset_inspect",
   "reference_search",
+  "load_reference",
   // Session tools
   "session_list",
   "session_read",

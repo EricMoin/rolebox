@@ -4,7 +4,7 @@ import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-ef
 import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
 function request(mode: "native" | "discover" | "code", grants = ["custom_lookup"]): OutcomeDispatchRequest {
-  return { graphId: "graph", planRevision: "revision", nodeId: "node", attemptId: "attempt", agent: "worker", prompt: "Task", credential: "fixture", declaredTools: grants, toolPresentation: { mode } };
+  return { graphId: "graph", planRevision: "revision", nodeId: "node", attemptId: "attempt", agent: "worker", prompt: "Task", credential: "fixture", declaredTools: grants, inheritedTools: ["custom_lookup", "mcp_lookup"], toolPresentation: { mode } };
 }
 const context: CanonicalToolContext = {
   sessionID: "worker", messageID: "message", agent: "worker", directory: "/workspace", worktree: "/workspace",
@@ -61,8 +61,10 @@ describe("OpenCode graph tool presentation", () => {
     const next = fresh(); controller.filterContext("worker", next);
     expect(next.mcp_lookup).toBeDefined();
     const removed = { bash: { description: "Shell", input: {} } };
-    expect(() => controller.filterContext("worker", removed)).toThrow("matches no registered tool");
-    expect(Object.keys(removed)).toEqual([]);
+    expect(() => controller.filterContext("worker", removed)).not.toThrow();
+    expect(Object.keys(removed)).toEqual(["bash"]);
+    const unavailable = await tools.graph_worker_tools!.execute({ action: "describe", name: "mcp_lookup" }, context);
+    expect(JSON.stringify(unavailable)).toContain("unavailable or not authorized");
   });
 
   it("keeps v1 default MCP nodes and refuses explicit presentation without changing host permissions", async () => {

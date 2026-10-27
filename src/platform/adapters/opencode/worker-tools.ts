@@ -52,7 +52,7 @@ export class OpencodeWorkerTools {
       if (request.toolPresentation !== undefined) throw new Error("OpenCode v1 tool presentation is unsupported: the plugin API cannot filter the complete custom/MCP tool catalog independently of host permissions. Keep the default native presentation.");
       return;
     }
-    if (request.toolPresentation === undefined && request.declaredTools === undefined) return undefined;
+    if (request.toolPresentation === undefined) return undefined;
     if (this.#options.ready?.() === false) throw new Error("OpenCode worker tool enforcement hooks are unavailable");
     if (request.toolPresentation?.mode === "code") throw new Error("OpenCode code presentation is unsupported: the plugin API cannot invoke tools through the complete host permission and execution hooks. Use native or discover presentation.");
     if (this.#options.contextCatalogOnly) return;
@@ -60,11 +60,6 @@ export class OpencodeWorkerTools {
   }
 
   #validateCatalog(request: WorkerRequest, catalog: readonly WorkerToolDescriptor[]): void {
-    for (const grant of request.declaredTools ?? []) {
-      if (!catalog.some(tool => workerTaskToolAllowed(tool.name, [grant], request.inheritedTools))) {
-        throw new Error(`OpenCode worker grant ${JSON.stringify(grant)} matches no registered tool`);
-      }
-    }
     const presentation = request.toolPresentation;
     for (const name of presentation?.preload ?? []) {
       if (!catalog.some(tool => tool.name === name) || !workerTaskToolAllowed(name, request.declaredTools, request.inheritedTools)) {
@@ -113,7 +108,7 @@ export class OpencodeWorkerTools {
       const request = this.#request(context.sessionID);
       if (!request?.toolPresentation) return undefined;
       return createWorkerToolSession({ presentation: request.toolPresentation,
-        allowedTools: request.inheritedTools?.filter(name => declaredToolsAllow(name, request.declaredTools)) ?? request.declaredTools,
+        allowedTools: request.inheritedTools,
         registry: {
           list: async () => {
             const contextCatalog = this.#catalogs.get(context.sessionID);

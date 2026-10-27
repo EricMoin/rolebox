@@ -121,7 +121,7 @@ export const PI_SUBAGENT_TOOLS: string[] = [
   // pi built-ins
   "read", "bash", "write", "edit", "grep", "find", "ls",
   // rolebox gate tools
-  "load_role_skill", "skill_compose", "reference_search",
+  "load_role_skill", "load_reference", "skill_compose", "reference_search",
   "asset_search", "asset_inspect", "asset_validate",
   "hashline_read", "hashline_edit",
   "memory_recall", "memory_list", "memory_read", "memory_write", "memory_update",
@@ -930,7 +930,7 @@ export default async function(pi: any): Promise<void> {
       workspaceDir: process.cwd(),
       storeRoot: outcomeStoreRoot,
       deliver: outcomeDelivery.deliver,
-      defaultWorkerToolPresentation: { mode: "discover" },
+      defaultWorkerToolPresentation: { mode: "native" },
       workerTaskToolsOf: invocation => inheritedWorkerTaskTools(pi.getAllTools().map((tool: { name: string }) => tool.name),
         findGraphWorkerRole(resolvedRoles, invocation.agent ?? activeAgent.get() ?? "")?.config.tools),
       // THE SHIPPED ACCEPTANCE PRIMITIVES (P4 items 2 and 4): schema, artifact,

@@ -135,6 +135,7 @@ function renderPayload(payload: LoadedSkillPayload, ownerId: string): string {
 
   if (payload.references.length > 0) {
     lines.push("", "### References");
+    lines.push("Use load_reference with a listed reference name to load its full content.");
     for (const ref of payload.references) {
       lines.push(
         `- \`${ref.name}\` — ${ref.description} (\`${ref.path}\`)`,

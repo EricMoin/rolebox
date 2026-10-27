@@ -28,6 +28,11 @@ import { PI_SUBAGENT_TOOLS } from "../../src/entries/pi.ts";
 import { WORKER_GRANTED_GRAPH_TOOLS } from "../../src/graph/host/outcome-host.ts";
 
 describe("the Pi spawned-child tool face", () => {
+  it("includes name-based skill and reference loaders", () => {
+    expect(PI_SUBAGENT_TOOLS).toContain("load_role_skill");
+    expect(PI_SUBAGENT_TOOLS).toContain("load_reference");
+  });
+
   it("carries exactly the host's worker grant of the graph face", () => {
     const graphTools = PI_SUBAGENT_TOOLS.filter((name) => name.startsWith("graph_"));
     expect(graphTools).toEqual([...WORKER_GRANTED_GRAPH_TOOLS]);

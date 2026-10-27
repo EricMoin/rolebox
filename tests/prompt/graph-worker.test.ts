@@ -7,9 +7,11 @@ describe("graph worker tool guidance", () => {
     mode => {
       const presentation = mode === undefined ? undefined : { mode };
       const block = buildGraphWorkerToolGrantBlock(["docs_read", "browse_*"], presentation);
-      expect(block).toContain("worker baseline entry points are graph_submit_outcome, graph_worker_exec");
-      expect(block).toContain("this node restricts inherited host tools to docs_read, browse_*");
-      expect(block).toContain("Use authorized host tools when they fit the task");
+      expect(block).toContain("Worker entry points are graph_submit_outcome, graph_worker_exec");
+      expect(block).toContain("inherits the parent's authorized task tools");
+      expect(block).not.toContain("hashline_");
+      expect(block).not.toContain("docs_read, browse_*");
+      expect(block).toContain("Use them directly when exposed");
       expect(block).toContain("Graph control tools and recursive agent dispatch remain unavailable");
       expect(block).not.toContain("only tools you may call");
     },
@@ -17,7 +19,7 @@ describe("graph worker tool guidance", () => {
 
   it.each([{ declared: undefined }, { declared: [] }] as const)("states an absent host grant without freezing tool visibility: $declared", ({ declared }) => {
     const block = buildGraphWorkerToolGrantBlock(declared, { mode: "discover" });
-    expect(block).toContain(declared === undefined ? "inherits the parent's authorized task tools" : "restricts additional task tools to an empty set");
+    expect(block).toContain("inherits the parent's authorized task tools");
     expect(block).toContain("graph_worker_tools");
     expect(block).toContain("Discovery cannot grant additional permissions");
     expect(block).not.toContain("only tools you may call");
@@ -40,7 +42,7 @@ describe("graph worker tool guidance", () => {
 
   it("uses the host's baseline without adding another host's command tool", () => {
     const block = buildGraphWorkerToolGrantBlock(["docs_read"], { mode: "code" }, ["bash", "graph_submit_outcome"]);
-    expect(block).toContain("worker baseline entry points are bash, graph_submit_outcome, graph_worker_tools, graph_worker_code");
+    expect(block).toContain("Worker entry points are bash, graph_submit_outcome, graph_worker_tools, graph_worker_code");
     expect(block).not.toContain("graph_worker_exec");
   });
 });

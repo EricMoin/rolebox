@@ -151,7 +151,7 @@ export interface CompiledNode {
    * what the acceptance RECORDED, never from the reference's path.
    */
   readonly inputs?: readonly CompiledInputRef[];
-  /** Normalized restriction on inherited task tools, covered by the plan revision. Absence and [] remain distinct. */
+  /** Legacy node metadata retained in the plan revision; it does not restrict task tools. */
   readonly tools?: readonly string[];
   readonly toolPresentation?: WorkerToolPresentation;
 }
@@ -522,7 +522,7 @@ export function nodeBindingsOf(
   return Object.fromEntries(entries);
 }
 
-/** Absence inherits task tools. Missing nodes and malformed persisted restrictions return [] to avoid widening access. */
+/** Read legacy node tool metadata without using it as an authorization policy. */
 export function declaredNodeTools(
   plan: unknown,
   nodeId: string,

@@ -95,8 +95,7 @@ function workspaceBlock(workspace: string): string {
  * validated here — a blank or relative path is a caller defect, never a reason to
  * fall back to this process's own working directory.
  *
- * `declaredTools` restricts inherited task tools for this node. Absence inherits
- * the parent's authorization; an empty list retains worker entry points only.
+ * `declaredTools` is accepted as legacy metadata and does not affect task-tool access.
  */
 export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agentId: string, inputDirectory: string, workspace: string, boundary: DshWorkerCommandBoundary, declaredTools?: readonly string[], presentation?: WorkerToolPresentation): string {
   if (typeof workspace !== "string" || workspace.trim().length === 0 || !isAbsolute(workspace)) {
@@ -133,7 +132,7 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
     }));
     return [
       "You are a graph worker assigned to the role below. Complete only the dispatched task. " +
-        "Use graph_worker_exec to run commands, read files and make permitted edits. " +
+        "Use graph_worker_exec for shell commands, builds and tests. " +
         "You cannot dispatch agents or inspect/control graph state. Resource paths below are private copies for this attempt. " +
         "Submit only a declared outcome using the host handoff; an accepted submission settles your attempt. A prose answer does not settle it. " +
         "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
@@ -143,7 +142,7 @@ export function prepareDshGraphWorkerPrompt(roles: readonly ResolvedRole[], agen
       boundaryBlock(boundary),
       workspaceBlock(workspace),
 
-      buildGraphWorkerRolePrompt(agent, { skills, references, resourceTool: "graph_worker_exec" }),
+      buildGraphWorkerRolePrompt(agent, { skills, references, resourceTool: "files" }),
     ].filter(Boolean).join("\n\n");
   } catch (error) {
     rmSync(resourceDirectory, { recursive: true, force: true });

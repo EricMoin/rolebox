@@ -6,7 +6,7 @@ export type RoleForSession = (sessionID?: string) => string | undefined;
 
 const ROLE_SCOPED_TOOLS = new Set([
   "asset_search", "asset_inspect", "asset_validate", "reference_search",
-  "load_role_skill", "skill_compose", "graph_declare",
+  "load_role_skill", "load_reference", "skill_compose", "graph_declare",
 ]);
 
 function delegationRefusal(declaration: unknown, agentId: string, roles: ResolvedRole[]): string | undefined {

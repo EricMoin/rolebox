@@ -92,20 +92,12 @@ That role may snapshot a page and nothing else: the exact `browse_snapshot`
 entry wins over the `browse_*` prefix, and every other browse tool is denied.
 Prefix matching also covers future members of the family.
 
-Graph nodes still declare the tools they need in their node `tools` array. For a
-web step, include observation and the actions the step needs, plus `browse_close`
-so the worker releases the browser:
+Graph workers inherit the parent's authorized browser tools with native schemas
+shown by default. Node `tools` lists do not restrict access. Use observation and
+the actions the step needs, then `browse_close` to release the browser.
 
-```json
-{
-  "tools": ["browse_status", "browse_open", "browse_snapshot",
-    "browse_click", "browse_type", "browse_close"]
-}
-```
-
-Node grants remain subject to host registration and role restrictions. A
-declaration cannot enable an unregistered family, override a denied capability
-or turn a gate that is off on.
+Inherited access remains subject to host registration, role restrictions and
+the browse gate. It cannot enable an unregistered family or override a denial.
 
 ## Workflow
 

@@ -1162,7 +1162,11 @@ describe("dsh plugin apply()", () => {
       expect(guard).toBeDefined();
       expect(guard({ name: "computer_screenshot", agent: workers[shooterIndex] })).toBeUndefined();
       expect(guard({ name: "computer_screenshot", agent: workers[plainIndex] })).toBeUndefined();
-      expect(guard({ name: "web_search", agent: workers[shooterIndex] })).toContain("Graph workers may only");
+      expect(guard({ name: "web_search", agent: workers[shooterIndex] })).toBeUndefined();
+      for (const worker of workers) {
+        expect(guard({ name: "hashline_read", agent: worker })).toBeUndefined();
+        expect(guard({ name: "hashline_edit", agent: worker })).toBeUndefined();
+      }
       expect(guard({ name: "graph_control", agent: workers[shooterIndex] })).toContain("Graph workers may only");
 
       const requestOf = (node: string): DshSubagentStartRequest =>
@@ -1185,20 +1189,21 @@ describe("dsh plugin apply()", () => {
       // (a) THE DELIVERED PROMPT states the grant: the declared node is told
       // about its host tools, the undeclared node is told the baseline.
       expect(promptText(shooter)).toContain(
-        "worker baseline entry points are graph_submit_outcome, graph_worker_exec",
+        "Worker entry points are graph_submit_outcome, graph_worker_exec",
       );
-      expect(promptText(shooter)).toContain("this node restricts inherited host tools to computer_*");
-      expect(promptText(shooter)).not.toContain("inherits the parent's authorized task tools");
+      expect(promptText(shooter)).toContain("inherits the parent's authorized task tools");
+      expect(promptText(shooter)).not.toContain("restricts inherited host tools");
       // The composed worker prompt reaches the child ahead of the plan prompt
       // and the attempt handoff.
       expect(promptText(shooter)).toContain("shoot");
       expect(promptText(plain)).toContain("inherits the parent's authorized task tools");
       expect(promptText(plain)).toContain(
-        "worker baseline entry points are graph_submit_outcome, graph_worker_exec",
+        "Worker entry points are graph_submit_outcome, graph_worker_exec",
       );
       // ONE start, TWO nodes: the stated grant is per attempt, which a static
       // option could not express.
       expect(promptText(shooter)).not.toBe(promptText(plain));
+      expect(promptText(plain)).not.toContain("graph_worker_tools");
     } finally {
       disposer?.();
       process.chdir(cwd);
@@ -1231,10 +1236,11 @@ describe("dsh plugin apply()", () => {
     process.chdir(tmpDir);
     let disposer: DshPluginDisposer | undefined;
     try {
-      new ActiveRoleStore(process.cwd()).saveSync(new Map(["parent", "worker"].map(sessionId =>
+      new ActiveRoleStore(process.cwd()).saveSync(new Map(["parent"].map(sessionId =>
         [sessionId, { sessionId, roleId: "coordinator", updatedAt: Date.now() }])));
       const parent = { id: "parent", inject: () => undefined };
-      const fixture = createFakeCtx({ agents: { get: () => parent }, systemPrompt: true });
+      const liveAgents = new Map<string, { id: string; session?: { id: string; events: never[] } }>([["parent", parent]]);
+      const fixture = createFakeCtx({ agents: { get: id => liveAgents.get(id) }, systemPrompt: true });
       const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
       const requests: DshSubagentStartRequest[] = [];
       const workerSections: string[] = [];
@@ -1249,6 +1255,7 @@ describe("dsh plugin apply()", () => {
         const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: {
           presentAs: () => () => {}, register: (_definition: DshToolDefinition) => () => {},
         } } };
+        liveAgents.set("worker", worker);
         fixture.ctx.emit("agent/created", { agent: worker });
         workerSections.push(...fixture.sections.map(section => section.text({ agent: { id: "worker" } })));
         workerContexts.push(...fixture.contexts.map(context => context.text({ agent: { id: "worker" } })));
@@ -1281,6 +1288,9 @@ describe("dsh plugin apply()", () => {
       expect(prompt).not.toContain("Inactive worker instructions");
       expect(prompt).not.toContain("Use the Read tool");
       expect(prompt).not.toContain("Use the skill tool");
+      expect(prompt).toContain("use load_role_skill if available");
+      expect(prompt).toContain("Use load_reference with the listed name");
+      expect(prompt).not.toContain("Prefer hashline_");
       expect(prompt).not.toContain("## Available sub-agents");
       expect(requests[0].agentOptions).toEqual({ provider: "worker-provider", model: "model-name" });
       // The block states the delivery directory once; each entry names its own
@@ -1289,6 +1299,16 @@ describe("dsh plugin apply()", () => {
       expect(referenceDirectory.startsWith(tmpDataDir)).toBe(true);
       expect(prompt).toContain("- `schema` — ");
       expect(readFileSync(join(referenceDirectory, "schema.md"), "utf8")).toBe("The planning schema");
+      const resourceContext = { signal: new AbortController().signal, callId: "worker-resource", agent: liveAgents.get("worker"),
+        deferContext: () => {}, concludeTurn: () => {} };
+      const skillLoader = fixture.tools.registeredTools.find(tool => tool.name === "load_role_skill")!;
+      expect(JSON.stringify(await skillLoader.execute({ name: "research" }, resourceContext))).toContain("## Skill: research");
+      const references = fixture.tools.registeredTools.find(tool => tool.name === "reference_search")!;
+      expect(JSON.stringify(await references.execute({ query: "planning schema" }, resourceContext))).toContain("The planning schema");
+      const referenceLoader = fixture.tools.registeredTools.find(tool => tool.name === "load_reference")!;
+      expect(JSON.stringify(await referenceLoader.execute({ name: "schema" }, resourceContext))).toContain("The planning schema");
+      expect(JSON.stringify(await referenceLoader.execute({ name: "schema" }, { ...resourceContext, agent: parent })))
+        .toContain("The planning schema");
       expect(workerSections).toEqual([""]);
       // One entry per registered context contribution: rolebox:context,
       // rolebox:recall, rolebox:memory, rolebox:focus, rolebox:computer and

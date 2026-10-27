@@ -226,7 +226,7 @@ describe("DSH memory prompt and execution integration", () => {
     expect(f.memory.render(agent)).toContain("rolebox_session_read");
     f.first.config.tools = { session_read: false };
     expect(f.memory.render(agent)).not.toContain("session consolidation");
-    await f.start(agent, { agent: "parent--worker", declaredTools: ["rolebox_memory_read", "rolebox_memory_write", "rolebox_session_list"] });
+    await f.start(agent, { agent: "parent--worker", inheritedTools: ["rolebox_memory_read", "rolebox_memory_write", "rolebox_session_list"] });
     expect(f.memory.render(agent)).not.toContain("session consolidation");
   });
 
@@ -235,7 +235,7 @@ describe("DSH memory prompt and execution integration", () => {
     const agent = f.agent("worker-session");
     f.active.set(agent.id, "parent");
     await f.call("memory_write", { title: "Parent memory", content: "Coordinator fact" }, agent);
-    await f.start(agent, { agent: "parent--worker", declaredTools: ["memory_read", "memory_write"] });
+    await f.start(agent, { agent: "parent--worker", inheritedTools: ["memory_read", "memory_write"] });
     const rendered = f.memory.render(agent);
     expect(rendered).toContain("memory_read");
     expect(rendered).toContain("memory_write");
@@ -255,14 +255,14 @@ describe("DSH memory prompt and execution integration", () => {
     const agent = f.agent();
     f.active.set(agent.id, "role-a");
     await f.call("memory_write", { title: "Project memory", content: "Project fact", scope: "workspace" }, agent);
-    await f.start(agent, { agent: "parent--worker", declaredTools: [] });
+    await f.start(agent, { agent: "parent--worker", inheritedTools: [] });
     expect(f.memory.render(agent)).toBe("");
   });
 
   it.each(["discover", "code"] as const)("routes memory guidance through %s presentation", async mode => {
     const f = fixture();
     const agent = f.agent();
-    await f.start(agent, { agent: "parent--worker", declaredTools: ["memory_recall"], toolPresentation: { mode } });
+    await f.start(agent, { agent: "parent--worker", inheritedTools: ["memory_recall"], toolPresentation: { mode } });
     const rendered = f.memory.render(agent);
     expect(rendered).toContain("memory_recall");
     expect(rendered).toContain("graph_worker_tools");
@@ -294,7 +294,7 @@ describe("DSH memory prompt and execution integration", () => {
     expect(rendered).toContain("Prefixed tool result");
     expect(rendered).toContain("memory_write naming decision");
     expect(rendered).not.toContain("rolebox_memory_write naming decision");
-    await f.start(agent, { agent: "parent--worker", declaredTools: ["rolebox_memory_read"] });
+    await f.start(agent, { agent: "parent--worker", inheritedTools: ["rolebox_memory_read"] });
     expect(f.memory.render(agent)).toContain("rolebox_memory_read");
     expect(f.memory.render(agent)).not.toContain("rolebox_memory_write");
   });

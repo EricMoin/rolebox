@@ -151,7 +151,7 @@ export interface NodeDeclarationV3 {
    * never reads "the latest result of some type" at run time.
    */
   inputs?: InputDeclarationV3[];
-  /** Optional restriction on inherited task tools. Absence inherits; an empty list keeps worker entry points only. */
+  /** @deprecated Retained for declaration compatibility; task tools inherit parent authorization. */
   tools?: string[];
   /** How authorized host tools are presented to this worker. */
   toolPresentation?: WorkerToolPresentation;

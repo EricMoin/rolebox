@@ -7,6 +7,7 @@ import type { ResolvedRole, ResolvedSubAgent } from "../../src/types.ts";
 import { createAssetSearchTool } from "../../src/asset/asset-search.ts";
 import { createAssetInspectTool } from "../../src/asset/asset-inspect.ts";
 import { createLoadRoleSkillTool } from "../../src/asset/skill-tool.ts";
+import { createLoadReferenceTool } from "../../src/asset/reference-tool.ts";
 import { createSkillComposeTool } from "../../src/asset/skill-compose.ts";
 import { createAssetValidateTool } from "../../src/asset/asset-validate.ts";
 import { createReferenceSearchTool } from "../../src/utils/reference-search.ts";
@@ -88,6 +89,11 @@ describe("role asset visibility", () => {
     const own = await load.execute({ name: "nested-skill" }, context);
     expect(typeof own).toBe("object");
     expect(JSON.stringify(own)).toContain("visibility marker nested-skill");
+    const reference = createLoadReferenceTool(roles);
+    expect(await reference.execute({ name: "nested-skill" }, context)).toMatchObject({ metadata: { payload: { content: "visibility marker nested-skill" } } });
+    const hidden = await reference.execute({ name: "missing" }, context);
+    expect(hidden).not.toContain("private-skill");
+    expect(hidden).not.toContain("designer-public");
   });
 
   it("applies the same scope to reference search, validation, and skill composition", async () => {
@@ -143,6 +149,7 @@ describe("role asset visibility", () => {
     });
     const context = makeToolContext({ agent: "unbound-host-session" });
     expect(await tools.load_role_skill.execute({ name: "designer-public" }, context)).toBe("Role assets require an active role for this session.");
+    expect(await tools.load_reference.execute({ name: "designer-public" }, context)).toBe("Role assets require an active role for this session.");
     expect(await tools.asset_search.execute(search, context)).toBe("Role assets require an active role for this session.");
   });
 });

@@ -98,7 +98,7 @@ describe("DSH browse workflow", () => {
     const f = fixture();
     f.options.worker = () => ({
       agent: "parent--child",
-      declaredTools: ["browse_open", "browse_snapshot"],
+      inheritedTools: ["browse_open", "browse_snapshot"],
       toolPresentation: { mode },
     });
     const result = f.render({ id: "worker" });
@@ -110,7 +110,7 @@ describe("DSH browse workflow", () => {
     f.options.worker = () => ({ agent: "parent--child" });
     expect(f.render({ id: "worker" })).toContain("browse_open");
     f.options.worker = () => ({ agent: "parent--child", declaredTools: [] });
-    expect(f.render({ id: "worker" })).toBe("");
+    expect(f.render({ id: "worker" })).toContain("browse_open");
     f.options.worker = () => ({ agent: "parent--child", inheritedTools: [] });
     expect(f.render({ id: "worker" })).toBe("");
   });

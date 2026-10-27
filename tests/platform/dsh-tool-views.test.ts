@@ -123,7 +123,7 @@ describe("rolebox tool-call rows — descriptors", () => {
       "team_create", "team_send_event", "team_status",
       "loop_start", "loop_output",
       "hashline_read", "hashline_edit",
-      "asset_search", "asset_validate", "reference_search",
+      "asset_search", "asset_validate", "reference_search", "load_reference",
       "web_read", "signal", "interactive_terminal", "load_role_skill",
       "computer_screenshot", "computer_click", "browse_open", "browse_snapshot",
     ]) {

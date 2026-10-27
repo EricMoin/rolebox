@@ -191,6 +191,7 @@ describe("PI Extension — Extension Point Registration", () => {
       "asset_search",
       "asset_inspect",
       "reference_search",
+      "load_reference",
     ];
 
     for (const toolName of coreTools) {

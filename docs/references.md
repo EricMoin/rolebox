@@ -54,6 +54,20 @@ references:
 ---
 ```
 
+## Loading references
+
+Main agents and sub-agents use `load_reference({ name: "api-spec" })` to load a
+reference by its exact listed name. The tool returns its full content and
+resolved path, including references listed by `load_role_skill`. Use
+`reference_search` to search for passages instead.
+
+Visibility matches `load_role_skill`: callers can load resources in their owning
+role tree, including nested sub-agents. Other roles' private resources are
+excluded from lookups and available-name lists. For duplicate names, deeper
+sub-agent resources take precedence over ancestor resources; role references
+take precedence over skill references at the same level. Relative file links
+resolve against the loaded reference's directory.
+
 ## Resolution
 
 - Role-level references are discovered from `{roleDir}/references/`

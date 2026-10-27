@@ -85,9 +85,9 @@ describe("DSH graph worker prompt", () => {
     for (const declaredTools of [undefined, ["docs_*"]]) {
       const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.inputDirectory, f.workspace, CONFINED,
         declaredTools, { mode });
-      expect(prompt).toContain("worker baseline entry points are graph_submit_outcome, graph_worker_exec, graph_worker_tools");
+      expect(prompt).toContain("Worker entry points are graph_submit_outcome, graph_worker_exec, graph_worker_tools");
       expect(prompt).toContain("list/search authorized host tools");
-      expect(prompt).toContain("Use authorized host tools when they fit the task");
+      expect(prompt).toContain("Use them directly when exposed");
       expect(prompt).not.toContain("Your tools are");
       expect(prompt).not.toContain("only tools you may call");
       expect(prompt).not.toContain("for all file reads");
@@ -116,7 +116,10 @@ describe("DSH graph worker prompt", () => {
     expect(prompt).toContain("You are the planner.");
     expect(prompt).toContain("## Active functions");
     expect(prompt).toContain("Return a Strategy.");
-    expect(prompt).toContain("Use graph_worker_exec to read");
+    expect(prompt).toContain("use load_role_skill if available");
+    expect(prompt).toContain("Use load_reference with the listed name");
+    expect(prompt).not.toContain("hashline_");
+    expect(prompt).not.toContain("Use graph_worker_exec to read");
     for (const forbidden of ["You are the coordinator.", "triage", "Legacy rendered", "graph_declare", "Use the Read tool", "Use the skill tool", "## Available sub-agents"]) {
       expect(prompt).not.toContain(forbidden);
     }

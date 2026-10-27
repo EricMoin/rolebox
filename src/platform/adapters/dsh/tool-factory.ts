@@ -1055,6 +1055,10 @@ export const DSH_TOOL_PRESENTATION: Readonly<Record<string, DshToolPresentation>
   web_read: { presentCall: presentFetchCall, isConcurrencySafe: () => true },
   asset_search: { presentCall: presentSearchCall, isConcurrencySafe: () => true },
   reference_search: { presentCall: presentSearchCall, isConcurrencySafe: () => true },
+  load_reference: {
+    presentCall: args => ({ card: "generic", title: `Load reference ${(args as { name?: string } | undefined)?.name ?? ""}`, kind: "read" }),
+    isConcurrencySafe: () => true,
+  },
   // These two already attach their own display metadata (`title`/`metadata`) to
   // the canonical ToolResult, so their result projections mirror it faithfully
   // (dsh analogue: web/tool-web/src/fetch.ts). Their pending card is generic.

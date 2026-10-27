@@ -269,5 +269,6 @@ describe("createLoadRoleSkillTool", () => {
     expect(output).toContain("## Skill: graph-visualiser");
     expect(output).toContain("SKILL-CONTENT-42");
     expect(output).toContain("theory/core-principles");
+    expect(output).toContain("Use load_reference with a listed reference name");
   });
 });

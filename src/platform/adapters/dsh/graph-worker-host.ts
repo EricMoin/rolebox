@@ -28,7 +28,7 @@ export function createDshGraphWorkerGrantHost(hosts: () => Iterable<WorkerHost>)
       const remembered = owners.get(principal);
       const host = remembered && [...hosts()].includes(remembered)
         ? remembered : locate(principal.workerSessionId, principal)?.host;
-      return host?.workerToolGrantOf(principal) ?? { declaredTools: [] };
+      return host?.workerToolGrantOf(principal) ?? { inheritedTools: [] };
     },
   };
 }

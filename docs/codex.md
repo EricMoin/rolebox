@@ -184,14 +184,14 @@ and `SIGTERM` flush handlers on first evaluation.
 ## Tool surface on Codex
 
 The MCP server registers the canonical tool intersection built for a harness with no
-session client and no dispatch backend, plus `load_role_skill` — 15 tools:
+session client and no dispatch backend, plus `load_role_skill` — 18 tools:
 
 | Group | Tools |
 |---|---|
 | Files | `hashline_read`, `hashline_edit` |
 | Memory | `memory_write`, `memory_recall`, `memory_read`, `memory_list`, `memory_update` |
 | Web | `web_search`, `web_read`, `web_fetch` |
-| Assets and references | `asset_search`, `asset_inspect`, `asset_validate`, `reference_search`, `load_role_skill` |
+| Assets and references | `asset_search`, `asset_inspect`, `asset_validate`, `reference_search`, `load_reference`, `load_role_skill` |
 | Runtime | `signal`, `interactive_terminal` |
 
 ## Not supported on Codex yet

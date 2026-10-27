@@ -1,97 +1,56 @@
-/** Node restrictions select inherited host tools without widening graph control access. */
-
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
+import { describe, expect, it } from "vitest";
 import { compileGraph } from "../../src/graph/compiler/compile.ts";
+import { parseGraphDeclarationV3, type DeclarationV3ErrorCode } from "../../src/graph/compiler/parse-declaration-v3.ts";
+import { createPersistedCompiledPlan, declaredNodeTools } from "../../src/graph/compiler/plan.ts";
+import { workerTaskToolAllowed, declaredToolsAllow, declaredToolAllows } from "../../src/graph/host/tool-binding.ts";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
-import {
-  createPersistedCompiledPlan,
-  declaredNodeTools,
-} from "../../src/graph/compiler/plan.ts";
-import {
-  parseGraphDeclarationV3,
-  type DeclarationV3ErrorCode,
-} from "../../src/graph/compiler/parse-declaration-v3.ts";
-import {
-  OutcomeHost,
-  WORKER_GRANTED_GRAPH_TOOLS,
-  WORKER_TOOL_FORBIDDEN_CODE,
-} from "../../src/graph/host/outcome-host.ts";
-import {
-  declaredToolAllows,
-  declaredToolsAllow,
-} from "../../src/graph/host/tool-binding.ts";
-import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
-import { createValidatorRegistry } from "../../src/graph/outcome/validators.ts";
-import { readStoredDefinition } from "../../src/graph/persistence/declared-record.ts";
-import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
-import { createOutcomeGraphTools } from "../../src/graph/tools/index.ts";
-import {
-  installDshGraphWorkerBoundary,
-  type DshGraphWorkerRegistry,
-} from "../../src/platform/adapters/dsh/graph-worker.ts";
-import { resolveDshWorkerToolAllowList } from "../../src/platform/adapters/dsh/outcome-dispatch.ts";
-import { prepareDshGraphWorkerPrompt } from "../../src/platform/adapters/dsh/worker-prompt.ts";
-import { buildGraphWorkerToolGrantBlock } from "../../src/prompt/graph-worker.ts";
-import type { CanonicalToolContext, CanonicalToolDef } from "../../src/platform/types.ts";
-import type { ResolvedRole } from "../../src/types.ts";
-import { removeTempTrees } from "./helpers/temp-dirs.ts";
 
-// ── Fixtures ────────────────────────────────────────────────────────────────
-
-const EMPTY_VALIDATORS = createValidatorRegistry([]);
-
-/** The synthetic HOST tools a declared node may be granted. */
-const HOST_TOOLS = ["computer_screenshot", "computer_click", "browser_open"] as const;
-
-const tmpDirs: string[] = [];
-
-function makeTmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tmpDirs.push(dir);
-  return dir;
+function declaration(tools?: string[]): GraphDeclarationV3 {
+  return { version: 3, name: "legacy-node-tools", nodes: [{
+    id: "worker", agent: "worker", prompt: "Inspect", outcomes: [{ id: "done" }],
+    ...(tools === undefined ? {} : { tools }),
+  }], edges: [] };
 }
 
-afterEach(() => {
-  removeTempTrees(tmpDirs);
+describe("legacy node tools compatibility", () => {
+  it.each([{ tools: undefined }, { tools: [] }, { tools: ["docs_read"] }, { tools: ["missing_lookup", "graph_*"] }])(
+    "ignores the node list for task authorization: $tools", ({ tools }) => {
+      const graph = declaration(tools);
+      const parsed = parseGraphDeclarationV3(graph);
+      expect(parsed.ok).toBe(true);
+      const compiled = compileGraph(graph);
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) throw new Error("Fixture must compile");
+      expect(declaredNodeTools(createPersistedCompiledPlan(compiled.plan), "worker")).toEqual(tools?.slice().sort());
+      for (const name of ["hashline_read", "hashline_edit", "docs_read"]) {
+        expect(workerTaskToolAllowed(name, tools, ["hashline_read", "hashline_edit", "docs_read"])).toBe(true);
+      }
+      expect(workerTaskToolAllowed("private_lookup", tools, ["hashline_read"])).toBe(false);
+    },
+  );
+
+  it("normalizes legacy lists without using them as capability grants", () => {
+    const parsed = parseGraphDeclarationV3(declaration([" docs_write ", "docs_read", "docs_read"]));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error("Fixture must parse");
+    expect(parsed.declaration.nodes[0].tools).toEqual(["docs_read", "docs_write"]);
+    expect(workerTaskToolAllowed("hashline_edit", parsed.declaration.nodes[0].tools, ["hashline_edit"])).toBe(true);
+  });
+
+  it.each(["graph_control", "graph_status", "rb_graph_control", "dispatch", "rb_dispatch", "team_create", "task", "task_retry", "session_fork"])(
+    "keeps orchestration unavailable even when inherited and listed: %s", name => {
+      expect(workerTaskToolAllowed(name, [name, "rb_*", "graph_*"], [name])).toBe(false);
+    },
+  );
+
+  it("retains allow-list matching for parent catalogs and broker sessions", () => {
+    expect(declaredToolsAllow("docs_read", ["docs_*"])).toBe(true);
+    expect(declaredToolsAllow("private_read", ["docs_*"])).toBe(false);
+    expect(declaredToolsAllow("docs_read", [])).toBe(false);
+    expect(declaredToolsAllow("docs_read", undefined)).toBe(true);
+  });
 });
 
-/** A canonical tool context, as a platform hands one to a tool call. */
-function makeContext(sessionID: string, agent: string, directory: string): CanonicalToolContext {
-  return {
-    sessionID,
-    messageID: "m1",
-    agent,
-    directory,
-    worktree: directory,
-    abort: new AbortController().signal,
-    metadata: () => {},
-    ask: async () => {},
-  };
-}
-
-/** The child session the platform "created" for one attempt (the dsh mapping). */
-function childSessionOf(attemptId: string): string {
-  return "child-session:" + attemptId;
-}
-
-/** One synthetic host tool that says it ran. */
-function hostTool(name: string): CanonicalToolDef {
-  return {
-    description: "Synthetic host tool " + name,
-    args: {},
-    async execute() {
-      return name + " ran";
-    },
-  };
-}
-
-// ── (a) The front-end ───────────────────────────────────────────────────────
-
-/** A one-or-more node declaration with `extra` merged into its first node. */
 function declarationWith(extra: Record<string, unknown>, nodeCount = 1): unknown {
   const nodes: unknown[] = [];
   for (let index = 0; index < nodeCount; index++) {
@@ -106,7 +65,7 @@ function declarationWith(extra: Record<string, unknown>, nodeCount = 1): unknown
   return { version: 3, name: "node-tool-grants.grammar", nodes, edges: [] };
 }
 
-describe("the v3 node `tools` grammar", () => {
+describe("legacy v3 node `tools` grammar", () => {
   it("accepts a trailing-star prefix and normalizes the retained set", () => {
     const parsed = parseGraphDeclarationV3(
       declarationWith({ tools: [" computer_b ", "computer_a", "computer_a", "computer_*"] }),
@@ -165,7 +124,7 @@ describe("the v3 node `tools` grammar", () => {
 
 // ── (e) The compiled and persisted plan ─────────────────────────────────────
 
-describe("the compiled plan carries the declared grant", () => {
+describe("the compiled plan preserves legacy tool metadata", () => {
   const DECLARED: GraphDeclarationV3 = {
     version: 3,
     name: "node-tool-grants.plan",
@@ -207,7 +166,7 @@ describe("the compiled plan carries the declared grant", () => {
 
 // ── The matcher itself ──────────────────────────────────────────────────────
 
-describe("the declared-grant matcher", () => {
+describe("parent-catalog allow-list matching", () => {
   it("admits an exact name or a trailing-star prefix, and nothing else", () => {
     expect(declaredToolAllows("computer_screenshot", "computer_screenshot")).toBe(true);
     expect(declaredToolAllows("computer_screenshot", "computer_click")).toBe(false);
@@ -218,567 +177,9 @@ describe("the declared-grant matcher", () => {
     expect(declaredToolAllows("*", "computer_click")).toBe(false);
   });
 
-  it("inherits task tools by default and honors an explicit empty restriction", () => {
+  it("supports unrestricted and empty parent catalogs", () => {
     expect(declaredToolsAllow("computer_click", undefined)).toBe(true);
     expect(declaredToolsAllow("computer_click", [])).toBe(false);
     expect(declaredToolsAllow("computer_click", ["computer_*"])).toBe(true);
-  });
-});
-
-// ── The shipped face over a real store: (b), (c) and (d) ────────────────────
-
-/**
- * Three entry nodes in one graph: `alpha` declares the prefix `computer_*`,
- * `beta` inherits task tools, and `gamma` declares the
- * exact name `computer_screenshot`. One start dispatches all three, so one host
- * holds three bound workers — the population a widened grant could leak across.
- */
-const GRANTS: GraphDeclarationV3 = {
-  version: 3,
-  name: "node-tool-grants.fan-out",
-  nodes: [
-    {
-      id: "alpha",
-      agent: "agent.alpha",
-      prompt: "Do alpha.",
-      outcomes: [{ id: "done" }],
-      tools: ["computer_*"],
-    },
-    { id: "beta", agent: "agent.beta", prompt: "Do beta.", outcomes: [{ id: "done" }] },
-    {
-      id: "gamma",
-      agent: "agent.gamma",
-      prompt: "Do gamma.",
-      outcomes: [{ id: "done" }],
-      tools: ["computer_screenshot"],
-    },
-  ],
-  edges: [],
-};
-
-interface GrantFixture {
-  readonly dir: string;
-  readonly storeRoot: string;
-  readonly graphId: string;
-  readonly host: OutcomeHost;
-  readonly dispatched: readonly OutcomeDispatchRequest[];
-  readonly tools: Record<string, CanonicalToolDef>;
-  readonly call: (tool: string, sessionID: string, agent: string) => Promise<string>;
-}
-
-/**
- * One host over an EXISTING store root, with the shipped face bound to it and
- * the synthetic host tools in the face.
- *
- * Separate from {@link openGrantFixture} so a case can open a SECOND host over
- * the store a first host already declared and dispatched into: the durable half
- * of the worker binding and of the declared grant.
- */
-function bindGrantHost(
-  dir: string,
-  storeRoot: string,
-): {
-  readonly host: OutcomeHost;
-  readonly dispatched: OutcomeDispatchRequest[];
-  readonly tools: Record<string, CanonicalToolDef>;
-  readonly call: (tool: string, sessionID: string, agent: string) => Promise<string>;
-} {
-  const dispatched: OutcomeDispatchRequest[] = [];
-  let host: OutcomeHost | undefined;
-  const opened = OutcomeHost.open({
-    workspaceDir: dir,
-    storeRoot,
-    deliver: (request, effect) => {
-      dispatched.push(request);
-      host?.confirmExecution(effect, { executionId: childSessionOf(request.attemptId) });
-    },
-    validators: EMPTY_VALIDATORS,
-    declareInvocationIdentity: false,
-    workerSessionOf: (execution) => execution.executionId,
-  });
-  host = opened;
-  const toolset = createGraphToolSet({
-    stateDir: dir,
-    credentialIsolation: opened.credentialIsolation,
-    hostIdentity: opened.workerIdentity,
-    outcomeDispatch: opened.dispatch,
-    outcomeValidators: EMPTY_VALIDATORS,
-    outcomeArtifactRoot: dir,
-  });
-  const face: Record<string, CanonicalToolDef> = {
-    ...createOutcomeGraphTools(toolset),
-  };
-  for (const name of HOST_TOOLS) face[name] = hostTool(name);
-  const tools = opened.bindTools(face);
-  return {
-    host: opened,
-    dispatched,
-    tools,
-    call: async (tool, sessionID, agent) => {
-      const def = tools[tool];
-      if (def === undefined) throw new Error("fixture: no tool " + tool);
-      return String(await def.execute({}, makeContext(sessionID, agent, dir)));
-    },
-  };
-}
-
-/** The shipped host assembly over a REAL declared graph, plus host tools. */
-async function openGrantFixture(): Promise<GrantFixture> {
-  const dir = makeTmpDir("node-tool-grants-");
-  const storeRoot = join(dir, "host-store");
-  mkdirSync(storeRoot, { recursive: true });
-  const bound = bindGrantHost(dir, storeRoot);
-  const declarer = makeContext("session-declarer", "agent.declarer", dir);
-  const declared = String(await bound.tools.graph_declare.execute({ declaration: GRANTS }, declarer));
-  if (declared.includes("graph_declare failed:")) {
-    throw new Error("fixture: graph_declare refused the declaration: " + declared);
-  }
-  const started = await bound.host.startDeclaredGraph(GRANTS.name, {
-    sessionId: "session-declarer",
-    agent: "agent.declarer",
-  });
-  if (started.kind !== "started") {
-    throw new Error("fixture: the graph did not start (" + started.kind + ")");
-  }
-  return { dir, storeRoot, graphId: GRANTS.name, ...bound };
-}
-
-/** One parsed worker refusal, as the boundary renders it. */
-interface WorkerToolRefusal {
-  readonly refused?: boolean;
-  readonly code?: string;
-  readonly tool?: string;
-  readonly granted_tools?: readonly string[];
-}
-
-describe("a dispatched worker's granted host tools", () => {
-  it("narrows inherited tools by prefix or exact name and inherits them when omitted", async () => {
-    const fixture = await openGrantFixture();
-    try {
-      expect(fixture.dispatched.map((request) => request.attemptId)).toEqual([
-        "alpha#1",
-        "beta#2",
-        "gamma#3",
-      ]);
-
-      // (c) alpha declares `computer_*`: a computer_ tool runs…
-      expect(await fixture.call("computer_screenshot", childSessionOf("alpha#1"), "agent.alpha"))
-        .toBe("computer_screenshot ran");
-      // …while a name outside the declared prefix is refused BY THE BOUNDARY,
-      // and the refusal names the face it judged: the baseline plus alpha's own
-      // declared grant.
-      const refused = JSON.parse(
-        await fixture.call("browser_open", childSessionOf("alpha#1"), "agent.alpha"),
-      ) as WorkerToolRefusal;
-      expect(refused.refused).toBe(true);
-      expect(refused.code).toBe(WORKER_TOOL_FORBIDDEN_CODE);
-      expect(refused.tool).toBe("browser_open");
-      expect(refused.granted_tools).toEqual([...WORKER_GRANTED_GRAPH_TOOLS, "computer_*"]);
-
-      expect(await fixture.call("computer_screenshot", childSessionOf("beta#2"), "agent.beta"))
-        .toBe("computer_screenshot ran");
-      expect(await fixture.call("browser_open", childSessionOf("beta#2"), "agent.beta"))
-        .toBe("browser_open ran");
-
-      // gamma declares the EXACT name: it admits that name and no sibling.
-      expect(await fixture.call("computer_screenshot", childSessionOf("gamma#3"), "agent.gamma"))
-        .toBe("computer_screenshot ran");
-      const sibling = JSON.parse(
-        await fixture.call("computer_click", childSessionOf("gamma#3"), "agent.gamma"),
-      ) as WorkerToolRefusal;
-      expect(sibling.refused).toBe(true);
-      expect(sibling.granted_tools).toEqual([
-        ...WORKER_GRANTED_GRAPH_TOOLS,
-        "computer_screenshot",
-      ]);
-    } finally {
-      fixture.host.close();
-    }
-  });
-
-  it("keeps the graph face unchanged for a node that declares host tools", async () => {
-    const fixture = await openGrantFixture();
-    try {
-      // The declared names are HOST tools, never graph tools: alpha's extra
-      // grant does not widen one graph entry.
-      const refused = JSON.parse(
-        await fixture.call("graph_status", childSessionOf("alpha#1"), "agent.alpha"),
-      ) as WorkerToolRefusal;
-      expect(refused.refused).toBe(true);
-      expect(refused.code).toBe(WORKER_TOOL_FORBIDDEN_CODE);
-      expect(await fixture.call("graph_submit_outcome", childSessionOf("alpha#1"), "agent.alpha"))
-        .not.toContain(WORKER_TOOL_FORBIDDEN_CODE);
-    } finally {
-      fixture.host.close();
-    }
-  });
-
-  it("(d) leaves the declaring session and an unrelated session unaffected", async () => {
-    const fixture = await openGrantFixture();
-    try {
-      expect(await fixture.call("computer_screenshot", "session-declarer", "agent.declarer"))
-        .toBe("computer_screenshot ran");
-      expect(await fixture.call("browser_open", "session-declarer", "agent.declarer"))
-        .toBe("browser_open ran");
-      expect(await fixture.call("computer_click", "session-unrelated", "agent.unrelated"))
-        .toBe("computer_click ran");
-    } finally {
-      fixture.host.close();
-    }
-  });
-
-  it("(e) resolves the grant from the durable record in a FRESH host", async () => {
-    const fixture = await openGrantFixture();
-    const { dir, storeRoot } = fixture;
-    fixture.host.close();
-    // A host that never dispatched these attempts and holds no process cache:
-    // it still binds alpha's worker from the durable execution row, and still
-    // reads alpha's grant from the persisted definition.
-    const second = bindGrantHost(dir, storeRoot);
-    try {
-      expect(await second.call("computer_screenshot", childSessionOf("alpha#1"), "agent.alpha"))
-        .toBe("computer_screenshot ran");
-      const refused = JSON.parse(
-        await second.call("browser_open", childSessionOf("alpha#1"), "agent.alpha"),
-      ) as WorkerToolRefusal;
-      expect(refused.refused).toBe(true);
-      expect(await second.call("computer_screenshot", childSessionOf("beta#2"), "agent.beta"))
-        .toBe("computer_screenshot ran");
-    } finally {
-      second.host.close();
-    }
-  });
-
-  it("(e) persists the grant in the graph's own definition", async () => {
-    const fixture = await openGrantFixture();
-    try {
-      const reading = readStoredDefinition(fixture.storeRoot, fixture.graphId);
-      expect(reading.kind).toBe("ok");
-      if (reading.kind !== "ok") return;
-      expect(declaredNodeTools(reading.declared.plan, "alpha")).toEqual(["computer_*"]);
-      expect(declaredNodeTools(reading.declared.plan, "beta")).toBeUndefined();
-      expect(declaredNodeTools(reading.declared.plan, "gamma")).toEqual(["computer_screenshot"]);
-    } finally {
-      fixture.host.close();
-    }
-  });
-});
-
-// ── The dsh execution guard ─────────────────────────────────────────────────
-
-interface FakeWorkerAgent {
-  readonly id: string;
-  readonly session: { readonly id: string; readonly events: readonly unknown[] };
-  readonly ctx: { readonly tools: { presentAs(mode: "native"): () => void } };
-}
-
-function fakeAgent(id: string): FakeWorkerAgent {
-  return {
-    id,
-    session: { id, events: [] },
-    ctx: { tools: { presentAs: () => () => {} } },
-  };
-}
-
-const PRINCIPAL = {
-  graphId: "node-tool-grants.guard",
-  attemptId: "guard#1",
-  executionId: "exec-1",
-  workerSessionId: "worker-session",
-};
-
-function dshGuardBoundary(host: Record<string, unknown>): {
-  readonly guard: (execution: { readonly name: string; readonly agent?: FakeWorkerAgent }) => string | undefined;
-  readonly prepare: (agent: FakeWorkerAgent) => void;
-  readonly dispose: () => void;
-} {
-  let guard: ((execution: { readonly name: string; readonly agent?: FakeWorkerAgent }) => string | undefined) | undefined;
-  const registry: DshGraphWorkerRegistry = {
-    guard: (callback) => {
-      guard = callback as typeof guard;
-      return () => {
-        guard = undefined;
-      };
-    },
-  };
-  const boundary = installDshGraphWorkerBoundary(host as never, registry, () => undefined);
-  return {
-    guard: (execution) => guard!(execution),
-    prepare: (agent) => boundary.prepare(agent as never),
-    dispose: () => boundary.dispose(),
-  };
-}
-
-describe("the dsh execution guard", () => {
-  it("grants the baseline plus the executing node's declared tools", () => {
-    const boundary = dshGuardBoundary({
-      workerPrincipalOf: (sessionId: string) =>
-        sessionId === PRINCIPAL.workerSessionId ? PRINCIPAL : undefined,
-      workerDeclaredToolsOf: () => ["computer_*"],
-    });
-    const worker = fakeAgent(PRINCIPAL.workerSessionId);
-    boundary.prepare(worker);
-    try {
-      expect(boundary.guard({ name: "graph_worker_exec", agent: worker })).toBeUndefined();
-      expect(boundary.guard({ name: "graph_submit_outcome", agent: worker })).toBeUndefined();
-      expect(boundary.guard({ name: "computer_screenshot", agent: worker })).toBeUndefined();
-      expect(boundary.guard({ name: "browser_open", agent: worker })).toContain(
-        "Graph workers may only",
-      );
-      // A session this host did NOT bind as a worker is unaffected.
-      expect(boundary.guard({ name: "browser_open", agent: fakeAgent("session-unrelated") }))
-        .toBeUndefined();
-    } finally {
-      boundary.dispose();
-    }
-  });
-
-  it("never allows on uncertainty: missing, throwing and malformed lookups stay baseline", () => {
-    const scenarios: Array<Record<string, unknown>> = [
-      { workerPrincipalOf: (sessionId: string) => (sessionId === PRINCIPAL.workerSessionId ? PRINCIPAL : undefined) },
-      {
-        workerPrincipalOf: (sessionId: string) => (sessionId === PRINCIPAL.workerSessionId ? PRINCIPAL : undefined),
-        workerDeclaredToolsOf: () => {
-          throw new Error("the store could not be read");
-        },
-      },
-      {
-        workerPrincipalOf: (sessionId: string) => (sessionId === PRINCIPAL.workerSessionId ? PRINCIPAL : undefined),
-        workerDeclaredToolsOf: () => "computer_*",
-      },
-    ];
-    for (const host of scenarios) {
-      const boundary = dshGuardBoundary(host);
-      const worker = fakeAgent(PRINCIPAL.workerSessionId);
-      boundary.prepare(worker);
-      try {
-        expect(boundary.guard({ name: "computer_screenshot", agent: worker })).toContain(
-          "Graph workers may only",
-        );
-        expect(boundary.guard({ name: "graph_submit_outcome", agent: worker })).toBeUndefined();
-      } finally {
-        boundary.dispose();
-      }
-    }
-  });
-});
-
-// ── The worker prompt ───────────────────────────────────────────────────────
-
-const WORKER_ROLE: ResolvedRole = {
-  id: "planner",
-  config: { name: "Planner", description: "Plans", prompt: "You are the planner." },
-  prompt: "Legacy rendered prompt",
-  skills: [],
-  references: [],
-  functions: [],
-  subagents: [],
-};
-
-describe("the worker prompt states the node's grant", () => {
-  it("states the declared list when the node declares one", () => {
-    const block = buildGraphWorkerToolGrantBlock(["computer_*"]);
-    expect(block).toContain("computer_*");
-    expect(block).toContain("graph_submit_outcome");
-    expect(block).toContain("graph_worker_exec");
-  });
-
-  it("distinguishes inherited tools from an explicit empty restriction", () => {
-    for (const declared of [undefined, [] as string[]]) {
-      const block = buildGraphWorkerToolGrantBlock(declared);
-      expect(block).toContain(declared === undefined ? "inherits the parent's authorized task tools" : "restricts additional task tools to an empty set");
-      expect(block).toContain("worker baseline");
-      expect(block).not.toContain("computer_*");
-    }
-  });
-
-  it("reaches the assembled dsh worker prompt for a declaring node", () => {
-    const workspace = makeTmpDir("node-tool-grants-workspace-");
-    const boundary = {
-      kind: "confined",
-      mode: "workspace-write",
-      workspaceRoot: "/workspace/example",
-    } as const;
-    const declared = prepareDshGraphWorkerPrompt(
-      [WORKER_ROLE],
-      WORKER_ROLE.id,
-      makeTmpDir("node-tool-grants-prompt-"),
-      workspace,
-      boundary,
-      ["computer_*"],
-    );
-    expect(declared).toContain("this node restricts inherited host tools to computer_*");
-    expect(declared).toContain(
-      "worker baseline entry points are graph_submit_outcome, graph_worker_exec",
-    );
-    const baseline = prepareDshGraphWorkerPrompt(
-      [WORKER_ROLE],
-      WORKER_ROLE.id,
-      makeTmpDir("node-tool-grants-prompt-"),
-      workspace,
-      boundary,
-    );
-    expect(baseline).toContain("this node inherits the parent's authorized task tools");
-    expect(baseline).toContain("worker baseline entry points are graph_submit_outcome, graph_worker_exec");
-    expect(baseline).not.toContain("only tools you may call");
-  });
-});
-
-// ── A declared grant never re-opens the graph face ──────────────────────────
-//
-// ITEM 2 OF THE r3 REVIEW. The declared-grant matcher is consulted for EVERY
-// name the boundary judges, and a bound worker's calls include the graph face
-// itself. `tools: ["graph_*"]` therefore used to admit `graph_control` and
-// `graph_declare` — the exact invariant the module states it holds
-// (`tool-binding.ts` "THE GRAPH FACE ... STAYS STATIC"). These cases drive the
-// SHIPPED face over a real store, so the refusal is the one a worker actually
-// receives, not a matcher unit test.
-
-/**
- * Three entry nodes whose grants name the graph face: `face` declares the whole
- * namespace with the wildcard, `status` names one graph tool exactly, and
- * `mixed` declares a graph grant AND a real host tool. The last one is what
- * proves the fix is a NARROWING and not a blanket refusal of declared grants.
- */
-const GRAPH_FACE_GRANTS: GraphDeclarationV3 = {
-  version: 3,
-  name: "node-tool-grants.graph-face",
-  nodes: [
-    {
-      id: "face",
-      agent: "agent.face",
-      prompt: "Do face.",
-      outcomes: [{ id: "done" }],
-      tools: ["graph_*"],
-    },
-    {
-      id: "status",
-      agent: "agent.status",
-      prompt: "Do status.",
-      outcomes: [{ id: "done" }],
-      tools: ["graph_status"],
-    },
-    {
-      id: "mixed",
-      agent: "agent.mixed",
-      prompt: "Do mixed.",
-      outcomes: [{ id: "done" }],
-      tools: ["computer_*", "graph_*"],
-    },
-  ],
-  edges: [],
-};
-
-/** The shipped face + host tools over a real store holding GRAPH_FACE_GRANTS. */
-async function openGraphFaceFixture(): Promise<GrantFixture> {
-  const dir = makeTmpDir("node-tool-grants-face-");
-  const storeRoot = join(dir, "host-store");
-  mkdirSync(storeRoot, { recursive: true });
-  const bound = bindGrantHost(dir, storeRoot);
-  const declarer = makeContext("session-declarer", "agent.declarer", dir);
-  const declared = String(
-    await bound.tools.graph_declare.execute({ declaration: GRAPH_FACE_GRANTS }, declarer),
-  );
-  if (declared.includes("graph_declare failed:")) {
-    throw new Error("fixture: graph_declare refused the declaration: " + declared);
-  }
-  const started = await bound.host.startDeclaredGraph(GRAPH_FACE_GRANTS.name, {
-    sessionId: "session-declarer",
-    agent: "agent.declarer",
-  });
-  if (started.kind !== "started") {
-    throw new Error("fixture: the graph did not start (" + started.kind + ")");
-  }
-  return { dir, storeRoot, graphId: GRAPH_FACE_GRANTS.name, ...bound };
-}
-
-describe("a declared grant never re-opens the graph face", () => {
-  it("refuses graph_status and graph_control to a worker of a node that declares them", async () => {
-    const fixture = await openGraphFaceFixture();
-    try {
-      const attemptOf = (nodeId: string): string =>
-        fixture.dispatched.find((request) => request.nodeId === nodeId)!.attemptId;
-      // Every request carries ITS node's declared list (dispatch order is the
-      // plan's, not this assertion's).
-      expect(
-        Object.fromEntries(
-          fixture.dispatched.map((request) => [request.nodeId, request.declaredTools]),
-        ),
-      ).toEqual({
-        face: ["graph_*"],
-        status: ["graph_status"],
-        mixed: ["computer_*", "graph_*"],
-      });
-
-      for (const nodeId of ["face", "status", "mixed"]) {
-        for (const tool of ["graph_status", "graph_control", "graph_declare"]) {
-          const refused = JSON.parse(
-            await fixture.call(tool, childSessionOf(attemptOf(nodeId)), "agent." + nodeId),
-          ) as WorkerToolRefusal;
-          expect(refused.refused, `${nodeId} -> ${tool}`).toBe(true);
-          expect(refused.code).toBe(WORKER_TOOL_FORBIDDEN_CODE);
-          expect(refused.tool).toBe(tool);
-        }
-      }
-
-      // The graph-facing entries are NOT reported as granted either: the
-      // refusal names the face the worker actually holds, plus the declared
-      // entries that can admit a host tool.
-      const faceRefusal = JSON.parse(
-        await fixture.call(
-          "graph_status",
-          childSessionOf(attemptOf("face")),
-          "agent.face",
-        ),
-      ) as WorkerToolRefusal;
-      expect(faceRefusal.granted_tools).toEqual([...WORKER_GRANTED_GRAPH_TOOLS]);
-      const mixedRefusal = JSON.parse(
-        await fixture.call(
-          "graph_status",
-          childSessionOf(attemptOf("mixed")),
-          "agent.mixed",
-        ),
-      ) as WorkerToolRefusal;
-      expect(mixedRefusal.granted_tools).toEqual([
-        ...WORKER_GRANTED_GRAPH_TOOLS,
-        "computer_*",
-      ]);
-    } finally {
-      fixture.host.close();
-    }
-  });
-
-  it("still allows the declared HOST tool of a node that also declares the graph face", async () => {
-    const fixture = await openGraphFaceFixture();
-    try {
-      const attemptId = fixture.dispatched.find((request) => request.nodeId === "mixed")!.attemptId;
-      expect(await fixture.call("computer_screenshot", childSessionOf(attemptId), "agent.mixed"))
-        .toBe("computer_screenshot ran");
-      // …and the name the node did NOT declare stays refused for that worker.
-      const refused = JSON.parse(
-        await fixture.call("browser_open", childSessionOf(attemptId), "agent.mixed"),
-      ) as WorkerToolRefusal;
-      expect(refused.refused).toBe(true);
-      // The declaring session itself keeps the whole face: the rule only ever
-      // applies to a session the host bound as a worker.
-      expect(await fixture.call("graph_control", "session-declarer", "agent.declarer"))
-        .not.toContain(WORKER_TOOL_FORBIDDEN_CODE);
-    } finally {
-      fixture.host.close();
-    }
-  });
-
-  it("keeps the graph face out of the START allow-list too (the delivery half)", () => {
-    // The same rule decides the start request's filter
-    // (resolveDshWorkerToolAllowList consults the one matcher): a `graph_*`
-    // declaration adds nothing there either, so the prompt, the filter and the
-    // refusal cannot disagree.
-    const allow = resolveDshWorkerToolAllowList({
-      baseline: ["graph_submit_outcome"],
-      declared: ["graph_*"],
-      candidates: ["graph_status", "graph_control", "graph_declare", "graph_submit_outcome"],
-      isRegistered: () => true,
-    });
-    expect(allow).toEqual(["graph_submit_outcome"]);
   });
 });

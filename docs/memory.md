@@ -55,15 +55,10 @@ Keep memories concise and reusable. Do not store transient task progress, raw tr
 
 ## DSH graph workers
 
-DSH graph nodes must declare the memory tools they need. A node's tool grant is separate from the role's memory configuration. For example, these node fields grant reading and writing:
-
-```json
-{
-  "tools": ["memory_recall", "memory_read", "memory_list", "memory_write", "memory_update"]
-}
-```
-
-In DSH, an omitted or empty `tools` grant provides no extra memory capabilities. Declaring tools still remains subject to the host's available tools and permissions. Use only the read tools for a worker that should consult knowledge without changing it. Pi workers have a different baseline that already includes memory tools.
+DSH graph workers inherit the parent's authorized memory tools and expose their
+native schemas by default. Node `tools` lists no longer restrict access. Memory
+operations still follow the role's memory configuration, visibility rules and
+host permissions. Use role or host policy when memory writes must be disabled.
 
 For DSH nodes using `toolPresentation.mode: "discover"`, the workflow directs the worker to describe a capability with `graph_worker_tools` and invoke it through that tool's `call` action. In `code` mode, it describes schemas first and invokes capabilities through `graph_worker_code`. The guidance names only memory capabilities the worker is authorized to use.
 

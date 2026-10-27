@@ -210,10 +210,10 @@ function createGraphDeclareTool(
           "The v3 declaration as JSON text or an already-parsed JSON value: " +
           "{ version: 3, name, nodes[], edges[], loop_groups?[] } with the closed " +
           "v3 grammar (nodes declare outcomes; every edge binds one). " +
-          "Workers inherit the parent's authorized task tools by default. A node may narrow them with tools: [exact host names or trailing-star prefixes]; tools: [] keeps only worker entry points. Graph control and recursive dispatch remain unavailable. Use " +
+          "Workers inherit the parent's authorized task tools without node-level tool restrictions. Graph control and recursive dispatch remain unavailable. Use " +
           "toolPresentation: { mode: 'native' | 'discover' | 'code', preload?: [exact granted names] }. " +
-          "Presentation controls visibility only; tools can never expand inherited authorization. " +
-          "Supported hosts default to discover presentation. See worker-tools.md for host support.",
+          "Presentation controls visibility only and never expands inherited authorization. " +
+          "Hosts default to native presentation, exposing authorized tool schemas directly. See worker-tools.md for host support.",
         ),
       graph_id: z
         .string()

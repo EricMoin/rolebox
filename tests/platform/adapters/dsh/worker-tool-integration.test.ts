@@ -97,6 +97,24 @@ function createFixture(startup: DshWorkerStartupTools, executorMode: boolean) {
 
 describe.each(["presentation switch", "scoped executor"])("dsh worker capability integration with %s", mode => {
   const fixture = (startup: DshWorkerStartupTools) => createFixture(startup, mode === "scoped executor");
+  it("exposes hashline schemas and executes file tools without discovery despite legacy empty lists", async () => {
+    const f = fixture({ declaredTools: [], inheritedTools: ["hashline_read", "hashline_edit"] });
+    f.register("hashline_read");
+    f.register("hashline_edit");
+    try {
+      await f.start();
+      expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS, "hashline_read", "hashline_edit"]);
+      expect(f.local.has("graph_worker_tools")).toBe(false);
+      for (const name of ["hashline_read", "hashline_edit"]) {
+        const result = await f.registry.execute!({ name, arguments: {}, agent: f.agent, callId: name,
+          signal: new AbortController().signal });
+        expect(result).toBe(f.rich);
+      }
+      expect(f.executions.map(execution => execution.name)).toEqual(["hashline_read", "hashline_edit"]);
+      expect(f.guard("graph_control")).toContain("Graph workers may only");
+    } finally { f.boundary.dispose(); }
+  });
+
   it.each(["discover", "code"] as const)("inherits parent capabilities through %s without expanding schemas", async presentation => {
     const f = fixture({ inheritedTools: ["custom_search", "mcp_docs_lookup"], toolPresentation: { mode: presentation } });
     try {
@@ -127,7 +145,7 @@ describe.each(["presentation switch", "scoped executor"])("dsh worker capability
     } finally { f.boundary.dispose(); }
   });
   it("reads one coherent grant for the entire catalog and rechecks it for each invocation", async () => {
-    const startup = { declaredTools: ["custom_*"] };
+    const startup = { declaredTools: ["custom_*"], inheritedTools: ["custom_search", ...Array.from({ length: 100 }, (_, i) => "custom_" + i)] };
     const f = fixture(startup);
     try {
       await f.start();
@@ -140,6 +158,8 @@ describe.each(["presentation switch", "scoped executor"])("dsh worker capability
       expect(f.grantReads() - before).toBe(mode === "scoped executor" ? 2 : 1);
       expect(f.guard("custom_search")).toBeUndefined();
       startup.declaredTools = [];
+      expect(f.guard("custom_search")).toBeUndefined();
+      startup.inheritedTools = [];
       expect(f.guard("custom_search")).toContain("Graph workers may only");
       expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS]);
     } finally { f.boundary.dispose(); }
@@ -159,7 +179,7 @@ describe.each(["presentation switch", "scoped executor"])("dsh worker capability
   });
 
   it("presents and authorizes custom and MCP tools before and after worker confirmation", async () => {
-    const f = fixture({ declaredTools: ["custom_*", "mcp_docs_*"] });
+    const f = fixture({ declaredTools: ["custom_*", "mcp_docs_*"], inheritedTools: ["custom_search", "mcp_docs_lookup", "mcp_docs_recent"] });
     try {
       await f.start();
       expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS, "custom_search", "mcp_docs_lookup"]);
@@ -174,7 +194,7 @@ describe.each(["presentation switch", "scoped executor"])("dsh worker capability
   });
 
   it("discovers only authorized capabilities and activates their native schemas", async () => {
-    const f = fixture({ declaredTools: ["custom_*", "mcp_docs_*"], toolPresentation: { mode: "discover", preload: ["custom_search"] } });
+    const f = fixture({ declaredTools: ["custom_*", "mcp_docs_*"], inheritedTools: ["custom_search", "mcp_docs_lookup"], toolPresentation: { mode: "discover", preload: ["custom_search"] } });
     try {
       await f.start();
       expect(await f.visible()).toEqual([...DSH_GRAPH_WORKER_TOOLS, "custom_search", "graph_worker_tools"]);
@@ -253,14 +273,14 @@ describe.each(["presentation switch", "scoped executor"])("dsh worker capability
     } finally { f.boundary.dispose(); }
   });
 
-  it("rejects unavailable exact grants and reports unmatched dynamic prefixes", async () => {
+  it("ignores unavailable legacy node entries without availability warnings", async () => {
     const missing = fixture({ declaredTools: ["missing_lookup"] });
-    try { await expect(missing.start()).rejects.toThrow("unavailable host tools: missing_lookup"); }
+    try { await expect(missing.start()).resolves.toBeUndefined(); }
     finally { missing.boundary.dispose(); }
     const deferred = fixture({ declaredTools: ["future_*"] });
     try {
       await deferred.start();
-      expect(JSON.stringify((await deferred.assemble()).contexts)).toContain("future_*");
+      expect((await deferred.assemble()).contexts).toEqual([]);
       deferred.register("future_lookup");
       expect((await deferred.assemble()).contexts).toEqual([]);
       expect(await deferred.visible()).toContain("future_lookup");

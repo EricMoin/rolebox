@@ -188,7 +188,7 @@ it("refreshes dispatch, definition and state grants together after commits", asy
     savedDefinition = JSON.stringify(row.plan);
     store.run(`UPDATE ${tables.definitions} SET plan = '{}' WHERE graph_id = ?`, fx.graphId);
   });
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   mutate(fx.root, store => {
     store.run(`UPDATE ${tables.definitions} SET plan = ? WHERE graph_id = ?`, savedDefinition, fx.graphId);
     store.run(`UPDATE ${tables.pendingEffects} SET status = 'done' WHERE graph_id = ?`, fx.graphId);
@@ -202,7 +202,7 @@ it("refreshes dispatch, definition and state grants together after commits", asy
     const state = store.readGraphState(fx.graphId)!;
     store.writeGraphState({ ...state, body: { ...reading.state, bodyVersion: 99 } });
   });
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
 });
 
 it("does not publish uncommitted grant changes or keep grants after a rolled back read", async () => {
@@ -269,9 +269,9 @@ it("retains locally confirmed identity while grants fail closed and retries afte
   const saved = readFileSync(marker);
   writeFileSync(marker, "{");
   expect(fx.first.workerPrincipalOf(fx.principal.workerSessionId)).toEqual(fx.principal);
-  expect(fx.first.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.first.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   writeFileSync(marker, saved);
   expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toEqual(fx.principal);
   expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
@@ -284,7 +284,7 @@ it("revalidates schema changes before returning cached identities or grants", as
   const db = createDatabaseSync(graphStoreFilePath(fx.root));
   try { db.exec(`DROP TABLE ${tables.workerChannels}`); } finally { db.close(); }
   expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
 });
 
 it("does not retain cached grants when the database disappears", async () => {
@@ -292,7 +292,7 @@ it("does not retain cached grants when the database disappears", async () => {
   expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
   const removal = attemptStoreEntryRemoval(fx.root);
   if (removal.removed) {
-    expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+    expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
     expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
   } else {
     expect(removal.refusals.every(refusal => /^(EBUSY|EPERM|EACCES)$/.test(refusal.code))).toBe(true);
@@ -306,7 +306,7 @@ it("drops cached authorization for corrupt bytes and retries after a matching re
   const file = graphStoreFilePath(fx.root);
   const saved = readFileSync(file);
   writeFileSync(file, "not a database");
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
   writeFileSync(file, saved);
   expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
@@ -338,7 +338,7 @@ it("drops the old inode and reopens a valid replacement on the following read", 
     return;
   }
   writeFileSync(file, saved);
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
 });
 
@@ -355,7 +355,7 @@ it("refuses a same-inode database with another identity and recovers after resto
   saved.copy(replacement, 92, 92, 96);
   writeFileSync(file, replacement);
   expect(statSync(file).ino).toBe(inode);
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
   writeFileSync(file, saved);
   expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
@@ -374,7 +374,7 @@ it("reopens a fenced shared reader while another host retains the old connection
   saved.copy(replacement, 24, 24, 28);
   saved.copy(replacement, 92, 92, 96);
   writeFileSync(file, replacement);
-  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+  expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
   writeFileSync(file, saved);
   const acquire = vi.spyOn(GraphStore, "acquireReadOnlyConnection");
   try {
@@ -404,7 +404,7 @@ it("lets a cold host replace a stale pooled reader without waiting for its old o
   writeFileSync(file, saved);
   const acquire = vi.spyOn(GraphStore, "acquireReadOnlyConnection");
   try {
-    expect(cold.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+    expect(cold.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
     expect(cold.workerToolGrantOf(fx.principal)).toEqual(expectedGrant);
     const fresh = acquire.mock.results[1];
     if (fresh?.type !== "return") throw new Error("fixture fresh connection missing");
@@ -429,7 +429,7 @@ it("releases its retained read-only connection and does not reopen after close",
       fx.reader.close();
       expect(close).toHaveBeenCalledTimes(1);
       expect(fx.reader.workerPrincipalOf(fx.principal.workerSessionId)).toBeUndefined();
-      expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ declaredTools: [] });
+      expect(fx.reader.workerToolGrantOf(fx.principal)).toEqual({ inheritedTools: [] });
       expect(acquire).toHaveBeenCalledTimes(1);
     } finally { close.mockRestore(); }
   } finally { acquire.mockRestore(); }
