@@ -47,6 +47,7 @@ export type DshSystemPromptSection = {
   order: number;
   /** Render the section body for a context; `''` drops the section. */
   text: (ctx: DshSystemPromptContext) => string;
+  interpolate?: boolean;
 };
 
 /** A named, ordered context contribution (same shape as a section). */
@@ -84,7 +85,7 @@ export interface DshSystemPromptAdapterOptions {
   recallContext?: (ctx: DshSystemPromptContext) => string;
   /** The agent-curated session-focus block for a compacted session. */
   focusContext?: (ctx: DshSystemPromptContext) => string;
-  /** Graph workers receive their target role through the dispatch prompt. */
+  /** Graph workers receive their target role through an agent-scoped section. */
   isGraphWorker?: (ctx: DshSystemPromptContext) => boolean;
   /** Registry holding all resolved agent definitions (roles + subagents). */
   registrar: DshAgentRegistrar;

@@ -6,7 +6,7 @@ import { handleSystemTransform } from "../../src/hooks/system-transform.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import { CustomHookRegistry } from "../../src/hooks/custom/registry.ts";
 import { createSubLogger } from "../../src/logger.ts";
-import { buildAvailableFunctionsBlock, buildMemoryBlock, buildSkillBlock } from "../../src/prompt/builder.ts";
+import { buildAgentPrompt, buildAvailableFunctionsBlock, buildMemoryBlock, buildSkillBlock } from "../../src/prompt/builder.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
 import type { HookEvent, HookContext } from "../../src/hooks/custom/types.ts";
 import type { ResolvedFunction, ResolvedRole } from "../../src/types.ts";
@@ -80,30 +80,100 @@ function makeState(): HookState {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("handleSystemTransform — early exit", () => {
-  it("hands a confirmed graph worker only its own active functions", async () => {
+  it.each(["top-level", "nested"])("replaces a %s worker's registered role without removing host context", async placement => {
     const active = makeFn("active");
     const inactive = makeFn("inactive");
-    const role: ResolvedRole = {
-      id: "parent", config: { name: "Parent", description: "Parent", prompt: "Parent" },
-      prompt: "Parent", skills: [], references: [], functions: [],
-      subagents: [{
-        id: "parent--worker", parentId: "parent", inheritedFrom: {},
-        config: { name: "Worker", description: "Worker", prompt: "Worker", auto_activate: ["active"] },
-        prompt: "Worker", skills: [], references: [], functions: [active, inactive], subagents: [],
+    const worker: ResolvedRole = {
+      id: placement === "nested" ? "parent--worker" : "worker",
+      config: { name: "Worker", description: "Worker", prompt: "Inspect [input]. Report $1 and $& literally.", auto_activate: ["active"] },
+      prompt: "", functions: [active, inactive], subagents: [],
+      skills: [{ name: "verify", description: "Verify the result", scope: "rolebox", filePath: "/roles/worker/skills/verify/SKILL.md", references: [] }],
+      references: [{
+        name: "criteria", description: "Acceptance criteria", scope: "role", relativePath: "references/criteria.md",
+        filePath: "/roles/worker/references/criteria.md",
       }],
     };
-    const output = { system: ["Host instructions", "Worker"] };
+    worker.prompt = buildAgentPrompt(worker.config, worker.skills, {
+      references: worker.references,
+      subagents: [{ id: "worker--child", name: "Child", description: "Child responsibilities" }],
+      publicAgents: [{ id: "peer", name: "Peer", description: "Peer responsibilities" }],
+    });
+    const role: ResolvedRole = placement === "top-level" ? worker : {
+      id: "parent", config: { name: "Parent", description: "Parent", prompt: "Parent" },
+      prompt: "Parent", skills: [], references: [], functions: [makeFn("parent-only")],
+      subagents: [{ ...worker, parentId: "parent", inheritedFrom: {} }],
+    };
+    const hostPrefix = "Host instructions\n";
+    const hostSuffix = "\nHost environment\n## Available public agents\nHost-owned catalog";
+    const system = [hostPrefix + worker.prompt + hostSuffix, "Host project rules"];
+    const output = { system };
+    const state = makeState();
+    state.sessionAgentRegistry.set("sess-1", worker.id);
+    functionSessionState.activate("sess-1", ["parent-only"]);
     const deps = minimalDeps({
       roleMap: new Map([[role.id, role]]),
-      roleFunctionsMap: new Map([["parent--worker", [active, inactive]]]),
+      roleFunctionsMap: new Map([[worker.id, [active, inactive]], ["parent", [makeFn("parent-only")]]]),
       isGraphWorker: (sessionID) => sessionID === "sess-1",
     });
-    await handleSystemTransform({ sessionID: "sess-1", agent: "parent--worker" }, output, makeState(), deps);
-    expect(output.system.slice(0, 2)).toEqual(["Host instructions", "Worker"]);
-    expect(output.system.join("\n")).toContain("active content");
-    expect(output.system.join("\n")).not.toContain("inactive content");
-    expect(output.system.join("\n")).not.toContain("## Available functions");
+    const input = { sessionID: "sess-1" };
+    await handleSystemTransform(input, output, state, deps);
+    expect(output.system).toBe(system);
+    const text = output.system.join("\n");
+    expect(output.system[0]).toStartWith(hostPrefix);
+    expect(output.system[0]).toEndWith(hostSuffix);
+    expect(output.system[1]).toBe("Host project rules");
+    expect(text.match(/Inspect \[input\]/g)).toHaveLength(1);
+    expect(text).toContain("Report $1 and $& literally.");
+    expect(text).toContain("Verify the result");
+    expect(text).toContain("Acceptance criteria");
+    expect(text).toContain("/roles/worker/references");
+    expect(text).toContain("load_role_skill");
+    expect(text.match(/active content/g)).toHaveLength(1);
+    expect(text).not.toContain("inactive content");
+    expect(text).not.toContain("parent-only content");
+    expect(text).not.toContain("## Available functions");
+    expect(text).not.toContain("## Available sub-agents");
+    expect(text).not.toContain("Peer responsibilities");
+    expect(text).not.toContain("JSON fallback");
+    const once = [...output.system];
+    await handleSystemTransform(input, output, state, deps);
+    expect(output.system).toEqual(once);
     expect(deps.customHooks.runHooks).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("handles overlapping role prompts when active functions are %s", async withActive => {
+    const role: ResolvedRole = {
+      id: "worker", config: { name: "Worker", description: "Worker", prompt: "Worker responsibilities", auto_activate: withActive ? ["active"] : [] },
+      prompt: "", skills: [], references: [], functions: [makeFn("active")], subagents: [],
+    };
+    role.prompt = buildAgentPrompt(role.config, [], withActive ? {} : {
+      publicAgents: [{ id: "peer", name: "Peer", description: "Peer responsibilities" }],
+    });
+    const output = { system: [role.prompt, "Host context"] };
+    const deps = minimalDeps({ roleMap: new Map([[role.id, role]]), isGraphWorker: () => true });
+    await handleSystemTransform({ sessionID: "sess-1", agent: role.id }, output, makeState(), deps);
+    expect(output.system.join("\n")).not.toContain("## Available public agents");
+    expect(output.system.join("\n")).toContain("Worker responsibilities");
+    if (withActive) expect(output.system.join("\n")).toContain("active content");
+    expect(output.system[1]).toBe("Host context");
+    const once = [...output.system];
+    await handleSystemTransform({ sessionID: "sess-1", agent: role.id }, output, makeState(), deps);
+    expect(output.system).toEqual(once);
+  });
+
+  it("adds a missing worker role once and leaves unknown roles untouched", async () => {
+    const role: ResolvedRole = {
+      id: "worker", config: { name: "Worker", description: "Worker", prompt: "Worker responsibilities" },
+      prompt: "", skills: [], references: [], functions: [], subagents: [],
+    };
+    const output = { system: ["Host context"] };
+    const deps = minimalDeps({ roleMap: new Map([[role.id, role]]), isGraphWorker: () => true });
+    await handleSystemTransform({ sessionID: "sess-1", agent: "unknown" }, output, makeState(), deps);
+    expect(output.system).toEqual(["Host context"]);
+    await handleSystemTransform({ sessionID: "sess-1", agent: role.id }, output, makeState(), deps);
+    expect(output.system).toEqual(["Host context", "## Role instructions\n\nWorker responsibilities"]);
+    await handleSystemTransform({ sessionID: "sess-1", agent: role.id }, output, makeState(), deps);
+    expect(output.system).toHaveLength(2);
   });
 
   it("returns early when sessionID is missing", async () => {

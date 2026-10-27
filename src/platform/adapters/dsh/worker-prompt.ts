@@ -7,7 +7,13 @@ import {
 import type { ResolvedRole } from "../../../types.ts";
 import type { WorkerToolPresentation } from "../../../graph/domain/worker-tools.ts";
 
-export function prepareDshGraphWorkerPrompt(
+export function prepareDshGraphWorkerRolePrompt(roles: readonly ResolvedRole[], agentId: string): string {
+  const agent = findGraphWorkerRole(roles, agentId);
+  if (!agent) throw new Error(`Graph worker agent is not resolved: ${agentId}`);
+  return buildGraphWorkerRolePrompt(agent, { resourceTool: "files" });
+}
+
+export function prepareDshGraphWorkerExecutionPrompt(
   roles: readonly ResolvedRole[], agentId: string, workspace: string,
   declaredTools?: readonly string[], presentation?: WorkerToolPresentation,
 ): string {
@@ -17,14 +23,14 @@ export function prepareDshGraphWorkerPrompt(
   const agent = findGraphWorkerRole(roles, agentId);
   if (!agent) throw new Error(`Graph worker agent is not resolved: ${agentId}`);
   return [
-    "You are a graph worker assigned to the role below. Complete the dispatched task using the host's native tools and rolebox capabilities. " +
-      "You cannot dispatch agents or inspect/control graph state. " +
-      "Submit only a declared outcome using the host handoff; an accepted submission settles your attempt. A prose answer does not settle it. " +
-      "If the tool call does not settle your attempt, end your final message with exactly one fenced ```json block of the form " +
-      "{\"outcome_id\": \"<an outcome this node declares>\", \"data\": <the outcome payload>, \"evidence_refs\": [\"<path>\"]} " +
-      "— the host reads your last turn's output when no submission arrives, and exactly one such block is required for it to be used.",
     buildGraphWorkerToolGrantBlock(declaredTools, presentation),
-    `Worker workspace: ${workspace}. Use the host's native command and file tools; their working-directory behavior, permissions and sandbox policy apply.`,
-    buildGraphWorkerRolePrompt(agent, { resourceTool: "files" }),
+    `Worker workspace: ${workspace}. The host's working-directory behavior, permissions and sandbox policy apply.`,
+    "JSON fallback applies only when completion is explicit or unspecified. If your final turn completes normally without an accepted settlement, " +
+      "the host may derive an outcome from exactly one fenced ```json block across that turn's assistant text. Put it at the end of your final message: " +
+      "{\"outcome_id\": \"<declared outcome>\", \"data\": <payload>, \"evidence_refs\": [\"<path>\"]}. " +
+      "Only outcome_id is required; omit unused optional fields and include no other keys or credential. " +
+      "A prior rejected or refused submission does not disable this fallback. The host must authenticate the execution and apply the same outcome, " +
+      "schema and acceptance checks; correct any reported issues first. Failed or aborted turns are ineligible. " +
+      "Natural-completion nodes use the plan's pinned outcome instead.",
   ].filter(Boolean).join("\n\n");
 }

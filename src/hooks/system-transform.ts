@@ -18,7 +18,7 @@ import { logEvent, withLogScope } from "../log/index.ts";
 import type { ResolvedFunction } from "../types.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
-import { buildGraphWorkerFunctionBlock, findGraphWorkerRole } from "../prompt/graph-worker.ts";
+import { buildGraphWorkerRolePrompt, findGraphWorkerRole } from "../prompt/graph-worker.ts";
 
 const log = createSubLogger("hook-sys-xform");
 
@@ -33,8 +33,22 @@ export async function handleSystemTransform(
   if (deps.isGraphWorker?.(sid)) {
     const agentId = input.agent ?? state.sessionAgentRegistry.get(sid);
     const role = agentId === undefined ? undefined : findGraphWorkerRole([...deps.roleMap.values()], agentId);
-    const block = role === undefined ? "" : buildGraphWorkerFunctionBlock(role);
-    if (block) output.system.push(block);
+    if (role === undefined) return;
+    const workerPrompt = buildGraphWorkerRolePrompt(role);
+    const prompts = [...new Set([role.prompt, workerPrompt])].filter(Boolean).sort((a, b) => b.length - a.length);
+    if (prompts.length === 0) return;
+    // Match the longer form first: either prompt can contain the other as a prefix.
+    const pattern = new RegExp(prompts.map(prompt => prompt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+    let injected = false;
+    // OpenCode v1 keeps this array and joins the role prompt with host context in one entry.
+    for (let index = 0; index < output.system.length; index += 1) {
+      output.system[index] = output.system[index].replace(pattern, () => {
+        const replacement = injected ? "" : workerPrompt;
+        injected = true;
+        return replacement;
+      });
+    }
+    if (!injected && workerPrompt) output.system.push(workerPrompt);
     return;
   }
 

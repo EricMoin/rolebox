@@ -57,6 +57,16 @@ describe("buildAttemptDeliveryPrompt", () => {
     expect(prompt).not.toContain('"completion"');
   });
 
+  it("distinguishes correctable outcome rejection from denied permissions", () => {
+    const prompt = buildAttemptDeliveryPrompt(REQUEST);
+    expect(prompt).toContain("If outcome validation or acceptance checks reject your submission, address the reported issues before resubmitting.");
+    expect(prompt).toContain("A host permission or approval denial is different: do not repeat the denied operation or try to widen your permissions");
+    expect(prompt).toContain("report the resulting limitation through an applicable declared outcome");
+    expect(prompt).toContain("An outcome report does not authorize a denied operation");
+    expect(prompt).toContain("Stop after an accepted submission");
+    expect(prompt).not.toContain("A rejection or refusal leaves it open");
+  });
+
   it("delivers the exact natural completion mapping", () => {
     const completion = { mode: "natural", outcome: "done" } as const;
     const prompt = buildAttemptDeliveryPrompt({ ...REQUEST, completion });

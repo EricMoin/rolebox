@@ -106,8 +106,9 @@ export interface DshSubagentDispatchRuntime extends DshSubagentRuntime {
  * On the 0.2.x line a provider with `prepareContinuable` never sees its own
  * `start()` — the service composes the child — so the role prompt, context and
  * model must be resolved before `startActivation`. The dsh entry wires this to
- * {@link DshAgentRegistrar.composeSpawnRequest}. `workerPrompt`, when supplied,
- * is a graph worker's COMPLETE prompt and replaces the role-prompt prepend.
+ * {@link DshAgentRegistrar.composeSpawnRequest}. `workerExecutionPrompt`, when supplied,
+ * carries graph execution guidance and suppresses role injection into the
+ * dispatch message; the worker's role is registered in its scoped system section.
  *
  * Absent → the request is started exactly as composed by the adapter (a host
  * without the registrar still dispatches, just without role materialization).
@@ -115,7 +116,7 @@ export interface DshSubagentDispatchRuntime extends DshSubagentRuntime {
 export type DshSpawnRequestComposer = (
   agent: string,
   request: DshSubagentStartRequest,
-  workerPrompt?: string,
+  workerExecutionPrompt?: string,
 ) => DshSubagentStartRequest;
 
 /**

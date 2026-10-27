@@ -23,7 +23,7 @@ import type { DshSessionEventLike } from "./session.ts";
  *   composing the child, so an unresolvable parent fails LOUD before the start);
  *   the agent id is the `provider`, `delivery: "caller"` leaves the worker's
  *   answer with the graph host that observes the run, and the composed request
- *   (role prompt, model override) is built BEFORE the call because a local
+ *   (execution guidance, model override) is built BEFORE the call because a local
  *   provider never sees its own `start()`;
  * - the invocation the run belongs to arrives WITH the delivery (the host's
  *   third argument: the graph's declaring invocation, recorded by the host and
@@ -194,50 +194,21 @@ export type DshOutcomeSettlement =
   };
 
 export interface DshOutcomeDeliveryOptions {
-  /**
-   * THE BASELINE ALLOW-LIST, used when no per-request resolver answers: the
-   * worker's own delivery channel (`graph_submit_outcome`). It is deliberately STATIC and unconditional — this is
-   * the surface every worker keeps, and nothing a caller passes can widen it.
-   */
-  readonly workerTools?: readonly string[];
-  /**
-   * THE ALLOW-LIST FOR ONE REQUEST, resolved by the entry that owns the host
-   * tool registry: the baseline plus inherited task tools,
-   * each intersected with the tools the host actually registered
-   * ({@link resolveDshWorkerToolAllowList}).
-   *
-   * WHY PER REQUEST. The node's declared grant rides ON the request
-   * ({@link OutcomeDispatchRequest.declaredTools}), so the allow-list is a
-   * property of the attempt, not of the adapter: one delivery may start a
-   * worker inheriting one parent catalog and the next inheriting another.
-   *
-   * FAIL CLOSED ON EVERY UNCERTAINTY. An answer of `undefined`, a resolver the
-   * entry did not install, and a resolver that THROWS all fall back to
-   * {@link DshOutcomeDeliveryOptions.workerTools} — the static baseline. A
-   * missing answer is never read as a grant.
-   */
-  readonly workerToolsOf?: (request: OutcomeDispatchRequest) => readonly string[] | undefined;
   readonly readExecutionEvents?: (id: string) => Promise<readonly DshSessionEventLike[] | undefined>;
   /**
-   * Build the COMPLETE prompt a graph worker runs under (role, command
-   * boundary, tool face and the attempt handoff). The dsh entry wires it to
-   * `prepareDshGraphWorkerPrompt`. A host that omits it starts the worker with
-   * the bare attempt-delivery prompt.
-   *
-   * ON dsh 0.2.x THIS IS THE ONLY WAY THE WORKER PROMPT REACHES THE CHILD: the
-   * provider whose `prepareContinuable` puts it on the local path never sees its
-   * own `start()`, so the prompt must be composed into the request here rather
-   * than prepended by the provider.
+   * Build execution guidance for the dispatch message, without role content.
+   * The dsh entry registers the role separately in the child's system section.
+   * A host that omits this starts with the bare attempt-delivery prompt.
    */
-  readonly workerPrompt?: (
+  readonly workerExecutionPrompt?: (
     request: OutcomeDispatchRequest,
     inputView: DeliveredInputView | undefined,
   ) => string | undefined;
   /**
    * Optional call-site spawn composer ({@link DshSpawnRequestComposer}) — the
    * dsh entry wires it to `DshAgentRegistrar.composeSpawnRequest` so a graph
-   * worker still receives its role's MODEL override and any spawn context, with
-   * `workerPrompt` replacing the role's system-prompt prepend.
+   * worker still receives its role's model override. `workerExecutionPrompt`
+   * suppresses the role prepend and parent session context in this message.
    */
   readonly composeRequest?: DshSpawnRequestComposer;
   readonly startWorker?: (label: string, start: () => Promise<DshSubagentRun>, request: OutcomeDispatchRequest) => Promise<DshSubagentRun>;
@@ -841,27 +812,10 @@ export class DshOutcomeDelivery {
     }
 
     const controller = new AbortController();
-    // Intersect the inherited catalog, node restriction and registered tools. A resolver that THROWS or
-    // answers nothing has not granted anything: the delivery falls back to the
-    // static baseline rather than starting a worker under a list nobody
-    // resolved. Never wider, only narrower.
-    //
-    // The start scope carries this request to the worker boundary, which
-    // filters the model's schemas through system-prompt/assemble and checks
-    // every execution independently through the host registry guard.
-    let workerTools: readonly string[] | undefined;
-    try {
-      workerTools = this.opts.workerToolsOf?.(request) ?? this.opts.workerTools;
-    } catch {
-      workerTools = this.opts.workerTools;
-    }
-    // THE WORKER'S ONE PROMPT (D7): the plan's prompt, the attempt handoff and
-    // the input view the host materialized beside it, under the COMPLETE worker
-    // role/boundary prompt when the host supplies one. The view's file paths are
-    // the worker's own copies, verified before this call.
-    const workerPrompt = this.opts.workerPrompt?.(request, inputView);
-    const deliveryText = buildAttemptDeliveryPrompt(request, inputView)
-      + (workerTools ? "\nUse the authorized host and rolebox tools for commands, file operations, builds and tests." : "");
+    // The dispatch message carries execution guidance, the task, the attempt
+    // contract and verified upstream inputs. The role belongs to the system section.
+    const workerExecutionPrompt = this.opts.workerExecutionPrompt?.(request, inputView);
+    const deliveryText = buildAttemptDeliveryPrompt(request, inputView);
     const baseRequest: DshSubagentStartRequest = {
       label: dispatchIdempotencyKeyOf(effect),
       prompt: [{ type: "text", text: deliveryText }],
@@ -869,14 +823,13 @@ export class DshOutcomeDelivery {
       signal: controller.signal,
       sessionId: parentSessionId,
     };
-    // THE ROLE AND MODEL ARE MATERIALIZED AT THE CALL SITE (0.2.x). The
+    // THE MODEL AND EXECUTION GUIDANCE ARE MATERIALIZED AT THE CALL SITE. The
     // provider whose `prepareContinuable` selects the local path never receives
     // its own `start()`, so the composer — not the provider — builds the request
-    // the child runs with. `workerPrompt` replaces the role's system-prompt
-    // prepend and keeps the definition's model override.
-    const startRequest = this.opts.composeRequest?.(agent, baseRequest, workerPrompt) ?? {
+    // the child runs with, suppressing the role prepend while keeping its model.
+    const startRequest = this.opts.composeRequest?.(agent, baseRequest, workerExecutionPrompt) ?? {
       ...baseRequest,
-      ...(workerPrompt === undefined ? {} : { prompt: [{ type: "text", text: workerPrompt } as DshContentBlock, ...baseRequest.prompt] }),
+      ...(workerExecutionPrompt === undefined ? {} : { prompt: [{ type: "text", text: workerExecutionPrompt } as DshContentBlock, ...baseRequest.prompt] }),
     };
     // The start itself is a promise; the delivery contract is synchronous. A
     // rejection is reported as a failed start (nothing was observed running).

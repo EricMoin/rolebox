@@ -48,6 +48,7 @@ import { initializeRoleboxRuntime } from "../../src/platform/factory.ts";
 import { openOpencode2GraphHost } from "../../src/platform/adapters/opencode2/index.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-effects.ts";
+import type { Opencode2AgentEditor, Opencode2MutableAgentInfo, Opencode2HostMutableAgentInfo } from "../../src/platform/adapters/opencode2/agents.ts";
 import { PLUGIN_ID } from "../../src/constants.ts";
 
 // ── What the entry must register ────────────────────────────────────────────
@@ -83,6 +84,14 @@ interface FakeContext {
   readonly pushEvent: (event: unknown) => void;
   /** Every dispose the host's registrations ran. */
   readonly disposed: () => number;
+  readonly agents: Map<string, Opencode2MutableAgentInfo>;
+  readonly context: () => ((event: ContextEvent) => Promise<void>) | undefined;
+}
+
+interface ContextEvent {
+  sessionID: string;
+  agent: string;
+  system: Array<{ type: "text"; text: string; cache?: unknown; metadata?: Record<string, unknown> }>;
 }
 
 function registration(): { dispose: () => Promise<void> } {
@@ -130,6 +139,8 @@ function makeContext(
   fake: FakeContext;
 } {
   const tools: string[] = [];
+  const agents = new Map<string, Opencode2MutableAgentInfo>();
+  let contextHook: ((event: ContextEvent) => Promise<void>) | undefined;
   let disposed = 0;
   let signal: AbortSignal | undefined;
   let push: ((event: unknown) => void) | undefined;
@@ -161,7 +172,8 @@ function makeContext(
   };
 
   const sessionDomain: Record<string, unknown> = {
-    hook: async () => {
+    hook: async (name: string, callback: (event: ContextEvent) => Promise<void>) => {
+      if (name === "context") contextHook = callback;
       disposed += 1;
       return registration();
     },
@@ -193,7 +205,19 @@ function makeContext(
       list: async () => [],
       reload: async () => {},
     },
-    agent: { transform: disposeRegistration, reload: async () => {} },
+    agent: {
+      transform: async (callback: (editor: Opencode2AgentEditor) => void) => {
+        callback({ update: (id, update) => {
+          const agent: Opencode2MutableAgentInfo = {
+            id, name: id, mode: "primary", hidden: false, request: { body: {} }, permissions: [],
+          };
+          update(agent as unknown as Opencode2HostMutableAgentInfo);
+          agents.set(id, agent);
+        } });
+        return disposeRegistration();
+      },
+      reload: async () => {},
+    },
     skill: { transform: disposeRegistration, reload: async () => {} },
     command: { transform: disposeRegistration, reload: async () => {} },
     session: sessionDomain,
@@ -207,6 +231,8 @@ function makeContext(
       subscribeSignal: () => signal,
       pushEvent: (event: unknown) => push?.(event),
       disposed: () => disposed,
+      agents,
+      context: () => contextHook,
     },
   };
 }
@@ -383,6 +409,78 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 // ── The real host ───────────────────────────────────────────────────────────
 
 describe("opencode v2 entry — the declared-graph face registers through the real host", () => {
+  it("replaces only the worker role body while preserving host context and ordinary role catalogs", async () => {
+    writeRole();
+    const roleDir = path.join(tmpDir, "rolebox", "emperor");
+    writeFileSync(path.join(roleDir, "role.yaml"), [
+      "name: Emperor",
+      "description: Reviews changes",
+      "prompt: Review correctness and report reproducible evidence.",
+      "skills: [review-guide]",
+      "subagents:",
+      "  - name: Inspector",
+      "    description: Inspects changes",
+      "    prompt: Inspect the assigned changes.",
+    ].join("\n"));
+    const skillDir = path.join(roleDir, "skills", "review-guide");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: review-guide\ndescription: Review methodology\n---\nReview with evidence.\n");
+    mkdirSync(path.join(roleDir, "references"));
+    writeFileSync(path.join(roleDir, "references", "checklist.md"), "# Acceptance checklist\nVerify each reported issue.\n");
+    const peerDir = path.join(tmpDir, "rolebox", "peer");
+    mkdirSync(peerDir);
+    writeFileSync(path.join(peerDir, "role.yaml"), "name: Peer\ndescription: Peer review\nprompt: Review independently.\n");
+    const { ctx, fake } = contextInTmp();
+    const plugin = createOpencode2Plugin(withGraphSpy(makeHostSpy().openGraphHost));
+    const cleanup = await plugin.setup(ctx);
+    try {
+      const rolePrompt = fake.agents.get("emperor")?.system;
+      expect(rolePrompt).toContain("## Available sub-agents");
+      expect(rolePrompt).toContain("## Available public agents");
+      const contextHook = fake.context();
+      expect(contextHook).toBeDefined();
+      const hostPart = {
+        type: "text" as const, text: "Host safety and workspace rules.",
+        cache: { type: "ephemeral" }, metadata: { source: "host" },
+      };
+      const tailPart = {
+        type: "text" as const, text: "Repository context.", metadata: { source: "project" },
+      };
+      const worker: ContextEvent = {
+        sessionID: "ses_worker", agent: "emperor",
+        system: [hostPart, { type: "text", text: `Host preface.\n${rolePrompt}\nHost suffix.` }, tailPart],
+      };
+      await contextHook!(worker);
+      expect(worker.system[0]).toBe(hostPart);
+      expect(worker.system[2]).toBe(tailPart);
+      const text = worker.system.map(part => part.text).join("\n");
+      expect(text).toContain("Host preface.");
+      expect(text).toContain("Host suffix.");
+      expect(text.split("Review correctness and report reproducible evidence.")).toHaveLength(2);
+      expect(text).toContain("## Available references");
+      expect(text).toContain("checklist");
+      expect(text).toContain("## Available skills");
+      expect(text).toContain("review-guide");
+      expect(text).not.toContain("## Available sub-agents");
+      expect(text).not.toContain("## Available public agents");
+      expect(text).not.toContain("JSON fallback");
+      const workerBefore = [...worker.system];
+      await contextHook!(worker);
+      expect(worker.system).toEqual(workerBefore);
+      const parent: ContextEvent = {
+        sessionID: "ses_parent", agent: "emperor",
+        system: [hostPart, { type: "text", text: rolePrompt! }],
+      };
+      await contextHook!(parent);
+      expect(parent.system[0]).toBe(hostPart);
+      expect(parent.system[1]?.text).toBe(rolePrompt);
+      expect(parent.system[1]?.text).toContain("## Available sub-agents");
+      expect(parent.system[1]?.text).toContain("## Available public agents");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
   it("connects prompt isolation to the host's confirmed worker identity", async () => {
     writeRole();
     const { ctx } = contextInTmp();

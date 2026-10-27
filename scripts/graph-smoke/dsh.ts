@@ -82,11 +82,17 @@ let capabilityProbes = 0;
 const capabilitySteps = new Map<string, number>();
 const parentNotices: string[] = [];
 const hostErrors: string[] = [];
+const workerRoleText = "Complete the fixture. Preserve {{model}} literally.";
+const workerFunctionText = "Check the fixture's acceptance evidence.";
 let modelRequests = 0;
 class ScriptedAdapter extends LlmAdapter {
   async *stream(options: any): AsyncIterable<any> {
     if (++modelRequests > 200) throw new Error("Scripted smoke provider exceeded its request budget");
-    const texts = options.messages.flatMap((message: any) => (message.content ?? []).filter((block: any) => block.type === "text").map((block: any) => block.text)).join("\n");
+    const messageText = (messages: any[]) => messages.flatMap((message: any) => (message.content ?? [])
+      .filter((block: any) => block.type === "text").map((block: any) => block.text)).join("\n");
+    const texts = messageText(options.messages);
+    const systemText = messageText(options.messages.filter((message: any) => message.role === "system"));
+    const userText = messageText(options.messages.filter((message: any) => message.role === "user"));
     const lastMessage = options.messages.at(-1);
     const last = JSON.stringify(lastMessage);
     const graphId = texts.match(/graph_id:\s+([^\s]+)/)?.[1];
@@ -98,6 +104,26 @@ class ScriptedAdapter extends LlmAdapter {
     const capabilityStep = capabilityMode ? capabilitySteps.get(graphId!) ?? 0 : 0;
     if (!graphId && graphNotice) parentNotices.push(last);
     if (graphId) {
+      for (const roleText of [workerRoleText, workerFunctionText]) {
+        assert.equal(systemText.split(roleText).length - 1, 1, "Worker role and active functions must appear once in system messages");
+        assert.ok(!userText.includes(roleText), "Worker role and active functions must not be duplicated in dispatch messages");
+      }
+      assert.ok(!systemText.includes("Verify the graph."), "Worker must not inherit the parent's active role");
+      for (const heading of ["## Assigned task", "## Declared outcome contract", "[rolebox outcome protocol — attempt handoff]"]) {
+        assert.equal(userText.split(heading).length - 1, 1, "Attempt contract must remain in one dispatch message");
+        assert.ok(!systemText.includes(heading), "Attempt contract must not become system instructions");
+      }
+      const assignedTask = userText.match(/## Assigned task\n\n([^\n]+)/)?.[1];
+      assert.ok(assignedTask, "Worker dispatch must carry the assigned task");
+      assert.ok(!systemText.includes(assignedTask), "Assigned task must not enter the role system section");
+      assert.ok(credential && userText.includes(credential), "Attempt credential must remain in its dispatch message");
+      assert.ok(!systemText.includes(credential!), "Attempt credential must not enter the system section");
+      if (nodeId === "review") {
+        assert.ok(userText.includes("## Accepted upstream results"));
+        assert.ok(userText.includes("accepted-upstream"));
+        assert.ok(!systemText.includes("## Accepted upstream results"));
+        assert.ok(!systemText.includes("accepted-upstream"));
+      }
       const names = options.tools.map((tool: any) => tool.name);
       assert.ok(names.includes("graph_submit_outcome"));
       for (const forbidden of ["graph_declare", "graph_control", "graph_status", "graph_audit", "dispatch", "task", "team_create"]) {
@@ -112,6 +138,9 @@ class ScriptedAdapter extends LlmAdapter {
         assert.ok(names.includes("bash"), "Worker must inherit the host's native command tool");
         assert.ok(!names.includes("graph_worker_tools"), "Default workers should use native schemas");
       }
+    } else {
+      assert.ok(!systemText.includes(workerRoleText), "Worker system sections must not leak to the parent or its peers");
+      assert.ok(!systemText.includes(workerFunctionText), "Worker active functions must remain scoped to the worker");
     }
     if (graphId) writeFileSync(join(root, graphId + ".ready"), "ready");
     if (graphId && texts.includes("FAIL_FIXTURE") && !existsSync(join(root, graphId + ".failed"))) {
@@ -163,7 +192,10 @@ try {
   process.chdir(launcher);
   writeFileSync(protectedFile, "host-state", { mode: 0o600 });
   mkdirSync(join(root, "rolebox", "smoke"), { recursive: true });
-  writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), "name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\ntools:\n  unsafe_probe: false\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: Complete the fixture.\n    model: example-provider/deterministic\n    subagents:\n      - name: Private\n        description: Private nested worker\n        prompt: Complete internal work.\n        model: example-provider/deterministic\n");
+  writeFileSync(join(root, "rolebox", "smoke", "role.yaml"), `name: Smoke\ndescription: Host verification\nprompt: Verify the graph.\nmodel: example-provider/deterministic\ntools:\n  unsafe_probe: false\nsubagents:\n  - name: Worker\n    description: Deterministic worker\n    prompt: ${workerRoleText}\n    functions: [worker-check]\n    auto_activate: [worker-check]\n    model: example-provider/deterministic\n    subagents:\n      - name: Private\n        description: Private nested worker\n        prompt: Complete internal work.\n        model: example-provider/deterministic\n`);
+  mkdirSync(join(root, "rolebox", "smoke", "functions"), { recursive: true });
+  writeFileSync(join(root, "rolebox", "smoke", "functions", "worker-check.md"),
+    `---\nname: worker-check\ndescription: Verify fixture evidence\n---\n${workerFunctionText}\n`);
   fibers.push(ctx.plugin(SessionPersistence, { root: join(root, "sessions"), compression: "none" }));
   for (const plugin of [SessionStore, SessionProjections, FileSystem, AgentRegistry, LlmService, SystemPrompt, SubagentService]) fibers.push(ctx.plugin(plugin));
   fibers.push(ctx.plugin(SessionQuery, { path: join(root, "session-query.sqlite"), openAt: "never" }));
@@ -360,7 +392,7 @@ try {
   await handle.dispose();
   await dispose();
   await verifyHostProcessRestart(import.meta.filename, root, queryGraphs(graphStoreRoot(data, root)).graphs);
-  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", entry: process.env.ROLEBOX_SMOKE_BUILT === "1" ? "built" : "source", cordisActivation: "verified", profileLoader: profile ? "real" : "not-required", inheritedPreset: Boolean(profile), activeRole: "verified", nestedChild: "refused", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", unconfirmedExecutionRecovery: "verified", workerDiscovery: "verified", workerCode: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
+  console.log(JSON.stringify({ host: "dsh", mode: "real-sdk-scripted-provider", entry: process.env.ROLEBOX_SMOKE_BUILT === "1" ? "built" : "source", cordisActivation: "verified", profileLoader: profile ? "real" : "not-required", inheritedPreset: Boolean(profile), activeRole: "verified", nestedChild: "refused", declaration: "persisted", budgetRefusal: true, explicitChain: "complete", downstreamInput: "verified", unconfirmedExecutionRecovery: "verified", workerDiscovery: "verified", workerCode: "verified", natural: "complete", sandbox: "enforced", sessionWorkspace: "verified", nativeFirstRequest: "verified", workerSystemSection: "scoped-once", attemptDelivery: "user-message", systemGit: "verified", ...controls, hostReload: "reattached", naturalAfterReload: "complete", processRecovery: "verified" }));
   }
 } catch (error) { console.error(error); throw error; } finally {
   for (const fiber of fibers.reverse()) await fiber.dispose();

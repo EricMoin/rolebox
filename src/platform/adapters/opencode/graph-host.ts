@@ -553,8 +553,8 @@ export class OpencodeGraphHost {
     try { await this.options.workerTools?.prepare(request); }
     catch (error) { this.failDelivery(request, effect, "worker tool configuration refused before session creation", error); return; }
     // 1. The ONE channel the credential travels over (delivery.ts:14-43).
-    const text = buildAttemptDeliveryPrompt(request, inputView) + (request.toolPresentation === undefined ? "" :
-      "\n\n" + buildGraphWorkerToolGrantBlock(request.declaredTools, request.toolPresentation, ["bash", "graph_submit_outcome"]));
+    const text = buildAttemptDeliveryPrompt(request, inputView) + "\n\n" +
+      buildGraphWorkerToolGrantBlock(request.declaredTools, request.toolPresentation, ["bash", "graph_submit_outcome"]);
     // 2-3. Create the session and confirm it, in that order: the confirm is what
     // turns the registry row from `creating` into a host FACT.
     let session: { id: string } | null;

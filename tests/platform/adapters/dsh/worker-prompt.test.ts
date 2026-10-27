@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FunctionSource, ReferenceScope } from "../../../../src/constants.ts";
-import { prepareDshGraphWorkerPrompt } from "../../../../src/platform/adapters/dsh/worker-prompt.ts";
+import { prepareDshGraphWorkerExecutionPrompt, prepareDshGraphWorkerRolePrompt } from "../../../../src/platform/adapters/dsh/worker-prompt.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../../../src/types.ts";
 
 const directories: string[] = [];
@@ -44,14 +44,19 @@ function fixture() {
 describe("DSH graph worker prompt", () => {
   it.each(["native", "discover", "code"] as const)("uses host and rolebox capabilities in %s mode", mode => {
     const f = fixture();
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace, [], { mode });
-    expect(prompt).toContain("host's native tools and rolebox capabilities");
+    const prompt = prepareDshGraphWorkerExecutionPrompt(f.roles, f.planner.id, f.workspace, [], { mode });
     expect(prompt).toContain("inherits the parent's authorized task tools");
     expect(prompt).toContain("Worker entry points are graph_submit_outcome");
     expect(prompt).toContain("Graph control tools and recursive agent dispatch remain unavailable");
-    expect(prompt).toContain("host's native command and file tools");
+    expect(prompt).toContain("Use them directly when exposed");
     expect(prompt).toContain("permissions and sandbox policy apply");
     expect(prompt).toContain("```json");
+    expect(prompt).not.toContain("You are the planner.");
+    expect(prompt).not.toContain("Return a Strategy.");
+    expect(prompt).not.toContain("## Role instructions");
+    expect(prompt).not.toContain("## Active functions");
+    expect(prompt).not.toContain(f.refs);
+    expect(prompt).not.toContain(f.skill);
     expect(prompt).not.toContain("graph_worker_exec");
     expect(prompt).not.toContain("disposable per-command");
     expect(prompt).not.toContain("private copies");
@@ -59,14 +64,34 @@ describe("DSH graph worker prompt", () => {
     if (mode === "code") expect(prompt).toContain("graph_worker_code to call them from JavaScript");
   });
 
+  it("states the runtime fallback conditions without treating a refused submission as settlement", () => {
+    const f = fixture();
+    const prompt = prepareDshGraphWorkerExecutionPrompt(f.roles, f.planner.id, f.workspace);
+    expect(prompt).toContain("completion is explicit or unspecified");
+    expect(prompt).toContain("final turn completes normally without an accepted settlement");
+    expect(prompt).toContain("exactly one fenced ```json block across that turn's assistant text");
+    expect(prompt).toContain("Only outcome_id is required");
+    expect(prompt).toContain("include no other keys or credential");
+    expect(prompt).toContain("A prior rejected or refused submission does not disable this fallback");
+    expect(prompt).toContain("authenticate the execution and apply the same outcome, schema and acceptance checks");
+    expect(prompt).toContain("Failed or aborted turns are ineligible");
+    expect(prompt).toContain("Natural-completion nodes use the plan's pinned outcome instead");
+    expect(prompt).not.toContain("when no submission arrives");
+    expect(prompt).not.toContain("If the tool call does not settle");
+  });
+
   it("includes only the target role and its active functions", () => {
     const f = fixture();
     f.planner.functions.push({ name: "unused", description: "Other work", content: "Inactive instructions.",
       filePath: "unused.md", source: FunctionSource.RoleLocal });
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    const prompt = prepareDshGraphWorkerRolePrompt(f.roles, f.planner.id);
     expect(prompt).toContain("## Role instructions\n\nYou are the planner.");
     expect(prompt).toContain("## Active functions");
-    expect(prompt).toContain("Return a Strategy.");
+    expect(prompt.match(/You are the planner\./g)).toHaveLength(1);
+    expect(prompt.match(/Return a Strategy\./g)).toHaveLength(1);
+    expect(prompt).not.toContain("Worker workspace:");
+    expect(prompt).not.toContain("Worker entry points");
+    expect(prompt).not.toContain("```json");
     for (const forbidden of ["You are the coordinator.", "triage", "Legacy rendered", "Inactive instructions.",
       "## Available functions", "## Available sub-agents", "## Available public agents"]) {
       expect(prompt).not.toContain(forbidden);
@@ -76,7 +101,7 @@ describe("DSH graph worker prompt", () => {
   it("uses the role's original resource paths and normal loaders without copying bundles", () => {
     const f = fixture();
     const before = readdirSync(f.directory);
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    const prompt = prepareDshGraphWorkerRolePrompt(f.roles, f.planner.id);
     expect(prompt).toContain("use load_role_skill if available");
     expect(prompt).toContain("Use load_reference with the listed name");
     expect(prompt).toContain(`Base directory: \`${f.refs}\``);
@@ -92,24 +117,25 @@ describe("DSH graph worker prompt", () => {
     writeFileSync(join(f.refs, "theory", "deep.md"), "Nested theory");
     f.planner.references.push({ name: "theory/deep", description: "Nested theory", scope: ReferenceScope.Role,
       relativePath: "references/theory/deep.md", filePath: join(f.refs, "theory", "deep.md") });
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    const prompt = prepareDshGraphWorkerRolePrompt(f.roles, f.planner.id);
     expect(prompt).toContain(`Base directory: \`${f.refs}\``);
     expect(prompt).toContain("- `theory/deep` — Nested theory");
   });
 
   it("states the workspace without promising a custom command runner", () => {
     const f = fixture();
-    const prompt = prepareDshGraphWorkerPrompt(f.roles, f.planner.id, f.workspace);
+    const prompt = prepareDshGraphWorkerExecutionPrompt(f.roles, f.planner.id, f.workspace);
     expect(prompt).toContain(`Worker workspace: ${f.workspace}.`);
-    expect(prompt.indexOf("Worker workspace:")).toBeLessThan(prompt.indexOf("## Role instructions"));
+    expect(prompt).not.toContain("## Role instructions");
     expect(prompt).not.toContain("Worker command boundary:");
   });
 
   it("refuses unknown agents and invalid workspaces", () => {
     const f = fixture();
-    expect(() => prepareDshGraphWorkerPrompt(f.roles, "missing", f.workspace)).toThrow("not resolved");
+    expect(() => prepareDshGraphWorkerExecutionPrompt(f.roles, "missing", f.workspace)).toThrow("not resolved");
+    expect(() => prepareDshGraphWorkerRolePrompt(f.roles, "missing")).toThrow("not resolved");
     for (const workspace of ["", "   ", "relative/workspace"]) {
-      expect(() => prepareDshGraphWorkerPrompt(f.roles, f.planner.id, workspace))
+      expect(() => prepareDshGraphWorkerExecutionPrompt(f.roles, f.planner.id, workspace))
         .toThrow("The 'workspace' argument must be a non-blank absolute path");
     }
   });

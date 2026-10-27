@@ -1055,20 +1055,20 @@ export class DshAgentRegistrar implements IAgentRegistrar {
    * the service — this method is that one composition, and
    * {@link DshDispatchAdapter} / {@link DshOutcomeDelivery} both call it.
    *
-   * `workerPrompt` is the COMPLETE prompt a graph worker runs under (assembled
-   * by the graph host); when present it replaces the definition's system-prompt
-   * prepend and suppresses the session-role/context injection, exactly as the
-   * provider's external path always did. An UNKNOWN agent id is forwarded
+   * `workerExecutionPrompt` carries graph execution guidance only. When present,
+   * it suppresses the definition's role prepend and parent session context;
+   * the worker boundary registers the role in the child's system section.
+   * An UNKNOWN agent id is forwarded
    * untouched: the provider lookup inside `startActivation` reports it by name.
    */
   composeSpawnRequest(
     agentId: string,
     request: DshSubagentStartRequest,
-    workerPrompt?: string,
+    workerExecutionPrompt?: string,
   ): DshSubagentStartRequest {
     const definition = this.entries.get(agentId)?.definition;
     if (definition === undefined) return request;
-    const composed = this.resolveComposition(definition, request, workerPrompt);
+    const composed = this.resolveComposition(definition, request, workerExecutionPrompt);
     return {
       ...request,
       prompt: composed.prompt,
@@ -1083,11 +1083,11 @@ export class DshAgentRegistrar implements IAgentRegistrar {
   private resolveComposition(
     definition: AgentDefinition,
     request: DshSubagentStartRequest,
-    workerPrompt?: string,
+    workerExecutionPrompt?: string,
   ): { prompt: DshContentBlock[]; agentOptions?: DshAgentOptions } {
-    const isolated = workerPrompt !== undefined || definition.mode === RoleMode.Subagent;
-    const prompt = workerPrompt !== undefined
-      ? [{ type: "text", text: workerPrompt } as DshContentBlock, ...request.prompt]
+    const isolated = workerExecutionPrompt !== undefined || definition.mode === RoleMode.Subagent;
+    const prompt = workerExecutionPrompt !== undefined
+      ? [{ type: "text", text: workerExecutionPrompt } as DshContentBlock, ...request.prompt]
       : prependSystemPrompt(definition, request.prompt);
     const agentOptions = mergeAgentOptions(
       definition,
@@ -1096,7 +1096,7 @@ export class DshAgentRegistrar implements IAgentRegistrar {
     );
     // Session role overrides apply to ordinary session rounds, not workers.
     const active = isolated ? undefined : this.resolveActiveOverride(request.sessionId, definition.id);
-    const context = workerPrompt !== undefined ? undefined
+    const context = workerExecutionPrompt !== undefined ? undefined
       : isolated ? this.contextProvider?.(request.sessionId ?? "", definition.id)
       : this.resolveSpawnContext(request.sessionId);
     return {

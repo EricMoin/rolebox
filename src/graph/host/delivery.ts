@@ -44,16 +44,17 @@ export function buildAttemptDeliveryPrompt(
     " attempt " +
     JSON.stringify(request.attemptId) +
     ".",
-    "When your work satisfies one of this node's declared outcomes, settle it with the",
-    "graph_submit_outcome tool, passing:",
+    "Report your outcome with graph_submit_outcome, passing:",
     "  graph_id:   " + request.graphId,
     "  node_id:    " + request.nodeId,
     "  outcome_id: the declared outcome your work achieved",
     "  credential: " + request.credential,
     "  data:       the payload required by the chosen outcome and assigned task, when applicable",
     "  evidence_refs: artifact paths required by the assigned task and acceptance gates, when applicable",
-    "Only an accepted decision settles the attempt. A rejection or refusal leaves it open;",
-    "address the reported issues before resubmitting. Stop after an accepted submission.",
+    "Only an accepted decision settles the attempt. Stop after an accepted submission.",
+    "If outcome validation or acceptance checks reject your submission, address the reported issues before resubmitting.",
+    "A host permission or approval denial is different: do not repeat the denied operation or try to widen your permissions;",
+    "report the resulting limitation through an applicable declared outcome. An outcome report does not authorize a denied operation.",
     "The credential is bound to THIS attempt only. Do not write it into a file, a",
     "shared message, or another node's context; pass it only to graph_submit_outcome.",
   ];

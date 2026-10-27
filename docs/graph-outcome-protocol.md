@@ -564,11 +564,22 @@ evidence requirements and domain acceptance criteria.
 
 **Worker role context across hosts.** DSH, Pi and OpenCode 1/2 include only the
 worker role's explicitly auto-activated function instructions, without an inactive
-function catalog or parent-session function activation. DSH and Pi prepare the
-worker's role prompt before launch; OpenCode keeps the host's existing system
-instructions and applies the same function selection in its system hook, using
-the host-confirmed worker session identity. Ordinary sessions retain their normal
-function activation. Codex's MCP adapter currently has no graph dispatch backend.
+function catalog or parent-session function activation. DSH registers the role,
+active functions and resource guidance once in the worker's agent-scoped
+`rolebox:role` system section, before its first model request. This section
+shadows the inherited role section and preserves literal template text. Execution
+guidance, the task, outcome contract, attempt handoff and upstream inputs remain
+in the dispatch message. A worker requires a scoped system-prompt registry;
+role text is never copied back into the dispatch message as a fallback.
+Pi prepares the worker's role prompt before launch. OpenCode 1/2 replace the
+registered role text in their system hook with the worker-specific role prompt,
+using the host-confirmed worker session identity. This retains role responsibilities,
+skills, references and auto-activated functions while omitting generated sub-agent
+and public-agent catalogs. Surrounding host system instructions remain intact,
+including when v1 combines them with the role text in one entry. Both OpenCode
+versions include worker tool guidance in the dispatch message; JSON fallback
+guidance remains exclusive to DSH. Ordinary sessions retain their normal catalogs
+and function activation. Codex's MCP adapter currently has no graph dispatch backend.
 
 ## Runs, controls and limits
 
@@ -968,9 +979,10 @@ dispatch catalogs and advertise the target role's skills and references through
 the normal rolebox loaders. Resource paths point to the original role bundles,
 so relative supporting files resolve from the loaded resource's directory.
 
-A dsh graph worker's prompt asks it to end its **final message** with exactly one
-fenced `json` block, so an execution that ends without a submission can still
-carry the outcome it reached:
+A dsh graph worker with explicit or unspecified completion may use JSON fallback
+when its final turn completes normally without an accepted settlement. The prompt
+asks it to put one fenced `json` block at the end of its **final message**; the
+reader requires exactly one such block across all assistant text in that turn:
 
 ```json
 {
@@ -987,9 +999,18 @@ from the worker's own final turn, and only when that turn completed: a failed or
 aborted final turn belongs to the execution observation rather than being a
 declaration source. No block, more than one block, an unknown key, or a missing or
 empty `outcome_id` all mean the host derives nothing and the attempt stays open.
-A declaration is not a submission — it settles nothing by itself — and it is the
-input to the host-derived completion channel described under Natural completion
-and approval.
+A prior rejected or refused submission does not disable fallback. The host must
+authenticate the confirmed execution and apply the same outcome, payload schema
+and acceptance checks. An already accepted attempt is not settled again, and
+natural-completion nodes cannot use this channel: they use the plan's pinned
+completion mapping. A declaration settles nothing by itself; it is input to the
+host-derived completion channel described under Natural completion and approval.
+
+Outcome validation or acceptance rejection calls for correcting the reported
+issues before resubmission. Host permission or approval denial does not authorize
+retrying the denied operation or widening the worker's permissions; report the
+limitation through an applicable declared outcome. JSON fallback does not authorize
+a denied task operation.
 
 The loopback channel's own envelope admits more names than a worker's grant, and
 that is transport plumbing rather than a worker capability: which graph tool a

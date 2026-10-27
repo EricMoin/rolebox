@@ -524,6 +524,13 @@ describe("opencode graph host — the declared-graph tool face", () => {
     expect(prompts()[3]?.text).toContain("Worker interrupted after editing; inspect existing work");
     expect(prompts()[3]?.text).toContain('Producer: "review"; outcome: "revise"; attempt: "review#2"');
     expect(prompts()[3]?.text).toContain('"problem":"Missing cleanup"');
+    for (const prompt of prompts()) {
+      expect(prompt.text).toContain("Task tools: this worker inherits the parent's authorized task tools. Use them directly when exposed.");
+      expect(prompt.text).toContain("Worker entry points are bash, graph_submit_outcome.");
+      expect(prompt.text.match(/Graph control tools and recursive agent dispatch remain unavailable\./g)).toHaveLength(1);
+      expect(prompt.text).not.toContain("JSON fallback");
+      expect(prompt.text).not.toContain("host may derive an outcome");
+    }
   });
 
   it("registers exactly the five declared-graph tools", () => {

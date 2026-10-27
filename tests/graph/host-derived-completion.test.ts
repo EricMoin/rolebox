@@ -828,6 +828,63 @@ describe("settleHostDerivedCompletion — the plan still decides", () => {
     );
   });
 
+  it.each([
+    { outcomeId: "done", kind: "rejected" },
+    { outcomeId: "undeclared", kind: "refused" },
+  ] as const)("accepts a corrected derived outcome after a $kind submission without bypassing acceptance", async ({ outcomeId, kind }) => {
+    await withHarness(
+      gatedDeclaration(),
+      async (harness) => {
+        const { runtime, ledger, requests, graphId, executions } = harness;
+        expect(runtime.start(NOW).kind).toBe("started");
+        executions.set("work#1", { executionId: WORK_EXECUTION });
+
+        const submitted = runtime.submit({
+          nodeId: WORK,
+          outcomeId,
+          credential: credentialOf(requests, "work#1"),
+          data: { verdict: "fail" },
+        }, NOW + 1);
+        expect(submitted.kind).toBe(kind);
+        if (submitted.kind === "refused") {
+          expect(submitted.refusals.map(refusal => refusal.code)).toEqual(["undeclared-outcome"]);
+        }
+        expect(ledger.acceptedEvents(graphId)).toEqual([]);
+
+        const unchanged = runtime.settleHostDerivedCompletion(
+          factOf(executions, "work#1", { data: { verdict: "fail" } }),
+          NOW + 2,
+        );
+        expect(unchanged.kind).toBe("rejected");
+        if (unchanged.kind !== "rejected") return;
+        expect(unchanged.decision.requirements).toMatchObject([{
+          requirement: { id: GATE_ID, version: GATE_VERSION },
+          outcome: { kind: "fail" },
+        }]);
+        expect(ledger.acceptedEvents(graphId)).toEqual([]);
+        expect(requests.map(request => request.attemptId)).toEqual(["work#1"]);
+
+        const corrected = runtime.settleHostDerivedCompletion(
+          factOf(executions, "work#1", { data: { verdict: "pass" } }),
+          NOW + 3,
+        );
+        expect(corrected.kind).toBe("accepted");
+        if (corrected.kind !== "accepted") return;
+        expect(corrected.completion.source).toBe(HOST_DERIVED_SOURCE);
+        expect(corrected.completion.attemptId).toBe("work#1");
+        expect(nodeOf(corrected.state, WORK)).toMatchObject({ status: "settled", outcomeId: "done" });
+        expect(ledger.acceptedEvents(graphId).map(event => event.submissionId)).toEqual([
+          corrected.completion.submissionId,
+        ]);
+        expect(requests.map(request => request.attemptId)).toEqual(["work#1", "ship#2"]);
+      },
+      {
+        validators: payloadGate(),
+        supportedValidators: [{ validator: GATE_ID, version: GATE_VERSION }],
+      },
+    );
+  });
+
   it("refuses a NATURAL-completion node by name, before anything is written", async () => {
     await withHarness(naturalDeclaration(), async (harness) => {
       const { runtime, graphId, executions, dir } = harness;

@@ -271,15 +271,15 @@ async function createFixture(
   /**
    * Spawn ONE agent the way the production adapters do: compose the request at
    * the call site (applying the active role, the spawn context and the
-   * definition's model), then activate it. `workerPrompt`, when given, is a
-   * graph worker's COMPLETE prompt and replaces the role-prompt prepend.
+   * definition's model), then activate it. `workerExecutionPrompt`, when given,
+   * suppresses role injection into the dispatch message.
    */
   const start = async (
     agentId: string,
     request: DshSubagentStartRequest,
-    workerPrompt?: string,
+    workerExecutionPrompt?: string,
   ) => {
-    const composed = registrar.composeSpawnRequest(agentId, request, workerPrompt);
+    const composed = registrar.composeSpawnRequest(agentId, request, workerExecutionPrompt);
     return subagents.startActivation({
       provider: agentId,
       label: agentId,
@@ -318,7 +318,7 @@ function markerContextProvider(): DshSpawnContextProvider {
 // ── Spawn seam: activated role reaches the spawned prompt ───────────────────
 
 describe("dsh active-role spawn seam", () => {
-  it("keeps graph workers on their target prompt and model, including primary targets", async () => {
+  it("keeps graph worker roles out of the dispatch message and retains their target model, including primary targets", async () => {
     for (const mode of [RoleMode.Primary, RoleMode.Subagent]) {
       const { switcher, start, spawned } = await createFixture([
         makeAgent("coordinator", { mode: RoleMode.Primary, model: "parent-provider/parent-model" }),
@@ -327,10 +327,8 @@ describe("dsh active-role spawn seam", () => {
         contextProvider: () => [{ type: "text", text: "parent functions" }],
       });
       await switcher.activate("coordinator", "s1");
-      // The worker's COMPLETE prompt is the call-site composer's third argument;
-      // on dsh 0.2.x it never travels through the provider's start().
-      await start("planner", spawnRequest("s1"), "Worker planner instructions and own functions");
-      expect(promptText(spawned[0].request.prompt)).toBe("Worker planner instructions and own functions\nuser request");
+      await start("planner", spawnRequest("s1"), "Worker execution guidance");
+      expect(promptText(spawned[0].request.prompt)).toBe("Worker execution guidance\nuser request");
       expect(spawned[0].request.agentOptions).toEqual({ provider: "worker-provider", model: "worker-model" });
     }
   });

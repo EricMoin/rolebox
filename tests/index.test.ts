@@ -1032,13 +1032,27 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 
 describe("RoleboxPlugin declared-graph run notifications", () => {
   it("wakes the declaring session through the real v1 entry when a graph completes", async () => {
-    await writeRole("agent.worker", "name: Worker\ndescription: Worker\nprompt: Worker instructions\n");
+    await writeRole("agent.worker", [
+      "name: Worker",
+      "description: Worker",
+      "prompt: Worker instructions",
+      "subagents:",
+      "  - name: Inspector",
+      "    description: Inspect changes",
+      "    prompt: Inspect assigned changes.",
+    ].join("\n"));
+    await writeRole("peer", "name: Peer\ndescription: Peer responsibilities\nprompt: Peer instructions\n");
 
     // THE REAL ENTRY over a fake opencode 1.x client: `RoleboxPlugin` builds the
     // session adapter from `client`, hands that SAME adapter to the host as its
     // wake-up channel, and returns the handler map opencode iterates.
     const fake = fakeOpencodeClient();
     const hooks = await bootPlugin({ ...createPluginInput(tmpDir), client: fake.client });
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+    const registeredPrompt = cfg.agent!["agent.worker"]!.prompt!;
+    expect(registeredPrompt).toContain("## Available sub-agents");
+    expect(registeredPrompt).toContain("## Available public agents");
 
     try {
       const declared = JSON.parse(
@@ -1074,17 +1088,21 @@ describe("RoleboxPlugin declared-graph run notifications", () => {
         cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
         limit: { context: 1024, output: 1024 }, status: "active", options: {}, headers: {},
       };
-      const workerSystem = { system: ["Host and worker role instructions"] };
+      const system = [registeredPrompt + "\nHost workspace instructions", "Host policy"];
+      const workerSystem = { system };
       await hooks["chat.message"]!({ sessionID: "ses_worker", agent: "agent.worker" }, {
         parts: [{ type: "text", text: "Inspect the literal |unused| marker." }],
       } as never);
       await hooks["experimental.chat.system.transform"]!({ sessionID: "ses_worker", model }, workerSystem);
-      expect(workerSystem.system).toEqual(["Host and worker role instructions"]);
-      const parentSystem = { system: ["Parent instructions"] };
+      expect(workerSystem.system).toBe(system);
+      expect(system).toEqual(["## Role instructions\n\nWorker instructions\nHost workspace instructions", "Host policy"]);
+      expect(workerSystem.system.join("\n")).not.toContain("JSON fallback");
+      const parentSystem = { system: [registeredPrompt] };
       await hooks["chat.message"]!({ sessionID: "ses_parent", agent: "agent.worker" }, {
         parts: [{ type: "text", text: "Parent task" }],
       } as never);
       await hooks["experimental.chat.system.transform"]!({ sessionID: "ses_parent", model }, parentSystem);
+      expect(parentSystem.system[0]).toBe(registeredPrompt);
       expect(parentSystem.system.join("\n")).toContain("## Available functions");
       expect(parentSystem.system.join("\n")).toContain("Inactive orchestration instructions");
       const handoffText = promptCallText(handoff);

@@ -13,6 +13,7 @@ import { DshToolFactory, type DshToolDefinition, type DshToolRunContext } from "
 import type { DshContentBlock } from "./agent-registrar.ts";
 import { readDshSessionEvents, type DshEventSource } from "./session-events.ts";
 import type { DshWorkerExecutorFactory, DshWorkerToolExecution, DshWorkerToolExecutor } from "./worker-executor.ts";
+import type { DshSystemPromptRegistry } from "./system-prompt.ts";
 
 export const DSH_GRAPH_WORKER_GRANT: readonly GraphToolName[] = Object.freeze([
   "graph_submit_outcome",
@@ -27,7 +28,7 @@ function message(error: unknown): string {
 export interface DshWorkerAgent {
   readonly id?: string;
   readonly session?: DshEventSource & { readonly id?: string };
-  readonly ctx?: { readonly tools?: {
+  readonly ctx?: { readonly systemPrompt?: Pick<DshSystemPromptRegistry, "section">; readonly tools?: {
     /** Published rc3 uses presentAs; newer source hosts use setExecutor. */
     presentAs?(mode: "native"): () => void;
     setExecutor?(executor: DshWorkerToolExecutor): () => void;
@@ -87,7 +88,8 @@ function nativeResultFailed(value: unknown): boolean {
 /** Keep authorization in the registry guard and filter the worker's model tool surface. */
 export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, tools: DshGraphWorkerRegistry,
   subscribe: (event: string, listener: (...args: unknown[]) => unknown) => (() => void) | void,
-  createExecutor?: DshWorkerExecutorFactory) {
+  createExecutor?: DshWorkerExecutorFactory,
+  rolePromptOf?: (agent: DshWorkerAgent, startup: DshWorkerStartupTools) => string) {
   const labels = new Map<string, DshWorkerStartupTools>();
   const prepared = new WeakMap<DshWorkerAgent, { startup: DshWorkerStartupTools; activated: Set<string> }>();
   const workerSessions = new Set<string>();
@@ -161,6 +163,12 @@ export function installDshGraphWorkerBoundary(host: DshGraphWorkerGrantHost, too
     const sessionId = agent.session?.id ?? agent.id;
     const owned: (() => void)[] = [];
     try {
+      if (rolePromptOf) {
+        const registry = agent.ctx?.systemPrompt;
+        if (!registry) throw new Error("Graph workers require an agent-scoped system-prompt registry");
+        const rolePrompt = rolePromptOf(agent, state.startup);
+        owned.push(registry.section({ name: "rolebox:role", order: 50, interpolate: false, text: () => rolePrompt }));
+      }
       let invoke = tools.execute ? (execution: DshWorkerToolExecution) => tools.execute!(execution) : undefined;
       if (scoped.setExecutor) {
         if (!createExecutor) throw new Error("Graph workers require the host native tool executor");

@@ -3,7 +3,7 @@ import { readDshExecutionEvents } from "../platform/adapters/dsh/graph-observati
 import { loadDshWorkerExecutorFactory, type DshWorkerExecutorContext } from "../platform/adapters/dsh/worker-executor.ts";
 import { createGraphNotificationSender } from "../platform/graph-notifications.ts";
 import { installDshGraphWorkerBoundary, type DshGraphWorkerRegistry, DSH_GRAPH_WORKER_TOOLS } from "../platform/adapters/dsh/graph-worker.ts";
-import { prepareDshGraphWorkerPrompt } from "../platform/adapters/dsh/worker-prompt.ts";
+import { prepareDshGraphWorkerExecutionPrompt, prepareDshGraphWorkerRolePrompt } from "../platform/adapters/dsh/worker-prompt.ts";
 import { inheritedWorkerTaskTools } from "../graph/domain/worker-tools.ts";
 /**
  * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
@@ -150,7 +150,6 @@ import { graphStoreRoot } from "../graph/store/schema.ts";
 import { getDataDir } from "../cli/paths.ts";
 import {
   DshOutcomeDelivery,
-  resolveDshWorkerToolAllowList,
   type DshOutcomeSubagentRuntime,
 } from "../platform/adapters/dsh/outcome-dispatch.ts";
 import type { OutcomeDispatchRequest } from "../graph/outcome/dispatch-effects.ts";
@@ -1828,6 +1827,10 @@ export async function apply(
     createDshGraphWorkerGrantHost(() => [...graphRuntimes.values()].map(runtime => runtime.host)),
     ctx.tools, (event, listener) => ctx.on(event, listener),
     ctx.tools.setExecutor ? await loadDshWorkerExecutorFactory(ctx) : undefined,
+    (agent, startup) => {
+      const { roleId } = resolveDshSessionContext(contextOptions, agent, startup.agent, startup);
+      return prepareDshGraphWorkerRolePrompt(resolvedRoles, roleId);
+    },
   );
   let sessionPersistence: unknown;
   try { sessionPersistence = ctx.get("sessionPersistence"); } catch { /* Optional host service. */ }
@@ -1961,12 +1964,10 @@ export async function apply(
         if (session.id === id && event.type === "turn/end") listener(session.snapshotEvents?.() ?? session.events ?? []);
       }) ?? (() => { }),
       readExecutionEvents: (id) => readDshExecutionEvents(ctx.sessions, ctx.get("sessionPersistence"), id),
-      // THE WORKER'S COMPLETE PROMPT, composed at the CALL SITE. On dsh 0.2.x
-      // the rolebox provider takes the local path (`prepareContinuable`) and
-      // never sees its own `start()`, so the worker prompt must be in the start
-      // request rather than prepended by a provider.
-      workerPrompt: (request) => {
-        const prompt = prepareDshGraphWorkerPrompt(resolvedRoles, request.agent, workspace,
+      // Execution context travels with the attempt; the worker boundary puts
+      // the target role into the child's scoped system section before its first turn.
+      workerExecutionPrompt: (request) => {
+        const prompt = prepareDshGraphWorkerExecutionPrompt(resolvedRoles, request.agent, workspace,
           request.declaredTools, request.toolPresentation);
         const memory = systemPromptRegistry ? "" : memoryContext.render({ session: { header: { cwd: workspace } } }, request.agent, request);
         const computer = systemPromptRegistry ? "" : computerContext({ session: { header: { cwd: workspace } } }, request.agent, request);
@@ -1976,35 +1977,9 @@ export async function apply(
         const browse = systemPromptRegistry ? "" : browseContext({ session: { header: { cwd: workspace } } }, request.agent, request);
         return [prompt, memory, computer, browse].filter(Boolean).join("\n\n");
       },
-      composeRequest: (agent, request, workerPrompt) =>
-        registrar.composeSpawnRequest(agent, request, workerPrompt),
+      composeRequest: (agent, request, workerExecutionPrompt) =>
+        registrar.composeSpawnRequest(agent, request, workerExecutionPrompt),
       startWorker: async (label, start, request) => workerBoundary!.start(label, start, request),
-      // THE BASELINE the delivery falls back to: the outcome submission entry, used
-      // when the per-request resolver below is not installed (a host with no tool
-      // lookup) or answers nothing. It is never widened from here.
-      workerTools: DSH_GRAPH_WORKER_TOOLS,
-      // (b) THE PER-REQUEST ALLOW-LIST: the baseline PLUS the node's declared
-      // entries intersected with the tools the host actually registered. The
-      // declared list is read from the request (runtime provenance), never from a
-      // caller; the intersection is computed here, where the registry is. A host
-      // without `ctx.tools.get` cannot substantiate registration at all, so the
-      // option is not installed and the static baseline above stands.
-      ...(typeof ctx.tools.get !== "function" ? {} : {
-        workerToolsOf: (request: OutcomeDispatchRequest) =>
-          resolveDshWorkerToolAllowList({
-            baseline: DSH_GRAPH_WORKER_TOOLS,
-            declared: request.declaredTools,
-            inherited: request.inheritedTools,
-            candidates: ctx.tools.schemas?.().map(tool => tool.name) ?? [],
-            isRegistered: (name: string) => {
-              try {
-                return ctx.tools.get?.(name) !== undefined;
-              } catch {
-                return false;
-              }
-            },
-          }),
-      }),
       subagents: ctx.subagents,
       parentResolver: (sid) => agentRegistry?.get(sid),
       onStartFailed: (_request, effect, reason) => {

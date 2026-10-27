@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { installDshGraphWorkerBoundary, type DshGraphWorkerRegistry } from "../../../../src/platform/adapters/dsh/graph-worker.ts";
+import type { DshSystemPromptSection } from "../../../../src/platform/adapters/dsh/system-prompt.ts";
+
+function promptAgent(id: string) {
+  const sections = new Map<string, DshSystemPromptSection>();
+  const registrations: DshSystemPromptSection[] = [];
+  const modes: string[] = [];
+  let disposed = 0;
+  return {
+    id, session: { id, events: [] }, sections, registrations, modes,
+    disposed: () => disposed,
+    ctx: {
+      systemPrompt: { section: (entry: DshSystemPromptSection) => {
+        if (sections.has(entry.name)) throw new Error(`Duplicate section: ${entry.name}`);
+        sections.set(entry.name, entry);
+        registrations.push(entry);
+        return () => { if (sections.delete(entry.name)) disposed++; };
+      } },
+      tools: { presentAs: (mode: "native") => { modes.push(mode); return () => {}; } },
+    },
+  };
+}
 
 describe("DSH graph worker presentation", () => {
   it("recognizes restored worker descriptors from SDK session snapshots", async () => {
@@ -107,48 +128,130 @@ describe("DSH graph worker presentation", () => {
     boundary.dispose();
   });
 
-  // The start scope no longer carries a prepared prompt (the worker's complete
-  // prompt is composed at the call site by
-  // `DshAgentRegistrar.composeSpawnRequest`, because dsh 0.2.x runs a provider
-  // with `prepareContinuable` on the LOCAL activation path and never calls its
-  // `start()`). Its remaining job is ADMISSION: an `agent/created` observed
-  // inside a start scope is marked as a worker before its first assembly, and
-  // concurrent starts stay independent.
-  it("admits each concurrent start's own child and leaves agents created outside every start alone", async () => {
+  it("registers each concurrent worker's role once in its own scope and leaves the parent alone", async () => {
     const listeners = new Map<string, (...args: unknown[]) => unknown>();
     const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
       guard: () => () => {},
     }, (event, listener) => {
       listeners.set(event, listener);
       return () => { listeners.delete(event); };
-    });
-    const agent = (id: string) => {
-      const modes: string[] = [];
-      return { id, session: { id, events: [] }, modes,
-        ctx: { tools: { presentAs: (mode: "native") => { modes.push(mode); return () => {}; } } } };
-    };
-    const first = agent("first-worker");
-    const second = agent("second-worker");
-    const outside = agent("outside");
+    }, undefined, (_agent, startup) => `Role ${startup.agent}: preserve {{literal}}`);
+    const first = promptAgent("first-worker");
+    const second = promptAgent("second-worker");
+    const parent = promptAgent("parent");
+    parent.ctx.systemPrompt.section({ name: "rolebox:role", order: 50, text: () => "Parent role" });
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
 
     const firstStart = boundary.start("first-label", async () => {
       await blocked;
       await listeners.get("agent/created")!({ agent: first });
-    });
+    }, { agent: "first-role" });
     await boundary.start("second-label", async () => {
       await listeners.get("agent/created")!({ agent: second });
-    });
+    }, { agent: "second-role" });
     release();
     await firstStart;
 
     expect(first.modes).toEqual(["native"]);
     expect(second.modes).toEqual(["native"]);
-    // No start scope is active here, and this agent has no worker descriptor or
-    // principal, so admission must not leak onto it.
-    await listeners.get("agent/created")!({ agent: outside });
-    expect(outside.modes).toEqual([]);
+    expect(first.sections.get("rolebox:role")?.text({})).toBe("Role first-role: preserve {{literal}}");
+    expect(second.sections.get("rolebox:role")?.text({})).toBe("Role second-role: preserve {{literal}}");
+    for (const worker of [first, second]) {
+      expect(worker.sections.get("rolebox:role")).toMatchObject({ order: 50, interpolate: false });
+      await listeners.get("agent/pre-step")!({ agent: worker }, async () => ({ kind: "enter" }));
+      await listeners.get("agent/pre-step")!({ agent: worker }, async () => ({ kind: "enter" }));
+      boundary.prepare(worker);
+      expect(worker.registrations).toHaveLength(1);
+    }
+    await listeners.get("agent/created")!({ agent: parent });
+    expect(parent.modes).toEqual([]);
+    expect(parent.sections.get("rolebox:role")?.text({})).toBe("Parent role");
     boundary.dispose();
+    expect(first.sections.size).toBe(0);
+    expect(second.sections.size).toBe(0);
+    expect(first.disposed()).toBe(1);
+    expect(second.disposed()).toBe(1);
+    expect(parent.disposed()).toBe(0);
+    expect(parent.sections.get("rolebox:role")?.text({})).toBe("Parent role");
+  });
+
+  it("recovers a delayed child's scoped role from its start descriptor", async () => {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>();
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: () => () => {},
+    }, (event, listener) => { listeners.set(event, listener); }, undefined,
+    (_agent, startup) => `Delayed ${startup.agent}`);
+    const worker = { ...promptAgent("delayed-worker"), session: {
+      id: "delayed-worker", snapshotEvents: () => [
+        { type: "subagent/descriptor", data: { label: "delayed-attempt", provider: "delayed-role" } },
+      ],
+    } };
+    try {
+      await boundary.start("delayed-attempt", async () => {}, { agent: "delayed-role" });
+      await listeners.get("agent/created")!({ agent: worker });
+      boundary.prepare(worker);
+      expect(worker.registrations).toHaveLength(1);
+      expect(worker.sections.get("rolebox:role")?.text({})).toBe("Delayed delayed-role");
+    } finally { boundary.dispose(); }
+  });
+
+  it("prepares an authenticated restored worker without an in-memory start", () => {
+    const worker = promptAgent("restored-worker");
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: sessionId => sessionId === worker.id
+      ? { graphId: "graph", attemptId: "attempt", executionId: worker.id, workerSessionId: worker.id } : undefined,
+    }, { guard: () => () => {} }, () => undefined, undefined, agent => {
+      expect(agent).toBe(worker);
+      return "Restored role";
+    });
+    try {
+      boundary.prepare(worker);
+      boundary.prepare(worker);
+      expect(worker.registrations).toHaveLength(1);
+      expect(worker.sections.get("rolebox:role")?.text({})).toBe("Restored role");
+    } finally { boundary.dispose(); }
+    expect(worker.sections.size).toBe(0);
+  });
+
+  it("refuses role injection without an agent-scoped system-prompt registry", async () => {
+    let resolvedRole = false;
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: () => () => {},
+    }, () => undefined, undefined, () => { resolvedRole = true; return "Worker role"; });
+    const worker = { id: "worker", ctx: { tools: {} } };
+    try {
+      await expect(boundary.start("attempt", async () => {
+        boundary.prepare(worker, true);
+      })).rejects.toThrow("agent-scoped system-prompt registry");
+      expect(resolvedRole).toBe(false);
+      expect(boundary.isWorker(worker)).toBe(false);
+    } finally { boundary.dispose(); }
+  });
+
+  it("rolls back the scoped role when tool preparation fails and permits a clean retry", async () => {
+    const boundary = installDshGraphWorkerBoundary({ workerPrincipalOf: () => undefined }, {
+      guard: () => () => {},
+    }, () => undefined, undefined, () => "Worker role");
+    const worker = promptAgent("worker");
+    let failTools = true;
+    const presentAs = worker.ctx.tools.presentAs;
+    worker.ctx.tools.presentAs = mode => {
+      if (failTools) throw new Error("Tool setup failed");
+      return presentAs(mode);
+    };
+    try {
+      await expect(boundary.start("attempt", async () => {
+        boundary.prepare(worker, true);
+      })).rejects.toThrow("Tool setup failed");
+      expect(worker.sections.size).toBe(0);
+      expect(worker.disposed()).toBe(1);
+      expect(boundary.isWorker(worker)).toBe(false);
+      failTools = false;
+      await boundary.start("retry-attempt", async () => { boundary.prepare(worker, true); });
+      expect(worker.sections.get("rolebox:role")?.text({})).toBe("Worker role");
+      expect(worker.registrations).toHaveLength(2);
+    } finally { boundary.dispose(); }
+    expect(worker.sections.size).toBe(0);
+    expect(worker.disposed()).toBe(2);
   });
 });

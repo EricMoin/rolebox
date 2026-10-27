@@ -1072,21 +1072,26 @@ describe("dsh plugin apply()", () => {
     const fixture = createFakeCtx({ agents: { get: () => parent } });
     const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
     // THE RUNTIME'S ONLY ENTRY on dsh 0.2.x (`startActivation`). The delivery
-    // composes the request at the CALL SITE — role prompt, worker prompt, model —
-    // and hands it here, so what this records IS what the child runs with. The
+    // composes execution guidance and the model at the CALL SITE. The
     // fake stands in for the service's LOCAL path: rolebox's provider declares
     // `prepareContinuable`, so the provider's own start() is never called and the
     // child creation the worker boundary observes is emitted here, inside the
     // worker's start scope.
     const requests: DshSubagentStartRequest[] = [];
+    const scopedSections: DshSystemPromptSection[][] = [];
     const workers: Array<{ id: string; session: { id: string; events: never[] } }> = [];
     runtime.startActivation = async (spec) => {
       requests.push({ ...spec.request, label: spec.label, signal: spec.signal });
       const id = "worker-" + requests.length;
+      const sections: DshSystemPromptSection[] = [];
+      scopedSections.push(sections);
       const worker = {
         id,
         session: { id, events: [] },
-        ctx: { tools: { presentAs: () => () => {}, register: (_definition: DshToolDefinition) => () => {} } },
+        ctx: {
+          systemPrompt: { section: (section: DshSystemPromptSection) => { sections.push(section); return () => {}; } },
+          tools: { presentAs: () => () => {}, register: (_definition: DshToolDefinition) => () => {} },
+        },
       };
       workers.push(worker);
       fixture.ctx.emit("agent/created", { agent: worker });
@@ -1193,8 +1198,7 @@ describe("dsh plugin apply()", () => {
       );
       expect(promptText(shooter)).toContain("inherits the parent's authorized task tools");
       expect(promptText(shooter)).not.toContain("restricts inherited host tools");
-      // The composed worker prompt reaches the child ahead of the plan prompt
-      // and the attempt handoff.
+      // Execution guidance accompanies the plan prompt and the attempt handoff.
       expect(promptText(shooter)).toContain("shoot");
       expect(promptText(plain)).toContain("inherits the parent's authorized task tools");
       expect(promptText(plain)).toContain(
@@ -1204,19 +1208,25 @@ describe("dsh plugin apply()", () => {
       // option could not express.
       expect(promptText(shooter)).not.toBe(promptText(plain));
       expect(promptText(plain)).not.toContain("graph_worker_tools");
+      for (const [index, sections] of scopedSections.entries()) {
+        expect(sections.map(section => section.name)).toEqual(["rolebox:role"]);
+        expect(sections[0].interpolate).toBe(false);
+        expect(sections[0].text({})).toContain("## Role instructions");
+        expect(promptText(requests[index])).not.toContain("## Role instructions");
+      }
     } finally {
       disposer?.();
       process.chdir(cwd);
     }
   });
 
-  it("delivers only the graph target's role, functions and role resources through the real registrar", async () => {
+  it("registers only the graph target's role, functions and resources in its scoped system section", async () => {
     writeRoleYaml("coordinator", [
       "name: Coordinator", "description: Coordinates", "prompt: Coordinator-only prompt",
       "model: parent-provider/model-name", "functions: [triage]", "disable_functions: [plan, execute, loop]",
     ].join("\n"));
     writeRoleYaml("coordinator/subagents/planner", [
-      "name: Planner", "description: Plans", "prompt: Planner-only prompt",
+      "name: Planner", "description: Plans", "prompt: Planner-only prompt with literal {{model}}",
       "model: worker-provider/model-name", "functions: [plan, unused]", "auto_activate: [plan]",
       "disable_functions: [execute, loop]", "skills: [research]", "tools:", "  graph_declare: false",
     ].join("\n"));
@@ -1243,21 +1253,23 @@ describe("dsh plugin apply()", () => {
       const fixture = createFakeCtx({ agents: { get: id => liveAgents.get(id) }, systemPrompt: true });
       const runtime = fixture.ctx.subagents as DshSubagentDispatchRuntime;
       const requests: DshSubagentStartRequest[] = [];
-      const workerSections: string[] = [];
+      const workerSections: DshSystemPromptSection[] = [];
       const workerContexts: string[] = [];
       // THE RUNTIME'S ONLY ENTRY on dsh 0.2.x (`startActivation`), standing in
       // for the service's LOCAL path exactly as in the declared-tools test above:
-      // the delivery composes the worker's COMPLETE prompt at the call site, and
-      // the child creation the worker boundary observes is emitted here, inside
-      // the worker's start scope.
+      // the child creation registers its scoped role before its first model request.
       runtime.startActivation = async (spec) => {
         requests.push({ ...spec.request, label: spec.label, signal: spec.signal });
-        const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: { tools: {
+        const worker = { id: "worker", session: { id: "worker", events: [] }, ctx: {
+          systemPrompt: { section: (section: DshSystemPromptSection) => {
+            workerSections.push(section);
+            return () => { workerSections.splice(workerSections.indexOf(section), 1); };
+          } }, tools: {
           presentAs: () => () => {}, register: (_definition: DshToolDefinition) => () => {},
         } } };
         liveAgents.set("worker", worker);
         fixture.ctx.emit("agent/created", { agent: worker });
-        workerSections.push(...fixture.sections.map(section => section.text({ agent: { id: "worker" } })));
+        expect(fixture.sections.map(section => section.text({ agent: { id: "worker" } }))).toEqual([""]);
         workerContexts.push(...fixture.contexts.map(context => context.text({ agent: { id: "worker" } })));
         return { childId: "worker", result: Promise.resolve({ stopReason: "completed", output: [] }), dispose: async () => {} };
       };
@@ -1276,12 +1288,32 @@ describe("dsh plugin apply()", () => {
       } }, { signal: new AbortController().signal, callId: "declare-worker-prompt", deferContext: () => {}, concludeTurn: () => {},
         agent: { id: "parent", session: { id: "parent", header: { cwd: tmpDir } } } });
       expect(requests).toHaveLength(1);
-      const prompt = requests[0].prompt.map(block => block.text ?? "").join("\n\n");
+      const dispatch = requests[0].prompt.map(block => block.text ?? "").join("\n\n");
+      expect(dispatch.match(/Graph control tools and recursive agent dispatch remain unavailable/g)).toHaveLength(1);
+      expect(dispatch.match(/Only an accepted decision settles the attempt/g)).toHaveLength(1);
+      expect(dispatch).not.toContain("You cannot dispatch agents or inspect/control graph state");
+      expect(dispatch).not.toContain("Submit only a declared outcome using the host handoff");
+      expect(dispatch).not.toContain("Use the authorized host and rolebox tools for commands, file operations, builds and tests");
+      expect(dispatch).toContain("A prior rejected or refused submission does not disable this fallback");
+      expect(dispatch).toContain("A host permission or approval denial is different");
+      expect(workerSections).toHaveLength(1);
+      expect(workerSections[0]).toMatchObject({ name: "rolebox:role", order: 50, interpolate: false });
+      const prompt = workerSections[0].text({ agent: { id: "worker" } });
       expect(prompt).toContain("Planner-only prompt");
+      expect(prompt).toContain("literal {{model}}");
+      expect(prompt.match(/Planner-only prompt/g)).toHaveLength(1);
       expect(prompt).toContain("## Active functions");
       expect(prompt).toContain("Child planning function");
-      expect(prompt).toContain("Produce a strategy.");
-      expect(prompt.match(/attempt handoff/g)).toHaveLength(1);
+      expect(dispatch).toContain("Produce a strategy.");
+      expect(dispatch).toContain("## Declared outcome contract");
+      expect(dispatch.match(/attempt handoff/g)).toHaveLength(1);
+      expect(dispatch).toContain("credential:");
+      for (const text of ["Produce a strategy.", "## Declared outcome contract", "attempt handoff", "credential:"]) {
+        expect(prompt).not.toContain(text);
+      }
+      for (const text of ["Planner-only prompt", "Child planning function", "## Role references", "Coordinator-only prompt", "Parent routing function"]) {
+        expect(dispatch).not.toContain(text);
+      }
       expect(prompt).not.toContain("Coordinator-only prompt");
       expect(prompt).not.toContain("Parent routing function");
       expect(prompt).not.toContain("## Available functions");
@@ -1307,14 +1339,12 @@ describe("dsh plugin apply()", () => {
       expect(JSON.stringify(await referenceLoader.execute({ name: "schema" }, resourceContext))).toContain("The planning schema");
       expect(JSON.stringify(await referenceLoader.execute({ name: "schema" }, { ...resourceContext, agent: parent })))
         .toContain("The planning schema");
-      expect(workerSections).toEqual([""]);
-      // One entry per registered context contribution: rolebox:context,
-      // rolebox:recall, rolebox:memory, rolebox:focus, rolebox:computer and
-      // rolebox:browse — every one of them renders "" for a graph worker, whose
-      // prompt is composed elsewhere (the recall and focus providers skip graph
-      // workers outright).
+      // No parent function catalog or disabled workflow context is injected.
       expect(workerContexts).toEqual(["", "", "", "", "", ""]);
       expect(fixture.sections[0].text({ agent: { id: "parent" } })).toContain("Coordinator-only prompt");
+      expect(fixture.sections[0].text({ agent: { id: "parent" } })).not.toContain("Planner-only prompt");
+      disposer();
+      expect(workerSections).toEqual([]);
     } finally {
       disposer?.();
       process.chdir(cwd);
