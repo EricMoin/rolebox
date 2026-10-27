@@ -104,6 +104,7 @@ describe("DSH session focus", () => {
     const registered = new Set(["memory_write", "memory_update", "memory_read"]);
     const names = new Map<string, string>();
     const workers = new Set<string>();
+    const workerTools: string[] = [];
     let sessionValue: ReturnType<typeof session> | undefined;
     const context: DshContextOptions = {
       roles: () => roles,
@@ -111,12 +112,12 @@ describe("DSH session focus", () => {
       session: () => sessionValue,
       tools: (agent?: DshContextAgent) => {
         const id = agent?.session?.id ?? agent?.id ?? "";
-        return workers.has(id) ? [] : [...registered];
+        return workers.has(id) ? [...workerTools] : [...registered];
       },
       names: () => names,
       worker: (agent?: DshContextAgent) => {
         const id = agent?.session?.id ?? agent?.id ?? "";
-        return workers.has(id) ? { declaredTools: [] } : undefined;
+        return workers.has(id) ? { agent: "role-a", inheritedTools: workerTools } : undefined;
       },
     };
     const focus = createDshSessionFocus({ context, maxChars: options.maxChars });
@@ -127,6 +128,7 @@ describe("DSH session focus", () => {
       registered,
       names,
       workers,
+      workerTools,
       context,
       focus,
       setSession(value: ReturnType<typeof session> | undefined) {
@@ -344,7 +346,7 @@ describe("DSH session focus", () => {
     expect(relative.render()).toBe("");
   });
 
-  it("renders '' for a graph worker even when an entry exists", () => {
+  it("renders '' for a graph worker without memory authorization", () => {
     const f = fixture();
     f.active.set(SESSION, "role-a");
     f.setSession(session(SESSION, root));
@@ -352,6 +354,18 @@ describe("DSH session focus", () => {
 
     expect(f.render()).toBe("");
     seedFocus();
+    expect(f.render()).toBe("");
+  });
+
+  it("uses session focus for an authorized graph worker", () => {
+    const f = fixture();
+    f.setSession(session(SESSION, root));
+    f.workers.add(SESSION);
+    f.workerTools.push("memory_write", "memory_update", "memory_read");
+    expect(f.render()).toContain("## Session focus");
+    seedFocus();
+    expect(f.render()).toContain("## Session focus");
+    f.workerTools.length = 0;
     expect(f.render()).toBe("");
   });
 

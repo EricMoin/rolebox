@@ -25,6 +25,7 @@
  * @module
  */
 
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import { isAbsolute } from "node:path";
 import type { MemoryEntry } from "../../../memory/types.ts";
 import { MemoryStore } from "../../../memory/store.ts";
@@ -93,8 +94,8 @@ export interface DshMemoryRecall {
    * Returns `''` (the registry drops the contribution) when the session has no
    * user-authored prompt, the prompt yields fewer than two search terms, the
    * search finds nothing, when the role opts out with `memory.recall: false`,
-   * without an absolute workspace, for a graph worker, or when the memory
-   * store is unavailable. Never throws.
+   * without an absolute workspace, when a worker has no authorized memory tools,
+   * or when the memory store is unavailable. Never throws.
    *
    * @param ctx - The dsh system-prompt context.
    * @returns The block, or `''`.
@@ -185,13 +186,19 @@ function renderRecall(
     if (!sessionId) return "";
     const agent = promptAgent(ctx, sessionId);
     const resolved = resolveDshSessionContext(options.context, agent);
-    // Graph workers run under a dispatch grant, not the role's memory policy;
-    // their continuity comes from the dispatch prompt.
-    if (resolved.worker) return "";
     const role = resolved.role;
     if (role?.config.memory?.recall === false) return "";
     const directory = resolved.directory;
     if (!directory || !isAbsolute(directory)) return "";
+
+    const worker = resolved.worker;
+    const registered = new Set([...registeredTools(options.context, agent)].filter(name =>
+      !worker || workerTaskToolAllowed(name, worker.declaredTools, worker.inheritedTools)));
+    const names = toolAliases(options.context);
+    if (worker && !["memory_read", "memory_recall", "memory_list"].some(name =>
+      availableTool(name, role?.config.tools, registered, names) !== undefined)) return "";
+    const readTool = availableTool("memory_read", role?.config.tools, registered, names);
+    const recallTool = availableTool("memory_recall", role?.config.tools, registered, names);
 
     const prompt = prompts.get(sessionId)
       ?? latestUserPrompt(readDshSessionEvents(agent.session ?? sessionOf(options.context, sessionId)));
@@ -202,7 +209,7 @@ function renderRecall(
     // not the raw token count.
     if (memoryPromptTerms(prompt.text).length < MIN_PROMPT_TERMS) return "";
 
-    const key = `${sessionId}:${prompt.key}:${role?.id ?? ""}`;
+    const key = `${sessionId}:${prompt.key}:${role?.id ?? ""}:${JSON.stringify([readTool, recallTool])}`;
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
 
@@ -212,13 +219,11 @@ function renderRecall(
     const entries = recallEntries(directory, queries, role?.id ?? "", maxEntries);
     if (entries.length === 0) return "";
 
-    const registered = registeredTools(options.context, agent);
-    const names = toolAliases(options.context);
     const block = renderBlock({
       entries,
       maxChars: charsBudget(options.maxChars),
-      readTool: availableTool("memory_read", role?.config.tools, registered, names),
-      recallTool: availableTool("memory_recall", role?.config.tools, registered, names),
+      readTool,
+      recallTool,
     });
     remember(cache, key, block);
     return block;

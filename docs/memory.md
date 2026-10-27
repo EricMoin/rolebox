@@ -78,7 +78,7 @@ The next prompt assembly carries a bounded `## Session focus` block with that en
 
 With no entry yet, the block states the create recipe instead: `memory_write` with title `Session focus — <short>` (the session id's first eight characters after `session-`, so the title identifies the session), tags `["session-focus"]`, category `note`, relevance `high`, scope `role` when a role is active and `workspace` otherwise, and the content sections above. After a compaction it is phrased as an urgent instruction to write the entry before continuing; otherwise as a standing convention. An entry whose content is blank is treated as one to fill: the block names its id and the `memory_update` call instead of asking for a duplicate.
 
-Writing and updating are permission-gated, and the block never bypasses them: the create recipe appears only when `memory_write` is authorized by the role's `tools` map and registered in the session, and the update instruction only when `memory_update` is. Displaying the block needs neither `memory_read` nor any write — rolebox reads the store in-process — so a session allowed only to read memory still sees its focus entry. A session without an absolute workspace is skipped, and DSH graph-worker sessions are skipped: their continuity comes from the dispatch prompt and their grants, not the role's memory policy.
+Writing and updating are permission-gated, and the block never bypasses them: the create recipe appears only when `memory_write` is authorized by the role's `tools` map and registered in the session, and the update instruction only when `memory_update` is. Displaying the block needs neither `memory_read` nor any write — rolebox reads the store in-process — so a session allowed only to read memory still sees its focus entry. A session without an absolute workspace is skipped. DSH graph workers use the same focus workflow when their inherited tools authorize memory access.
 
 Everything is fail-soft: a store failure, a missing session or an unreadable event log renders no block and never fails the prompt assembly. No memory is written automatically; only the agent writes or updates the entry.
 
@@ -99,7 +99,7 @@ Recall uses the same role visibility as the tools: a role sees workspace entries
 
 CJK search is fixed in the same index. FTS5's `unicode61` tokenizer treats a whole run of Han characters as one token, so `记忆机制` never matched `记忆机制需要保存关键点` and `压缩` never matched `上下文压缩后…`. The index now stores the original title, content and tags unchanged **plus** the deduplicated two-character bigrams of every Han run (a single-character run indexes as itself), and a Chinese query is rewritten to the same bigrams joined with `OR`. A two-character term therefore matches inside a longer phrase, while Latin, number and explicit FTS queries behave exactly as before. This affects `memory_recall` too, not only turn recall. The tool keeps its own contract: a query with no Han characters is still passed through byte-for-byte with its explicit FTS syntax intact, and the prompt extraction and function-word filtering above apply only to turn recall and its query scout.
 
-DSH graph-worker sessions are skipped: their continuity comes from the dispatch prompt and their tool grant, not the role's memory policy. Use `recall: false` to opt out for a role:
+DSH graph workers receive relevant memory when a memory reading tool is authorized and available. Their hints name only authorized tools. Use `recall: false` to opt out for a role:
 
 ```yaml
 memory:

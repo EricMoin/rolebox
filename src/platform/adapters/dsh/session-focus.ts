@@ -23,6 +23,7 @@
  * @module
  */
 
+import { workerTaskToolAllowed } from "../../../graph/host/tool-binding.ts";
 import { isAbsolute } from "node:path";
 import type { MemoryEntry } from "../../../memory/types.ts";
 import { MemoryStore } from "../../../memory/store.ts";
@@ -78,8 +79,8 @@ export interface DshSessionFocus {
    * Returns `''` (the registry drops the contribution) when the session has no
    * focus entry and no authorized/registered `memory_write`, when the role
    * opts out with `memory.session_focus: false`, without an absolute
-   * workspace, for a graph worker, or when the memory store is unavailable.
-   * Never throws.
+   * workspace, when a worker has no authorized memory tools, or when the memory
+   * store is unavailable. Never throws.
    *
    * @param ctx - The dsh system-prompt context.
    * @returns The block, or `''`.
@@ -118,9 +119,6 @@ function renderFocus(options: DshSessionFocusOptions, ctx: DshSystemPromptContex
     if (!sessionId) return "";
     const agent = promptAgent(ctx, sessionId);
     const resolved = resolveDshSessionContext(options.context, agent);
-    // Graph workers run under a dispatch grant, not the role's memory policy;
-    // their continuity comes from the dispatch prompt.
-    if (resolved.worker) return "";
     const role = resolved.role;
     if (role?.config.memory?.session_focus === false) return "";
     const directory = resolved.directory;
@@ -128,9 +126,13 @@ function renderFocus(options: DshSessionFocusOptions, ctx: DshSystemPromptContex
 
     const names = toolAliases(options.context);
     const registered = registeredTools(options.context, agent);
-    const canWrite = memoryToolEnabled("memory_write", role?.config.tools) &&
+    const allowed = (name: string) => !resolved.worker || workerTaskToolAllowed(
+      toolName(names, name), resolved.worker.declaredTools, resolved.worker.inheritedTools);
+    if (resolved.worker && !["memory_read", "memory_list", "memory_write", "memory_update"].some(name =>
+      memoryToolEnabled(name, role?.config.tools) && registered.has(toolName(names, name)) && allowed(name))) return "";
+    const canWrite = allowed("memory_write") && memoryToolEnabled("memory_write", role?.config.tools) &&
       registered.has(toolName(names, "memory_write"));
-    const canUpdate = memoryToolEnabled("memory_update", role?.config.tools) &&
+    const canUpdate = allowed("memory_update") && memoryToolEnabled("memory_update", role?.config.tools) &&
       registered.has(toolName(names, "memory_update"));
 
     const session = agent.session ?? sessionOf(options.context, sessionId);

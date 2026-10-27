@@ -123,6 +123,7 @@ describe("DSH turn recall", () => {
     const registered = new Set(["memory_read", "memory_recall", "memory_list", "memory_write"]);
     const names = new Map<string, string>();
     const workers = new Set<string>();
+    const workerTools: string[] = [];
     let sessionValue: ReturnType<typeof session> | undefined;
     const context: DshContextOptions = {
       roles: () => roles,
@@ -130,12 +131,12 @@ describe("DSH turn recall", () => {
       session: () => sessionValue,
       tools: (agent?: DshContextAgent) => {
         const id = agent?.session?.id ?? agent?.id ?? "";
-        return workers.has(id) ? [] : [...registered];
+        return workers.has(id) ? [...workerTools] : [...registered];
       },
       names: () => names,
       worker: (agent?: DshContextAgent) => {
         const id = agent?.session?.id ?? agent?.id ?? "";
-        return workers.has(id) ? { declaredTools: [] } : undefined;
+        return workers.has(id) ? { agent: "role-a", inheritedTools: workerTools } : undefined;
       },
     };
     const recall = createDshMemoryRecall({ context, ...options });
@@ -146,6 +147,7 @@ describe("DSH turn recall", () => {
       registered,
       names,
       workers,
+      workerTools,
       context,
       recall,
       setSession(value: ReturnType<typeof session> | undefined) {
@@ -318,13 +320,29 @@ describe("DSH turn recall", () => {
     expect(f.render()).toBe("");
   });
 
-  it("renders '' for a graph worker even when memory matches", () => {
+  it("renders '' for a graph worker without memory authorization", () => {
     const f = fixture();
     f.active.set(SESSION, "role-a");
     seed();
     f.setSession(session(SESSION, root, [userMessage("deployment migration", 1)]));
     f.workers.add(SESSION);
 
+    expect(f.render()).toBe("");
+  });
+
+  it("retrieves relevant role memory for an authorized graph worker", () => {
+    const f = fixture();
+    seed();
+    f.setSession(session(SESSION, root, [userMessage("deployment migration", 1)]));
+    f.workers.add(SESSION);
+    f.workerTools.push("memory_read", "memory_recall");
+    expect(f.render()).toContain("## Relevant memory");
+    expect(f.render()).toContain("read a full entry with `memory_read`");
+    f.workerTools.splice(0, f.workerTools.length, "memory_list");
+    expect(f.render()).toContain("## Relevant memory");
+    expect(f.render()).not.toContain("read a full entry with `memory_read`");
+    expect(f.render()).not.toContain("search for more with `memory_recall`");
+    f.workerTools.length = 0;
     expect(f.render()).toBe("");
   });
 
