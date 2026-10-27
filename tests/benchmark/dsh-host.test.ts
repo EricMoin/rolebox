@@ -10,6 +10,9 @@ import type { BenchmarkWorkerRequest, BenchmarkWorkerResult } from "../../src/be
 import { queryGraphs } from "../../src/graph/query/graph-query.ts";
 import { graphStoreRoot } from "../../src/graph/store/schema.ts";
 
+/** Backstop for a hung real dsh worker; a shared CI runner cold-starts far slower than a developer machine (production's own startup allowance is 10 s, src/benchmark/process.ts:9). */
+const fixtureStartupAllowanceMs = 30_000;
+
 const temporaryRoots: string[] = [];
 afterEach(async () => { await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
@@ -33,12 +36,13 @@ async function execute(mode: string, options: { model?: string; config?: Record<
     ...(mode === "skill" ? [] : ["subagents:", "  - name: Worker", "    description: Isolated fixture worker",
       "    prompt: Complete the assigned graph fixture.", "    model: example-provider/scripted", ""]),
   ].join("\n"));
+  const workerTimeoutMs = options.timeoutMs ?? (mode.includes("timeout") ? 100 : 5_000);
   const request: BenchmarkWorkerRequest = {
     protocolVersion: 1, workspace, rolesDirectory, roleId: "fixture", provider: "example-provider", model: "scripted",
     host: { plugins: [{ module: join(fixtures, "scripted-dsh-provider.mjs"), sourceDigest: options.sourceDigest, config: {
       runtimeAnchor: resolveDshRuntime().anchor, mode, ...options.config,
     } }], env: options.allowedEnv ?? [] },
-    prompt: "Complete the task.", timeoutMs: options.timeoutMs ?? (mode.includes("timeout") ? 100 : 5_000),
+    prompt: "Complete the task.", timeoutMs: workerTimeoutMs,
   };
   const requestPath = join(root, "request.json");
   const resultPath = join(root, "result.json");
@@ -53,7 +57,7 @@ async function execute(mode: string, options: { model?: string; config?: Record<
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([process.exited, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { process.kill(); reject(new Error("Worker fixture exceeded its outer deadline.")); }, 15_000);
+      timer = setTimeout(() => { process.kill(); reject(new Error("Worker fixture exceeded its outer deadline.")); }, workerTimeoutMs + fixtureStartupAllowanceMs);
     })]);
     expect(await stderr).not.toContain("Unhandled");
     const result = JSON.parse(await readFile(resultPath, "utf8")) as BenchmarkWorkerResult;
@@ -127,20 +131,20 @@ describe.skipIf(!available)("dsh benchmark with a real host and scripted provide
     expect(result.activation?.promptDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, costUsd: null, source: "host" });
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("keeps absent token accounting unknown", async () => {
     const result = await execute("missing-usage");
     expect(result.status, result.diagnostic).toBe("completed");
     expect(result.usage).toEqual({ inputTokens: null, outputTokens: null, costUsd: null, source: "unavailable" });
-  }, 20_000);
+  }, 45_000);
 
   it("includes descendant requests in usage and disposes their handles", async () => {
     const result = await execute("child-success");
     expect(result.status, result.diagnostic).toBe("completed");
     expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 10, costUsd: null, source: "host" });
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("waits for a real two-node graph and the parent's completion followup", async () => {
     const result = await execute("graph");
@@ -148,14 +152,14 @@ describe.skipIf(!available)("dsh benchmark with a real host and scripted provide
     expect(result.output).toBe("fixture complete");
     expect(result.usage.inputTokens).toBeGreaterThanOrEqual(50);
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("loads a role's named skill through the real native skill tool", async () => {
     const result = await execute("skill");
     expect(result.status, result.diagnostic).toBe("completed");
     expect(result.output).toBe("NATIVE_SKILL_LOADED");
     expect(result.usage.inputTokens).toBe(20);
-  }, 20_000);
+  }, 45_000);
 
   it("does not report success when a real native loop ends in an error", async () => {
     const result = await execute("loop");
@@ -163,46 +167,46 @@ describe.skipIf(!available)("dsh benchmark with a real host and scripted provide
     expect(result.diagnostic).toContain("native dsh loop");
     expect(result.diagnostic).toContain("error");
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("rejects a conflicting role model before making a model request", async () => {
     const result = await execute("success", { model: "different-model" });
     expect(result.status).toBe("invalid");
     expect(result.activation).toBeUndefined();
     expect(result.diagnostic).toContain("conflicts");
-  }, 20_000);
+  }, 45_000);
 
   it("does not confuse idle after a failed request with completion", async () => {
     const result = await execute("failure");
     expect(result.status).toBe("infra_error");
     expect(result.diagnostic).toContain("error");
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("records the model's output limit as a task failure", async () => {
     const result = await execute("max-tokens");
     expect(result.status, result.diagnostic).toBe("task_failure");
     expect(result.output).toBe("fixture complete");
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("cancels and drains the real agent on timeout", async () => {
     const result = await execute("timeout");
     expect(result.status).toBe("task_timeout");
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("cancels active descendants and drains their owned handles", async () => {
     const result = await execute("child-timeout", { timeoutMs: 2_000 });
     expect(result.status).toBe("task_timeout");
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("rejects environment references outside the explicit allowlist", async () => {
     const result = await execute("success", { config: { response: { $env: "BENCHMARK_FIXTURE_SECRET" } } });
     expect(result.status).toBe("invalid");
     expect(result.diagnostic).toContain("host.env");
-  }, 20_000);
+  }, 45_000);
 
   it("rejects a changed plugin entry before activating a role or calling a model", async () => {
     const result = await execute("success", { sourceDigest: "0".repeat(64) });
@@ -212,12 +216,12 @@ describe.skipIf(!available)("dsh benchmark with a real host and scripted provide
     expect(result.output).toBe("");
     expect(result.usage.source).toBe("unavailable");
     expect(result.terminationConfirmed).toBe(true);
-  }, 20_000);
+  }, 45_000);
 
   it("loads an unchanged plugin entry with a matching source digest", async () => {
     const source = await readFile(join(fixtures, "scripted-dsh-provider.mjs"), "utf8");
     const result = await execute("success", { sourceDigest: createHash("sha256").update(source).digest("hex") });
     expect(result.status, result.diagnostic).toBe("completed");
     expect(result.output).toBe("fixture complete");
-  }, 20_000);
+  }, 45_000);
 });

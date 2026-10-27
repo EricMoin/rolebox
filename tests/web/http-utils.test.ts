@@ -472,16 +472,19 @@ describe("per-host pacing", () => {
 
   it("honours ROLEBOX_WEB_HOST_MIN_INTERVAL_MS after a reset", async () => {
     process.env.ROLEBOX_WEB_HOST_MIN_INTERVAL_MS = "0";
+    __configureHostPacing({ minIntervalMs: 5000, jitterMs: 0 });
     __resetHostPacing();
-    globalThis.fetch = fetchDouble(() => Promise.resolve(new Response("ok", { status: 200 })));
+    const starts: number[] = [];
+    globalThis.fetch = fetchDouble(() => { starts.push(Date.now()); return Promise.resolve(new Response("ok", { status: 200 })); });
 
-    const start = Date.now();
     await fetchWithTimeout("https://pacing-f.example.com/one", {}, 5000);
     await fetchWithTimeout("https://pacing-f.example.com/two", {}, 5000);
 
-    // The env value (0) is honoured: the reset restores the default 1000 ms
-    // interval (plus up to 250 ms jitter), which this bound excludes.
-    expect(Date.now() - start).toBeLessThan(500);
+    // The env value (0) is honoured, so only the default jitter (up to 250 ms)
+    // can separate the starts. An ignored env value would leave the 1000 ms
+    // default (gap >= ~750 ms), and a missing reset would leave ~5000 ms.
+    expect(starts).toHaveLength(2);
+    expect(starts[1] - starts[0]).toBeLessThan(500);
   });
 
   it("keeps later same-origin callers moving when the wait fails", async () => {
