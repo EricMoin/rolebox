@@ -819,6 +819,8 @@ describe("graph_control — explicit command types only", () => {
       expect(retried.kind).toBe("applied");
       expect(retried.command).toBe("retry");
       expect(retried.minted?.map((entry) => entry.attemptId)).toEqual(["work#2"]);
+      expect(fixture.dispatched.at(-1)?.outcomes).toEqual(fixture.dispatched[0]?.outcomes);
+      expect(fixture.dispatched.at(-1)?.outcomes).toEqual([{ id: "done", acceptance: [] }]);
       expect(readControlRows(fixture).decisions.map((entry) => entry.attemptId)).toEqual([
         "work#1",
       ]);

@@ -687,6 +687,37 @@ function ledgerRefusingStateWrites(
 // ── The run path ────────────────────────────────────────────────────────────
 
 describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
+  it("dispatches only the current node's pinned outcome and data contract", async () => {
+    const declaration: GraphDeclarationV3 = {
+      ...LINEAR,
+      nodes: LINEAR.nodes.map((node) => ({
+        ...node,
+        completion: { mode: "explicit" },
+        outcomes: node.outcomes.map((outcome) => ({
+          ...outcome,
+          data: { schema: node.id + "-report", version: 2 },
+          acceptance: [{ validator: GATE_ID, version: GATE_VERSION }],
+        })),
+      })),
+    };
+    await withHarness(declaration, ({ runtime, requests, plan }) => {
+      expect(runtime.start(NOW).kind).toBe("started");
+      expect(requests[0]?.outcomes).toEqual(plan.nodes.find((node) => node.id === "work")?.outcomes);
+      expect(requests[0]?.completion).toEqual({ mode: "explicit" });
+      expect(JSON.stringify(requests[0]?.outcomes)).not.toContain("ship-report");
+      expect(runtime.submit({
+        nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1"),
+        data: { summary: "Completed." },
+      }, NOW + 1).kind).toBe("accepted");
+      expect(requests[1]?.outcomes).toEqual(plan.nodes.find((node) => node.id === "ship")?.outcomes);
+      expect(requests[1]?.completion).toEqual({ mode: "explicit" });
+      expect(JSON.stringify(requests[1]?.outcomes)).not.toContain("work-report");
+    }, {
+      supportedValidators: [{ validator: GATE_ID, version: GATE_VERSION }],
+      validators: gatedRegistry({ kind: "pass" }),
+    });
+  });
+
   it("dispatches the entry node, accepts an outcome and settles at the terminal", async () => {
     await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId }) => {
       const started = runtime.start(NOW);

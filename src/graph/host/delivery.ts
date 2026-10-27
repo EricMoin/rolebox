@@ -7,8 +7,8 @@ const SUMMARY_MAX_CHARS = 240;
 
 /**
  * Render the prompt one attempt's worker receives: the plan's own prompt, the
- * attempt identity and credential handoff, and — when this attempt consumes
- * upstream results — the input view it was armed with.
+ * declared outcome contract, attempt identity and credential handoff, and — when
+ * this attempt consumes upstream results — the input view it was armed with.
  *
  * The plan's prompt follows its heading verbatim. Every later block follows it,
  * never interleaves it, so a node author's instructions read exactly as declared.
@@ -25,6 +25,17 @@ export function buildAttemptDeliveryPrompt(
     request.prompt,
     "",
     "---",
+    "## Declared outcome contract",
+    "This contract comes from this node's compiled plan revision " + JSON.stringify(request.planRevision) + ".",
+    "Choose only an outcome listed below. Each data.schema names the host's payload validator contract;",
+    "data.version is its exact version. Acceptance lists the gates the host must pass before settlement.",
+    "These schema identities do not describe role-specific report fields; follow the assigned task and role for those fields and outcome meanings.",
+    JSON.stringify({
+      outcomes: request.outcomes,
+      ...(request.completion === undefined ? {} : { completion: request.completion }),
+    }, null, 2),
+    "",
+    "---",
     "[rolebox outcome protocol — attempt handoff]",
     "You are running graph " +
     JSON.stringify(request.graphId) +
@@ -39,6 +50,10 @@ export function buildAttemptDeliveryPrompt(
     "  node_id:    " + request.nodeId,
     "  outcome_id: the declared outcome your work achieved",
     "  credential: " + request.credential,
+    "  data:       the payload required by the chosen outcome and assigned task, when applicable",
+    "  evidence_refs: artifact paths required by the assigned task and acceptance gates, when applicable",
+    "Only an accepted decision settles the attempt. A rejection or refusal leaves it open;",
+    "address the reported issues before resubmitting. Stop after an accepted submission.",
     "The credential is bound to THIS attempt only. Do not write it into a file, a",
     "shared message, or another node's context; pass it only to graph_submit_outcome.",
   ];

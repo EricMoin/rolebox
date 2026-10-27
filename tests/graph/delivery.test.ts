@@ -11,6 +11,7 @@ const REQUEST: OutcomeDispatchRequest = {
   nodeId: "review",
   attemptId: "review#1",
   agent: "agent.review",
+  outcomes: [{ id: "done", acceptance: [] }],
   prompt: "Verify the change.",
   credential: "attempt-credential",
 };
@@ -30,6 +31,38 @@ function viewOf(...payloads: AcceptedData[]): DeliveredInputView {
 }
 
 describe("buildAttemptDeliveryPrompt", () => {
+  it("delivers every declared outcome with its exact data contract, ordered gates and completion policy", () => {
+    const outcomes = [
+      { id: "pass", data: { schema: "review-report", version: 3 }, acceptance: [
+        { validator: "schema", version: 1 }, { validator: "artifact-reference", version: 1 },
+      ] },
+      { id: "revise", data: { schema: "review-report", version: 3 }, acceptance: [] },
+      { id: "blocked", acceptance: [] },
+    ];
+    const completion = { mode: "explicit" } as const;
+    const prompt = buildAttemptDeliveryPrompt({ ...REQUEST, outcomes, completion });
+    expect(prompt).toContain(JSON.stringify({ outcomes, completion }, null, 2));
+    expect(prompt.indexOf("## Declared outcome contract")).toBeGreaterThan(prompt.indexOf(REQUEST.prompt));
+    expect(prompt.indexOf("## Declared outcome contract")).toBeLessThan(prompt.indexOf("attempt handoff"));
+    expect(prompt).toContain('compiled plan revision "rev-1"');
+    expect(prompt).toContain("These schema identities do not describe role-specific report fields");
+    expect(prompt).toContain("Only an accepted decision settles the attempt");
+  });
+
+  it("preserves an unversioned schema and absent completion without inventing defaults", () => {
+    const outcomes = [{ id: "done", data: { schema: "unversioned-report" }, acceptance: [] }];
+    const prompt = buildAttemptDeliveryPrompt({ ...REQUEST, outcomes });
+    expect(prompt).toContain(JSON.stringify({ outcomes }, null, 2));
+    expect(prompt).not.toContain('"version"');
+    expect(prompt).not.toContain('"completion"');
+  });
+
+  it("delivers the exact natural completion mapping", () => {
+    const completion = { mode: "natural", outcome: "done" } as const;
+    const prompt = buildAttemptDeliveryPrompt({ ...REQUEST, completion });
+    expect(prompt).toContain(JSON.stringify({ outcomes: REQUEST.outcomes, completion }, null, 2));
+  });
+
   it("separates the assigned task from the preceding section", () => {
     const prompt = buildAttemptDeliveryPrompt(REQUEST);
 

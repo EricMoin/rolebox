@@ -54,6 +54,7 @@ function dispatchRequest(attemptId: string): OutcomeDispatchRequest {
     nodeId: "work",
     attemptId,
     agent: "agent.work",
+    outcomes: [{ id: "done", acceptance: [] }],
     prompt: "Do the work.",
     // A neutral placeholder, never a real capability value.
     credential: "placeholder-attempt-credential",

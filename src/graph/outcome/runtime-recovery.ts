@@ -1140,6 +1140,8 @@ export class OutcomeDispatchRecovery {
     inputs: readonly ResolvedInput[],
     credential: string,
   ): OutcomeDispatchRequest {
+    const node = this.compiledNodeOf(nodeId);
+    if (node === undefined) throw new Error("outcome-runtime: dispatch node is absent from the compiled plan");
     return Object.freeze({
       graphId: this.graphId,
       planRevision: this.planRevision,
@@ -1147,6 +1149,8 @@ export class OutcomeDispatchRecovery {
       attemptId,
       agent,
       prompt,
+      outcomes: node.outcomes,
+      ...(node.completion === undefined ? {} : { completion: node.completion }),
       inputs,
       credential,
     });

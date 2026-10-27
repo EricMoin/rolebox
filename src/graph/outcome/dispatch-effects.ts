@@ -1,4 +1,5 @@
 import type { PendingEffectRecord } from "../ledger/types.ts";
+import type { CompiledNode } from "../compiler/plan.ts";
 import type { WorkerToolPresentation } from "../domain/worker-tools.ts";
 import type { ResolvedInput } from "./inputs.ts";
 
@@ -53,6 +54,9 @@ export interface OutcomeDispatchTarget {
  * submission ingress; the store it is checked against is the runtime's own.
  */
 export interface OutcomeDispatchRequest extends OutcomeDispatchTarget {
+  /** This node's contract from the immutable plan, including payload schema identities and gates. */
+  readonly outcomes: CompiledNode["outcomes"];
+  readonly completion?: CompiledNode["completion"];
   /**
    * The bearer credential issued for this attempt. A capability, not an
    * identity: possession proves the holder was handed this attempt's

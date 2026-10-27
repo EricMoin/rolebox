@@ -481,7 +481,8 @@ describe("opencode graph host — the declared-graph tool face", () => {
     const declaration: GraphDeclarationV3 = {
       version: 3, name: "repair-feedback",
       nodes: [
-        { id: "work", agent: "agent.work", prompt: "Implement and repair.", outcomes: [{ id: "done" }],
+        { id: "work", agent: "agent.work", prompt: "Implement and repair.", completion: { mode: "explicit" },
+          outcomes: [{ id: "done", data: { schema: "json-object", version: 1 }, acceptance: [{ validator: "schema", version: 1 }] }],
           inputs: [{ from: "review", outcome: "revise", when: "triggered" }] },
         { id: "review", agent: "agent.review", prompt: "Review.", outcomes: [{ id: "revise" }, { id: "pass" }],
           inputs: [{ from: "work", outcome: "done" }] },
@@ -492,6 +493,8 @@ describe("opencode graph host — the declared-graph tool face", () => {
     await callTool(tools, "graph_declare", { declaration }, parent);
     await waitFor(() => prompts().length === 1, "initial work");
     expect(prompts()[0]?.text).not.toContain("## Accepted upstream results");
+    const contract = JSON.stringify({ outcomes: declaration.nodes[0]?.outcomes, completion: { mode: "explicit" } }, null, 2);
+    expect(prompts()[0]?.text).toContain(contract);
     const submit = async (index: number, nodeId: string, outcomeId: string, data: object) => {
       const prompt = prompts()[index];
       if (!prompt) throw new Error("fixture: missing prompt");
@@ -506,6 +509,7 @@ describe("opencode graph host — the declared-graph tool face", () => {
     await submit(1, "review", "revise", { items: [{ id: "cleanup", problem: "Missing cleanup" }] });
     await waitFor(() => prompts().length === 3, "repair");
     const repair = prompts()[2]!;
+    expect(repair.text).toContain(contract);
     expect(repair.text).toContain('Producer: "review"; outcome: "revise"; attempt: "review#2"');
     expect(repair.text).toContain('"problem":"Missing cleanup"');
     expect(host.host.workerPrincipalOf(repair.sessionID)?.attemptId).toBe("work#3");

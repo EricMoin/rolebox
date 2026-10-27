@@ -550,6 +550,18 @@ reason to the new dispatch prompt. This context persists with the dispatch effec
 the compiled node prompt stays unchanged. A subsequent retry starts from that same
 compiled prompt with its own reason, without accumulating earlier retry prompts.
 
+**Worker outcome contract across hosts.** DSH, Pi and OpenCode 1/2 deliver the
+current node's complete compiled outcomes (`id`, optional `data.schema` and exact
+`data.version`, ordered `acceptance` gates), and its declared completion policy.
+The runtime reads this contract from the immutable plan on every initial,
+successor, retry and recovery dispatch. Node prompts do not need to repeat these
+declarations or the host's credential and settlement instructions.
+
+Schema references identify executable host validators; they are not field-level
+JSON Schema documents. For example, the shipped `json-object@1` checks for a
+non-null, non-array object. Roles still own their report fields, outcome meanings,
+evidence requirements and domain acceptance criteria.
+
 **Worker role context across hosts.** DSH, Pi and OpenCode 1/2 include only the
 worker role's explicitly auto-activated function instructions, without an inactive
 function catalog or parent-session function activation. DSH and Pi prepare the

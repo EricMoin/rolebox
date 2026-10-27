@@ -73,6 +73,7 @@ function request(): OutcomeDispatchRequest {
     nodeId: "work",
     attemptId: ATTEMPT_ID,
     agent: "agent.work",
+    outcomes: [{ id: "done", acceptance: [] }],
     prompt: "Do the work.",
     credential: "credential-fixture-1",
   };

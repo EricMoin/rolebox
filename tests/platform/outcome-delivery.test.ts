@@ -124,6 +124,7 @@ function request(): OutcomeDispatchRequest {
     nodeId: "work",
     attemptId: "work#1",
     agent: "agent.work",
+    outcomes: [{ id: "done", data: { schema: "json-object", version: 1 }, acceptance: [{ validator: "schema", version: 1 }] }],
     prompt: "Do the work.",
     credential: CREDENTIAL,
   };
@@ -342,6 +343,7 @@ describe("DshOutcomeDelivery", () => {
     expect(starts[0].agent).toBe("agent.work");
     const text = starts[0].request.prompt.map((b) => b.text).join("\n");
     expect(text).toContain("Do the work.");
+    expect(text).toContain(JSON.stringify({ outcomes: request().outcomes }, null, 2));
     expect(text).toContain(CREDENTIAL);
     expect(text).toContain("work#1");
     expect(settled).toEqual(["completed"]);
@@ -417,6 +419,7 @@ describe("PiOutcomeDelivery", () => {
     expect(launches).toHaveLength(1);
     expect(launches[0].subagent).toBe("agent.work");
     expect(launches[0].prompt).toContain(CREDENTIAL);
+    expect(launches[0].prompt).toContain(JSON.stringify({ outcomes: request().outcomes }, null, 2));
     expect(launches[0].run_in_background).toBe(true);
     expect(launches[0].suppressCompletionNotification).toBe(true);
     // The parent context is the delivery's invocation — the adapter holds no
@@ -553,6 +556,7 @@ describe("the input view reaches the worker each adapter starts (D7)", () => {
     expect(prompt).toContain('Producer: "review"; outcome: "revise"; attempt: "review#2"');
     expect(prompt).toContain('"problem":"Missing cleanup"');
     expect(prompt).toContain("Resume after interruption.");
+    expect(prompt).toContain(JSON.stringify({ outcomes: retry.outcomes }, null, 2));
     expect(readFileSync(deliveredPathIn(prompt)).equals(VIEW_BYTES)).toBe(true);
   });
 

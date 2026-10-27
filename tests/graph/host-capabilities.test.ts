@@ -494,6 +494,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         nodeId: "work",
         attemptId: "work#1",
         agent: "agent.work",
+        outcomes: [{ id: "done", acceptance: [] }],
         prompt: "Do the work.",
         credential: "cred-work-1",
       };
@@ -547,6 +548,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         nodeId: "work",
         attemptId: "work#1",
         agent: "agent.work",
+        outcomes: [{ id: "done", acceptance: [] }],
         prompt: "Do the work.",
         credential: "cred-work-1",
       };
@@ -586,6 +588,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         nodeId: "work",
         attemptId: "work#1",
         agent: "agent.work",
+        outcomes: [{ id: "done", acceptance: [] }],
         prompt: "Do the work.",
         credential: "cred-work-1",
       };
@@ -618,6 +621,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
             nodeId: "work",
             attemptId: "work#2",
             agent: "agent.work",
+            outcomes: [{ id: "done", acceptance: [] }],
             prompt: "Do the work.",
             credential: "cred-work-2",
           },
@@ -640,6 +644,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         nodeId: "work",
         attemptId: "work#1",
         agent: "agent.work",
+        outcomes: [{ id: "done", acceptance: [] }],
         prompt: "Do the work.",
         credential: "cred-work-1",
       };
@@ -800,6 +805,7 @@ describe("host dispatch adapter — create at most once, look up the host's fact
         nodeId,
         attemptId,
         agent: "agent." + nodeId,
+        outcomes: [{ id: "done", acceptance: [] }],
         prompt: "Do the work.",
         credential: "cred-" + attemptId,
       });

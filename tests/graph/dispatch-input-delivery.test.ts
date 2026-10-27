@@ -147,6 +147,7 @@ function requestOf(inputs: readonly ResolvedInput[]): OutcomeDispatchRequest {
     nodeId: "review",
     attemptId: "review#2",
     agent: "agent.review",
+    outcomes: [{ id: "done", acceptance: [] }],
     prompt: "Review the work.",
     credential: "credential-review-2",
     inputs,

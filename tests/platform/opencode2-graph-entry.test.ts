@@ -483,7 +483,8 @@ describe("opencode v2 entry — the graph host injection seam", () => {
         const policy = spy.calls[0]?.workerTools;
         if (!policy) throw new Error("Entry did not provide worker tool policy");
         await expect(policy.prepare({ graphId: "graph", planRevision: "revision", nodeId: "node", attemptId: "attempt",
-          agent: "worker", prompt: "Task", credential: "fixture", toolPresentation: { mode: "native" } })).rejects.toThrow("enforcement hooks are unavailable");
+          agent: "worker", outcomes: [{ id: "done", acceptance: [] }],
+          prompt: "Task", credential: "fixture", toolPresentation: { mode: "native" } })).rejects.toThrow("enforcement hooks are unavailable");
       } finally { await cleanup?.(); }
     });
   }

@@ -60,7 +60,8 @@ it("keeps observing a launched worker when the task announcement precedes its na
   });
   try {
     delivery.deliver({ graphId: "late-end", planRevision: "revision", nodeId: "work", attemptId: "work#1",
-      agent: "worker", prompt: "Work", credential: "fixture-credential" },
+      agent: "worker", outcomes: [{ id: "done", acceptance: [] }],
+      prompt: "Work", credential: "fixture-credential" },
       { graphId: "late-end", effectId: "dispatch:work#1", attemptId: "work#1" }, { sessionId: "parent" });
     await new Promise(resolve => setTimeout(resolve, 0));
     announce!("task", "error");

@@ -4,7 +4,8 @@ import type { OutcomeDispatchRequest } from "../../src/graph/outcome/dispatch-ef
 import type { CanonicalToolContext } from "../../src/platform/types.ts";
 
 function request(mode: "native" | "discover" | "code", grants = ["custom_lookup"]): OutcomeDispatchRequest {
-  return { graphId: "graph", planRevision: "revision", nodeId: "node", attemptId: "attempt", agent: "worker", prompt: "Task", credential: "fixture", declaredTools: grants, inheritedTools: ["custom_lookup", "mcp_lookup"], toolPresentation: { mode } };
+  return { graphId: "graph", planRevision: "revision", nodeId: "node", attemptId: "attempt", agent: "worker", outcomes: [{ id: "done", acceptance: [] }],
+    prompt: "Task", credential: "fixture", declaredTools: grants, inheritedTools: ["custom_lookup", "mcp_lookup"], toolPresentation: { mode } };
 }
 const context: CanonicalToolContext = {
   sessionID: "worker", messageID: "message", agent: "worker", directory: "/workspace", worktree: "/workspace",

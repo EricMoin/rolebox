@@ -68,6 +68,7 @@ const REQUEST: OutcomeDispatchRequest = {
   nodeId: "work",
   attemptId: "work#1",
   agent: "agent.work",
+  outcomes: [{ id: "done", acceptance: [] }],
   prompt: "Do the work.",
   credential: "cred-work-1",
 };

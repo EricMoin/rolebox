@@ -634,6 +634,8 @@ describe("a restarted process delivers the bound input view (D6)", () => {
       );
       expect(delivered).toBeDefined();
       expect(delivered?.inputs).toEqual(bound);
+      expect(delivered?.outcomes).toEqual(plan.nodes.find((node) => node.id === "review")?.outcomes);
+      expect(delivered?.completion).toEqual(plan.nodes.find((node) => node.id === "review")?.completion);
       expect(restarted.creates.map((request) => request.attemptId)).toEqual([
         "review#2",
       ]);
